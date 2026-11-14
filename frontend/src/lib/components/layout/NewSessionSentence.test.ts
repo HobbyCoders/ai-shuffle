@@ -2,10 +2,11 @@
  * The new-session sentence: "Runs on <worker> in <project> on <branch> in
  * <a worktree>." / "Runs on <worker> with <no project>." Each part is a real
  * button that opens its menu; branch and worktree only for a git project; the
- * worker's online dot never shows in the sentence.
+ * worker's online dot never shows in the sentence. Cmd/Ctrl+P (AppPage's
+ * shortcut, through `openProjectPicker`) opens its project picker.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const m = vi.hoisted(() => ({
@@ -49,6 +50,7 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 		clusterProjects: writable([]),
 		profiles: writable([]),
 		profilesLoaded: writable(true),
+		sessions: writable([]),
 		appData: { loadClusterProjects: vi.fn(), current: { projects: [], clusterProjects: [] } }
 	};
 });
@@ -86,6 +88,7 @@ vi.mock('$lib/api/installs', () => ({
 vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
 
 import NewSessionSentence from './NewSessionSentence.svelte';
+import { openProjectPicker } from '$lib/services/project-picker';
 import { resetWorkerPresence } from '$lib/stores/worker-presence';
 
 const install = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
@@ -202,5 +205,82 @@ describe('NewSessionSentence', () => {
 		expect(rows[1].disabled || rows[1].getAttribute('aria-disabled') === 'true').toBe(true);
 		// The menu hangs from <body>, centred under the word.
 		expect(screen.getByRole('menu').parentElement).toBe(document.body);
+	});
+
+	describe('Cmd/Ctrl+P', () => {
+		let editor: HTMLElement;
+		beforeEach(() => {
+			editor = document.createElement('div');
+			editor.tabIndex = 0;
+			editor.setAttribute('data-message-editor', '');
+			document.body.append(editor);
+		});
+		afterEach(() => editor.remove());
+
+		it('declines with no new-session row on screen, so the browser keeps the key', () => {
+			expect(openProjectPicker()).toBe(false);
+		});
+
+		it('declines once the chat is a saved session', async () => {
+			session({ sessionId: 'chat-1' });
+			render(NewSessionSentence);
+			await tick();
+			expect(openProjectPicker()).toBe(false);
+			expect(screen.queryByRole('dialog')).toBeNull();
+		});
+
+		it('opens the picker on "No project" from the editor, and Escape returns there', async () => {
+			session({ project: '', projectV2Id: null });
+			render(NewSessionSentence);
+			await tick();
+			editor.focus();
+			expect(openProjectPicker()).toBe(true);
+			await tick();
+			const search = screen.getByRole('textbox', { name: 'Search projects' });
+			expect(document.activeElement).toBe(search);
+			expect(screen.getByRole('button', { name: /^No project\. Add a project/ }).getAttribute('aria-expanded')).toBe('true');
+			await fireEvent.keyDown(search, { key: 'Escape' });
+			expect(screen.queryByRole('textbox', { name: 'Search projects' })).toBeNull();
+			expect(document.activeElement).toBe(editor);
+		});
+
+		it('picks with Enter and keeps the cursor in the editor', async () => {
+			session({ project: '', projectV2Id: null });
+			render(NewSessionSentence);
+			await tick();
+			editor.focus();
+			openProjectPicker();
+			await tick();
+			await fireEvent.keyDown(screen.getByRole('textbox', { name: 'Search projects' }), { key: 'Enter' });
+			expect(m.setProject).toHaveBeenCalledWith('p1', null, { user: true });
+			expect(document.activeElement).toBe(editor);
+		});
+
+		it('switches a picked project from the project word, "No project" clearing it', async () => {
+			render(NewSessionSentence);
+			const word = await screen.findByRole('button', { name: /^Workspace folders: ai-shuffle$/ });
+			expect(word.getAttribute('aria-keyshortcuts')).toMatch(/^(Control|Meta)\+P$/);
+			editor.focus();
+			expect(openProjectPicker()).toBe(true);
+			await tick();
+			const picker = screen.getByRole('dialog', { name: 'Switch project' });
+			await fireEvent.click(within(picker).getByRole('button', { name: 'No project' }));
+			expect(m.clearProject).toHaveBeenCalledWith({ user: true });
+			expect(document.activeElement).toBe(editor);
+		});
+
+		it('offers the same picker to the mouse from the folders menu', async () => {
+			vi.useFakeTimers();
+			try {
+				render(NewSessionSentence);
+				await fireEvent.click(await screen.findByRole('button', { name: /^Workspace folders: ai-shuffle$/ }));
+				await fireEvent.click(screen.getByRole('button', { name: /Switch project/ }));
+				await vi.runAllTimersAsync();
+				expect(screen.getByRole('dialog', { name: 'Switch project' })).toBeTruthy();
+				expect(screen.queryByRole('dialog', { name: 'Workspace folders' })).toBeNull();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 });

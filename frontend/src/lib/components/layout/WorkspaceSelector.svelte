@@ -6,18 +6,25 @@
 	 * Centered hero with clickable workspace name dropdown.
 	 * Uses GroupedSelector for group-aware project selection.
 	 */
-	import { ChevronDown, FolderClosed } from 'lucide-svelte';
+	import { ChevronDown, FolderClosed, FolderX } from 'lucide-svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
 	import { menuHost as hostMenu } from '$lib/components/ui/menu-host';
 	import { closeDropdown, openDropdown, openHeaderDropdown } from '$lib/stores/header-dropdowns';
 	import { isMobileUi } from '$lib/stores/platform.svelte';
-	import { appData, clusterProjects, profiles, profilesLoaded, projects } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, profilesLoaded, projects, sessions } from '$lib/stores/app-data.svelte';
+	import {
+		PROJECT_PICKER_ATTRIBUTE,
+		projectPickerAriaShortcut,
+		projectPickerShortcutHint
+	} from '$lib/services/project-picker';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import GroupedSelector from '$lib/components/GroupedSelector.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import {
 		buildWorkspacePickerItems,
 		pickerItemName,
+		projectRecency,
+		rankPickerItems,
 		selectedPickerId
 	} from './workspace-catalog';
 
@@ -28,14 +35,23 @@
 		/**
 		 * `sentence`: the new-session row's "No project" control. The same
 		 * picker drops down centred under it; picking one adds the project.
+		 * Outside the phone sheet its list has a search field, most recently
+		 * used projects first, and opens from Cmd/Ctrl+P too (`openPicker`).
 		 */
 		variant?: 'hero' | 'sentence';
+		/**
+		 * No trigger of its own: the sentence picker opened by `openPicker` on
+		 * another control (the project word, to switch a picked project).
+		 */
+		headless?: boolean;
+		/** Offers a "No project" row while a project is picked. */
+		onClearProject?: () => void;
 		/** The phone sheet's stacked row, with its list on the sheet's own page. */
 		sheetMode?: boolean;
 		menuHost?: HTMLElement | null;
 	}
 
-	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero', sheetMode = false, menuHost = null }: Props = $props();
+	let { selectedProject, selectedProjectV2Id = null, onSelectProject, variant = 'hero', headless = false, onClearProject, sheetMode = false, menuHost = null }: Props = $props();
 
 	let showDropdown = $state(false);
 	let dropdownRef = $state<HTMLElement | null>(null);
@@ -44,6 +60,16 @@
 	let sentenceTrigger = $state<HTMLButtonElement | null>(null);
 	let groupedSelector = $state<ReturnType<typeof GroupedSelector> | null>(null);
 	const pickerId = $props.id();
+	/** Opened by `openPicker` on this control instead of the trigger. */
+	let anchorOverride = $state<HTMLElement | null>(null);
+	/** Where focus goes back after a keyboard-opened pick or Escape (the message editor). */
+	let returnTo: HTMLElement | null = null;
+	let autofocusSearch = $state(false);
+	const NO_PROJECT_ID = '__no_project__';
+	// The desktop row's list: the phone sheet keeps its plain full-page list.
+	const searchable = $derived(variant === 'sentence' && !sheetMode);
+	const shortcutHint = projectPickerShortcutHint();
+	const ariaShortcut = projectPickerAriaShortcut();
 
 	// On the mobile shell use the top layer so neither the chat surface nor the
 	// keyboard can clip this popup. The desktop shell keeps its anchored dropdown
@@ -121,7 +147,14 @@
 		if (event.key !== 'Escape' || !showDropdown) return;
 		event.preventDefault();
 		showDropdown = false;
-		dropdownRef?.querySelector('button')?.focus({ preventScroll: true });
+		const back = takeReturnFocus() ?? anchorOverride ?? dropdownRef?.querySelector('button');
+		back?.focus({ preventScroll: true });
+	}
+
+	function takeReturnFocus(): HTMLElement | null {
+		const back = returnTo?.isConnected ? returnTo : null;
+		returnTo = null;
+		return back;
 	}
 
 	// Add project modal state
@@ -131,6 +164,11 @@
 	const selectedId = $derived(
 		selectedPickerId(selectedProject, selectedProjectV2Id, pickerItems)
 	);
+	// Most recently used first: the newest session per project in the sidebar's list.
+	const recency = $derived(searchable ? projectRecency(pickerItems, $sessions) : new Map<string, number>());
+	const rankProjects = (list: { id: string; name: string }[], query: string) =>
+		rankPickerItems(list, query, recency);
+	const noProjectRow = $derived(searchable && selectedId && onClearProject ? { id: NO_PROJECT_ID, name: 'No project' } : null);
 	const resolvedProjectName = $derived(
 		pickerItemName(pickerItems, selectedId) ||
 			$projects.find((p) => p.id === selectedProject)?.name ||
@@ -147,26 +185,58 @@
 		const target = e.target as Node;
 		if (dropdownRef && !dropdownRef.contains(target) && !listRef?.contains(target)) {
 			showDropdown = false;
+			returnTo = null;
 		}
 	}
 
 	function handleSelect(id: string) {
-		const item = pickerItems.find((i) => i.id === id);
-		if (item) {
-			onSelectProject(item.project, item.projectV2Id);
-		} else {
-			onSelectProject(id);
-		}
+		const back = takeReturnFocus();
 		showDropdown = false;
+		if (id === NO_PROJECT_ID) {
+			onClearProject?.();
+		} else if (id !== selectedId || !searchable) {
+			const item = pickerItems.find((i) => i.id === id);
+			if (item) {
+				onSelectProject(item.project, item.projectV2Id);
+			} else {
+				onSelectProject(id);
+			}
+		}
+		// Opened from the message editor: keep typing there.
+		back?.focus({ preventScroll: true });
 	}
 
 	function openAddModal() {
 		showDropdown = false;
+		returnTo = null;
 		showAddModal = true;
+	}
+
+	/**
+	 * Open the searchable list from the keyboard (Cmd/Ctrl+P), anchored on
+	 * `anchor` (default: this control), with the cursor in its search field.
+	 * Picking or Escape puts focus back on `returnFocus`.
+	 */
+	export function openPicker({ anchor = null, returnFocus = null }: { anchor?: HTMLElement | null; returnFocus?: HTMLElement | null } = {}) {
+		returnTo = returnFocus;
+		if (showDropdown) {
+			groupedSelector?.focusSearch();
+			return;
+		}
+		anchorOverride = anchor;
+		autofocusSearch = true;
+		showDropdown = true;
+		groupedSelector?.reset();
+		void appData.loadClusterProjects();
 	}
 
 	function toggleDropdown() {
 		showDropdown = !showDropdown;
+		returnTo = null;
+		anchorOverride = null;
+		// A mouse click types next only with a real keyboard at hand; a touch
+		// screen would raise its keyboard over the list.
+		autofocusSearch = typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches;
 		if (showDropdown) {
 			if (sheetMode) openDropdown('sheet-new-project');
 			// Reset grouped selector to main panel when opening
@@ -180,26 +250,33 @@
 
 {#if variant === 'sentence'}
 <span class="picker-container sentence-variant" bind:this={dropdownRef}>
+	{#if !headless}
 	<button
 		bind:this={sentenceTrigger}
 		type="button"
+		data-project-control
 		class={sheetMode ? 'ctx-chip repo-chip' : 'sentence-tok'}
 		aria-expanded={showDropdown}
 		aria-haspopup="dialog"
 		aria-controls={pickerId}
 		aria-label="No project. Add a project (optional: adds checkout, branch and git)"
-		title="Add a project (optional)"
+		aria-keyshortcuts={searchable ? ariaShortcut : undefined}
+		title={searchable ? `Add a project (optional) · ${shortcutHint}` : 'Add a project (optional)'}
 		onclick={toggleDropdown}
 	><FolderClosed size={sheetMode ? 16 : 14} strokeWidth={1.75} aria-hidden="true" /><span class={sheetMode ? 'ctx-chip-label' : 'sentence-tok-label'}>No project</span>{#if sheetMode}<ChevronDown size={16} class="ctx-chip-chev" aria-hidden="true" />{/if}</button>
+	{/if}
 	{#if showDropdown}
 		<div
 			id={pickerId}
 			class="picker-dropdown sentence-menu"
 			class:sheet-page={sheetMode}
+			role={searchable ? 'dialog' : undefined}
+			aria-label={searchable ? (selectedId ? 'Switch project' : 'Add a project') : undefined}
+			{...{ [PROJECT_PICKER_ATTRIBUTE]: searchable ? '' : undefined }}
 			bind:this={listRef}
 			use:mobilePopup
 			use:hostMenu={sheetMode ? menuHost : null}
-			use:floatingMenu={{ anchor: sentenceTrigger, align: 'start', enabled: !isMobileUi() && !sheetMode }}
+			use:floatingMenu={{ anchor: anchorOverride ?? sentenceTrigger, align: 'start', enabled: !isMobileUi() && !sheetMode }}
 		>
 			<GroupedSelector
 				bind:this={groupedSelector}
@@ -207,13 +284,23 @@
 				entityType="projects"
 				selectedId={selectedId}
 				onSelect={handleSelect}
-				label="Add a project"
+				label={selectedId ? 'Switch project' : 'Add a project'}
 				addLabel="Add Project"
 				onAdd={openAddModal}
 				emptyMessage="No projects yet"
 				itemIcon={FolderClosed}
+				searchable={searchable}
+				searchLabel="Search projects"
+				rank={searchable ? rankProjects : undefined}
+				numbered={searchable}
+				trailingItem={noProjectRow}
+				trailingIcon={FolderX}
+				autofocus={searchable && autofocusSearch}
 			/>
-			<p class="sentence-hint">Optional · adds checkout, branch and git</p>
+			<p class="sentence-hint">
+				<span>Optional · adds checkout, branch and git</span>
+				{#if searchable && !isMobileUi()}<kbd class="shortcut-hint" aria-hidden="true">{shortcutHint}</kbd>{/if}
+			</p>
 		</div>
 	{/if}
 </span>
@@ -431,11 +518,21 @@
 		animation-name: sentence-dropdown-in;
 	}
 	.sentence-hint {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
 		margin: 4px 0 0;
 		padding: 6px 8px 2px;
 		border-top: 1px solid var(--border-subtle);
 		font-size: 11px;
 		color: var(--muted-foreground);
+	}
+	.shortcut-hint {
+		flex-shrink: 0;
+		color: var(--subtle-foreground);
+		font-family: var(--font-mono, ui-monospace, monospace);
+		font-size: 10.5px;
 	}
 	@keyframes sentence-dropdown-in {
 		from { opacity: 0; transform: translateY(-4px) scale(0.98); }

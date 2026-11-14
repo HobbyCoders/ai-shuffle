@@ -9,7 +9,7 @@ import {
 } from './session-switcher';
 import { feedController } from './v2/feed-controller';
 import { pendingQueue } from './pending-queue';
-import type { ActiveSessionState } from '../active-session';
+import type { ActiveSessionState, PersistedSession } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ChatMessage } from '../types';
@@ -1741,8 +1741,8 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 // A brand-new tab falls back to the device's last snapshot; a new session
 // starts without a project (owner decision 2026-11-13).
 describe('withoutBorrowedComposeProject', () => {
-	const compose = { sessionId: null, mode: 'code' as const, title: 'New Chat', project: 'p1', projectV2Id: 'pv2-1',
-		modelOverride: 'sonnet', permissionModeOverride: null, worktreeIntent: 'worktree' as const, workspaceProjectIds: ['extra'] };
+	const compose: PersistedSession = { sessionId: null, mode: 'code', title: 'New Chat', profile: 'agent', project: 'p1', projectV2Id: 'pv2-1',
+		modelOverride: 'sonnet', permissionModeOverride: null, effortLevelOverride: null, worktreeIntent: 'worktree', workspaceProjectIds: ['extra'] };
 
 	it('drops another tab\'s project from an untyped compose, keeping its run binding', () => {
 		expect(withoutBorrowedComposeProject(compose)).toMatchObject({ mode: 'chat', project: '', projectV2Id: null,

@@ -1,22 +1,25 @@
-// Journey: the new-session screen opens on the owner's last project choice,
-// "no project" included (owner decision 2026-10-31). Someone working in a
-// project should not have to pick it again for every session; clearing it is
-// a choice too and sticks until a project is picked again.
-//
-// The preview cookie cannot write account preferences, so on the dev
-// instance the choice lives in this browser's storage; every case gets a
-// fresh browser, so no case sees another's choice.
+// Journey: every new session starts with no project (owner decision
+// 2026-11-13, reversing 2026-10-31), and Cmd/Ctrl+P picks one from the
+// keyboard. A new-chat draft with typed text keeps the project it was typed
+// in; an untyped one left for another chat starts over.
 //
 // Cases:
-//   keeps-project   pick a project, press New session (on the screen itself,
+//   starts-without-project
+//                   pick a project, press New session (on the screen itself,
 //                   and again after opening a chat in ANOTHER project), then
-//                   reload: every time the screen shows the picked project.
-//   keeps-cleared   pick a project, clear it, press New session and reload:
-//                   the screen stays without a project.
+//                   reload: every time the screen shows no project.
+//   keeps-typed-draft
+//                   type a draft in a project, open another chat, press New
+//                   session: the draft and its project are back.
 //   late-effort-capabilities-keep-controls-still
 //                   capability refreshes preserve the open phone sheet geometry.
+//   keyboard-picker (desktop) Cmd/Ctrl+P from the message box opens the
+//                   project search: type + Enter picks, a digit picks a listed
+//                   row, Escape and every pick put the cursor back in the
+//                   message box, and the same keys switch or clear a picked
+//                   project. Inside a saved chat the keys are left alone.
 import { runJourney } from './runner.mjs';
-import { PROJECT, SEEDED, expect, openChatSetup, openFromSidebar, openNewChat, pickProject, settleServiceWorker, showSidebar, waitChat, waitChatOpen, withChatSetup } from './lib/app.mjs';
+import { PROJECT, SEEDED, composer, expect, openChatSetup, openFromSidebar, openNewChat, settleServiceWorker, showSidebar, uniq, waitChat, waitChatOpen, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const hero = (page) => page.getByRole('region', { name: 'New chat' });
@@ -83,7 +86,7 @@ await runJourney({
 	name: 'new-chat-project',
 	cases: [
 		{
-			name: 'keeps-project',
+			name: 'starts-without-project',
 			async setup(ctx) {
 				await settleServiceWorker(ctx.page, ctx.status);
 				await openNewChat(ctx, { project: PROJECT });
@@ -91,17 +94,37 @@ await runJourney({
 			async act({ page, mark, log }) {
 				await mark('New session on the new-session screen');
 				await pressNewSession(page);
-				await expectProject(page, PROJECT, log);
+				await expectProject(page, null, log);
 
 				await mark('open a chat in another project');
 				await openFromSidebar(page, SEEDED.other_project);
 				await waitChatOpen(page);
 				await mark('New session from that chat');
 				await pressNewSession(page);
-				await expectProject(page, PROJECT, log);
+				await expectProject(page, null, log);
 
 				await reload(page, mark);
+				await expectProject(page, null, log);
+			}
+		},
+		{
+			name: 'keeps-typed-draft',
+			async setup(ctx) {
+				await settleServiceWorker(ctx.page, ctx.status);
+				await openNewChat(ctx, { project: PROJECT });
+			},
+			async act({ page, mark, log }) {
+				const draft = `draft ${uniq()}`;
+				await mark('type a draft in the project');
+				await composer(page).click();
+				await page.keyboard.type(draft);
+				await mark('open a chat in another project');
+				await openFromSidebar(page, SEEDED.other_project);
+				await waitChatOpen(page);
+				await mark('New session from that chat');
+				await pressNewSession(page);
 				await expectProject(page, PROJECT, log);
+				expect((await composer(page).innerText()).includes(draft), 'the typed draft comes back with its project');
 			}
 		},
 		{
@@ -176,32 +199,65 @@ await runJourney({
 			}
 		},
 		{
-			name: 'keeps-cleared',
+			name: 'keyboard-picker',
+			viewports: ['desktop'],
 			async setup(ctx) {
 				await settleServiceWorker(ctx.page, ctx.status);
-				const heroRegion = await openNewChat(ctx, { project: PROJECT });
-				const { page } = ctx;
-				const folders = page.getByRole('dialog', { name: 'Workspace folders' });
-				await withChatSetup(page, async () => {
-					await projectWord(page, PROJECT).click();
-					await folders.waitFor();
-					await folders.getByRole('button', { name: `Remove ${PROJECT}: start without a project` }).click();
-					await heroRegion.getByRole('button', { name: /^No project/ }).waitFor();
-				});
+				await openNewChat(ctx);
 			},
 			async act({ page, mark, log }) {
-				await mark('New session after clearing the project');
-				await pressNewSession(page);
+				const search = page.getByRole('textbox', { name: 'Search projects' });
+				const inEditor = () => page.evaluate(() => !!document.activeElement?.closest('[data-message-editor]'));
+				const openPicker = async () => {
+					await page.keyboard.press('ControlOrMeta+p');
+					await search.waitFor({ timeout: 10_000 });
+					expect(await search.evaluate(node => node === document.activeElement), 'the search field has the cursor');
+				};
+
+				await mark('Cmd/Ctrl+P from the message box');
+				await composer(page).click();
+				await openPicker();
+				const rows = await page.locator('[data-project-picker] .panel-scroll .menu-item .item-name').allInnerTexts();
+				log(`picker-rows ${JSON.stringify(rows)}`);
+				expect(rows.includes(PROJECT), 'the picker lists the projects');
+
+				await mark('Escape goes back to the message box');
+				await page.keyboard.press('Escape');
+				await search.waitFor({ state: 'detached' });
+				expect(await inEditor(), 'Escape puts the cursor back in the message box');
 				await expectProject(page, null, log);
 
-				await reload(page, mark);
-				await expectProject(page, null, log);
-
-				await mark('pick the project again');
-				await pickProject(page, hero(page));
-				await mark('New session after picking it again');
-				await pressNewSession(page);
+				await mark('type part of a name and press Enter');
+				await openPicker();
+				await page.keyboard.type(PROJECT.slice(0, 5).toLowerCase());
+				await page.keyboard.press('Enter');
 				await expectProject(page, PROJECT, log);
+				expect(await inEditor(), 'a pick puts the cursor back in the message box');
+
+				await mark('the same keys switch: 0 is No project');
+				await openPicker();
+				expect(await page.getByRole('dialog', { name: 'Switch project' }).isVisible(), 'a picked project opens the switcher');
+				await page.keyboard.press('0');
+				await expectProject(page, null, log);
+
+				await mark('a digit picks that row');
+				await openPicker();
+				const first = await page.locator('[data-project-picker] .panel-scroll .menu-item .item-name').first().innerText();
+				await page.keyboard.press('1');
+				await expectProject(page, first, log);
+				expect(await inEditor(), 'a digit pick puts the cursor back in the message box');
+
+				await mark('inside a saved chat the keys are left to the browser');
+				await openFromSidebar(page, SEEDED.other_project);
+				await waitChatOpen(page);
+				const prevented = await page.evaluate(() => {
+					const target = document.querySelector('[data-message-editor]') ?? document.body;
+					const event = new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, metaKey: /Mac/.test(navigator.platform), bubbles: true, cancelable: true });
+					target.dispatchEvent(event);
+					return event.defaultPrevented;
+				});
+				expect(!prevented, 'Cmd/Ctrl+P in a saved chat must not be taken');
+				expect(!(await search.isVisible()), 'no picker in a saved chat');
 			}
 		}
 	],

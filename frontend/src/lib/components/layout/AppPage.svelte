@@ -38,7 +38,8 @@
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
 	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
-	import { registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { NOT_HANDLED, registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
+	import { PROJECT_PICKER_SHORTCUT, isProjectPickerKey, openProjectPicker } from '$lib/services/project-picker';
 	import { isMessageEditorKey } from '$lib/services/message-editor-key';
 	import { registerSearchShortcut } from '$lib/services/search-shortcut';
 	import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -393,6 +394,17 @@
 				// editor, where the cursor usually is. Other fields keep it off.
 				allowInInput: isMessageEditorKey,
 				action: () => handleNewSession()
+			}),
+			registerShortcut({
+				id: 'pick-project',
+				description: 'Pick a project (new session)',
+				...PROJECT_PICKER_SHORTCUT,
+				category: 'chat',
+				// From the message editor too, like Ctrl/Cmd+N, and inside the
+				// open picker. Anywhere but the new-session screen it declines,
+				// so the browser's own Cmd/Ctrl+P (print) is untouched.
+				allowInInput: (e) => isMessageEditorKey(e) || isProjectPickerKey(e),
+				action: () => (openProjectPicker() ? undefined : NOT_HANDLED)
 			}),
 			registerShortcut({
 				id: 'show-shortcuts',

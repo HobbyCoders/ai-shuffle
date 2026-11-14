@@ -421,11 +421,14 @@
 			]
 		},
 		{
-			"why": "the new-session screen opens on the owner's last project choice, no project included",
+			"why": "every new session starts with no project, a typed draft keeps its project, and Cmd/Ctrl+P picks one from the keyboard",
 			"journeys": ["new-chat-project"],
 			"globs": [
 				"frontend/tests/journeys/new-chat-project.journey.mjs",
 				"frontend/src/lib/stores/composer-preferences*",
+				"frontend/src/lib/stores/session/session-switcher.ts",
+				"frontend/src/lib/services/project-picker.ts",
+				"frontend/src/lib/components/GroupedSelector.svelte",
 				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector.svelte",
 				"frontend/src/lib/components/chat/WorkspaceFolderSelector.svelte"
