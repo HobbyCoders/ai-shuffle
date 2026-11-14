@@ -2110,6 +2110,8 @@ class HarnessAdapter(ProviderAdapter):
                 _delegated_tool_policy(options, self._build_permissions(options), blocked)
             ),
             system_append=instructions,
+            # The models the agent offers become the row's model catalog.
+            on_models=antigravity.capture_offered_models(str(row["id"])),
         )
         # Sign-out, delete, disable or a new key ends this engine's process.
         antigravity.register_agent(str(row["id"]), self._engine, self._antigravity_binding)

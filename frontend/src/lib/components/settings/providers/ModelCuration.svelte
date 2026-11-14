@@ -103,7 +103,7 @@
 	let saving = $state(false);
 	let error = $state('');
 	let filter = $state('');
-	let source = $state<'preset' | 'upstream' | ''>('');
+	let source = $state<'preset' | 'upstream' | 'agent' | ''>('');
 	let hiddenMedia = $state<HiddenMedia[]>([]);
 	/** The list is missing or empty, so model names can be typed in. */
 	let typeable = $state(false);
@@ -322,7 +322,10 @@
 		{/if}
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
-	{#if catalog?.fetched_at}
+	{#if catalog?.fetched_at && catalog.source === 'agent'}
+		<!-- Refresh re-reads this list; only a chat start asks the agent again. -->
+		<p class="pv-msg" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} when a chat started, <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {catalog.fetched_by_name ?? catalog.fetched_by_device}. Each new chat updates it.</p>
+	{:else if catalog?.fetched_at}
 		<p class="pv-msg">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {catalog.fetched_by_name ?? catalog.fetched_by_device}</p>
 	{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}

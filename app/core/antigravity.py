@@ -121,6 +121,81 @@ DEFAULT_MODELS: List[Dict[str, Any]] = [
      "reasoning_capabilities": _thinking(["low", "medium", "high"])},
 ]
 
+
+def offered_catalog(models: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Curation entries for the models the agent offered at a session start.
+
+    ``models`` is what ``AcpLoop`` reports (``{"id", "label", "levels"}``, the
+    levels in the agent's own words). Thinking levels map onto the app's effort
+    scale ("extra" is the agent's older word for xhigh). A model the agent named
+    without levels keeps the seed's levels when it is a seed model, else its
+    levels stay unknown. A model named only by its id gets a readable label.
+    """
+    from fluid.engine.acp.antigravity import THOUGHT_TO_EFFORT
+
+    seeded = {m["id"]: m for m in DEFAULT_MODELS}
+    out: List[Dict[str, Any]] = []
+    for model in models:
+        model_id = str(model.get("id") or "").strip()
+        if not model_id or any(entry["id"] == model_id for entry in out):
+            continue
+        label = str(model.get("label") or "").strip()
+        if not label or label == model_id:
+            # An agent that names a model by its id: the seed's name, else a
+            # readable one ("gemini-4-hydrogen" -> "Gemini 4 Hydrogen").
+            label = seeded[model_id]["label"] if model_id in seeded else model_id.replace("-", " ").title()
+        entry: Dict[str, Any] = {"id": model_id, "label": label}
+        levels = model.get("levels")
+        efforts = list(dict.fromkeys(THOUGHT_TO_EFFORT[level] for level in levels or ()
+                                     if level in THOUGHT_TO_EFFORT))
+        if efforts:
+            entry["reasoning_capabilities"] = _thinking(efforts)
+        elif model_id in seeded:
+            entry["reasoning_capabilities"] = dict(seeded[model_id]["reasoning_capabilities"])
+        out.append(entry)
+    return out
+
+
+def record_offered_models(row_id: str, models: List[Mapping[str, Any]],
+                          agent_version: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Store the agent's model list as the row's model catalog (blocking).
+
+    ``fetch-models`` serves it from then on in place of :data:`DEFAULT_MODELS`;
+    curation on the row is untouched (new models wait to be ticked).
+    """
+    from app.core import model_catalogs
+    from app.db import database as db
+
+    entries = offered_catalog(models)
+    row = db.get_model_provider(row_id, include_token=True)
+    if not entries or not row or row.get("provider_type") != PROVIDER_TYPE:
+        return None
+    return model_catalogs.save_agent(row_id, entries, agent_version=agent_version,
+                                     expected_binding=model_catalogs.binding(row))
+
+
+_capture_tasks: "set[asyncio.Task[Any]]" = set()
+
+
+def capture_offered_models(row_id: str) -> Any:
+    """An ``AcpLoop(on_models=...)`` callback that stores the list in the
+    background: the engine calls it from its reader, which must not wait on
+    the database."""
+    def capture(models: List[Dict[str, Any]], agent_version: Optional[str]) -> None:
+        from app.db.async_database import run_sync
+
+        async def run() -> None:
+            try:
+                await run_sync(record_offered_models, row_id, models, agent_version)
+            except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+                logger.warning("Could not store the models Google's agent offered for provider %s", row_id)
+
+        task = asyncio.get_running_loop().create_task(run())
+        _capture_tasks.add(task)
+        task.add_done_callback(_capture_tasks.discard)
+
+    return capture
+
 _URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
 _LOGIN_PROMPT_RE = re.compile(r"please visit the following url[^:]*:|enter the authorization code\s*:?", re.I)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")

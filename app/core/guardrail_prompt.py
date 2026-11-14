@@ -273,6 +273,9 @@ def model_rerouted_note(
     served = data.get("served_model")
     requested = data.get("requested_model")
     content = f"{label} answered with {served} instead of {requested}."
+    if data.get("reason") == "not_offered":
+        # An agent that picks its own model (ACP): the chosen one is not on its list.
+        content = f"{label} does not offer {requested} here, so {served} answered instead."
     category = data.get("category")
     if category:
         content += f" Safety check: {str(category).replace('_', ' ')}."

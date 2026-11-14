@@ -127,6 +127,38 @@ def save(provider_id: str, catalog: dict[str, Any], *, expected_binding: str | N
     return snapshot
 
 
+def save_agent(provider_id: str, models: list[dict[str, Any]], *, agent_version: str | None,
+               expected_binding: str | None) -> dict[str, Any] | None:
+    """Save the model list a provider's own agent reported (``source: "agent"``).
+
+    For a provider with no HTTP catalog (Google Antigravity), the agent's list
+    at a session start is the only evidence, so this also saves on an unpaired
+    worker: a ``v2:local:`` binding verifies only where it was made, so a copy
+    that ever replicated elsewhere is ignored there. ``fetched_at`` is when the
+    agent reported the list; ``agent_version`` the agent's own version.
+    """
+    if not expected_binding:
+        return None
+    device_id = settings.effective_instance_id
+    worker = db.get_install(device_id) or {}
+    snapshot = {
+        "source": "agent", "models": [_model(m) for m in models], "hidden": [],
+        "binding": expected_binding, "recommended": [],
+        "agent_version": agent_version or None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_by_device": device_id,
+        "fetched_by_name": worker.get("device_name") or device_id,
+    }
+    value = _encode(snapshot)
+    if len(value.encode("utf-8")) > MAX_BYTES:
+        logger.warning("Model list for provider %s is too large to store; keeping the previous one", provider_id)
+        return None
+    if binding(db.get_model_provider(provider_id, include_token=True)) != expected_binding:
+        return None
+    db.set_system_setting(key(provider_id), value)
+    return snapshot
+
+
 def read(provider_id: str) -> dict[str, Any] | None:
     """Return discovery only when it matches the current credential binding.
 

@@ -1146,6 +1146,51 @@ def test_rows_carry_gemini_models_with_thinking_levels(client):
     assert ids == [m["id"] for m in ag.DEFAULT_MODELS] and all(i.startswith("gemini-") for i in ids)
 
 
+async def test_the_models_the_agent_reports_become_the_rows_catalog(client, monkeypatch):
+    """What AcpLoop reports at a session start (fake shapes from CLI 1.5.9's
+    combined ids; the real agent's Hydrogen levels were not observed)."""
+    from app.api import model_providers
+    from app.core import model_catalogs
+    from app.core.guardrail_prompt import model_rerouted_note
+
+    # An unpaired worker: its catalog snapshots are otherwise never stored.
+    monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
+    row = _create(client)
+    curated = db.get_model_provider(row["id"])["models_json"]
+    reported = [
+        {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "levels": ["low", "extra"]},
+        # Named by id only: the seed's levels and name stand.
+        {"id": "gemini-3.1-pro", "label": "gemini-3.1-pro", "levels": None},
+        {"id": "gemini-9-new", "label": "gemini-9-new", "levels": None},  # levels unknown
+    ]
+    ag.capture_offered_models(row["id"])(reported, "1.5.9")
+    await asyncio.gather(*ag._capture_tasks)
+
+    catalog_app = FastAPI()
+    catalog_app.include_router(model_providers.router)
+    catalog_app.dependency_overrides[require_admin] = lambda: None
+    with TestClient(catalog_app) as catalog:
+        first = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+        again = catalog.post(f"/api/v1/model-providers/{row['id']}/fetch-models").json()
+    assert first["source"] == "agent" and first["agent_version"] == "1.5.9" and first["fetched_at"]
+    # Refresh serves the stored list without re-stamping it.
+    assert again["fetched_at"] == first["fetched_at"]
+    levels = {m["id"]: (m.get("reasoning_capabilities") or {}).get("effort_levels") for m in first["models"]}
+    assert levels == {"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+                      "gemini-4-carbon": ["low", "xhigh"], "gemini-3.1-pro": ["low", "high"],
+                      "gemini-9-new": None}
+    assert [m["label"] for m in first["models"]] == [
+        "Gemini 4 Hydrogen", "Gemini 4 Carbon", "Gemini 3.1 Pro", "Gemini 9 New"]
+    assert first["recommended"] == ["gemini-3.1-pro"]
+    # Curation is the owner's: nothing new is ticked, nothing curated dropped.
+    assert db.get_model_provider(row["id"])["models_json"] == curated
+    # A turn on a model the agent does not offer leaves a card naming both.
+    note = model_rerouted_note({"requested_model": "gemini-4-argon", "served_model": "gemini-3.1-pro",
+                                "provider": "antigravity", "rerouted": True, "reason": "not_offered"}, row["id"])
+    assert "does not offer gemini-4-argon" in note["content"] and "gemini-3.1-pro answered" in note["content"]
+
+
 @pytest.mark.parametrize("mode,billing", [
     ("oauth-personal", "subscription"), ("oauth-business", "subscription"),
     ("gemini-api-key", "api"),
