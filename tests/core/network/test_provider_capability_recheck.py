@@ -433,30 +433,24 @@ def test_started_chat_reports_wait_for_the_worker_update_then_arrive(workers, mo
                           derive_provider_from_profile=False)
         with db.get_db() as conn:
             conn.cursor().execute("UPDATE sessions SET owner_device_id=%s WHERE id='s-or'", (b.device_id,))
-        # A report forwarded from the outbox, and the first report of a chat
-        # the assistant started from that worker.
         orch._owe_forward("s-gem", b.device_id, frame, 0)
         orch._owe_forward("s-or", b.device_id, dict(frame, task_id="other"), 0)
-        monkeypatch.setattr(orch, "build_started_report", lambda *args: (None, b.device_id, dict(frame, task_id="c2")))
-        monkeypatch.setattr(orch, "_report_sender", lambda session_id: "s-gem")
-        asyncio.run(orch.report_settled_start("c2", {"id": "t9"}, "completed"))
         for _ in range(3):
             asyncio.run(orch.deliver_forwarded_reports(force=True))
         # Kept pending with the reason; the report for a chat it can run went.
         kept = _outbox(orch._FORWARD_PENDING)
-        assert sorted(r["report"]["task_id"] for r in kept) == ["c2", "child"]
+        assert [r["report"]["task_id"] for r in kept] == ["child"]
         assert all("Old worker needs an update to use Gemini key" in r["deferred"] for r in kept)
         assert _outbox(orch._FORWARD_REFUSED) == []
         assert sent == [(b.device_id, orch.FORWARD_REPORT_ACTION, "s-or")]
         # One warning per report, not one per pass.
-        assert caplog.text.count("kept until that worker is updated") == 2
-        # The worker updates: the next pass sends both, each its own way.
+        assert caplog.text.count("kept until that worker is updated") == 1
+        # The worker updates: the next pass sends it.
         _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
         provider_capability.recheck([b.device_id])
-        assert asyncio.run(orch.deliver_forwarded_reports()) == 2
+        assert asyncio.run(orch.deliver_forwarded_reports()) == 1
         assert _outbox(orch._FORWARD_PENDING) == []
-    assert sorted(sent[1:]) == sorted([(b.device_id, orch.FORWARD_REPORT_ACTION, "s-gem"),
-                                       (b.device_id, orch.REPORT_ACTION, "c2")])
+    assert sent[1:] == [(b.device_id, orch.FORWARD_REPORT_ACTION, "s-gem")]
 
 
 def test_task_reports_wait_for_the_worker_update_then_arrive(workers, monkeypatch, caplog):
@@ -648,37 +642,50 @@ def test_a_model_id_a_gated_row_also_lists_does_not_move_bound_work(workers):
         assert "needs an update" in provider_capability.picks_refusal(b.device_id, [], ["gemini-2.5-pro"])
 
 
-def _deferred_first_report(orch, monkeypatch, b, frame):
+def _first_report(orch, monkeypatch, b, frame):
     monkeypatch.setattr(orch, "build_started_report", lambda *args: (None, b.device_id, frame))
     monkeypatch.setattr(orch, "_report_sender", lambda session_id: "s-gem")
-    asyncio.run(orch.report_settled_start(frame["task_id"], {"id": "t9"}, "completed"))
-    assert [r["report_of"] for r in _outbox(orch._FORWARD_PENDING)] == [frame["task_id"]]
+    asyncio.run(orch.report_settled_start(frame["task_id"], {"id": frame["agent_message_turn_id"]}, "completed"))
 
 
-def test_a_deferred_report_for_a_deleted_assistant_chat_stays_on_the_started_chat(workers, monkeypatch):
+def _kept_on_chat():
+    with db.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, payload FROM session_events "
+                       "WHERE event_type='orchestration.report_deferred' ORDER BY id")
+        return [(row["session_id"], row["payload"] if isinstance(row["payload"], dict)
+                 else json.loads(row["payload"])) for row in cursor.fetchall()]
+
+
+def test_a_first_report_for_an_incapable_worker_stays_on_the_started_chat(workers, monkeypatch, caplog):
+    """A started chat's first report has no receipt on the assistant's
+    worker, so it is never sent later: for a worker that cannot run the
+    assistant's provider row it stays on the started chat, with the reason,
+    even while the assistant's chat is active, and nothing is owed."""
     from app.core import session_orchestration as orch
-
-    from app.core import credential_gate
 
     a, b = _network_with_old_worker(workers)
     sent = _no_send(monkeypatch)
-    monkeypatch.setattr(credential_gate, "default_run_model", lambda **kw: ("gem", "gemini-2.5-pro"))
     frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
+    caplog.set_level(logging.WARNING, logger=orch.log.name)
     with a.active():
         _gemini_session(owner=b.device_id)
         db.create_session("c2", "default", derive_provider_from_profile=False)
-        _deferred_first_report(orch, monkeypatch, b, frame)
-        assert db.delete_session("s-gem")
-        with db.get_db() as conn:
-            from app.db import sessions
-            sessions.record_deleted_chat(conn.cursor(), "s-gem")
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
+        _first_report(orch, monkeypatch, b, frame)
+        kept = _kept_on_chat()
+        assert [session for session, _ in kept] == ["c2"]
+        assert kept[0][1]["starter_session_id"] == "s-gem" and kept[0][1]["child_turn_id"] == "t9"
+        assert "Old worker needs an update to use Gemini key" in kept[0][1]["reason"]
+        assert "kept on that chat, not sent" in caplog.text
         assert _outbox(orch._FORWARD_PENDING) == [] and _outbox(orch._FORWARD_REFUSED) == []
-        with db.get_db() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT session_id FROM session_events WHERE event_type='orchestration.report_deferred'")
-            assert [row["session_id"] for row in cursor.fetchall()] == ["c2"]
-    assert sent == []
+        # The worker updates: the kept report is not sent; the next one is.
+        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
+        provider_capability.recheck([b.device_id])
+        assert asyncio.run(orch.deliver_forwarded_reports(force=True)) == 0
+        assert sent == []
+        _first_report(orch, monkeypatch, b, dict(frame, agent_message_turn_id="t10"))
+        assert len(_kept_on_chat()) == 1
+    assert [(device, action) for device, action, _ in sent] == [(b.device_id, orch.REPORT_ACTION)]
 
 
 def test_reports_for_a_removed_worker_leave_the_capability_wait(workers, monkeypatch):
@@ -701,7 +708,7 @@ def test_reports_for_a_removed_worker_leave_the_capability_wait(workers, monkeyp
     with a.active():
         _gemini_session(owner=b.device_id)
         _gemini_session("main", owner=b.device_id)
-        _deferred_first_report(orch, monkeypatch, b, frame)
+        orch._owe_forward("s-gem", b.device_id, frame, 0)
         with db.get_db() as conn:
             remote_tasks.record_child("child", b.device_id, conn=conn)
         assert remote_tasks.owe_report("child", "c1", {"worker_session_id": "child"})
@@ -712,7 +719,7 @@ def test_reports_for_a_removed_worker_leave_the_capability_wait(workers, monkeyp
         monkeypatch.setattr(control, "call", call)
         asyncio.run(orch.deliver_forwarded_reports(force=True))
         asyncio.run(remote_task.deliver_due())
-        assert tried == [orch.REPORT_ACTION, remote_task.TASK_REPORT_ACTION]
+        assert tried == [orch.FORWARD_REPORT_ACTION, remote_task.TASK_REPORT_ACTION]
         kept = _outbox(orch._FORWARD_PENDING)
         assert kept[0]["attempts"] == 1 and "deferred" not in kept[0]
         assert kept[0]["next_attempt_at"] > 0
@@ -755,75 +762,3 @@ def test_a_task_report_for_a_deleted_caller_goes_to_its_worker(workers, monkeypa
         assert asyncio.run(remote_task.deliver_due()) == 1
         assert remote_tasks.due_reports() == []
     assert sent == [remote_task.TASK_REPORT_ACTION]
-
-
-def test_a_deferred_first_report_that_may_have_arrived_is_not_sent_again(workers, monkeypatch):
-    """A first report may steer into a live turn there, which keeps no
-    receipt: after a lost reply it is not resent. One that never left (no
-    route) is, and so is a forwarded report (its receiver keeps a receipt)."""
-    from app.core import session_orchestration as orch
-    from app.network import control
-
-    a, b = _network_with_old_worker(workers)
-    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
-    sent = []
-    failure = [control.RunnerUnreachable("no route")]
-
-    async def call(device_id, action, body=None, **kwargs):
-        sent.append(action)
-        raise failure[0]
-
-    with a.active():
-        _gemini_session(owner=b.device_id)
-        _deferred_first_report(orch, monkeypatch, b, frame)
-        orch._owe_forward("s-gem", b.device_id, dict(frame, task_id="child"), 0)
-        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
-        monkeypatch.setattr(control, "call", call)
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-        assert len(_outbox(orch._FORWARD_PENDING)) == 2
-        failure[0] = control.MaybeApplied("did not answer in time")
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-        kept = _outbox(orch._FORWARD_PENDING)
-        assert [r["report"]["task_id"] for r in kept] == ["child"]
-        assert kept[0]["attempts"] == 2
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-    assert sent.count(orch.REPORT_ACTION) == 2
-    assert sent.count(orch.FORWARD_REPORT_ACTION) == 3
-
-
-def test_a_deferred_first_report_whose_connection_hangs_stays_owed(workers, monkeypatch):
-    """Connecting to a blackholed address outlasts the report's own timeout
-    (two connect attempts and the pause between them) before anything is
-    sent: the first report stays owed and goes once the address answers."""
-    import httpx
-
-    from app.core import session_orchestration as orch
-    from app.network import control, transport
-
-    a, b = _network_with_old_worker(workers)
-    frame = {"task_id": "c2", "agent_message_turn_id": "t9", "status": "completed", "summary": "done"}
-    monkeypatch.setattr(orch, "REMOTE_TIMEOUT", 0.2)
-    monkeypatch.setattr(control, "CONNECT_TIMEOUT", 0.15)
-    monkeypatch.setattr(control, "CONNECT_RETRY_DELAY", 0.05)
-    monkeypatch.setitem(transport._links, b.device_id, transport.PeerLink(b.device_id, ["http://192.0.2.1:9"]))
-    blackholed, sent = [True], []
-
-    async def post(link, client, ctx, route, action, payload, timeout):
-        if blackholed[0]:
-            await asyncio.sleep(control.CONNECT_TIMEOUT)
-            raise control._RouteFailed(httpx.ConnectTimeout("timed out"))
-        sent.append(action)
-        return {"delivered": True}
-
-    with a.active():
-        _gemini_session(owner=b.device_id)
-        _deferred_first_report(orch, monkeypatch, b, frame)
-        _set_presence(b.device_id, {gemini_provider.CAPABILITY: 1})
-        monkeypatch.setattr(control, "_post", post)
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-        kept = _outbox(orch._FORWARD_PENDING)
-        assert [r["report_of"] for r in kept] == ["c2"] and kept[0]["attempts"] == 1
-        blackholed[0] = False
-        asyncio.run(orch.deliver_forwarded_reports(force=True))
-        assert _outbox(orch._FORWARD_PENDING) == []
-    assert sent == [orch.REPORT_ACTION]
