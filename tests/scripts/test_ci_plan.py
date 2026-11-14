@@ -699,7 +699,7 @@ def test_a_checkout_that_cannot_be_read_runs_everything_and_records_nothing(tmp_
     found = plan.plan(tmp_path / "missing", environment(), records)
     assert list(found) == list(plan.AREAS)
     assert all({**state, "error": ""} == {"key": "", "record": "", "proven": False, "by": "", "error": ""}
-               and "No such file" in state["error"] for state in found.values())
+               and state["error"] for state in found.values())  # the system's own wording
     assert "running everything" in capsys.readouterr().err
 
 
