@@ -26,6 +26,8 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const hero = (page) => page.getByRole('region', { name: 'New chat' });
 const projectWord = (page, project) => hero(page).getByRole('button', { name: `Workspace folders: ${project}` });
 const noProjectWord = (page) => hero(page).getByRole('button', { name: /^No project/ });
+// The Sonnet alias, labelled with the version the worker's Claude Code reports ("Sonnet 5.5").
+const SONNET_CHIP = /^Model: Sonnet(?: \d[\d.]*)?$/;
 
 /** Press the sidebar's New session (opening the drawer first on a phone). */
 async function pressNewSession(page) {
@@ -143,7 +145,7 @@ await runJourney({
 				// or mutated by the test. The model identity stays constant below.
 				await page.getByRole('button', { name: /^Model: / }).first().click();
 				await page.getByRole('option', { name: /^Sonnet\b/ }).click();
-				await page.getByRole('button', { name: 'Model: Sonnet', exact: true }).first().waitFor();
+				await page.getByRole('button', { name: SONNET_CHIP }).first().waitFor();
 				await page.locator('.mcp-scrim').waitFor({ state: 'detached' });
 				await openChatSetup(page);
 				await page.evaluate(() => {
@@ -195,7 +197,7 @@ await runJourney({
 					expect(before.length > 1 && before.length === after.length &&
 						before.every((group, i) => Math.abs(group.top - after[i].top) <= 1 && Math.abs(group.height - after[i].height) <= 1),
 						`${mode} effort metadata must not resize or move the open controls groups`);
-					expect(await sheet.getByRole('button', { name: 'Model: Sonnet', exact: true }).isVisible(), 'capability refresh must keep the selected model');
+					expect(await sheet.getByRole('button', { name: SONNET_CHIP }).isVisible(), 'capability refresh must keep the selected model');
 					if (mode !== 'known') {
 						const note = mode === 'unknown' ? /Reasoning effort capabilities are not known yet/ : /Adjustable reasoning effort is not available/;
 						expect(await sheet.getByText(note).isVisible(), `${mode} capabilities need a truthful explanation, not stale choices`);
