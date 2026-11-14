@@ -64,6 +64,7 @@ import { appData } from './app-data.svelte';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerPreferences } from './composer-preferences';
 import { sessionEphemeralCache } from './session-cache';
+import { notify } from './notifications';
 import { selectedContextWindow, standardContextCap } from './session/context-window';
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
@@ -716,6 +717,14 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.fastMode).toBe(true);
 		expect(activeSession.current.isStreaming).toBe(true);
 		expect(hoisted.reconnect).not.toHaveBeenCalled();
+	});
+
+	it("shows the worker's reason when it refuses an effort pick", async () => {
+		const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+		vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
+		await activeSession.setEffortLevelOverride('low');
+		expect(error).toHaveBeenCalledWith('Could not change effort: The session is still connecting. Try again in a moment.', expect.anything());
+		expect(activeSession.current.effortLevelOverride).toBe('high');
 	});
 
 	it('retains picks after rejection and does not submit a message', async () => {

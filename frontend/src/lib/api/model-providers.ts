@@ -247,7 +247,9 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
  * separate shared catalog, never a selection.
  */
 export interface FetchModelsResult {
-	source: 'preset' | 'upstream';
+	/** `agent`: the list the provider's own agent reported at a chat start
+	 *  (Google Antigravity), stamped with `fetched_at` and `agent_version`. */
+	source: 'preset' | 'upstream' | 'agent';
 	models: ProviderModelEntry[];
 	/** Media endpoints the server held back: this picker is for chat models, and
 	 *  audio/voice/image/video ones are configured elsewhere. Reported so the UI
@@ -263,6 +265,8 @@ export interface FetchModelsResult {
 	fetched_at?: string | null;
 	fetched_by_device?: string | null;
 	fetched_by_name?: string | null;
+	/** The agent's version when `source` is `agent`. */
+	agent_version?: string | null;
 }
 
 export type ModelCatalogSnapshot = FetchModelsResult;

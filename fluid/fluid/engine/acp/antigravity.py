@@ -38,11 +38,19 @@ TERMINAL_LOGIN = "terminal-login"
 AUTH_METHODS = (OAUTH_PERSONAL, OAUTH_BUSINESS, GEMINI_API_KEY, AGENT_PLATFORM, TERMINAL_LOGIN)
 # Methods whose sign-in the agent keeps itself (a person signed in once).
 STORED_SIGN_IN = (OAUTH_PERSONAL, OAUTH_BUSINESS, TERMINAL_LOGIN)
-# Our effort scale → the agent's thought_level values, in order. The agent
-# offers a per-model subset (1.5.6: low/high on Gemini 3.1 Pro).
-THOUGHT_LEVELS = ("low", "medium", "high", "extra", "max")
+# The agent's thought_level values we know, least thinking first. The agent
+# offers a per-model subset (1.5.6: low/high on Gemini 3.1 Pro; 1.5.9's
+# combined ids name gemini-4-hydrogen-xhigh). "extra" is the older spelling of
+# the step above high: it ranks with "xhigh", and whichever of the two the
+# model offers is the one asked for.
+THOUGHT_LEVELS = ("low", "medium", "high", "xhigh", "extra", "max")
+_LEVEL_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "extra": 3, "max": 4}
+# Our effort scale → the agent's level (matched against what it offers).
 EFFORT_TO_THOUGHT = {"minimal": "low", "low": "low", "medium": "medium", "high": "high",
-                     "xhigh": "extra", "max": "max"}
+                     "xhigh": "xhigh", "max": "max"}
+# The agent's level → our effort scale, for the levels a picker offers.
+THOUGHT_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh",
+                     "extra": "xhigh", "max": "max"}
 _ERROR_TEXT = "Agent execution terminated due to error"
 # Environment the agent may inherit from the host; everything else (API keys,
 # database URLs, tokens) is left out.
@@ -88,6 +96,69 @@ def split_model_id(model: str | None) -> tuple[str | None, str | None]:
     return model, None
 
 
+def _option(options: Sequence[Mapping[str, Any]], kind: str) -> Mapping[str, Any] | None:
+    for option in options:
+        if option.get("id") == kind or option.get("category") == kind:
+            return option
+    return None
+
+
+def _values(option: Mapping[str, Any] | None) -> list[tuple[str, str]]:
+    """``(value, name)`` of a select option's choices."""
+    out: list[tuple[str, str]] = []
+    for choice in (option or {}).get("options") or []:
+        if isinstance(choice, Mapping) and choice.get("value") is not None:
+            value = str(choice["value"])
+            out.append((value, str(choice.get("name") or value)))
+    return out
+
+
+def offered_models(options: Sequence[Mapping[str, Any]],
+                   models: Mapping[str, Any] | None) -> list[dict[str, Any]]:
+    """The models the agent offers, each ``{"id", "label", "levels"}``.
+
+    The ``model`` config option is the list (it is what ``set_config_option``
+    can select); without one, the base ids of the legacy ``models`` reply.
+    ``levels`` are the agent's own thought_level values for that model, from
+    the combined ids in ``models.availableModels`` (``gemini-3.1-pro-high``);
+    for the current model the ``thought_level`` option instead, when it has
+    one. None when the agent said nothing about a model's levels.
+    """
+    choices = _values(_option(options, "model"))
+    combined: list[str] = []
+    if isinstance(models, Mapping):
+        for entry in models.get("availableModels") or []:
+            if isinstance(entry, Mapping) and entry.get("modelId"):
+                combined.append(str(entry["modelId"]))
+    if not choices:
+        seen: dict[str, None] = {}
+        for model_id in combined:
+            seen.setdefault(split_model_id(model_id)[0] or model_id, None)
+        choices = [(model_id, model_id) for model_id in seen]
+    bases = sorted((value for value, _ in choices), key=len, reverse=True)
+    levels: dict[str, list[str]] = {}
+    for model_id in combined:
+        # Longest offered id first: a level the agent names that we do not
+        # know (yet) is still read from what follows the model's own id.
+        base = next((b for b in bases if model_id.startswith(b + "-")), None)
+        if base is not None:
+            level = model_id[len(base) + 1:]
+            if level and level not in levels.setdefault(base, []):
+                levels[base].append(level)
+    model_option = _option(options, "model")
+    current = str(model_option.get("currentValue")) if model_option and model_option.get("currentValue") else None
+    thought = [value for value, _ in _values(_option(options, "thought_level"))]
+    if current and thought:
+        # The thought_level option is the current model's list right now: it
+        # wins over the combined ids (it may add or drop a level). It says
+        # nothing about any other model.
+        levels[current] = thought
+    return [{"id": value, "label": name,
+             "levels": sorted(levels[value], key=lambda v: _LEVEL_RANK.get(v, len(_LEVEL_RANK)))
+             if value in levels else None}
+            for value, name in choices]
+
+
 @dataclass
 class AntigravitySpec(AcpAgentSpec):
     provider: str = PROVIDER
@@ -123,26 +194,33 @@ class AntigravitySpec(AcpAgentSpec):
 
     def config_value(self, options: Sequence[Mapping[str, Any]], kind: str,
                      wanted: str | None) -> tuple[str, str] | None:
-        if kind == "model":
-            wanted = split_model_id(wanted)[0]
         choice = super().config_value(options, kind, wanted)
-        if choice is not None or kind != "thought_level" or wanted not in THOUGHT_LEVELS:
+        if choice is not None:
             return choice
-        # Nearest level the model offers, preferring the lower one.
-        for option in options:
-            if option.get("id") != "thought_level" and option.get("category") != "thought_level":
-                continue
-            offered = [str(v.get("value")) for v in option.get("options") or [] if isinstance(v, Mapping)]
-            ranked = [v for v in THOUGHT_LEVELS if v in offered]
-            if not ranked:
-                return None
-            target = THOUGHT_LEVELS.index(wanted)
-            best = min(ranked, key=lambda v: (abs(THOUGHT_LEVELS.index(v) - target), THOUGHT_LEVELS.index(v)))
-            return str(option.get("id")), best
-        return None
+        if kind == "model":
+            # A combined id (gemini-4-hydrogen-xhigh) names the model before its level.
+            base = split_model_id(wanted)[0]
+            return super().config_value(options, kind, base) if base != wanted else None
+        if kind != "thought_level" or wanted not in _LEVEL_RANK:
+            return None
+        option = _option(options, "thought_level")
+        if option is None:
+            return None
+        # The model's own spelling of the same step ("extra" for "xhigh"),
+        # else the nearest level it offers, preferring the lower one.
+        ranked = [v for v, _ in _values(option) if v in _LEVEL_RANK]
+        if not ranked:
+            return None
+        target = _LEVEL_RANK[wanted]
+        best = min(ranked, key=lambda v: (abs(_LEVEL_RANK[v] - target), _LEVEL_RANK[v]))
+        return str(option.get("id")), best
 
     def effort_value(self, effort: str | None) -> str | None:
         return EFFORT_TO_THOUGHT.get(effort or "") if effort else None
+
+    def offered_models(self, options: Sequence[Mapping[str, Any]],
+                       models: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
+        return offered_models(options, models) or None
 
     def turn_failure(self, text: str) -> str | None:
         if _ERROR_TEXT in (text or ""):
