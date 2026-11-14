@@ -195,17 +195,37 @@ async def test_other_session_errors_propagate_rather_than_masquerading_as_timeou
             raise AssertionError(f"{exc!r} was swallowed")
 
 
-async def test_legacy_sdk_without_mrtr_kwargs_is_called_positionally() -> None:
+async def test_mrtr_keywords_reach_the_sdk_once_and_are_never_dropped() -> None:
+    """A ``call_tool`` that takes the MRTR keywords (mcp 2.x) gets them on a
+    single call. A ``TypeError`` is never answered by resending the call
+    without them: that used to drop the user's answer (#1560). The mcp 1.x
+    path is covered on the app's own SDK by
+    tests/core/test_mcp_mrtr_pinned_sdk.py."""
     from fluid.tools.mcp.client import McpClient
 
-    session = _FakeSession(legacy=True)
-    out = await McpClient("srv", {})._do_call(session, "echo", None)
+    answers = {"confirm": {"action": "accept", "content": {"ok": True}}}
+    session = _FakeSession()
+    out = await McpClient("srv", {})._do_call(
+        session, "echo", None, input_responses=answers, request_state="rs-1",
+    )
     assert out == {
         "kind": "result", "text": "ran echo", "images": [], "is_error": False,
         "structured": None,
     }
-    assert session.calls[0][2] == {"allow_input_required": True}
-    assert session.calls[1] == ("echo", {}, {})
+    assert session.calls == [("echo", {}, {
+        "allow_input_required": True, "input_responses": answers, "request_state": "rs-1",
+    })]
+
+    rejecting = _FakeSession(legacy=True)
+    try:
+        await McpClient("srv", {})._do_call(
+            rejecting, "echo", {}, input_responses=answers, request_state="rs-1",
+        )
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("the TypeError was swallowed")
+    assert len(rejecting.calls) == 1
 
 
 async def test_actor_death_fails_every_queued_command() -> None:
