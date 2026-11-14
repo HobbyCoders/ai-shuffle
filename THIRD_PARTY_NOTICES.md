@@ -114,7 +114,7 @@ Installed into the Docker image and the desktop installer's Python runtime (`req
 | coverage | 7.16.1 | Apache-2.0 | https://github.com/coveragepy/coveragepy |
 | cryptography | 50.0.1 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography |
 | discord.py | 2.7.1 | MIT License | https://pypi.org/project/discord-py/ |
-| dnspython | 2.9.0 | ISC | https://www.dnspython.org |
+| dnspython | 2.9.2 | ISC | https://www.dnspython.org |
 | evdev | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev/2.0.0/ |
 | evdev-binary | 2.0.0 | BSD-3-Clause | https://pypi.org/project/evdev-binary/2.0.0/ |
 | execnet | 2.1.2 | MIT | https://execnet.readthedocs.io/en/latest/ |
