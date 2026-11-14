@@ -4,6 +4,7 @@ import {
 	setPersistedRunBinding,
 	gateSnapshotPatch,
 	reconciledSessionMode,
+	withoutBorrowedComposeProject,
 	type SessionSwitcherDeps,
 } from './session-switcher';
 import { feedController } from './v2/feed-controller';
@@ -1734,5 +1735,26 @@ describe('leaving a session with an unanswered prose question (spec §5)', () =>
 		deps.update((s) => ({ ...s, sessionId: 'session-A', messages: [asked[0]], isLoadingSession: true }));
 		switcher.newChat();
 		expect(get(proseQuestionSessions).has('session-A')).toBe(true);
+	});
+});
+
+// A brand-new tab falls back to the device's last snapshot; a new session
+// starts without a project (owner decision 2026-11-13).
+describe('withoutBorrowedComposeProject', () => {
+	const compose = { sessionId: null, mode: 'code' as const, title: 'New Chat', project: 'p1', projectV2Id: 'pv2-1',
+		modelOverride: 'sonnet', permissionModeOverride: null, worktreeIntent: 'worktree' as const, workspaceProjectIds: ['extra'] };
+
+	it('drops another tab\'s project from an untyped compose, keeping its run binding', () => {
+		expect(withoutBorrowedComposeProject(compose)).toMatchObject({ mode: 'chat', project: '', projectV2Id: null,
+			worktreeIntent: 'local', workspaceProjectIds: [], modelOverride: 'sonnet' });
+	});
+
+	it('keeps an existing session, a staged checkout and a voice compose as saved', () => {
+		const session = { ...compose, sessionId: 'chat-1' };
+		expect(withoutBorrowedComposeProject(session)).toBe(session);
+		const staged = { ...compose, worktreeBranch: 'topic/x' };
+		expect(withoutBorrowedComposeProject(staged)).toBe(staged);
+		const voice = { ...compose, mode: 'voice' as const };
+		expect(withoutBorrowedComposeProject(voice)).toBe(voice);
 	});
 });

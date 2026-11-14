@@ -1,9 +1,11 @@
 /**
- * The new-session screen's "Runs on <worker> in <project> on <branch> in <a
- * worktree>" choices stay what the owner picked when they open another chat
- * and come back, typed message or not. Coming back is New session again: the
- * compose they left is kept under the shared '__new_chat__' slot. Drives the
- * real activeSession store with only Git and the catalog stubbed.
+ * Every new session starts without a project (owner decision 2026-11-13). The
+ * new-session screen's "Runs on <worker> in <project> on <branch> in <a
+ * worktree>" choices come back only with a kept draft: typed text or a staged
+ * checkout, the compose in progress. An untyped compose left for another chat
+ * starts over without a project; its worker carries over. Coming back is New
+ * session again: the compose left is kept under the shared '__new_chat__' slot.
+ * Drives the real activeSession store with only Git and the catalog stubbed.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -32,6 +34,8 @@ function gitRepo(projectId: string) {
 	for (const listener of mocks.gitListeners) listener(mocks.git);
 }
 
+const typed = JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'half-typed' }] }] });
+
 /** Open another chat, then New session to come back. */
 function awayAndBack() {
 	active.switchSession('other-chat', null, null, 'Other chat', null);
@@ -49,17 +53,32 @@ beforeEach(async () => {
 	active.newChat();
 });
 
-it('keeps the worker, project, base branch and worktree after opening another chat', () => {
+it('keeps the worker, project, base branch and worktree of a typed draft after opening another chat', () => {
 	active.setDeviceIntent(PEER);
 	gitRepo('a'); active.setProject('a');
+	active.setWorktreeIntent('worktree');
+	active.setWorktreeBaseBranch('develop');
+	active.setDraft(typed);
+
+	awayAndBack();
+
+	expect(active.current).toMatchObject({
+		sessionId: null, mode: 'code', deviceIntent: PEER, project: 'a', draft: typed,
+		worktreeIntent: 'worktree', worktreeBranch: '', worktreeBaseBranch: 'develop',
+	});
+});
+
+it('starts an untyped compose left for another chat over without a project, keeping its worker', () => {
+	active.setDeviceIntent(PEER);
+	gitRepo('a'); active.setProject('a', null, { user: true });
 	active.setWorktreeIntent('worktree');
 	active.setWorktreeBaseBranch('develop');
 
 	awayAndBack();
 
 	expect(active.current).toMatchObject({
-		sessionId: null, mode: 'code', deviceIntent: PEER, project: 'a',
-		worktreeIntent: 'worktree', worktreeBranch: '', worktreeBaseBranch: 'develop',
+		sessionId: null, mode: 'chat', deviceIntent: PEER, project: '', projectV2Id: null,
+		worktreeIntent: 'local', worktreeBranch: '', worktreeBaseBranch: 'main',
 	});
 });
 
@@ -67,6 +86,7 @@ it('keeps the worktree and base branch while Git status still describes the chat
 	gitRepo('a'); active.setProject('a');
 	active.setWorktreeIntent('worktree');
 	active.setWorktreeBaseBranch('develop');
+	active.setDraft(typed);
 	active.switchSession('other-chat', null, null, 'Other chat', null);
 	// The other chat's status replaced the project's.
 	mocks.git = { projectId: null, hydrated: false, stale: false, status: null };
@@ -80,16 +100,17 @@ it('keeps the worktree and base branch while Git status still describes the chat
 });
 
 it('drops the worktree when the kept project turns out not to be a Git repository', () => {
-	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree');
+	gitRepo('a'); active.setProject('a'); active.setWorktreeIntent('worktree'); active.setDraft(typed);
 	awayAndBack();
 	mocks.git = { projectId: 'a', hydrated: true, stale: false, status: { is_git_repo: false } };
 	for (const listener of mocks.gitListeners) listener(mocks.git);
 	expect(active.current).toMatchObject({ project: 'a', worktreeIntent: 'local' });
 });
 
-it('keeps a project in the main checkout (worktree off)', () => {
+it('keeps a typed draft\'s project in the main checkout (worktree off)', () => {
 	gitRepo('a'); active.setProject('a');
 	active.setWorktreeIntent('local');
+	active.setDraft(typed);
 
 	awayAndBack();
 
@@ -166,9 +187,9 @@ it('keeps the worker and "no project" when the owner cleared the project', () =>
 	expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, worktreeIntent: 'local', deviceIntent: PEER });
 });
 
-// The owner's last project choice is what every new session opens with,
-// "no project" included (owner decision 2026-10-31).
-it('opens the next new session in the last project picked once a session was created from it', () => {
+// The owner's last project pick is still recorded (per-project picks, other
+// devices) but a new session never opens with it (owner decision 2026-11-13).
+it('starts the next new session without a project after one was created in a project', async () => {
 	gitRepo('a'); active.setProject('a', null, { user: true }); active.setWorktreeIntent('worktree');
 	// A first send spends the compose (message-sender clears the slot).
 	active.switchSession('created-chat', 'a', null, 'Created', null);
@@ -176,29 +197,26 @@ it('opens the next new session in the last project picked once a session was cre
 
 	active.newChat();
 
-	expect(active.current).toMatchObject({ sessionId: null, mode: 'code', project: 'a', worktreeIntent: 'worktree' });
+	expect(active.current).toMatchObject({ sessionId: null, mode: 'chat', project: '', projectV2Id: null, worktreeIntent: 'local' });
+	const { composerPreferences } = await import('./composer-preferences');
+	expect(composerPreferences.current.project).toEqual({ projectId: 'a', projectV2Id: null });
 });
 
-it('keeps the last project when New session is pressed on the new-session screen itself', () => {
+it('clears an untyped project when New session is pressed on the new-session screen itself', () => {
 	gitRepo('a'); active.setProject('a', null, { user: true });
 
 	active.newChat();
 
-	expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
 });
 
-it('opens the next new session without a project once the owner cleared it, until one is picked again', () => {
-	active.setProject('a', null, { user: true });
-	active.clearProject({ user: true });
-	active.switchSession('created-chat', null, null, 'Created', null);
-	ephemeral.remove('__new_chat__');
+it('keeps a typed draft\'s project when New session is pressed on the new-session screen itself', () => {
+	gitRepo('a'); active.setProject('a', null, { user: true });
+	active.setDraft(typed);
 
 	active.newChat();
-	expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
 
-	active.setProject('b', null, { user: true });
-	active.newChat();
-	expect(active.current).toMatchObject({ mode: 'code', project: 'b' });
+	expect(active.current).toMatchObject({ mode: 'code', project: 'a', draft: typed });
 });
 
 it('never opens a new session in the project of the chat being left', () => {
@@ -210,16 +228,34 @@ it('never opens a new session in the project of the chat being left', () => {
 	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
 });
 
-it('does not remember a clear the app made itself, and skips a remembered project this worker no longer lists', () => {
-	active.setProject('a', null, { user: true });
-	// A catalog fix-up (dropMissingProject) clears without the owner.
-	active.clearProject();
-	active.newChat();
-	expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+it('never adds the remembered project when defaults or the catalog are re-applied', async () => {
+	const { composerPreferences } = await import('./composer-preferences');
+	composerPreferences.set('project', { projectId: 'a', projectV2Id: null });
 
+	active.applyComposerDefaults();
+	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
+	active.resolveComposerDefaultsAfterCatalog();
+	expect(active.current).toMatchObject({ mode: 'chat', project: '' });
+	active.dropMissingProject();
+	expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
+});
+
+it('keeps the project an idle compose picked when defaults are re-applied', async () => {
+	active.setProject('a', null, { user: true });
+	const { composerPreferences } = await import('./composer-preferences');
+	// Another device picks a different project: this compose keeps its own.
+	composerPreferences.set('project', { projectId: 'b', projectV2Id: null });
+
+	active.applyComposerDefaults();
+
+	expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+});
+
+it('drops a project this worker no longer lists from a compose, without adding another', () => {
+	active.setProject('a', null, { user: true });
 	mocks.catalog.projects = [{ id: 'b' }];
 	try {
-		active.newChat();
+		active.applyComposerDefaults();
 		expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
 	} finally {
 		mocks.catalog.projects = [{ id: 'a' }, { id: 'b' }];
@@ -240,21 +276,25 @@ describe('one-time new branch picked, sent, and left while the session is still 
 		return { claim, composerPreferences };
 	}
 
-	it('is cleared once the session is created; project and worktree stay', async () => {
+	it('is cleared once the session is created; the next new session starts without a project', async () => {
 		const { claim, composerPreferences } = await sendAndLeave();
 		claim.consume();
 		active.newChat();
 		expect(composerPreferences.current.checkout).toBeNull();
+		expect(active.current).toMatchObject({ mode: 'chat', project: '', worktreeIntent: 'local', worktreeBranch: '' });
+		active.setProject('a');
 		expect(active.current).toMatchObject({
 			mode: 'code', project: 'a', worktreeIntent: 'worktree',
 			worktreeBranch: '', worktreeBaseBranch: 'main', worktreeCreateNewBranch: false,
 		});
 	});
 
-	it('comes back when that create failed', async () => {
+	it('comes back with the project when that create failed', async () => {
 		const { claim } = await sendAndLeave();
 		claim.release();
 		active.newChat();
+		expect(active.current).toMatchObject({ mode: 'chat', project: '' });
+		active.setProject('a');
 		expect(active.current).toMatchObject({
 			mode: 'code', project: 'a', worktreeIntent: 'worktree',
 			worktreeBranch: 'topic/new', worktreeBaseBranch: 'develop', worktreeCreateNewBranch: true,
@@ -266,7 +306,6 @@ describe('a draft restored by a reload keeps the place it was typed in', () => {
 	// After a reload the text is only in this tab's draft slot until the
 	// composer reads it back; another tab or device may have saved a different
 	// project choice meanwhile.
-	const typed = JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'half-typed' }] }] });
 
 	it('keeps no project', async () => {
 		active.clearProject({ user: true });
@@ -298,22 +337,19 @@ describe('a draft restored by a reload keeps the place it was typed in', () => {
 
 		active.applyComposerDefaults();
 
-		expect(active.current).toMatchObject({ mode: 'code', project: 'a' });
+		// Not a draft, so the defaults apply: and they carry no project.
+		expect(active.current).toMatchObject({ mode: 'chat', project: '' });
 	});
 });
 
-it('keeps the shared id of a remembered project this worker has no local copy of', async () => {
-	const { composerPreferences } = await import('./composer-preferences');
+it('keeps the shared id of a typed compose\'s project this worker has no local copy of', () => {
 	const remote = { project_v2_id: 'repo-x', local_project_id: null, remote_only: true, origin: 'git@example:x', name: 'X' };
 	(mocks.catalog.clusterProjects as unknown[]).push(remote);
 	try {
-		composerPreferences.set('project', { projectId: '', projectV2Id: 'repo-x' });
-		active.switchSession('other-chat', null, null, 'Other chat', null);
-		ephemeral.remove('__new_chat__');
-		// Even when the defaults stand aside (a draft slot left by a reload).
-		sessionStorage.setItem('__aihub_draft_new', JSON.stringify({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'x' }] }] }));
+		active.setProject('', 'repo-x', { user: true });
+		active.setDraft(typed);
 
-		active.newChat();
+		awayAndBack();
 
 		expect(active.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'repo-x' });
 	} finally {

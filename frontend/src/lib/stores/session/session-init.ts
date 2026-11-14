@@ -279,6 +279,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 			}
 
 			const defaultProfile = backendSelection?.selectedProfile || switcher.getPersistedProfile();
+			// Only an EXISTING session saved without its project falls back to
+			// the device's last pick; a compose never does (a new session starts
+			// without a project, owner decision 2026-11-13).
 			const defaultProject = backendSelection?.selectedProject || switcher.getPersistedProject();
 
 			if (deepLinkSessionId) {
@@ -294,9 +297,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 					...s,
 					isRestoringSession: false,
 					profile: s.profile || defaultProfile,
-					// A new session starts without a project (#371 step 4);
-					// only a compose that already picked one keeps it.
-					...(s.mode === 'chat' ? {} : resolvePersistedProject(
+					// A new session starts without a project (owner decision
+					// 2026-11-13); a compose keeps exactly the project it holds.
+					...(s.mode === 'chat' || !s.sessionId ? {} : resolvePersistedProject(
 						{ project: s.project, projectV2Id: s.projectV2Id },
 						defaultProject,
 					)),
@@ -351,9 +354,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 						// Bypass, #371).
 						...(persisted.sessionId && normalizeSessionMode(persisted.mode) === 'chat'
 							? { project: persisted.project ?? '', projectV2Id: persisted.projectV2Id ?? null }
-							: persisted.sessionId || persisted.project || persisted.projectV2Id
-								? resolvePersistedProject(persisted, defaultProject)
-								: { project: '', projectV2Id: null }),
+							: resolvePersistedProject(persisted, persisted.sessionId ? defaultProject : '')),
 						// Run binding. A restored EXISTING session keeps whatever the
 						// record holds — null included, which lets the backend fall
 						// back to what that session actually last ran on. Only an
@@ -373,7 +374,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.contextWindowChoice ??
 							(persisted.sessionId ? DEFAULT_CONTEXT_WINDOW_CHOICE : s.contextWindowChoice),
 						worktreeIntent: persisted.sessionId ? persisted.worktreeIntent || 'local'
-							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, defaultProject).project, persisted.projectV2Id ?? null),
+							: switcher.getPersistedWorktreeIntent(resolvePersistedProject(persisted, '').project, persisted.projectV2Id ?? null),
 						worktreeBranch: persisted.worktreeBranch || '',
 						worktreeBaseBranch: persisted.worktreeBaseBranch || 'main',
 						worktreeId: persisted.worktreeId ?? null,
@@ -399,11 +400,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 						void switcher.refreshSessionMetadata(persisted.sessionId);
 					}
 				} else {
-					// No saved compose: the owner's last project choice applies
-					// after init (applyComposerDefaults). One the user picked
-					// while this loaded is theirs (#930).
-					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile,
-						...(s.mode === 'chat' || hasBootProjectPick(initGen) ? {} : { project: defaultProject }) }));
+					// No saved compose: a new session, without a project. One the
+					// user picked while this loaded is theirs (#930) and stays.
+					update(s => ({ ...s, isRestoringSession: false, profile: defaultProfile }));
 				}
 			}
 

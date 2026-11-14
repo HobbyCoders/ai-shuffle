@@ -23,8 +23,11 @@ beforeEach(async () => {
  active = (await import('./active-session')).activeSession;
  Object.assign(active.current, { mode: 'code', sessionId: null, draft: '', worktreeBranch: '' });
 });
+// A compose holding a project by its shared id only (picked or restored before
+// this worker's catalog answered) while the account's defaults arrive. The
+// owner's remembered project itself is never applied to a compose.
 async function receiveDefaults(projectId = 'foreign-clone') {
- mocks.adapters.get('composer.project')!.apply({ projectId, projectV2Id: 'repo' });
+ Object.assign(active.current, { project: '', projectV2Id: 'repo' });
  mocks.prefixes.get('composer.projectWorktree.')('composer.projectWorktree.shared%3Arepo').apply({intent:'worktree', checkout:{ kind: 'branch', projectId, projectV2Id: 'repo',
   branch: 'topic/remote', baseBranch: 'develop', createNew: true }});
  mocks.adapters.get('composer.model')!.apply('sonnet');
@@ -63,6 +66,15 @@ it.each(['draft', 'branch'])('preserves a local %s staged while catalogs are loa
 });
 // #1636 review: a send held for the catalog must leave on the remembered
 // branch, not an auto-named one, even when text was typed while it loaded.
+it('never moves an idle compose onto a project picked on another device', async () => {
+ mocks.catalog.projects = [{ id: 'local-clone' }]; mocks.catalog.clusterProjects = [linked]; mocks.catalogLoaded = true;
+ Object.assign(active.current, { mode: 'chat', project: '', projectV2Id: null });
+ mocks.adapters.get('composer.project')!.apply({ projectId: 'foreign-clone', projectV2Id: 'repo' });
+ await Promise.resolve();
+ active.resolveComposerDefaultsAfterCatalog();
+ expect(active.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, worktreeBranch: '' });
+ expect(active.composerAwaitingProjectCatalog).toBe(false);
+});
 it('finishes the remembered project and branch under a draft typed while the catalog loaded', async () => {
  await receiveDefaults();
  expect(active.composerAwaitingProjectCatalog).toBe(true);
