@@ -36,6 +36,19 @@ describe('docs search ranking (#1581)', () => {
 		}
 	});
 
+	it('scores a hyphenated word by its separate words, so the page titled with them wins', () => {
+		const engine = new DocsSearchEngine([
+			doc('endpoints', 'Endpoints', '`GET /api/v1/remote-access/status` and `POST /api/v1/remote-access/enable`.'),
+			doc('changelog', 'Changelog', 'Added a remote-access toggle.'),
+			doc('remote-access', 'Remote Access', 'Turn on remote access in Settings, then open the link on your phone.'),
+			doc('hosts', 'Hosts', 'Remote hosts need access keys.')
+		]);
+		const slugs = engine.search('remote-access').map((r) => r.slug);
+		expect(slugs[0]).toBe('features/remote-access');
+		// Every page holding the words together ranks above the one that has them apart.
+		expect(slugs.at(-1)).toBe('features/hosts');
+	});
+
 	it('puts the snippet and the jump at the phrase, not an earlier lone word', () => {
 		const text = `Remote hosts are supported. ${'Padding unrelated context. '.repeat(12)}Enable remote-access here.`;
 		const lower = text.toLowerCase();
@@ -75,5 +88,9 @@ describe('docs search ranking (#1581)', () => {
 		expect(first.slug).toBe('getting-started/quick-start');
 		// Short words together find the FAQ first, as Spotlight's backend does.
 		expect(engine.search('do I')[0]?.slug).toBe('getting-started/faq');
+		// A hyphenated word finds the page about it first, as Spotlight's backend does.
+		for (const query of ['remote-access', 'remote, access!', 'remote access']) {
+			expect(engine.search(query)[0]?.slug, query).toBe('getting-started/remote-access');
+		}
 	});
 });

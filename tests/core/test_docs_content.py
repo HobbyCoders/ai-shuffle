@@ -201,11 +201,33 @@ def test_search_snippet_shows_the_phrase_not_an_earlier_lone_word(tmp_path, monk
     assert dc._phrase_span(text, "remote") is None
 
 
+def test_search_scores_a_hyphenated_word_by_its_separate_words(tmp_path, monkeypatch):
+    """`remote-access` puts the page titled "Remote access" above pages that only
+    spell the hyphenated word literally, such as an API path or a changelog line."""
+    root = tmp_path / "content"
+    monkeypatch.setattr(dc, "DOCS_DIR", root)
+    _doc(root, "api-reference/endpoints.md",
+         "<!--\ntitle: Endpoints\n-->\n"
+         "`GET /api/v1/remote-access/status` and `POST /api/v1/remote-access/enable`.\n")
+    _doc(root, "changelog.md", "<!--\ntitle: Changelog\n-->\nAdded a remote-access toggle.\n")
+    _doc(root, "getting-started/remote-access.md",
+         "<!--\ntitle: Remote access\ndescription: Reach your worker from anywhere\n-->\n"
+         "Turn on remote access in Settings, then open the link on your phone.\n")
+    _doc(root, "features/hosts.md", "<!--\ntitle: Hosts\n-->\nRemote hosts need access keys.\n")
+    slugs = [r["slug"] for r in DocsIndex().search("remote-access")]
+    assert slugs[0] == "remote-access", slugs
+    # Every page holding the words together ranks above the one that has them apart.
+    assert slugs[-1] == "hosts", slugs
+
+
 def test_real_docs_find_a_pasted_sentence_first():
     index = DocsIndex()
     [first, *_] = index.search("write its prompt (its instructions), and choose its tools")
     assert first["slug"] == "quick-start"
     # Short words together find the FAQ first, as the Docs panel does.
     assert index.search("do I")[0]["slug"] == "faq"
+    # A hyphenated word finds the page about it first, as the Docs panel does.
+    for query in ("remote-access", "remote, access!", "remote access"):
+        assert index.search(query)[0]["slug"] == "remote-access", query
     [cloud] = [r for r in index.search("Ultimate") if r["slug"] == "cloud"]
     assert not any(ch in cloud["snippets"][0] for ch in "|*`") and "](" not in cloud["snippets"][0]

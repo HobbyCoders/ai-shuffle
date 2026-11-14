@@ -8,13 +8,20 @@
 import type { DocEntry, SearchResult } from './types';
 import { markdownToPlainText } from './markdown';
 
-/** Words of a query as the index splits them. */
+/**
+ * Words of a query as the index splits them. A hyphenated word also counts as
+ * its separate words (`remote-access` → `remote`, `access`), so a page that
+ * writes them apart, or names them in its title, scores for them too.
+ */
 function tokenize(text: string): string[] {
-	return text
-		.toLowerCase()
-		.replace(/[^\w\s-]/g, ' ')
-		.split(/\s+/)
-		.filter((t) => t.length > 2);
+	const tokens: string[] = [];
+	for (const token of text.toLowerCase().replace(/[^\w\s-]/g, ' ').split(/\s+/)) {
+		const parts = token.split('-');
+		for (const t of parts.length > 1 ? [token, ...parts] : parts) {
+			if (t.length > 2) tokens.push(t);
+		}
+	}
+	return tokens;
 }
 
 /**

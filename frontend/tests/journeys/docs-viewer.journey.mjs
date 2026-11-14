@@ -176,6 +176,11 @@ await runJourney({
 				await docsResults.getByRole('button').first().waitFor();
 				return (await docsResults.getByRole('button').first().innerText()).replace(/\s+/g, ' ').trim();
 			};
+			// The hyphenated word also counts as its separate words, so among the
+			// pages holding them together the one titled with them wins.
+			await mark('Docs panel: "remote-access" ranks Remote Access first');
+			const hyphen = await firstDocsRow('remote-access');
+			expect(hyphen.startsWith('Remote Access'), `the first Docs result for "remote-access" is Remote Access (${hyphen.slice(0, 80)})`);
 			await mark('Docs panel: "remote, access!" ranks Remote Access first');
 			const remote = await firstDocsRow('remote, access!');
 			expect(remote.startsWith('Remote Access'), `the first Docs result is Remote Access (${remote.slice(0, 80)})`);
@@ -217,6 +222,17 @@ await runJourney({
 			const spotPasted = await firstSpotlightRow(sentence, 'Quick Start');
 			expect(spotPasted.startsWith('Quick Start') && spotPasted.includes(sentence), `Spotlight's first Documentation row is Quick Start with the sentence (${spotPasted.slice(0, 120)})`);
 			expect(!/[|*`]|\]\(/.test(spotPasted), `Spotlight's row has no Markdown (${spotPasted.slice(0, 120)})`);
+			// After the sentence, whose first row is Quick Start, so a row left over
+			// from an earlier query can't pass for this one.
+			await mark('Spotlight: "remote-access" ranks Remote Access first');
+			await spotlight.fill('remote-access');
+			const firstRow = docsGroup.getByRole('button').first();
+			let spotHyphen = '';
+			for (const end = Date.now() + 8000; Date.now() < end; await page.waitForTimeout(200)) {
+				spotHyphen = ((await firstRow.innerText({ timeout: 500 }).catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+				if (spotHyphen.startsWith('Remote Access')) break;
+			}
+			expect(spotHyphen.startsWith('Remote Access'), `Spotlight's first Documentation row for "remote-access" is Remote Access (${spotHyphen.slice(0, 80)})`);
 		}
 	}]
 });
