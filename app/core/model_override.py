@@ -152,9 +152,10 @@ def app_id(provider_id: Optional[str], model_id: Optional[str]) -> Optional[str]
     if provider_id:
         return f"prov:{provider_id}:{text}"
     if is_native_claude_model(text):
-        from app.core.model_registry import normalize_model
+        from app.core.model_registry import normalize_picked
 
-        return normalize_model(text)
+        # On a subscription a full id is inherited and sent on as itself.
+        return normalize_picked(text)
     return text
 
 

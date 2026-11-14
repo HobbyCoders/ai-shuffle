@@ -23,6 +23,7 @@ Script shape::
     "init": {"tools": [...], "model": "...", "session_id": "...",
              "claude_code_version": "...", "apiKeySource": "...",
              "drop_plugins": true},           # list no --plugin-dir plugin
+    "initialize_reply": {"models": [...]},    # more initialize reply fields
     "context_usage": "answer" | "error" | "mute",   # get_context_usage replies
     "controls": {"<subtype>": "error" | "mute" | {"late": s}},
                                               # how other control requests
@@ -206,6 +207,10 @@ class Fake:
             if msg is None or msg.get("type") == "user":
                 return msg
 
+    def initialize_extra(self) -> dict:
+        """More ``initialize`` reply fields (the CLI's ``models`` list, say)."""
+        return dict(self.script.get("initialize_reply") or {})
+
     def answer_control(self, msg: dict) -> None:
         rid = msg.get("request_id", "")
         req = msg.get("request") or {}
@@ -213,7 +218,7 @@ class Fake:
         self.served[subtype] = self.served.get(subtype, 0) + 1
         payload: dict = {}
         if subtype == "initialize":
-            payload = {"commands": [], "output_style": "default"}
+            payload = {"commands": [], "output_style": "default", **self.initialize_extra()}
         elif subtype == "interrupt":
             self.interrupted = True
         elif (

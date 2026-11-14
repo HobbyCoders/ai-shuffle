@@ -90,7 +90,17 @@ const STATIC_VERSIONED_MODELS: readonly ModelOption[] = [
 	{ value: 'claude-haiku-4-5', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null },
 	{ value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', family: 'haiku', context_window: 200_000, effort_levels: [], default_effort: null },
 	{ value: 'claude-opus-5-5', label: 'Opus 5.5', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
-	{ value: 'claude-sonnet-5-5', label: 'Sonnet 5.5', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' }
+	{ value: 'claude-sonnet-5-5', label: 'Sonnet 5.5', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
+	// Versions a subscription CLI offers by id (app/core/claude_cli_models.py).
+	{ value: 'claude-fable-5-2', label: 'Fable 5.2', family: 'fable', context_window: 1_000_000 },
+	{ value: 'claude-fable-5-1', label: 'Fable 5.1', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
+	{ value: 'claude-fable-5', label: 'Fable 5', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
+	{ value: 'claude-opus-5', label: 'Opus 5', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
+	{ value: 'claude-opus-4-8', label: 'Opus 4.8', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
+	{ value: 'claude-opus-4-7', label: 'Opus 4.7', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'xhigh' },
+	{ value: 'claude-opus-4-6', label: 'Opus 4.6', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'max'], default_effort: 'high' },
+	{ value: 'claude-sonnet-5', label: 'Sonnet 5', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
+	{ value: 'claude-sonnet-4-6', label: 'Sonnet 4.6', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'max'], default_effort: 'high' }
 ];
 
 const STATIC_DEFAULT = 'sonnet';
@@ -278,6 +288,15 @@ export interface ClaudeAuthInfo {
 	auth_kind: ProviderAuthKind | null;
 	/** Subscription tier for account auth (e.g. `'max'`); null otherwise/unknown. */
 	plan_type: string | null;
+	/** When this worker's subscription CLI last reported its model list. */
+	cli_models?: { cli_version: string | null; captured_at: string | null } | null;
+}
+
+/** A versioned model the subscription CLI lists (Settings > Claude > Models). */
+export interface ClaudeVersionedModel extends ModelOption {
+	description: string;
+	/** The owner turned it on, so the pickers offer it. */
+	enabled: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,6 +310,8 @@ interface RegistryState {
 	effortModelAliases: Record<string, string>;
 	providers: ProviderEntry[];
 	claude: ClaudeAuthInfo;
+	/** Every version the subscription CLI lists, on or off; empty otherwise. */
+	claudeVersioned: ClaudeVersionedModel[];
 	hydrated: boolean;
 	/**
 	 * Agent providers that can run now (`/auth/status` -> `agent_gate.ready_providers`):
@@ -310,6 +331,7 @@ const _registry = $state<RegistryState>({
 	effortModelAliases: { ...STATIC_EFFORT_MODEL_ALIASES },
 	providers: [],
 	claude: { auth_kind: null, plan_type: null },
+	claudeVersioned: [],
 	hydrated: false,
 	readyProviders: null
 });
@@ -468,6 +490,11 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 	return _registry.claude;
 }
 
+/** Versions this worker's subscription CLI lists (empty in other modes). */
+export function getClaudeVersionedModels(): ClaudeVersionedModel[] {
+	return _registry.claudeVersioned;
+}
+
 // ---------------------------------------------------------------------------
 // Provider display naming — the ONE place the brand/subtext rules live.
 //
@@ -585,7 +612,9 @@ export function formatProviderDisplay(display: ProviderDisplay): string {
  */
 export function normalizeModel(value: string | null | undefined): string {
 	if (!value) return INHERIT_VALUE;
-	const mapped = _registry.legacyMap[value] ?? STATIC_LEGACY_MAP[value];
+	// The server's map is authoritative once hydrated: an id a subscription
+	// CLI lists by name is absent from it and means itself.
+	const mapped = _registry.legacyMap[value];
 	if (mapped !== undefined) {
 		if (mapped === 'haiku' && _registry.effortModelAliases.haiku !== STATIC_EFFORT_MODEL_ALIASES.haiku) return value;
 		return mapped;
@@ -605,7 +634,9 @@ export function isPresetModel(value: string | null | undefined): boolean {
 export function getNativeModel(value: string | null | undefined): ModelOption | undefined {
 	const base = normalizeModel(value);
 	const version = base.startsWith('claude-') ? base.replace(/-\d{8}$/, '') : base;
-	return _registry.models.find((m) => m.value === base) ?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
+	return _registry.models.find((m) => m.value === base)
+		?? _registry.claudeVersioned.find((m) => m.value === base)
+		?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
 }
 
 /** Native window for a Claude alias or version pin; null for unknown models.
@@ -815,6 +846,7 @@ interface RegistryProviderPayload {
 interface RegistryClaudePayload {
 	auth_kind?: string | null;
 	plan_type?: string | null;
+	cli_models?: { cli_version?: string | null; captured_at?: string | null } | null;
 }
 
 interface RegistryPayload {
@@ -825,6 +857,7 @@ interface RegistryPayload {
 	effort_model_aliases?: Record<string, string>;
 	providers?: RegistryProviderPayload[];
 	claude?: RegistryClaudePayload;
+	versioned_models?: (RegistryModelPayload & { description?: string; enabled?: boolean })[];
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
@@ -878,7 +911,10 @@ function mapPayloadClaude(c: RegistryClaudePayload | undefined): ClaudeAuthInfo 
 	const kind = c?.auth_kind;
 	return {
 		auth_kind: kind === 'api' || kind === 'subscription' ? kind : null,
-		plan_type: c?.plan_type ?? null
+		plan_type: c?.plan_type ?? null,
+		...(c?.cli_models
+			? { cli_models: { cli_version: c.cli_models.cli_version ?? null, captured_at: c.cli_models.captured_at ?? null } }
+			: {})
 	};
 }
 
@@ -1005,8 +1041,9 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 		}
 		const models = payload.models.map(mapPayloadModel);
 		// Drift-checked against the static Claude bundle only — providers are
-		// entirely db-sourced (no static baseline to drift from).
-		warnOnDrift(models, STATIC_MODELS);
+		// entirely db-sourced (no static baseline to drift from). Versions a
+		// subscription CLI offers are not part of the bundle.
+		warnOnDrift(models.filter((m) => !m.value.startsWith('claude-')), STATIC_MODELS);
 		_registry.models = models;
 		_registry.default = payload.default || STATIC_DEFAULT;
 		_registry.serverDefaultSet = !!payload.default;
@@ -1016,6 +1053,11 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 			? payload.providers.map(mapPayloadProvider)
 			: [];
 		_registry.claude = mapPayloadClaude(payload.claude);
+		_registry.claudeVersioned = Array.isArray(payload.versioned_models)
+			? payload.versioned_models.map((m) => ({
+				...mapPayloadModel(m), description: m.description ?? '', enabled: m.enabled === true
+			}))
+			: [];
 		_registry.hydrated = true;
 		latestCapabilityProviders = payload.providers ?? [];
 		if (refreshCapabilities) refreshStaleCapabilities(payload.providers ?? []);

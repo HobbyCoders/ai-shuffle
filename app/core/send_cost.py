@@ -209,7 +209,7 @@ def _comparison(
     session: Dict[str, Any], leg: Optional[str], tokens: int,
     snapshot: Dict[str, Any], last: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
+    from app.core.model_registry import DEFAULT_MODEL, delegated_model_aliases
     from app.core.provider.harness_adapter import (
         _catalog_pricing_resolver, _context_overhead_tokens,
     )
@@ -221,7 +221,8 @@ def _comparison(
     decoded = decode_provider_model(raw)
     provider_id = decoded[0] if decoded else session.get("provider_id")
     model = decoded[1] if decoded else raw
-    model = API_MODEL_IDS.get(model, model) if leg == "delegated" else model
+    # The model the CLI runs for an alias (a subscription CLI names it).
+    model = delegated_model_aliases().get(model, model) if leg == "delegated" else model
     resolver = _catalog_pricing_resolver(SessionOptions(model=model, extra={"provider_id": provider_id}))
     # Preserve measured fixed overhead; compaction cannot remove system/tools.
     overhead = _context_overhead_tokens(snapshot) or 0
