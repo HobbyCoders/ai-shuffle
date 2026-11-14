@@ -268,6 +268,10 @@ preferences:
   `generationPreferences`).
 - `generation.lastChoice.<kind>`: the latest pick from a card, offered first as
   "Same as last time" but never run without asking.
+- `generation.forgottenChoice.<kind>`: the remembered choice that "Ask me next
+  time" dropped. It is offered as the last choice only while there is no real
+  last pick, so a choice saved in Settings stays first on the next card. A
+  real pick always comes first, whichever worker made it.
 - `generation.choicesMigrated`: set once the saved Settings defaults were
   copied. A remembered choice is never overwritten by the migration.
 
