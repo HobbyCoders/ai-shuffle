@@ -47,7 +47,7 @@ class Api:
             return {"total_count": next(item.get("jobs", 0) for item in self.runs if item["id"] == run_id)}
         workflow, _, query = endpoint.partition("/runs?")
         status = dict(item.split("=") for item in query.split("&"))["status"]
-        if workflow == "actions/workflows/main-suite.yml":
+        if workflow == "actions/workflows/ci.yml":
             pool = self.runs + (self.hidden if status != "completed" else [])
         elif workflow == "actions/workflows/desktop-source.yml":
             pool = self.publishers
@@ -95,7 +95,7 @@ def test_a_replaced_waiting_run_is_not_an_event():
     assert code == 0
     assert not any("cancel" in line.lower() for line in said)
     assert [line.split(".")[0] for line in said] == [
-        "Not in a nightly yet (live: 1", f"main-suite passed on {TIP[:9]}; waiting for the publisher", "Published: nightly 1"]
+        "Not in a nightly yet (live: 1", f"CI passed on {TIP[:9]}; waiting for the publisher", "Published: nightly 1"]
 
 
 def test_unchanged_state_is_reported_once():
@@ -143,7 +143,7 @@ def test_a_run_that_has_not_registered_yet_gets_time_to_appear():
 
     code, said, _ = wait(api, fetch, timeout=900)
     assert code == 2
-    assert said[0].startswith("No main-suite run in flight covers") and "queued" in said[1]
+    assert said[0].startswith("No CI run in flight covers") and "queued" in said[1]
 
 
 def test_a_pass_the_publisher_never_ships_is_reported():

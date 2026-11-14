@@ -70,7 +70,7 @@ EVERY_JOURNEY = "*"
 SELECTOR = JOURNEYS / "select.mjs"
 SUFFIX = ".journey.mjs"
 JOURNEY_MAP = "frontend/tests/journeys/map.json"
-# Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
+# Clean shards across six CI runs on 2026-11-06 had 7–14s step overhead.
 # Keep the existing setup, retry and teardown allowances. Planning also reserves
 # the 120s error allowed by the independent hosted calibration: point estimates
 # must not spend that uncertainty out of the full retry/teardown reserves.
@@ -262,7 +262,7 @@ def base_journey_map(root: Path = ROOT, base: str = "HEAD^1") -> str | None:
 
 
 def last_green_main(root: Path = ROOT) -> str | None:
-    """The newest ancestor of HEAD that main-suite passed on; None if unknown.
+    """The newest ancestor of HEAD that CI passed on; None if unknown.
 
     Every journey held there: by running, or because that run narrowed the same
     way from an older green commit. Needs main's history fetched.
@@ -318,7 +318,7 @@ def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str]
     """(journey files or None for all, why) for a workflow event.
 
     A pull request runs what its merge changes. A push to main runs what
-    changed since the last commit main-suite passed on. Both narrow only when
+    changed since the last commit CI passed on. Both narrow only when
     the diff and the selection are readable; schedules, dispatches and other
     callers run all.
     """
@@ -327,8 +327,8 @@ def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str]
     elif event == "push":
         base = last_green_main(root)
         if base is None:
-            return None, "every journey: no earlier commit that main-suite passed on was found"
-        files, what = files_since(base, root), f"the changes since {base[:12]}, which main-suite passed on"
+            return None, "every journey: no earlier commit that CI passed on was found"
+        files, what = files_since(base, root), f"the changes since {base[:12]}, which CI passed on"
     else:
         return None, f"every journey: a {event or 'local'} run is not narrowed"
     if files is None:
@@ -491,7 +491,7 @@ def stale_journeys(run_id: int, changed: list[str], modules: dict[str, set[str]]
 
 
 def _run_revision(run_id: int, repo: str) -> str:
-    """The checked-out revision of one clean green main-suite run; refuses any other run."""
+    """The checked-out revision of one clean green CI run; refuses any other run."""
     state = json.loads(subprocess.check_output(
         ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
          "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
@@ -502,11 +502,11 @@ def _run_revision(run_id: int, repo: str) -> str:
         raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
                          f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
                          "Choose a clean first-attempt run.")
-    # main-suite push jobs check out headSha. PR runs check out a merge revision
+    # CI push jobs check out headSha. PR runs check out a merge revision
     # the run's headSha does not name, so their source is not recorded.
     if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
-            "push", "main", "main-suite"):
-        raise ValueError(f"Run {run_id} must be a push to main from main-suite; "
+            "push", "main", "CI"):
+        raise ValueError(f"Run {run_id} must be a push to main from CI; "
                          "PR/other runs do not establish the checkout revision. "
                          "No weights were replaced.")
     revision = state.get("headSha")
@@ -541,7 +541,7 @@ def _run_samples(run_id: int, repo: str) -> list[tuple[str, float, int]]:
 
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path | None = None) -> None:
-    """Median hosted seconds per journey file from clean green first-attempt main-suite runs.
+    """Median hosted seconds per journey file from clean green first-attempt CI runs.
 
     A sample counts only when the code it timed is still what this checkout
     runs: the journey file and the modules it imports are unchanged since the
@@ -598,7 +598,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
     counts.update({name: old_counts[name] for name in kept})
     data = {
         "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
-                    "green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights "
+                    "green CI push-to-main runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...] [--out PATH] in a checkout of the runs' revision. Only samples whose "
                     "workload is unchanged and whose case count matches the file count; a file with no "
                     "such sample keeps its entry. seconds_per_case is the median "

@@ -15,7 +15,7 @@ SPEC.loader.exec_module(suite)
 import local_ci
 
 
-def workflow(name="main-suite.yml"):
+def workflow(name="ci.yml"):
     return yaml.load((ROOT / ".github/workflows" / name).read_text(), Loader=yaml.BaseLoader)
 
 
@@ -28,74 +28,99 @@ def test_every_local_full_stage_has_an_explicit_hosted_mapping():
     assert local_ci.android_unavailable.__name__ == "android_unavailable"
 
 
-def test_root_calls_existing_workflows_and_requires_all_parity_jobs():
+SUFFIX = "${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}"
+# A manual run on any ref but main fails closed: nothing runs, so the verdict fails.
+ON_MAIN_IF_MANUAL = "github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'"
+CALLED = {
+    "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
+    "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
+    "container": "container-postgres", "identity": "ci-instance-identity",
+    "policy": "ci-artifact-policy", "desktop-source": "desktop-source-checks", "desktop": "desktop",
+    "android": "android", "android-minified": "ci-android-minified",
+}
+
+
+def ci_plan():
+    spec = importlib.util.spec_from_file_location("ci_plan", ROOT / "scripts/ci/plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_one_workflow_checks_pull_requests_and_main_and_requires_all_parity_jobs():
     config = workflow()
+    assert config["name"] == "CI"
     assert config["permissions"] == {"contents": "read"}
-    assert set(config["on"]) == {"push", "schedule", "workflow_dispatch"}
+    assert set(config["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}
+    # Every pull request, whatever it changes: the plan decides what runs.
+    assert config["on"]["pull_request"] == ""
     assert config["on"]["push"] == {"branches": ["main"]}
     # The daily run skips nothing and cannot displace a waiting push run.
     assert config["on"]["schedule"] == [{"cron": "0 8 * * *"}]
-    assert config["concurrency"]["group"] == (
-        "main-suite-${{ github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}")
-    # A burst of merges must not cancel every run and stall the nightly.
-    assert config["concurrency"]["cancel-in-progress"] == "false"
+    assert config["concurrency"]["group"] == "ci-${{ github.event.pull_request.number || github.ref }}" + SUFFIX
+    # A newer push replaces a pull request's run. On main a burst of merges
+    # must not cancel every run and stall the nightly.
+    assert config["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
     jobs = config["jobs"]
-    gate = jobs["main-suite"]
-    assert gate["name"] == "Main suite"
+    gate = jobs["ci"]
+    assert gate["name"] == "CI"
     # The verdict starts with the run (after the lookup it reads), so it never
     # queues for a runner once the last job finishes; it judges the jobs itself.
     assert gate["if"] == "${{ !cancelled() }}"
-    assert gate["needs"] == ["proven"]
-    assert set(suite.REQUIRED) == set(jobs) - {"main-suite", "source-ui", "proven"}
-    expected = {
-        "backend": "ci-backend", "javascript": "ci-frontend", "fluid": "ci-fluid",
-        "windows": "windows-suite", "browser-workspace": "ci-browser-workspace",
-        "container": "container-postgres", "identity": "ci-instance-identity",
-        "policy": "ci-artifact-policy", "desktop-source": "desktop-source-checks", "desktop": "desktop",
-    }
-    for job, name in expected.items():
+    assert gate["needs"] == ["plan"]
+    assert set(suite.REQUIRED) == set(jobs) - {"ci", "source-ui", "plan"}
+    for job, name in CALLED.items():
         assert jobs[job]["uses"] == f"./.github/workflows/{name}.yml"
         called = workflow(name + ".yml")
         # The daily run never shares a queue with a push run's called workflows.
-        assert called["concurrency"]["group"].endswith("${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}")
-        assert "workflow_call" in called["on"]
-        assert called["on"]["pull_request"] == ""
+        assert called["concurrency"]["group"].endswith(SUFFIX)
+        # Nothing but ci.yml starts these checks for a pull request or a push:
+        # one run, one verdict, and no area starts twice.
+        assert set(called["on"]) == {"workflow_call", "workflow_dispatch"}, name
         assert called["permissions"] == {"contents": "read"}
         assert called["concurrency"]["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert sorted(job for job, item in jobs.items() if "uses" in item) == sorted([*CALLED, "source-ui"])
     for job in ["identity", "desktop", "policy"]:
         assert jobs[job]["with"] == {"main_suite": "true"}
     assert jobs["windows"]["with"] == {"main_suite": "true", "gated_by_caller": "true"}
     assert jobs["backend"]["with"] == jobs["browser-workspace"]["with"] == {"gated_by_caller": "true"}
-    on_main = "github.event_name == 'push' || github.ref == 'refs/heads/main'"
+    # Publishing stays with the owner's manual run and the release workflow.
+    assert "with" not in jobs["android"] and "with" not in jobs["android-minified"]
     for name in suite.REQUIRED:
         if name in suite.PROVABLE:
-            # Skipped only when the lookup answered "true"; a failed or empty lookup runs it.
-            assert jobs[name]["needs"] == ["proven"]
-            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({on_main}) && needs.proven.outputs.{name} != 'true' }}}}"
+            # Skipped only when the plan answered "true"; a failed or empty plan runs it.
+            assert jobs[name]["needs"] == ["plan"]
+            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({ON_MAIN_IF_MANUAL}) && needs.plan.outputs.{name} != 'true' }}}}"
         elif name == "javascript":
-            assert jobs[name]["needs"] == ["proven"]
-            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({on_main}) }}}}"
+            assert jobs[name]["needs"] == ["plan"]
+            assert jobs[name]["if"] == f"${{{{ !cancelled() && ({ON_MAIN_IF_MANUAL}) }}}}"
+        elif name in suite.MAIN_ONLY:
+            assert "needs" not in jobs[name]
+            assert jobs[name]["if"] == "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
         else:
             assert "needs" not in jobs[name]
-            assert jobs[name]["if"] == on_main
+            assert jobs[name]["if"] == ON_MAIN_IF_MANUAL
     step = next(step for step in gate["steps"] if step.get("id") == "verdict")
-    assert step["env"] == {"GH_TOKEN": "${{ github.token }}", "RESULTS": "${{ toJSON(needs) }}"}
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}", "RESULTS": "${{ toJSON(needs) }}",
+        "RECORD": "${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}"}
     assert step["run"] == "python scripts/ci/main_gate.py"
     source = (ROOT / "scripts/ci/main_gate.py").read_text()
-    assert "from ci.main_suite import LOOKUP, REQUIRED, aggregate" in source and "aggregate(results)" in source
+    assert "from ci.main_suite import LOOKUP, REQUIRED, aggregate" in source and "aggregate(results, event)" in source
 
 
-def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
+def test_a_run_skips_only_the_areas_whose_files_already_passed():
     config = workflow()
     jobs = config["jobs"]
-    lookup = jobs["proven"]
-    assert lookup["if"] == "github.event_name == 'push' || github.ref == 'refs/heads/main'"
+    plan = ci_plan()
+    lookup = jobs[suite.LOOKUP]
+    assert lookup["if"] == ON_MAIN_IF_MANUAL
     assert "needs" not in lookup
     # A failed lookup neither fails the run nor stops it: every area then runs.
     assert lookup["continue-on-error"] == "true"
     assert main_gate().Plan().is_advisory(lookup["name"])
     # Advisory lists change with no file changing, so the blocking audits of the
-    # recorded areas always run on main, with the pull-request commands.
+    # recorded areas always run, with the commands of the areas themselves.
     audits = "\n".join(step.get("run", "") for step in jobs["supply-chain"]["steps"])
     backend_audit = next(step for step in workflow("ci-backend.yml")["jobs"]["backend-security"]["steps"]
                          if step.get("name") == "Audit public Python dependencies")
@@ -114,43 +139,61 @@ def test_a_push_skips_only_what_a_pull_request_recorded_for_the_same_files():
     for name in suite.PROVABLE:
         text = (ROOT / ".github/workflows" / jobs[name]["uses"].rsplit("/", 1)[1]).read_text()
         assert (" audit --audit-level" in text or "pip_audit" in text) == (name == "backend")
-    assert lookup["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
+    assert lookup["permissions"] == {"contents": "read", "actions": "read"}
+    # The plan answers for exactly the areas the verdict may see skipped, and the JavaScript checks.
     areas = [*suite.PROVABLE, "javascript-checks"]
-    assert lookup["outputs"] == {area: f"${{{{ steps.check.outputs.{area} }}}}" for area in areas}
+    assert sorted(plan.AREAS) == sorted(areas)
+    assert lookup["outputs"] == {**{area: f"${{{{ steps.plan.outputs.{area} }}}}" for area in plan.AREAS},
+                                 "records": "${{ steps.plan.outputs.records }}"}
     step = lookup["steps"][-1]
-    assert step["id"] == "check"
-    assert step["run"] == f'python3 scripts/ci/proven.py check --areas {",".join(areas)} >> "$GITHUB_OUTPUT"'
+    assert step["id"] == "plan"
+    assert step["run"] == 'python3 scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"'
     # The JavaScript workflow always runs: it decides the journeys itself.
     javascript = jobs["javascript"]
     assert javascript["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "read"}
-    assert javascript["with"] == {"checks_proven": "${{ needs.proven.outputs.javascript-checks == 'true' }}",
+    assert javascript["with"] == {"checks_proven": "${{ needs.plan.outputs.javascript-checks == 'true' }}",
                                   "gated_by_caller": "true"}
-    # Every area main may skip is recorded by exactly one job of its pull-request
-    # workflow, for this repository's own pull requests only, after its checks passed.
-    recorded = {}
-    for job in suite.PROVABLE:
-        called = workflow(jobs[job]["uses"].rsplit("/", 1)[1])["jobs"]
-        (record,) = [item for item in called.values() if item.get("uses") == "./.github/workflows/record-pass.yml"]
-        assert record["with"] == {"area": job}
-        recorded[job] = record
+    # The verdict job alone records an area's pass, after it judged the area's
+    # jobs (and its receipts): one upload step per area, named by the plan.
+    gate = jobs["ci"]
+    uploads = {step["with"]["name"]: step for step in gate["steps"]
+               if step.get("uses", "").startswith("actions/upload-artifact")}
+    receipts = {"backend": "backend-receipts", "windows": "windows-receipts"}
+    assert sorted(uploads) == sorted(f"${{{{ steps.verdict.outputs.pass-{area} }}}}" for area in plan.AREAS)
+    for area in plan.AREAS:
+        step = uploads[f"${{{{ steps.verdict.outputs.pass-{area} }}}}"]
+        wanted = f"!cancelled() && steps.verdict.outputs.pass-{area} != ''"
+        if area in receipts:
+            wanted += f" && steps.{receipts[area]}.outcome == 'success'"
+        assert step["if"] == f"${{{{ {wanted} }}}}"
+        # Losing a record only loses the shortcut; it must never fail a run.
+        assert step["continue-on-error"] == "true"
+        assert step["with"] == {"name": step["with"]["name"], "path": "pass.txt", "retention-days": "7", "overwrite": "true"}
+    ids = [step.get("id") for step in gate["steps"]]
+    assert ids.index("verdict") < ids.index("backend-receipts") < ids.index("windows-receipts")
+    names = [step.get("name") for step in gate["steps"]]
+    assert ids.index("windows-receipts") < names.index("Record that backend passed on these files")
+    # The UI journeys alone keep the older whole-tree record (scripts/ci/proven.py).
     called = workflow("ci-frontend.yml")["jobs"]
-    recorded["javascript-checks"] = called["record-checks"]
-    recorded["journeys"] = called["record-journeys"]
-    assert called["record-checks"]["with"] == {"area": "javascript-checks"}
+    for name in CALLED.values():
+        records = [key for key, item in workflow(name + ".yml")["jobs"].items()
+                   if item.get("uses") == "./.github/workflows/record-pass.yml"]
+        assert records == (["record-journeys"] if name == "ci-frontend" else []), name
     assert called["record-journeys"]["with"] == {"area": "journeys", "key": "${{ needs.journey-plan.outputs.key }}"}
     own = "github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository"
-    for record in recorded.values():
-        needs = record["needs"]
-        assert record["if"] == " && ".join([*(f"needs.{name}.result == 'success'" for name in needs), own])
-    # Main differs from a pull request here, or has no pull-request twin: always run.
+    record = called["record-journeys"]
+    assert record["if"] == " && ".join([*(f"needs.{name}.result == 'success'" for name in record["needs"]), own])
+    # These read no recorded pass: they differ per run or have no files of their own.
     assert set(suite.REQUIRED) - set(suite.PROVABLE) == {
-        "javascript", "policy", "desktop", "android-and-docs", "supply-chain", "update-reach"}
+        "javascript", "policy", "android-and-docs", "supply-chain", "update-reach"}
     # The non-journey JavaScript jobs are exactly the ones the record stands for.
-    checks = set(called["record-checks"]["needs"])
-    assert checks == set(called["javascript"]["needs"]) - {"journey-plan", "journeys"}
+    checks = set(called["javascript"]["needs"]) - {"journey-plan", "journeys"}
     for name in checks:
         assert called[name]["if"] == "inputs.checks_proven != true"
     assert "if" not in called["journey-plan"]
+    excepted = set(plan.AREAS["javascript-checks"]["except"])
+    assert excepted == {"javascript / " + called[name].get("name", name).split(" (")[0]
+                        for name in ("journey-plan", "journeys")} | {"javascript / record-journeys"}
 
 
 def test_record_pass_names_the_record_as_the_lookup_expects():
@@ -170,12 +213,12 @@ def test_record_pass_names_the_record_as_the_lookup_expects():
 
 
 def test_main_suite_has_no_test_secrets_or_paid_runners():
-    for name in ["main-suite.yml", "ci-artifact-policy.yml"]:
+    for name in ["ci.yml", "ci-artifact-policy.yml"]:
         config = workflow(name)
         assert "secrets" not in (ROOT / ".github/workflows" / name).read_text()
         for name, job in config["jobs"].items():
             assert "environment" not in job
-            if name == "proven":
+            if name == suite.LOOKUP:
                 assert job["continue-on-error"] == "true"
             else:
                 assert "continue-on-error" not in job
@@ -192,7 +235,7 @@ def main_gate():
 
 def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
     jobs = workflow()["jobs"]
-    gate = jobs["main-suite"]
+    gate = jobs["ci"]
     steps = {step.get("id"): step for step in gate["steps"]}
     report = steps["report"]
     # A red sibling shard must not suppress recovered cases from another shard.
@@ -205,7 +248,7 @@ def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
     # Reporting comes after the verdict and the receipt checks, never before them.
     names = [step.get("id") or step.get("name") for step in gate["steps"]]
     assert names.index("verdict") < names.index("report")
-    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["main-suite"]
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("issues") == "write"] == ["ci"]
     # Publishing checks the whole workflow; the reporter step can never fail it.
     assert "github.event.workflow_run.conclusion == 'success'" in workflow("desktop-source.yml")["jobs"]["gate"]["if"]
     uploader = next(step for step in workflow("ci-frontend.yml")["jobs"]["journeys"]["steps"]
@@ -216,14 +259,22 @@ def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
 
 def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_verdicts_checked():
     jobs = workflow()["jobs"]
-    gate = jobs["main-suite"]
+    gate = jobs["ci"]
     assert gate["permissions"] == {"contents": "read", "actions": "write", "issues": "write"}
-    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["main-suite"]
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["ci"]
+    # android.yml holds the owner's publishing job, which asks for write access; a
+    # caller must allow what a called job asks for. It runs from no event of ci.yml.
+    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("contents") == "write"] == ["android"]
+    publish = workflow("android.yml")["jobs"]["publish"]
+    assert publish["permissions"] == {"contents": "write"}
+    assert "inputs.publish_download" in publish["if"] and "github.actor_id == '76577322'" in publish["if"]
+    assert "github.event_name == 'pull_request'" not in publish["if"] and "'schedule'" not in publish["if"]
+    assert "(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))" in publish["if"]
     # It holds its runner for the whole run, which is longer than any job.
     assert int(gate["timeout-minutes"]) >= 150
     assert gate["runs-on"] == "ubuntu-24.04"
     module = main_gate()
-    assert module.GATE == gate["name"] == "Main suite"
+    assert module.GATE == gate["name"] == "CI"
     steps = gate["steps"]
     # The same receipt checks as the called workflows' own verdict jobs.
     backend = workflow("ci-backend.yml")["jobs"]["backend"]["steps"]
@@ -238,7 +289,9 @@ def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_v
                          if step.get("uses", "").startswith("actions/download-artifact")]
     for step in steps:
         if step.get("uses", "").startswith("actions/download-artifact") or "shard_evidence" in step.get("run", ""):
-            assert step["if"] in ("steps.verdict.outputs.backend == 'true'", "steps.verdict.outputs.windows == 'true'")
+            # Also after another area failed, so this area's pass can still be recorded.
+            assert step["if"] in ("${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}",
+                                  "${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}")
 
 
 def test_parity_jobs_reuse_local_commands_and_strict_reach(monkeypatch):
@@ -282,7 +335,7 @@ def test_policy_pr_and_manual_selection_and_dependencies_are_unchanged():
 
 def full(found=None):
     results = {name: {"result": "success"} for name in suite.REQUIRED}
-    results["proven"] = {"result": "success", "outputs": dict(found or {})}
+    results[suite.LOOKUP] = {"result": "success", "outputs": dict(found or {})}
     return results
 
 
@@ -303,7 +356,7 @@ def test_aggregate_accepts_a_skip_only_for_an_area_the_lookup_proved():
         # A lookup that failed has no outputs and proves nothing.
         results = full()
         results[area]["result"] = "skipped"
-        results["proven"] = {"result": "failure", "outputs": {}}
+        results[suite.LOOKUP] = {"result": "failure", "outputs": {}}
         with pytest.raises(ValueError):
             suite.aggregate(results)
     for area in set(suite.REQUIRED) - set(suite.PROVABLE):
@@ -312,9 +365,29 @@ def test_aggregate_accepts_a_skip_only_for_an_area_the_lookup_proved():
         with pytest.raises(ValueError):
             suite.aggregate(results)
     results = full()
-    del results["proven"]
+    del results[suite.LOOKUP]
     with pytest.raises(ValueError):
         suite.aggregate(results)
+
+
+def test_aggregate_accepts_the_main_only_jobs_skipped_on_a_pull_request_only():
+    assert suite.MAIN_ONLY == ("update-reach",)
+    for name in suite.MAIN_ONLY:
+        results = full()
+        results[name]["result"] = "skipped"
+        suite.aggregate(results, "pull_request")
+        for event in ("push", "schedule", "workflow_dispatch", ""):
+            with pytest.raises(ValueError):
+                suite.aggregate(results, event)
+        results[name]["result"] = "failure"
+        with pytest.raises(ValueError):
+            suite.aggregate(results, "pull_request")
+    # Nothing else may be skipped on a pull request without a recorded pass.
+    for name in set(suite.REQUIRED) - set(suite.MAIN_ONLY):
+        results = full()
+        results[name]["result"] = "skipped"
+        with pytest.raises(ValueError):
+            suite.aggregate(results, "pull_request")
 
 
 @pytest.mark.parametrize("name", suite.REQUIRED)

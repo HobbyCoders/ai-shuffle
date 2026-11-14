@@ -1,0 +1,444 @@
+name: CI
+
+# The one workflow that checks a change: every pull request, every push to
+# main, a daily run of everything, and a manual run on main.
+#
+# Each area (backend, JavaScript, Android, ...) lists the files its checks read
+# (scripts/ci/plan.py). The "plan" job skips an area whose files are unchanged
+# since that area last passed, on any pull request or on main, so a change runs
+# only the areas it touches: Android runs when Android's files changed. The
+# daily and the manual run skip nothing. The "CI" job gives the one verdict and
+# records each area that passed.
+#
+# A manual run on any ref but main fails closed: its jobs do not run.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # Everything, nothing skipped, on whatever main is at 08:00 UTC. It never
+    # publishes: the nightly follows push and dispatch runs only.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its running checks. On main a started
+# run always finishes; GitHub keeps only the newest waiting run and drops older
+# waiting ones. Cancelling in progress let a burst of merges cancel every run,
+# so nothing was proven and the nightly stalled until main went quiet. The
+# daily run has its own group so it can never displace a waiting push run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Build beside the suite, not after it. This optional cache is never proof of
+  # eligibility; publication still requires the exact successful CI run.
+  source-ui:
+    if: github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/source-ui-bundle.yml
+    with:
+      source-ref: ${{ github.sha }}
+      artifact-name: source-ui-${{ github.sha }}-${{ github.run_attempt }}
+      optional: true
+
+  # Which areas already passed on exactly the files they read. Any doubt or
+  # error answers "run it"; the daily and the manual run look nothing up.
+  plan:
+    name: Plan what this run has to check
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Only a shortcut: if this job fails, every area runs and the run can still pass.
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      backend: ${{ steps.plan.outputs.backend }}
+      javascript-checks: ${{ steps.plan.outputs.javascript-checks }}
+      fluid: ${{ steps.plan.outputs.fluid }}
+      windows: ${{ steps.plan.outputs.windows }}
+      desktop: ${{ steps.plan.outputs.desktop }}
+      desktop-source: ${{ steps.plan.outputs.desktop-source }}
+      browser-workspace: ${{ steps.plan.outputs.browser-workspace }}
+      container: ${{ steps.plan.outputs.container }}
+      identity: ${{ steps.plan.outputs.identity }}
+      android: ${{ steps.plan.outputs.android }}
+      android-minified: ${{ steps.plan.outputs.android-minified }}
+      records: ${{ steps.plan.outputs.records }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compare each area's files with its recorded passes
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/plan.py plan >> "$GITHUB_OUTPUT"
+
+  backend:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.backend != 'true' }}
+    uses: ./.github/workflows/ci-backend.yml
+    with:
+      gated_by_caller: true
+
+  javascript:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
+    # The journey selection reads earlier runs and pass records.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    uses: ./.github/workflows/ci-frontend.yml
+    with:
+      checks_proven: ${{ needs.plan.outputs.javascript-checks == 'true' }}
+      gated_by_caller: true
+
+  fluid:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.fluid != 'true' }}
+    uses: ./.github/workflows/ci-fluid.yml
+
+  windows:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.windows != 'true' }}
+    uses: ./.github/workflows/windows-suite.yml
+    with:
+      main_suite: true
+      gated_by_caller: true
+
+  browser-workspace:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.browser-workspace != 'true' }}
+    uses: ./.github/workflows/ci-browser-workspace.yml
+    with:
+      gated_by_caller: true
+
+  container:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.container != 'true' }}
+    uses: ./.github/workflows/container-postgres.yml
+
+  identity:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.identity != 'true' }}
+    uses: ./.github/workflows/ci-instance-identity.yml
+    with:
+      main_suite: true
+
+  desktop-source:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.desktop-source != 'true' }}
+    uses: ./.github/workflows/desktop-source-checks.yml
+
+  desktop:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.desktop != 'true' }}
+    uses: ./.github/workflows/desktop.yml
+    with:
+      main_suite: true
+
+  # The emulators run only when the app shell or the phone UI changed. android.yml
+  # also holds the owner's publishing job, which asks for write access and so
+  # must be allowed it here; that job runs only on the owner's manual run or a
+  # release tag with publish_download set, never from this workflow.
+  android:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.android != 'true' }}
+    permissions:
+      contents: write
+    uses: ./.github/workflows/android.yml
+
+  android-minified:
+    needs: [plan]
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.android-minified != 'true' }}
+    uses: ./.github/workflows/ci-android-minified.yml
+
+  policy:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-artifact-policy.yml
+    with:
+      main_suite: true
+
+  android-and-docs:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python scripts/ci/main_suite.py android-and-docs
+
+  supply-chain:
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: python scripts/secret_scan.py
+      # Identical report-only audit semantics to local/full (all locked packages,
+      # including source-publisher). Existing hosted audits remain blocking too.
+      - run: python scripts/dependency_audit.py
+      # The advisory lists change without any file changing, so a pull request's
+      # pass record cannot stand for them: the blocking audits of the backend
+      # and JavaScript checks always run here, with the same commands.
+      - name: Install what the Python audit inspects
+        run: |
+          python -m pip install --upgrade pip==26.2.1
+          pip install -r requirements.txt -r requirements-dev.txt
+          pip install -e ./fluid
+      - name: Audit public Python dependencies
+        timeout-minutes: 8
+        run: |
+          python -m pip install pip-audit==2.10.1
+          python scripts/pip_audit_retry.py --skip-editable
+          python scripts/pip_audit_retry.py -r requirements-voice.lock
+      - name: Audit JavaScript dependencies
+        run: |
+          for package in frontend tools browser-mcp; do
+            (cd "$package" && npx -y npm@11 audit --audit-level=high)
+          done
+
+  # Main only: it compares with what main has published and with the pull
+  # requests merged since. Its regression tests are part of the backend suite.
+  update-reach:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt && pip install -e ./fluid
+      - name: Update-reach regression tests
+        env:
+          PYTHONPATH: .:fluid
+        run: python -m pytest tests/test_update_reach.py tests/scripts/test_local_ci.py tests/scripts/test_edge_publication_gate.py -o addopts="" -q -n 2 --timeout=120
+      - name: Strict signed-publication and merged-PR update reach
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/main_suite.py update-reach
+
+  # The one verdict, and the one check main requires. It starts with the run
+  # and keeps its runner, so it never waits for a free runner after the last
+  # job finishes (runners are shared with every open pull request). It reads
+  # this run's jobs as they finish (scripts/ci/main_gate.py). On main the first
+  # failed, cancelled or timed-out required job cancels the run, since it can
+  # no longer publish; a pull request's run goes on, so one round shows every
+  # failure. The called workflows skip their own verdict jobs here
+  # (gated_by_caller); this job applies their rules, receipts included. The
+  # publisher and nightly_wait.py read this job by its name.
+  ci:
+    name: CI
+    if: ${{ !cancelled() }}
+    needs: [plan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      # Read the run's jobs and artifacts; cancel the run on the first failure.
+      actions: write
+      # Recovered UI journeys are reported as issues (push to main only).
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install PyYAML==6.0.3
+      - name: Judge every job as it finishes
+        id: verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          # A fork's pull request leaves no pass records: they would never count.
+          RECORD: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        run: python scripts/ci/main_gate.py
+      # The receipts are checked whenever the area's jobs all succeeded, also
+      # when another area failed, so the area's pass can still be recorded.
+      - name: Download successful backend shard receipts
+        if: ${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: backend-shard-*-a*
+          path: shard-attempts
+      - name: Fail closed on incomplete backend coverage
+        id: backend-receipts
+        if: ${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}
+        env:
+          BACKEND_NEEDS: ${{ steps.verdict.outputs.backend-needs }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count 4 --source shard-attempts --destination shard-results
+          python scripts/ci/backend_gate.py --head "$HEAD_SHA"
+      - name: Download Windows desktop shard receipts
+        if: ${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          pattern: windows-desktop-*-a*
+          path: ${{ runner.temp }}/desktop-attempts
+      - name: Prove the Windows desktop shard inventory union
+        id: windows-receipts
+        if: ${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}
+        env:
+          SOURCE: ${{ runner.temp }}/desktop-attempts
+          EVIDENCE: ${{ runner.temp }}/desktop-evidence
+        run: |
+          python scripts/ci/shard_evidence.py --prefix windows-desktop --count 3 --source "$SOURCE" --destination "$EVIDENCE"
+          python tests/scripts/test_ci_parallel_gates.py --desktop-evidence "$EVIDENCE"
+      # One tiny artifact per area that passed, named for the files the area
+      # reads (scripts/ci/plan.py), so no later run repeats it on the same
+      # files. Losing one only loses the shortcut.
+      - name: Write the pass record
+        if: ${{ !cancelled() }}
+        run: echo "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" > pass.txt
+      - name: Record that backend passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-backend != '' && steps.backend-receipts.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-backend }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that javascript-checks passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-javascript-checks != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-javascript-checks }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that fluid passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-fluid != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-fluid }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that windows passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-windows != '' && steps.windows-receipts.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-windows }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that desktop passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-desktop != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-desktop }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that desktop-source passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-desktop-source != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-desktop-source }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that browser-workspace passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-browser-workspace != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-browser-workspace }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that container passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-container != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-container }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that identity passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-identity != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-identity }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that android passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-android != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-android }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      - name: Record that android-minified passed on these files
+        if: ${{ !cancelled() && steps.verdict.outputs.pass-android-minified != '' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.verdict.outputs.pass-android-minified }}
+          path: pass.txt
+          retention-days: 7
+          overwrite: true
+      # Cancelled journey shards still upload their receipts; the cancel stops
+      # the verdict step too, so this waits in its own step (at once when the
+      # verdict was reached: every job has finished then). GitHub force-stops a
+      # cancelled job 5 minutes after the cancel, so this wait (at most 90 s)
+      # and the reporting step together stay within 4 minutes; a shard still
+      # uploading after that is not collected.
+      - name: Wait for cancelled jobs to stop
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/ci/main_gate.py settle
+      # Best effort and never fatal: a red shard must not hide a recovered case
+      # of another shard, and a reporting failure changes no result.
+      - name: Open or update flaky journey issues
+        id: report
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        timeout-minutes: 2
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -m scripts.devloop.journey_issues
+      - name: Warn if reporting could not finish
+        if: always() && steps.report.outcome == 'failure'
+        run: echo "::warning title=UI journey issue reporting::Reporting could not finish; suite and publication results are unchanged."

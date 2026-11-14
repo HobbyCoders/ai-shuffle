@@ -1,4 +1,4 @@
-"""The `Main suite` verdict, given the moment the last required job finishes.
+"""The `CI` verdict, given the moment the last required job finishes.
 
 Every job that starts after other jobs finish waits for a free runner again, and
 runners are shared with every open pull request. The old closing chain (each
@@ -9,12 +9,17 @@ keeps its runner, and reads the run's own jobs through the Actions API:
 - It knows which jobs to expect from the checked-in workflow files, so a job
   GitHub has not created yet (a matrix chosen by an earlier job) is waited
   for, never mistaken for "nothing left".
-- The first required job that fails, is cancelled or times out ends the run:
-  the gate names it, cancels the run (it can no longer publish) and fails.
-- When every expected job has finished it applies the same rules as before:
-  `main_suite.aggregate` for the areas, with a skip accepted only where the
-  pass-record lookup answered "true", and the rules of the called workflows'
-  own verdict jobs, which do not run when main-suite calls them.
+- On main the first required job that fails, is cancelled or times out ends
+  the run: the gate names it, cancels the run (it can no longer publish) and
+  fails. A pull request's run goes on to the end, so one round shows every
+  failure and every area that did pass is recorded.
+- When every expected job has finished it applies `main_suite.aggregate` for
+  the areas, with a skip accepted only where the plan found a recorded pass,
+  and the rules of the called workflows' own verdict jobs, which do not run
+  when ci.yml calls them.
+- It names the areas that passed in this run (`pass-<area>` outputs), so the
+  workflow can record them for later runs (scripts/ci/plan.py), also when
+  another area failed.
 
 It never judges its own job, and a run it cannot read is a failure, not a pass.
 """
@@ -33,16 +38,22 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
+from ci import plan as ci_plan  # noqa: E402
 from ci.main_suite import LOOKUP, REQUIRED, aggregate  # noqa: E402
 
 API = "https://api.github.com"
 WORKFLOWS = ROOT / ".github" / "workflows"
-GATE_KEY = "main-suite"
-GATE = "Main suite"
+WORKFLOW = "ci.yml"
+GATE_KEY = "ci"
+GATE = ci_plan.GATE
 # Jobs that cannot fail the run: the optional UI bundle cache and the
 # pass-record lookup (a failed lookup only means every area runs).
 ADVISORY = ("source-ui", LOOKUP)
-# Called workflows whose own verdict job main-suite skips (input
+# Matrix members whose own workflow lets them fail (`continue-on-error`).
+# GitHub lists such a job as failed although the run goes on; here it counts
+# as passed once it has finished.
+TOLERATED = frozenset(name for area in ci_plan.AREAS.values() for name in area.get("advisory", ()))
+# Called workflows whose own verdict job ci.yml skips (input
 # `gated_by_caller`), mapped to that job. This gate applies its rules instead.
 CALLER_GATED = {
     "backend": "backend",
@@ -127,18 +138,29 @@ class Slot:
         return name if self.key is None else f"{self.area} / {name}"
 
 
+MATRIX_KEY = re.compile(r"\$\{\{\s*matrix\.([\w-]+)\s*\}\}")
+
+
 def _matrix_values(area, key, job, inputs):
     """The values of a one-key matrix, or None when a job of this run chooses them.
 
-    A shape this cannot read fails here, so the gate is never left to guess
-    which members exist.
+    A matrix given as an `include` list is read through the one matrix key the
+    job's name uses. A shape this cannot read fails here, so the gate is never
+    left to guess which members exist.
     """
     matrix = _matrix(job)
     if not matrix:
         return None
     if not isinstance(matrix, dict) or len(matrix) != 1:
-        raise ValueError(f"{area} / {key}: only a one-key matrix without include or exclude is understood")
+        raise ValueError(f"{area} / {key}: only a one-key matrix or an include list is understood")
     (values,) = matrix.values()
+    if "include" in matrix:
+        template = job.get("name") or ""
+        named = MATRIX_KEY.findall(template)
+        if (len(named) != 1 or len(EXPRESSION.findall(template)) != 1 or not isinstance(values, list)
+                or not all(isinstance(entry, dict) and named[0] in entry for entry in values)):
+            raise ValueError(f"{area} / {key}: an include matrix must be named by one of its keys")
+        return [entry[named[0]] for entry in values]
     if isinstance(values, list):
         return values
     if (area, key) in RESOLVED:
@@ -153,7 +175,7 @@ def _matrix_values(area, key, job, inputs):
     raise ValueError(f"{area} / {key}: a computed matrix main_gate.py does not know")
 
 
-# Computed matrices whose members follow from main-suite's inputs alone.
+# Computed matrices whose members follow from ci.yml's inputs alone.
 RESOLVED = {
     ("identity", "identity"): (
         "${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && "
@@ -170,11 +192,11 @@ SELECTED = {
 
 
 class Plan:
-    """What main-suite.yml and the workflows it calls define, read from the checkout."""
+    """What ci.yml and the workflows it calls define, read from the checkout."""
 
     def __init__(self, workflows=WORKFLOWS):
         workflows = Path(workflows)
-        main = _load(workflows / "main-suite.yml")["jobs"]
+        main = _load(workflows / WORKFLOW)["jobs"]
         self.reusable, self.slots, self.advisory, self.called = set(), [], [], {}
         for area, job in main.items():
             if area == GATE_KEY:
@@ -216,8 +238,19 @@ def _matrix(job):
 
 
 def judged(plan, jobs):
-    """The listed jobs that decide the run: not this gate and not advisory."""
-    return [job for job in jobs if job.get("name") != GATE and not plan.is_advisory(job.get("name", ""))]
+    """The listed jobs that decide the run: not this gate and not advisory.
+
+    A finished job its own workflow lets fail is given as passed.
+    """
+    found = []
+    for job in jobs:
+        name = job.get("name", "")
+        if name == GATE or plan.is_advisory(name):
+            continue
+        if name in TOLERATED and job.get("status") == "completed" and job.get("conclusion") not in PASSED:
+            job = {**job, "conclusion": "success"}
+        found.append(job)
+    return found
 
 
 def failed(jobs):
@@ -346,7 +379,18 @@ def check_every_branch(area, needs, expected):
         raise ValueError(f"{area}: a required job failed, was cancelled, skipped or is missing")
 
 
-def verdict(plan, jobs, lookup):
+def check_inner(plan, jobs, area, checks_proven):
+    """Apply the rules of the area's own verdict job. Return its rebuilt `needs`."""
+    needs, expected = inner_needs(plan, jobs, area)
+    expected = [expected] if isinstance(expected, str) else list(expected)
+    if area == "javascript":
+        check_javascript(needs, expected, checks_proven)
+    else:
+        check_every_branch(area, needs, expected)
+    return needs
+
+
+def verdict(plan, jobs, lookup, event=""):
     """Raise ValueError unless the finished run passes. Return the evidence to check next."""
     jobs = judged(plan, jobs)
     bad = failed(jobs)
@@ -357,33 +401,90 @@ def verdict(plan, jobs, lookup):
     if unfinished or absent:
         raise ValueError("not finished: " + ", ".join(unfinished + absent))
     results = area_results(plan, jobs, lookup)
-    aggregate(results)
+    aggregate(results, event)
     proven = (lookup.get("outputs") or {}).get("javascript-checks") == "true"
-    evidence = {"backend": "false", "windows": "false"}
     for area in CALLER_GATED:
-        if results[area]["result"] != "success":
-            continue  # a skip the lookup proved: nothing of it ran
-        needs, expected = inner_needs(plan, jobs, area)
-        expected = [expected] if isinstance(expected, str) else list(expected)
-        if area == "javascript":
-            check_javascript(needs, expected, proven)
-        else:
-            check_every_branch(area, needs, expected)
+        if results[area]["result"] == "success":  # else a skip the plan proved: nothing of it ran
+            check_inner(plan, jobs, area, proven)
+    return evidence_of(plan, jobs)
+
+
+def complete(plan, jobs, area):
+    """True when every job the called workflow defines is listed and finished.
+
+    A job waiting on another is not listed until that one finishes, so a
+    run read part-way can show only an area's first, passed jobs.
+    """
+    if any(name == area or name.startswith(f"{area} / ") for name in missing(plan, jobs)):
+        return False
+    return all(job.get("status") == "completed" for job in jobs if job.get("name", "").startswith(f"{area} / "))
+
+
+def evidence_of(plan, jobs):
+    """Which receipts the workflow has to check next: an area's, once all its jobs succeeded."""
+    jobs = judged(plan, jobs)
+    evidence = {"backend": "false", "windows": "false"}
+    for area in ("backend", "windows"):
+        try:
+            if not complete(plan, jobs, area):
+                continue
+            needs = check_inner(plan, jobs, area, False)
+        except (ValueError, KeyError):
+            continue
+        evidence[area] = "true"
         if area == "backend":
-            evidence["backend"] = "true"
             evidence["backend-needs"] = json.dumps(needs, sort_keys=True)
-        elif area == "windows":
-            evidence["windows"] = "true"
     return evidence
 
 
-def report(bad, out=sys.stdout, summary_path=None):
+def passes(plan, jobs, lookup):
+    """{area: record name} for the areas of scripts/ci/plan.py that passed in this run.
+
+    An area counts on its own, whatever another area did: every job its
+    workflow defines is listed and finished, none failed, at least one ran,
+    and its own verdict job's rules hold. An area the plan skipped ran nothing
+    and is not recorded again.
+    """
+    jobs = judged(plan, jobs)
+    outputs = lookup.get("outputs") or {}
+    try:
+        records = json.loads(outputs.get("records") or "{}")
+    except ValueError:
+        return {}
+    found = {}
+    for area, rule in ci_plan.AREAS.items():
+        record = records.get(area) if isinstance(records, dict) else None
+        if not isinstance(record, str) or not record or outputs.get(area) == "true":
+            continue
+        caller = rule["jobs"][0]
+        try:
+            if not complete(plan, jobs, caller) or not ci_plan.area_passed(area, jobs):
+                continue
+            if caller == "javascript":
+                needs, _ = inner_needs(plan, jobs, caller)
+                if any(needs.get(name, {}).get("result") != "success"
+                       for name in plan.called[caller][CALLER_GATED[caller]]["needs"]
+                       if name not in ("journey-plan", "journeys")):
+                    continue
+            elif caller in CALLER_GATED:
+                check_inner(plan, jobs, caller, False)
+        except (ValueError, KeyError):
+            continue
+        found[area] = record
+    return found
+
+
+def report(bad, out=sys.stdout, summary_path=None, stopped=True):
     lines = [f"- {job['name']}: {job.get('conclusion')} {job.get('html_url', '')}".rstrip() for job in bad]
-    print("::error title=Main suite stopped early::" + "; ".join(job["name"] for job in bad), file=out)
+    title = "CI stopped early" if stopped else "CI failed"
+    print(f"::error title={title}::" + "; ".join(job["name"] for job in bad), file=out)
     print("\n".join(lines), file=out, flush=True)
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as handle:
-            handle.write("### Stopped on the first failure\n\nThese jobs did not pass, so the rest of the run was cancelled:\n\n")
+            if stopped:
+                handle.write("### Stopped on the first failure\n\nThese jobs did not pass, so the rest of the run was cancelled:\n\n")
+            else:
+                handle.write("### Failed\n\nThese jobs did not pass. Areas that did pass are recorded and will not run again on the same files:\n\n")
             handle.write("\n".join(lines) + "\n")
 
 
@@ -406,14 +507,18 @@ def settle(plan, repository, run, attempt, token, call, sleep, clock, out):
             if all(job.get("status") == "completed" for job in jobs):
                 return True
         sleep(POLL_SECONDS)
-    print("::warning title=Main suite::Some cancelled jobs had not stopped; journey reporting may miss them.",
+    print("::warning title=CI::Some cancelled jobs had not stopped; journey reporting may miss them.",
           file=out, flush=True)
     return False
 
 
 def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep, clock=time.monotonic,
-          out=sys.stdout, summary_path=None):
+          out=sys.stdout, summary_path=None, stop_early=True, seen=None):
     """Poll until the run is decided. Return the judged jobs, or raise SystemExit(1).
+
+    With ``stop_early`` the first failure cancels the run. Without it the run
+    is watched to its end and the jobs are returned for the verdict to fail.
+    ``seen`` receives the jobs of the last readable poll, also on an early exit.
 
     Only the current attempt is read. "Re-run failed jobs" or "Re-run job"
     lists every job it does not run again in the new attempt, as a completed
@@ -429,13 +534,15 @@ def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep,
             unreadable += 1
             print(f"could not read the run's jobs ({error})", file=out, flush=True)
             if unreadable >= MAX_FAILED_READS:
-                print("::error title=Main suite::The run's jobs could not be read; it is not proven.", file=out)
+                print("::error title=CI::The run's jobs could not be read; it is not proven.", file=out)
                 raise SystemExit(1)
             sleep(POLL_SECONDS)
             continue
         unreadable = 0
+        if seen is not None:
+            seen[:] = jobs
         bad = failed(jobs)
-        if bad:
+        if bad and stop_early:
             report(bad, out, summary_path)
             try:
                 call("POST", f"/repos/{repository}/actions/runs/{run}/cancel", token)
@@ -456,12 +563,19 @@ def watch(plan, repository, run, attempt, token, call=request, sleep=time.sleep,
                 continue
             stalled_since = clock() if stalled_since is None else stalled_since
             if clock() - stalled_since >= STALL_SECONDS:
-                print("::error title=Main suite::Expected jobs never appeared: " + ", ".join(absent), file=out)
+                print("::error title=CI::Expected jobs never appeared: " + ", ".join(absent), file=out)
                 raise SystemExit(1)
         else:
             stalled_since = None
         confirming = None
         sleep(POLL_SECONDS)
+
+
+def write_outputs(environ, values):
+    if environ.get("GITHUB_OUTPUT"):
+        with open(environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+            for key, value in values.items():
+                handle.write(f"{key}={value}\n")
 
 
 def main(environ=os.environ, call=request, sleep=time.sleep, out=sys.stdout, argv=None, clock=time.monotonic):
@@ -475,19 +589,33 @@ def main(environ=os.environ, call=request, sleep=time.sleep, out=sys.stdout, arg
         print("usage: main_gate.py [settle]", file=out)
         return 2
     lookup = json.loads(environ["RESULTS"]).get(LOOKUP) or {}
-    jobs = watch(plan, environ["GITHUB_REPOSITORY"], environ["GITHUB_RUN_ID"],
-                 environ.get("GITHUB_RUN_ATTEMPT", "1"), environ["GH_TOKEN"], call=call, sleep=sleep, out=out,
-                 summary_path=environ.get("GITHUB_STEP_SUMMARY"))
+    event = environ.get("GITHUB_EVENT_NAME", "")
+    seen = []
     try:
-        evidence = verdict(plan, jobs, lookup)
+        # A pull request's run goes on after a failure: one round shows every
+        # failure, and the areas that pass are recorded.
+        jobs = watch(plan, environ["GITHUB_REPOSITORY"], environ["GITHUB_RUN_ID"],
+                     environ.get("GITHUB_RUN_ATTEMPT", "1"), environ["GH_TOKEN"], call=call, sleep=sleep, out=out,
+                     summary_path=environ.get("GITHUB_STEP_SUMMARY"), stop_early=event != "pull_request", seen=seen)
+    finally:
+        # Also after an early stop: what did pass need not run again. RECORD is
+        # "true" except for a fork's pull request, whose records never count.
+        try:
+            values = dict(evidence_of(plan, seen))
+            if environ.get("RECORD") == "true":
+                values.update({f"pass-{area}": record for area, record in passes(plan, seen, lookup).items()})
+            write_outputs(environ, values)
+        except Exception as error:  # noqa: BLE001 - recording is a shortcut, never the verdict
+            print(f"could not name the areas that passed ({error})", file=out, flush=True)
+    try:
+        verdict(plan, jobs, lookup, event)
     except ValueError as error:
-        print(f"::error title=Main suite::{error}", file=out)
+        bad = failed(judged(plan, jobs))
+        if bad:
+            report(bad, out, environ.get("GITHUB_STEP_SUMMARY"), stopped=False)
+        print(f"::error title=CI::{error}", file=out)
         return 1
-    if environ.get("GITHUB_OUTPUT"):
-        with open(environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-            for key, value in evidence.items():
-                handle.write(f"{key}={value}\n")
-    print("Every hosted full-suite job succeeded, or a pull request passed it on these exact files.", file=out)
+    print("Every required area succeeded, or already passed on exactly the files it reads.", file=out)
     return 0
 
 

@@ -377,7 +377,7 @@ def test_journey_ci_reads_main_suite_through_gh(monkeypatch):
                           "conclusion": "success"} for k in (1, 2)]}
     monkeypatch.setattr(srs, "_gh_json", fake_gh)
     assert srs.journey_ci(CANDIDATE) == {"state": "success", "url": "u"}
-    assert "actions/workflows/main-suite.yml/runs" in calls[0][1] and "/runs/5/jobs" in calls[1][1]
+    assert "actions/workflows/ci.yml/runs" in calls[0][1] and "/runs/5/jobs" in calls[1][1]
 
 
 def test_collect_blocks_and_renders_when_the_journeys_are_not_green(tmp_path, monkeypatch):

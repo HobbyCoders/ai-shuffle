@@ -1,16 +1,19 @@
 # Where tests run
 
 Tests run on GitHub CI. The local push gate is the offline secret scan (plus the
-update-reach check); it runs no test suites. Every pull request, including drafts
-and forks, runs the hosted gates in parallel. Backend
-shards, real contracts and security all run unconditionally, regardless of paths.
-Merge requires green CI and review. Edge/nightly publication remains separate:
-a hosted full-suite pass on the exact main revision or the owner's local
-attested full pass authorizes the read-only publication gate.
+update-reach check); it runs no test suites. One workflow, `ci.yml`, checks
+every pull request (drafts and forks included), every push to `main`, and
+everything once a day. A run checks the areas whose files changed and skips an
+area whose files are unchanged since it last passed
+([What a run skips](#what-a-run-skips)); the backend suite reads the whole
+repository, so it runs on every change. The run's one verdict is the `CI`
+check: merge requires a green `CI` and review. Edge/nightly publication remains
+separate: a `CI` pass on the exact main revision or the owner's local attested
+full pass authorizes the read-only publication gate.
 
-PR workflows use only free standard GitHub-hosted Linux and Windows runners.
+CI uses only free standard GitHub-hosted Linux and Windows runners.
 The Docker runtime-overlay acceptance uses native `ubuntu-24.04` and
-`ubuntu-24.04-arm` runners; the other PR workflows use `ubuntu-24.04` and
+`ubuntu-24.04-arm` runners; the other workflows use `ubuntu-24.04` and
 `windows-latest`. No larger/paid runners and no macOS PR jobs are used.
 Linux jobs pin `ubuntu-24.04` rather than `ubuntu-latest`, because the newer
 `ubuntu-26.04` image lacks the preinstalled PostgreSQL 16 the backend jobs use;
@@ -20,8 +23,11 @@ build-push actions with branch-isolated GitHub Actions layer caching.
 
 ## Every pull request
 
-These workflows retain manual dispatch and also run on unfiltered
-`pull_request` events (no path filters or draft skips):
+`ci.yml` calls the workflows below. None of them has a `pull_request` trigger
+of its own: each runs when `ci.yml` calls it, or on a manual dispatch, so a
+push to a pull request starts one workflow run with one verdict. There are no
+draft skips. Which of them a run starts depends on the files the change touches
+([What a run skips](#what-a-run-skips)):
 
 - `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
   unconditional security checks and the stable fail-closed `Backend tests` gate.
@@ -62,12 +68,11 @@ These workflows retain manual dispatch and also run on unfiltered
   covers the production container path without requiring secrets.
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
-  and disposable signing are test-only; release keep rules are unchanged. Like
-  `android.yml` it runs only on PRs that change what the APK is built from
-  (`android/**`, `mobile/**`, `frontend/**`), its own workflow or the cost policy:
-  a backend-only PR starts neither. The
-  `android.yml` also runs the broader **debug** instrumentation suite on relevant
-  PRs, as described below. Neither workflow publishes on a PR or needs publisher credentials.
+  and disposable signing are test-only; release keep rules are unchanged.
+- `android.yml`: the broader **debug** instrumentation suite, as described below.
+  Both Android workflows run only when the app shell or the phone UI changed
+  since they last passed: a backend-only or web-UI-only change starts neither.
+  Neither workflow publishes from `ci.yml` or needs publisher credentials.
 
 `runtime-overlay-acceptance.yml` runs on PRs changing its workflow, the overlay
 harness or the runtime contract, and supports manual dispatch. It builds
@@ -77,11 +82,98 @@ dependencies on the pinned candidate interpreter. It needs no signing secrets.
 
 `ci-folder-confinement.yml` stays manual because it is macOS-only; Linux folder
 confinement is already covered by CI Backend. Stable release authorization is unchanged.
-Each PR workflow groups concurrency by workflow plus PR number (or ref for manual
-runs), cancelling superseded PR runs only. Permissions are `contents: read`;
-none of these workflows references secrets or requires private checkout access.
+`ci.yml` also runs four small jobs whatever changed: `policy`
+(`ci-artifact-policy.yml`), `android-and-docs` (the Android download-bridge and
+workflow-shell scripts and the docs-copy check; no emulator), `supply-chain`
+(secret scan and dependency audits) and, on main only, `update-reach`.
+
+In `ci.yml` the called workflows skip their own verdict jobs (`Backend tests`,
+`JavaScript package checks`, `Windows desktop`, `Real browser workspace`); the
+`CI` job applies the same rules, shard receipts included
+(`scripts/ci/main_gate.py`). Those verdict jobs still run on a manual dispatch
+of the workflow itself. `CI` is the only check the `main` ruleset requires.
+
+A pull request's run does not stop at the first failure: every area finishes,
+so one round shows every failure, and the areas that passed are recorded and do
+not run again on the next push unless their files change.
+
+`ci.yml` groups concurrency by pull request (or ref): a newer push to a pull
+request cancels its running checks. Permissions are `contents: read`, with
+these exceptions: the `plan` and `javascript` jobs read Actions data; the `CI`
+job may cancel its own run and, on a push to main, report journey issues; and
+the `android` call is allowed `contents: write` because `android.yml` holds the
+owner's publishing job, which never runs from `ci.yml`. None of the workflows
+in the list above references secrets or requires private checkout access.
 Fork PRs use the ordinary read-only `pull_request` context, never
-`pull_request_target`.
+`pull_request_target`, and leave no pass records.
+
+### What a run skips
+
+Each area of `ci.yml` lists the files its checks read (`AREAS` in
+`scripts/ci/plan.py`). The area's key is a hash of exactly those files (path,
+mode and content id) in the commit under test, so two commits that differ only
+in other files share the key. When every job of an area finishes without a
+failure, the `CI` job uploads a tiny artifact named `pass-<area>-<key>`. The
+`plan` job of a later run (the next push to the pull request, another pull
+request, or main after the merge) finds the record and skips the area.
+
+| Area | Runs when these changed since it last passed |
+| --- | --- |
+| `backend` | anything: its tests read sources all over the repository |
+| `javascript-checks` (every `ci-frontend.yml` job but the journeys) | `frontend/`, `mobile/`, `tools/`, `browser-mcp/`, the docs content, and the backend files those tests read (transcript views, the API contract, the connector catalog, shared fixtures) |
+| `fluid` | `fluid/`, `scripts/` |
+| `windows`, `desktop`, `desktop-source` | anything but prose, the UI's own source (`frontend/src/`, `frontend/tests/`, `mobile/src/`), `ios/` and `android/` (except `android/ci/`) |
+| `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, the Python pins |
+| `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/` |
+| `identity` | `app/`, `fluid/`, `tests/`, the Python pins |
+| `android`, `android-minified` | `android/`, `mobile/`, and `frontend/` except the web UI's own source (`frontend/src/`, `frontend/tests/`) |
+
+Every area also reads its own workflow file and the four files that decide and
+judge a run (`ci.yml`, `scripts/ci/plan.py`, `scripts/ci/main_gate.py`,
+`scripts/ci/main_suite.py`): a change to one of those four runs everything
+once. `python scripts/ci/plan.py affected FILE...` prints the areas a change
+touches; the `plan` job's summary says, per area, whether the run skipped it
+and which earlier run proved it.
+
+- A record's name alone proves nothing, because the run writes it and any run
+  can upload an artifact. A record counts only when all of this holds: it is
+  live; its run is `ci.yml` of this repository (never a fork's); the commit
+  GitHub itself says that run took its workflows from, read again from GitHub,
+  gives the same key for the area; and the area's jobs in that run all finished
+  and none failed. Records expire after 7 days. A failed lookup, a missing
+  token or any error answers "not proven": the area runs. If the `plan` job
+  itself fails, every area runs and the run can still pass. Losing a record
+  only loses the shortcut, so the record steps never fail a run.
+- The `CI` job accepts a skipped area only when the `plan` job answered `true`
+  for it. Missing, failed, cancelled or unproven skipped jobs fail closed.
+- Dependency audits depend on advisory lists, which change without any file
+  changing, so a record cannot stand for them: the blocking Python and npm
+  audits of the backend and JavaScript checks also run in the always-running
+  `supply-chain` job.
+- The UI journeys keep their own record, by the whole tree and the selection
+  (see [UI journeys](#ui-journeys)). `policy`, `android-and-docs`,
+  `supply-chain` and `update-reach` have no record: they always run.
+- The daily scheduled run and a manual run look nothing up: they run
+  **everything**, emulators and every journey included, and record what passed.
+
+The file lists are what makes a skip safe, and they have limits:
+
+- A check that reads a file its area does not list could be skipped on a pass
+  older than a change to that file. The lists are broad on purpose,
+  `tests/scripts/test_ci_plan.py` fails when a workflow step names a path
+  outside its area's list, and the daily run checks everything on main within
+  a day. When a test starts reading another part of the repository, add that
+  part to its area in `scripts/ci/plan.py`.
+- Android does not run for the web UI's own source, although the phone UI
+  imports it (`$lib` is `frontend/src/lib`) and the APK bundles the phone UI as
+  its offline demo. That source changes in most pull requests; the JavaScript
+  checks build and test it with the phone UI every time, and the paired worker,
+  not the APK, serves the UI people chat in. A web UI change that breaks an
+  emulator test shows in the daily run. To run Android for the shared UI code
+  as well, drop `WEB_UI_SOURCE` from the two Android areas.
+- A record is not withdrawn when a later run on the same files fails (an
+  environment failure in the daily run, say). The area runs again with the
+  next change to its files.
 
 ### Android native pull requests
 
@@ -89,11 +181,15 @@ Fork PRs use the ordinary read-only `pull_request` context, never
 time with push turned on for the debug build (`-PpushEnabledDebug=true`, the code
 path release builds take once Firebase config is present; no `google-services.json`
 is needed or committed), builds the debug and test APKs,
-and exercises the full native instrumentation suite on API 34 and API 36 for PRs
-changing `android/**`, `mobile/**`, `frontend/**`, the workflow itself, or its CI
-cost/publication policy tests. The asset paths matter: the APK's offline demo is
-built from `mobile/` and shared `frontend/` dependencies. Drafts and forks run too,
-on standard free `ubuntu-24.04` runners. Superseded PR runs are cancelled.
+and exercises the full native instrumentation suite on API 34 and API 36 when
+the `android` area runs: after a change to `android/`, `mobile/`, the
+frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
+`frontend/tests/`), the workflow itself or the files that decide a run, and in
+the daily run. The asset paths matter: the APK's offline demo is built from
+`mobile/` and shared `frontend/` dependencies;
+[What a run skips](#what-a-run-skips) says why the web UI's own source is left
+out. Drafts and forks run too, on standard free `ubuntu-24.04` runners.
+Superseded PR runs are cancelled.
 
 Both Android emulator workflows deliberately use `google_apis` on API 36 again,
 reversing the earlier AOSP-only choice after SystemUI/GMS ANRs. This image permits
@@ -151,7 +247,8 @@ and publication inputs enabled. `tests/scripts/test_owner_publication_policy.py`
 checks those actual predicates; no release guard is relaxed. In `android.yml`,
 API 36 retains its existing release-advisory status (tracking #2375); its failures
 remain visible, not app passes. API 34 gates publication. The separate minified
-API 34 and API 36 checks are both required on every PR, with no advisory bypass;
+API 34 and API 36 checks are both required whenever the `android-minified` area
+runs, with no advisory bypass;
 the image/provider choice and limited boot evidence above apply to them too.
 
 The `android.yml` emulator leg retries one infrastructure failure: the emulator
@@ -170,63 +267,37 @@ repository. App checks do not need that checkout. When app docs/install files
 change, refresh the committed website snapshots there using `AI_SHUFFLE_CHECKOUT`
 and its README; the app still checks `docs/content` against the frontend copy.
 
-## Hosted main-suite
+## The run on main
 
-`main-suite.yml` runs once per push to `main`, once a day on a schedule, or on
-an explicit dispatch on `main`.
+`ci.yml` runs once per push to `main`, once a day on a schedule, or on an
+explicit dispatch on `main`. It is the workflow a pull request runs, with the
+same plan.
 
-**A push does not repeat what a pull request already passed on the same files.**
-When every job of an area passes on a pull request from this repository, the
-area's workflow calls `record-pass.yml`, which uploads a tiny artifact named
-`proven-<area>-<tree>`. The tree is the Git tree of the merge commit the checks
-ran on: one id for the content of every file, tests and workflows included. A
-squash merge onto a main that has not moved produces the same tree, so the
-`proven` job of the push run (`scripts/ci/proven.py check`) finds the record
-and that area is skipped; the `Main suite` aggregate accepts a skipped area
-only when the lookup answered `true` for it. If main moved between the pull
-request's run and the merge, the tree differs and the area runs. Nothing lists
-what an area depends on, so a record can never stand for different code.
+**A push does not repeat what already passed on the same files.** An area's
+key covers only the files the area reads, so after a merge the push run finds
+the records the pull request's run left, unless another merge changed that
+area's files in between, and it never starts the areas the change did not
+touch ([What a run skips](#what-a-run-skips)). `update-reach` runs on main
+only: it compares with what main has published.
 
-- Recorded areas: `backend`, `fluid`, `windows`, `browser-workspace`,
-  `container`, `identity`, `desktop-source`, `javascript-checks` (every
-  `ci-frontend.yml` job but the journeys) and `journeys` (see
-  [UI journeys](#ui-journeys)). `policy` and `desktop` run more on main than on
-  a pull request, and `android-and-docs`, `supply-chain` and `update-reach`
-  have no pull-request twin: they always run.
-- A record's name alone proves nothing, because the run writes it and any run
-  can upload an artifact. A record counts only when all of this holds: it is
-  live; its run is the area's own workflow, started by a pull request of this
-  repository (never a fork) whose head was merged to main as exactly this
-  commit; that pull request is the only one its branch ever opened and its base
-  was never changed (another base would run unreviewed workflows on the same
-  commit); GitHub's own note of the run names that pull request's test merge
-  commit, and that commit holds exactly this tree; and no job of the run failed,
-  was cancelled or has an unknown state.
-  Records expire after 7 days. A failed lookup, a missing token or any
-  error answers "not proven": the area runs. Losing a record only loses the
-  shortcut, so the record steps never fail a pull request.
-- Dependency audits depend on advisory lists, which change without any file
-  changing, so a record cannot stand for them: the blocking Python and npm
-  audits of the backend and JavaScript checks also run in the always-running
-  `supply-chain` job.
-- The lookup job is only a shortcut. If it fails, every area runs and the run
-  can still pass; the `Main suite` gate ignores its failure.
-- Only a push looks for records. The daily scheduled run (08:00 UTC, its own
-  concurrency groups, in `main-suite.yml` and every workflow it calls, so it
-  never queues with or displaces a push run) and a dispatch (its own groups
-  too) run **everything**. The scheduled run never publishes: the nightly follows
-  push and dispatch runs only. Dispatch `main-suite.yml` on `main` before a
-  stable release to prove the whole tree in one run.
+- The daily scheduled run (08:00 UTC, its own concurrency groups in `ci.yml`
+  and every workflow it calls, so it never queues with or displaces a push run)
+  and a dispatch (its own groups too) run **everything**. The scheduled run
+  never publishes: the nightly follows push and dispatch runs only. Dispatch
+  `ci.yml` on `main` before a stable release to prove the whole tree in one run.
+- A push run that skipped areas authorizes publication like any other: the
+  `CI` job passes only when every area either passed in this run or was skipped
+  on a verified record of the same files.
 
-A dispatch on another ref skips the suites and fails the aggregate.
+A dispatch on another ref skips the suites and fails the verdict.
 
 **The verdict never waits for a runner.** Runners are shared with every open
 pull request, so a job that starts only after the last test job finishes can
-queue for many minutes to do seconds of work. The `Main suite` job therefore
-starts with the run (it needs only `proven`) and keeps its runner:
+queue for many minutes to do seconds of work. The `CI` job therefore
+starts with the run (it needs only `plan`) and keeps its runner:
 `scripts/ci/main_gate.py` reads the run's jobs through the Actions API every 20
 seconds and gives the verdict as soon as the last job finishes. It knows which
-jobs to expect from `main-suite.yml` and the workflows it calls, so a matrix
+jobs to expect from `ci.yml` and the workflows it calls, so a matrix
 or a call that GitHub has not created yet is waited for, never mistaken for
 done; a final listing taken a few seconds later must be identical. Every
 matrix member counts on its own. The UI journey shards are chosen during the
@@ -237,19 +308,22 @@ gate cannot expand fails its tests. A re-run attempt ("Re-run failed jobs" or
 one job) lists the jobs it does not run again as completed copies, so the gate
 reads only the current attempt. The called
 workflows (`ci-backend.yml`, `ci-frontend.yml`, `windows-suite.yml`,
-`ci-browser-workspace.yml`) skip their own verdict jobs when main-suite passes
+`ci-browser-workspace.yml`) skip their own verdict jobs when `ci.yml` passes
 `gated_by_caller: true`, and the gate applies their rules instead: every inner
 job must succeed (or, for the JavaScript checks, be skipped exactly when their
 pass record proved them; the journeys only when the selection chose none), and
 the backend and Windows desktop shard receipts are checked in the gate job
-itself. On pull requests those verdict jobs run as before, under the same
-required names. Advisory jobs (`source-ui`, the record lookup) never decide.
+itself. The one job that may fail is the API 36 emulator of `android.yml`,
+which that workflow already marks advisory. Advisory jobs (`source-ui`, the
+`plan` lookup) never decide.
 
-A started run finishes unless a required job fails, is cancelled or times out:
-the gate then names the failed jobs in the run summary and cancels the run at
-once, because it can no longer publish and would only hold the lane while the
-fix waits. The gate itself ends red, so such a run never reports green; it ends
-"cancelled" but has jobs, and `nightly_wait.py` reports it as a failure. If the
+A started run on main finishes unless a required job fails, is cancelled or
+times out: the gate then names the failed jobs in the run summary and cancels
+the run at once, because it can no longer publish and would only hold the lane
+while the fix waits. (A pull request's run is not cancelled: its other areas
+finish and are recorded.) The gate itself ends red, so such a run never reports
+green; it ends "cancelled" but has jobs, and `nightly_wait.py` reports it as a
+failure. If the
 jobs cannot be read for ten minutes, or an expected job never appears within
 five minutes of everything else finishing, the gate fails closed. GitHub keeps one more run waiting behind it; a newer merge
 replaces that waiting run, which GitHub then lists as "cancelled". It never
@@ -270,12 +344,12 @@ nothing in flight can publish it (the newest covering run failed, or a pass was
 never published; the reason is printed), or 2 on timeout (default 120 minutes).
 `--once` reports the current state and exits (3 when not published yet).
 
-The root workflow calls the same checked-in reusable
-CI workflows; their PR triggers, matrices, full test selection and gates remain
-in force. No test job has signing secrets; workflow-default permissions are
-`contents: read`, using only standard free hosted runners. Only the `Main suite`
-gate can cancel the run (`actions: write`) and write issues, for the
-non-blocking main-push journey reporting step (see below). Windows calls select the existing
+The root workflow calls the checked-in reusable CI workflows; their matrices,
+full test selection and gates remain in force. No test job has signing
+secrets; workflow-default permissions are `contents: read`, using only
+standard free hosted runners. Only the `CI` job can cancel the run
+(`actions: write`) and write issues, for the non-blocking main-push journey
+reporting step (see below). Windows calls select the existing
 three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
@@ -298,7 +372,8 @@ three desktop shards, not the separate stable-release portability matrix.
 
 Additional existing gates are required too: Windows desktop (three shards),
 real browser workspace (three cases + smoke), container lifecycle/buyer install,
-Windows identity and desktop-source protocol checks. `Main suite` runs unless
+Windows identity, desktop-source protocol checks and, when their files changed,
+the two Android emulator suites. `CI` runs unless
 the run was cancelled and requires every called workflow and parity job to
 succeed. Missing, failed, cancelled or unproven skipped jobs fail closed; the checked-in parity inventory
 also catches new local stages without a mapping. A backend test-map cache is a
@@ -1072,7 +1147,7 @@ out whether tests pass.
 ## UI journeys and visual regression
 
 Both run in `ci-frontend.yml` on free standard runners and feed the required
-`JavaScript package checks` aggregate. The workflow has no path filter. The
+`CI` verdict. The journeys have no path filter. The
 visual comparison runs on every pull request; the journeys a pull request runs
 are selected from its changed files, a push to main runs the journeys for what
 changed since main last passed, and the daily and dispatched runs run all of them.
@@ -1100,8 +1175,8 @@ the journey names), `shards` (the shard numbers that got a file) and `key`
 record).
 
 - A scheduled run, a dispatch and any other caller run **every** journey.
-- A push to main (`main-suite.yml`) runs the journeys for the files changed
-  since the newest earlier commit that `main-suite` passed on (hence the full
+- A push to main runs the journeys for the files changed
+  since the newest earlier commit that `ci.yml` passed on, on main (hence the full
   history, `fetch-depth: 0`), with the same rules as a pull request below and
   that commit's `map.json` as the base copy. Every journey held at that commit:
   it ran there, or that run narrowed the same way from an older green commit.
@@ -1209,7 +1284,7 @@ checked-in medians stay as measured and reviewed; the next refresh should use
 runs on one revision.
 
 The earlier 9/10/11-shard changes guarded point estimates but not their allowed
-error. Across eleven main-suite runs on Nov 7–8, the slowest measured steps took
+error. Across eleven main runs on Nov 7–8, the slowest measured steps took
 1168–1251 seconds, exceeding the 1140-second first-pass ceiling needed to keep
 both full reserves. The matching-workload run `42519656415` measured 1213.41
 seconds of journeys on shard 4 against a 1058.97-second point estimate. Increasing
@@ -1219,7 +1294,7 @@ the stronger planning bound address both causes; the frozen historical
 calibration remains unchanged. Continued hosted headroom is tracked in #1197.
 
 Refresh after journey runtime changes, using one or more recent green
-`main-suite.yml` run IDs with authenticated `gh`, in a checkout of the runs'
+`ci.yml` run IDs of pushes to main with authenticated `gh`, in a checkout of the runs'
 revision (for example a detached checkout of the newest run's commit):
 `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
 (`--out` writes elsewhere and leaves the checked-in file alone). A matching
@@ -1244,7 +1319,7 @@ journey. A footer may include the runner's `, N known bug` clause only when
 passed plus known-bug cases equals the positive total. The fallback is the
 median of each sample's seconds divided by its total case count, including
 known-bug cases. Each run must be a completed green push to `main` from
-`main-suite` on **attempt 1**: re-runs (`attempt != 1`) are refused because
+`ci.yml` on **attempt 1**: re-runs (`attempt != 1`) are refused because
 GitHub's logs archive contains only the latest attempt's jobs. Pull request and
 other runs are refused because their headSha does not name the checkout.
 Within a run, a shard job with a retry marker anywhere in its log (including
@@ -1296,9 +1371,9 @@ verdicts, and `devloop.log` is the instance's whole log. A clean first pass
 does not upload an artifact. The retry flag is opt-in: local `run-all.mjs`
 and the CI driver without the flag still run once.
 
-**Main retries too:** `main-suite.yml` calls `ci-frontend.yml` with the same
+**Main retries too:** on main `ci.yml` calls `ci-frontend.yml` with the same
 retry behavior. A main run that passes only on retry can authorize nightly
-publication. On **push-to-main runs only**, the last step of the `Main suite`
+publication. On **push-to-main runs only**, the last step of the `CI`
 job (after the verdict, so it adds no queued job) reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
 artifacts and opens one issue per recovered journey + full case ID (including
 viewport/throttle). A crashed file without per-case evidence retains the
@@ -1332,7 +1407,7 @@ included, so the wait gives up after 90 seconds (two-minute step limit) and
 the two-minute reporting step still fits: a shard that has not finished
 uploading by then is not collected, which only costs this advisory report. It is non-blocking (`continue-on-error`): an
 API/reporting failure emits a warning and cannot change the verdict or prevent
-nightly publication. Only the `Main suite` job has `issues: write` (beside
+nightly publication. Only the `CI` job has `issues: write` (beside
 `actions: write` for the verdict); workflow defaults and all PR jobs remain
 read-only. Reporting has a two-minute step deadline, no dependency
 installation, and does not run any tests again. An unexpectedly ineligible non-dry-run
