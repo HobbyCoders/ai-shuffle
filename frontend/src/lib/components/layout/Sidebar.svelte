@@ -89,6 +89,7 @@
 		isVisibleSidebarSession,
 		sidebarGroup,
 		lastWorkFailed,
+		lastWorkStopped,
 		openSessionNeeds,
 		sessionNeedsInput,
 		liveProjectKeys,
@@ -411,6 +412,7 @@
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
 						isActive: !!s.is_active,
 						failed: lastWorkFailed(s),
+						stopped: lastWorkStopped(s),
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
 							openNeedsNow,

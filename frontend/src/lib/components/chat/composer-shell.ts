@@ -116,7 +116,8 @@ export interface ComposerSheetProps {
 	/** The level the model runs at when no pick is pinned ("Auto"). */
 	effortDefaultValue?: string | null;
 	effortValue: string | null;
-	onEffortSelect: (value: string) => void;
+	/** A level pins it; `null` returns to Auto (the model's default). */
+	onEffortSelect: (value: string | null) => void;
 	fastSupported?: boolean;
 	fastEnabled?: boolean;
 	/** The chat's own Fast setting has not loaded yet (#418): show it loading and hold the toggle. */

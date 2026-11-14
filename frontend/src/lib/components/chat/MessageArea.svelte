@@ -262,6 +262,8 @@
 	let currentTurnAnchorId: string | null = null;
 	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
 	let anchorMaintenanceRaf: number | null = null;
+	// The prompt whose first placement the pending frame still owes (#1321).
+	let anchorPlacementOwedFor: string | null = null;
 	// Passive reserve for the LATEST user turn once the sent-turn anchor has
 	// released. Without it the deepest possible scroll bottoms out right after
 	// the last response, so a short final response can never bring its prompt to
@@ -1324,6 +1326,7 @@
 	function cancelCurrentTurnAnchor(resetTail = true) {
 		if (!currentTurnAnchorId && tailReservePx === MIN_TRANSCRIPT_TAIL_RESERVE) return;
 		currentTurnAnchorId = null;
+		anchorPlacementOwedFor = null;
 		if (anchorMaintenanceRaf !== null) {
 			cancelAnimationFrame(anchorMaintenanceRaf);
 			anchorMaintenanceRaf = null;
@@ -1456,9 +1459,16 @@
 	function scheduleCurrentTurnAnchorMaintenance(initial = false) {
 		if (!currentTurnAnchorId) return;
 		if (anchorMaintenanceRaf !== null) cancelAnimationFrame(anchorMaintenanceRaf);
+		// A later request replaces the frame, not a new prompt's first placement.
+		// Sending after Stop turns following back on, and the effects that read it
+		// ask for maintenance in the same tick as the send; dropping the placement
+		// left the prompt low with its reserve below, for the reply to jump (#1321).
+		if (initial) anchorPlacementOwedFor = currentTurnAnchorId;
 		anchorMaintenanceRaf = requestAnimationFrame(() => {
 			anchorMaintenanceRaf = null;
-			void maintainCurrentTurnAnchor(initial);
+			const place = anchorPlacementOwedFor !== null && anchorPlacementOwedFor === currentTurnAnchorId;
+			anchorPlacementOwedFor = null;
+			void maintainCurrentTurnAnchor(place);
 		});
 	}
 
