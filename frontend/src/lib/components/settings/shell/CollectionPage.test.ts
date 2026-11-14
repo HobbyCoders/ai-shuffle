@@ -286,6 +286,110 @@ describe('CollectionPage scroll on a phone (#1582)', () => {
 		expect(scrollTo).toHaveBeenLastCalledWith({ top: 300 });
 	});
 
+	/**
+	 * A pane that, like a browser's, ignores scrolling while one pane shows at
+	 * a time (data-replace) and keeps its offset for when it scrolls again.
+	 */
+	function rotatingPane(scroller: HTMLElement) {
+		const coll = scroller.querySelector<HTMLElement>('.st-coll')!;
+		const pane = scroller.querySelector<HTMLElement>('.st-dpane')!;
+		const state = { top: 0 };
+		const paneScroll = vi.fn((o: ScrollToOptions) => {
+			if (!coll.hasAttribute('data-replace')) state.top = o.top ?? state.top;
+		});
+		pane.scrollTo = paneScroll as unknown as typeof pane.scrollTo;
+		/** The reader scrolls the pane. */
+		const read = (top: number) => {
+			state.top = top;
+			pane.dispatchEvent(new Event('scroll'));
+		};
+		return { coll, state, paneScroll, read };
+	}
+	async function settle() {
+		flushSync();
+		await tick();
+		await tick();
+	}
+
+	it('opens a new item at its top after the phone turns sideways and back', async () => {
+		settingsNav.stacked = true;
+		const { scroller } = inScroller();
+		const { coll, state, read } = rotatingPane(scroller);
+		settingsNav.selectItem('a');
+		await settle();
+		read(300);
+
+		// Sideways: too wide to stack, too narrow for both panes.
+		settingsNav.stacked = false;
+		resize(coll, 460);
+		await settle();
+		expect(coll.dataset.replace).toBe('detail');
+		settingsNav.selectItem('b');
+		await settle();
+		expect(state.top).toBe(300); // Not a scroller here: the reset did nothing.
+
+		// Upright again: the pane scrolls on its own and starts at the top.
+		settingsNav.stacked = true;
+		await settle();
+		expect(coll.hasAttribute('data-replace')).toBe(false);
+		expect(state.top).toBe(0);
+	});
+
+	it("keeps the reader's place in the same item across a turn", async () => {
+		settingsNav.stacked = true;
+		const { scroller } = inScroller();
+		const { coll, state, paneScroll, read } = rotatingPane(scroller);
+		settingsNav.selectItem('a');
+		await settle();
+		read(300);
+		paneScroll.mockClear();
+		settingsNav.stacked = false;
+		resize(coll, 460);
+		await settle();
+		settingsNav.stacked = true;
+		await settle();
+		expect(paneScroll).not.toHaveBeenCalled();
+		expect(state.top).toBe(300);
+	});
+
+	it('Back shows the row it came from where it was, even after the list is laid out again', async () => {
+		settingsNav.stacked = true;
+		const { scroller, scrollTo, setTop } = inScroller();
+		// Row A sits at `rowY` in the list; the scroller's top is the screen's.
+		let rowY = 400;
+		const row = scroller.querySelector<HTMLElement>('[data-settings-item="a"]')!;
+		row.getClientRects = (() => [{}]) as unknown as typeof row.getClientRects;
+		row.getBoundingClientRect = () => ({ top: rowY - scroller.scrollTop, height: 48 }) as DOMRect;
+		scroller.getBoundingClientRect = () => ({ top: 0 }) as DOMRect;
+		let screen = 788;
+		Object.defineProperty(scroller, 'clientHeight', { get: () => screen, configurable: true });
+		setTop(300); // Row A shows 100px down the screen.
+		settingsNav.selectItem('a');
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 0 });
+
+		// Turned sideways and back, the list above row A now takes 150px less.
+		rowY = 250;
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		expect(scrollTo).toHaveBeenLastCalledWith({ top: 150 });
+		expect(rowY - scroller.scrollTop).toBe(100);
+
+		// Opened 600px down a tall screen, Back on a short one keeps the row on it.
+		rowY = 900;
+		setTop(300);
+		settingsNav.view = 'detail';
+		flushSync();
+		await tick();
+		screen = 390;
+		settingsNav.view = 'page';
+		flushSync();
+		await tick();
+		expect(rowY - scroller.scrollTop).toBe(390 - 48);
+	});
+
 	it('leaves a split pane alone when nothing new is picked', async () => {
 		const { scroller, scrollTo } = inScroller();
 		settingsNav.selectItem('a');

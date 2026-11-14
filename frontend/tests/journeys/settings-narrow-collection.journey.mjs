@@ -193,6 +193,62 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  {
+  // Live QA on #1593: turned sideways the phone shows one pane at a time and
+  // the detail pane stops scrolling on its own, so a hook opened there must
+  // still start at its top once the phone is upright again. Back after the
+  // turn shows the row it came from, though the list was laid out again.
+  name: 'phone-turn-opens-at-top', viewports: ['phone'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await page.route(/\/api\/v1\/hooks\/app(\?.*)?$/, route => (route.request().method() === 'GET' ? route.fulfill({ json: HOOKS }) : route.fallback()));
+   await gotoApp(page, status);
+   await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await settingsNav(page).waitFor();
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+  },
+  async act({ page, mark }) {
+   const row = name => page.locator('.st-lcol [data-settings-item]').filter({ hasText: new RegExp(`^\\s*${name}\\b`) }).filter({ visible: true }).first();
+   const title = name => page.locator('[data-settings-heading="detail"]').filter({ hasText: name }).filter({ visible: true }).first();
+   // Inside the settings scroller's visible box (no top bar shows sideways).
+   const onScreen = name => row(name).evaluate(el => {
+    const v = document.querySelector('.settings-viewport').getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top), bottom: Math.round(r.bottom), view: [Math.round(v.top), Math.round(v.bottom)], ok: r.top >= v.top - 1 && r.bottom <= v.bottom + 1 };
+   });
+   await mark('scroll the list, open a hook, scroll its pane');
+   await page.evaluate(() => document.querySelector('.settings-viewport').scrollTo({ top: 250 }));
+   await waitScroll(page, { page: 250 });
+   await row('Check hook 12').click();
+   await title('Check hook 12').waitFor();
+   await page.evaluate(() => document.querySelector('.settings-shell .st-dpane').scrollTo({ top: 300 }));
+   const read = await waitScroll(page, { pane: 300 });
+   expect(read.pane > 100, `the pane scrolls on its own (${JSON.stringify(read)})`);
+
+   await mark('turn sideways, Back shows the row it came from');
+   await page.setViewportSize({ width: 844, height: 390 });
+   await page.waitForFunction(() => document.querySelector('.settings-shell .st-coll')?.dataset.replace === 'detail', null, { timeout: 5000 });
+   await button(page, 'Back to Hooks').click();
+   await row('Check hook 12').waitFor();
+   await page.waitForTimeout(300);
+   const back = await onScreen('Check hook 12');
+   expect(back.ok, `Back shows the hook's row on screen (${JSON.stringify(back)})`);
+
+   await mark('open another hook sideways');
+   await row('Check hook 5').click();
+   await title('Check hook 5').waitFor();
+
+   await mark('upright again: the new hook starts at its top');
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.waitForFunction(() => { const c = document.querySelector('.settings-shell .st-coll'); return !!c?.closest('.settings-shell')?.hasAttribute('data-stacked') && !c.dataset.replace; }, null, { timeout: 5000 });
+   await page.waitForTimeout(300);
+   const s = await scrollState(page);
+   const titleTop = await title('Check hook 5').evaluate(el => el.getBoundingClientRect().top);
+   const barBottom = await page.getByRole('banner').filter({ visible: true }).first().evaluate(el => el.getBoundingClientRect().bottom);
+   expect(s.pane === 0, `the hook opened sideways starts at its top upright (${JSON.stringify(s)})`);
+   expect(titleTop >= barBottom, `its title is below the top bar (title ${Math.round(titleTop)}, bar ${Math.round(barBottom)})`);
+  }
+ },
+ {
   name: 'wide-split-unchanged', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page, { users: [user] });
