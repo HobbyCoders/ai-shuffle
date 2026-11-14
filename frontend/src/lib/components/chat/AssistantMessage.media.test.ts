@@ -239,6 +239,23 @@ describe('media markdown while a reply streams (#1619)', () => {
 		expect(view.container.querySelector('pre')).toBeNull();
 	});
 
+	// Text added later can reach back into blocks that were already drawn: a
+	// reference definition, or a setext underline that turns the lines above
+	// into a heading. The streamed render still shows what the full one does.
+	it.each([art, image])('draws a reference image defined after a later block (%s)', async (url) => {
+		reducedMotion();
+		const view = await stream(['![x][r]', '\n# Heading', `\n[r]: ${url}`], 'Heading');
+		await waitFor(() => expect(players(view.container)).toHaveLength(1));
+		expect(view.container.textContent).not.toContain('![x][r]');
+	});
+
+	it('turns a title and a comment line into one heading once the underline arrives', async () => {
+		reducedMotion();
+		const view = await stream(['Title', '\n<!--', '\n---'], 'Title');
+		await waitFor(() => expect(view.container.querySelector('h2')?.textContent).toContain('<!--'));
+		expect(view.container.querySelector('p')).toBeNull();
+	});
+
 	it('keeps a settled image mounted while later paragraphs stream', async () => {
 		const view = await stream([`Start.\n\n![A](${art})\n\nOne`, ' two', '\n\nThree']);
 		const img = players(view.container)[0];

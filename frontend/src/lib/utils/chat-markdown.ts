@@ -182,22 +182,27 @@ const chatMarked = new Marked({
 });
 
 /**
- * Where a streaming reply splits into a settled prefix and a re-parsed tail:
- * the start of the last top-level block marked's lexer finds in `text`. Each
- * earlier block was ended by the lexer itself, so appended text cannot change
- * it. The last one can still grow (a fence or an HTML block such as <pre> or
- * a comment that has not closed, a list a later line continues), so it is
- * always parsed together with what follows (#1619).
+ * Where a streaming reply splits into a prefix and a tail that are parsed
+ * apart: the start of the last top-level block marked's lexer finds in the
+ * whole of `text`. Parsing the blocks before it and the blocks from it on
+ * gives the same markup as parsing `text` at once, so a streaming render shows
+ * what the full render would (#1619). The last block (a fence or HTML block
+ * such as <pre> or a comment that has not closed, a list a later line
+ * continues) is always in the tail.
  *
- * `from` is an earlier split of the same growing text: the blocks before it are
- * final, so only the rest is lexed.
+ * Lexed fresh each time: appended text can turn earlier lines into another
+ * block (a setext heading), so no earlier split is trusted. A reply that
+ * defines link references is parsed whole (0), since a definition reaches
+ * across blocks.
  */
-export function streamingSplit(text: string, from = 0): number {
-	let offset = from;
-	let last = from;
-	for (const token of chatMarked.lexer(text.substring(from))) {
+export function streamingSplit(text: string): number {
+	const tokens = chatMarked.lexer(text);
+	if (Object.keys(tokens.links).length > 0) return 0;
+	let offset = 0;
+	let last = 0;
+	for (const token of tokens) {
 		// The lexer normalises line endings; offsets hold only while each raw is the source.
-		if (!text.startsWith(token.raw, offset)) return from;
+		if (!text.startsWith(token.raw, offset)) return 0;
 		if (token.type !== 'space') last = offset;
 		offset += token.raw.length;
 	}

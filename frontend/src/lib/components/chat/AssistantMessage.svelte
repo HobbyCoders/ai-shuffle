@@ -508,14 +508,14 @@
 	 * (settled media stays put).
 	 */
 	function renderMarkdownIncremental(text: string): { prefix: string; tail: string } {
-		// Split where marked's lexer starts the reply's last top-level block:
-		// every block before it is closed for good, while the last one (an
-		// unclosed fence, <pre> or comment, a list) is parsed whole with what
-		// follows, never cut at a blank line inside it (#1619).
-		const split = streamingSplit(text, _cache.stablePrefixContent.length);
+		// Split where marked's lexer starts the reply's last top-level block, so
+		// the two parses together match the full render (#1619): the last block
+		// (an unclosed fence, <pre> or comment, a list) is never cut at a blank
+		// line inside it.
+		const split = streamingSplit(text);
 		const stableContent = text.substring(0, split);
 
-		// When the stable prefix grows, re-parse, sanitize, and cache it once.
+		// When the stable prefix changes, re-parse, sanitize, and cache it once.
 		// Only this side gets syntax highlighting, and Shiki's memo makes the
 		// repeat renders cheap.
 		if (stableContent !== _cache.stablePrefixContent) {
