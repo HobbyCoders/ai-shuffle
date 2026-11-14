@@ -244,6 +244,10 @@ _register(Collection(
     shared_row=_shared_setting_row, map_secrets=_setting_secrets,
     notes="Only keys is_shared_setting_key() accepts. Values that are enc: ciphertext travel decrypted."))
 
+# avatar_color is a retired column (the avatar feature was removed) that this
+# build never reads or writes. It still travels unchanged: dropping it would
+# change every agent's content hash (a fleet-wide republish at fresh clocks on
+# upgrade) and the shape of the records that retired-starter fingerprints match.
 _register(Collection(
     name="agents", table="agents", keys=("id",),
     fields=("id", "name", "description", "is_builtin", "config", "mcp_tools", "avatar_color",

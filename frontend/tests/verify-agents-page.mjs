@@ -49,9 +49,10 @@ for (const themeName of ['default', 'vercel']) {
 	await page.waitForTimeout(300);
 	await shot(page, `${themeName}-1440-subagents`);
 	await page.getByRole('tab', { name: /^Profile/ }).click();
-	await page.getByRole('button', { name: 'Change', exact: true }).click();
 	await page.waitForTimeout(300);
-	await shot(page, `${themeName}-1440-avatar`);
+	// The avatar feature is gone: no Avatar row and no identity art in the header.
+	assert.equal(await page.getByText('Avatar', { exact: true }).count(), 0, 'no Avatar row');
+	assert.equal(await page.locator('.st-dh .st-identity > *').count(), 0, 'no header avatar');
 	await page.getByRole('button', { name: 'New agent', exact: true }).first().click();
 	await page.waitForTimeout(300);
 	await shot(page, `${themeName}-1440-new`);
@@ -101,7 +102,7 @@ for (const themeName of ['default', 'vercel']) {
 }
 
 // States: 404 default, empty, loading
-let page = await open('default=404&colors=0', { width: 1440, height: 900 });
+let page = await open('default=404', { width: 1440, height: 900 });
 await page.getByRole('tab', { name: /^Models/ }).click();
 await page.waitForTimeout(300);
 assert.equal(await page.getByText('Subagent default').count(), 0);

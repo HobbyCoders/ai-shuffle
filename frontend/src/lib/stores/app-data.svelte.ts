@@ -902,12 +902,12 @@ export const appData = {
 		}
 	},
 
-	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown>; avatar_color?: string | null }) {
+	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
 		await api.post('/agents', data);
 		await appData.loadProfiles();
 	},
 
-	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown>; avatar_color?: string | null }) {
+	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown> }) {
 		await api.put(`/agents/${profileId}`, data);
 		await appData.loadProfiles();
 	},
