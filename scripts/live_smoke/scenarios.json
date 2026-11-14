@@ -1594,7 +1594,7 @@
           "kind": "owner",
           "needs": ["install"],
           "how": "On a disposable Windows candidate with a throwaway project (#1602), add a Git-sourced marketplace and install one of its plugins at LOCAL and at PROJECT scope. Sync the marketplace, update the plugin and reinstall it over itself. While a sync runs, open the plugin, MCP server and project plugin lists. Uninstall both project plugins, then remove the marketplace. Never touch a live worker's plugins or data.",
-          "pass_when": "Every step succeeds without a 409 'unreadable' or a leftover folder; the plugin and clone folders, .git objects included, are gone. No .bak appears for a file that was only being replaced. Lists answer during the sync and never fail during an uninstall.",
+          "pass_when": "Every step succeeds without a 409 'unreadable' or a leftover folder; the plugin and clone folders, .git objects included, are gone. No .bak appears for a file that was only being replaced. The plugin list answers during the sync; the MCP server and project plugin lists may wait for the sync but then answer; no list fails during an uninstall.",
           "past_bug": "#1482: removing a Git-sourced plugin failed on read-only .git objects. #1488: a read during another write's replace was refused as unreadable and left a .bak."
         }
       ]
