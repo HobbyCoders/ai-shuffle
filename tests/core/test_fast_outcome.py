@@ -102,7 +102,7 @@ async def test_the_route_returns_a_remote_owners_answer_unchanged(monkeypatch):
     monkeypatch.setattr(api.control, "owner_of", lambda session: "worker-2")
     monkeypatch.setattr(api.control, "call", call)
     monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "s"}))
-    monkeypatch.setattr(api, "_announce_context_window", AsyncMock())
+    monkeypatch.setattr(api, "_announce_run_settings", AsyncMock())
     assert await api.update_run_settings(MagicMock(), "s", api.RunSettingsUpdate(fast=True), token="t") == remote
     call.assert_awaited_once_with("worker-2", "run-settings", {"session_id": "s", "fast": True})
 
