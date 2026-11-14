@@ -1996,7 +1996,7 @@ async def clear_session(
         await sync_engine.broadcast_user_session_updated(
             user_id=existing.get("api_user_id") or "admin",
             session_id=session_id,
-            updates={"last_turn_failed": False},
+            updates={"last_turn_failed": False, "last_turn_stopped": False},
         )
     except Exception:  # noqa: BLE001 — sync fan-out is best-effort
         logger.debug("session clear broadcast failed", exc_info=True)

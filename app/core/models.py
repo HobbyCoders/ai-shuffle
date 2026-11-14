@@ -394,6 +394,8 @@ class Session(SessionBase):
     # The latest turn that ran ended in a failure, so the row says so (#1032).
     # Like the chips: read for the list and search, null where it was not read.
     last_turn_failed: Optional[bool] = None
+    # The latest turn that ran was stopped, so the row reads Stopped, not Done (#1340).
+    last_turn_stopped: Optional[bool] = None
     # Accepted, but held by start admission until the database can take it (#583).
     # Only set while it waits; read from memory, never stored.
     start_queued: Optional[bool] = None

@@ -110,9 +110,89 @@
 	let lastScrolled: string | null | undefined;
 	$effect(() => {
 		const current = openItem ?? null;
-		if (lastScrolled !== undefined && lastScrolled !== current) pane?.scrollTo?.({ top: 0 });
+		if (lastScrolled !== undefined && lastScrolled !== current) resetPane();
 		lastScrolled = current;
 	});
+	// The pane scrolls on its own only while the list is beside it (no
+	// data-replace). A reset asked for while it cannot scroll (a phone turned
+	// sideways shows one pane at a time) does nothing, and the browser brings
+	// the old offset back once the pane scrolls again. So the reset waits until
+	// the pane next scrolls on its own, unless the pane has scrolled since.
+	let paneResetPending = false;
+	function resetPane() {
+		paneResetPending = true;
+		pane?.scrollTo?.({ top: 0 });
+	}
+	let lastReplace: boolean | undefined;
+	$effect(() => {
+		const now = replace;
+		const before = lastReplace;
+		lastReplace = now;
+		if (before === undefined || before === now || now) return;
+		void tick().then(() => {
+			if (paneResetPending) pane?.scrollTo?.({ top: 0 });
+		});
+	});
+
+	// Where the detail replaces the list (stacked on a phone, or one pane at a
+	// time), both scroll in the page's own scroller. An opened detail starts at
+	// its top, not at the list's offset, and Back returns to where the list was.
+	// Pre-effect: the list's offset is read before the detail replaces it.
+	// Stacked Back keeps the item selected and only steps back to the list, so
+	// the item on screen, not the selection, is what changes. Stacked, the
+	// detail pane can also scroll on its own (settings.css pins it), and
+	// reopening the same item does not change the selection, so the pane
+	// starts at its top here too. Beside the list (split panes) none of this
+	// runs: the pane reset above handles a newly picked item.
+	const shownItem = $derived(
+		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
+	);
+	// Back puts the row it was opened from where it was on screen, so a list
+	// laid out again meanwhile (the phone turned) still shows that row; with
+	// no row, the list's old offset.
+	let listTop = 0;
+	let rowGap: number | null = null;
+	let lastSwapped: string | null | undefined;
+	$effect.pre(() => {
+		const current = shownItem;
+		const previous = lastSwapped;
+		lastSwapped = current;
+		if (previous === undefined || previous === current) return;
+		if (!untrack(() => replace || settingsNav.stacked)) return;
+		const scroller = el && scrollParent(el);
+		if (previous === null && scroller) {
+			listTop = scroller.scrollTop;
+			rowGap = rowBox(scroller, current)?.top ?? null;
+		}
+		void tick().then(() => {
+			if (current !== null) {
+				scroller?.scrollTo?.({ top: 0 });
+				resetPane();
+				return;
+			}
+			const now = scroller && rowGap !== null ? rowBox(scroller, previous) : null;
+			if (!scroller || !now) return void scroller?.scrollTo?.({ top: listTop });
+			// A shorter screen (turned sideways) keeps the row on it.
+			const gap = Math.max(0, Math.min(rowGap!, scroller.clientHeight - now.height));
+			scroller.scrollTo?.({ top: scroller.scrollTop + now.top - gap });
+		});
+	});
+	/** The item's list row, relative to the scroller's top, if shown. */
+	function rowBox(scroller: HTMLElement, item: string | null): { top: number; height: number } | null {
+		const row = [...(lcol?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
+			(node) => node.dataset.settingsItem === item
+		);
+		if (!row?.getClientRects().length) return null;
+		const box = row.getBoundingClientRect();
+		return { top: box.top - scroller.getBoundingClientRect().top, height: box.height };
+	}
+	function scrollParent(node: HTMLElement): HTMLElement | null {
+		for (let p = node.parentElement; p; p = p.parentElement) {
+			const overflow = getComputedStyle(p).overflowY;
+			if (overflow === 'auto' || overflow === 'scroll') return p;
+		}
+		return null;
+	}
 
 	// The list and the detail swap in place, so focus has to move with them:
 	// into the detail's title, or back to the row it was opened from.
@@ -232,7 +312,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane}>
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={() => (paneResetPending = false)}>
 		<!-- A detail that is only a state ("Not found", "Loading…", no access)
 		     has no Back of its own. Where it replaces the list, this one shows
 		     (settings.css); everywhere else it is not displayed. -->

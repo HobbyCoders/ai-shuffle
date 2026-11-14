@@ -11,6 +11,16 @@ export function formatUsd(value: number): string {
  return value < 0 && text !== '0.00' ? `-$${text}` : `$${text}`;
 }
 
+/**
+ * A dollar balance or allowance as every usage display shows it: `formatUsd`
+ * text, and `danger` at zero or below, when nothing is left to spend. The chat's
+ * usage popover and the Settings provider pages both read balances through this.
+ * Null when the worker reported no number.
+ */
+export function balanceDisplay(value: unknown, suffix = ''): { text: string; danger: boolean } | null {
+ return typeof value === 'number' && Number.isFinite(value) ? { text: `${formatUsd(value)}${suffix}`, danger: value <= 0 } : null;
+}
+
 export interface CreditText {
  short: string;
  detail: string;
@@ -23,8 +33,8 @@ export function creditText(credits: Record<string, unknown> | null, type: string
  if (type === 'openai') return null;
  const balance = creditNumber(credits, 'balance_remaining');
  if (balance != null) {
-  const left = `${formatUsd(balance)} left`;
-  return { short: left, detail: left, exhausted: balance <= 0 };
+  const left = balanceDisplay(balance, ' left')!;
+  return { short: left.text, detail: left.text, exhausted: left.danger };
  }
  if (type === 'chatgpt') {
   const extra = creditNumber(credits, 'balance');
@@ -35,8 +45,8 @@ export function creditText(credits: Record<string, unknown> | null, type: string
  if (credits?.unlimited === true && type !== 'openrouter' && type !== 'openrouter_account') return { short: 'Credits: unlimited', detail: 'Credits: unlimited' };
  const left = creditNumber(credits, 'limit_remaining');
  if (left != null) {
-  const text = `${formatUsd(left)} left on this key`;
-  return { short: text, detail: text, exhausted: left <= 0 };
+  const shown = balanceDisplay(left, ' left on this key')!;
+  return { short: shown.text, detail: shown.text, exhausted: shown.danger };
  }
  // Org costs and lifetime key spend are not balances. Keep optional spend
  // detail for legacy integrations, but never headline it as allowance left.

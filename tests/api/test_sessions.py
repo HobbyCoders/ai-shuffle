@@ -1597,7 +1597,7 @@ class TestClearSession:
             response = client.post("/api/v1/sessions/test-session-id/clear")
 
         assert response.status_code == 200
-        assert ("test-session-id", {"last_turn_failed": False}) in seen
+        assert ("test-session-id", {"last_turn_failed": False, "last_turn_stopped": False}) in seen
 
     def test_clear_session_no_broadcast_when_blocked(
         self, client, mock_database, sample_session, monkeypatch

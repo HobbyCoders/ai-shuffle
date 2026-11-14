@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { detailLine, safeKeyHint } from './credential-display';
+	import { balanceDisplay, safeKeyHint } from './credential-display';
+	import DetailLine from './DetailLine.svelte';
 	/**
 	 * The fal.ai media key: image, video, audio and 3D tools run on it, and it
 	 * also reads the account balance. Its switch turns fal.ai off without
@@ -31,10 +32,7 @@
 
 	const s = $derived(providers.current);
 	const entry = $derived(s.usage?.providers?.find((p) => p.provider_id === 'fal-ai') ?? null);
-	const balanceValue = $derived.by(() => {
-		const raw = entry?.credits?.balance_remaining;
-		return typeof raw === 'number' && Number.isFinite(raw) ? `$${raw.toFixed(2)}` : null;
-	});
+	const balance = $derived(balanceDisplay(entry?.credits?.balance_remaining));
 	const checked = $derived(entry?.fetched_at ? formatAsOf(entry.fetched_at, Date.now()) : null);
 
 	let toggleError = $state('');
@@ -78,9 +76,13 @@
 	onMount(() => void providers.loadUsage());
 </script>
 
+{#snippet subtitle()}
+	<DetailLine parts={[s.falEnabled ? 'Used by media tools' : 'Media tools are off', balance, checked]} />
+{/snippet}
+
 <DetailPane
 	name={credential.name}
-	subtitle={detailLine(s.falEnabled ? 'Used by media tools' : 'Media tools are off', balanceValue, checked)}
+	{subtitle}
 	{danger}
 	item={FAL_KEY_ITEM}
 >
@@ -115,7 +117,7 @@
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<RowGroup title="Balance">
 		<SettingRow id="providers.falBalance">
-			<ValueText tone="fg" value={balanceValue ?? 'Not reported yet'} />
+			<ValueText tone={balance?.danger ? 'danger' : 'fg'} value={balance?.text ?? 'Not reported yet'} />
 		</SettingRow>
 	</RowGroup>
 	<RowGroup title="Used by">

@@ -1690,8 +1690,26 @@ def turn_failed(turn: Optional[Dict[str, Any]]) -> bool:
     return state in ("completed", "parked") and bool(turn.get("error"))
 
 
+def turn_stopped(turn: Optional[Dict[str, Any]]) -> bool:
+    """Whether a person's Stop ended this turn, not a failure or a finish (#1340).
+
+    A turn parked on background work that Stop settles completes (its reply
+    stands) with ``interrupt_mode='stop'``: see :func:`settle_parked_turns`.
+    """
+    turn = turn or {}
+    if turn.get("state") == "completed":
+        return turn.get("stop_reason") == "parked_settled" and turn.get("interrupt_mode") == "stop"
+    return turn.get("state") == "aborted" and not abort_was_failure(turn.get("stop_reason"))
+
+
 def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
-    """Of ``session_ids``, those whose latest turn that ran ended in a failure.
+    """Of ``session_ids``, those whose latest turn that ran ended in a failure."""
+    return {sid for sid, outcome in latest_turn_outcomes(session_ids).items() if outcome == "failed"}
+
+
+def latest_turn_outcomes(session_ids: List[str]) -> Dict[str, str]:
+    """Of ``session_ids``, those whose latest turn that ran ended in a failure
+    (``"failed"``) or was stopped (``"stopped"``). A finish leaves the session out.
 
     Read from ``turns`` because every way a turn ends writes there, including the
     ones no client watches: the reap sweep, a dead worker, a chat nobody has open.
@@ -1699,7 +1717,7 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
     baseline speak; with none, the baseline's own outcome stands. See
     :func:`set_outcome_baseline`.
     """
-    failed: set = set()
+    outcomes: Dict[str, str] = {}
     skip = ", ".join(["%s"] * len(_NEVER_ANSWERED_STOP_REASONS))
     with get_db() as conn:
         cursor = conn.cursor()
@@ -1708,8 +1726,10 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
             ids = ", ".join(["%s"] * len(chunk))
             cursor.execute(
                 "SELECT s.id AS session_id, s.outcome_baseline_failed, "
-                "ranked.state, ranked.stop_reason, ranked.error FROM sessions s LEFT JOIN ("
-                "  SELECT t.session_id, t.state, t.stop_reason, t.error, ROW_NUMBER() OVER ("
+                "ranked.state, ranked.stop_reason, ranked.error, ranked.interrupt_mode "
+                "FROM sessions s LEFT JOIN ("
+                "  SELECT t.session_id, t.state, t.stop_reason, t.error, t.interrupt_mode, "
+                "  ROW_NUMBER() OVER ("
                 "    PARTITION BY t.session_id "
                 "    ORDER BY t.insert_order DESC, t.created_at DESC, t.position DESC, t.id DESC"
                 "  ) AS newest FROM turns t JOIN sessions b ON b.id = t.session_id "
@@ -1720,11 +1740,17 @@ def sessions_with_failed_latest_turn(session_ids: List[str]) -> set:
                 f"WHERE s.id IN ({ids})",
                 (*chunk, *_NEVER_ANSWERED_STOP_REASONS, *chunk),
             )
-            failed.update(
-                row["session_id"] for row in cursor.fetchall()
-                if (turn_failed(row) if row["state"] else row["outcome_baseline_failed"])
-            )
-    return failed
+            for row in cursor.fetchall():
+                # With no turn past the baseline, the baseline's outcome stands;
+                # it records failures only, so it never reads as stopped.
+                if row["state"] is None:
+                    if row["outcome_baseline_failed"]:
+                        outcomes[row["session_id"]] = "failed"
+                elif turn_failed(row):
+                    outcomes[row["session_id"]] = "failed"
+                elif turn_stopped(row):
+                    outcomes[row["session_id"]] = "stopped"
+    return outcomes
 
 
 def set_outcome_baseline(cursor: Any, session_id: str, failed: bool) -> None:
@@ -2331,6 +2357,7 @@ def settle_parked_turns(
     only_if_idle: bool = False,
     observed_park: Optional[Dict[str, Any]] = None,
     can_settle: Optional[Callable[[], bool]] = None,
+    user_stop: bool = False,
 ) -> int:
     """Settle every ``parked`` turn row for ``session_id`` to ``completed``.
 
@@ -2358,12 +2385,17 @@ def settle_parked_turns(
     ``can_settle`` rechecks in-memory work under the admission lock (it must
     not open another DB transaction). A changed interval or failed recheck
     returns zero so the caller retries from a fresh observation.
+    ``user_stop`` marks a settlement the owner's Stop caused with
+    ``interrupt_mode='stop'``, like any stopped turn, so the chat reads Stopped
+    (:func:`turn_stopped`) and a reboot keeps the Stop. The row still completes
+    as ``parked_settled``: its reply and usage stand.
     Returns the row count.
     """
     sql = (
         "UPDATE turns SET state='completed', "
-        "stop_reason=COALESCE(stop_reason, 'parked_settled'), ended_at=NOW() "
-        "WHERE session_id=%s AND state='parked' "
+        "stop_reason=COALESCE(stop_reason, 'parked_settled'), ended_at=NOW()"
+        + (", interrupt_mode='stop' " if user_stop else " ")
+        + "WHERE session_id=%s AND state='parked' "
     )
     params: tuple = (session_id,)
     if turn_ids is not None:
@@ -2442,6 +2474,28 @@ def settle_parked_turns(
     if events and _conn is None:
         session_events.notify_session_write(session_id, "session_events")
     return len(rows or [])
+
+
+def mark_settled_park_stopped(session_id: str, observed_park: Dict[str, Any]) -> int:
+    """Mark a park a Stop named as stopped after another writer settled it first.
+
+    A Stop's receipt names the parks it applies to, and :func:`settle_parked_turns`
+    with ``user_stop`` settles each one. Other cleanup can settle that park in
+    between, such as the post-park Monitor check while the Stop latch holds, so the
+    Stop's guarded write finds no parked row. The park was still the Stop's, so its
+    settlement keeps the Stop: the same row and run, settled as a park, with no
+    interrupt mode yet. A park that resumed has a new run id and is left alone.
+    Returns the row count.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET interrupt_mode='stop' WHERE session_id=%s AND id=%s "
+            "AND run_id IS NOT DISTINCT FROM %s AND state='completed' "
+            "AND stop_reason='parked_settled' AND interrupt_mode IS NULL",
+            (session_id, observed_park["id"], observed_park.get("run_id")),
+        )
+        return cursor.rowcount or 0
 
 
 def requeue_turn(turn_id: str) -> Optional[Dict[str, Any]]:

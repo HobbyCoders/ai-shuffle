@@ -796,11 +796,20 @@ async def enter_user_stop(session_id: str, *, stop: Optional[_UserStop] = None) 
     try:
         # By these ids and intervals, rechecked under the admission lock the next
         # message's enqueue also takes: a park named here can have resumed.
+        marked = 0
         for park in receipt.get("parks") or []:
-            parked_settled += await asyncio.to_thread(
+            settled = await asyncio.to_thread(
                 turns_db.settle_parked_turns, session_id, observed_park=park,
+                user_stop=True,
             )
-        if parked_settled:
+            if not settled:
+                # Other cleanup (the post-park Monitor check, a repair) settled
+                # this park first; the Stop it names still owns the outcome.
+                marked += await asyncio.to_thread(
+                    turns_db.mark_settled_park_stopped, session_id, park,
+                )
+            parked_settled += settled
+        if parked_settled or marked:
             # Settling banked the park's working time; show the final total.
             from app.core.turn_finalize import broadcast_work_time
 

@@ -41,6 +41,8 @@ export interface Session {
 	has_running_tasks?: boolean;
 	/** The latest turn that ran ended in a failure, so the row says so. */
 	last_turn_failed?: boolean | null;
+	/** The latest turn that ran was stopped, so the row says so, not Done (#1340). */
+	last_turn_stopped?: boolean | null;
 	/** A new turn was accepted but is waiting for the database to have room. */
 	start_queued?: boolean | null;
 	/** A turn runs now. Listed rows only; the streaming map is live after the
