@@ -175,8 +175,9 @@ _NONCE_RE = re.compile(r"[0-9a-f]{32}")
 
 def signin_tag(row_id: str, *, create: bool = False) -> Optional[str]:
     """This worker's tag for the row's current sign-in, kept in a file so it
-    survives a restart; a new one after each sign-out, completed new sign-in
-    or delete. Only its digest leaves the worker (in the catalog). A missing,
+    survives a restart; dropped with the signed-in marker (``_note_signin``),
+    so the next start after it makes a new one. Only its digest leaves the
+    worker (in the catalog). A missing,
     empty, cut-short or unreadable file is no tag; ``create`` replaces it,
     publishing the new one whole (written aside, then renamed)."""
     path = _signin_tag_path(row_id)
@@ -755,19 +756,35 @@ def signed_in_here(row_id: str) -> bool:
 
 
 def _note_signin(row_id: str, state: str) -> None:
+    """The one place a sign-in's lifetime on this worker ends or begins.
+
+    A signed-out answer (also what sign-out and delete record) removes the
+    marker and drops the catalog tag: a list captured before it is not the
+    next sign-in's. A signed-in answer that creates the marker bumps
+    :func:`signin_epoch`, so every warm agent of the row is replaced at its
+    next turn with a new capture binding (the tag is made at that start).
+
+    Not closable here: the agent switching accounts with no signed-out answer
+    ever seen by the app (the app never reads its sign-in), and rows with no
+    marker at all. There the list is at worst the previous account's until
+    the next agent start on the row replaces it, and a model it does not
+    offer shows the reroute card.
+    """
     if not row_id or state not in ("signed_in", "signed_out"):
         return  # not installed or an error says nothing about the sign-in
     marker = _signed_in_marker(row_id)
-    # The catalog tag stays: an answer does not end the sign-in's lifetime
-    # (sign-out, delete or a completed new sign-in does, and replaces agents).
     try:
         if state == "signed_in":
+            if not marker.is_file():
+                _signin_epochs[row_id] = signin_epoch(row_id) + 1
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
         else:
             marker.unlink(missing_ok=True)
     except OSError:
         logger.debug("[antigravity] could not record the sign-in state of %s", row_id, exc_info=True)
+    if state == "signed_out":
+        _forget_signin_tag(row_id)
 
 
 async def probe(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -775,7 +792,8 @@ async def probe(row: Mapping[str, Any]) -> Dict[str, Any]:
     a sign-in row records the answer for :func:`signed_in_here`."""
     epoch = signin_epoch(str(row.get("id") or ""))
     result = await _probe(row)
-    # A sign-out or delete while the binary answered: its answer is stale.
+    # A sign-out, delete or another answer that began a sign-in while the
+    # binary answered: this answer is stale.
     if row.get("auth_mode") in STORED_SIGN_IN and epoch == signin_epoch(str(row.get("id") or "")):
         _note_signin(str(row.get("id") or ""), str(result.get("state") or ""))
     return result
@@ -1027,11 +1045,6 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
             login.message += " This worker is still signed in with the earlier account."
     elif result.get("state") == "signed_in":
         login.state, login.message = "signed_in", None
-        # A new sign-in (maybe another account): the old one's model list no
-        # longer holds, and each warm chat's next turn starts a new agent
-        # (a new spawn binding) with a new capture binding.
-        _signin_epochs[login.row_id] = signin_epoch(login.row_id) + 1
-        _forget_signin_tag(login.row_id)
     else:
         login.state = "failed"
         login.message = ("Antigravity did not accept the sign-in. Start the sign-in again; "
@@ -1054,8 +1067,9 @@ _signin_epochs: Dict[str, int] = {}
 
 def signin_epoch(row_id: str) -> int:
     """Bumped each time this worker forgets the row's sign-in (sign-out,
-    delete) or completes a new one: a usage reading taken across a bump is
-    not written, and a warm agent is replaced at its next turn."""
+    delete) or the binary first answers signed-in (``_note_signin``): a usage
+    reading taken across a bump is not written, a probe answer across one is
+    not recorded, and a warm agent is replaced at its next turn."""
     return _signin_epochs.get(str(row_id), 0)
 
 
@@ -1081,7 +1095,6 @@ async def forget_row(row_id: str, *, reason: Optional[str] = None) -> None:
     async with _login_lock(str(row_id)):
         await _stop_logins(str(row_id))
         _note_signin(str(row_id), "signed_out")
-        _forget_signin_tag(str(row_id))  # the model list was this sign-in's
         path = _home_path(str(row_id))
         if path.is_dir():
             await asyncio.to_thread(shutil.rmtree, path, True)

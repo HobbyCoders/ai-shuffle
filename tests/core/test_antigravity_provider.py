@@ -1281,37 +1281,48 @@ def test_a_cut_short_or_bad_tag_file_is_replaced(client, content):
     assert ag.signin_tag(row["id"]) == bound[0]["signin"]
 
 
-async def test_a_signed_out_answer_keeps_the_sign_ins_list_and_a_new_sign_in_replaces_warm_agents(
-        client, session_row, monkeypatch):
-    """A status check answering signed-out once does not end the sign-in, so
-    a warm chat's captures still count. A completed new sign-in does: the old
-    list stops counting, the warm chat's next turn runs a replaced agent with
-    a new capture binding, and a new chat captures under the same new tag."""
+async def test_a_sign_ins_list_lives_as_long_as_its_signed_in_marker(client, session_row, monkeypatch):
+    """One rule, in ``_note_signin``: a signed-out answer ends the sign-in's
+    list (even a transient one), and the first signed-in answer after it
+    replaces each warm agent of the row at its next turn, with a new capture
+    binding whose captures count. A sign-in through the app takes that path."""
     from app.core import model_catalogs
 
     monkeypatch.setattr(model_catalogs, "_binding_key", lambda: (b"fixture-local-hmac-key", "local"))
     row = _create(client)
+    ag._note_signin(row["id"], "signed_in")  # a status check found it signed in
     adapter = _connected(row["id"])
     holder = adapter._antigravity_capture
     capture = ag.capture_offered_models(row["id"], lambda: holder["bound"])
+
+    async def captured():
+        capture(_REPORTED, "1.5.9")
+        await asyncio.gather(*ag._capture_tasks)
+        return model_catalogs.read(row["id"])
+
+    assert (await captured())["source"] == "agent"
+    first = dict(holder["bound"])
     ag._note_signin(row["id"], "signed_out")  # a transient answer...
-    ag._note_signin(row["id"], "signed_in")  # ...then signed in again
-    capture(_REPORTED, "1.5.9")
-    await asyncio.gather(*ag._capture_tasks)
-    assert model_catalogs.read(row["id"])["source"] == "agent"
-    old = dict(holder["bound"])
+    assert await captured() is None  # ...ends the list; the warm agent's report no longer counts
+    ag._note_signin(row["id"], "signed_in")  # signed in again
+    ag._note_signin(row["id"], "signed_in")  # a repeat answer begins nothing
+    assert model_catalogs.read(row["id"]) is None
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1  # the warm chat runs a replaced agent
+    assert holder["bound"]["signin"] and holder["bound"] != first
+    assert _bound(row["id"]) == holder["bound"]  # a new chat: the same new tag
+    assert (await captured())["source"] == "agent"
+    await _turn(adapter, "user")
+    assert len(adapter._engine.specs) == 1
+    second = dict(holder["bound"])
     started = client.post(f"{BASE}/providers/{row['id']}/login").json()
     done = client.post(f"{BASE}/providers/{row['id']}/login/{started['login_id']}/complete",
                        json={"code": "good"}).json()
     assert done["state"] == "signed_in", done
-    assert model_catalogs.read(row["id"]) is None  # the previous account's list
+    assert model_catalogs.read(row["id"]) is None  # the previous sign-in's list
     await _turn(adapter, "user")
-    assert len(adapter._engine.specs) == 1  # a new agent for the warm chat
-    assert holder["bound"]["signin"] and holder["bound"] != old
-    assert _bound(row["id"]) == holder["bound"]  # a new chat: the same new tag
-    capture(_REPORTED, "1.5.9")
-    await asyncio.gather(*ag._capture_tasks)
-    assert model_catalogs.read(row["id"])["source"] == "agent"
+    assert len(adapter._engine.specs) == 2 and holder["bound"] != second
+    assert (await captured())["source"] == "agent"
 
 
 @pytest.mark.parametrize("mode,billing", [
