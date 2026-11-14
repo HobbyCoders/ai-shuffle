@@ -90,9 +90,110 @@ export function lastWorkFailed(s: Pick<Session, 'status'> & Partial<Pick<Session
  *  whose work failed, goes to "Needs you": nothing more happens there without
  *  them. A settled row always goes to Settled, even if the server still reports
  *  a wait (#2324) — settling is the user saying "not now". */
-export function sidebarGroup(status: SessionCardStatus, isActive: boolean): 'needs' | 'active' | 'settled' {
-	if (!isActive) return 'settled';
+export function sidebarGroup(
+	status: SessionCardStatus,
+	isActive: boolean,
+	snoozed = false
+): 'needs' | 'active' | 'snoozed' | 'settled' {
+	if (!isActive) return snoozed ? 'snoozed' : 'settled';
 	return isAttentionStatus(status) || status === 'failed' ? 'needs' : 'active';
+}
+
+// ── Snooze ───────────────────────────────────────────────────────────────
+// A snoozed chat is settled with a wake time (`snoozed_until`, UTC). The
+// server wakes it at that time; the sidebar regroups it locally the moment
+// the time passes, so the row never waits for the push.
+
+type SnoozeFields = Pick<Session, 'is_active'> & Partial<Pick<Session, 'snoozed_until' | 'status'>>;
+
+/** The wake time in ms, or null when the row is not snoozed. */
+export function snoozeUntilMs(s: SnoozeFields): number | null {
+	if (s.is_active || !s.snoozed_until || s.status === 'archived') return null;
+	const at = Date.parse(s.snoozed_until);
+	return Number.isFinite(at) ? at : null;
+}
+
+/** Snoozed and still waiting: it belongs in the Snoozed group. */
+export function isSnoozed(s: SnoozeFields, now: number): boolean {
+	const at = snoozeUntilMs(s);
+	return at !== null && at > now;
+}
+
+/** Its snooze has run out but the server's wake has not arrived yet: show it as Active. */
+export function isSnoozeDue(s: SnoozeFields, now: number): boolean {
+	const at = snoozeUntilMs(s);
+	return at !== null && at <= now;
+}
+
+function sameDay(a: Date, b: Date): boolean {
+	return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+/** The row's wake label in the viewer's timezone: "until 3:00 PM" today,
+ *  "until Fri 9:00 AM" within the week, "until Nov 30, 9:00 AM" beyond it. */
+export function snoozeLabel(untilMs: number, now: number): string {
+	const at = new Date(untilMs);
+	const time = at.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+	if (sameDay(at, new Date(now))) return `until ${time}`;
+	if (untilMs - now < 6 * 86_400_000) {
+		return `until ${at.toLocaleDateString(undefined, { weekday: 'short' })} ${time}`;
+	}
+	const sameYear = at.getFullYear() === new Date(now).getFullYear();
+	const date = at.toLocaleDateString(undefined, sameYear ? { month: 'short', day: 'numeric' } : { month: 'short', day: 'numeric', year: 'numeric' });
+	return `until ${date}, ${time}`;
+}
+
+/** One quick choice in the snooze picker. */
+export interface SnoozePreset {
+	id: 'later' | 'evening' | 'tomorrow' | 'monday';
+	label: string;
+	at: Date;
+}
+
+/**
+ * The picker's quick choices, in the viewer's local time: Later today (+3h),
+ * This evening (6:00 PM), Tomorrow 9:00 AM and Next Monday 9:00 AM. A choice
+ * that is not ahead of now, or that repeats another's time, is left out, and
+ * "Later today" only shows while it is still today.
+ */
+export function snoozePresets(now: Date): SnoozePreset[] {
+	const at = (days: number, hour: number) => {
+		const d = new Date(now);
+		d.setDate(d.getDate() + days);
+		d.setHours(hour, 0, 0, 0);
+		return d;
+	};
+	const later = new Date(now.getTime() + 3 * 3_600_000);
+	later.setSeconds(0, 0);
+	const toMonday = ((8 - now.getDay()) % 7) || 7;
+	const out: SnoozePreset[] = [];
+	const add = (p: SnoozePreset) => {
+		if (p.at.getTime() > now.getTime() && !out.some((o) => o.at.getTime() === p.at.getTime())) out.push(p);
+	};
+	if (sameDay(later, now)) add({ id: 'later', label: 'Later today', at: later });
+	add({ id: 'evening', label: 'This evening', at: at(0, 18) });
+	add({ id: 'tomorrow', label: 'Tomorrow', at: at(1, 9) });
+	add({ id: 'monday', label: 'Next Monday', at: at(toMonday, 9) });
+	return out;
+}
+
+/** `<input type="datetime-local">` value (local time) for a date. */
+export function toLocalInputValue(d: Date): string {
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** Parse a custom wake time typed in local time: the time, or why it is refused. */
+export function parseCustomSnooze(value: string, now: number): { at: Date } | { error: string } {
+	const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(value.trim());
+	if (!m) return { error: 'Pick a date and time.' };
+	const [, y, mo, d, h, mi] = m.map(Number);
+	const at = new Date(y, mo - 1, d, h, mi, 0, 0);
+	if (Number.isNaN(at.getTime()) || at.getMonth() !== mo - 1 || at.getDate() !== d) {
+		return { error: 'Pick a date and time.' };
+	}
+	if (at.getTime() <= now) return { error: 'Pick a time in the future.' };
+	return { at };
 }
 
 /** The states that get a live-ticking timer — in-flight, including a session
@@ -845,17 +946,27 @@ export function isArchived(s: Session): boolean {
 	return s.status === 'archived'; // Decode old metadata only; never a sidebar lane or readonly state.
 }
 
-/** A sidebar row action. */
-export type CardAction = 'settle' | 'activate';
+/** A sidebar row action. Unsnooze moves a snoozed row back to Active. */
+export type CardAction = 'settle' | 'activate' | 'snooze' | 'unsnooze';
 
 /**
- * The actions a row offers. On touch, a left swipe commits the state toggle
- * (Settle for an Active row, Move to Active for a settled one, Restore for an
- * archived one) and a right swipe commits Archive. The card sorts Archive
- * first for its hover actions, so this order is not the on-screen order.
+ * The actions a row offers, in on-screen order. The first is what a left
+ * swipe commits: Settle for an Active row, Move to Active for a settled or
+ * snoozed one (a snooze whose time has passed counts as Active). An Active
+ * row also offers Snooze (when the list can open the
+ * picker); a snoozed row offers Settle, which ends its snooze.
  */
-export function cardActions(s: Pick<Session, 'is_active' | 'status'>): CardAction[] {
-	return [s.is_active && s.status !== 'archived' ? 'settle' : 'activate'];
+export function cardActions(
+	s: Pick<Session, 'is_active' | 'status'> & Partial<Pick<Session, 'snoozed_until'>>,
+	now: number = Date.now(),
+	canSnooze = false
+): CardAction[] {
+	// A snooze whose time has passed is Active already, before the server says so.
+	if ((s.is_active || isSnoozeDue(s, now)) && s.status !== 'archived') {
+		return canSnooze ? ['settle', 'snooze'] : ['settle'];
+	}
+	if (isSnoozed(s, now)) return ['unsnooze', 'settle'];
+	return ['activate'];
 }
 
 /**

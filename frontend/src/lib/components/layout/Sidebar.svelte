@@ -31,6 +31,7 @@
 		X,
 		Check,
 		Undo2,
+		AlarmClock,
 		Files,
 		Notebook,
 		SquarePen,
@@ -78,6 +79,7 @@
 	import PanelToggle from './view/PanelToggle.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
+	import SnoozePicker from './sidebar/SnoozePicker.svelte';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
 	import {
 		branchLabel,
@@ -88,6 +90,7 @@
 		projectKey,
 		isVisibleSidebarSession,
 		sidebarGroup,
+		snoozeUntilMs,
 		lastWorkFailed,
 		openSessionNeeds,
 		sessionNeedsInput,
@@ -390,6 +393,34 @@
 	// comparison, i.e. O(n log n) date parses per recompute.
 	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number }
 
+	// Snoozes whose time has passed count as Active at once: the server's wake
+	// lands a moment later and changes nothing on screen. Keyed by a string so
+	// the shared ticker only rebuilds the rows when a snooze actually runs out.
+	const snoozeDueKey = $derived(
+		visibleSessions
+			.filter((s) => {
+				const until = snoozeUntilMs(s);
+				return until !== null && until <= now;
+			})
+			.map((s) => s.id)
+			.join(',')
+	);
+	const snoozeDue = $derived(new Set(snoozeDueKey ? snoozeDueKey.split(',') : []));
+	const rowActive = (s: Session) => !!s.is_active || snoozeDue.has(s.id);
+	const rowSnoozed = (s: Session) => !rowActive(s) && snoozeUntilMs(s) !== null;
+
+	// The shared ticker can be 30s apart, so wake the list at the soonest snooze
+	// time itself, to the second.
+	$effect(() => {
+		const soonest = Math.min(
+			...visibleSessions.map((s) => snoozeUntilMs(s) ?? Infinity).filter((at) => at > now)
+		);
+		if (!Number.isFinite(soonest)) return;
+		// setTimeout's ceiling is ~24.8 days; a later wake re-arms on the next tick.
+		const timer = setTimeout(() => (now = Date.now()), Math.min(soonest - Date.now() + 50, 2 ** 31 - 1));
+		return () => clearTimeout(timer);
+	});
+
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
 			.map((s) => {
@@ -409,7 +440,7 @@
 						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
-						isActive: !!s.is_active,
+						isActive: rowActive(s),
 						failed: lastWorkFailed(s),
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
@@ -428,9 +459,15 @@
 	// unrelated activity. Settling is the user saying "not
 	// now" (#2324): a settled row always lands in Settled, keeping its amber badge
 	// if the server still reports a wait.
-	const laneOf = (r: CardRow) => sidebarGroup(r.status, !!r.session.is_active);
+	// A snoozed row has its own lane, soonest wake first, until its time passes.
+	const laneOf = (r: CardRow) => sidebarGroup(r.status, rowActive(r.session), rowSnoozed(r.session));
 	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs'));
 	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active'));
+	const snoozedRows = $derived(
+		rows
+			.filter((r) => laneOf(r) === 'snoozed')
+			.sort((a, b) => (snoozeUntilMs(a.session) ?? 0) - (snoozeUntilMs(b.session) ?? 0))
+	);
 	const settledRows = $derived(rows.filter((r) => laneOf(r) === 'settled'));
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
@@ -534,8 +571,8 @@
 	// One kind of session; the project is picked (or not) on the new screen.
 	const newLabel = 'New chat';
 
-	/** Which overlay is up: the More menu, the filter, or neither. */
-	let sheet = $state<'more' | 'filter' | null>(null);
+	/** Which overlay is up: the More menu, the filter, the snooze picker, or none. */
+	let sheet = $state<'more' | 'filter' | 'snooze' | null>(null);
 	let customizeOpen = $state(false);
 
 	function openCustomize() {
@@ -661,8 +698,10 @@
 	let selected = $state<Set<string>>(new Set());
 	const selecting = $derived(selected.size > 0);
 	const selectedRows = $derived(rows.filter((r) => selected.has(r.session.id)));
-	const anySelectedActive = $derived(selectedRows.some((r) => r.session.is_active));
-	const anySelectedSettled = $derived(selectedRows.some((r) => !r.session.is_active));
+	const anySelectedSettled = $derived(selectedRows.some((r) => !rowActive(r.session)));
+	// Settle and Snooze both take Active rows and snoozed ones (a new time, or
+	// no snooze at all); a settled row only goes back to Active.
+	const anySelectedSettleable = $derived(selectedRows.some((r) => rowActive(r.session) || rowSnoozed(r.session)));
 
 	// Rows that left the list (archived elsewhere, filtered out) leave the
 	// selection too, so the count never names rows the user cannot see.
@@ -716,7 +755,7 @@
 
 	async function runBulk(kind: 'settle' | 'activate') {
 		const targets = selectedRows.filter((r) =>
-			kind === 'settle' ? r.session.is_active : kind === 'activate' ? !r.session.is_active : true
+			kind === 'settle' ? rowActive(r.session) || rowSnoozed(r.session) : !rowActive(r.session)
 		);
 		cancelSelection();
 		if (targets.length === 0) return;
@@ -730,6 +769,41 @@
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
 		}
+	}
+
+	// --- snooze --------------------------------------------------------------
+	// One picker for a row's Snooze button and the selection bar's.
+	let snoozeTargets = $state<string[]>([]);
+	let snoozeOpenedAt = $state(Date.now());
+
+	function openSnooze(ids: string[]) {
+		if (ids.length === 0) return;
+		snoozeTargets = ids;
+		snoozeOpenedAt = Date.now();
+		sheet = 'snooze';
+	}
+
+	function snoozeSelected() {
+		openSnooze(selectedRows.filter((r) => rowActive(r.session) || rowSnoozed(r.session)).map((r) => r.session.id));
+	}
+
+	async function applySnooze(at: Date) {
+		const ids = snoozeTargets;
+		sheet = null;
+		snoozeTargets = [];
+		cancelSelection();
+		const until = at.toISOString();
+		const results = await Promise.allSettled(ids.map((id) => appData.setSessionActive(id, false, until)));
+		const done = ids.filter((_, i) => results[i].status === 'fulfilled');
+		const failed = ids.length - done.length;
+		if (failed) {
+			const reason = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')?.reason as { detail?: unknown } | undefined;
+			const detail = typeof reason?.detail === 'string' ? reason.detail.trim() : '';
+			if (ids.length === 1 && detail) notify(`Failed to snooze: ${detail}`, { severity: 'error' });
+			else reportBulkFailure(failed, ids.length);
+		}
+		// Like Settle, the open chat leaves Active; on desktop the shell moves on.
+		if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
 	}
 
 	// --- keyboard ------------------------------------------------------------
@@ -799,6 +873,7 @@
 		onLongPress={startSelecting}
 		onOpen={onOpenSession}
 		onSettled={onSettledOpenSession}
+		onSnooze={(id) => openSnooze([id])}
 	/>
 {/snippet}
 
@@ -815,11 +890,11 @@
 	{/each}
 {/snippet}
 
-{#snippet sect(key: 'needs' | 'active' | 'settled', label: string, count: number)}
+{#snippet sect(key: 'needs' | 'active' | 'snoozed' | 'settled', label: string, count: number)}
 	<button
 		class="sect"
 		class:needs={key === 'needs'}
-		class:settled={key === 'settled'}
+		class:settled={key === 'settled' || key === 'snoozed'}
 		class:closed={collapsedGroups[key]}
 		onclick={() => toggleGroup(key)}
 		aria-expanded={!collapsedGroups[key]}
@@ -876,7 +951,10 @@
 					<Undo2 size={15} strokeWidth={2} />Active
 				</button>
 			{/if}
-			{#if anySelectedActive}
+			{#if anySelectedSettleable}
+				<button class="act" type="button" aria-haspopup="dialog" onclick={snoozeSelected}>
+					<AlarmClock size={15} strokeWidth={2} />Snooze
+				</button>
 				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
 					<Check size={15} strokeWidth={2.25} />Settle
 				</button>
@@ -960,6 +1038,18 @@
 				{/if}
 			{/if}
 
+			{#if snoozedRows.length > 0}
+				{@render sect('snoozed', 'Snoozed', snoozedRows.length)}
+				{#if !collapsedGroups.snoozed}
+					<!-- One list in wake order, so no project headers: each row names its own. -->
+					<div class="cards" data-group="snoozed">
+						{#each snoozedRows as row (row.session.id)}
+							{@render card(row, true, spansProjects)}
+						{/each}
+					</div>
+				{/if}
+			{/if}
+
 			{#if settledLaneShown}
 				{@render sect('settled', filtersSet || $settledTotal === null ? 'Settled · loaded' : 'Settled', filtersSet ? settledRows.length : ($settledTotal ?? settledRows.length))}
 			{/if}
@@ -1019,6 +1109,12 @@
 					<button class="opt" type="button" aria-pressed={deviceFilter === opt.id} onclick={() => (deviceFilter = opt.id)}>{opt.label}</button>
 				{/each}
 			</div>
+		</SidebarSheet>
+
+		<SidebarSheet open={sheet === 'snooze'} label={snoozeTargets.length > 1 ? 'Snooze chats' : 'Snooze chat'} {phone} placement="popover" onClose={() => (sheet = null)}>
+			{#if sheet === 'snooze'}
+				<SnoozePicker now={snoozeOpenedAt} count={snoozeTargets.length} {phone} onPick={applySnooze} />
+			{/if}
 		</SidebarSheet>
 	</div>
 

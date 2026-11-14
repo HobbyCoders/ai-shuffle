@@ -34,11 +34,15 @@
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
 	 * edge on hover. Settle has no Undo, since a settled
-	 * session is one tap from Active. Rename, Fork, and Delete
+	 * session is one tap from Active. Snooze sits beside Settle on an active
+	 * row and opens the sidebar's time picker; a snoozed row offers Unsnooze and
+	 * Settle instead, and its line two says when it wakes. Rename, Fork, and Delete
 	 * live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
 	import {
+		AlarmClock,
+		AlarmClockOff,
 		ArrowUpFromLine,
 		Check,
 		Diff,
@@ -82,6 +86,8 @@
 		summarizePullRequests,
 		sessionTimestamp,
 		cardActions,
+		snoozeLabel,
+		snoozeUntilMs,
 		withinTapTarget,
 		type CardAction,
 		type SessionCardStatus,
@@ -122,6 +128,8 @@
 		onOpen: (sessionId: string) => void;
 		/** Desktop only: after settling the open session, let the shell move to a fresh chat. */
 		onSettled?: () => void;
+		/** Opens the snooze picker for this row. Without it the row offers no Snooze. */
+		onSnooze?: (sessionId: string) => void;
 	}
 
 	let {
@@ -140,7 +148,8 @@
 		onSelectToggle,
 		onLongPress,
 		onOpen,
-		onSettled
+		onSettled,
+		onSnooze
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
@@ -305,11 +314,16 @@
 	// Numbers already say "uncommitted", so the word only stands in without them.
 	const progressWord = $derived(diff ? null : gitProgressWord(stage, !!gitStatus?.has_changes));
 
+	// "until Fri 9:00 AM": the wake time takes the place of the row's age.
+	const snoozeText = $derived.by(() => {
+		const until = snoozeUntilMs(session);
+		return until === null || until <= now ? null : snoozeLabel(until, now);
+	});
 	const remote = $derived(!!session.is_remote);
 	const whereText = $derived([showProject ? projectLabel : null, branch].filter(Boolean).join(' · ') || null);
 	// Nothing to report: the line holds the row's age so its rhythm stays and it
 	// never goes blank.
-	const factless = $derived(!showPr && !diff && !progressWord && !whereText);
+	const factless = $derived(!showPr && !diff && !progressWord && !whereText && !snoozeText);
 	const ageText = $derived.by(() => {
 		if (!factless) return null;
 		const age = formatAge(Math.max(0, now - lastActivity));
@@ -317,7 +331,7 @@
 	});
 
 	// The row's whole story, for the hover tip.
-	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText]);
+	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText, snoozeText ? `Snoozed ${snoozeText}` : null]);
 	const rowDetails = $derived(rowFacts.filter(Boolean).join(' · '));
 	const rowTip = $derived(`${title}\n${rowDetails}`);
 	// The same for a screen reader, which already hears the several-PR chip by
@@ -335,7 +349,9 @@
 	// A row with no recorded work has no time worth a column.
 	const showTimer = $derived(counting || workMs >= 1000);
 
-	const actions = $derived(cardActions(session));
+	// Read with the sidebar's clock, so a row whose snooze has run out already
+	// offers the Active actions.
+	const actions = $derived(cardActions(session, now, !!onSnooze));
 	/** The single membership toggle is also available to assistive technology. */
 	const hoverActions = $derived(actions);
 	/** Left swipe toggles membership; right swipe never changes the session. */
@@ -345,7 +361,9 @@
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' }
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
+		snooze: { title: 'Snooze session', aria: 'Snooze session', label: 'Snooze' },
+		unsnooze: { title: 'Unsnooze: move to Active', aria: 'Unsnooze session and move it to Active', label: 'Move to Active' }
 	};
 
 	function reportFailure(err: unknown) {
@@ -369,7 +387,11 @@
 					if (active && !platform.isMobile) onSettled?.();
 					break;
 				case 'activate':
+				case 'unsnooze':
 					await appData.setSessionActive(id, true);
+					break;
+				case 'snooze':
+					onSnooze?.(id);
 					break;
 			}
 		} catch (err) {
@@ -623,7 +645,7 @@
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
-			{:else if leftAction === 'activate'}
+			{:else if leftAction === 'activate' || leftAction === 'unsnooze'}
 				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
 			{/if}
 		</div>
@@ -714,6 +736,9 @@
 					{:else if progressWord}
 						<span class="st progress" class:uncommitted={!compact && stage === 'dirty'} aria-hidden="true">{progressWord}</span>
 					{/if}
+					{#if snoozeText}
+						<span class="snooze-until" aria-hidden="true"><AlarmClock size={11} strokeWidth={MARK_STROKE} />{snoozeText}</span>
+					{/if}
 					{#if whereText}
 						<span class="where" aria-hidden="true">{whereText}</span>
 					{:else if ageText}
@@ -745,6 +770,10 @@
 						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
 						<Undo2 size={14} strokeWidth={1.75} />
+					{:else if action === 'snooze'}
+						<AlarmClock size={14} strokeWidth={1.75} />
+					{:else if action === 'unsnooze'}
+						<AlarmClockOff size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}
@@ -1033,6 +1062,13 @@
 	.diff .p { color: var(--success); }
 	.diff .m { color: var(--destructive); }
 	/* The only fact that truncates, and not into a stump. */
+	.snooze-until {
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		gap: 3px;
+		font-variant-numeric: tabular-nums;
+	}
 	.where {
 		flex: 1 1 0;
 		min-width: 56px;
