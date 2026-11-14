@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The AI Shuffle app ships mcp 1.x (requirements.txt), so McpClient must work
+# on both generations; tests/core/test_mcp_mrtr_pinned_sdk.py fails if the
+# app's SDK cannot carry an input_required answer (#1560).
 mcp = [
     "mcp>=2.0",
 ]
