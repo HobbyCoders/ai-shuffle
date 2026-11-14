@@ -18,7 +18,7 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
 	import ClaudeCloudForm from './ClaudeCloudForm.svelte';
-	import { CLOUD_WARNING, GATEWAY_WARNING } from './claude-cloud';
+	import { cloudWarning, GATEWAY_WARNING } from './claude-cloud';
 	import { CLAUDE_CLOUD_ITEM, type CredentialView, type ProviderView } from './providers-model';
 
 	interface Props {
@@ -91,7 +91,8 @@
 	status={credential.attention ? credential.status : undefined}
 	statusText={credential.attention ? credential.statusText : undefined}
 	subtitle={detailLine(
-		!credential.attention && credential.statusText,
+		// A ready method's status ("Standby", "Off") is what `position` says.
+		!credential.attention && !status?.ready && credential.statusText,
 		status?.method_label,
 		position,
 		!status?.ready && status?.missing.length ? `Missing ${status.missing.join(', ')}` : null,
@@ -103,7 +104,7 @@
 >
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet banner()}
-		<InlineBanner tone="warn">{config?.warning ?? CLOUD_WARNING}</InlineBanner>
+		<InlineBanner tone="warn">{cloudWarning(config, config?.method ?? status?.method)}</InlineBanner>
 		{#if gateway}<InlineBanner tone="warn">{config?.gateway_warning ?? GATEWAY_WARNING}</InlineBanner>{/if}
 		{#if status?.storage_locked}
 			<InlineBanner tone="warn">The credential store is locked, so the stored values cannot be read.</InlineBanner>

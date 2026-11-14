@@ -36,6 +36,11 @@ def test_save_returns_no_secret_and_logs_none(authenticated_client, caplog):
     gateway = next(m for m in body["methods"] if m["id"] == "gateway")
     assert gateway["allowlist"] == ["ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN"]
     assert "smallest permissions" in body["warning"] and "address you enter" in body["gateway_warning"]
+    # Only Vertex AI keeps a key file on disk, so only its warning names one (#1583).
+    assert "key file" not in body["warning"]
+    assert "key file" not in body["method_warnings"]["gateway"]
+    assert "Vertex AI key file" in body["method_warnings"]["vertex"]
+    assert all("smallest permissions" in w for w in body["method_warnings"].values())
     for path in (CLOUD, MODE, "/api/v1/settings/integrations"):
         assert TOKEN not in authenticated_client.get(path).text
     assert TOKEN not in caplog.text
