@@ -159,10 +159,11 @@ export interface SnoozePreset {
 }
 
 /**
- * The picker's quick choices, in the viewer's local time: Later today (+3h),
- * This evening (6:00 PM), Tomorrow 9:00 AM and Next Monday 9:00 AM. A choice
- * that is not ahead of now, or that repeats another's time, is left out, and
- * "Later today" only shows while it is still today.
+ * The picker's quick choices, in the viewer's local time and in time order:
+ * Later today (+3h), This evening (6:00 PM), Tomorrow 9:00 AM and Next
+ * Monday 9:00 AM. A choice that is not ahead of now, or that repeats
+ * another's time, is left out. "Later today" only shows while it is still
+ * before 6:00 PM: from then on it would be later than "This evening".
  */
 export function snoozePresets(now: Date): SnoozePreset[] {
 	const at = (days: number, hour: number) => {
@@ -178,11 +179,12 @@ export function snoozePresets(now: Date): SnoozePreset[] {
 	const add = (p: SnoozePreset) => {
 		if (p.at.getTime() > now.getTime() && !out.some((o) => o.at.getTime() === p.at.getTime())) out.push(p);
 	};
-	if (sameDay(later, now)) add({ id: 'later', label: 'Later today', at: later });
-	add({ id: 'evening', label: 'This evening', at: at(0, 18) });
+	const evening = at(0, 18);
+	if (later.getTime() < evening.getTime()) add({ id: 'later', label: 'Later today', at: later });
+	add({ id: 'evening', label: 'This evening', at: evening });
 	add({ id: 'tomorrow', label: 'Tomorrow', at: at(1, 9) });
 	add({ id: 'monday', label: 'Next Monday', at: at(toMonday, 9) });
-	return out;
+	return out.sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 
 /** `<input type="datetime-local">` value (local time) for a date. */

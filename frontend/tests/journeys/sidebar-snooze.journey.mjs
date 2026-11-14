@@ -140,6 +140,25 @@ async function swipeSetup({ page, status, log }, { settled = false } = {}) {
 	log(`chat ${id}${settled ? ' (settled)' : ''}${mobileShell ? ' in /mobile/' : ''}`);
 }
 
+/**
+ * Type a wake time `days` from now at 10:00 into the open picker's own field.
+ * Late on a Sunday the picker has a single quick choice, so a second,
+ * different time comes from here; returns the value typed.
+ */
+async function pickCustom(page, days) {
+	const picker = snoozePicker(page);
+	const value = await page.evaluate((days) => {
+		const d = new Date();
+		d.setDate(d.getDate() + days);
+		const pad = (n) => String(n).padStart(2, '0');
+		return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T10:00`;
+	}, days);
+	await picker.getByLabel('Pick a date and time').fill(value);
+	await picker.getByRole('button', { name: 'Snooze', exact: true }).click();
+	await picker.waitFor({ state: 'hidden', timeout: 10_000 });
+	return value;
+}
+
 /** Pick quick choice `index` in the open picker; returns its label. */
 async function pickPreset(page, index) {
 	const picker = snoozePicker(page);
@@ -222,7 +241,7 @@ await runJourney({
 				await swipeRow(page, id, 1, expectSnoozeLane);
 				await snoozePicker(page).waitFor({ timeout: 10_000 });
 				await expectRowInPlace(page, id);
-				const second = await pickPreset(page, 1);
+				const second = await pickCustom(page, 10);
 				await waitSaved(page, id, (row) => !row.is_active && !!row.snoozed_until && row.snoozed_until !== before,
 					`the new wake time (${second}) never replaced ${before}`);
 				await waitLane(page, id, 'snoozed');

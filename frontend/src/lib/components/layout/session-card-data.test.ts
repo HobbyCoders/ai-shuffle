@@ -817,7 +817,7 @@ describe('snooze', () => {
 		expect(snoozeLabel(at(2026, 12, 25, 9).getTime(), now)).toMatch(/^until .+, /);
 	});
 
-	it('offers presets ahead of now only, in order', () => {
+	it('offers presets ahead of now only, in time order', () => {
 		const morning = snoozePresets(at(2026, 11, 13, 10)); // Friday 10:00
 		expect(morning.map((p) => p.id)).toEqual(['later', 'evening', 'tomorrow', 'monday']);
 		expect(morning.map((p) => p.at.getTime())).toEqual([
@@ -826,15 +826,38 @@ describe('snooze', () => {
 			at(2026, 11, 14, 9).getTime(),
 			at(2026, 11, 16, 9).getTime(),
 		]);
-		// 7 PM: "This evening" has passed, "Later today" is 10 PM.
-		expect(snoozePresets(at(2026, 11, 13, 19)).map((p) => p.id)).toEqual(['later', 'tomorrow', 'monday']);
+		// 3:30 PM: "Later today" would be 6:30 PM, after "This evening", so only the evening shows.
+		const afternoon = snoozePresets(at(2026, 11, 13, 15, 30));
+		expect(afternoon.map((p) => p.id)).toEqual(['evening', 'tomorrow', 'monday']);
+		expect(afternoon[0].at.getTime()).toBe(at(2026, 11, 13, 18).getTime());
+		// 3:00 PM: "Later today" lands on 6:00 PM exactly; "This evening" keeps it.
+		expect(snoozePresets(at(2026, 11, 13, 15)).map((p) => p.id)).toEqual(['evening', 'tomorrow', 'monday']);
+		// 5:30 PM: "This evening" (6:00 PM) only.
+		const dusk = snoozePresets(at(2026, 11, 13, 17, 30));
+		expect(dusk.map((p) => p.id)).toEqual(['evening', 'tomorrow', 'monday']);
+		expect(dusk[0].at.getTime()).toBe(at(2026, 11, 13, 18).getTime());
+		// 7 PM: "This evening" has passed and "Later today" would be later still: neither shows.
+		expect(snoozePresets(at(2026, 11, 13, 19)).map((p) => p.id)).toEqual(['tomorrow', 'monday']);
 		// 9:30 PM: "Later today" would be tomorrow, so it is left out.
 		expect(snoozePresets(at(2026, 11, 13, 21, 30)).map((p) => p.id)).toEqual(['tomorrow', 'monday']);
 		// Sunday: tomorrow IS next Monday, so it shows once; Monday means the one after.
 		const sunday = snoozePresets(at(2026, 11, 15, 22));
 		expect(sunday.map((p) => p.id)).toEqual(['tomorrow']);
+		const sundayMorning = snoozePresets(at(2026, 11, 15, 10));
+		expect(sundayMorning.map((p) => p.id)).toEqual(['later', 'evening', 'tomorrow']);
+		expect(sundayMorning[2].at.getTime()).toBe(at(2026, 11, 16, 9).getTime());
 		const monday = snoozePresets(at(2026, 11, 16, 8));
 		expect(monday.find((p) => p.id === 'monday')?.at.getTime()).toBe(at(2026, 11, 23, 9).getTime());
+	});
+
+	it('keeps presets in the future, distinct and in time order at every half hour of a week', () => {
+		for (let step = 0; step < 7 * 48; step++) {
+			const now = new Date(at(2026, 11, 9, 0).getTime() + step * 1_800_000);
+			const times = snoozePresets(now).map((p) => p.at.getTime());
+			for (let i = 0; i < times.length; i++) {
+				expect(times[i]).toBeGreaterThan(i === 0 ? now.getTime() : times[i - 1]);
+			}
+		}
 	});
 
 	it('takes a custom local time and refuses a past or malformed one', () => {
