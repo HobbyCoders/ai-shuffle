@@ -2,10 +2,12 @@
 // (#1406): the open item replaces the list and nothing spills past the pane,
 // Back returns to the list with focus on the row, an item that no longer exists
 // can still be left, and Logs "Same logger" shows its filtered list. A guard at
-// 1280 keeps the split unchanged. API users and logs are route stubs, so the
+// 1280 keeps the split unchanged. On a phone (#1582) a detail opens at its top,
+// Back returns to the list's scroll position, and reopening the same item
+// starts its pane at the top. API users, logs and hooks are route stubs, so the
 // worker's real data never decides the result.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp } from './lib/app.mjs';
+import { expect, gotoApp, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const user = { id: 'u1', name: 'Build bot', description: '', project_id: null, profile_id: null, model: null, effort: null, permission_mode: null, allowed_agents: [], is_active: true, created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', last_used_at: null };
@@ -68,6 +70,16 @@ async function sameLogger(page) {
  await button(page, 'Same logger').click();
  await page.waitForFunction(() => [...document.querySelectorAll('.st-lcol [data-settings-item]')].filter(el => el.checkVisibility()).length === 2, null, { timeout: 5000 }).catch(() => {});
 }
+
+// App hooks for the phone scroll case: enough rows that the list scrolls.
+const HOOKS = Array.from({ length: 20 }, (_, i) => ({ id: `hk${i + 1}`, project_id: null, name: `Check hook ${i + 1}`, event: 'PreToolUse', hook_type: 'command', command: `echo check ${i + 1}`, timeout: 30, url: null, has_secret: false, enabled: true, tool_matcher: null, created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-01T00:00:00Z', last_triggered_at: null, failure_count: 0 }));
+const scrollState = page => page.evaluate(() => ({ page: Math.round(document.querySelector('.settings-viewport')?.scrollTop ?? -1), pane: Math.round(document.querySelector('.settings-shell .st-dpane')?.scrollTop ?? -1) }));
+async function waitScroll(page, want) {
+ await page.waitForFunction(w => Object.entries(w).every(([k, v]) => Math.abs(Math.round((k === 'page' ? document.querySelector('.settings-viewport') : document.querySelector('.settings-shell .st-dpane'))?.scrollTop ?? -99) - v) <= 1), want, { timeout: 5000 }).catch(() => {});
+ return scrollState(page);
+}
+const hookRow = page => page.locator('.st-lcol [data-settings-item]').filter({ hasText: 'Check hook 12' }).filter({ visible: true }).first();
+const hookTitle = page => page.locator('[data-settings-heading="detail"]').filter({ hasText: 'Check hook 12' }).filter({ visible: true }).first();
 
 // The service worker would answer the stubbed requests before page.route sees them.
 await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ context: { serviceWorkers: 'block' } }), allow: DEV_INSTANCE_NOISE, cases: [
@@ -132,6 +144,52 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
    expect(await visibleLogRows(page) === 2, `two alpha lines listed (${await visibleLogRows(page)})`);
    expect(await replaceState(page) !== 'detail', 'no entry hides the list');
    expect(await focusInList(page), 'focus is in the list');
+  }
+ },
+ {
+  // #1582: on a phone the detail replaces the list in one scroller. It opens at
+  // its top with the title below the top bar, Back returns to where the list
+  // was, and reopening the same item starts its own scrolled pane at the top.
+  name: 'phone-detail-opens-at-top', viewports: ['phone'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await page.route(/\/api\/v1\/hooks\/app(\?.*)?$/, route => (route.request().method() === 'GET' ? route.fulfill({ json: HOOKS }) : route.fallback()));
+   await gotoApp(page, status);
+   await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await settingsNav(page).waitFor();
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+  },
+  async act({ page, mark }) {
+   await mark('scroll the list, open a hook');
+   await page.evaluate(() => document.querySelector('.settings-viewport').scrollTo({ top: 250 }));
+   const listTop = (await waitScroll(page, { page: 250 })).page;
+   expect(listTop > 100, `the list scrolls (${listTop})`);
+   await hookRow(page).click();
+   await hookTitle(page).waitFor();
+   let s = await waitScroll(page, { page: 0 });
+   const titleTop = await hookTitle(page).evaluate(el => el.getBoundingClientRect().top);
+   const barBottom = await page.getByRole('banner').filter({ visible: true }).first().evaluate(el => el.getBoundingClientRect().bottom);
+   expect(s.page === 0, `the detail opens at its top (${s.page})`);
+   expect(titleTop >= barBottom, `the title is below the top bar (title ${Math.round(titleTop)}, bar ${Math.round(barBottom)})`);
+
+   await mark('scroll the detail, Back returns to the list where it was');
+   await page.evaluate(() => { document.querySelector('.settings-viewport').scrollTo({ top: 200 }); document.querySelector('.settings-shell .st-dpane').scrollTo({ top: 200 }); });
+   const read = await scrollState(page);
+   expect(read.page > 0 || read.pane > 0, `the detail scrolls (${JSON.stringify(read)})`);
+   await button(page, 'Back to Hooks').click();
+   await hookRow(page).waitFor();
+   s = await waitScroll(page, { page: listTop });
+   expect(Math.abs(s.page - listTop) <= 1, `Back returns to the list at ${listTop} (${s.page})`);
+
+   await mark('reopen the same hook: page and pane start at the top');
+   await hookRow(page).click();
+   await hookTitle(page).waitFor();
+   s = await waitScroll(page, { page: 0, pane: 0 });
+   expect(s.page === 0 && s.pane === 0, `the same hook reopens at its top (${JSON.stringify(s)})`);
+   await button(page, 'Back to Hooks').click();
+   await hookRow(page).waitFor();
+   s = await waitScroll(page, { page: listTop });
+   expect(Math.abs(s.page - listTop) <= 1, `Back returns to the list at ${listTop} again (${s.page})`);
   }
  },
  {
