@@ -174,6 +174,12 @@ describe('generated media in the turn gallery (#784)', () => {
 		expect(html).toContain('media-download-btn');
 	});
 
+	it('drops a gallery image whose alt text holds `code`, and keeps one it does not show', () => {
+		const html = rewriteWithGallery(`![The \`a\` one](${art('a')})\n\n![The \`z\` one](${art('z')})`, new Set([art('a')]));
+		expect(html).not.toContain(art('a'));
+		expect(html).toContain(`src="${art('z')}"`);
+	});
+
 	it('counts a reply artifact image as a gallery image, once (#1603)', () => {
 		const gallery = galleryMediaForTurn([
 			made('g1', unified({ image_url: art('a') })),

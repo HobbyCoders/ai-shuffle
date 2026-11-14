@@ -477,7 +477,26 @@ const MEDIA_TOKEN = /!?\[[^\]]*\]\([^)\s]+\)/g;
 // of rendering ~100k chars of literal text.
 const RAW_BASE64 = /"image_base64"\s*:\s*"[A-Za-z0-9+/=]{100,}"/g;
 // Fenced blocks and inline code spans: their text is code, never an embed.
-export const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/g;
+const CODE_SPAN = /(^|\n)( {0,3})(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n {0,3}\3[`~]*[ \t]*(?=\n|$)|$)|`+[^`\n]*?`+/;
+// One line's complete media token, read whole: its alt text may hold `code`.
+const ONE_LINE_MEDIA_TOKEN = /!?\[[^\]\n]*\]\([^)\s]+\)/;
+const PROSE_OR_CODE = new RegExp(`${ONE_LINE_MEDIA_TOKEN.source}|${CODE_SPAN.source}`, 'g');
+
+/**
+ * Apply `prose` to the text outside fenced blocks and inline code spans, and
+ * `code` to those (as written by default). A complete media token is never
+ * split by backticks in its alt text: `![The \`model\` result](url)` is prose.
+ */
+export function mapOutsideCode(text: string, prose: (part: string) => string, code: (part: string) => string = (part) => part): string {
+	let out = '';
+	let at = 0;
+	for (const match of text.matchAll(PROSE_OR_CODE)) {
+		if (/^!?\[/.test(match[0])) continue; // a media token stays in its prose run
+		out += prose(text.slice(at, match.index)) + code(match[0]);
+		at = match.index + match[0].length;
+	}
+	return out + prose(text.slice(at));
+}
 const PLACEHOLDER = '<div class="media-placeholder my-4 p-4 bg-muted/30 rounded-lg border border-border text-center text-muted-foreground text-sm">';
 
 /**
@@ -496,13 +515,7 @@ export function rewriteMediaMarkdown(
 	renderMedia: (kind: MediaKind, url: string, label: string) => string = mediaHtml
 ): string {
 	// Code shows its markdown as written (#1603): only prose embeds media.
-	let out = '';
-	let at = 0;
-	for (const code of text.matchAll(CODE_SPAN)) {
-		out += rewriteProseMedia(text.slice(at, code.index), renderMedia) + code[0];
-		at = code.index + code[0].length;
-	}
-	out += rewriteProseMedia(text.slice(at), renderMedia);
+	const out = mapOutsideCode(text, (part) => rewriteProseMedia(part, renderMedia));
 	// Never dump a raw base64 image blob as literal prose.
 	return out.replace(RAW_BASE64, `${PLACEHOLDER}Image data omitted</div>`);
 }

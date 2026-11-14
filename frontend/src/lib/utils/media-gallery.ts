@@ -1,7 +1,7 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { marked } from 'marked';
 import {
-	CODE_SPAN,
+	mapOutsideCode,
 	mediaHtml,
 	resolveMediaUrl,
 	rewriteMediaMarkdown,
@@ -159,11 +159,5 @@ export function rewriteWithGallery(text: string, sources: ReadonlySet<string>, s
 			);
 	// Code renders exactly as it does without a gallery: nothing is dropped
 	// from it, since the lexer never counted it as an embed.
-	let out = '';
-	let at = 0;
-	for (const code of text.matchAll(CODE_SPAN)) {
-		out += prose(text.slice(at, code.index)) + rewriteMediaMarkdown(code[0]);
-		at = code.index + code[0].length;
-	}
-	return out + prose(text.slice(at));
+	return mapOutsideCode(text, prose, (code) => rewriteMediaMarkdown(code));
 }
