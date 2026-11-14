@@ -30,6 +30,7 @@ vi.mock('$lib/stores/layout.svelte', () => ({ layout: { openFeaturePage } }));
 vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 import WorkspaceSelector from './WorkspaceSelector.svelte';
+import { groups } from '$lib/stores/groups.svelte';
 
 type W = { set: (v: unknown) => void };
 let onSelectProject: Mock<(projectId: string, projectV2Id?: string | null) => void>;
@@ -252,6 +253,69 @@ describe('WorkspaceSelector sentence picker', () => {
 		expect(onSelectProject).not.toHaveBeenCalled();
 		expect(document.activeElement).toBe(editor);
 		anchor.remove();
+	});
+
+	it('keeps the place focus goes back to when the shortcut is pressed again while open', async () => {
+		await openFromEditor();
+		// The second press comes from the search field: no editor to return to.
+		selector.openPicker({ returnFocus: null });
+		await tick();
+		expect(document.activeElement).toBe(search());
+		await fireEvent.keyDown(search(), { key: 'Escape' });
+		expect(document.activeElement).toBe(editor);
+		// Closed, then opened again: it takes the new place.
+		const other = document.createElement('button');
+		document.body.append(other);
+		other.focus();
+		selector.openPicker({ returnFocus: other });
+		await tick();
+		await fireEvent.keyDown(search(), { key: '1' });
+		expect(onSelectProject).toHaveBeenCalledWith('p2', null);
+		expect(document.activeElement).toBe(other);
+		other.remove();
+	});
+
+	describe('with every project in a group', () => {
+		beforeEach(() => {
+			groups.assignToGroup('projects', 'p1', 'Work');
+			groups.assignToGroup('projects', 'p2', 'Work');
+			groups.assignToGroup('projects', 'p3', 'Side');
+		});
+		afterEach(() => {
+			groups.deleteGroup('projects', 'Work');
+			groups.deleteGroup('projects', 'Side');
+		});
+
+		it('lists them flat, most recently used first and numbered', async () => {
+			await openFromEditor();
+			expect(dialog().querySelector('.group-item')).toBeNull();
+			expect(rowNames()).toEqual(['API', 'Docs site', 'Website']);
+			expect([...dialog().querySelectorAll('.panel-scroll .row-key')].map(k => k.textContent)).toEqual(['1', '2', '3']);
+			await fireEvent.input(search(), { target: { value: 'site' } });
+			expect(rowNames()).toEqual(['Docs site', 'Website']);
+			await fireEvent.input(search(), { target: { value: '' } });
+			const one = new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true });
+			search().dispatchEvent(one);
+			expect(one.defaultPrevented).toBe(true);
+			expect(onSelectProject).toHaveBeenCalledWith('p2', null);
+		});
+
+		it('still offers No project (0) and Add Project when switching', async () => {
+			await openFromEditor('p2', true);
+			expect(rowNames()).toEqual(['API', 'Docs site', 'Website', 'No project']);
+			expect(within(dialog()).getByRole('button', { name: /Add Project/ })).toBeTruthy();
+			search().dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true, cancelable: true }));
+			expect(onClearProject).toHaveBeenCalledOnce();
+		});
+
+		it('keeps the groups in the phone sheet list', async () => {
+			render(WorkspaceSelector, { props: { variant: 'sentence', sheetMode: true, selectedProject: null, onSelectProject } });
+			const word = screen.getByRole('button', { name: /^No project/ });
+			await fireEvent.click(word);
+			const list = document.getElementById(word.getAttribute('aria-controls') ?? '')!;
+			expect([...list.querySelectorAll('.group-item .item-name')].map(n => n.textContent)).toEqual(['Work', 'Side']);
+			expect(list.querySelector('.row-key')).toBeNull();
+		});
 	});
 
 	it('gives a mouse click the same search, keeping Add Project', async () => {

@@ -132,6 +132,7 @@ export function pickerItemName(
 /** The session fields recency ordering reads. */
 export interface ProjectRecencySession {
 	project_id: string | null;
+	project_v2_id?: string | null;
 	last_user_message_at?: string | null;
 	updated_at?: string | null;
 	created_at?: string | null;
@@ -140,20 +141,26 @@ export interface ProjectRecencySession {
 /**
  * When each picker item was last used: the newest session in that project
  * (its last user message, else its last update), from the session list the
- * sidebar already holds. Items with no session are absent.
+ * sidebar already holds. A session counts for the item with its shared
+ * project id first (a project only on another worker has no local id), then
+ * its local id or an alias. Items with no session are absent.
  */
 export function projectRecency(
 	items: WorkspacePickerItem[],
 	sessions: ProjectRecencySession[]
 ): Map<string, number> {
+	const itemByShared = new Map<string, string>();
 	const itemByProject = new Map<string, string>();
 	for (const item of items) {
+		if (item.projectV2Id) itemByShared.set(item.projectV2Id, item.id);
 		if (item.project) itemByProject.set(item.project, item.id);
 		for (const alias of item.projectAliases ?? []) itemByProject.set(alias, item.id);
 	}
 	const recency = new Map<string, number>();
 	for (const session of sessions) {
-		const id = session.project_id ? itemByProject.get(session.project_id) : undefined;
+		const id =
+			(session.project_v2_id ? itemByShared.get(session.project_v2_id) : undefined) ??
+			(session.project_id ? itemByProject.get(session.project_id) : undefined);
 		if (!id) continue;
 		const at = Date.parse(session.last_user_message_at || session.updated_at || session.created_at || '');
 		if (!Number.isFinite(at)) continue;

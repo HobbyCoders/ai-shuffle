@@ -215,14 +215,16 @@
 	/**
 	 * Open the searchable list from the keyboard (Cmd/Ctrl+P), anchored on
 	 * `anchor` (default: this control), with the cursor in its search field.
-	 * Picking or Escape puts focus back on `returnFocus`.
+	 * Picking or Escape puts focus back on `returnFocus`. Pressed again while
+	 * the list is open (the cursor is in its search), it only refocuses the
+	 * search and keeps the place focus goes back to.
 	 */
 	export function openPicker({ anchor = null, returnFocus = null }: { anchor?: HTMLElement | null; returnFocus?: HTMLElement | null } = {}) {
-		returnTo = returnFocus;
 		if (showDropdown) {
 			groupedSelector?.focusSearch();
 			return;
 		}
+		returnTo = returnFocus;
 		anchorOverride = anchor;
 		autofocusSearch = true;
 		showDropdown = true;

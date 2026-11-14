@@ -207,6 +207,27 @@ describe('quick picker ordering', () => {
 		});
 	});
 
+	it('counts a session by its shared project id first: a project only on another worker, or a linked one once', () => {
+		const linked = [
+			{ id: 'web', name: 'Website', project: 'web', projectV2Id: 'pv2-web', remoteOnly: false },
+			{ id: 'pv2-x', name: 'Infra', project: '', projectV2Id: 'pv2-x', remoteOnly: true }
+		];
+		const recency = projectRecency(linked, [
+			// Started on another worker: no local id here, only the shared one.
+			{ project_id: null, project_v2_id: 'pv2-x', updated_at: '2026-11-07T00:00:00Z' },
+			{ project_id: 'remote-local-id', project_v2_id: 'pv2-x', updated_at: '2026-11-03T00:00:00Z' },
+			// The linked project, from here and from another worker: one item, the newest.
+			{ project_id: 'web', project_v2_id: 'pv2-web', updated_at: '2026-11-02T00:00:00Z' },
+			{ project_id: 'web', updated_at: '2026-11-01T00:00:00Z' },
+			{ project_id: 'other-worker-web', project_v2_id: 'pv2-web', updated_at: '2026-11-04T00:00:00Z' }
+		]);
+		expect(Object.fromEntries(recency)).toEqual({
+			'pv2-x': Date.parse('2026-11-07T00:00:00Z'),
+			web: Date.parse('2026-11-04T00:00:00Z')
+		});
+		expect(ids(rankPickerItems(linked, '', recency))).toEqual(['pv2-x', 'web']);
+	});
+
 	it('lists recent projects first, then the rest in catalog order', () => {
 		const recency = new Map([['docs', 2], ['api', 1]]);
 		expect(ids(rankPickerItems(items, '', recency))).toEqual(['docs', 'api', 'web', 'pv2-x']);

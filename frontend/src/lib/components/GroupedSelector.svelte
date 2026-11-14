@@ -6,8 +6,10 @@
 	 * clicking one slides to a sub-panel with that group's items.
 	 * Back button slides back. Works well on mobile and desktop.
 	 *
-	 * `searchable` adds a search field over the main panel: typing lists the
-	 * matching items (across groups) best first, ↑/↓ move the highlight, Enter
+	 * `searchable` adds a search field over the main panel and lists the items
+	 * flat, ignoring groups, in the resting order `rank` gives (a quick picker:
+	 * most recently used first). Typing lists the matches best first, ↑/↓ move
+	 * the highlight, Enter
 	 * picks it, and with `numbered` a digit picks one of the first nine rows
 	 * while the field is empty. Escape is left to the menu's owner.
 	 */
@@ -123,6 +125,9 @@
 
 	// Has any groups at all
 	const hasGroups = $derived(populatedGroups.length > 0);
+	/** Group rows on the main panel. A searchable list stays flat, so its
+	 *  resting order and 1–9 keys cover every item, grouped or not. */
+	const grouped = $derived(hasGroups && !searchable);
 
 	const extraPopulated = $derived(extraGroups.filter(g => g.items.length > 0));
 
@@ -146,8 +151,8 @@
 		if (searching) {
 			for (const item of matches) list.push({ kind: 'item', id: item.id });
 		} else {
-			if (hasGroups) for (const group of populatedGroups) list.push({ kind: 'group', id: group.name });
-			for (const item of hasGroups ? organized.ungrouped : ordered) list.push({ kind: 'item', id: item.id });
+			if (grouped) for (const group of populatedGroups) list.push({ kind: 'group', id: group.name });
+			for (const item of grouped ? organized.ungrouped : ordered) list.push({ kind: 'item', id: item.id });
 			for (const group of extraPopulated) list.push({ kind: 'group', id: group.name });
 		}
 		if (showTrailing && trailingItem) list.push({ kind: 'trailing', id: trailingItem.id });
@@ -364,8 +369,8 @@
 						<p class="empty-message">No matches</p>
 					{/if}
 				{/each}
-			{:else if !hasGroups}
-				<!-- No groups: show flat list -->
+			{:else if !grouped}
+				<!-- No groups (or searchable): show flat list -->
 				{#each ordered as item (item.id)}
 					{@render itemButton(item)}
 				{:else}
@@ -400,7 +405,7 @@
 			{/if}
 
 			{#if extraPopulated.length > 0 && !searching}
-				{#if items.length > 0 || hasGroups}
+				{#if items.length > 0}
 					<div class="menu-divider"></div>
 				{/if}
 				{#each extraPopulated as group (group.name)}
