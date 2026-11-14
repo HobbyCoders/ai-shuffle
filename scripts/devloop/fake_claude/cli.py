@@ -484,7 +484,7 @@ class DevClaude(script.Fake):
     # ── protocol ──
     def initialize_extra(self) -> dict:
         """The model list a subscription CLI reports at ``initialize``."""
-        return {"claude_code_version": str(self.script.get("version") or "2.1.280").split()[0],
+        return {"claude_code_version": VERSION.split()[0],
                 "models": FAKE_CLI_MODELS, **super().initialize_extra()}
 
     def answer_control(self, msg: dict) -> None:
