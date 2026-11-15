@@ -512,7 +512,9 @@
 		if (reconciled === effortValue) return;
 		activeSession.setEffortLevelOverride(reconciled, false);
 		if (switched && effortValue && !voiceLane) {
-			notify(effortFitNotice(effortValue, reconciled, effortModel), { severity: 'info', title: 'Effort' });
+			// A passing banner: the fit is a local adjustment, not an event worth
+			// keeping in every device's notification history.
+			notify.banner(effortFitNotice(effortValue, reconciled, effortModel), { severity: 'info', persist: false, duration_ms: 6000 });
 		}
 	});
 
