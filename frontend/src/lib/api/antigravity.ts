@@ -20,16 +20,12 @@ export interface AntigravityAuthModeMeta {
 	headless: boolean;
 	/** Rows of this kind run only in chats the owner types into, unless lifted. */
 	guarded: boolean;
-	/** Show Google's terms warning before and after connecting. */
-	warning: boolean;
 }
 
 export interface AntigravityMeta {
 	provider_type: 'antigravity';
 	capability: string;
 	auth_modes: AntigravityAuthModeMeta[];
-	warning: string;
-	terms_url: string;
 	dashboard_url: string;
 	guard_default: boolean;
 	default_models: ProviderModelEntry[];

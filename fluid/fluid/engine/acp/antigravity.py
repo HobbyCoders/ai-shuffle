@@ -96,6 +96,39 @@ def split_model_id(model: str | None) -> tuple[str | None, str | None]:
     return model, None
 
 
+def listed_models(text: str) -> list[dict[str, Any]]:
+    """The models ``agy models`` prints, each ``{"id", "label", "levels"}``
+    like :func:`offered_models`.
+
+    One model per line, ``<combined id>\\t<label>`` (1.5.8/1.5.9:
+    ``gemini-4-hydrogen-high\\tGemini 4 Hydrogen (High)``). Combined ids fold
+    into one model per base id with its levels; the label loses its
+    "(Level)" suffix. An id with no level suffix is its own model, its levels
+    unknown (None). Lines that are not ``id\\tlabel`` are skipped.
+    """
+    order: list[str] = []
+    labels: dict[str, str] = {}
+    levels: dict[str, list[str]] = {}
+    for line in (text or "").splitlines():
+        model_id, sep, label = line.strip().partition("\t")
+        model_id, label = model_id.strip(), label.strip()
+        if not sep or not model_id or any(c.isspace() for c in model_id):
+            continue
+        base, level = split_model_id(model_id)
+        base = base or model_id
+        if level and label.lower().endswith(f"({level})"):
+            label = label[: -len(level) - 2].rstrip()
+        if base not in labels:
+            order.append(base)
+            labels[base] = label or base
+        if level and level not in levels.setdefault(base, []):
+            levels[base].append(level)
+    return [{"id": base, "label": labels[base],
+             "levels": sorted(levels[base], key=lambda v: _LEVEL_RANK.get(v, len(_LEVEL_RANK)))
+             if levels.get(base) else None}
+            for base in order]
+
+
 def _option(options: Sequence[Mapping[str, Any]], kind: str) -> Mapping[str, Any] | None:
     for option in options:
         if option.get("id") == kind or option.get("category") == kind:

@@ -19,7 +19,7 @@
 
 	interface Props {
 		rowId: string;
-		/** Start label ("I understand, start sign-in" after the terms warning). */
+		/** Start label ("Start sign-in"). */
 		startLabel?: string;
 		/** A sign-in already waiting for its code (started on another device
 		 * or tab): shown with its code entry instead of a start that would

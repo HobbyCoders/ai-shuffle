@@ -178,8 +178,9 @@ def read(provider_id: str) -> dict[str, Any] | None:
 
     This rejects old or delayed sync records without needing delete tombstones.
     Legacy snapshots without a binding are not evidence for the current key.
-    A Google sign-in row's list holds only with this worker's current sign-in
-    tag, so a copy synced from another worker or an earlier sign-in is ignored.
+    A Google Antigravity row's list holds only when its agent listed it, and
+    a Google sign-in row's only with this worker's current sign-in tag, so a
+    copy synced from another worker or an earlier sign-in is ignored.
     """
     value = db.get_system_setting(key(provider_id))
     if not value:

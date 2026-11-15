@@ -11,7 +11,7 @@ import { antigravity } from '../antigravity.svelte';
 const idle: AntigravityInstallJob = { kind: 'install', state: 'idle', version: null, error: null, message: null };
 const installed: AntigravityInstallStatus = { installed: true, version: '1.5.6', source: 'app', can_install: true,
 	install: idle, workers_requiring_update: [] };
-const meta = { auth_modes: [], warning: '', terms_url: '', dashboard_url: '', guard_default: true, default_models: [] };
+const meta = { auth_modes: [], dashboard_url: '', guard_default: true, default_models: [] };
 let current: AntigravityInstallStatus;
 
 beforeEach(() => {

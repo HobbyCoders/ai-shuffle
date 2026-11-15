@@ -560,6 +560,30 @@ def test_split_model_id() -> None:
     assert split_model_id("gemini-4-hydrogen-xhigh") == ("gemini-4-hydrogen", "xhigh")
 
 
+def test_listed_models_reads_agy_models_output() -> None:
+    """``agy models`` as 1.5.9 printed it on a signed-in worker: combined ids
+    fold into one model per base with its levels, the "(Level)" leaves the
+    label, an id with no level suffix keeps unknown levels, and every model
+    the agent lists is kept (not only Gemini)."""
+    from fluid.engine.acp.antigravity import listed_models
+
+    text = (Path(FAKE).parent / "agy_models_1.5.9.tsv").read_text(encoding="utf-8")
+    listed = listed_models(text)
+    assert [(m["id"], m["label"], m["levels"]) for m in listed] == [
+        ("gemini-4-argon", "Gemini 4 Argon", ["low", "medium", "high"]),
+        ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ["low", "medium", "high", "xhigh"]),
+        ("gemini-pro-orchestrator-g1-pro", "Orchestrator (Argon)", None),
+        ("gemini-3.8-flash", "Gemini 3.8 Flash", ["low", "medium", "high"]),
+        ("claude-opus-5-5", "Claude Opus 5.5", ["low", "medium", "high"]),
+        ("claude-sonnet-5-5", "Claude Sonnet 5.5", ["low", "medium", "high"]),
+        ("gpt-oss-120b", "GPT-OSS 120B", ["medium"]),
+    ]
+    # Windows line ends, a progress line and blank or label-less lines.
+    noisy = "Fetching available models...\r\n\r\ngemini-x-high\tGemini X (High)\r\nno tab here\r\n\tNo id\r\n"
+    assert listed_models(noisy) == [{"id": "gemini-x", "label": "Gemini X", "levels": ["high"]}]
+    assert listed_models("") == [] and listed_models("Error: Please sign in") == []
+
+
 def test_agent_env_passes_only_its_own_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     from fluid.engine.acp.antigravity import agent_env
 

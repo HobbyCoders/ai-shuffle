@@ -104,11 +104,11 @@ const KINDS: Record<Exclude<BuiltInProviderId, NativeProviderId> | 'gateway', Cr
 	],
 	openrouter: [{ label: 'API key', flavor: 'key', multiple: true, hint: 'One key, many models' }],
 	fal: [{ label: 'Media key', flavor: 'fal', multiple: false, hint: 'Also reads the balance' }],
-	// The supported routes first; a personal sign-in carries Google's terms warning.
+	// The supported routes first.
 	antigravity: [
 		{ label: 'Gemini API key', flavor: 'agy-key', multiple: true, hint: 'Pay per use, supported' },
 		{ label: 'Business Google sign-in', flavor: 'agy-business', multiple: false, hint: 'Workspace or Cloud account' },
-		{ label: 'Personal Google sign-in', flavor: 'agy-personal', multiple: false, hint: 'Consumer plan, read the terms' }
+		{ label: 'Personal Google sign-in', flavor: 'agy-personal', multiple: false, hint: 'Consumer plan' }
 	],
 	gateway: [{ label: 'Gateway key', flavor: 'gateway', multiple: false, hint: 'Endpoint, dialect, token' }]
 };

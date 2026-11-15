@@ -4,8 +4,8 @@
 	 * A Google Antigravity provider row (Google's own agent on the worker).
 	 * Overview: what the agent reports for this row (signed in, signed out, not
 	 * installed, error), sign-in and sign-out for Google sign-in rows, the key
-	 * for key rows, and the interactive-only guard on personal sign-ins with
-	 * Google's terms warning. Models: curation (Gemini models only). Usage: the
+	 * for key rows, and the interactive-only guard on personal sign-ins.
+	 * Models: curation of what the agent lists. Usage: the
 	 * agent's own /usage reading, read on demand.
 	 */
 	import { onMount, untrack } from 'svelte';
@@ -34,7 +34,6 @@
 	import ModelCuration from './ModelCuration.svelte';
 	import SavedSecretRow from './SavedSecretRow.svelte';
 	import CredentialControl from './CredentialControl.svelte';
-	import AntigravityWarning from './AntigravityWarning.svelte';
 	import AntigravityInstall from './setup/AntigravityInstall.svelte';
 	import AntigravitySignIn from './setup/AntigravitySignIn.svelte';
 	import { antigravity } from './antigravity.svelte';
@@ -286,7 +285,6 @@
 				<button type="button" class="st-btn" disabled={usageBusy} onclick={refreshUsage}><RefreshCw />{usageBusy ? 'Reading' : 'Refresh'}</button>
 			</div>
 		{:else}
-			{#if personal}<AntigravityWarning />{/if}
 			{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 			{#if notice}<p class="pv-note" role="status">{notice}</p>{/if}
 			<RowGroup title="Account">
