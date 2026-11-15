@@ -12,6 +12,12 @@ the checks of the pull request that was merged as this very commit (never a
 fork's, never another branch's run), and only a push to main looks: scheduled
 and dispatched runs run every journey again.
 
+With a merge queue on main no record is needed for the queued merge: the
+queue's own run checked the very commit main then moves to, so the push that
+follows finds that run by the commit (``queue_passed``). Because the queue
+runs the full selection, a pull request's own runs then keep to the journeys a
+rule names for its files (``merge_queue_guards``).
+
 Every other check keeps its record by the files it reads: scripts/ci/plan.py.
 """
 from __future__ import annotations
@@ -28,6 +34,10 @@ API = "https://api.github.com"
 PREFIX = "proven"
 WORKFLOW = "ci.yml"
 MAIN_EVENTS = ("push", "schedule", "workflow_dispatch")
+# GitHub's merge queue tests a pull request on a branch of this form, named for
+# the branch the group is headed for, and starts the run with this event.
+QUEUE_EVENT = "merge_group"
+QUEUE_BRANCH = "gh-readonly-queue/main/"
 
 
 def request(path, token, urlopen=urllib.request.urlopen):
@@ -184,10 +194,70 @@ def green_main_commits(repository: str, token: str, call=request) -> list[str]:
             and run.get("conclusion") == "success" and run.get("head_sha")]
 
 
-def environment() -> tuple[str, str] | None:
-    """(repository, token) when a push to main may look for records; else None."""
+def queue_runs(repository: str, token: str, call=request, commit: str | None = None) -> list[dict]:
+    """This repository's successful CI runs the merge queue started for main, newest first.
+
+    With ``commit`` only the runs on that commit. Only GitHub starts a run with
+    this event, on the commit the queue built, and that commit becomes main's
+    when the group merges.
+    """
+    query = f"?event={QUEUE_EVENT}&status=success&per_page=30"
+    if commit:
+        query += f"&head_sha={urllib.parse.quote(commit)}"
+    data = call(f"/repos/{repository}/actions/workflows/{WORKFLOW}/runs{query}", token)
+    return [run for run in data.get("workflow_runs") or []
+            if isinstance(run, dict) and run.get("event") == QUEUE_EVENT
+            and run.get("status") == "completed" and run.get("conclusion") == "success"
+            and str(run.get("head_branch") or "").startswith(QUEUE_BRANCH)
+            and run.get("path") == f".github/workflows/{WORKFLOW}"
+            and (run.get("repository") or {}).get("full_name") == repository
+            and (run.get("head_repository") or {}).get("full_name") == repository
+            and run.get("head_sha") and (commit is None or run["head_sha"] == commit)]
+
+
+def green_queue_commits(repository: str, token: str, call=request) -> list[str]:
+    """Commits whose CI run in the merge queue for main succeeded, newest run first."""
+    return [run["head_sha"] for run in queue_runs(repository, token, call)]
+
+
+def queue_passed(repository: str, token: str, call=request, commit: str | None = None) -> bool:
+    """True when the merge queue's CI run succeeded on exactly ``commit`` (by default the one checked out).
+
+    That run selected its journeys the way a push to main does, from the last
+    commit CI passed on, so the push that moves main to the same commit has
+    nothing left to run.
+    """
+    commit = commit or os.environ.get("GITHUB_SHA", "")
+    return bool(commit) and bool(queue_runs(repository, token, call, commit))
+
+
+def merge_queue_guards(repository: str, token: str, branch: str = "main", call=request) -> bool:
+    """True when GitHub's active rules send every merge into ``branch`` through a merge queue."""
+    rules = call(f"/repos/{repository}/rules/branches/{urllib.parse.quote(branch, safe='')}?per_page=100", token)
+    return isinstance(rules, list) and any(isinstance(rule, dict) and rule.get("type") == "merge_queue"
+                                           for rule in rules)
+
+
+def _where() -> tuple[str, str] | None:
     repository = os.environ.get("GITHUB_REPOSITORY", "")
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    if os.environ.get("GITHUB_EVENT_NAME") != "push" or os.environ.get("GITHUB_REF") != "refs/heads/main":
-        return None
     return (repository, token) if repository and token else None
+
+
+def _push_to_main() -> bool:
+    return os.environ.get("GITHUB_EVENT_NAME") == "push" and os.environ.get("GITHUB_REF") == "refs/heads/main"
+
+
+def environment() -> tuple[str, str] | None:
+    """(repository, token) when a push to main may look for records; else None."""
+    return _where() if _push_to_main() else None
+
+
+def history_environment() -> tuple[str, str] | None:
+    """(repository, token) for a run that narrows from the last commit CI passed on; else None.
+
+    A push to main, and the merge queue's run of a group headed for main.
+    """
+    queued = (os.environ.get("GITHUB_EVENT_NAME") == QUEUE_EVENT
+              and os.environ.get("GITHUB_REF", "").startswith("refs/heads/" + QUEUE_BRANCH))
+    return _where() if queued or _push_to_main() else None

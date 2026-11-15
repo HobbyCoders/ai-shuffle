@@ -102,8 +102,11 @@ def recovered(receipt: dict) -> list[FlakyCase]:
 
 
 def eligible_run(repository: str, run_id: int, metadata: dict) -> Run | None:
-    if (metadata.get("id") != run_id or metadata.get("event") != "push"
-            or metadata.get("head_branch") != "main" or metadata.get("name") != "CI"
+    """The run when it checked main itself: a push to main, or the merge queue's run of a merge headed for main."""
+    event, branch = metadata.get("event"), metadata.get("head_branch")
+    on_main = event == "push" and branch == "main"
+    queued = event == "merge_group" and isinstance(branch, str) and branch.startswith("gh-readonly-queue/main/")
+    if (metadata.get("id") != run_id or not (on_main or queued) or metadata.get("name") != "CI"
             or metadata.get("path") != ".github/workflows/ci.yml"
             or metadata.get("repository", {}).get("full_name") != repository
             or metadata.get("head_repository", {}).get("full_name") != repository):

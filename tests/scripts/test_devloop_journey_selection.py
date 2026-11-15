@@ -11,6 +11,16 @@ from scripts.devloop import ci
 NAMES = sorted(path.name for path in ci.journey_files())
 
 
+@pytest.fixture(autouse=True)
+def no_merge_queue(monkeypatch):
+    """No test asks GitHub about a merge queue unless it sets one up itself."""
+    from scripts.ci import proven
+
+    monkeypatch.setattr(ci, "merge_queue_follows", lambda: False)
+    monkeypatch.setattr(proven, "queue_passed", lambda *where, **more: False)
+    monkeypatch.setattr(proven, "green_queue_commits", lambda *where: [])
+
+
 def _git(repo, *args):
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
                    cwd=repo, check=True, capture_output=True)
@@ -66,7 +76,7 @@ def test_a_pull_request_falls_back_to_every_journey_when_unsure(monkeypatch):
     monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: None)
     assert ci.selection_for_event("pull_request")[0] is None
     monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: ["docs/readme.md"])
-    monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None: None)
+    monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None, before_queue=False: None)
     assert ci.selection_for_event("pull_request")[0] is None
 
 
@@ -104,7 +114,8 @@ def test_an_edited_map_is_judged_against_the_base_copy_and_never_drops_a_journey
     assert ci.select_journeys([ci.JOURNEY_MAP, "docs/readme.md"], previous_map=json.dumps(stricter)) is None
     # The workflow passes the base copy only when the map changed, and all when it cannot be read.
     seen = []
-    monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None: seen.append(previous_map) or [])
+    monkeypatch.setattr(ci, "select_journeys",
+                        lambda files, previous_map=None, before_queue=False: seen.append(previous_map) or [])
     monkeypatch.setattr(ci, "base_journey_map", lambda root=ci.ROOT, base="HEAD^1": f"MAP AT {base}")
     monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: ["docs/readme.md"])
     ci.selection_for_event("pull_request")
@@ -138,30 +149,105 @@ def test_a_push_runs_what_changed_since_the_last_commit_main_suite_passed_on(tmp
     repo, (first, second, third) = _main_history(tmp_path)
     assert ci.files_since(first, repo) == ["three.txt", "two.txt"]
     assert ci.files_since("f" * 40, repo) is None
-    monkeypatch.setattr(proven, "environment", lambda: ("o/r", "token"))
-    # The newest green ancestor wins; HEAD itself and commits not in this history never do.
+    monkeypatch.setattr(proven, "history_environment", lambda: ("o/r", "token"))
+    # The nearest green ancestor wins; HEAD itself and commits not in this history never do.
     monkeypatch.setattr(proven, "green_main_commits", lambda *where: [third, "e" * 40, second, first])
     assert ci.last_green_main(repo) == second
+    # In whatever order the runs are listed.
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: [first, "e" * 40, second, third])
+    assert ci.last_green_main(repo) == second
+    # A commit the merge queue passed counts like one main passed: the nearer of the two wins.
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: [first])
+    monkeypatch.setattr(proven, "green_queue_commits", lambda *where: ["e" * 40, second])
+    assert ci.last_green_main(repo) == second
+    monkeypatch.setattr(proven, "green_main_commits", lambda *where: [second])
+    monkeypatch.setattr(proven, "green_queue_commits", lambda *where: [third, first])
+    assert ci.last_green_main(repo) == second
+    monkeypatch.setattr(proven, "green_queue_commits", lambda *where: [])
     monkeypatch.setattr(proven, "green_main_commits", lambda *where: [third, "e" * 40])
     assert ci.last_green_main(repo) is None
     monkeypatch.setattr(proven, "green_main_commits", lambda *where: 1 / 0)
     assert ci.last_green_main(repo) is None
-    # Off a push to main nothing is looked up at all.
-    monkeypatch.setattr(proven, "environment", lambda: None)
+    # Off a push to main and off its merge queue nothing is looked up at all.
+    monkeypatch.setattr(proven, "history_environment", lambda: None)
     monkeypatch.setattr(proven, "green_main_commits", lambda *where: pytest.fail("must not ask"))
+    monkeypatch.setattr(proven, "green_queue_commits", lambda *where: pytest.fail("must not ask"))
     assert ci.last_green_main(repo) is None
 
     seen = []
-    monkeypatch.setattr(ci, "select_journeys", lambda files, previous_map=None: seen.append(files) or [NAMES[0]])
+    monkeypatch.setattr(ci, "select_journeys",
+                        lambda files, previous_map=None, before_queue=False: seen.append((files, before_queue)) or [NAMES[0]])
     monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: first)
     only, why = ci.selection_for_event("push", repo)
-    assert only == [NAMES[0]] and seen == [["three.txt", "two.txt"]] and first[:12] in why
+    assert only == [NAMES[0]] and seen == [(["three.txt", "two.txt"], False)] and first[:12] in why
+    # The merge queue's run selects exactly like the push it stands for.
+    assert ci.selection_for_event("merge_group", repo) == (only, why)
+    assert seen.pop() == (["three.txt", "two.txt"], False)
     # No green base, or a base whose diff cannot be read: every journey.
     monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: "f" * 40)
     assert ci.selection_for_event("push", repo)[0] is None
     monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: None)
     assert ci.selection_for_event("push", repo)[0] is None
     assert len(seen) == 1
+
+
+def test_before_a_merge_queue_a_pull_request_runs_only_what_a_rule_names(monkeypatch):
+    harness, unmapped = "frontend/tests/journeys/runner.mjs", "frontend/src/lib/__no_rule_covers_this__.ts"
+    journey = f"frontend/tests/journeys/{NAMES[0]}"
+    # The real selector: what runs everything in the full selection is left to the queue.
+    assert ci.select_journeys([harness, unmapped]) is None
+    assert ci.select_journeys([harness, unmapped], before_queue=True) == []
+    assert ci.select_journeys([harness, unmapped, journey], before_queue=True) == [NAMES[0]]
+    assert ci.select_journeys([ci.JOURNEY_MAP, journey], before_queue=True) == [NAMES[0]]
+
+    seen = []
+    monkeypatch.setattr(ci, "select_journeys",
+                        lambda files, previous_map=None, before_queue=False: seen.append(before_queue) or [NAMES[0]])
+    monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: [harness])
+    assert "merge queue" not in ci.selection_for_event("pull_request")[1]
+    monkeypatch.setattr(ci, "merge_queue_follows", lambda: True)
+    only, why = ci.selection_for_event("pull_request")
+    assert only == [NAMES[0]] and "the merge queue runs the full selection before main moves" in why
+    assert seen == [False, True]
+    # A diff that cannot be read still runs everything, queue or not, and the queue is not even asked about.
+    monkeypatch.setattr(ci, "pull_request_files", lambda root=ci.ROOT: None)
+    monkeypatch.setattr(ci, "merge_queue_follows", lambda: pytest.fail("must not ask"))
+    assert ci.selection_for_event("pull_request")[0] is None
+    # Only a pull request leaves anything to the queue: main and the queue itself select in full.
+    monkeypatch.setattr(ci, "last_green_main", lambda root=ci.ROOT: "c" * 40)
+    monkeypatch.setattr(ci, "files_since", lambda base, root=ci.ROOT: [harness])
+    for event in ("push", "merge_group"):
+        ci.selection_for_event(event)
+    assert seen == [False, True, False, False]
+
+
+def test_a_merge_queue_follows_only_when_githubs_rules_for_main_say_so(tmp_path, monkeypatch):
+    from scripts.ci import proven
+
+    monkeypatch.undo()  # the real merge_queue_follows, not this file's stand-in
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": {"base": {"ref": "main"}}}))
+    asked = []
+    monkeypatch.setattr(proven, "merge_queue_guards",
+                        lambda repository, token, branch: asked.append((repository, token, branch)) or True)
+    for name, value in (("GITHUB_REPOSITORY", "o/r"), ("GH_TOKEN", "token"), ("GITHUB_EVENT_PATH", str(event))):
+        monkeypatch.setenv(name, value)
+    assert ci.merge_queue_follows() is True and asked == [("o/r", "token", "main")]
+    monkeypatch.setattr(proven, "merge_queue_guards", lambda *where: False)
+    assert ci.merge_queue_follows() is False
+    # Unknown is no: another base, an event without a pull request, an unreadable answer, no token.
+    monkeypatch.setattr(proven, "merge_queue_guards", lambda *where: pytest.fail("must not ask"))
+    event.write_text(json.dumps({"pull_request": {"base": {"ref": "release/public-1"}}}))
+    assert ci.merge_queue_follows() is False
+    event.write_text("{}")
+    assert ci.merge_queue_follows() is False
+    event.write_text(json.dumps({"pull_request": {"base": {"ref": "main"}}}))
+    monkeypatch.setattr(proven, "merge_queue_guards", lambda *where: 1 / 0)
+    assert ci.merge_queue_follows() is False
+    monkeypatch.setattr(proven, "merge_queue_guards", lambda *where: True)
+    monkeypatch.delenv("GH_TOKEN")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert ci.merge_queue_follows() is False
 
 
 def test_a_selection_key_names_exactly_the_journeys_chosen():
@@ -179,14 +265,16 @@ def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(
     key = ci.selection_key(only)
     monkeypatch.setattr(ci, "selection_for_event", lambda event: (only, "test"))
     monkeypatch.setattr(proven, "head_tree", lambda root=ci.ROOT: "t" * 40)
-    asked = []
+    asked, said = [], []
 
     def shards(records, where=("o/r", "token")):
         asked.clear()
         monkeypatch.setattr(proven, "environment", lambda: where)
         monkeypatch.setattr(proven, "exists", lambda name, *rest, area, tree: asked.append(name) or (area == "journeys" and tree == "t" * 40 and name in records))
         assert ci.main(["matrix"]) == 0
-        lines = capsys.readouterr().out.splitlines()
+        printed = capsys.readouterr()
+        lines = printed.out.splitlines()
+        said.append(printed.err)
         assert lines[2] == f"key={key}" and lines[0] != "only="
         return json.loads(lines[1].split("=", 1)[1])
 
@@ -197,6 +285,15 @@ def test_journeys_are_skipped_only_for_a_record_of_the_same_files_and_selection(
     assert len(shards({f"proven-journeys-{'u' * 40}-{key}", "proven-journeys-" + "t" * 40})) == 2
     # Not a push to main: the records are not even read.
     assert len(shards({mine}, where=None)) == 2 and asked == []
+    # The merge queue's run on this very commit stands for any selection, and no record is read.
+    queue = []
+    monkeypatch.setattr(proven, "queue_passed", lambda *where, **more: queue.append(where) or True)
+    assert shards(set()) == [] and asked == [] and queue == [("o/r", "token")]
+    assert "the merge queue already passed its journeys on this very commit" in said[-1]
+    assert "a pull request already passed them" in said[0] and "merge queue" not in said[0]
+    # Off a push to main the queue is not asked either.
+    assert len(shards(set(), where=None)) == 2 and len(queue) == 1
+    monkeypatch.setattr(proven, "queue_passed", lambda *where, **more: False)
     monkeypatch.setattr(proven, "exists", lambda name, *rest, area, tree: 1 / 0)
     assert ci.main(["matrix"]) == 0
     assert len(json.loads(capsys.readouterr().out.splitlines()[1].split("=", 1)[1])) == 2
