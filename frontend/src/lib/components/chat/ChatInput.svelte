@@ -35,6 +35,7 @@
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
+	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
@@ -87,7 +88,7 @@
 	import ContextPillBar from './ContextPillBar.svelte';
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
-	import { composerCircles, createWrapWatcher } from './composer-wrap';
+	import { composerCircles, createArrivalGuard, createWrapWatcher, type RowButton } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
@@ -742,6 +743,40 @@
 	}));
 	const showTalk = $derived(circles.includes('talk'));
 
+	// A button that slides into a seat ignores pointer presses for a moment
+	// (#1632): when Stop or a held Send leaves, a tap aimed at it must not
+	// start a call or dictation, or stop the turn on a Stop that just took a
+	// spinner's place. Typing, a chat switch and voice availability settle
+	// the row instead (the user caused it, or nothing moved under a tap).
+	const arrivals = createArrivalGuard();
+	// On the start screen nothing is guarded: the composer moves away as the
+	// chat opens, so no button slides under a tap meant for another one.
+	let rowCause: { chat: string | null; content: boolean; call: boolean; compact: boolean } | null = null;
+	$effect(() => {
+		const row: RowButton[] = ['mic', ...circles];
+		const cause = { chat: $activeSession.sessionId, content: hasMessageContent, call: callAvailable, compact };
+		const settled = !compact || !rowCause || rowCause.chat !== cause.chat || rowCause.content !== cause.content
+			|| rowCause.call !== cause.call || rowCause.compact !== cause.compact;
+		rowCause = cause;
+		arrivals.update(row, settled);
+	});
+	function ignoreArrivingPress(event: MouseEvent) {
+		// detail is 0 for a click from the keyboard (Enter, Space): never ignored.
+		if (event.detail === 0) return;
+		const button = (event.target as Element | null)?.closest?.('button');
+		const kind: RowButton | null = button?.classList.contains('voice-btn') ? 'mic'
+			: button?.classList.contains('call-circle') ? 'talk'
+			: button?.classList.contains('stop-btn') ? 'stop' : null;
+		if (!kind) return;
+		// Judged by when the press was made, so a busy main thread that handles
+		// it late does not let it through.
+		const now = performance.now();
+		const pressedAt = event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
+		if (!arrivals.ignores(kind, pressedAt)) return;
+		event.preventDefault();
+		event.stopPropagation();
+	}
+
 	// Wrap: while the text fits on one line, attach and the circles sit inline
 	// with it; once it needs a second line they move to the controls row's two
 	// ends and the text takes the full width (composer-wrap.ts).
@@ -800,6 +835,9 @@
 
 	// Error display — shared between file upload errors and voice recording errors
 	let errorMessage = $state('');
+	// This composer's dictation error (VoiceRecorder): shown with the notices
+	// above the box, never in the action row (#1631).
+	let dictationError = $state<string | null>(null);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -1934,6 +1972,9 @@
 		{#if errorMessage}
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
 		{/if}
+		{#if dictationError}
+			<Banner severity="error" message={dictationError} dismissible onDismiss={clearSttError} />
+		{/if}
 
 		<!-- Agents cannot start here yet (no license, or no provider ready):
 		     say what is missing instead of failing later. -->
@@ -2063,7 +2104,7 @@
 					     independently. StopButton confirms first when background
 					     agents are live. A circle that is not shown takes no room:
 					     the others move over (owner decision, 2026-11-14). -->
-					<div class="send-cluster" bind:this={sendClusterRef}>
+					<div class="send-cluster" bind:this={sendClusterRef} onclickcapture={ignoreArrivingPress}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
@@ -2172,6 +2213,7 @@
 		disabled={!$anyCredential || isUploading}
 		bind:isRecording
 		bind:isTranscribing
+		bind:error={dictationError}
 	/>
 {/snippet}
 

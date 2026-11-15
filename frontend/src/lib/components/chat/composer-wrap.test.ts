@@ -4,7 +4,7 @@
  * line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { composerCircles, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
+import { ARRIVAL_GUARD_MS, composerCircles, createArrivalGuard, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
 
 const idle = { callAvailable: true, hasContent: false, working: false, busy: false };
 
@@ -230,5 +230,68 @@ describe('createWrapWatcher', () => {
 		run();
 		expect(state.wrapped).toBe(wraps);
 		expect(state.widths).toEqual([462, 462, 462]);
+	});
+});
+
+describe('createArrivalGuard (#1632)', () => {
+	let clock = 0;
+	const guard = () => createArrivalGuard(() => clock);
+	afterEach(() => { clock = 0; });
+
+	it('ignores a press on Talk just after it took the place Stop left', () => {
+		const g = guard();
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], false);
+		expect(g.ignores('talk', 1120)).toBe(true);
+		// Made before the change was drawn: aimed at Stop.
+		expect(g.ignores('talk', 990)).toBe(true);
+		expect(g.ignores('talk', 1000 + ARRIVAL_GUARD_MS)).toBe(false);
+		// The mic slid over too, into Talk's old place.
+		expect(g.ignores('mic', 1120)).toBe(true);
+	});
+
+	it('ignores a press on the mic just after it took a held Send\'s place', () => {
+		const g = guard();
+		g.update(['mic', 'send', 'stop'], false);
+		clock = 500;
+		g.update(['mic', 'stop'], false);
+		expect(g.ignores('mic', 650)).toBe(true);
+		expect(g.ignores('stop', 650)).toBe(false);
+	});
+
+	it('ignores a press on Stop just after it replaced the spinner', () => {
+		const g = guard();
+		g.update(['mic', 'busy'], false);
+		clock = 2000;
+		g.update(['mic', 'stop'], false);
+		expect(g.ignores('stop', 2100)).toBe(true);
+		expect(g.ignores('stop', 2500)).toBe(false);
+	});
+
+	it('never guards Send, the first row, or a change the user made', () => {
+		const g = guard();
+		g.update(['mic', 'talk'], false);
+		expect(g.ignores('talk', 1)).toBe(false);
+		clock = 100;
+		g.update(['mic', 'send', 'stop'], false);
+		expect(g.ignores('send', 150)).toBe(false);
+		expect(g.ignores('stop', 150)).toBe(true);
+		// Typing settles the row: the user is looking at it.
+		clock = 200;
+		g.update(['mic', 'talk', 'stop'], true);
+		expect(g.ignores('talk', 210)).toBe(false);
+		expect(g.ignores('stop', 210)).toBe(false);
+	});
+
+	it('keeps an arrival through updates that change nothing', () => {
+		const g = guard();
+		g.update(['mic', 'send'], false);
+		clock = 100;
+		g.update(['mic', 'stop'], false);
+		clock = 300;
+		g.update(['mic', 'stop'], false);
+		expect(g.ignores('stop', 350)).toBe(true);
+		expect(g.ignores('stop', 100 + ARRIVAL_GUARD_MS)).toBe(false);
 	});
 });

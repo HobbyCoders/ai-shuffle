@@ -222,3 +222,52 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 		}
 	};
 }
+
+/** The action row left to right: dictate, then the circles after it. */
+export type RowButton = 'mic' | ComposerCircle;
+
+/**
+ * How long a mic, Talk or Stop circle ignores pointer presses after it moved
+ * into its seat (#1632). The row keeps no empty seats (owner decision,
+ * 2026-11-14), so when Stop or a held Send leaves, the next button slides
+ * into the place a tap was aimed at; a press made that soon after was aimed
+ * at the button that left, not at one nobody has seen yet.
+ */
+export const ARRIVAL_GUARD_MS = 400;
+
+/** Arrivals whose press would start or stop something: dictation, a call, the turn. */
+const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
+
+/**
+ * When each seat of the action row last got another button. Seats count from
+ * the row's right end, where the circles sit, so a button that slides over
+ * takes a new seat. A change the user made themselves (typing turns Talk
+ * into Send, a chat switch) is `settled`: they are looking at the row, and
+ * nothing arrives unseen. Send is never guarded: a stray press on it sends
+ * the draft that was typed to be sent.
+ */
+export function createArrivalGuard(now: () => number = () => performance.now()) {
+	let row: RowButton[] | null = null;
+	let arrivedAt: number[] = [];
+	return {
+		/** The row as shown now. */
+		update(next: RowButton[], settled: boolean) {
+			const at = now();
+			const before = row;
+			arrivedAt = next.map((button, i) => {
+				const seat = next.length - 1 - i;
+				if (settled || !before) return -Infinity;
+				const was = before[before.length - 1 - seat];
+				return was === button ? (arrivedAt[seat] ?? -Infinity) : at;
+			}).reverse();
+			row = [...next];
+		},
+		/** Whether a pointer press made at `pressedAt` on `button` came too soon after it arrived. */
+		ignores(button: RowButton, pressedAt: number): boolean {
+			if (!row || !GUARDED.has(button)) return false;
+			const index = row.lastIndexOf(button);
+			if (index < 0) return false;
+			return pressedAt < (arrivedAt[row.length - 1 - index] ?? -Infinity) + ARRIVAL_GUARD_MS;
+		}
+	};
+}

@@ -108,6 +108,20 @@ const composerPlace = (page) =>
 	});
 
 /** Open a first exchange, so this is a chat, where Stop can come and go under a draft. */
+/** Watch the action row: when its circles last changed, and each click with when it was made. */
+const watchRow = (page) =>
+	page.evaluate(() => {
+		const row = () => [...document.querySelectorAll('.send-cluster button')].filter((b) => b.getClientRects().length).map((b) => b.className).join('|');
+		window.__row = { changes: [], last: row(), clicks: [] };
+		// When the row last changed before a press was made.
+		window.__row.changedBefore = (made) => Math.max(-Infinity, ...window.__row.changes.filter((t) => t <= made));
+		new MutationObserver(() => {
+			const now = row();
+			if (now !== window.__row.last) { window.__row.last = now; window.__row.changes.push(performance.now()); }
+		}).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'disabled'] });
+		document.addEventListener('click', (e) => window.__row.clicks.push({ made: e.timeStamp, on: e.target.closest?.('button')?.getAttribute('aria-label') ?? null }), true);
+	});
+
 async function firstExchange(ctx) {
 	await openNewChat(ctx);
 	await ctx.page.waitForTimeout(800);
@@ -168,6 +182,36 @@ await runJourney({
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: DEV_INSTANCE_NOISE,
 	cases: [seatCase(true), seatCase(false), {
+		name: 'first-send-slot',
+		viewports: ['phone', 'fold-cover'],
+		setup: async (ctx) => { await openNewChat(ctx); await ctx.page.waitForTimeout(800); },
+		async act({ page, mark, variant, log }) {
+			// #1645: the slot keeps its height through the first send from the
+			// start screen. (A draft too long for one line takes its own row
+			// while it is typed; that is the wrapped layout, not this.)
+			await composer(page).click();
+			await page.keyboard.type('hi');
+			await page.waitForTimeout(400);
+			await page.evaluate(() => {
+				const height = () => Math.round(document.querySelector('.input-slot')?.getBoundingClientRect().height ?? -1);
+				window.__slot = { before: height(), seen: [] };
+				const tick = () => {
+					const h = height();
+					const seen = window.__slot.seen;
+					if (seen[seen.length - 1] !== h) seen.push(h);
+					if (!window.__slot.stop) requestAnimationFrame(tick);
+				};
+				requestAnimationFrame(tick);
+			});
+			await mark('first send');
+			await sendButton(page).click();
+			await waitChat(page, { streaming: 'false', messagesAtLeast: 2 }, { timeout: 60_000 });
+			await page.waitForTimeout(300);
+			const slot = await page.evaluate(() => { window.__slot.stop = true; return window.__slot; });
+			log(`slot ${slot.before}px before Send, then ${slot.seen.join(' → ')}`);
+			expect(slot.seen.every((h) => h === slot.before), `the slot keeps one height through the first send (${slot.before} → ${slot.seen.join(' → ')})`);
+		}
+	}, {
 		name: 'double-tap-send',
 		viewports: VIEWPORTS,
 		async setup(ctx) {
@@ -229,6 +273,108 @@ await runJourney({
 				}
 				expect(proved, `${what}: no attempt pressed Stop inside the window as intended (see the log)`);
 			}
+		}
+	}, {
+		// #1632 case 1: Stop leaves as the turn ends and Talk takes its place. A
+		// tap meant for Stop that lands just after must not start a call.
+		name: 'late-tap-on-stop',
+		viewports: ['phone'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a turn ends under a tap meant for Stop, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 40 })}`);
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; });
+				await page.waitForFunction(() => !document.querySelector('.send-cluster .stop-btn'), null, { polling: 'raf', timeout: 60_000 });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(1500);
+				const { click, changedAt } = await page.evaluate(() => ({ click: window.__row.clicks[0], changedAt: window.__row.changedBefore(window.__row.clicks[0]?.made ?? 0) }));
+				const after = click ? Math.round(click.made - changedAt) : null;
+				log(`attempt ${attempt}: the tap was made ${after}ms after the row changed, on ${click?.on}`);
+				proved = !!click && /call|Talk/i.test(click.on ?? '') && after < 300;
+				const call = await page.getByRole('button', { name: 'Stop voice agent' }).isVisible();
+				if (proved) expect(!call, `a tap ${after}ms after Talk took Stop's place did not start a call`);
+				if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
+			}
+			expect(proved, 'no attempt tapped Talk just after it took Stop\'s place (see the log)');
+		}
+	}, {
+		// #1632 case 2: no call, a turn running, a draft sent. Send stays held for
+		// the double-tap window, then the mic slides into its place. A second tap
+		// on Send that lands on the mic must not start dictation.
+		name: 'late-tap-on-held-send',
+		viewports: ['fold-cover'],
+		async setup(ctx) {
+			await withoutCalls(ctx.page);
+			await firstExchange(ctx);
+		},
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			await typeAndSend(page, `long turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+			await stopButton(page).waitFor({ timeout: 20_000 });
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a second tap on a queued Send, attempt ${attempt}`);
+				await composer(page).click();
+				await page.keyboard.type(`queued tok-${uniq()}`);
+				const box = await sendButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForFunction(() => !document.querySelector('.send-cluster .send-btn'), null, { polling: 'raf', timeout: 5000 });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(1200);
+				const { clicks, changedAt } = await page.evaluate(() => ({ clicks: window.__row.clicks, changedAt: window.__row.changedBefore(window.__row.clicks[1]?.made ?? 0) }));
+				const second = clicks[1];
+				const after = second ? Math.round(second.made - changedAt) : null;
+				log(`attempt ${attempt}: the second tap was made ${after}ms after the row changed, on ${second?.on}`);
+				proved = !!second && second.on === 'Start voice input' && after < 300;
+				const dictating = await page.evaluate(() => !!document.querySelector('.voice-btn-wrapper.expanded, .voice-btn.recording, .voice-btn.preparing')
+					|| [...document.querySelectorAll('[role="alert"]')].some((el) => /record|microphone/i.test(el.textContent ?? '')));
+				if (proved) expect(!dictating, `a tap ${after}ms after the mic took Send's place did not start dictation`);
+				if (dictating) {
+					await page.keyboard.press('Escape');
+					const dismiss = page.getByRole('button', { name: 'Dismiss' });
+					if (await dismiss.isVisible()) await dismiss.click();
+				}
+			}
+			expect(proved, 'no attempt tapped the mic just after it took Send\'s place (see the log)');
+			await stopButton(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
+		// #1632 comment: a double click on Send in a new chat (desktop, a project
+		// picked) left the first message "Not sent (stopped)".
+		name: 'new-chat-double-click-send',
+		viewports: ['desktop', 'phone'],
+		setup: async (ctx) => { await openNewChat(ctx, { project: 'Dev other' }); await ctx.page.waitForTimeout(800); },
+		async act({ page, mark, variant, log, token }) {
+			const text = `Let's work on the work project tests today tok-${uniq()} ${scriptTag(variant, 'default')}`;
+			await composer(page).click();
+			await page.keyboard.type(text);
+			await page.evaluate(() => {
+				window.__clicks = [];
+				document.addEventListener('click', (e) => window.__clicks.push({ made: Math.round(e.timeStamp), on: e.target.closest?.('button')?.getAttribute('aria-label') ?? e.target.tagName }), true);
+			});
+			await mark('double click Send');
+			const box = await sendButton(page).boundingBox();
+			const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+			if (isPhone(variant)) {
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(120);
+				await page.touchscreen.tap(at.x, at.y);
+			} else {
+				await page.mouse.dblclick(at.x, at.y);
+			}
+			await waitChat(page, { messagesAtLeast: 2, streaming: 'false' }, { timeout: 60_000 });
+			await page.waitForTimeout(500);
+			log(`clicks: ${JSON.stringify(await page.evaluate(() => window.__clicks))}`);
+			const notSent = await page.locator('[data-not-sent="true"]').count();
+			expect(notSent === 0, `the first message was sent, not marked "Not sent" (${notSent} not-sent rows)`);
 		}
 	}, {
 		name: 'draft-in-stop-band',
