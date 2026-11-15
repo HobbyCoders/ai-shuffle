@@ -167,6 +167,33 @@ describe('duplicateAgentName', () => {
 	});
 });
 
+describe('duplicateAgentName against existing names', () => {
+	it('numbers a copy whose name is taken', () => {
+		expect(duplicateAgentName('Scribe', ['Scribe', 'Scribe copy'])).toBe('Scribe copy 2');
+		expect(duplicateAgentName('Scribe', ['Scribe copy', 'Scribe copy 2'])).toBe('Scribe copy 3');
+	});
+	it('keeps copies of a copy at the 100 limit distinct', () => {
+		const base = 'w'.repeat(AGENT_NAME_MAX);
+		const names = [base];
+		const first = duplicateAgentName(base, names);
+		names.push(first);
+		// Duplicating the copy would cut it back to the same "… copy".
+		const second = duplicateAgentName(first, names);
+		names.push(second);
+		const third = duplicateAgentName(first, names);
+		expect(first).toBe('w'.repeat(95) + ' copy');
+		expect(second).toBe('w'.repeat(93) + ' copy 2');
+		expect(third).toBe('w'.repeat(93) + ' copy 3');
+		expect(names.concat(third).every((n) => codePoints(n) <= AGENT_NAME_MAX)).toBe(true);
+	});
+	it('cuts on a character boundary to make room for the number', () => {
+		const family = '👩\u200d👩\u200d👧';
+		const name = 'a'.repeat(90) + family;
+		const taken = [name, name + ' copy'];
+		expect(duplicateAgentName(name, taken)).toBe('a'.repeat(90) + ' copy 2');
+	});
+});
+
 describe('defaultModelBinding', () => {
 	it('pins a Claude alias on the native key', () => {
 		expect(defaultModelBinding('sonnet')).toEqual({ __native__: 'sonnet' });

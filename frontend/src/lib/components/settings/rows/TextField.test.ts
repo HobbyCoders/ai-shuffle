@@ -95,6 +95,36 @@ describe('TextField code-point limit (maxchars)', () => {
 		expect(field.value).toBe('a'.repeat(99) + smile);
 	});
 
+	it('drops a ZWJ family pasted after 97 characters whole, never leaving a dangling joiner', async () => {
+		const family = '👩\u200d👩\u200d👧';
+		const { field, oninput, edit } = setup('a'.repeat(97));
+		await edit('a'.repeat(97) + family);
+		expect(field.value).toBe('a'.repeat(97));
+		expect(oninput).toHaveBeenLastCalledWith('a'.repeat(97));
+		// With room for it (95 + 5 code points) the family is kept whole.
+		await edit('a'.repeat(95), 95);
+		await edit('a'.repeat(95) + family);
+		expect(field.value).toBe('a'.repeat(95) + family);
+	});
+
+	it('keeps 80 pasted emoji, and a second paste fills to exactly 100', async () => {
+		const { field, edit } = setup();
+		await edit(smile.repeat(80));
+		expect(field.value).toBe(smile.repeat(80));
+		await edit(smile.repeat(160));
+		expect(field.value).toBe(smile.repeat(100));
+	});
+
+	it('cuts a ZWJ family committed by an IME after 97 characters whole', async () => {
+		const family = '👩\u200d👩\u200d👧';
+		const { field, oninput, edit } = setup('a'.repeat(97));
+		await fireEvent.compositionStart(field);
+		await edit('a'.repeat(97) + family, 97 + family.length, { isComposing: true });
+		await fireEvent.compositionEnd(field);
+		expect(field.value).toBe('a'.repeat(97));
+		expect(oninput).toHaveBeenCalledExactlyOnceWith('a'.repeat(97));
+	});
+
 	it('waits for an IME composition to end before cutting or reporting', async () => {
 		const { field, oninput, edit } = setup('a'.repeat(99));
 		await fireEvent.compositionStart(field);

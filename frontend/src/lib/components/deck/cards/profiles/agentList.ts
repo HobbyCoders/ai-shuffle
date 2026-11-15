@@ -5,7 +5,7 @@
  * without rendering.
  */
 import type { Profile } from '$lib/api/client';
-import { cutCodePoints } from '$lib/utils/code-points';
+import { codePoints, cutCodePoints } from '$lib/utils/code-points';
 import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY, decodeProviderModel } from '$lib/constants/models';
 
 /**
@@ -134,10 +134,18 @@ export function uniqueAgentId(name: string, taken: Iterable<string>): string {
 	return id;
 }
 
-/** The name a duplicate of `name` gets ("Scribe" → "Scribe copy"), within AGENT_NAME_MAX code points. */
-export function duplicateAgentName(name: string): string {
-	const suffix = ' copy';
-	return cutCodePoints(name, AGENT_NAME_MAX - suffix.length).trimEnd() + suffix;
+/**
+ * The name a duplicate of `name` gets ("Scribe" → "Scribe copy", then
+ * "Scribe copy 2" when that is taken), within AGENT_NAME_MAX code points. A
+ * long name is cut on a character boundary to make room, so a copy of a
+ * copy at the limit still gets a name of its own.
+ */
+export function duplicateAgentName(name: string, taken: Iterable<string> = []): string {
+	const used = new Set(taken);
+	const fit = (suffix: string) => cutCodePoints(name, AGENT_NAME_MAX - codePoints(suffix)).trimEnd() + suffix;
+	let copy = fit(' copy');
+	for (let n = 2; used.has(copy); n += 1) copy = fit(` copy ${n}`);
+	return copy;
 }
 
 /** "1 tool", "3 tools". */
