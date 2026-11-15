@@ -1349,7 +1349,8 @@ def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow
 
 
 def attach_session_project(
-    session_id: str, project_id: str, project_v2_id: Optional[str]
+    session_id: str, project_id: str, project_v2_id: Optional[str],
+    owned: Optional[Callable[[dict], bool]] = None,
 ) -> Optional[SessionRow]:
     """Give a no-project session its project, once (issue #371 step 4).
 
@@ -1369,15 +1370,20 @@ def attach_session_project(
     The write holds the session row lock that turn admission takes
     (``turns.enqueue_turn``) and raises :class:`AttachBusy`, writing nothing,
     while the session has a turn queued or live. No turn can be admitted
-    between that check and the write.
+    between that check and the write. ``owned`` re-checks, under the same
+    lock, that this worker still runs the row: a hand-off that committed
+    after the caller's own check raises :class:`AttachMoved`.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        cursor.execute(f"SELECT id FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
-        if cursor.fetchone() is None:
+        cursor.execute(f"SELECT * FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
+        locked = cursor.fetchone()
+        if locked is None:
             return None
+        if owned is not None and not owned(row_to_dict(locked)):
+            raise AttachMoved(session_id)
         cursor.execute(
             f"SELECT DISTINCT state FROM turns WHERE session_id = {_ph} AND state IN "
             "('queued','running','interrupting','draining','parked')",
@@ -1393,6 +1399,11 @@ def attach_session_project(
             (project_id, project_v2_id, now, session_id),
         )
         return row_to_dict(cursor.fetchone())
+
+
+class AttachMoved(Exception):
+    """The row moved to another worker, so :func:`attach_session_project`
+    wrote nothing."""
 
 
 class AttachBusy(Exception):

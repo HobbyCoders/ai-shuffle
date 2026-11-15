@@ -136,7 +136,7 @@ describe('AttachProjectSheet', () => {
 	});
 
 	it('for a chat another worker runs, offers that worker’s projects and relays by shared identity', async () => {
-		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: 'b-local', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
 		const onClose = vi.fn();
 		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
 		const radio = (name: RegExp) => screen.getByRole('radio', { name });
@@ -153,7 +153,7 @@ describe('AttachProjectSheet', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
 		await waitFor(() => expect(onClose).toHaveBeenCalled());
 		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', { project_v2_id: 'v2-remote' });
-		expect(mocks.applyAttachedProject).toHaveBeenCalledWith('sess-1', 'b-local', 'v2-remote', 'default');
+		expect(mocks.applyAttachedProject).toHaveBeenCalledWith('sess-1', '', 'v2-remote', 'default');
 	});
 
 	it('keeps the sheet open with the server’s reason when the attach is refused', async () => {

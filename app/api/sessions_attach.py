@@ -68,6 +68,8 @@ class AttachProjectRequest(BaseModel):
 
 class AttachProjectResponse(BaseModel):
     session_id: str
+    #: The CALLER's worker's legacy id: empty after a relayed attach when this
+    #: worker has no checkout of the project (``project_v2_id`` names it).
     project_id: str
     project_v2_id: Optional[str] = None
     mode: str
@@ -216,8 +218,10 @@ async def apply_attach_project(
 
     try:
         row = await run_sync(
-            database.attach_session_project, session_id, project["id"], project_v2_id
+            database.attach_session_project, session_id, project["id"], project_v2_id, _owned_here,
         )
+    except database.AttachMoved:
+        raise HTTPException(status.HTTP_409_CONFLICT, NOT_HERE) from None
     except database.AttachBusy as busy:
         detail = BUSY_BACKGROUND if busy.background_only else BUSY
         raise HTTPException(status.HTTP_409_CONFLICT, detail) from None
@@ -343,7 +347,24 @@ async def attach_project(
         ) from exc
     except control.ControlRefused as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
-    return AttachProjectResponse.model_validate(result)
+    response = AttachProjectResponse.model_validate(result)
+    # The owner answered with ITS legacy id; legacy ids are per install. The
+    # caller's composer needs this worker's own project, else none (V2 only).
+    response.project_id = await run_sync(
+        _local_project_id, response.project_v2_id or identity.get("project_v2_id"), identity.get("origin"),
+    )
+    return response
+
+
+def _local_project_id(project_v2_id: Optional[str], origin: Optional[str]) -> str:
+    """This worker's own project row for the attached project, matched by
+    origin as ``_own_checkout`` matches it; empty when it has none."""
+    from app.core import project_resolver, project_setup
+
+    pv2 = project_resolver.resolve_catalog_project(project_v2_id) if project_v2_id else None
+    key = (pv2 or {}).get("origin") or origin
+    row = project_setup._own_rows_by_origin().get(key) if key else None
+    return (row or {}).get("id") or ""
 
 
 async def _worker_name(device_id: str) -> str:

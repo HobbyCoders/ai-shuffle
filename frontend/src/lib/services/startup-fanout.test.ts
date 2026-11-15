@@ -38,6 +38,7 @@ vi.mock('$lib/stores/active-session', async () => {
 			// The part of init that reads the network: the composer defaults.
 			init: async () => { await composerPreferences.hydrate(); },
 			applyComposerDefaults: vi.fn(),
+			adoptAttachedProject: vi.fn(),
 			resetForAccountChange: vi.fn(),
 			newChat: vi.fn(),
 			validateSelectedProfile: vi.fn(),

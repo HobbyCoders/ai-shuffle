@@ -13,7 +13,8 @@ Two owner-reported failures, and the rule behind both:
   create dropped the attachment silently.
 
 The rule: a send lifts (remote) or copies in (same worker) files from exactly
-the areas the session admits, plus, for the owner's own send only, the areas
+the areas the session admits, plus, for the install owner's own send only
+(``session_modes.composer_owner``, not every paired device), the areas
 the owner's composer stages into. Each file is checked against the one root
 that contains it, with links resolved, never a wider folder.
 """
@@ -213,7 +214,7 @@ async def test_a_remote_worktree_create_carries_a_chat_lane_chip(remote_project)
     with _Patches():
         resp = await swt._create_v2_branch_session(
             _body(prompt=f"read {chip}", pending_upload_paths=[chip]),
-            remote_project["legacy"], None, entry=True,
+            remote_project["legacy"], None, entry=True, composer=True,
         )
     blobs = upload_blobs_db.list_blobs_for_session(resp.session_id)
     assert [upload_blobs_db.get_blob_data(b["id"]) for b in blobs] == [b"chat-lane-bytes"]
@@ -229,18 +230,19 @@ async def test_a_remote_worktree_create_carries_another_projects_chip(remote_pro
     with _Patches():
         resp = await swt._create_v2_branch_session(
             _body(prompt="read", pending_upload_paths=[str(staged)]),
-            remote_project["legacy"], None, entry=True,
+            remote_project["legacy"], None, entry=True, composer=True,
         )
     assert [upload_blobs_db.get_blob_data(b["id"]) for b in upload_blobs_db.list_blobs_for_session(resp.session_id)] == [b"from-b"]
 
 
 async def test_a_non_owner_remote_create_still_refuses_a_chat_lane_chip(remote_project):
+    # A person's entry alone (any paired device) is not the owner's authority.
     chip = _chat_chip()
     with _Patches():
         with pytest.raises(HTTPException) as exc:
             await swt._create_v2_branch_session(
                 _body(prompt="read", pending_upload_paths=[chip]),
-                remote_project["legacy"], None, entry=False,
+                remote_project["legacy"], None, entry=True, composer=False,
             )
     assert exc.value.status_code == 400
     assert "outside this session's upload area" in exc.value.detail
@@ -261,3 +263,215 @@ def test_a_same_worker_worktree_create_copies_a_chat_lane_chip(workspace, tmp_pa
     # Without the owner's allowance it is refused, never copied.
     errors = swt._migrate_uploads_to_dir("proj-1", worktree, [chip], {}, composer=False)
     assert errors and "outside this session's upload area" in errors[0]
+
+
+# ═══ Who may reach the composer areas (review S1) ═══════════════════════════
+
+_OWNER = {"kind": "admin", "principal_id": "install", "credential_hash": "h-owner",
+          "account_id": None, "owner": "install-admin"}
+
+
+def _paired(owner_admin, *, client_id="dev-1"):
+    return ({"kind": "paired", "principal_id": "dev-1", "credential_hash": "h-dev",
+             "account_id": "acct", "owner": "account:acct"},
+            {"id": client_id, "account_owner_admin": owner_admin})
+
+
+@pytest.mark.parametrize("principal, client, expected", [
+    (_OWNER, None, True),
+    (_paired(True)[0], _paired(True)[1], True),
+    # An ordinary paired controller is a person, not the install owner.
+    (_paired(False)[0], _paired(False)[1], False),
+    # The live client must be the one the principal names.
+    (_paired(True)[0], _paired(True, client_id="dev-2")[1], False),
+    ({"kind": "api_user", "principal_id": "u", "credential_hash": "h"}, None, False),
+    ("preview", None, False),
+    (None, None, False),
+])
+def test_composer_owner_is_the_install_owner_only(monkeypatch, principal, client, expected):
+    from app.core import mobile_tool_identity, session_modes
+
+    if principal == "preview":
+        principal = mobile_tool_identity.preview_limited(dict(_OWNER))
+    monkeypatch.setattr(database, "get_paired_client_by_session_hash", lambda h: client)
+    assert session_modes.composer_owner(principal) is expected
+
+
+def _route(monkeypatch, principal, client, *, legacy):
+    """Call the public with-worktree route as ``principal`` would."""
+    from unittest.mock import MagicMock
+
+    from app.api import chat_query
+    from app.core import mobile_tool_identity
+
+    monkeypatch.setattr(chat_query, "_request_query_principal", lambda req: principal)
+    monkeypatch.setattr(database, "get_paired_client_by_session_hash", lambda h: client)
+    monkeypatch.setattr(mobile_tool_identity, "request_principal", lambda req: None)
+    monkeypatch.setattr(swt, "get_api_user_from_request", lambda req: None)
+    real = swt.require_origin_access
+
+    def access(**kw):
+        found = real(**kw)
+        return {**found, "legacy": found["legacy"] if legacy else None}
+
+    monkeypatch.setattr(swt, "require_origin_access", access)
+
+    async def call(body):
+        return await swt.create_session_with_worktree(request=MagicMock(), body=body, token="tok")
+    return call
+
+
+async def test_a_paired_non_owner_cannot_lift_another_projects_upload(remote_project, workspace, monkeypatch):
+    """A paired controller without owner authority names a file in another
+    project's uploads folder: refused, nothing created (it passed before)."""
+    staged = _project(workspace, "proj-b") / "uploads" / "secret.txt"
+    staged.write_bytes(b"not yours")
+    principal, client = _paired(False)
+    call = _route(monkeypatch, principal, client, legacy=True)
+    with _Patches():
+        with pytest.raises(HTTPException) as exc:
+            await call(_body(prompt="read", pending_upload_paths=[str(staged)]))
+    assert exc.value.status_code == 400
+    assert "outside this session's upload area" in exc.value.detail
+    assert database.get_sessions() == []
+
+
+async def test_the_owners_paired_device_lifts_another_projects_upload(remote_project, workspace, monkeypatch):
+    staged = _project(workspace, "proj-b") / "uploads" / "b.txt"
+    staged.write_bytes(b"from-b")
+    principal, client = _paired(True)
+    call = _route(monkeypatch, principal, client, legacy=True)
+    with _Patches():
+        resp = await call(_body(prompt="read", pending_upload_paths=[str(staged)]))
+    assert [upload_blobs_db.get_blob_data(b["id"]) for b in upload_blobs_db.list_blobs_for_session(resp.session_id)] == [b"from-b"]
+
+
+# ═══ Early refusals run after the owner's admission (review S3) ═════════════
+
+
+async def test_the_route_carries_a_chip_to_a_project_only_the_other_worker_has(remote_project, monkeypatch):
+    """Attach with no project, then pick a project this worker has no checkout
+    of and create its worktree chat on the worker that has it."""
+    chip = _chat_chip()
+    call = _route(monkeypatch, _OWNER, None, legacy=False)
+    body = _body(project_id=None, project_v2_id=remote_project["pv2"]["id"],
+                 prompt=f"read {chip}", pending_upload_paths=[chip])
+    with _Patches():
+        resp = await call(body)
+    blobs = upload_blobs_db.list_blobs_for_session(resp.session_id)
+    assert [upload_blobs_db.get_blob_data(b["id"]) for b in blobs] == [b"chat-lane-bytes"]
+    assert turns_db.get_queued_turns(resp.session_id)[0]["payload"]["upload_blob_ids"] == [blobs[0]["id"]]
+
+
+async def test_the_route_still_refuses_a_non_owner_without_a_checkout(remote_project, monkeypatch):
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+
+    chip = _chat_chip()
+    principal, client = _paired(False)
+    call = _route(monkeypatch, principal, client, legacy=False)
+    body = _body(project_id=None, project_v2_id=remote_project["pv2"]["id"],
+                 prompt="read", pending_upload_paths=[chip])
+    with _Patches():
+        with pytest.raises(HTTPException) as exc:
+            await call(body)
+    assert exc.value.status_code == 400 and exc.value.detail == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert database.get_sessions() == []
+
+
+async def _ws_new_chat(principal, upload_paths, *, mode="code"):
+    from unittest.mock import patch
+
+    from app.core import mobile_tool_identity
+    from tests.api.test_chat_ws_v2_turns import _make_handler, _Patches as _WsPatches
+
+    # The owner's login is live (a fixture install has no owner session row).
+    with _WsPatches(), patch.object(mobile_tool_identity, "validate", lambda value: None):
+        handler = _make_handler()
+        handler.trusted_principal = principal
+        await handler.handle_query({
+            "prompt": "what is in this?", "session_id": None, "profile": "scope-agent",
+            "project": None, "mode": mode, "upload_paths": [str(p) for p in upload_paths],
+        })
+    return handler
+
+
+async def test_a_new_chat_keeps_a_project_chip_after_the_project_is_cleared(workspace):
+    """The owner attached in a project, cleared the project, then sent the
+    first message of the new chat over the socket."""
+    from tests.helpers import sent_frames
+
+    staged = _project(workspace, "proj-b") / "uploads" / "b.txt"
+    staged.write_bytes(b"from-b")
+    handler = await _ws_new_chat(_OWNER, [staged])
+    assert [f["message"] for f in sent_frames(handler, "error")] == []
+    session_id = sent_frames(handler, "session_created")[0]["session_id"]
+    session = database.get_session(session_id)
+    paths = turns_db.get_queued_turns(session_id)[0]["payload"]["upload_paths"]
+    # Copied into the new chat's own area, which its turn re-checks.
+    assert len(paths) == 1 and Path(paths[0]).read_bytes() == b"from-b"
+    upload_transfer.validate_upload_paths(paths, session)
+
+
+async def test_a_new_chat_from_a_non_owner_still_refuses_a_foreign_chip(workspace):
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    from tests.helpers import sent_frames
+
+    staged = _project(workspace, "proj-b") / "uploads" / "b.txt"
+    staged.write_bytes(b"from-b")
+    handler = await _ws_new_chat({**_OWNER, "kind": "api_user"}, [staged])
+    assert [f["message"] for f in sent_frames(handler, "error")] == [ATTACHMENTS_NEED_LOCAL_CHECKOUT]
+    assert sent_frames(handler, "session_created") == []
+
+
+# ═══ Nested projects and linked upload folders (review S4, S5) ══════════════
+
+
+def test_a_nested_projects_chip_lands_in_the_worktrees_uploads(workspace, tmp_path):
+    """Project B lives inside project A: B's chip is still foreign to A."""
+    outer = _project(workspace, "proj-a")
+    inner = outer / "nested"
+    (inner / "uploads").mkdir(parents=True)
+    database.create_project(project_id="proj-n", name="n", description=None, path=str(inner))
+    chip = inner / "uploads" / "n.txt"
+    chip.write_bytes(b"nested")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    migrated: dict = {}
+    assert swt._migrate_uploads_to_dir("proj-a", worktree, [str(chip)], migrated, composer=True) == []
+    dest = Path(migrated[str(chip)])
+    assert dest.parent == worktree / "uploads" and dest.read_bytes() == b"nested"
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_linked_uploads_folder_admits_nothing(workspace):
+    """``uploads`` pointing at its own project would admit every file in it."""
+    base = workspace / "proj-l"
+    base.mkdir()
+    (base / "private.txt").write_bytes(b"private")
+    try:
+        os.symlink(base, base / "uploads", target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    database.create_project(project_id="proj-l", name="l", description=None, path=str(base))
+    roots = upload_transfer.composer_staging_roots()
+    assert base.resolve() not in roots
+    assert not upload_transfer.composer_staged([str(base / "uploads" / "private.txt")])
+    with pytest.raises(upload_transfer.UploadLiftError):
+        upload_transfer.validate_upload_paths(
+            [str(base / "private.txt")], {"id": "s-l", "project_id": "proj-l"})
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="needs symlinks")
+def test_a_linked_chat_uploads_folder_admits_nothing(workspace):
+    chat = chat_uploads_dir()
+    for child in chat.iterdir():
+        child.unlink()
+    chat.rmdir()
+    try:
+        os.symlink(workspace, chat, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    (workspace / "secret.txt").write_bytes(b"x")
+    assert workspace.resolve() not in upload_transfer.composer_staging_roots()
+    assert not upload_transfer.composer_staged([str(chat / "secret.txt")])

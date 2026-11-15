@@ -137,7 +137,8 @@ def _migrate_uploads_to_dir(
     human-readable error messages; a missing or mis-rooted file does not abort
     the whole migration.
 
-    ``composer`` (owner requests only) also admits the areas the owner's
+    ``composer`` (install-owner requests only, ``session_modes.composer_owner``)
+    also admits the areas the owner's
     composer stages into before a project is picked
     (``upload_transfer.composer_staging_roots``); such a file lands in
     ``target_dir/uploads`` under a free name.
@@ -148,23 +149,34 @@ def _migrate_uploads_to_dir(
     if not target_dir.exists():
         return [f"Target directory does not exist: {target_dir}"]
 
-    project = database.get_project(project_id)
-    project_dir = Path(get_project_working_dir(project or project_id)).resolve()
+    project = database.get_project(project_id) if project_id else None
+    project_dir = Path(get_project_working_dir(project or project_id)).resolve() if project_id else None
     from app.core import upload_transfer
     # Validate before copying too: a symlink in uploads must not escape the
     # staging root, nor may the destination uploads directory point elsewhere.
     base_session = {"id": "branch-compose", "project_id": project_id}
+    own_roots = upload_transfer.admitted_upload_roots(base_session)
+    composer_roots = upload_transfer.composer_staging_roots() if composer else []
     for file_path in file_paths:
         try:
-            upload_transfer.validate_upload_paths([file_path], base_session, composer=composer)
+            # Pick the admitted area first: a file in another project's uploads
+            # folder is foreign even when that project sits inside this one.
+            try:
+                upload_transfer.upload_root_of(file_path, own_roots)
+                foreign = False
+            except upload_transfer.UploadLiftError:
+                upload_transfer.upload_root_of(file_path, composer_roots)
+                foreign = True
             src = Path(file_path).resolve()
             if not src.exists():
                 errors.append(f"File not found: {file_path}")
                 continue
             try:
+                if foreign or project_dir is None:
+                    raise ValueError(file_path)
                 rel = src.relative_to(project_dir)
             except ValueError:
-                if not composer:
+                if not foreign:
                     errors.append(f"File not in project directory: {file_path}")
                     continue
                 from app.core.confined_files import upload
@@ -356,6 +368,7 @@ async def _create_remote_branch_session(
     session_create_overrides: Optional[dict] = None,
     creator: Optional[dict] = None,
     entry: Any = False,
+    composer: bool = False,
 ) -> WorktreeSessionResponse:
     """Create a branch session that will materialize on ANOTHER install.
 
@@ -421,7 +434,7 @@ async def _create_remote_branch_session(
                     upload_transfer.lift_session_paths_to_blobs,
                     body.pending_upload_paths,
                     {"id": session_id, "project_id": body.project_id, "project_v2_id": pv2["id"]},
-                    composer=entry is True,
+                    composer=composer,
                     project_v2_id=pv2["id"],
                 ))
             except Exception as e:  # noqa: BLE001 — refuse, never half-create
@@ -588,6 +601,7 @@ async def _create_v2_branch_session(
     session_create_overrides: Optional[dict] = None,
     creator: Optional[dict] = None,
     entry: Any = False,
+    composer: bool = False,
 ) -> WorktreeSessionResponse:
     """V2 branch-intake: create a branch session WITHOUT a legacy worktree row.
 
@@ -607,17 +621,10 @@ async def _create_v2_branch_session(
     NULL — no md5-hash worktree dir, no ``worktrees`` row. Legacy worktree
     sessions (existing rows) keep working through the unchanged legacy path.
     """
-    from app.core import project_resolver, checkout_manager
+    from app.core import project_resolver, checkout_manager, upload_transfer
     from app.core.config import settings
 
     branch_name = body.branch_name
-
-    # Remote-only compose has no local project dir; the upload lift is project-dir-relative.
-    if body.pending_upload_paths and not (body.project_id and project):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
-        )
 
     # 0. Composer device pick. A target that is not us takes the remote
     #    path: nothing is materialized here, a durable git op carries the
@@ -625,6 +632,17 @@ async def _create_v2_branch_session(
     target_instance_id = (body.target_instance_id or "").strip() or None
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
+
+    # Without a project dir here, only the install owner's composer chips can
+    # travel to another worker (each lifted from its own staging area).
+    if body.pending_upload_paths and not (body.project_id and project) and not (
+        target_instance_id and composer
+        and await run_sync(upload_transfer.composer_staged, body.pending_upload_paths)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+        )
 
     # 1. Origin-keyed project_v2. The HTTP path passes the row already
     #    resolved by ``require_origin_access``; direct callers still look it
@@ -662,6 +680,7 @@ async def _create_v2_branch_session(
             session_create_overrides,
             creator,
             entry,
+            composer,
         )
 
     # 2. Materialize the deterministic (project, branch) checkout. Idempotent with
@@ -766,7 +785,7 @@ async def _create_v2_branch_session(
                 Path(checkout_path),
                 body.pending_upload_paths,
                 migrated_paths,
-                entry is True,
+                composer,
             ) or None
             if upload_migration_errors:
                 logger.warning(
@@ -857,7 +876,14 @@ async def create_session_with_worktree(
         project_v2_id=body.project_v2_id,
     )
     project = access["legacy"]
-    if body.pending_upload_paths and not project:
+    from app.api.chat_query import request_composer_owner
+    from app.core import upload_transfer
+    composer = bool(body.pending_upload_paths) and await run_sync(request_composer_owner, request)
+    if body.pending_upload_paths and not project and not (
+        composer and await run_sync(upload_transfer.composer_staged, body.pending_upload_paths)
+    ):
+        # Without a checkout here only the install owner's composer chips can
+        # travel (lifted to the target below); anything else has no source.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=ATTACHMENTS_NEED_LOCAL_CHECKOUT,
@@ -881,4 +907,5 @@ async def create_session_with_worktree(
     entry = await run_sync(request_person_entry, request)
     return await _create_v2_branch_session(
         body, project, api_user_id, access["project_v2"], creator=creator, entry=entry,
+        composer=composer,
     )

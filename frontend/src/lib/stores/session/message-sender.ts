@@ -812,9 +812,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Sidepanel mode for a NEW session. Creation-time only — the backend
 					// ignores it once the session row exists.
 					mode: _state.sessionId ? undefined : _state.mode,
-					// Existing remote-only sessions stage attachments per session;
-					// only an uncreated remote draft has no upload destination.
-					upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
+					// Existing remote-only sessions stage attachments per session; an
+					// uncreated remote draft sends them only to a picked worker (the
+					// server lifts the owner's composer chips to it, refuses the rest).
+					upload_paths: (!remoteOnly || !!_state.sessionId || !!_state.deviceIntent?.id) && options?.pendingUploadPaths?.length
 						? options.pendingUploadPaths
 						: undefined,
                     upload_references: options?.pendingUploadReferences?.length ? options.pendingUploadReferences : undefined,
@@ -1018,7 +1019,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return null; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return null; }
 			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return null; }
-			if (!_state.project && pendingUploadPaths?.length) {
+			// No checkout here: only another worker can take the files (the
+			// server lifts the owner's composer chips to it, and refuses the rest).
+			if (!_state.project && pendingUploadPaths?.length && !_state.deviceIntent?.id) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
 				return null;
 			}
@@ -1056,9 +1059,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// away. A call started on the new session needs them before
 					// any message is sent.
 					overrides: overridesSnapshot,
-					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
-						? pendingUploadPaths
-						: undefined,
+					// Remote-only compose reaches here with files only when another
+					// worker was picked (refused above otherwise).
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 					// Composer device pick composes with the worktree checkbox: the
 					// target install materializes the checkout itself (durable git-ops
 					// queue) and the uploads travel as DB blobs.
@@ -1214,7 +1217,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
-			if (!_state.project && pendingUploadPaths?.length) {
+			if (!_state.project && pendingUploadPaths?.length && !_state.deviceIntent?.id) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
 				return false;
 			}
@@ -1314,9 +1317,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					prompt,
 					client_message_id: clientMessageId,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
-					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
-						? pendingUploadPaths
-						: undefined,
+					// Remote-only compose reaches here with files only when another
+					// worker was picked (refused above otherwise).
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 					// Composer device pick composes with the worktree checkbox (see
 					// createWorktree above).
 					target_instance_id: deviceIntentSnap?.id || undefined,

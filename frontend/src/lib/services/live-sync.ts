@@ -87,7 +87,12 @@ export function startLiveSync() {
   resourceSync.invalidate(names);
  };
  const unsubscribeResources = [
-  resourceSync.subscribe(['sessions', 'tags'], () => appData.loadSessions()),
+  resourceSync.subscribe(['sessions', 'tags'], async () => {
+   await appData.loadSessions();
+   // A project attached elsewhere (another tab, or the worker that runs this
+   // chat) turns the open no-project chat into a project session here too.
+   activeSession.adoptAttachedProject(appData.current.sessions);
+  }),
   resourceSync.subscribe(['projects'], async () => {
    await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions(), refreshProjectsOverviewIfUsed()]);
    activeSession.applyComposerDefaults();

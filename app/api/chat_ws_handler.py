@@ -23,7 +23,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from app.core.config import settings
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import permission_handler
-from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
+from app.core.session_modes import chat_mode_read_permitted, composer_owner, normalize_session_mode
 from app.core.session_payload import client_view
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import invalidate_queue_snapshot, queue_snapshot_epoch, sync_engine
@@ -1528,7 +1528,13 @@ class ChatWebSocketHandler:
                 chat_mode_read_permitted("Read", {"file_path": p})
                 for p in upload_paths
             )
-            if upload_paths and not project_id and not chat_lane_uploads:
+            from app.core import upload_transfer
+            if upload_paths and not project_id and not chat_lane_uploads and not (
+                await run_sync(composer_owner, self.trusted_principal)
+                and await run_sync(upload_transfer.composer_staged, upload_paths)
+            ):
+                # The install owner's composer chips stay admitted: the send
+                # below copies or lifts each from the area that holds it.
                 from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
 
                 await self.send_json({
@@ -1760,12 +1766,13 @@ class ChatWebSocketHandler:
 
         local_upload_paths = upload_paths
         upload_references = []
+        composer = False
         if upload_paths or data.get("upload_references"):
             from app.core import upload_transfer
             # The owner's composer may have staged a file under an earlier
             # project or the chat lane before the project, worktree or worker
-            # changed. Only the owner's send admits those areas.
-            composer = self._person_entry is True
+            # changed. Only the install owner's send admits those areas.
+            composer = await run_sync(composer_owner, self.trusted_principal)
             try:
                 upload_session = await run_sync(database.get_session, session_id)
                 local_upload_paths, upload_references = await run_sync(
@@ -1884,7 +1891,7 @@ class ChatWebSocketHandler:
             try:
                 blob_ids = await self._lift_uploads(
                     local_upload_paths, project_id, session_id,
-                    composer=self._person_entry is True,
+                    composer=composer,
                 )
             except Exception as lift_exc:  # noqa: BLE001 — refuse, never half-send
                 logger.warning(

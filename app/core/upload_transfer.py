@@ -148,6 +148,23 @@ def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[
     return staged, others
 
 
+def _staging_root(root: Path, base: Path) -> Optional[Path]:
+    """``root`` resolved, when it is a real folder strictly inside ``base``.
+
+    A link (symlink or junction) as the staging folder itself would widen the
+    root to wherever it points, ``.`` included, so the folder must resolve to
+    its own name under its resolved parent, as ``confined_files.upload``
+    writes it; None otherwise.
+    """
+    resolved = root.resolve()
+    base = base.resolve()
+    if resolved == base or not _is_under(resolved, base):
+        return None
+    if root.is_symlink() or resolved != root.parent.resolve() / root.name:
+        return None
+    return resolved
+
+
 def composer_staging_roots() -> List[Path]:
     """Where the owner's composer stages a file before it knows the session.
 
@@ -162,27 +179,45 @@ def composer_staging_roots() -> List[Path]:
     from app.db import database
 
     workspace = settings.effective_workspace_dir.resolve()
-    roots: List[Path] = []
-    chat = chat_uploads_dir().resolve()
-    if _is_under(chat, workspace):
-        roots.append(chat)
+    pairs = [(chat_uploads_dir(), workspace)]
     for project in database.get_all_projects() or []:
         try:
             base = _project_dir(project)
         except Exception:  # noqa: BLE001 — an unreadable project admits nothing
             continue
-        root = (base / UPLOADS_SUBDIR).resolve()
-        if _is_under(root, base):
-            roots.append(root)
+        pairs.append((base / UPLOADS_SUBDIR, base))
+    roots: List[Path] = []
+    for root, base in pairs:
+        real = _staging_root(root, base)
+        if real is not None and real not in roots:
+            roots.append(real)
     return roots
+
+
+def composer_staged(paths: List[str]) -> bool:
+    """Whether every path is in an area the owner's composer stages into.
+
+    For a refusal that runs before any session exists (no project here, or
+    the project was cleared): the caller must already know the sender is the
+    install owner (``session_modes.composer_owner``).
+    """
+    roots = composer_staging_roots()
+    try:
+        for raw in paths:
+            upload_root_of(raw, roots)
+    except UploadLiftError:
+        return False
+    return bool(paths)
 
 
 def admitted_upload_roots(session: Dict[str, Any], *, composer: bool = False) -> List[Path]:
     """Resolved folders this session may take attachments from.
 
-    ``composer`` adds :func:`composer_staging_roots`; only an owner send may
-    pass it, because only the owner's composer stages into those areas for a
-    session it has not created yet.
+    ``composer`` adds :func:`composer_staging_roots`; only a send from the
+    install owner (``session_modes.composer_owner``, decided on the worker that
+    received it) may pass it: those areas span every project, so a paired
+    device without owner authority, an API key or a preview keeps the
+    session's own roots.
     """
     from app.core.config import settings
     from app.core import project_resolver
@@ -209,8 +244,11 @@ def admitted_upload_roots(session: Dict[str, Any], *, composer: bool = False) ->
             if project:
                 base = _project_dir(project)
                 roots.append((base / UPLOADS_SUBDIR, base))
-    allowed = [root.resolve() for root, base in roots
-               if _is_under(root.resolve(), base)]
+    allowed = []
+    for root, base in roots:
+        real = _staging_root(root, base)
+        if real is not None and real not in allowed:
+            allowed.append(real)
     if composer:
         allowed += [root for root in composer_staging_roots() if root not in allowed]
     return allowed
@@ -269,14 +307,16 @@ def adopt_composer_uploads(paths: List[str], session: Dict[str, Any]) -> Dict[st
     # The folder this session's agent reads its own uploads from.
     cwd = project_resolver.resolve_existing_cwd(session) if (
         session.get("project_id") or session.get("project_v2_id")) and session.get("mode") != "chat" else None
+    # Folders under the workspace are written from it, so one the session has
+    # not used yet is created on the way.
+    workspace = settings.effective_workspace_dir
     if cwd:
         base, stage = Path(cwd), UPLOADS_SUBDIR
     elif session.get("mode") == "chat":
-        base, stage = chat_uploads_dir(), ""
+        base, stage = workspace, chat_uploads_dir().relative_to(workspace).as_posix()
     elif runs_in_owner_chat_folder(session):
-        base, stage = owner_chat_dir(), UPLOADS_SUBDIR
+        base, stage = workspace, (owner_chat_dir() / UPLOADS_SUBDIR).relative_to(workspace).as_posix()
     else:
-        workspace = settings.effective_workspace_dir
         base, stage = workspace, session_upload_dir(session["id"]).relative_to(workspace).as_posix()
     limit = _max_upload_size()
     mapping: Dict[str, str] = {}

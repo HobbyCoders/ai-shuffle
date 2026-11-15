@@ -4162,6 +4162,7 @@ from app.db.sessions import (  # noqa: F401
     set_session_project,
     attach_session_project,
     AttachBusy,
+    AttachMoved,
     set_session_branch,
     resync_session_branch,
     update_session_pr_state,

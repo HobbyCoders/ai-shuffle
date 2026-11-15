@@ -176,6 +176,17 @@ describe('compact first send', () => {
 		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
 	});
 
+	it('a new remote-only chat sends its chips only to a picked worker', async () => {
+		// Chips staged before the project was picked travel to the worker that
+		// runs the chat; with no worker picked there is nowhere to send them.
+		const picked = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-remote', deviceIntent: { id: 'runner-1', name: 'Runner' } }));
+		await createMessageSender(picked.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] });
+		expect(picked.wsConn.send.mock.calls[0][0]).toMatchObject({ upload_paths: ['/workspace/chat-uploads/a.png'], target_instance_id: 'runner-1' });
+		const unpicked = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-remote' }));
+		await createMessageSender(unpicked.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] });
+		expect(unpicked.wsConn.send.mock.calls[0][0].upload_paths).toBeUndefined();
+	});
+
 	it('does not reuse a refused draft id after its text or attachments change', async () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
@@ -2357,6 +2368,26 @@ describe('createWorktree remote-only compose', () => {
 
 		expect(apiMocks.post).not.toHaveBeenCalled();
 		expect(getState().worktreeError).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+	});
+
+	it('sends a chip staged before the project was picked to the worker that has it', async () => {
+		// Attached with no project, then a project only another worker has
+		// checked out: the server lifts the owner's chip to that worker.
+		apiMocks.post.mockResolvedValue({ session_id: 'new-remote' });
+		const { deps } = makeDeps(baseState({
+			project: '',
+			projectV2Id: 'pv2-remote',
+			worktreeBranch: 'feat/x',
+			worktreeIntent: 'worktree',
+			deviceIntent: { id: 'runner-1', name: 'Runner' },
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.createWorktree('hello', ['/workspace/chat-uploads/shot.png']);
+
+		const [, body] = apiMocks.post.mock.calls[0];
+		expect(body.pending_upload_paths).toEqual(['/workspace/chat-uploads/shot.png']);
+		expect(body.target_instance_id).toBe('runner-1');
 	});
 
 	it('still posts project_id for a local project and may include uploads', async () => {

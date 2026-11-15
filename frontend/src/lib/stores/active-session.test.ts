@@ -413,6 +413,32 @@ describe('attaching a project (#371)', () => {
 		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', permissionModeOverride: 'default' });
 	});
 
+	it('a refreshed row from a relayed attach adopts this worker\'s own project, else the V2 id alone', () => {
+		// The mirror dropped the owner's legacy id: map the V2 id to this
+		// worker's copy when it has one.
+		appData.current.clusterProjects = [
+			{ project_v2_id: 'v2-here', origin: 'o', name: 'here', local_project_id: 'local-here', eligible: [] },
+		] as never;
+		try {
+			expect(activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-here', permission_mode: 'default' }
+			])).toBe(true);
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: 'local-here', projectV2Id: 'v2-here', permissionModeOverride: 'default' });
+
+			activeSession.current.mode = 'chat';
+			activeSession.current.project = '';
+			activeSession.current.projectV2Id = null;
+			activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-elsewhere', permission_mode: 'default' }
+			]);
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-elsewhere' });
+			// Nothing attached: nothing to adopt.
+			expect(activeSession.adoptAttachedProject([{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-elsewhere' }])).toBe(false);
+		} finally {
+			appData.current.clusterProjects = [];
+		}
+	});
+
 	it('leaves a restored pick alone when nothing was attached', () => {
 		activeSession.reconcileSessionMode([{ id: 'attach-me', mode: 'chat', project_id: null, permission_mode: 'default' }]);
 		expect(activeSession.current.mode).toBe('chat');

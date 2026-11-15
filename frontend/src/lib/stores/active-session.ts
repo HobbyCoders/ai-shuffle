@@ -1203,34 +1203,47 @@ export const activeSession = {
 		const sessionId = _state.sessionId;
 		const mode = reconciledSessionMode(sessionId, sessionsList);
 		if (!mode) return null;
-		const row = sessionsList.find(s => s.id === sessionId);
-		// Restored from a snapshot saved while the session had no project, and
-		// a project was attached since (another tab or device, #371): take the
-		// row's project and access. The attach reset access to Ask; a saved
-		// Bypass would otherwise ride the next send and re-bind the session.
-		// A chat holds no project of its own: anything in `project` there is a
-		// filled-in device default, so it must not hide the attach.
-		const saved = _state.mode === 'chat'
-			? { mode: _state.mode, project: '', projectV2Id: null }
-			: { mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id };
-		if (attachedSinceSaved(saved, row)) {
-			const permissionMode = normalizePermissionMode(row?.permission_mode ?? 'default') ?? 'default';
-			const cached = sessionEphemeralCache.restore(sessionId!);
-			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
-			_update(s => ({
-				...s, mode,
-				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
-				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
-				permissionModeOverride: permissionMode,
-				...markBindingHydrated(s, 'permission'),
-			}));
-			persistSession();
-			return mode;
-		}
+		if (activeSession.adoptAttachedProject(sessionsList)) return mode;
 		if (mode !== _state.mode) {
 			_update(s => ({ ...s, mode }));
 		}
 		return mode;
+	},
+
+	/**
+	 * The open session was a no-project chat and its refreshed row now has a
+	 * project (#371): attached from another tab, or by the worker that runs it
+	 * after a relayed attach. Take the row's project and access, and report
+	 * whether it did. The attach reset access to Ask; a saved Bypass would
+	 * otherwise ride the next send and re-bind the session. A chat holds no
+	 * project of its own: anything in `project` there is a filled-in device
+	 * default, so it must not hide the attach.
+	 */
+	adoptAttachedProject(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
+		const sessionId = _state.sessionId;
+		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
+		const saved = _state.mode === 'chat'
+			? { mode: _state.mode, project: '', projectV2Id: null }
+			: { mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id };
+		if (!row || !attachedSinceSaved(saved, row)) return false;
+		const mode = reconciledSessionMode(sessionId, sessionsList) ?? 'code';
+		const projectV2Id = row.project_v2_id ?? null;
+		// A mirrored row keeps only a legacy id this worker has (the mirror drops
+		// the owner's); without one, this worker's own copy of the V2 project.
+		const project = row.project_id
+			|| (projectV2Id && appData.current.clusterProjects.find(p => p.project_v2_id === projectV2Id)?.local_project_id)
+			|| '';
+		const permissionMode = normalizePermissionMode(row.permission_mode ?? 'default') ?? 'default';
+		const cached = sessionEphemeralCache.restore(sessionId!);
+		if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
+		_update(s => ({
+			...s, mode, project, projectV2Id,
+			worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
+			permissionModeOverride: permissionMode,
+			...markBindingHydrated(s, 'permission'),
+		}));
+		persistSession();
+		return true;
 	},
 
 	/** `user`: the owner picked it in the UI (not a catalog or default fix-up). */

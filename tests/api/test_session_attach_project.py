@@ -208,6 +208,25 @@ async def test_a_row_this_worker_no_longer_runs_is_never_written_here(seeded, qu
     assert db.get_session("attach-chat")["mode"] == "chat"
 
 
+@pytest.mark.asyncio
+async def test_a_hand_off_between_the_check_and_the_write_writes_nothing(seeded, quiet, monkeypatch):
+    """The chat moves to another worker after the first ownership check: the
+    write re-checks under the row lock and refuses."""
+    calls = []
+
+    def owned(session):
+        calls.append(session["id"])
+        return len(calls) == 1  # owned at the check, moved by the write
+
+    monkeypatch.setattr(attach_api, "_owned_here", owned)
+    with pytest.raises(HTTPException) as exc:
+        await _attach("attach-chat")
+    assert exc.value.status_code == 409 and exc.value.detail == attach_api.NOT_HERE
+    assert len(calls) == 2
+    assert db.get_session("attach-chat")["mode"] == "chat"
+    assert db.get_session("attach-chat")["project_id"] is None
+
+
 # =============================================================================
 # A chat another worker runs: relayed to that worker
 # =============================================================================
@@ -219,10 +238,12 @@ def remote_owner(monkeypatch):
     from app.network import control
 
     monkeypatch.setattr(control, "owner_of", lambda session: "dev-b")
-    sent = AsyncMock(return_value={
-        "session_id": "attach-chat", "project_id": "b-local-id", "project_v2_id": "pv2-b",
-        "mode": "code", "permission_mode": "default",
-    })
+    async def owner_answers(device, action, body):
+        # The owner answers with ITS OWN legacy id, which means nothing here.
+        return {"session_id": body["session_id"], "project_id": "b-local-id",
+                "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
+
+    sent = AsyncMock(side_effect=owner_answers)
     monkeypatch.setattr(control, "call", sent)
     monkeypatch.setattr(attach_api, "_worker_name", AsyncMock(return_value="Worker B"))
     return sent
@@ -239,7 +260,10 @@ async def test_a_remote_chat_is_relayed_by_shared_identity(seeded, quiet, remote
     assert (device, action) == ("dev-b", "attach-project")
     # Legacy ids are per worker: only the shared identity crosses.
     assert body == {"session_id": "attach-chat", "project_v2_id": pv2["id"], "origin": pv2["origin"]}
-    assert result.project_id == "b-local-id" and result.permission_mode == "default"
+    # The caller's composer gets THIS worker's project, never the owner's id:
+    # its next send names a project this worker has.
+    assert result.project_id == "attach-proj" and result.project_v2_id == pv2["id"]
+    assert result.permission_mode == "default"
     # Nothing is written here: the owner's row syncs back as for any change.
     assert db.get_session("attach-chat")["project_id"] is None
 
@@ -251,8 +275,10 @@ async def test_a_remote_only_project_is_relayed_by_its_v2_id(seeded, quiet, remo
     pv2 = projects_v2.upsert_project("git:example/remote-only", "Remote only")
     session = db.get_session("attach-chat")
     with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
-        await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
+        result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
     body = remote_owner.await_args.args[2]
+    # No checkout here: no legacy id, the V2 id alone names it (the #1326 shape).
+    assert (result.project_id, result.project_v2_id) == ("", pv2["id"])
     assert body == {"session_id": "attach-chat", "project_v2_id": pv2["id"], "origin": "git:example/remote-only"}
 
 
