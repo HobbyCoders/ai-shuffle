@@ -11,7 +11,7 @@
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
 	import type { AgentForm, GroupState } from './agentForm';
-	import { AGENT_NAME_MAX } from './agentList';
+	import { nameMaxLength } from './agentList';
 
 	interface Props {
 		form: AgentForm;
@@ -89,7 +89,7 @@
 			value={form.name}
 			width={260}
 			placeholder="My agent"
-			maxlength={AGENT_NAME_MAX}
+			maxlength={nameMaxLength(form.name)}
 			oninput={(v) => onFormChange('name', v)}
 		/>
 	</SettingRow>

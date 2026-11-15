@@ -5,7 +5,9 @@ import {
 	AGENT_ID_MAX,
 	AGENT_NAME_MAX,
 	FOLDER_NONE,
+	codePoints,
 	duplicateAgentName,
+	nameMaxLength,
 	defaultModelBinding,
 	isPinned,
 	pinnedModel,
@@ -145,6 +147,33 @@ describe('duplicateAgentName', () => {
 		const name = duplicateAgentName('c'.repeat(AGENT_NAME_MAX));
 		expect(name).toHaveLength(AGENT_NAME_MAX);
 		expect(name.endsWith(' copy')).toBe(true);
+	});
+	it('never splits an emoji: no lone surrogate, at most 100 code points', () => {
+		const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+		const name = duplicateAgentName('a'.repeat(94) + '😀');
+		// The review case: 95 code points (96 UTF-16 units) fit, so the emoji stays whole.
+		expect(name).toBe('a'.repeat(94) + '😀 copy');
+		expect(codePoints(name)).toBe(AGENT_NAME_MAX);
+		expect(loneSurrogate.test(name)).toBe(false);
+		// One code point too many: the emoji goes whole.
+		expect(duplicateAgentName('a'.repeat(95) + '😀')).toBe('a'.repeat(95) + ' copy');
+		// A ZWJ family is one character: kept whole or dropped whole.
+		const family = '👩\u200d👩\u200d👧';
+		expect(duplicateAgentName('a'.repeat(93) + family)).toBe('a'.repeat(93) + ' copy');
+		expect(duplicateAgentName('a'.repeat(90) + family)).toBe('a'.repeat(90) + family + ' copy');
+		// An all-emoji name of 100 code points.
+		const emoji = duplicateAgentName('😀'.repeat(AGENT_NAME_MAX));
+		expect(codePoints(emoji)).toBe(AGENT_NAME_MAX);
+		expect(loneSurrogate.test(emoji)).toBe(false);
+	});
+});
+
+describe('nameMaxLength', () => {
+	it('lets the Name field hold 100 code points of emoji', () => {
+		expect(nameMaxLength('')).toBe(AGENT_NAME_MAX);
+		const full = '😀'.repeat(AGENT_NAME_MAX);
+		expect(nameMaxLength(full)).toBe(full.length);
+		expect(nameMaxLength('ab😀')).toBe(AGENT_NAME_MAX + 1);
 	});
 });
 

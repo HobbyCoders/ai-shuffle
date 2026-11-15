@@ -38,6 +38,12 @@ async function waitAgents(page, prefix, count) {
 	throw new Error(`expected ${count} saved agent(s) named ${prefix}…`);
 }
 
+/** Matches ExecutionModeBar's --branch-slot-max: the agent word is no wider than the branch word. */
+const CHIP_MAX = 232;
+
+let chip;
+let row;
+
 async function steps(page, mark) {
 	await mark('name a new agent with a 100-character unbroken word');
 	await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
@@ -50,6 +56,7 @@ async function steps(page, mark) {
 	await page.getByRole('heading', { level: 2, name, exact: true }).waitFor();
 	await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
 	created = await waitAgents(page, stem(), 2);
+	const copyName = created.find((a) => a.name !== name)?.name;
 
 	await mark('pick the agent for a new chat');
 	await workspace(page).getByRole('button', { name: 'New chat', exact: true }).click();
@@ -58,6 +65,34 @@ async function steps(page, mark) {
 	await hero.getByRole('button', { name: /^Agent:/ }).click();
 	await page.getByRole('menu', { name: 'Agent selection' }).getByRole('button', { name, exact: true }).click();
 	await hero.getByRole('button', { name: `Agent: ${name}` }).waitFor();
+	chip = await hero.evaluate((region) => {
+		const word = region.querySelector('.card-name');
+		const label = word.querySelector('.card-name-text');
+		const next = region.querySelector('[role=group] button');
+		const r = region.getBoundingClientRect();
+		const w = word.getBoundingClientRect();
+		return {
+			clipped: label.scrollWidth > label.clientWidth && getComputedStyle(label).textOverflow === 'ellipsis',
+			inside: w.right <= r.right + 0.5,
+			oneLine: Math.abs(next.getBoundingClientRect().top - w.top) < 1,
+			width: Math.round(w.width),
+			row: Math.round(r.width)
+		};
+	});
+
+	await mark("open the copy's Subagents tab");
+	await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+	await page.locator('[data-settings-item]').filter({ hasText: copyName }).first().click();
+	await page.getByRole('tab', { name: /^Subagents/ }).click();
+	const toggle = page.getByRole('switch', { name: `Allow ${name}`, exact: true });
+	await toggle.waitFor();
+	row = await toggle.evaluate((sw) => {
+		const nm = sw.closest('.ra').querySelector('.nm');
+		return {
+			clipped: nm.scrollWidth > nm.clientWidth && getComputedStyle(nm).textOverflow === 'ellipsis',
+			beforeSwitch: nm.getBoundingClientRect().right <= sw.getBoundingClientRect().left
+		};
+	});
 }
 
 async function check(page, log) {
@@ -69,36 +104,12 @@ async function check(page, log) {
 	const copy = created.find((a) => a.name !== name);
 	expect(copy.name.length <= NAME_MAX && copy.name.endsWith(' copy'), `the copy's name fits ${NAME_MAX}: ${copy.name.length}`);
 
-	// #1617: the new-chat agent word ends in an ellipsis and keeps the row on one line.
-	const chip = await page.getByRole('region', { name: 'New chat' }).evaluate((row) => {
-		const word = row.querySelector('.card-name');
-		const label = word.querySelector('.card-name-text');
-		const next = row.querySelector('[role=group] button');
-		const r = row.getBoundingClientRect();
-		const w = word.getBoundingClientRect();
-		return {
-			clipped: label.scrollWidth > label.clientWidth && getComputedStyle(label).textOverflow === 'ellipsis',
-			inside: w.right <= r.right + 0.5,
-			oneLine: Math.abs(next.getBoundingClientRect().top - w.top) < 1,
-			width: Math.round(w.width),
-			row: Math.round(r.width)
-		};
-	});
+	// #1617: the new-chat agent word ends in an ellipsis, no wider than the
+	// branch word, and keeps the row on one line.
 	expect(chip.clipped && chip.inside && chip.oneLine, `new-chat agent word truncates inside its row: ${JSON.stringify(chip)}`);
+	expect(chip.width <= CHIP_MAX, `new-chat agent word fits ${CHIP_MAX}px: ${chip.width}px`);
 
 	// #1617: in the copy's Subagents tab, the original's name stops before its switch.
-	await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
-	await page.locator('[data-settings-item]').filter({ hasText: copy.name }).first().click();
-	await page.getByRole('tab', { name: /^Subagents/ }).click();
-	const toggle = page.getByRole('switch', { name: `Allow ${name}`, exact: true });
-	await toggle.waitFor();
-	const row = await toggle.evaluate((sw) => {
-		const nm = sw.closest('.ra').querySelector('.nm');
-		return {
-			clipped: nm.scrollWidth > nm.clientWidth && getComputedStyle(nm).textOverflow === 'ellipsis',
-			beforeSwitch: nm.getBoundingClientRect().right <= sw.getBoundingClientRect().left
-		};
-	});
 	expect(row.clipped && row.beforeSwitch, `Subagents row name truncates before its switch: ${JSON.stringify(row)}`);
 	log(`saved ${ids.join(' and ')}; new-chat word ${chip.width}px in a ${chip.row}px row`);
 }
