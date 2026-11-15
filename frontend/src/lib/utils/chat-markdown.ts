@@ -194,16 +194,28 @@ const chatMarked = new Marked({
  * block (a setext heading), so no earlier split is trusted. A reply that
  * defines link references is parsed whole (0), since a definition reaches
  * across blocks.
+ *
+ * A block boundary does not reset marked's inline state (#1627): after a raw
+ * `<a>` or `<pre>`/`<code>`/`<kbd>`/`<script>` that has not closed, the full
+ * parse keeps later URLs as text and later text raw, while a tail parsed on
+ * its own would start fresh and could draw a player. So the split moves back
+ * to the last boundary where that state is closed. Each inline HTML token
+ * records the state after it; a markdown link around a tag can close it
+ * again, which only makes this check move back further than it needs to.
  */
 export function streamingSplit(text: string): number {
 	const tokens = chatMarked.lexer(text);
 	if (Object.keys(tokens.links).length > 0) return 0;
 	let offset = 0;
 	let last = 0;
+	let open = false;
 	for (const token of tokens) {
 		// The lexer normalises line endings; offsets hold only while each raw is the source.
 		if (!text.startsWith(token.raw, offset)) return 0;
-		if (token.type !== 'space') last = offset;
+		if (token.type !== 'space' && !open) last = offset;
+		chatMarked.walkTokens([token], (t) => {
+			if (t.type === 'html' && 'inLink' in t) open = t.inLink || t.inRawBlock;
+		});
 		offset += token.raw.length;
 	}
 	return last;

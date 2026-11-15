@@ -94,7 +94,12 @@ describe('streamingSplit (#1619)', () => {
 		['an open comment', 'One.\n\n<!--\nx\n\n![a](/a.png)', 'One.\n\n'],
 		['a list', 'One.\n\n- a\n\n    ![a](/a.png)', 'One.\n\n'],
 		['no block before the last', 'Just one', ''],
-		['a reply that defines a reference', 'One.\n\n![x][r]\n\n[r]: /a.png\n\nTwo', '']
+		['a reply that defines a reference', 'One.\n\n![x][r]\n\n[r]: /a.png\n\nTwo', ''],
+		['an unclosed raw <a> (#1627)', 'Intro <a href="/docs">label\n\nhttps://example.com/clip.mp4', ''],
+		['an unclosed raw <a> after a closed block (#1627)', 'One.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\n'],
+		['an unclosed raw <code> (#1627)', 'One.\n\nSee <code>x\n\n<b>raw</b>', 'One.\n\n'],
+		['a raw <a> that closed (#1627)', 'Intro <a href="/docs">label</a>\n\nhttps://example.com/clip.mp4', 'Intro <a href="/docs">label</a>\n\n'],
+		['a raw <a> closed in a later block (#1627)', 'A <a href="/d">x\n\ny</a>\n\nhttps://example.com/clip.mp4', 'A <a href="/d">x\n\ny</a>\n\n']
 	])('keeps the last block of %s in the tail', (_case, text, prefix) => {
 		expect(text.substring(0, streamingSplit(text))).toBe(prefix);
 	});
@@ -117,7 +122,11 @@ describe('streamingSplit (#1619)', () => {
 		['lists with continuations', '- a\n- b\n\n  continued ![x](/a.png)\n\n1. one\n2. two\n\n    code in item\n\npara'],
 		['fences holding images and blank lines', '```md\n![x](/a.png)\n\n```\n\n~~~~\n~~~\n![y](/api/v1/artifacts/a)\n~~~~\n\ntext'],
 		['a raw <pre> block', 'Intro.\n\n<pre>\nfirst\n\n![x](/api/v1/artifacts/a)\n</pre>\n\nAfter ![z](/a.png)'],
-		['HTML blocks, a rule and a heading', '<div>\nblock\n</div>\n\n***\n\n# H\nPara\n<details>\n\nx ![v](/clip.mp4)\n\n</details>']
+		['an unclosed raw <a> before a media URL (#1627)', 'Intro <a href="/docs">label\n\nhttps://example.com/clip.mp4'],
+		['an unclosed raw <a> in a list before a media link (#1627)', '- see <a href="/docs">x\n\n[Clip](/api/generated-videos/clip.mp4)\n\nend'],
+		['a raw <a> that closes two blocks later (#1627)', 'A <a href="/d">x\n\ny\n\nz</a>\n\nhttps://example.com/clip.mp4\n\nend'],
+		['an unclosed raw <kbd> before raw text (#1627)', 'Press <kbd>Ctrl\n\n<b>x</b> & ![y](/a.png)\n\nend'],
+		['HTML blocks, a rule and a heading','<div>\nblock\n</div>\n\n***\n\n# H\nPara\n<details>\n\nx ![v](/clip.mp4)\n\n</details>']
 	];
 
 	it.each(documents)('streams %s exactly as the full render shows it', (_case, doc) => {

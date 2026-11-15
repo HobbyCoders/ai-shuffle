@@ -256,6 +256,20 @@ describe('media markdown while a reply streams (#1619)', () => {
 		expect(view.container.querySelector('p')).toBeNull();
 	});
 
+	// A raw <a> that has not closed keeps the next paragraph's URL as text in the
+	// full render; the streaming render must not draw a player for it (#1627).
+	it('draws no player for a URL after an unclosed raw <a>, streaming and settled', async () => {
+		reducedMotion();
+		const text = 'Intro <a href="/docs">label\n\nhttps://example.com/clip.mp4';
+		const view = await stream(['Intro <a href="/docs">label', '\n\nhttps://example.com/clip.mp4'], 'clip.mp4');
+		expect(view.container.querySelector('video')).toBeNull();
+		await view.rerender({ content: text, streaming: false, sessionId: 'remote-chat' });
+		expect(view.container.querySelector('video')).toBeNull();
+		// Once the <a> closes, a later URL is a player again.
+		await view.rerender({ content: 'Intro <a href="/docs">label</a>\n\nhttps://example.com/clip.mp4', streaming: true, sessionId: 'remote-chat' });
+		await waitFor(() => expect(view.container.querySelector('video')).toBeTruthy());
+	});
+
 	it('keeps a settled image mounted while later paragraphs stream', async () => {
 		const view = await stream([`Start.\n\n![A](${art})\n\nOne`, ' two', '\n\nThree']);
 		const img = players(view.container)[0];
