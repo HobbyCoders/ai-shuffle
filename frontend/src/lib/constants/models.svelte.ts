@@ -92,7 +92,7 @@ const STATIC_VERSIONED_MODELS: readonly ModelOption[] = [
 	{ value: 'claude-opus-5-5', label: 'Opus 5.5', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
 	{ value: 'claude-sonnet-5-5', label: 'Sonnet 5.5', family: 'sonnet', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
 	// Versions a subscription CLI offers by id (app/core/claude_cli_models.py).
-	{ value: 'claude-fable-5-2', label: 'Fable 5.2', family: 'fable', context_window: 1_000_000 },
+	{ value: 'claude-fable-5-2', label: 'Fable 5.2', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'medium' },
 	{ value: 'claude-fable-5-1', label: 'Fable 5.1', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
 	{ value: 'claude-fable-5', label: 'Fable 5', family: 'fable', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },
 	{ value: 'claude-opus-5', label: 'Opus 5', family: 'opus', context_window: 1_000_000, effort_levels: ['low', 'medium', 'high', 'xhigh', 'max'], default_effort: 'high' },

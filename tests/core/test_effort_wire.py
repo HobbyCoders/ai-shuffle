@@ -323,7 +323,7 @@ async def test_api_local_settings_to_wire(authenticated_client, mock_db, monkeyp
 # Groups enumerate every native table entry; catalog routes state their metadata.
 WIRE_CONTRACTS = [
     ("anthropic", (
-        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+        "claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
         "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5",
         "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
     ), ("low", "medium", "high", "xhigh", "max")),
@@ -332,13 +332,13 @@ WIRE_CONTRACTS = [
     ("anthropic", ("claude-opus-4-5-20251101",), ("low", "medium", "high")),
     ("anthropic", ("claude-haiku-4-5", "claude-haiku-4-5-20251001"), ()),
     ("delegated", (
-        "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+        "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
         "claude-opus-4-8", "claude-opus-4-7", "claude-haiku-5-5", "claude-opus-5-5",
         "claude-sonnet-5-5",
     ), ("low", "medium", "high", "xhigh", "max")),
     ("delegated", ("claude-opus-4-6", "claude-sonnet-4-6"), ("low", "medium", "high", "max")),
     ("delegated", (
-        "claude-mythos-5-1", "claude-mythos-5", "claude-mythos-preview",
+        "claude-mythos-5-2", "claude-mythos-5-1", "claude-mythos-5", "claude-mythos-preview",
         "claude-opus-4-5-20251101", "claude-haiku-4-5", "claude-haiku-4-5-20251001",
     ), ()),
     ("openai", ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"),
@@ -371,6 +371,23 @@ for kind, models, levels in WIRE_CONTRACTS:
                     expected = "high"
             MATRIX_CASES.append(pytest.param(
                 kind, model, levels, pick, expected, id=f"{kind}-{model}-{pick}"))
+
+
+@pytest.mark.parametrize("model,route,default", [
+    # platform.claude.com/docs/en/build-with-claude/effort: API default high.
+    ("claude-fable-5-2", "anthropic", "high"),
+    ("claude-mythos-5-2", "anthropic", "high"),
+    # code.claude.com/docs/en/model-config: Claude Code defaults Fable 5.2 to medium.
+    ("claude-fable-5-2", "delegated", "medium"),
+    ("claude-fable-5-1", "delegated", "high"),
+])
+def test_fable_5_2_effort_defaults(monkeypatch, model, route, default):
+    from app.core import claude_cli_models
+
+    monkeypatch.setattr(claude_cli_models, "entry", lambda _model: None)
+    cap = effort_capabilities(model, route=route)
+    assert cap["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
+    assert cap["default_effort"] == default
 
 
 def test_wire_matrix_covers_native_catalog():
