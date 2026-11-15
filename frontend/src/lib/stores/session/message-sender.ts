@@ -45,12 +45,16 @@ let sendsInFlight = 0;
 /** Why a reload now would lose a message, or null. */
 
 /** A new chat whose project has no checkout on this worker, carrying files,
- * with no worker picked to take them. */
+ * with no worker picked to take them. A draft naming only the shared id asks
+ * the catalog: right after "Set up & send" put the project here the draft
+ * still has no local id, but the reloaded catalog does. */
 function needsRunsOnForUploads(
 	state: { sessionId: string | null; project: string; projectV2Id: string | null; deviceIntent?: { id?: string | null } | null },
 	paths: readonly string[] | undefined,
+	catalog: readonly { project_v2_id: string; local_project_id: string | null }[] | undefined,
 ): boolean {
-	return !state.sessionId && !state.project && !!state.projectV2Id && !!paths?.length && !state.deviceIntent?.id;
+	if (state.sessionId || state.project || !state.projectV2Id || !paths?.length || state.deviceIntent?.id) return false;
+	return !(catalog ?? []).some(p => p.project_v2_id === state.projectV2Id && p.local_project_id);
 }
 
 export function pendingSendReason(): string | null {
@@ -206,7 +210,11 @@ export interface MessageSenderDeps {
 		loadSessions: () => void;
 		loadApiUserSessions: () => void;
 		/** The sidebar's chats: the ones a compose started now cannot create. */
-		current?: { sessions: { id: string }[] };
+		current?: {
+			sessions: { id: string }[];
+			/** Which shared projects this worker has a checkout of. */
+			clusterProjects?: { project_v2_id: string; local_project_id: string | null }[];
+		};
 	};
 
 	persistSession: () => void;
@@ -507,7 +515,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// A new chat for a project with no checkout here: its files can only go
 			// to a picked worker. Refused before anything is spent, so the words
 			// and chips come back; never sent without them (review S3).
-			if (_state.worktreeIntent !== 'worktree' && needsRunsOnForUploads(_state, options?.pendingUploadPaths)) {
+			if (_state.worktreeIntent !== 'worktree' && needsRunsOnForUploads(_state, options?.pendingUploadPaths, deps.appData.current?.clusterProjects)) {
 				update(s => ({ ...s, error: ATTACHMENTS_NEED_RUNS_ON }));
 				return false;
 			}
@@ -1036,7 +1044,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return null; }
 			// No checkout here: only another worker can take the files (the
 			// server lifts the owner's composer chips to it, and refuses the rest).
-			if (needsRunsOnForUploads(_state, pendingUploadPaths)) {
+			if (needsRunsOnForUploads(_state, pendingUploadPaths, deps.appData.current?.clusterProjects)) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_RUNS_ON }));
 				return null;
 			}
@@ -1232,7 +1240,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
-			if (needsRunsOnForUploads(_state, pendingUploadPaths)) {
+			if (needsRunsOnForUploads(_state, pendingUploadPaths, deps.appData.current?.clusterProjects)) {
 				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_RUNS_ON }));
 				return false;
 			}

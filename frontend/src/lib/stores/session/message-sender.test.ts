@@ -195,6 +195,23 @@ describe('compact first send', () => {
 		expect(unpicked.wsConn.send.mock.calls[0][0]).toMatchObject({ upload_paths: ['/workspace/chat-uploads/a.png'], target_instance_id: 'runner-1' });
 	});
 
+	it('a draft naming only the shared id of a project this worker has sends its chips here', async () => {
+		// "Set up & send" put the project here and reloaded the catalog; the
+		// draft still names only the shared id. Nothing to refuse.
+		const after = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-setup', messages: [] }));
+		const catalog = [{ project_v2_id: 'pv2-setup', local_project_id: 'setup-here' }];
+		(after.deps.appData as any).current = { sessions: [], clusterProjects: catalog };
+		expect(await createMessageSender(after.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(true);
+		expect(after.wsConn.send.mock.calls[0][0]).toMatchObject({ project_v2_id: 'pv2-setup', upload_paths: ['/workspace/chat-uploads/a.png'] });
+		expect(after.getState().error).toBeNull();
+		// The catalog says no checkout here: refused.
+		const remote = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-setup', messages: [] }));
+		(remote.deps.appData as any).current = { sessions: [], clusterProjects: [{ project_v2_id: 'pv2-setup', local_project_id: null }] };
+		expect(await createMessageSender(remote.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(false);
+		expect(remote.wsConn.send).not.toHaveBeenCalled();
+		expect(remote.getState().error).toBe(ATTACHMENTS_NEED_RUNS_ON);
+	});
+
 	it('does not reuse a refused draft id after its text or attachments change', async () => {
 		const { deps } = makeDeps(baseState({ sessionId: 's1', title: 'Old chat' }));
 		const sender = createMessageSender(deps);
