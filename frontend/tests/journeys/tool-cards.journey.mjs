@@ -287,9 +287,15 @@ const nativeModel = {
 };
 
 // The owner answers a model switch on the regular prompt, never by typing.
+// The prompt drops a pointer click in its first 300ms on screen
+// (POINTER_ARM_DELAY_MS in PermissionRequest.svelte: the second half of a
+// double-click must not answer a request nobody saw), so read it first, as a
+// person would; a click at once was silently ignored and the prompt stayed.
+const PROMPT_READ_MS = 500;
 async function denyPermissionPrompt(page) {
 	const deny = page.getByRole('button', { name: 'Deny', exact: true });
 	await deny.waitFor({ timeout: 20_000 });
+	await page.waitForTimeout(PROMPT_READ_MS);
 	await deny.click();
 	await deny.waitFor({ state: 'hidden', timeout: 10_000 });
 }
