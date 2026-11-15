@@ -362,7 +362,13 @@ To turn the queue on (repository settings, not a file in this repository):
    through `gh pr merge` or the merge button as before, but only enqueue; main
    moves when the queue's run is green.
 2. Let the queue create its branches: a ruleset that restricts branch creation
-   must exclude `refs/heads/gh-readonly-queue/**`.
+   must exclude `refs/heads/gh-readonly-queue/**/*`. The queue's branches are
+   two levels deep (`gh-readonly-queue/main/pr-<N>-<sha>`) and a pattern ending
+   in `/**` reaches one level only: with it GitHub removes every pull request
+   from the queue within seconds (`branch_protection_failure`) and no run
+   starts. Check with
+   `gh api 'repos/<owner>/<repo>/rules/branches/gh-readonly-queue%2Fmain%2Fpr-1'`,
+   which must list no rule of that ruleset.
 
 Turning it off again needs no change here: the pull request selection returns
 to the full one with the next run.
