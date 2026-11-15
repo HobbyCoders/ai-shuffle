@@ -11,13 +11,10 @@ check: merge requires a green `CI` and review. Edge/nightly publication remains
 separate: a `CI` pass on the exact main revision or the owner's local attested
 full pass authorizes the read-only publication gate.
 
-CI uses free standard GitHub-hosted Linux and Windows runners, with one
-exception: the UI journey shards, which are most of CI's minutes, run on
-Blacksmith's paid 4-vCPU Ubuntu 24.04 runner (`blacksmith-4vcpu-ubuntu-2404`).
-`scripts/ci/test-cost-policy.py` names that one job, so a second paid job is a
-deliberate change there. The Docker runtime-overlay acceptance uses native
-`ubuntu-24.04` and `ubuntu-24.04-arm` runners; the other workflows use
-`ubuntu-24.04` and `windows-latest`. No macOS PR jobs are used.
+CI uses only free standard GitHub-hosted Linux and Windows runners.
+The Docker runtime-overlay acceptance uses native `ubuntu-24.04` and
+`ubuntu-24.04-arm` runners; the other workflows use `ubuntu-24.04` and
+`windows-latest`. No larger/paid runners and no macOS PR jobs are used.
 Linux jobs pin `ubuntu-24.04` rather than `ubuntu-latest`, because the newer
 `ubuntu-26.04` image lacks the preinstalled PostgreSQL 16 the backend jobs use;
 moving to a newer image is a deliberate change, not a silent label update.
@@ -202,8 +199,7 @@ frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
 the daily run. The asset paths matter: the APK's offline demo is built from
 `mobile/` and shared `frontend/` dependencies;
 [What a run skips](#what-a-run-skips) says why the web UI's own source is left
-out. Drafts and forks run too, on standard free `ubuntu-24.04` runners, apart
-from the UI journey shards on their paid runner.
+out. Drafts and forks run too, on standard free `ubuntu-24.04` runners.
 Superseded PR runs are cancelled.
 
 Both Android emulator workflows deliberately use `google_apis` on API 36 again,

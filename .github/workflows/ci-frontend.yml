@@ -330,10 +330,7 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.journey-plan.outputs.shards) }}
-    # The one job on a paid runner: the journeys are most of CI's minutes, so
-    # they are where a faster machine pays. Blacksmith's 4-vCPU Ubuntu 24.04
-    # image stands in for GitHub's; every other job stays on the free runners.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     env:
       JOURNEY_SELECTION: ${{ needs.journey-plan.outputs.only }}
@@ -369,9 +366,8 @@ jobs:
           pip install -r requirements.txt
           pip install -e ./fluid
           # As in CI Backend: the hosted tool cache can hold group/world-writable
-          # stdlib files, which the app's import provenance checks refuse. Root
-          # owns that cache on this runner, so tightening it needs sudo.
-          sudo chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+          # stdlib files, which the app's import provenance checks refuse.
+          chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
       - name: Install JavaScript dependencies
         if: steps.plan.outputs.files != ''
         run: |
@@ -403,12 +399,7 @@ jobs:
         timeout-minutes: 13
         working-directory: browser-mcp
         run: |
-          # Ubuntu's AppArmor rule against unprivileged user namespaces stops
-          # Chromium's sandbox. This runner's kernel has no such rule, hence
-          # no such setting; it is lifted wherever it exists.
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           # Use the primary signed Ubuntu archive, not the hosted mirror's
           # slow Azure fallback. Keep suites, components and Signed-By intact.
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
