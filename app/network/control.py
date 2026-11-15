@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -97,11 +98,16 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
 
 
 async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None,
-               secure: bool = False) -> Dict[str, Any]:
+               secure: bool = False, on_dispatch: Optional[Callable[[bool], None]] = None) -> Dict[str, Any]:
     """POST a control action to the owner with a device token.
 
     ``secure`` sends only to the peer's HTTPS addresses, and raises
     ``InsecureRoute`` when it has none, for a payload carrying private inputs.
+    ``on_dispatch(True)`` is called just before each request for the action
+    itself starts, and ``on_dispatch(False)`` when that request failed in a way
+    that proves the peer did not apply it (no connection, or a rejected token).
+    A caller cancelled while the last value is False (or before any call)
+    knows the action was not applied; True means it may have been.
     """
     ctx = engine.require_context()
     known = ctx.member(device_id)
@@ -138,17 +144,20 @@ async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = Non
                 tried = [route for route in link.routes() if not secure or _https(route)]
                 for route in tried:
                     try:
-                        result = await _post(link, client, ctx, route, action, payload, timeout)
+                        result = await _post(link, client, ctx, route, action, payload, timeout, on_dispatch)
                     except _RouteFailed as exc:
                         failures.append(exc.cause)
                         continue
                     except transport.PeerError as exc:
                         raise _refusal(exc) from exc
-                    except httpx.HTTPError as exc:
+                    except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError) as exc:
                         # The request may have reached the owner: never resend it.
+                        # An unreadable 2xx body (a proxy page, a truncated
+                        # answer) came after the action was dispatched.
                         peer, me = await run_sync(_names, ctx, device_id)
                         what = ("did not answer in time" if isinstance(exc, httpx.TimeoutException)
-                                else "dropped the connection")
+                                else "dropped the connection" if isinstance(exc, httpx.HTTPError)
+                                else "sent an answer that could not be read")
                         raise MaybeApplied(
                             f"{peer} {what} while handling a request from {me}. "
                             "It may still have been applied; check before retrying.") from exc
@@ -192,7 +201,8 @@ class _RouteFailed(Exception):
 
 
 async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, route: str, action: str,
-                payload: Any, timeout: float | None) -> Dict[str, Any]:
+                payload: Any, timeout: float | None,
+                on_dispatch: Optional[Callable[[bool], None]] = None) -> Dict[str, Any]:
     """POST the action at one address.
 
     Raises ``_RouteFailed`` only when nothing was dispatched: authentication
@@ -205,7 +215,12 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
         await link.authenticate(client, ctx, at=route)
     except transport.PeerError as exc:
         raise _RouteFailed(exc) from exc
+    def dispatching(sent: bool) -> None:
+        if on_dispatch is not None:
+            on_dispatch(sent)
+
     for attempt in range(2):
+        dispatching(True)
         try:
             return await link._request(
                 client, "POST", f"/api/v1/network/peer/control/{action}", json_body=payload, base=route,
@@ -215,6 +230,7 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
             # A worker restart invalidates tokens before their advertised
             # expiry. A 401 is pre-dispatch, so retrying cannot duplicate
             # a mutation. Never retry timeouts or other action failures.
+            dispatching(False)
             if attempt:
                 raise
             try:
@@ -222,6 +238,9 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
             except transport.PeerError as exc:
                 raise _RouteFailed(exc) from exc
         except transport.CONNECT_ERRORS as exc:
+            # Raised only while opening the connection, before any byte of
+            # the request was written.
+            dispatching(False)
             raise _RouteFailed(exc) from exc
     raise AssertionError("unreachable")  # pragma: no cover
 
