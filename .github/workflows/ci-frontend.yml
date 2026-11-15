@@ -462,6 +462,8 @@ jobs:
           npm ci
           npm ci --ignore-scripts --prefix ../browser-mcp
           npx svelte-kit sync
+      - name: Difference rules (unit test)
+        run: timeout --kill-after=10s 60s node --test tests/visual-diff.test.mjs
       - name: Compare every fixture at every viewport
         run: |
           export PLAYWRIGHT_MODULE="$PWD/../browser-mcp/node_modules/playwright-core"

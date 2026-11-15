@@ -1544,8 +1544,20 @@ one journey against your own instance as its README says.
 composer, usage rows) at desktop (1440×900), phone (412×915) and the Galaxy
 Z Fold 6 inner (884×1104) and cover (360×882) screens, with the panel or
 popover under test opened, the page clock frozen, animations off and web
-fonts settled, each compared with `frontend/tests/visual-baselines/` (0.2%
-of pixels may differ). `--strict` also fails a render with no baseline.
+fonts settled, each compared with `frontend/tests/visual-baselines/`.
+`--strict` also fails a render with no baseline.
+
+A pixel counts as changed when a colour channel moves by more than 8. A
+render fails when more than 0.2% of its pixels changed, or when one connected
+area of changed pixels reaches 8 pixels (`frontend/tests/visual-diff.mjs`,
+unit-tested by `visual-diff.test.mjs` in the same job). The area limit
+catches a small real change the share misses: ten moved 1px rail ticks were
+under 0.08% and left the `turn-navigator` baselines stale for five days
+(#1644). In the pinned container a render of an unchanged fixture matches its
+baseline exactly or differs only below the channel threshold (99 CI renders,
+2026-11-13 to 2026-11-15), so the limit does not flake. A render under both
+limits that still differs is reported as `ok, N px differ (largest area M px)`
+in the job summary, so a drifting baseline is visible before it fails.
 
 Renders must be identical run to run, so the job runs in the official
 Playwright container `mcr.microsoft.com/playwright:v<version>-noble`, where
