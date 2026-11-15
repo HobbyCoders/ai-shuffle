@@ -5,6 +5,7 @@
  * without rendering.
  */
 import type { Profile } from '$lib/api/client';
+import { cutCodePoints } from '$lib/utils/code-points';
 import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY, decodeProviderModel } from '$lib/constants/models';
 
 /**
@@ -105,7 +106,7 @@ export function profileModels(p: Profile): Record<string, string> {
 
 /** Longest agent id the server accepts (`ProfileCreate.id` max_length). */
 export const AGENT_ID_MAX = 50;
-/** Longest agent name the server accepts (`ProfileBase.name` max_length). */
+/** Longest agent name the server accepts (`ProfileBase.name` max_length, in code points). */
 export const AGENT_NAME_MAX = 100;
 
 /** `base` cut so it plus `suffix` fits AGENT_ID_MAX, never ending on a dash. */
@@ -131,38 +132,6 @@ export function uniqueAgentId(name: string, taken: Iterable<string>): string {
 	let id = base;
 	for (let n = 2; used.has(id); n += 1) id = fitId(base, `-${n}`);
 	return id;
-}
-
-/** Code points in `text`: the unit the server's length limits count (JS `.length` counts UTF-16 units). */
-export function codePoints(text: string): number {
-	return Array.from(text).length;
-}
-
-/** `text` cut to at most `max` code points, never inside a character (an emoji, a ZWJ sequence, a combining mark). */
-export function cutCodePoints(text: string, max: number): string {
-	if (codePoints(text) <= max) return text;
-	const chars =
-		typeof Intl !== 'undefined' && 'Segmenter' in Intl
-			? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (s) => s.segment)
-			: Array.from(text);
-	let out = '';
-	let used = 0;
-	for (const ch of chars) {
-		const n = codePoints(ch);
-		if (used + n > max) break;
-		out += ch;
-		used += n;
-	}
-	return out;
-}
-
-/**
- * The Name field's `maxlength`: the browser counts UTF-16 units, so each
- * character outside the BMP (most emoji) adds one, letting a name reach
- * AGENT_NAME_MAX code points.
- */
-export function nameMaxLength(value: string): number {
-	return AGENT_NAME_MAX + value.length - codePoints(value);
 }
 
 /** The name a duplicate of `name` gets ("Scribe" → "Scribe copy"), within AGENT_NAME_MAX code points. */

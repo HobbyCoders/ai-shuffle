@@ -1,13 +1,12 @@
 /** The Agents list: search, the All / Yours / Built-in filter, the folder filter and the sections. */
 import { describe, expect, it } from 'vitest';
 import type { Profile } from '$lib/api/client';
+import { codePoints } from '$lib/utils/code-points';
 import {
 	AGENT_ID_MAX,
 	AGENT_NAME_MAX,
 	FOLDER_NONE,
-	codePoints,
 	duplicateAgentName,
-	nameMaxLength,
 	defaultModelBinding,
 	isPinned,
 	pinnedModel,
@@ -165,15 +164,6 @@ describe('duplicateAgentName', () => {
 		const emoji = duplicateAgentName('😀'.repeat(AGENT_NAME_MAX));
 		expect(codePoints(emoji)).toBe(AGENT_NAME_MAX);
 		expect(loneSurrogate.test(emoji)).toBe(false);
-	});
-});
-
-describe('nameMaxLength', () => {
-	it('lets the Name field hold 100 code points of emoji', () => {
-		expect(nameMaxLength('')).toBe(AGENT_NAME_MAX);
-		const full = '😀'.repeat(AGENT_NAME_MAX);
-		expect(nameMaxLength(full)).toBe(full.length);
-		expect(nameMaxLength('ab😀')).toBe(AGENT_NAME_MAX + 1);
 	});
 });
 

@@ -65,8 +65,10 @@
 		sectionAgents,
 		uniqueAgentId,
 		duplicateAgentName,
+		AGENT_NAME_MAX,
 		type AgentFilter
 	} from './profiles/agentList';
+	import { cutCodePoints } from '$lib/utils/code-points';
 	import {
 		type SelectabilityContext,
 		type ToolSelectionMode,
@@ -654,13 +656,16 @@
 			content: profileForm.system_prompt_content
 		};
 
+		// The Name field already holds the server's limit; this backs it up so
+		// no save sends a name the server would store but not read back.
+		const name = cutCodePoints(profileForm.name, AGENT_NAME_MAX);
 		const derivedId = uniqueAgentId(
-			profileForm.name,
+			name,
 			profiles.map((p) => p.id)
 		);
 		const data: { id: string; name: string; description?: string; config: any } = {
 			id: editingProfile ? editingProfile.id : derivedId,
-			name: profileForm.name,
+			name,
 			description: profileForm.description || undefined,
 			config
 		};
