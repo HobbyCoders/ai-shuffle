@@ -241,29 +241,55 @@
 
 	async function confirm() {
 		if (!canAttach || !pickedItem) return;
+		// Fix everything this attach needs now. The sheet is not remounted per
+		// chat, so by the time an answer returns its props may name another one.
+		const id = sessionId;
+		const relayTo = owner;
+		const name = pickedItem.name;
+		const agent = agentName?.trim() || 'Your agent';
+		// Another worker runs the session: name the project by its shared
+		// identity, since this worker's project ids mean nothing there.
+		const target = relayTo
+			? { project_v2_id: pickedItem.projectV2Id ?? '' }
+			: { project_id: pickedItem.project };
+		// The page moved to another chat while waiting. The attach still happened
+		// on the server; that chat shows its project when it is opened again.
+		const left = () => sessionId !== id || activeSession.current.sessionId !== id;
 		attaching = true;
 		error = null;
 		try {
-			// Another worker runs the session: name the project by its shared
-			// identity, since this worker's project ids mean nothing there.
-			const target = owner
-				? { project_v2_id: pickedItem.projectV2Id ?? '' }
-				: { project_id: pickedItem.project };
-			const name = pickedItem.name;
-			const result = await attachProject(sessionId, target);
-			if (!owner) {
-				activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
-			} else if (await activeSession.waitForAttachedRow(sessionId, ATTACH_ROW_WAIT_MS) === 'pending') {
-				// The page holds a project only once this worker's own row does:
-				// the upload, file and Git routes here read that row.
-				notify(`${name} is attached on ${owner.name?.trim() || 'the worker that runs this chat'}. This page switches to it when it syncs.`);
+			const result = await attachProject(id, target);
+			if (left()) {
 				onClose();
 				return;
 			}
-			notify(`${name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
+			if (!relayTo) {
+				activeSession.applyAttachedProject(id, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
+			} else {
+				const outcome = await activeSession.waitForAttachedRow(id, ATTACH_ROW_WAIT_MS);
+				if (outcome === 'left' || left()) {
+					onClose();
+					return;
+				}
+				if (outcome === 'pending') {
+					// The page holds a project only once this worker's own row does:
+					// the upload, file and Git routes here read that row.
+					notify(`${name} is attached on ${relayTo.name?.trim() || 'the worker that runs this chat'}. This page switches to it when it syncs.`);
+					onClose();
+					return;
+				}
+			}
+			notify(`${name} attached. ${agent} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
-			error = getErrorMessage(e, 'Could not attach the project.');
+			const message = getErrorMessage(e, 'Could not attach the project.');
+			if (left()) {
+				// The sheet belongs to another chat now; say it outside it.
+				onClose();
+				notify(message, { severity: 'error' });
+			} else {
+				error = message;
+			}
 		} finally {
 			attaching = false;
 		}

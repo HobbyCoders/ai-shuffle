@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
 	applyAttachedProject: vi.fn(),
 	waitForAttachedRow: vi.fn(),
 	notify: vi.fn(),
+	current: { sessionId: 'sess-1' as string | null },
 }));
 
 vi.mock('$lib/stores/app-data.svelte', async () => {
@@ -28,7 +29,11 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 });
 vi.mock('$lib/api/sessions', () => ({ attachProject: mocks.attachProject }));
 vi.mock('$lib/stores/active-session', () => ({
-	activeSession: { applyAttachedProject: mocks.applyAttachedProject, waitForAttachedRow: mocks.waitForAttachedRow },
+	activeSession: {
+		get current() { return mocks.current; },
+		applyAttachedProject: mocks.applyAttachedProject,
+		waitForAttachedRow: mocks.waitForAttachedRow,
+	},
 }));
 vi.mock('$lib/stores/notifications', () => ({ notify: mocks.notify }));
 
@@ -50,6 +55,7 @@ beforeEach(() => {
 	mocks.applyAttachedProject.mockReset();
 	mocks.waitForAttachedRow.mockReset();
 	mocks.notify.mockReset();
+	mocks.current = { sessionId: 'sess-1' };
 });
 afterEach(() => cleanup());
 
@@ -212,6 +218,85 @@ describe('AttachProjectSheet', () => {
 		expect(onClose).not.toHaveBeenCalled();
 		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
 		expect(mocks.waitForAttachedRow).not.toHaveBeenCalled();
+	});
+
+	// The sheet is not remounted per chat: on the phone it survives Back to
+	// another no-project chat, with that chat's props.
+	const pending = <T,>() => {
+		let resolve: (v: T) => void = () => {};
+		let reject: (e: unknown) => void = () => {};
+		const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	};
+	const toLocalChat = async (rerender: (p: Record<string, unknown>) => Promise<void> | void) => {
+		mocks.current = { sessionId: 'sess-2' };
+		await rerender({ sessionId: 'sess-2', owner: null });
+	};
+
+	it('applies nothing to the chat the page moved to while a relayed attach was in flight', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		mocks.waitForAttachedRow.mockResolvedValue('adopted');
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.resolve({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		expect(mocks.waitForAttachedRow).not.toHaveBeenCalled();
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+
+	it('announces nothing when the page left the chat while waiting for its row', async () => {
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		mocks.waitForAttachedRow.mockResolvedValue('left');
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify).not.toHaveBeenCalled();
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+	});
+
+	it('applies a local attach to the chat it was made on, not the one the page moved to', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /ai-shuffle/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.resolve({ session_id: 'sess-1', project_id: 'proj-local', project_v2_id: 'v2-local', mode: 'code', permission_mode: 'default' });
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', { project_id: 'proj-local' });
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+
+	it('says a refusal that returns after the page left in a toast, not in the other chat’s sheet', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.reject(new Error('Worker B is offline. It must be online to attach a project.'));
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify).toHaveBeenCalledWith('Worker B is offline. It must be online to attach a project.', { severity: 'error' });
+		expect(screen.queryByText(/Worker B is offline/)).toBeNull();
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
 	});
 });
 
