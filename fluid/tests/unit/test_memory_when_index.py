@@ -469,13 +469,18 @@ def test_snapshot_shows_always_in_full_then_an_index_of_when_lines(tmp_path):
     assert always_part == f"- [{always.id} r1; session] {ROUTING}"
     assert f"- [{deploy.id} r1; session] {DEPLOY_WHEN}" in index_part
     assert DEPLOY not in section  # the index carries the when-line, not the text
-    assert f"- [{harvest.id} r1; tool] pytest lives in .venv/bin/python here. (unconfirmed " \
-        "harvest; confirm with Remember if still true)" in index_part
+    # A short tag per harvested line; the header explains it once.
+    assert f"- [{harvest.id} r1; tool] pytest lives in .venv/bin/python here. (unconfirmed)" \
+        in index_part
+    assert "confirm with Remember" not in index_part
+    assert head.count("A line tagged (unconfirmed) is an automatic harvest; confirm with "
+                      "Remember if still true.") == 1
     # Only owner-saved always memories get the authority heading.
     plain = SkillStore(tmp_path / "plain")
     plain.save_memory(DEPLOY, protected=True, when=DEPLOY_WHEN)
     assert ALWAYS_HEADING not in plain.render_memory_section()
     assert INDEX_HEADING not in plain.render_memory_section()
+    assert "(unconfirmed)" not in plain.render_memory_section()  # no harvest, no legend
 
 
 def test_index_order_is_task_match_then_project_then_usefulness(tmp_path):

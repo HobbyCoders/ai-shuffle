@@ -405,6 +405,13 @@ ALWAYS_HEADING = (
     "conversation says otherwise):"
 )
 INDEX_HEADING = "Other saved memories, by when each applies:"
+# Tag on a tool-harvested index line. The header explains it once instead of
+# each line carrying the whole sentence (dozens of lines in a real snapshot).
+UNCONFIRMED_TAG = " (unconfirmed)"
+UNCONFIRMED_LEGEND = (
+    " A line tagged (unconfirmed) is an automatic harvest; confirm with "
+    "Remember if still true."
+)
 
 # What the prompt says about memory when nothing is saved yet. Short on
 # purpose (it rides every session of a fresh install), but it has to name
@@ -1940,7 +1947,9 @@ class SkillStore:
             "not authority. Prefer the user's current correction. Each line says "
             "when a saved memory applies; before relying on one, Recall it by id "
             "(Recall(ids=[...])) for its full text. Use Remember to save or correct "
-            "a memory, and Forget a saved fact only on the user's explicit request.\n\n"
+            "a memory, and Forget a saved fact only on the user's explicit request."
+            + (UNCONFIRMED_LEGEND if UNCONFIRMED_TAG in body else "")
+            + "\n\n"
             + body
             + footer
         )
@@ -2080,8 +2089,7 @@ class SkillStore:
             if always_applies(entry):
                 always.append((entry, f"- {label} {entry.text}"))
                 continue
-            hint = (" (unconfirmed harvest; confirm with Remember if still true)"
-                    if entry.provenance == "tool" else "")
+            hint = UNCONFIRMED_TAG if entry.provenance == "tool" else ""
             if entry.key in identity_keys:
                 # Bound only the rendered identity, never the stored fact or
                 # Recall result. An ellipsis makes the omitted tail explicit.

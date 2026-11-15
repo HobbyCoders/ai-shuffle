@@ -23,11 +23,16 @@ from typing import Any
 import pytest
 
 from fluid.context.compiler import PromptInputs, compile_prompt
-from fluid.context.environment import environment_block, environment_note
+from fluid.context.environment import (
+    ENVIRONMENT_DETAILS_UNCHANGED,
+    environment_block,
+    environment_note,
+)
 from fluid.engine.native import NativeLoop
 from fluid.events import RespondQuestion
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
-from fluid.store.base import MemoryStore
+from fluid.messages import Message, Text
+from fluid.store.base import MemoryStore, SessionNode
 from fluid.tools import read_window
 from fluid.tools.builtins import register_builtins
 from fluid.tools.builtins.edit import handler as edit_handler
@@ -327,6 +332,66 @@ async def test_native_loop_reminds_the_volatile_environment_per_turn(git_repo: P
     loop = _loop(system=compiled.text, system_sections=compiled, ctx=ToolCtx(cwd=str(git_repo)))
     note = await loop._environment_reminder()
     assert note is not None and "Current time:" in note and "Current branch: main" in note
+
+
+async def test_environment_details_ride_only_the_turns_where_they_change(git_repo: Path) -> None:
+    """Recent commits and runtime facts are about 1.2k characters that used to
+    ride every turn; the date, branch and working tree still do."""
+    compiled = compile_prompt(PromptInputs(
+        base="b", cwd=str(git_repo), include_env=True,
+        include_global_instructions=False, include_project_instructions=False,
+        include_skills=False, include_agents=False, include_plugins=False,
+    ))
+    loop = _loop(system=compiled.text, system_sections=compiled, ctx=ToolCtx(cwd=str(git_repo)))
+    first = await loop._environment_reminder()
+    assert first is not None and "Recent commits:" in first and "Worker Python:" in first
+    second = await loop._environment_reminder()
+    assert second is not None and "Current time:" in second and "Current branch: main" in second
+    assert "Working tree: clean" in second
+    assert "Recent commits:" not in second and "Worker Python:" not in second
+    assert ENVIRONMENT_DETAILS_UNCHANGED in second
+    # A new commit changes the details: they come back once.
+    (git_repo / "b.txt").write_text("b\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=git_repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "second"], cwd=git_repo, check=True)
+    third = await loop._environment_reminder()
+    assert third is not None and "second" in third and "Worker Python:" in third
+    assert ENVIRONMENT_DETAILS_UNCHANGED in (await loop._environment_reminder() or "")
+    # A compaction may fold the last full note away: the next turn resends it.
+    loop._environment_details_sent = None  # what _emit_compaction does
+    assert "Worker Python:" in (await loop._environment_reminder() or "")
+
+
+async def test_resumed_engine_trusts_environment_details_only_in_the_view(git_repo: Path) -> None:
+    """A fresh engine (every park/wake in the app) does not resend details the
+    compacted view still shows, and does resend ones it does not."""
+    compiled = compile_prompt(PromptInputs(
+        base="b", cwd=str(git_repo), include_env=True,
+        include_global_instructions=False, include_project_instructions=False,
+        include_skills=False, include_agents=False, include_plugins=False,
+    ))
+    store = MemoryStore()
+    first = NativeLoop(provider=_IdleProvider(), store=store, model="m", system=compiled.text,
+                       system_sections=compiled, ctx=ToolCtx(cwd=str(git_repo)))
+    meta = await first._ensure_session()
+    note = await first._environment_reminder()
+    node = SessionNode(node_id="n1", parent_id=None,
+                       message=Message(role="user", content=[Text("hi"), Text(note)]))
+    await store.append(meta.session_id, node)
+    second = NativeLoop(provider=_IdleProvider(), store=store, model="m", system=compiled.text,
+                        system_sections=compiled, session_id=meta.session_id,
+                        ctx=ToolCtx(cwd=str(git_repo)))
+    await second._rehydrate_environment_details(meta.session_id, "n1")
+    again = await second._environment_reminder()
+    assert again is not None and ENVIRONMENT_DETAILS_UNCHANGED in again
+    # A view whose newest full note is stale (a commit since) gets the details.
+    third = NativeLoop(provider=_IdleProvider(), store=store, model="m", system=compiled.text,
+                       system_sections=compiled, session_id=meta.session_id,
+                       ctx=ToolCtx(cwd=str(git_repo)))
+    await third._rehydrate_environment_details(meta.session_id, "n1")
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "later"], cwd=git_repo, check=True)
+    fresh = await third._environment_reminder()
+    assert fresh is not None and "later" in fresh and "Worker Python:" in fresh
 
 
 async def test_no_environment_section_means_no_reminder(git_repo: Path) -> None:

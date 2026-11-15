@@ -271,27 +271,55 @@ def environment_block(
     return "\n".join(lines)
 
 
+ENVIRONMENT_NOTE_HEADER = (
+    "Environment as of this message (the system prompt's environment "
+    "section holds the facts that do not change):\n"
+)
+# Stands in for the recent commits and runtime facts on a turn where they
+# match the copy the model still holds.
+ENVIRONMENT_DETAILS_UNCHANGED = "Recent commits and runtime facts: unchanged since last shown."
+
+
+def environment_note_parts(
+    cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None,
+) -> tuple[list[str], str]:
+    """``(per-turn lines, details)`` of :func:`environment_note`.
+
+    The per-turn lines are the date, branch and working-tree counts. The
+    details (recent commits, then the runtime facts) change far less often,
+    so a caller that knows the model still holds them can leave them out.
+    """
+    cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+    lines = turn_time_lines(**(time_context or {}))
+    details: list[str] = []
+    git = git_context(cwd_str)
+    if git is not None:
+        head, sep, commits = git.partition("Recent commits:\n")
+        if head.strip():
+            lines.append(head.rstrip("\n"))
+        if sep:
+            details.append(sep + commits)
+    from fluid.context.runtime_facts import runtime_facts
+
+    details.append(runtime_facts(cwd_str))
+    return lines, "\n".join(details)
+
+
+def render_environment_note(lines: list[str], details: str | None) -> str:
+    """The note from its parts; ``details=None`` says they are unchanged."""
+    body = "\n".join([*lines, details if details is not None else ENVIRONMENT_DETAILS_UNCHANGED])
+    return f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}\n</system-reminder>"
+
+
 def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:
     """The volatile environment facts, as a system-reminder for one turn.
 
     The counterpart of ``environment_block(include_volatile=False)``: today's
     date and the git state (branch, working-tree counts, recent commits) as
-    they stand when the turn starts. Always renders — the date alone is worth
-    the line — and never raises.
+    they stand when the turn starts, plus the runtime facts. Always renders —
+    the date alone is worth the line — and never raises. The native engine
+    renders it from :func:`environment_note_parts` so the details ride only
+    the turns where they changed.
     """
-    cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
-    lines = turn_time_lines(**(time_context or {}))
-    git = git_context(cwd_str)
-    if git is not None:
-        lines.append(git)
-    from fluid.context.runtime_facts import runtime_facts
-
-    lines.append(runtime_facts(cwd_str))
-    body = "\n".join(lines)
-    return (
-        "<system-reminder>\n"
-        "Environment as of this message (the system prompt's environment "
-        "section holds the facts that do not change):\n"
-        f"{body}\n"
-        "</system-reminder>"
-    )
+    lines, details = environment_note_parts(cwd, time_context=time_context)
+    return render_environment_note(lines, details)

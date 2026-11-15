@@ -216,7 +216,11 @@ from fluid.providers.base import (
     ProviderRequest,
     WireState,
 )
-from fluid.context.environment import environment_note
+from fluid.context.environment import (
+    ENVIRONMENT_NOTE_HEADER,
+    environment_note_parts,
+    render_environment_note,
+)
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
@@ -1281,6 +1285,13 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._resume_anchor: str | None = None
         self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
+        # The environment note's details (recent commits, runtime facts) as
+        # the model last saw them in full; None sends them on the next turn.
+        # A compaction clears it, and a fresh engine seeds it from the
+        # compacted view (_rehydrate_environment_details).
+        self._environment_details_sent: str | None = None
+        self._environment_details_seen: str | None = None
+        self._environment_details_rehydrated = False
         # System text of the request in flight / the last completed one, for
         # the cache probe's system diff (see _cache_probe_fields).
         self._pending_system_text: str | None = None
@@ -2647,6 +2658,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._rehydrate_runtime_facts(sid, meta.head_node_id)
         await self._rehydrate_queued_peer_messages(sid)
         await self._rehydrate_compaction(sid)
+        await self._rehydrate_environment_details(sid, meta.head_node_id)
         await self._rehydrate_prefix_fingerprint(sid)
         await self._resolve_session_thinking(sid)
 
@@ -2774,6 +2786,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
+        if op.parent_node_id and op.parent_node_id != meta.head_node_id:
+            # A fork or rewind: the new path may not hold the last details.
+            self._environment_details_sent = None
         env_note = await self._environment_reminder()
         if env_note is not None:
             content.append(Text(env_note))
@@ -2792,6 +2807,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self._emit_profile_resolved(sid, turn_id)
         blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
         if blocked:
+            # The note never reached the model.
+            self._environment_details_sent = None
             return
         if hook_context:
             content.append(Text(hook_context))
@@ -3307,6 +3324,37 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._runtime_facts_sent = text[start:end if end >= 0 else None].strip("\n")
                 return
 
+    async def _rehydrate_environment_details(self, sid: str, head_node_id: str | None) -> None:
+        """Seed the environment details the model still holds (once).
+
+        Every park/wake is a fresh engine in the app, so without this the
+        details would ride most turns again. Only the compacted view counts:
+        the newest environment note in it that carries details (not the
+        "unchanged" line) is what the model sees, so a note folded into a
+        summary is sent again rather than trusted.
+        """
+        if self._environment_details_sent is not None or self._environment_details_rehydrated:
+            return
+        self._environment_details_rehydrated = True
+        if head_node_id is None:
+            return
+        try:
+            view = self._compactor.view(await self.store.load_path(sid, head_node_id))
+        except Exception:  # unknown history: the details are sent again
+            return
+        for message in reversed(view):
+            if message.role != "user":
+                continue
+            text = message.text()
+            start = text.rfind(ENVIRONMENT_NOTE_HEADER)
+            if start < 0:
+                continue
+            end = text.find("\n</", start)
+            note = text[start:end if end >= 0 else None]
+            if "\nWorker Python: " in note:
+                self._environment_details_seen = note
+                return
+
     async def _rehydrate_read_files(self, sid: str, head_node_id: str | None) -> None:
         """Seed the read-before-edit ledger from the stored transcript (once).
 
@@ -3354,6 +3402,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         Only a
         prompt compiled with an environment section gets the full note — a
         host that injects its own environment keeps its date and git lines.
+        The date, branch and working tree ride every turn; the note's details
+        (recent commits and runtime facts) only when they differ from the copy
+        the model holds (``_environment_details_sent``), else one line says
+        they are unchanged.
         The RUNTIME facts (which Python has pytest, which packages lack
         node_modules) are independent of that section: for any compiled
         prompt they ride their own small block on the first turn and
@@ -3373,7 +3425,17 @@ class NativeLoop(BackgroundLifecycleMixin):
             log.debug("environment note failed", exc_info=True)
             return None
         if has_env_section:
-            return note
+            lines, details = note
+            seen = self._environment_details_seen
+            if seen is not None:
+                # First turn of a fresh engine: the view already holds them.
+                self._environment_details_seen = None
+                if self._environment_details_sent is None and details in seen:
+                    self._environment_details_sent = details
+            if details == self._environment_details_sent:
+                return render_environment_note(lines, None)
+            self._environment_details_sent = details
+            return render_environment_note(lines, details)
         if self.system_sections is None:
             # A bare system string (no compiled sections): the host did not
             # go through compile_prompt and gets no reminders from fluid.
@@ -3383,7 +3445,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._runtime_facts_sent = facts
         return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>"
 
-    def _gather_environment(self, full: bool) -> tuple[str | None, str]:
+    def _gather_environment(self, full: bool) -> tuple[tuple[list[str], str] | None, str]:
         """Thread-side half of :meth:`_environment_reminder`: the full note
         when the prompt has an environment section, plus the runtime facts
         text on their own for the change check. Also harvests the facts into
@@ -3397,7 +3459,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             values = time_context(self.ctx.extra.get("time_turn_source", "wakeup")) if callable(time_context) else {}
         except Exception:
             values = {}
-        note = environment_note(self.ctx.cwd, time_context=values or {}) if full else None
+        note = environment_note_parts(self.ctx.cwd, time_context=values or {}) if full else None
         self._harvest_runtime_facts()
         return note, facts
 
@@ -3718,6 +3780,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         batch_measured_tokens: int = 0,
         node_id: str | None = None,
     ) -> None:
+        # A fold may hide the last full environment note: send it again.
+        self._environment_details_sent = None
         await self._emit(ContextCompaction(
             session_id=sid, turn_id=turn_id, node_id=node_id,
             tier=promo.tier, reason=promo.reason,
