@@ -13,7 +13,7 @@ The prompt text picks the behaviour:
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
 * ``plan`` — a plan update.
-* ``error`` — Antigravity's in-band error text.
+* ``error`` — Antigravity's in-band error text (``error-exit``: then exits).
 * ``die`` — exits mid-turn.
 * anything else — echoes the text.
 
@@ -331,9 +331,12 @@ class Agent:
                 {"content": "Write", "priority": "medium", "status": "in_progress"}]})
             await self.say(sid, "planned")
             return {"stopReason": "end_turn"}
-        if word == "error":
+        if word in ("error", "error-exit"):
             log_turn_error()
             await self.say(sid, "\n⚠ Agent execution terminated due to error.\n")
+            if word == "error-exit":
+                # Gone right after the turn ends, before the client reads it.
+                asyncio.get_running_loop().call_later(0.05, os._exit, 0)
             return {"stopReason": "end_turn"}
         if word == "die":
             await self.say(sid, "bye")

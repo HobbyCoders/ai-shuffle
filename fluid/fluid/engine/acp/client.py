@@ -20,6 +20,7 @@ import logging
 import os
 import signal
 import sys
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -162,6 +163,10 @@ class AcpConnection:
         self._closed = asyncio.Event()
         self.stderr_tail: list[str] = []
         self.info: AgentInfo | None = None
+        # The process this connection started, kept after it exits (``pid``
+        # is None then): a spec reading the agent's own log names it by this.
+        self.process_id: int | None = None
+        self.started_at: float | None = None
 
     # ─── lifecycle ──────────────────────────────────────────────────────
 
@@ -189,6 +194,8 @@ class AcpConnection:
             limit=STREAM_LINE_LIMIT,
             **kwargs,
         )
+        self.process_id = self._proc.pid
+        self.started_at = time.time()
         self._reader = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._read_stderr())
 

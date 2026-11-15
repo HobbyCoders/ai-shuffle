@@ -18,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 	xaiDevicePoll: vi.fn(),
 	refreshProviders: vi.fn(),
 	fetchProviderModels: vi.fn(),
-	storeProviders: [] as { id: string; models: { id: string; label: string }[] }[]
+	storeProviders: [] as { id: string; models: { id: string; label: string }[]; catalog_binding?: string }[]
 }));
 
 vi.mock('$lib/api/model-providers', () => ({
@@ -172,6 +172,28 @@ describe.each(KINDS)('$name sign-in', ({ kind, start, poll, type, base, name }) 
 			expect(mocks.fetchProviderModels).not.toHaveBeenCalled();
 			expect(mocks.updateModelProvider).not.toHaveBeenCalled();
 			expect(onDone).toHaveBeenCalled();
+		});
+
+		it("a reconnect seeds a fresh list and never the replaced account's (S2)", async () => {
+			mocks.storeProviders = [{ id: 'prov-9', models: [], catalog_binding: 'account-b' }];
+			mocks[poll].mockResolvedValue({ status: 'complete' });
+			// A fetch that answered for the account this reconnect replaced.
+			mocks.fetchProviderModels.mockResolvedValue({
+				source: 'live', binding: 'account-a', models: [{ id: 'old-1', label: 'Old' }]
+			});
+			render(DeviceCodeSetup, { kind, existingProviderId: 'prov-9', onDone: vi.fn() });
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(mocks.fetchProviderModels).toHaveBeenCalledWith('prov-9', { fresh: true });
+			expect(mocks.updateModelProvider).not.toHaveBeenCalled();
+			// The new account's own list is saved.
+			mocks.fetchProviderModels.mockResolvedValue({
+				source: 'live', binding: 'account-b', models: [{ id: 'new-1', label: 'New' }]
+			});
+			render(DeviceCodeSetup, { kind, existingProviderId: 'prov-9', onDone: vi.fn() });
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(mocks.updateModelProvider).toHaveBeenCalledWith('prov-9', { models: [{ id: 'new-1', label: 'New' }] });
 		});
 
 		it('a new subscription continues to model selection without saving the catalog', async () => {

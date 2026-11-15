@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -564,6 +566,65 @@ def test_turn_failure_keeps_the_hint_only_for_auth_or_quota(tmp_path: Path, logg
             f"E1115 errorreport.go:57] agent executor error: {logged}\n")
     assert spec.turn_failure("⚠ Agent execution terminated due to error.", pid=222) == expected
     assert spec.turn_failure("all fine", pid=222) is None
+
+
+async def test_an_exited_agent_quotes_its_own_log_not_another_chats(tmp_path: Path) -> None:
+    d = await _driver(tmp_path)
+    try:
+        # Another chat on the same row (same HOME) logged a newer error.
+        folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
+        folder.mkdir(parents=True, exist_ok=True)
+        rival = folder / "acp-server-20261115-120000-999999.log"
+        rival.write_text("E1115 errorreport.go:57] agent executor error: someone else's reason\n")
+        later = time.time() + 60
+        os.utime(rival, (later, later))
+        end = await d.turn("error-exit")
+        assert isinstance(end, ErrorEvent)
+        assert end.message == ("Antigravity ended the turn with an error: "
+                               "INVALID_ARGUMENT (code 400): request contains an invalid argument")
+    finally:
+        await d.close()
+
+
+def test_turn_failure_reads_no_log_without_the_process(tmp_path: Path) -> None:
+    spec = _spec(tmp_path)
+    folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "acp-server-20261115-120000-111.log").write_text(
+        "E1115 errorreport.go:57] agent executor error: another chat's reason\n")
+    text = "⚠ Agent execution terminated due to error."
+    assert spec.turn_failure(text) == "Antigravity ended the turn with an error and logged no reason."
+    # A recycled pid: the log predates this process, so it is not its reason.
+    assert spec.turn_failure(text, pid=111, since=time.time() + 60) == (
+        "Antigravity ended the turn with an error and logged no reason.")
+    assert spec.turn_failure(text, pid=111, since=time.time() - 60) == (
+        "Antigravity ended the turn with an error: another chat's reason")
+
+
+_KEY = "AIzaSyFAKE0123456789abcdefghijklmnopqrstu"
+
+
+@pytest.mark.parametrize("logged", [
+    f"GET https://generativelanguage.googleapis.com/v1beta/models?key={_KEY}&alt=sse: 400 Bad Request",
+    f'INVALID_ARGUMENT (code 400): {{"apiKey": "{_KEY}", "model": "x"}}',
+    "request failed: Authorization: Bearer ya29.a0FAKEaccess-token_value.more headers sent",
+    'token refresh failed: {"access_token": "ya29.FAKEtoken", "refresh_token": "1//0FAKErefreshTOKENvalue"}',
+    "x-goog-api-key: " + _KEY + " rejected",
+    "PERMISSION_DENIED (code 403): " + "x" * 360 + " key " + _KEY,  # the cut falls inside the key
+])
+def test_a_logged_reason_never_shows_a_secret(tmp_path: Path, logged: str) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "acp-server-20261115-120000-333.log").write_text(
+        f"E1115 errorreport.go:57] agent executor error: {logged}\n")
+    message = spec.turn_failure("⚠ Agent execution terminated due to error.", pid=333) or ""
+    assert message.startswith("Antigravity ended the turn")
+    for secret in (_KEY, "AIza", "ya29.", "1//0FAKE", "FAKEtoken"):
+        assert secret not in message
+    assert "[re" in message  # the cut may fall inside the marker, never inside the key
+    # stderr and RPC errors go through the same filter.
+    assert _KEY not in spec.redact(f"stderr: url?key={_KEY}\nnext line {_KEY}")
 
 
 async def test_set_model_mid_session_and_images(tmp_path: Path) -> None:

@@ -181,6 +181,14 @@
 				sharedFetchedAt = res.fetched_at ?? sharedFetchedAt;
 				// Discovery can backfill metadata and bump the provider revision.
 				await providers.refreshProviders();
+				// The credentials changed while that fetch ran (a joined fetch from
+				// before a reconnect): ask once more, for the new ones.
+				if (mode !== 'setup' && res.binding && current?.catalog_binding && res.binding !== current.catalog_binding) {
+					res = await providers.fetchProviderModels(id);
+					liveCatalog = res;
+					sharedFetchedAt = res.fetched_at ?? sharedFetchedAt;
+					await providers.refreshProviders();
+				}
 				// Keep the full live result; the shared copy may omit optional metadata.
 				if (mode === 'setup' && current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
 			}

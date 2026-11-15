@@ -261,7 +261,12 @@ export class DeviceEnrollment {
 			if (row && row.models.length > 0) return;
 		}
 		try {
-			const fetched = await providers.fetchProviderModels(id);
+			// Fresh, never a fetch still running for the account this replaced.
+			const fetched = await providers.fetchProviderModels(id, { fresh: true });
+			await providers.refreshProviders();
+			const binding = providers.current?.providers?.find((p) => p.id === id)?.catalog_binding;
+			// Models another account listed are not this one's.
+			if (fetched.binding && binding && fetched.binding !== binding) return;
 			await updateModelProvider(id, { models: fetched.models ?? [] });
 		} catch {
 			// Best-effort; the row is enrolled regardless.

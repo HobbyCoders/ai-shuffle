@@ -186,10 +186,16 @@ class AcpAgentSpec:
             return mode
         return _ACP_NORMAL_MODE if _ACP_NORMAL_MODE in available else None
 
-    def turn_failure(self, text: str, pid: int | None = None) -> str | None:
+    def turn_failure(self, text: str, pid: int | None = None, since: float | None = None) -> str | None:
         """An error the agent reported as message text instead of an RPC error.
-        ``pid``: the agent process, for a spec that reads its own log."""
+        ``pid`` and ``since``: the agent process that ran the turn and when it
+        started, for a spec that reads that process's own log."""
         return None
+
+    def redact(self, text: str) -> str:
+        """``text`` (agent output shown to the user) with this spec's secrets
+        removed."""
+        return text
 
     def auth_message(self, exc: AcpError) -> str:
         return f"The agent is not signed in ({exc.message})."
@@ -860,7 +866,8 @@ class AcpLoop:
 
     def _failure_event(self, sid: str, turn_id: str, exc: AcpError, *, prefix: str = "", **extra: Any) -> ErrorEvent:
         if not exc.auth_required:
-            return ErrorEvent(session_id=sid, turn_id=turn_id, message=f"{prefix}{exc.message}", **extra)
+            return ErrorEvent(session_id=sid, turn_id=turn_id, message=f"{prefix}{self.spec.redact(exc.message)}",
+                              **extra)
         # The sign-in guidance replaces the agent's bare "Authentication
         # required". No HTTP status: nothing here was an HTTP call, and a
         # host would prefix one ("provider returned HTTP 401: ...").
@@ -1000,10 +1007,13 @@ class AcpLoop:
             await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                          usage=usage, cost_usd=cost))
             return
-        reported = self.spec.turn_failure(mapper.text, pid=conn.pid)
+        # The process that ran this turn, even when it has already exited.
+        reported = self.spec.turn_failure(mapper.text, pid=getattr(conn, "process_id", None),
+                                          since=getattr(conn, "started_at", None))
         if reported:
+            stderr = self.spec.redact(" | ".join(conn.stderr_tail[-3:])) or None
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=reported,
-                                        provider_message=" | ".join(conn.stderr_tail[-3:]) or None,
+                                        provider_message=stderr,
                                         usage=usage, cost_usd=cost))
             return
         if stop == "refusal":

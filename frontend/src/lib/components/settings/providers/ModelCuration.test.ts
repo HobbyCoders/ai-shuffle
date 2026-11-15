@@ -193,6 +193,37 @@ describe('while the list is loading', () => {
 		expect(screen.getByTestId('curation-fetching')).toBeTruthy();
 	});
 
+	it('keeps the unticked row when the saved row comes back mid-fetch (#1650)', async () => {
+		const view = render(ModelCuration, { row: { ...agent(), revision: 'r1' } });
+		await screen.findByTestId('curation-fetching');
+		await toggle('gemini-3.8-flash');
+		// The store echoes the saved row (new revision, the model gone) before the list arrives.
+		await view.rerender({ row: { ...agent([entry('gemini-4-argon')]), revision: 'r2' } });
+		const flash = await screen.findByRole('checkbox', { name: 'gemini-3.8-flash' }) as HTMLInputElement;
+		expect(flash.checked).toBe(false);
+		expect((screen.getByRole('checkbox', { name: 'gemini-4-argon' }) as HTMLInputElement).checked).toBe(true);
+		finish({ source: 'agent', binding: 'ag-binding', models: seeded });
+		await waitFor(() => expect(screen.queryByTestId('curation-fetching')).toBeNull());
+		expect((screen.getByRole('checkbox', { name: 'gemini-3.8-flash' }) as HTMLInputElement).checked).toBe(false);
+	});
+
+	it('asks again when the key changed while the list was loading (S2)', async () => {
+		const view = render(ModelCuration, { row: agent() });
+		await screen.findByTestId('curation-fetching');
+		// Reconnected to another account while the old fetch runs: its models go.
+		await view.rerender({ row: { ...agent([entry('gemini-5-new')]), catalog_binding: 'ag-binding-b' } });
+		await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull());
+		const fetches = () => mocks.post.mock.calls.filter(([p]) => String(p).endsWith('/fetch-models')).length;
+		const before = fetches();
+		finish({ source: 'agent', binding: 'ag-binding', models: seeded });
+		// The old account's answer is not shown; the new account is asked.
+		await waitFor(() => expect(fetches()).toBeGreaterThan(before));
+		expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull();
+		finish({ source: 'agent', binding: 'ag-binding-b', models: [entry('gemini-5-new'), entry('gemini-5-other')] });
+		expect(await screen.findByRole('checkbox', { name: 'gemini-5-other' })).toBeTruthy();
+		expect((screen.getByRole('checkbox', { name: 'gemini-5-new' }) as HTMLInputElement).checked).toBe(true);
+	});
+
 	it('shows a running fetch, still after leaving and coming back, and what it ended with (#1649)', async () => {
 		const first = render(ModelCuration, { row: agent() });
 		expect((await screen.findByTestId('curation-fetching')).textContent).toBe('Fetching list');

@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
 	updateModelProvider: vi.fn(),
 	activateModelProvider: vi.fn(),
 	fetchProviderModels: vi.fn(),
+	deleteModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
@@ -32,7 +33,8 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		listModelProviders: mocks.listModelProviders,
 		updateModelProvider: mocks.updateModelProvider,
 		activateModelProvider: mocks.activateModelProvider,
-		fetchProviderModels: mocks.fetchProviderModels
+		fetchProviderModels: mocks.fetchProviderModels,
+		deleteModelProvider: mocks.deleteModelProvider
 	};
 });
 
@@ -350,5 +352,42 @@ describe('fetchProviderModels', () => {
 		await expect(providers.fetchProviderModels('p1')).rejects.toThrow('offline');
 		expect(providers.modelFetchRunning('p1')).toBe(false);
 		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+	});
+
+	it('never joins a fetch started for credentials since replaced (S2)', async () => {
+		const finishes: ((v: unknown) => void)[] = [];
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => finishes.push(r)));
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', catalog_binding: 'key-a' })] });
+		await providers.refreshProviders();
+		const underA = providers.fetchProviderModels('p1');
+		// The key changes while that fetch runs.
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', catalog_binding: 'key-b' })] });
+		await providers.refreshProviders();
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		const underB = providers.fetchProviderModels('p1');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		// A's late answer does not end B's fetch.
+		finishes[0]({ binding: 'key-a', models: [] });
+		await underA;
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		// A fresh request (a reconnect) never joins either.
+		void providers.fetchProviderModels('p1', { fresh: true });
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(3);
+		finishes[1]({ binding: 'key-b', models: [] });
+		finishes[2]({ binding: 'key-b', models: [] });
+		await underB;
+	});
+
+	it('forgets a removed row\'s running fetch', async () => {
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise(() => {}));
+		mocks.deleteModelProvider.mockResolvedValue(undefined);
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		void providers.fetchProviderModels('gone');
+		expect(providers.modelFetchRunning('gone')).toBe(true);
+		await providers.deleteProvider('gone');
+		expect(providers.modelFetchRunning('gone')).toBe(false);
 	});
 });

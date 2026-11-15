@@ -67,6 +67,23 @@ _REASON_CHARS = 400
 _AUTH_REASON = re.compile(r"UNAUTHENTICATED|PERMISSION_DENIED|API[_ ]?key|\bcode 40[13]\b|"
                           r"invalid_grant|not (?:signed|logged) in|credential", re.I)
 _QUOTA_REASON = re.compile(r"RESOURCE_EXHAUSTED|\bcode 429\b|quota|rate limit", re.I)
+# Secrets an agent error can echo (a request URL, headers, a token response):
+# removed before anything it logged or printed reaches a chat.
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS = (
+    # Authorization / x-goog-api-key headers, whatever the scheme.
+    re.compile(r"(?i)(\b(?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token)\s+)?)"
+               r"[^\s\"',;}]+"),
+    re.compile(r"(?i)(\bx-goog-api-key[\"']?\s*[:=]\s*[\"']?)[^\s\"',;}]+"),
+    re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+"),
+    # key=, token=, access_token= ... in a query string, JSON body or header.
+    re.compile(r"(?i)(\b(?:api[_-]?key|key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|"
+               r"client[_-]?secret|secret|password)[\"']?\s*[:=]\s*[\"']?)[^\s\"'&,;}]+"),
+    # Google's own shapes: API keys, OAuth access and refresh tokens.
+    re.compile(r"()\bAIza[0-9A-Za-z_-]{20,}"),
+    re.compile(r"()\bya29\.[0-9A-Za-z._-]+"),
+    re.compile(r"()\b1//[0-9A-Za-z._-]{10,}"),
+)
 # Environment the agent may inherit from the host; everything else (API keys,
 # database URLs, tokens) is left out.
 _PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
@@ -270,10 +287,22 @@ class AntigravitySpec(AcpAgentSpec):
                        models: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
         return offered_models(options, models) or None
 
-    def turn_failure(self, text: str, pid: int | None = None) -> str | None:
+    def redact(self, text: str) -> str:
+        """``text`` without this row's API key, credential headers, tokens and
+        ``key=``/``token=`` values."""
+        if not text:
+            return text
+        key = (self.env or {}).get("GEMINI_API_KEY")
+        if key:
+            text = text.replace(key, _REDACTED)
+        for pattern in _SECRET_PATTERNS:
+            text = pattern.sub(lambda m: m.group(1) + _REDACTED, text)
+        return text
+
+    def turn_failure(self, text: str, pid: int | None = None, since: float | None = None) -> str | None:
         if _ERROR_TEXT not in (text or ""):
             return None
-        reason = self.logged_reason(pid)
+        reason = self.logged_reason(pid, since)
         if reason is None:
             return "Antigravity ended the turn with an error and logged no reason."
         if _AUTH_REASON.search(reason):
@@ -282,18 +311,22 @@ class AntigravitySpec(AcpAgentSpec):
             return f"Antigravity ended the turn: {reason}. Check the provider's quota."
         return f"Antigravity ended the turn with an error: {reason}"
 
-    def logged_reason(self, pid: int | None = None) -> str | None:
-        """The last ``agent executor error`` the agent logged: its own log
-        (named with ``pid``); with no pid (the agent already exited), the
-        newest one. Another process's log (another chat on the same row) is
-        never read for a live agent. None when there is no such line."""
+    def logged_reason(self, pid: int | None = None, since: float | None = None) -> str | None:
+        """The last ``agent executor error`` that process ``pid`` logged, in
+        its own log (named with the pid), redacted. Only a log written since
+        ``since`` (when the process started) counts, so a recycled pid's old
+        log is not read. With no pid nothing is read: another chat sharing
+        this row's HOME may have logged the newest error. None when there is
+        no such line."""
         home = (self.env or {}).get("HOME")
-        if not home:
+        if not home or not pid:
             return None
         folder = os.path.join(home, *_LOG_DIR)
-        logs = glob.glob(os.path.join(glob.escape(folder), "acp-server-*.log"))
-        candidates = [path for path in logs if path.endswith(f"-{pid}.log")] if pid else logs
+        candidates = glob.glob(os.path.join(glob.escape(folder), f"acp-server-*-{int(pid)}.log"))
         try:
+            if since is not None:
+                # Whole-second slack: some filesystems store coarse mtimes.
+                candidates = [path for path in candidates if os.path.getmtime(path) >= since - 2]
             path = max(candidates, key=os.path.getmtime) if candidates else None
             if path is None:
                 return None
@@ -305,7 +338,8 @@ class AntigravitySpec(AcpAgentSpec):
         for line in reversed(lines):
             match = _EXECUTOR_ERROR.search(line)
             if match and match.group(1):
-                reason = match.group(1).rstrip(". ")
+                # Redacted before it is cut, so no part of a secret survives.
+                reason = self.redact(match.group(1)).rstrip(". ")
                 return reason if len(reason) <= _REASON_CHARS else reason[:_REASON_CHARS - 1] + "…"
         return None
 
