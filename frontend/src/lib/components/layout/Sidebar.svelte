@@ -642,25 +642,31 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
-	// A project's place is the newest START among its chats in Needs you and
-	// Active. Activity in a chat never moves its project: only a new chat does.
-	// Two things must not move it either, so the place is a high-water mark kept
-	// for as long as this list is mounted, and read from those two lanes alone:
+	// A project's place is the newest START among its chats in Needs you, Active
+	// and Snoozed. Activity in a chat never moves its project: only a chat
+	// arriving in those lanes does (a new chat, or one brought back from Settled).
+	// None of these may move it, which is why the place is a high-water mark kept
+	// for as long as this list is mounted:
 	// - its newest chat leaving the lane (settled, or archived and not yet gone).
 	//   Ranking on what is left made a project swap places, moving a screenful of
 	//   rows, and swap back if the server then refused the change;
-	// - a page of Settled history arriving. Active is loaded whole, Settled comes
-	//   in pages by last activity, so an older page can hold a chat started after
-	//   everything loaded so far.
-	const projectStartSeen = new Map<string, number>();
-	const projectStart = $derived.by(() => {
-		for (const s of visibleSessions) {
-			if (!rowActive(s)) continue;
+	// - a snoozed chat waking: Snoozed is loaded whole, so it already counts;
+	// - a page of Settled history arriving. Settled comes in pages by last
+	//   activity, so an older page can hold a chat started after everything
+	//   loaded so far. Settled rows are never read here.
+	// It is recorded in an effect, from every listed chat, so a chat that came and
+	// went while a filter hid its project, or its lane was closed, still counted.
+	let projectStart = $state.raw(new Map<string, number>());
+	$effect.pre(() => {
+		const seen = untrack(() => projectStart);
+		let next: Map<string, number> | null = null;
+		for (const s of sidebarSessions) {
+			if (!s.is_active && snoozeUntilMs(s) === null) continue;
 			const key = projectKey(s);
 			const started = sessionStartedAt(s);
-			if (started > (projectStartSeen.get(key) ?? -Infinity)) projectStartSeen.set(key, started);
+			if (started > ((next ?? seen).get(key) ?? -Infinity)) (next ??= new Map(seen)).set(key, started);
 		}
-		return new Map(projectStartSeen);
+		if (next) projectStart = next;
 	});
 	// Inside a lane, rows sit under their project when the lane spans more than
 	// one, so no row has to repeat it. Rows keep the lane's order inside it.

@@ -1137,6 +1137,54 @@ describe('Sidebar rows keep their place', () => {
 		expect(activeIds()).toEqual(['late', 'early']);
 	});
 
+	it('does not move the other Active rows when a snoozed chat wakes', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const snoozed = session('a10', 'Chat a10', 'visible-project', false, false, {
+			created_at: started(10),
+			updated_at: started(10),
+			snoozed_until: new Date(Date.now() + 3_600_000).toISOString(),
+		});
+		const rows = [chat('a08', 'visible-project', 8), chat('b09', 'other-project', 9, { project_name: 'Other Project' })];
+		mocks.sessions.set([...rows, snoozed]);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['a08', 'b09']);
+
+		mocks.sessions.set([...rows, { ...snoozed, is_active: true, snoozed_until: null }]);
+		await tick();
+		expect(activeIds()).toEqual(['a10', 'a08', 'b09']);
+	});
+
+	it('counts a chat that started and settled while a filter hid the other project', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [chat('a08', 'visible-project', 8), chat('b09', 'other-project', 9, { project_name: 'Other Project' })];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['b09', 'a08']);
+
+		// With one project listed the lane has no groups to order.
+		await openFilter();
+		await fireEvent.click(filterOption('Visible Project'));
+		const a10 = chat('a10', 'visible-project', 10);
+		mocks.sessions.set([...rows, a10]);
+		await tick();
+		expect(activeIds()).toEqual(['a10', 'a08']);
+		mocks.sessions.set([...rows, { ...a10, is_active: false }]);
+		await tick();
+		expect(activeIds()).toEqual(['a08']);
+
+		// Unfiltered, the new chat would have lifted its project and settling it
+		// would have left the project there. The filter changes neither.
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
+		await tick();
+		expect(activeIds()).toEqual(['a08', 'b09']);
+	});
+
 	it('keeps two projects started at the same moment in place when a row leaves the lane', async () => {
 		mocks.projects.set([
 			{ id: 'visible-project', name: 'Visible Project' },
