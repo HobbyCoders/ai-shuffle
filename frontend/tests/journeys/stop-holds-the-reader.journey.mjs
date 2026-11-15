@@ -28,6 +28,8 @@ const REPLY_LINE_PX = 30;
 
 /** Measured on a slow phone: at most 0.017 when the follow lands in the same task, 0.073 to 0.095 when it does not. */
 const BUBBLE_SHIFT_TOTAL = 0.05;
+/** Still-composer frames watched before Stop: more than the case needs to judge (6). */
+const STILL_FRAMES_BEFORE_STOP = 10;
 
 /**
  * Something in the transcript changes height long after the turn is over, as a
@@ -294,6 +296,19 @@ await runJourney({
 					await typeAndSend(page, `queued ${text}`);
 					await page.locator('.pending-messages [role="article"]').filter({ hasText: text }).waitFor({ timeout: 5000 });
 				}
+				// Watch the bubbles with a still composer for a while before Stop.
+				// On a fast runner the sends and the Stop can all land within ten
+				// frames, most of them with the composer still resizing from the
+				// last send, and the bounce check below then has too little to judge.
+				await page.waitForFunction((needed) => {
+					const frames = [...window.__stopFrames.frames].sort((a, b) => a.order - b.order);
+					const held = frames.filter((f) => f.messages[0].bubbles === 1);
+					let still = 0;
+					for (let i = 2; i < held.length; i++) {
+						if (Math.abs(held[i - 2].composerTop - held[i - 1].composerTop) < 1 && Math.abs(held[i - 1].composerTop - held[i].composerTop) < 1) still++;
+					}
+					return still >= needed;
+				}, STILL_FRAMES_BEFORE_STOP, { timeout: 10_000 });
 				await mark('stop');
 				await stopButton(page).click({ timeout: 2000 });
 				await waitChat(page, { streaming: 'false' }, { timeout: 60_000 });
