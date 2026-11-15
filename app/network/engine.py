@@ -2026,19 +2026,17 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         _apply_membership(cursor, ctx, plaintext)
 
     # Keep the local loser (a concurrent local edit) for the conflicts list.
-    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
-        local_row = _read_row(cursor, coll, env.record_id)
-        if local_row is not None:
-            try:
-                local_plain = serialize_row(coll, local_row, cursor=cursor)
-            except ApplyError:
-                local_plain = None
-            incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
-            if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
-                store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
-                                   losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
-                                   losing_record=redact_secrets(local_plain), winning_clock=env.clock,
-                                   winning_device_id=env.origin_device_id)
+    # The apply transaction signed unscanned local changes before observing
+    # this batch's clock (_publish_unscanned); one still unsigned (outbox
+    # held) is this worker's loser too (#1605).
+    unpublished = _unscanned_change(cursor, ctx, coll, env.record_id, publish=False, existing=existing)
+    if unpublished or (existing is not None and existing["origin_device_id"] != env.origin_device_id
+                       and not bool(existing["deleted"])):
+        conflict = _local_loser(cursor, coll, env.record_id, existing, ctx=ctx, unpublished=unpublished,
+                                incoming=plaintext if env.op == OP_UPSERT else None,
+                                winning_clock=env.clock, winning_device_id=env.origin_device_id)
+        if conflict:
+            store.add_conflict(cursor, **conflict)
 
     refresh_billing = False
     if env.op == OP_DELETE:
@@ -2294,6 +2292,118 @@ def _observe_clock(cursor, clock: int) -> None:
     store.observe_clock(cursor, clock)
 
 
+_READ = object()
+
+
+def _unscanned_change(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str, *,
+                      publish: bool, existing: Any = _READ) -> bool:
+    """Whether this worker holds a change of the record its scanner has not published (#1605).
+
+    The scanner publishes a shared row whose hash differs from its sync
+    record, and retracts a live record whose row is gone. With ``publish``,
+    sign that change now, as the scanner would; True then means it could not
+    be signed yet (outbox held, write key not yet safe). Owner-published
+    collections (the session catalog) and file-backed publishers are not
+    scanned and keep their own rules; ``session_active`` keeps its
+    ``local_pending`` rule. ``existing`` is the record's sync record when the
+    caller already read it.
+    """
+    if (ctx.bootstrap_state != BOOTSTRAP_READY or coll.name == "session_active"
+            or coll.name not in policy.SCANNED_COLLECTIONS
+            or (coll.name == "presence" and record_id != ctx.device_id)):
+        return False
+    if existing is _READ:
+        existing = store.get_record(cursor, coll.name, record_id)
+    live = existing is not None and not bool(existing["deleted"])
+    local = _read_row(cursor, coll, record_id)
+    if local is None:
+        if not live:
+            return False
+    else:
+        try:
+            plaintext = serialize_row(coll, local, cursor=cursor)
+        except ApplyError:
+            return False  # the scanner skips an unreadable row too
+        if plaintext is None or (live and existing["content_hash"] == content_hash(coll, plaintext)):
+            return False
+    if not publish:
+        return True
+    try:
+        return record(cursor, coll.name, record_id, local, ctx=ctx) is None
+    except ApplyError:
+        return True
+
+
+def _publish_unscanned(cursor, ctx: NetworkContext, items: Iterable[Tuple[Any, Any]], *, locked: bool) -> bool:
+    """Sign unscanned local changes of the records a batch is about to apply (#1605).
+
+    Call at the start of the apply transaction: after the state lock, before
+    the batch's clock is observed. A peer version applied first would
+    overwrite such a change unseen, and the next scan would find nothing to
+    publish. Signed here, the change gets the clock it would have had if the
+    scanner had run just before the batch, and ordinary last-writer-wins
+    decides between it and the peer version; the loser is kept as a conflict
+    on every worker. ``items`` are (collection, record_id) pairs; anything
+    malformed is left to the apply to refuse.
+
+    The rows are read under the state lock, so a concurrent apply of the same
+    record cannot be signed over with a stale local value. Unless ``locked``
+    says the caller holds it, take it here when any item is in a scanned
+    collection; return whether it is held now. A batch with nothing scanned
+    (transcript events) costs no extra round trip.
+    """
+    if ctx.bootstrap_state != BOOTSTRAP_READY:
+        return locked
+    wanted = sorted({(name, rid) for name, rid in items
+                     if isinstance(name, str) and isinstance(rid, str) and name in policy.SCANNED_COLLECTIONS})
+    if not wanted:
+        return locked
+    if not locked:
+        store.lock_state(cursor)
+    for name, record_id in wanted:
+        coll = policy.collection(name)
+        try:
+            _local_keys(coll, record_id)
+        except (ValueError, KeyError, TypeError):
+            continue
+        _unscanned_change(cursor, ctx, coll, record_id, publish=True)
+    return True
+
+
+def _envelope_records(chunk: Iterable[Any]) -> List[Tuple[Any, Any]]:
+    return [(data.get("collection"), data.get("record_id")) for data in chunk if isinstance(data, Mapping)]
+
+
+def _local_loser(cursor, coll: policy.Collection, record_id: str, existing: Optional[Mapping[str, Any]], *,
+                 ctx: NetworkContext, unpublished: bool, incoming: Optional[Mapping[str, Any]],
+                 winning_clock: int, winning_device_id: str) -> Optional[dict]:
+    """The conflict entry for the local version a winning peer version replaces, or None.
+
+    ``unpublished`` names an unscanned local change that could not be signed: it is
+    this worker's, and a missing row is its deletion. Otherwise the local row
+    is the version ``existing`` describes. Nothing when both say the same.
+    """
+    local_row = _read_row(cursor, coll, record_id)
+    incoming_hash = content_hash(coll, incoming) if incoming is not None else ""
+    if local_row is None:
+        if not unpublished or incoming is None:
+            return None
+        losing_record: Any = {"_deleted": True}  # an unscanned local delete this upsert brings back
+    else:
+        try:
+            local_plain = serialize_row(coll, local_row, cursor=cursor)
+        except ApplyError:
+            return None
+        if local_plain is None or content_hash(coll, local_plain) == incoming_hash:
+            return None
+        losing_record = redact_secrets(local_plain)
+    return dict(collection=coll.name, record_id=record_id,
+                losing_clock=int(existing["clock"]) if existing is not None else 0,
+                losing_device_id=ctx.device_id if unpublished else existing["origin_device_id"],
+                losing_record=losing_record, winning_clock=int(winning_clock),
+                winning_device_id=winning_device_id)
+
+
 def _count_outcome(result: ApplyResult, outcome: str) -> None:
     if outcome == "applied":
         result.applied += 1
@@ -2389,6 +2499,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+            _publish_unscanned(cursor, ctx, _envelope_records(window), locked=True)  # #1605
             _lock_deleted_session_handoffs(cursor, window)
             _lock_deleted_connectors(cursor, window)
             _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
@@ -2474,6 +2585,7 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
             # the frontier. Otherwise a slow single-op apply can replay an old
             # owner-ordered row after a concurrent batch has advanced it.
             store.lock_state(cursor)
+            _publish_unscanned(cursor, ctx, _envelope_records([data]), locked=True)  # #1605
             outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
     except TransientApplyError as exc:
         result.retry_operation(data, str(exc))
@@ -2712,9 +2824,11 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
         with get_db() as conn:
             cursor = conn.cursor()
             savepoints = type(cursor).__module__.startswith("psycopg2")
+            # Before the chunk's clock: see _publish_unscanned (#1605).
+            locked = _publish_unscanned(cursor, ctx, _envelope_records(chunk), locked=False)
             if seen:
                 store.observe_clock(cursor, seen)
-            else:
+            elif not locked:
                 store.lock_state(cursor)
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
@@ -3174,6 +3288,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     touched: List[Tuple[str, str, str]] = []
     if not items:
         return 0, touched
+    # Before the page's clock (see _publish_unscanned, #1605).
+    _publish_unscanned(cursor, ctx, ((coll.name, item.get("record_id")) for item in items), locked=False)
     store.observe_clock(cursor, max(int(item["clock"]) for item in items))
     ids = [item["record_id"] for item in items]
     if coll.name == "sessions":
@@ -3239,6 +3355,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
             continue
+        if _unscanned_change(cursor, ctx, coll, item["record_id"], publish=False, existing=existing):
+            # The item replaces an unscanned local change that could not be
+            # signed ahead of it (see above): that change is this worker's loser.
+            conflict = _local_loser(cursor, coll, item["record_id"], existing, ctx=ctx, unpublished=True,
+                                    incoming=None if item["deleted"] else item["record"],
+                                    winning_clock=int(item["clock"]), winning_device_id=item["origin_device_id"])
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
             if isinstance(record_data, dict):
