@@ -369,10 +369,16 @@ async def test_a_relayed_attach_works_by_shared_id_for_every_mirrored_row(
     that shares the owner's id, or none), the relay answers with the shared id
     alone, and what the page then calls by that id works: the session upload,
     the shared-id listing and Git. Nothing lands in a project folder here."""
+    import app.core.config as config
     from app.core import upload_transfer
     from app.db import projects_v2
     from app.network.catalog import prepare_session_mirror
 
+    # The session upload below stages under the workspace: keep it in the
+    # test's own folder, which exists, and out of the machine's real one.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", workspace)
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
     db.update_project("attach-proj", path=str(unrelated))
