@@ -52,34 +52,6 @@ def test_mirrored_session_drops_references_this_worker_cannot_see(workers):
             assert dropped["profile_id"] == "default"
 
 
-def test_mirrored_session_project_follows_the_shared_identity_not_the_legacy_id(workers):
-    """The owner's legacy ``app`` names an unrelated project here: the mirror
-    takes this worker's checkout of the shared project, else none."""
-    from app.core.config import settings
-
-    a = workers("a")
-    with a.active():
-        me = settings.effective_instance_id
-        a.sql("INSERT INTO projects_v2 (id, origin, name, settings) VALUES "
-              "('pv-theirs', 'git:theirs', 'Theirs', '{}'), ('pv-gone', 'git:gone', 'Gone', '{}')")
-        a.sql("INSERT INTO projects (id, name, path, instance_id, link_group_id) VALUES "
-              "('app', 'Unrelated', '/w/app', ?, 'git:mine'), "
-              "('theirs-here', 'Theirs', '/w/theirs', ?, 'git:theirs')", (me, me))
-        with get_db() as conn:
-            cursor = conn.cursor()
-
-            def mirrored(project_id, project_v2_id):
-                return catalog.prepare_session_mirror(cursor, {
-                    "id": "s1", "project_id": project_id, "project_v2_id": project_v2_id})["project_id"]
-
-            assert mirrored("app", "pv-theirs") == "theirs-here"
-            assert mirrored("theirs-here", "pv-theirs") == "theirs-here"
-            assert mirrored("app", "pv-gone") is None
-            # Not replicated here yet: the row's existence is all there is to go on.
-            assert mirrored("app", "pv-unknown") == "app"
-            assert mirrored("nowhere", "pv-unknown") is None
-
-
 def test_event_counter_follows_a_restarted_owner_stream(workers):
     a = workers("a")
     with a.active():

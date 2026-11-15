@@ -471,38 +471,6 @@ def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[
     return bool(owner) and owner == origin_device_id
 
 
-def _mirror_project_id(cursor, project_id: Optional[str], project_v2_id: Optional[str]) -> Optional[str]:
-    """This worker's own project row for a mirrored chat, else None.
-
-    Legacy project ids are per-worker slugs, so the owner's ``app`` can be an
-    unrelated project here. When this worker knows the copy's shared project,
-    the legacy id stands only if it is this worker's checkout of that origin;
-    otherwise the checkout that is takes its place. With no shared identity
-    (or one not replicated here yet) the id stands only if the row exists.
-    """
-    origin = None
-    if project_v2_id:
-        cursor.execute("SELECT origin FROM projects_v2 WHERE id = %s", (project_v2_id,))
-        row = cursor.fetchone()
-        origin = row["origin"] if row is not None else None
-    if not origin:
-        if project_id:
-            cursor.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,))
-            if cursor.fetchone() is None:
-                return None
-        return project_id
-    from app.core.project_resolver import origin_for_legacy_project
-
-    me = _my_instance_id()
-    cursor.execute("SELECT id, instance_id, link_group_id FROM projects "
-                   "WHERE instance_id = %s OR instance_id IS NULL ORDER BY id", (me,))
-    checkouts = [r for r in cursor.fetchall() if origin_for_legacy_project(r) == origin]
-    if any(r["id"] == project_id for r in checkouts):
-        return project_id
-    checkouts.sort(key=lambda r: r["instance_id"] != me)  # This worker's own row first.
-    return checkouts[0]["id"] if checkouts else None
-
-
 def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: Optional[str] = None,
                            device_id: Optional[str] = None) -> Dict[str, Any]:
     """A mirrored session must not reference local-only rows it cannot see.
@@ -511,8 +479,11 @@ def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: 
     this worker; without them the copy cannot set the chat's account label.
     """
     record = dict(record)
-    if "project_id" in record:
-        record["project_id"] = _mirror_project_id(cursor, record["project_id"], record.get("project_v2_id"))
+    project_id = record.get("project_id")
+    if project_id:
+        cursor.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,))
+        if cursor.fetchone() is None:
+            record["project_id"] = None
     profile_id = record.get("profile_id")
     if profile_id:
         cursor.execute("SELECT 1 FROM agents WHERE id = %s", (profile_id,))
