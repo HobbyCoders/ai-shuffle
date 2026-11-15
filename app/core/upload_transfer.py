@@ -148,19 +148,81 @@ def split_session_staged_paths(paths: List[str], session_id: str) -> tuple[List[
     return staged, others
 
 
-def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
-    """Admit provenance only from this session's attachment staging areas.
+def _staging_root(root: Path, base: Path) -> Optional[Path]:
+    """``root`` resolved, when it is a real folder strictly inside ``base``.
 
-    Reuse the lift path's resolved containment check, even for local sends that
-    never lift bytes. A symlink or traversal must not turn arbitrary client text
-    into a trusted attachment when the message is later restored.
+    A link (symlink or junction) as the staging folder itself would widen the
+    root to wherever it points, ``.`` included, so the folder must resolve to
+    its own name under its resolved parent, as ``confined_files.upload``
+    writes it; None otherwise.
+    """
+    resolved = root.resolve()
+    base = base.resolve()
+    if resolved == base or not _is_under(resolved, base):
+        return None
+    if root.is_symlink() or resolved != root.parent.resolve() / root.name:
+        return None
+    return resolved
+
+
+def composer_staging_roots() -> List[Path]:
+    """Where the owner's composer stages a file before it knows the session.
+
+    The composer picks the upload area from its state at attach time: the chat
+    lane's ``chat-uploads`` with no project, or a project's ``uploads`` folder
+    once one is picked. The owner can change the project, worktree choice or
+    worker before sending, so a send from the owner also admits these areas.
+    Each root is checked against its own base, never a wider folder.
+    """
+    from app.core.config import settings
+    from app.core.session_modes import chat_uploads_dir
+    from app.db import database
+
+    workspace = settings.effective_workspace_dir.resolve()
+    pairs = [(chat_uploads_dir(), workspace)]
+    for project in database.get_all_projects() or []:
+        try:
+            base = _project_dir(project)
+        except Exception:  # noqa: BLE001 — an unreadable project admits nothing
+            continue
+        pairs.append((base / UPLOADS_SUBDIR, base))
+    roots: List[Path] = []
+    for root, base in pairs:
+        real = _staging_root(root, base)
+        if real is not None and real not in roots:
+            roots.append(real)
+    return roots
+
+
+def composer_staged(paths: List[str]) -> bool:
+    """Whether every path is in an area the owner's composer stages into.
+
+    For a refusal that runs before any session exists (no project here, or
+    the project was cleared): the caller must already know the sender is the
+    install owner (``session_modes.composer_owner``).
+    """
+    roots = composer_staging_roots()
+    try:
+        for raw in paths:
+            upload_root_of(raw, roots)
+    except UploadLiftError:
+        return False
+    return bool(paths)
+
+
+def admitted_upload_roots(session: Dict[str, Any], *, composer: bool = False) -> List[Path]:
+    """Resolved folders this session may take attachments from.
+
+    ``composer`` adds :func:`composer_staging_roots`; only a send from the
+    install owner (``session_modes.composer_owner``, decided on the worker that
+    received it) may pass it: those areas span every project, so a paired
+    device without owner authority, an API key or a preview keeps the
+    session's own roots.
     """
     from app.core.config import settings
     from app.core import project_resolver
     from app.core.session_modes import chat_uploads_dir, owner_chat_dir, runs_in_owner_chat_folder
 
-    if not paths:
-        return
     if not session or not session.get("id"):
         raise UploadLiftError("Attachment session is unavailable.")
     workspace = settings.effective_workspace_dir.resolve()
@@ -182,12 +244,99 @@ def validate_upload_paths(paths: List[str], session: Dict[str, Any]) -> None:
             if project:
                 base = _project_dir(project)
                 roots.append((base / UPLOADS_SUBDIR, base))
-    allowed = [root.resolve() for root, base in roots
-               if _is_under(root.resolve(), base)]
+    allowed = []
+    for root, base in roots:
+        real = _staging_root(root, base)
+        if real is not None and real not in allowed:
+            allowed.append(real)
+    if composer:
+        allowed += [root for root in composer_staging_roots() if root not in allowed]
+    return allowed
+
+
+def upload_root_of(raw: str, roots: List[Path]) -> Path:
+    """The admitted root that contains ``raw`` after resolving links."""
+    path = Path(raw)
+    if path.is_absolute():
+        resolved = path.resolve()
+        for root in roots:
+            if _is_under(resolved, root):
+                return root
+    raise UploadLiftError("Attachment path is outside this session's upload area.")
+
+
+def validate_upload_paths(paths: List[str], session: Dict[str, Any], *, composer: bool = False) -> None:
+    """Admit provenance only from this session's attachment staging areas.
+
+    Reuse the lift path's resolved containment check, even for local sends that
+    never lift bytes. A symlink or traversal must not turn arbitrary client text
+    into a trusted attachment when the message is later restored.
+    """
+    if not paths:
+        return
+    roots = admitted_upload_roots(session, composer=composer)
     for raw in paths:
-        path = Path(raw)
-        if not path.is_absolute() or not any(_is_under(path.resolve(), root) for root in allowed):
-            raise UploadLiftError("Attachment path is outside this session's upload area.")
+        upload_root_of(raw, roots)
+
+
+def adopt_composer_uploads(paths: List[str], session: Dict[str, Any]) -> Dict[str, str]:
+    """Copy owner-composer files the session does not admit into its own area.
+
+    For a send that runs on THIS worker: the turn re-checks its paths against
+    the session's own areas when it starts, and a confined agent reads only
+    those. Returns ``{staged path: copy}`` for the prompt rewrite; a path the
+    session already admits is left alone. Raises for a path neither admits.
+    """
+    from app.core import project_resolver
+    from app.core.config import settings
+    from app.core.confined_files import upload
+    from app.core.session_modes import chat_uploads_dir, owner_chat_dir, runs_in_owner_chat_folder
+
+    if not paths:
+        return {}
+    own = admitted_upload_roots(session)
+    foreign = []
+    for raw in paths:
+        try:
+            upload_root_of(raw, own)
+        except UploadLiftError:
+            upload_root_of(raw, composer_staging_roots())
+            foreign.append(raw)
+    if not foreign:
+        return {}
+    # The folder this session's agent reads its own uploads from.
+    cwd = project_resolver.resolve_existing_cwd(session) if (
+        session.get("project_id") or session.get("project_v2_id")) and session.get("mode") != "chat" else None
+    # Folders under the workspace are written from it, so one the session has
+    # not used yet is created on the way. Written from the RESOLVED workspace,
+    # the form chat_uploads_dir() and owner_chat_dir() return, so a workspace
+    # reached through a link (or a Windows junction) still yields a relative
+    # destination; session_upload_dir() is joined unresolved, so it is made
+    # relative to the form it was built from.
+    workspace = settings.effective_workspace_dir
+    real_workspace = workspace.resolve()
+    if cwd:
+        base, stage = Path(cwd), UPLOADS_SUBDIR
+    elif session.get("mode") == "chat":
+        base, stage = real_workspace, chat_uploads_dir().relative_to(real_workspace).as_posix()
+    elif runs_in_owner_chat_folder(session):
+        base, stage = real_workspace, (owner_chat_dir() / UPLOADS_SUBDIR).relative_to(real_workspace).as_posix()
+    else:
+        base, stage = real_workspace, session_upload_dir(session["id"]).relative_to(workspace).as_posix()
+    limit = _max_upload_size()
+    mapping: Dict[str, str] = {}
+    for raw in foreign:
+        src = Path(raw).resolve()
+        if not src.is_file():
+            raise UploadLiftError(f"Attachment not found: {raw}")
+        if src.stat().st_size > limit:
+            raise UploadLiftError(f"Attachment {src.name} is too large (limit {limit // (1024 * 1024)}MB).")
+        try:
+            dest = upload(base, stage, src.name, src.read_bytes())
+        except Exception as exc:  # noqa: BLE001
+            raise UploadLiftError(f"Could not move attachment {src.name} to this chat: {exc}") from exc
+        mapping[raw] = str(dest)
+    return mapping
 
 
 def upload_owner_id(owner: Optional[str] = None) -> str:
@@ -228,11 +377,12 @@ def recorded_upload_references(session_id: str, event: Dict[str, Any]) -> List[D
 
 
 def partition_upload_paths(paths: List[str], session: Dict[str, Any], *,
-                           references: Optional[List[Dict[str, Any]]] = None) -> tuple[List[str], List[Dict[str, Any]]]:
+                           references: Optional[List[Dict[str, Any]]] = None,
+                           composer: bool = False) -> tuple[List[str], List[Dict[str, Any]]]:
     """Fresh paths stay fresh; only explicit owner/event/index chips are restores."""
     if not session or not session.get("id"):
         raise UploadLiftError("Attachment session is unavailable.")
-    validate_upload_paths(paths, session)
+    validate_upload_paths(paths, session, composer=composer)
     owner = upload_owner_id(session.get("instance_id"))
     checked = []
     if not isinstance(references or [], list):
@@ -300,9 +450,11 @@ def validate_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any]) -> N
                 raise UploadLiftError("Attachment is no longer on this owner; reattach it.")
 
 
-def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: str) -> List[str]:
+def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: str, *,
+                      composer: bool = False) -> List[str]:
     """Lift one send's staged uploads so another worker can receive them.
 
+    ``composer`` (owner sends only) also admits :func:`composer_staging_roots`.
     Raises rather than returning part of them: the caller refuses the send.
     Synchronous (filesystem + DB) — call via ``run_sync`` from async contexts.
     """
@@ -317,9 +469,11 @@ def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: s
     blob_ids: List[str] = []
     if staged:
         session = database.get_session(session_id)
-        if not session or not session.get("project_v2_id"):
-            raise UploadLiftError("Attachments need a project session.")
-        blob_ids = lift_session_paths_to_blobs(staged, session)
+        if not session:
+            raise UploadLiftError("Attachment session is unavailable.")
+        # A chat with no project lifts from the areas it admits (its staging,
+        # chat-uploads, the owner chat folder), each against its own root.
+        blob_ids = lift_session_paths_to_blobs(staged, session, composer=composer)
     if not paths:
         return blob_ids
     project = database.get_project(project_id)
@@ -337,21 +491,38 @@ def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: s
     session = database.get_session(session_id)
     cwd = project_resolver.resolve_existing_cwd(session) if session else None
     checkout = Path(cwd).resolve() if cwd else None
+    project_dir = _project_dir(project)
     for source in paths:
-        source_project = project
-        if checkout and _is_under(Path(source).resolve(), checkout):
+        resolved = Path(source).resolve()
+        if checkout and _is_under(resolved, checkout):
             source_project = {**project, "path": str(checkout)}
+        elif _is_under(resolved, project_dir) or not composer:
+            source_project = project
+        else:
+            # Staged by the owner's composer under an earlier project or the
+            # chat lane: lift it from that area's own root.
+            source_project = {"path": str(upload_root_of(source, composer_staging_roots()))}
         blob_ids += lift_paths_to_blobs([source], source_project, session_id, project_v2_id)
     return blob_ids
 
 
-def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any]) -> List[str]:
-    """Lift only this session's staged files, never arbitrary workspace paths."""
+def lift_session_paths_to_blobs(paths: List[str], session: Dict[str, Any], *,
+                                composer: bool = False, project_v2_id: Optional[str] = None) -> List[str]:
+    """Lift files from the areas this session admits, never arbitrary paths.
+
+    Each file is lifted against the one admitted root that contains it, so a
+    link or ``..`` cannot reach past that root.
+    """
     session_id = session["id"]
-    return lift_paths_to_blobs(
-        paths, {"path": str(session_upload_dir(session_id))}, session_id,
-        session.get("project_v2_id"),
-    )
+    roots = admitted_upload_roots(session, composer=composer)
+    blob_ids: List[str] = []
+    for source in paths:
+        root = upload_root_of(source, roots)
+        blob_ids += lift_paths_to_blobs(
+            [source], {"path": str(root)}, session_id,
+            project_v2_id or session.get("project_v2_id"),
+        )
+    return blob_ids
 
 
 def lift_paths_to_blobs(

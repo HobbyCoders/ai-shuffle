@@ -184,7 +184,7 @@ def test_remote_attachments_use_normal_lift_before_pair_admission(compact_chat, 
     lift = AsyncMock(side_effect=ValueError("file missing")) if lift_fails else AsyncMock(return_value=["blob-1"])
     monkeypatch.setattr(ChatWebSocketHandler, "_lift_uploads", lift)
     result = send(compact_chat, {"then_send": {"prompt": "inspect file", "upload_paths": [compact_upload]}})
-    lift.assert_awaited_once_with([compact_upload], None, "compact-chat")
+    lift.assert_awaited_once_with([compact_upload], None, "compact-chat", composer=True)
     rows = turns.get_queued_turns("compact-chat")
     if lift_fails:
         assert result.status_code == 400

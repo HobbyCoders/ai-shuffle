@@ -5,7 +5,7 @@ import type { ActiveSessionState } from '../active-session';
 import { createMessageHandlers, type InternalMutableState, type MessageHandlerDeps } from './ws-message-handlers';
 import { reopenWorktree } from '$lib/api/git';
 import { api } from '$lib/api/client';
-import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { ATTACHMENTS_NEED_RUNS_ON } from '$lib/components/chat/attach-disable';
 import { pendingQueue } from './pending-queue';
 import { STOP_TURN_NOT_NAMED, createNotSentHold, stopRecoveryAppliesToTurn } from '$lib/utils/not-sent-hold';
 import { feedController } from './v2/feed-controller';
@@ -174,6 +174,42 @@ describe('compact first send', () => {
 		expect(sessionStorage.getItem('compact-first-retry:s1')).not.toBeNull();
 		expect(await sender.sendMessage('normal message')).toBe(true);
 		expect(sessionStorage.getItem('compact-first-retry:s1')).toBeNull();
+	});
+
+	it('a new remote-only chat sends its chips only to a picked worker', async () => {
+		// Chips staged before the project was picked travel to the worker that
+		// runs the chat; with no worker picked there is nowhere to send them.
+		const picked = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-remote', deviceIntent: { id: 'runner-1', name: 'Runner' } }));
+		await createMessageSender(picked.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] });
+		expect(picked.wsConn.send.mock.calls[0][0]).toMatchObject({ upload_paths: ['/workspace/chat-uploads/a.png'], target_instance_id: 'runner-1' });
+		// With no worker picked, the send is refused before anything goes out or
+		// is spent: never sent without its attachment (review round 2 S3).
+		const unpicked = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-remote', messages: [] }));
+		expect(await createMessageSender(unpicked.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(false);
+		expect(unpicked.wsConn.send).not.toHaveBeenCalled();
+		expect(unpicked.getState().error).toBe(ATTACHMENTS_NEED_RUNS_ON);
+		expect(unpicked.getState().messages).toEqual([]);
+		// The owner then picks the worker: the same draft goes, chips and all.
+		unpicked.getState().deviceIntent = { id: 'runner-1', name: 'Runner' } as any;
+		expect(await createMessageSender(unpicked.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(true);
+		expect(unpicked.wsConn.send.mock.calls[0][0]).toMatchObject({ upload_paths: ['/workspace/chat-uploads/a.png'], target_instance_id: 'runner-1' });
+	});
+
+	it('a draft naming only the shared id of a project this worker has sends its chips here', async () => {
+		// "Set up & send" put the project here and reloaded the catalog; the
+		// draft still names only the shared id. Nothing to refuse.
+		const after = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-setup', messages: [] }));
+		const catalog = [{ project_v2_id: 'pv2-setup', local_project_id: 'setup-here' }];
+		(after.deps.appData as any).current = { sessions: [], clusterProjects: catalog };
+		expect(await createMessageSender(after.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(true);
+		expect(after.wsConn.send.mock.calls[0][0]).toMatchObject({ project_v2_id: 'pv2-setup', upload_paths: ['/workspace/chat-uploads/a.png'] });
+		expect(after.getState().error).toBeNull();
+		// The catalog says no checkout here: refused.
+		const remote = makeDeps(baseState({ sessionId: null, project: '', projectV2Id: 'pv2-setup', messages: [] }));
+		(remote.deps.appData as any).current = { sessions: [], clusterProjects: [{ project_v2_id: 'pv2-setup', local_project_id: null }] };
+		expect(await createMessageSender(remote.deps).sendMessage('look', { pendingUploadPaths: ['/workspace/chat-uploads/a.png'] })).toBe(false);
+		expect(remote.wsConn.send).not.toHaveBeenCalled();
+		expect(remote.getState().error).toBe(ATTACHMENTS_NEED_RUNS_ON);
 	});
 
 	it('does not reuse a refused draft id after its text or attachments change', async () => {
@@ -2356,7 +2392,27 @@ describe('createWorktree remote-only compose', () => {
 		await sender.createWorktree('hello', ['/tmp/upload.txt']);
 
 		expect(apiMocks.post).not.toHaveBeenCalled();
-		expect(getState().worktreeError).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+		expect(getState().worktreeError).toBe(ATTACHMENTS_NEED_RUNS_ON);
+	});
+
+	it('sends a chip staged before the project was picked to the worker that has it', async () => {
+		// Attached with no project, then a project only another worker has
+		// checked out: the server lifts the owner's chip to that worker.
+		apiMocks.post.mockResolvedValue({ session_id: 'new-remote' });
+		const { deps } = makeDeps(baseState({
+			project: '',
+			projectV2Id: 'pv2-remote',
+			worktreeBranch: 'feat/x',
+			worktreeIntent: 'worktree',
+			deviceIntent: { id: 'runner-1', name: 'Runner' },
+		}));
+		const sender = createMessageSender(deps);
+
+		await sender.createWorktree('hello', ['/workspace/chat-uploads/shot.png']);
+
+		const [, body] = apiMocks.post.mock.calls[0];
+		expect(body.pending_upload_paths).toEqual(['/workspace/chat-uploads/shot.png']);
+		expect(body.target_instance_id).toBe('runner-1');
 	});
 
 	it('still posts project_id for a local project and may include uploads', async () => {
@@ -2434,7 +2490,7 @@ describe('sendMessage clears the new-chat compose cache on first send', () => {
 });
 
 describe('sendMessage remote-only compose', () => {
-	it('sends project_v2_id and never upload_paths', async () => {
+	it('sends project_v2_id, and refuses files with no worker picked', async () => {
 		const { deps, wsConn } = makeDeps(baseState({
 			project: '',
 			projectV2Id: 'pv2-remote',
@@ -2444,8 +2500,10 @@ describe('sendMessage remote-only compose', () => {
 		}));
 		const sender = createMessageSender(deps);
 
-		await sender.sendMessage('hello remote', { pendingUploadPaths: ['/tmp/a.txt'] });
+		expect(await sender.sendMessage('hello remote', { pendingUploadPaths: ['/tmp/a.txt'] })).toBe(false);
+		expect(wsConn.send).not.toHaveBeenCalled();
 
+		await sender.sendMessage('hello remote');
 		const querySends = wsConn.send.mock.calls.filter(([m]) => (m as any)?.type === 'query');
 		expect(querySends).toHaveLength(1);
 		const frame = querySends[0][0] as any;

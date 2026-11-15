@@ -9,7 +9,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 const mocks = vi.hoisted(() => ({
 	attachProject: vi.fn(),
 	applyAttachedProject: vi.fn(),
+	waitForAttachedRow: vi.fn(),
 	notify: vi.fn(),
+	current: { sessionId: 'sess-1' as string | null },
 }));
 
 vi.mock('$lib/stores/app-data.svelte', async () => {
@@ -20,19 +22,26 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
 			{ id: 'proj-two', name: 'site', path: '/w/site' },
 		]),
 		clusterProjects: w([
-			{ project_v2_id: 'v2-remote', origin: 'git@example.com:me/remote-only.git', name: 'remote-only', local_project_id: null, eligible: [{ id: 'peer', online: true }] },
+			{ project_v2_id: 'v2-remote', origin: 'git@example.com:me/remote-only.git', name: 'remote-only', local_project_id: null, eligible: [{ install_id: 'peer', device_name: 'Worker B', online: true, is_self: false }] },
+			{ project_v2_id: 'v2-site', origin: 'local:proj-two', name: 'site', local_project_id: 'proj-two', eligible: [{ install_id: 'self', device_name: 'Worker A', online: true, is_self: true }] },
 		]),
 	};
 });
 vi.mock('$lib/api/sessions', () => ({ attachProject: mocks.attachProject }));
-vi.mock('$lib/stores/active-session', () => ({ activeSession: { applyAttachedProject: mocks.applyAttachedProject } }));
+vi.mock('$lib/stores/active-session', () => ({
+	activeSession: {
+		get current() { return mocks.current; },
+		applyAttachedProject: mocks.applyAttachedProject,
+		waitForAttachedRow: mocks.waitForAttachedRow,
+	},
+}));
 vi.mock('$lib/stores/notifications', () => ({ notify: mocks.notify }));
 
 import { tick } from 'svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import AttachProjectSheet from './AttachProjectSheet.svelte';
 
-const props = (over: Partial<{ blockedReason: string | null; onClose: () => void }> = {}) => ({
+const props = (over: Partial<{ blockedReason: string | null; owner: { id: string; name: string | null; online: boolean | null } | null; onClose: () => void }> = {}) => ({
 	open: true,
 	sessionId: 'sess-1',
 	agentName: 'Juniper',
@@ -44,7 +53,9 @@ const props = (over: Partial<{ blockedReason: string | null; onClose: () => void
 beforeEach(() => {
 	mocks.attachProject.mockReset();
 	mocks.applyAttachedProject.mockReset();
+	mocks.waitForAttachedRow.mockReset();
 	mocks.notify.mockReset();
+	mocks.current = { sessionId: 'sess-1' };
 });
 afterEach(() => cleanup());
 
@@ -123,10 +134,76 @@ describe('AttachProjectSheet', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
 
 		await waitFor(() => expect(onClose).toHaveBeenCalled());
-		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', 'proj-local');
+		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', { project_id: 'proj-local' });
 		// The attach put the session back on Ask; the open session shows that.
 		expect(mocks.applyAttachedProject).toHaveBeenCalledWith('sess-1', 'proj-local', 'v2-local', 'default');
 		expect(mocks.notify).toHaveBeenCalled();
+	});
+
+	it('names the worker that has a project this worker can’t attach', () => {
+		render(AttachProjectSheet, { props: props() });
+		expect(screen.getByRole('radio', { name: /remote-only/ }).textContent).toContain('on Worker B');
+	});
+
+	it('for a chat another worker runs, offers that worker’s projects and relays by shared identity', async () => {
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+		const radio = (name: RegExp) => screen.getByRole('radio', { name });
+
+		// This worker's own projects are greyed: Worker B has no checkout of them.
+		expect(radio(/ai-shuffle/).getAttribute('aria-disabled')).toBe('true');
+		expect(radio(/ai-shuffle/).textContent).toContain('not on Worker B');
+		expect(radio(/site/).textContent).toContain('only on Worker A');
+		expect(radio(/site/).textContent).not.toContain('this worker');
+		expect(radio(/remote-only/).getAttribute('aria-disabled')).toBeNull();
+		// No "attach from the other worker" block any more.
+		expect(screen.queryByText(/from the worker that runs this session/)).toBeNull();
+
+		mocks.waitForAttachedRow.mockResolvedValue('adopted');
+		await fireEvent.click(radio(/remote-only/));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', { project_v2_id: 'v2-remote' });
+	});
+
+	it('after a relayed attach, waits for this worker’s row instead of applying the answer', async () => {
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		let arrive: (outcome: string) => void = () => {};
+		mocks.waitForAttachedRow.mockReturnValue(new Promise((resolve) => { arrive = resolve; }));
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await waitFor(() => expect(mocks.waitForAttachedRow).toHaveBeenCalledWith('sess-1', expect.any(Number)));
+		// The answer is never applied: the page takes the project from its own
+		// row, which the upload, file and Git routes here read.
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		// Still attaching: no way out mid-wait, and nothing announced yet.
+		expect((screen.getByRole('button', { name: /^attach/i }) as HTMLButtonElement).disabled).toBe(true);
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		await fireEvent.click(document.querySelector('.attach-scrim') as HTMLElement);
+		expect(onClose).not.toHaveBeenCalled();
+		expect(mocks.notify).not.toHaveBeenCalled();
+
+		arrive('adopted');
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify.mock.calls[0][0]).toContain('remote-only attached');
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+	});
+
+	it('closes with a notice when this worker’s row has not arrived in time', async () => {
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		mocks.waitForAttachedRow.mockResolvedValue('pending');
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify).toHaveBeenCalledWith('remote-only is attached on Worker B. This page switches to it when it syncs.');
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
 	});
 
 	it('keeps the sheet open with the server’s reason when the attach is refused', async () => {
@@ -139,6 +216,86 @@ describe('AttachProjectSheet', () => {
 
 		await waitFor(() => expect(screen.getByText(/already has a project/)).toBeTruthy());
 		expect(onClose).not.toHaveBeenCalled();
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		expect(mocks.waitForAttachedRow).not.toHaveBeenCalled();
+	});
+
+	// The sheet is not remounted per chat: on the phone it survives Back to
+	// another no-project chat, with that chat's props.
+	const pending = <T,>() => {
+		let resolve: (v: T) => void = () => {};
+		let reject: (e: unknown) => void = () => {};
+		const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	};
+	const toLocalChat = async (rerender: (p: Record<string, unknown>) => Promise<void> | void) => {
+		mocks.current = { sessionId: 'sess-2' };
+		await rerender({ sessionId: 'sess-2', owner: null });
+	};
+
+	it('applies nothing to the chat the page moved to while a relayed attach was in flight', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		mocks.waitForAttachedRow.mockResolvedValue('adopted');
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.resolve({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		expect(mocks.waitForAttachedRow).not.toHaveBeenCalled();
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+
+	it('announces nothing when the page left the chat while waiting for its row', async () => {
+		mocks.attachProject.mockResolvedValue({ session_id: 'sess-1', project_id: '', project_v2_id: 'v2-remote', mode: 'code', permission_mode: 'default' });
+		mocks.waitForAttachedRow.mockResolvedValue('left');
+		const onClose = vi.fn();
+		render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify).not.toHaveBeenCalled();
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+	});
+
+	it('applies a local attach to the chat it was made on, not the one the page moved to', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /ai-shuffle/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.resolve({ session_id: 'sess-1', project_id: 'proj-local', project_v2_id: 'v2-local', mode: 'code', permission_mode: 'default' });
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.attachProject).toHaveBeenCalledWith('sess-1', { project_id: 'proj-local' });
+		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
+		expect(mocks.notify).not.toHaveBeenCalled();
+	});
+
+	it('says a refusal that returns after the page left in a toast, not in the other chat’s sheet', async () => {
+		const answer = pending<unknown>();
+		mocks.attachProject.mockReturnValue(answer.promise);
+		const onClose = vi.fn();
+		const { rerender } = render(AttachProjectSheet, { props: props({ owner: { id: 'peer', name: 'Worker B', online: true }, onClose }) });
+
+		await fireEvent.click(screen.getByRole('radio', { name: /remote-only/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /^attach/i }));
+		await toLocalChat(rerender);
+		answer.reject(new Error('Worker B is offline. It must be online to attach a project.'));
+
+		await waitFor(() => expect(onClose).toHaveBeenCalled());
+		expect(mocks.notify).toHaveBeenCalledWith('Worker B is offline. It must be online to attach a project.', { severity: 'error' });
+		expect(screen.queryByText(/Worker B is offline/)).toBeNull();
 		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
 	});
 });

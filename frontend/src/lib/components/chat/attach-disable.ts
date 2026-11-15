@@ -16,6 +16,12 @@ import type { SessionMode } from '$lib/stores/sessionMode.svelte';
 export const ATTACHMENTS_NEED_LOCAL_CHECKOUT =
 	'Attachments need a local checkout of this project. Clone it here, or send without files.';
 
+/** A new chat for a project this worker has no checkout of, with files the
+ * owner attached before picking it: only the worker that has the project can
+ * take them, so the send waits for that pick (the draft and its chips stay). */
+export const ATTACHMENTS_NEED_RUNS_ON =
+	'This project isn’t checked out here, so its attachments need the worker that has it. Pick that worker in Runs on, or send without files.';
+
 export const SELECT_PROJECT_TO_UPLOAD = 'Please select a project first to upload files.';
 
 /**

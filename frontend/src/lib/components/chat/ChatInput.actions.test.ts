@@ -19,7 +19,11 @@ describe('streaming composer actions', () => {
 		expect(dock).not.toContain('attachmentBlockReason');
 		expect(source).toContain('projectRulesLane(composerMode, projectlessSubagent)');
 		const sender = readFileSync(resolve(process.cwd(), 'src/lib/stores/session/message-sender.ts'), 'utf8');
-		expect(sender).toContain('upload_paths: (!remoteOnly || !!_state.sessionId)');
+		// The send always carries the paths; the server admits or refuses each
+		// one. A remote-only compose must never drop them on the way out.
+		expect(sender).toContain('upload_paths: options?.pendingUploadPaths?.length ? options.pendingUploadPaths : undefined');
+		expect(sender).not.toMatch(/upload_paths: \(?!remoteOnly/);
+		expect(sender).not.toContain('!remoteOnly && pendingUploadPaths');
 	});
 	it('drops an earlier upload error when a new upload starts, for picker, drop and large paste', () => {
 		expect(source.match(/isUploading = true;\r?\n\s*errorMessage = '';/g)).toHaveLength(3);

@@ -15,7 +15,7 @@ import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
 import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
-import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { ATTACHMENTS_NEED_RUNS_ON } from '$lib/components/chat/attach-disable';
 import { keepStopRecovery, STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
 // V2 Phase 1: SSE-fed reducer — the transcript authority for a session.
@@ -43,6 +43,20 @@ import { ANY_CHAT, createSendOrder, type SendLane, type SendReservation, type Se
 let sendsInFlight = 0;
 
 /** Why a reload now would lose a message, or null. */
+
+/** A new chat whose project has no checkout on this worker, carrying files,
+ * with no worker picked to take them. A draft naming only the shared id asks
+ * the catalog: right after "Set up & send" put the project here the draft
+ * still has no local id, but the reloaded catalog does. */
+function needsRunsOnForUploads(
+	state: { sessionId: string | null; project: string; projectV2Id: string | null; deviceIntent?: { id?: string | null } | null },
+	paths: readonly string[] | undefined,
+	catalog: readonly { project_v2_id: string; local_project_id: string | null }[] | undefined,
+): boolean {
+	if (state.sessionId || state.project || !state.projectV2Id || !paths?.length || state.deviceIntent?.id) return false;
+	return !(catalog ?? []).some(p => p.project_v2_id === state.projectV2Id && p.local_project_id);
+}
+
 export function pendingSendReason(): string | null {
 	return sendsInFlight > 0 ? 'message-sending' : null;
 }
@@ -196,7 +210,11 @@ export interface MessageSenderDeps {
 		loadSessions: () => void;
 		loadApiUserSessions: () => void;
 		/** The sidebar's chats: the ones a compose started now cannot create. */
-		current?: { sessions: { id: string }[] };
+		current?: {
+			sessions: { id: string }[];
+			/** Which shared projects this worker has a checkout of. */
+			clusterProjects?: { project_v2_id: string; local_project_id: string | null }[];
+		};
 	};
 
 	persistSession: () => void;
@@ -492,6 +510,13 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// send here would mint a second one over the WebSocket.
 			if (!_state.sessionId && promptlessCreate) {
 				update(s => ({ ...s, error: 'This session is still being created — try again in a moment.' }));
+				return false;
+			}
+			// A new chat for a project with no checkout here: its files can only go
+			// to a picked worker. Refused before anything is spent, so the words
+			// and chips come back; never sent without them (review S3).
+			if (_state.worktreeIntent !== 'worktree' && needsRunsOnForUploads(_state, options?.pendingUploadPaths, deps.appData.current?.clusterProjects)) {
+				update(s => ({ ...s, error: ATTACHMENTS_NEED_RUNS_ON }));
 				return false;
 			}
 			if (_state.sessionId && isCallActiveFor(_state.sessionId)) {
@@ -812,11 +837,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Sidepanel mode for a NEW session. Creation-time only — the backend
 					// ignores it once the session row exists.
 					mode: _state.sessionId ? undefined : _state.mode,
-					// Existing remote-only sessions stage attachments per session;
-					// only an uncreated remote draft has no upload destination.
-					upload_paths: (!remoteOnly || !!_state.sessionId) && options?.pendingUploadPaths?.length
-						? options.pendingUploadPaths
-						: undefined,
+					// Always carried: the server admits or refuses each path. An
+					// uncreated remote-only draft got here only with a picked worker
+					// (refused above otherwise); the server lifts the owner's chips to it.
+					upload_paths: options?.pendingUploadPaths?.length ? options.pendingUploadPaths : undefined,
                     upload_references: options?.pendingUploadReferences?.length ? options.pendingUploadReferences : undefined,
 					// Adoption token — present only for a new-session query (see requestId).
 					// The backend echoes it in session_created + the first start frame.
@@ -1018,8 +1042,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return null; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return null; }
 			if (!_state.worktreeBranch) { update(s => ({ ...s, worktreeError: 'Please select a branch' })); return null; }
-			if (!_state.project && pendingUploadPaths?.length) {
-				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
+			// No checkout here: only another worker can take the files (the
+			// server lifts the owner's composer chips to it, and refuses the rest).
+			if (needsRunsOnForUploads(_state, pendingUploadPaths, deps.appData.current?.clusterProjects)) {
+				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_RUNS_ON }));
 				return null;
 			}
 
@@ -1056,9 +1082,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// away. A call started on the new session needs them before
 					// any message is sent.
 					overrides: overridesSnapshot,
-					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
-						? pendingUploadPaths
-						: undefined,
+					// Remote-only compose reaches here with files only when another
+					// worker was picked (refused above otherwise).
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 					// Composer device pick composes with the worktree checkbox: the
 					// target install materializes the checkout itself (durable git-ops
 					// queue) and the uploads travel as DB blobs.
@@ -1214,8 +1240,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const _state = getState();
 			if (!_state.profile) { update(s => ({ ...s, worktreeError: 'Please select a profile' })); return false; }
 			if (!_state.project && !_state.projectV2Id) { update(s => ({ ...s, worktreeError: 'Please select a project' })); return false; }
-			if (!_state.project && pendingUploadPaths?.length) {
-				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_LOCAL_CHECKOUT }));
+			if (needsRunsOnForUploads(_state, pendingUploadPaths, deps.appData.current?.clusterProjects)) {
+				update(s => ({ ...s, worktreeError: ATTACHMENTS_NEED_RUNS_ON }));
 				return false;
 			}
 
@@ -1314,9 +1340,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					prompt,
 					client_message_id: clientMessageId,
 					overrides: Object.keys(overridesPayload).length > 0 ? overridesPayload : undefined,
-					pending_upload_paths: !remoteOnly && pendingUploadPaths?.length
-						? pendingUploadPaths
-						: undefined,
+					// Remote-only compose reaches here with files only when another
+					// worker was picked (refused above otherwise).
+					pending_upload_paths: pendingUploadPaths?.length ? pendingUploadPaths : undefined,
 					// Composer device pick composes with the worktree checkbox (see
 					// createWorktree above).
 					target_instance_id: deviceIntentSnap?.id || undefined,
