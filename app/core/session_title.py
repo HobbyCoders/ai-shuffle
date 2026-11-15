@@ -33,6 +33,11 @@ Tokens are consumed one at a time until the text no longer opens with ``@``,
 so multi-attachment messages are fully unwrapped. The helper never empties a
 title: if the message is nothing but attachments, the original text comes
 back through, truncated.
+
+A known path is also cut out wherever it sits: the composer puts a chip where
+the cursor was, usually after the typed words (``fix it @/ws/a.png``), and the
+title is the typed words only (#1654). Without known paths only leading
+tokens go: an ``@`` later in prose may be a mention.
 """
 
 import re
@@ -105,6 +110,29 @@ def strip_leading_attachment_tokens(
     return stripped or text
 
 
+def strip_known_attachment_references(text: str, known_paths: Optional[Iterable[str]] = None) -> str:
+    """Remove every ``@<path>`` of a known attachment, wherever it sits.
+
+    Longest path first, so one that is a prefix of another is never cut short.
+    The spaces a removal leaves are folded into one. Like the leading strip, a
+    message that is nothing but attachments comes back unchanged.
+    """
+    known = sorted({p for p in known_paths or [] if p}, key=len, reverse=True)
+    if not known:
+        return text
+    body = text
+    for path in known:
+        body = body.replace("@" + path, " ")
+    if body == text:
+        return text
+    body = _LINE_EDGE_SPACES.sub("\n", _SPACE_RUN.sub(" ", body)).strip()
+    return body or text
+
+
+_SPACE_RUN = re.compile(r"[ \t]{2,}")
+_LINE_EDGE_SPACES = re.compile(r"[ \t]*\n[ \t]*")
+
+
 def derive_session_title(
     text: str,
     known_paths: Optional[Iterable[str]] = None,
@@ -113,12 +141,14 @@ def derive_session_title(
 ) -> str:
     """Turn a first user message into a session title.
 
-    Leading attachment tokens are stripped first, then what remains is
-    truncated to ``max_chars``. ``word_boundary`` keeps the two historical
-    shapes: the 100-char sites cut at the last space before the ellipsis, the
-    older 50-char sites append the ellipsis to whatever the cut left.
+    Known attachment references are removed wherever they sit and leading
+    attachment tokens are stripped, then what remains is truncated to
+    ``max_chars``. ``word_boundary`` keeps the two historical shapes: the
+    100-char sites cut at the last space before the ellipsis, the older
+    50-char sites append the ellipsis to whatever the cut left.
     """
-    body = strip_leading_attachment_tokens(text, known_paths)
+    known = list(known_paths or [])
+    body = strip_leading_attachment_tokens(strip_known_attachment_references(text, known), known)
     title = body[:max_chars].strip()
     if len(body) > max_chars:
         if word_boundary:

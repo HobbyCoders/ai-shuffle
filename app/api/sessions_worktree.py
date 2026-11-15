@@ -241,14 +241,17 @@ def _resolve_default_profile_id(project: Optional[dict], body_profile_id: Option
 
 
 async def _persist_and_broadcast_first_message(
-    session_id: str, prompt: str, profile_id: str
+    session_id: str, prompt: str, profile_id: str,
+    upload_paths: Optional[List[str]] = None,
 ) -> None:
     """Store the compose-time first message + backfill the title, then broadcast.
 
     Shared verbatim by the local and remote branch-session paths so the two can
     never drift on what a new worktree session's history looks like.
+    ``upload_paths`` are the attachments the prompt names, left out of the
+    title (#1654).
     """
-    title = derive_session_title(prompt)
+    title = derive_session_title(prompt, upload_paths)
     msg_role, msg_meta = _detect_command_meta(prompt)
 
     def _persist_first_message():
@@ -455,7 +458,7 @@ async def _create_remote_branch_session(
                 "project_v2_id": pv2["id"],
                 # The owner receives this row before first-message persistence below.
                 # Give it the title now so its catalog cannot overwrite ours with "".
-                "title": derive_session_title(prompt or ""),
+                "title": derive_session_title(prompt or "", body.pending_upload_paths),
                 "api_user_id": api_user_id,
                 "is_active": True,
                 "target_instance_id": target_instance_id,
@@ -477,7 +480,8 @@ async def _create_remote_branch_session(
     # timeout. A timeout does not mean the remote session was never created.
     _broadcast_session_created(session_id)
     if prompt:
-        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
+        await _persist_and_broadcast_first_message(
+            session_id, prompt, profile_id, list(body.pending_upload_paths or []))
     from app.network import control, engine, git as network_git
     ctx = engine.context()
     remote_device = network_git.device_id(target_instance_id) if ctx else None
@@ -800,7 +804,10 @@ async def _create_v2_branch_session(
     from app.core import upload_transfer
     prompt = upload_transfer.rewrite_prompt((body.prompt or "").strip(), migrated_paths)
     if prompt:
-        await _persist_and_broadcast_first_message(session_id, prompt, profile_id)
+        # The prompt names the migrated copies now.
+        await _persist_and_broadcast_first_message(
+            session_id, prompt, profile_id,
+            list(migrated_paths.values()) + list(body.pending_upload_paths or []))
 
         # Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
         # path resolves cwd via the origin resolver off sessions.branch +

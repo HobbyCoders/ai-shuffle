@@ -33,6 +33,23 @@ export function splitUploadMentions(text: string, uploadPaths: string[]): Upload
 	return parts;
 }
 
+/**
+ * The typed words of a prompt: its attachments' `@path` mentions cut out
+ * wherever they sit, the spaces they leave folded (#1654). A chat title and an
+ * automatic branch name are named from these. Empty when the prompt is only
+ * attachments; the server's title helper (`app/core/session_title.py`) follows
+ * the same rule.
+ */
+export function typedWords(prompt: string, uploadPaths: readonly string[] | undefined): string {
+	if (!uploadPaths?.length) return prompt.trim();
+	return splitUploadMentions(prompt, [...uploadPaths])
+		.map(part => typeof part === 'string' ? part : ' ')
+		.join('')
+		.replace(/[ \t]{2,}/g, ' ')
+		.replace(/[ \t]*\n[ \t]*/g, '\n')
+		.trim();
+}
+
 /** What a sent bubble shows: words with chips in place, then any upload never mentioned. */
 export function userBubbleParts(content: string, uploadPaths: string[]): UploadMentionPart[] {
 	if (!uploadPaths.length) return [content];

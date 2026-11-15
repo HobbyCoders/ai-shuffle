@@ -15,6 +15,7 @@ import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
 import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
+import { typedWords } from '$lib/utils/message-presentation';
 import { ATTACHMENTS_NEED_RUNS_ON } from '$lib/components/chat/attach-disable';
 import { keepStopRecovery, STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
@@ -105,6 +106,14 @@ export function newSessionWorker(
 	if (state.sessionId) return null;
 	const target = state.deviceIntent?.id ? state.deviceIntent : null;
 	return { isRemote: target !== null, ownerDeviceName: target?.name ?? null, createdFromComposer: true };
+}
+
+/** A first message's chat title: its typed words without the attachments'
+ *  `@path` mentions (#1654), or the prompt itself when it is only attachments
+ *  (the server's title rule). */
+function firstMessageTitle(prompt: string, uploadPaths: readonly string[] | undefined): string {
+	const words = typedWords(prompt, uploadPaths) || prompt;
+	return words.substring(0, 100) + (words.length > 100 ? '...' : '');
 }
 
 /** An optimistic echo's attachments, in the shape its durable row will carry. */
@@ -681,7 +690,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const userMsgId = `user-${Date.now()}`;
 				const isFirstMessage = _state.title === 'New Chat';
 				const newTitle = isFirstMessage
-					? prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '')
+					? firstMessageTitle(prompt, [...(options?.pendingUploadPaths ?? []), ...(options?.pendingUploadReferences ?? []).map(ref => ref.path)])
 					: _state.title;
 				// Undefined while an existing session's agent is still loading: the
 				// backend resolves an omitted agent to the session's own (#418).
@@ -1301,15 +1310,17 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 			try {
 				let branchName: string;
-				if (projectId) {
+				// Named from the typed words, never an attachment's path (#1654).
+				const branchWords = typedWords(prompt, pendingUploadPaths);
+				if (projectId && branchWords) {
 					try {
-						const result = await generateBranchName(projectId, prompt);
+						const result = await generateBranchName(projectId, branchWords);
 						branchName = result.branch_name;
 					} catch {
-						branchName = generateBranchNameLocal(prompt);
+						branchName = generateBranchNameLocal(branchWords);
 					}
 				} else {
-					branchName = generateBranchNameLocal(prompt);
+					branchName = generateBranchNameLocal(branchWords);
 				}
 
 				// Update the branch label even if the user has navigated away —
@@ -1414,7 +1425,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// worktree turn has no registered watcher, so this device
 				// would otherwise show 'New Chat' until the session is
 				// reopened from the sidebar.
-				const derivedTitle = prompt.substring(0, 100) + (prompt.length > 100 ? '...' : '');
+				const derivedTitle = firstMessageTitle(prompt, pendingUploadPaths);
 				update(s => ({
 					...s,
 					sessionId: response.session_id,

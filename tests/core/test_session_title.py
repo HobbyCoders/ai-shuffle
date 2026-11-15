@@ -132,3 +132,26 @@ class TestDeriveSessionTitle:
 )
 def test_strip_matrix(text, expected):
     assert strip_leading_attachment_tokens(text) == expected
+
+
+class TestKnownAttachmentReferencesAnywhere:
+    """#1654: the title is the typed words, wherever the chips sit."""
+
+    def test_trailing_chip_run_into_the_last_word(self):
+        path = "/tmp/ai-shuffle-preview/work/chat-uploads/shot 1.png"
+        assert derive_session_title(f"QA E4 worktree B@{path}", [path]) == "QA E4 worktree B"
+
+    def test_several_chips_between_and_after_the_words(self):
+        a, b = "/ws/uploads/a.png", "/ws/uploads/b notes.md"
+        text = f"compare @{a} with @{b}\n\n@{a}"
+        assert derive_session_title(text, [a, b]) == "compare with"
+
+    def test_longer_path_wins_over_its_prefix(self):
+        short, long = "/ws/a.txt", "/ws/a.txt.bak"
+        assert derive_session_title(f"diff @{long} now", [short, long]) == "diff now"
+
+    def test_unknown_mid_message_mention_is_kept(self):
+        assert derive_session_title("email @user today", ["/ws/a.png"]) == "email @user today"
+
+    def test_attachments_only_is_not_emptied(self):
+        assert derive_session_title("@/ws/a.png", ["/ws/a.png"]) == "@/ws/a.png"

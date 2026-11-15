@@ -51,6 +51,8 @@ async def test_local_create_and_send_keeps_the_migrated_attachment(staged_upload
     expected = migrated if auto_prompt else source
     assert queued[-1]["payload"]["upload_paths"] == [str(expected)]
     assert queued[-1]["prompt"] == f"inspect @{expected}"
+    # #1654: the title is the typed words, not the attachment path.
+    assert database.get_session(result.session_id)["title"] == "inspect"
 
 
 async def test_remote_branch_creator_carries_paths_with_its_blobs(project):
@@ -64,6 +66,7 @@ async def test_remote_branch_creator_carries_paths_with_its_blobs(project):
     turn = turns.get_queued_turns(response.session_id)[0]
     assert turn["payload"]["upload_paths"] == [str(source)]
     assert turn["payload"]["upload_blob_ids"]
+    assert database.get_session(response.session_id)["title"] == "inspect"
 
 
 @pytest.mark.parametrize("failure", ["credential", "materialize", "cancel"])
@@ -149,6 +152,55 @@ def test_owner_resolves_only_its_own_session_attachment_references(staged_upload
     for bad in [{**ref, "owner_id": "wrong"}, {**ref, "event_id": "not-recorded"}, {**ref, "index": 1}, {**ref, "index": False}, {**ref, "path": "/other-file"}]:
         with pytest.raises(upload_transfer.UploadLiftError):
             upload_transfer.resolve_upload_references({**payload, "upload_references": [bad]}, database.get_session(SID))
+
+
+async def test_rewound_attachment_resends_after_a_project_was_attached(staged_upload, tmp_path):
+    """#1653: a file staged while the chat had no project still goes with the
+    resent message once a project is attached; admitted by its recorded
+    identity, while the same path sent as a fresh attachment stays refused."""
+    event = {"id": "chat-lane-upload", "type": "message.user", "payload": {
+        "content": f"inspect @{staged_upload}", "upload_paths": [str(staged_upload)],
+        "upload_owner_id": settings.effective_instance_id}}
+    session_events.append_events(SID, [event])
+    checkout = tmp_path / "attached-project"
+    checkout.mkdir()
+    database.create_project("attached-project", "Attached", None, str(checkout))
+    assert database.attach_session_project(SID, "attached-project", None)
+    session = database.get_session(SID)
+    assert session.get("mode") != "chat"
+    with pytest.raises(upload_transfer.UploadLiftError):
+        upload_transfer.validate_turn_uploads({"upload_paths": [str(staged_upload)]}, session)
+
+    references = upload_transfer.recorded_upload_references(SID, event)
+    with _Patches():
+        handler = _make_handler()
+        await handler.handle_query({"session_id": SID, "profile": "default", "project": "attached-project",
+            "prompt": f"inspect @{staged_upload}", "upload_references": references})
+    queued = turns.get_queued_turns(SID)
+    assert queued, handler.send_json.call_args_list
+    resend = queued[0]
+    assert resend["payload"]["upload_references"] == references
+    real_stream = query_engine._stream_to_websocket_impl
+    real_create = turn_recorder.TurnRecorder.create_for_run
+    with _pump_env(None), ExitStack() as stack:
+        bounds = engine_patches(stack, cwd=str(checkout), session_row=database.get_session(SID),
+            project_row=database.get_project("attached-project"))
+        stack.enter_context(patch.object(query_engine, "_stream_to_websocket_impl", real_stream))
+        stack.enter_context(patch.object(turn_recorder.TurnRecorder, "create_for_run", real_create))
+        assert await session_runtime.SessionRuntime(resend).execute() == "completed", turns.get_turn(resend["id"])
+        bounds.adapter.send_query.assert_awaited_once()
+    sent = [row for row in session_events.get_events(SID) if row["event_type"] == "message.user"][-1]
+    assert sent["id"] != event["id"]
+    assert sent["payload"]["upload_paths"] == [str(staged_upload)]
+
+    # The identity is what admits it: a reference naming another path, or the
+    # path without its reference, is still refused.
+    session = database.get_session(SID)
+    with pytest.raises(upload_transfer.UploadLiftError):
+        upload_transfer.admit_turn_uploads({"upload_paths": [str(staged_upload)]}, session)
+    with pytest.raises(upload_transfer.UploadLiftError):
+        upload_transfer.admit_turn_uploads({"upload_paths": ["/etc/hostname"], "upload_references": [
+            {**references[0], "path": "/etc/hostname"}]}, session)
 
 
 async def test_owner_materialized_attachment_rewinds_and_resends_through_a_viewer(staged_upload, tmp_path, monkeypatch, rewind_env):

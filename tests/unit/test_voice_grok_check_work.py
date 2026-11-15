@@ -486,7 +486,7 @@ async def test_check_work_mid_typed_send_leaves_the_typed_message_to_its_own_req
     monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: {"id": session_id, "mode": "chat"})
     monkeypatch.setattr(upload_transfer, "partition_upload_paths", lambda paths, session, references=None: (paths, []))
     monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: payload)
-    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: None)
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session, **_: None)
     send_json = call.websocket.send_json
     checked = []
 

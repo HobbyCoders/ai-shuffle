@@ -3,7 +3,8 @@ import {
 	MAX_COLLAPSED_USER_MESSAGE_LENGTH,
 	MAX_COLLAPSED_USER_MESSAGE_LINES,
 	shouldCollapseUserMessage,
-	canRewindUserMessage
+	canRewindUserMessage,
+	typedWords
 } from './message-presentation';
 
 describe('canRewindUserMessage', () => {
@@ -35,5 +36,21 @@ describe('shouldCollapseUserMessage', () => {
 	it('collapses prompts beyond the line threshold', () => {
 		expect(shouldCollapseUserMessage(Array(MAX_COLLAPSED_USER_MESSAGE_LINES).fill('line').join('\n'))).toBe(false);
 		expect(shouldCollapseUserMessage(Array(MAX_COLLAPSED_USER_MESSAGE_LINES + 1).fill('line').join('\n'))).toBe(true);
+	});
+});
+
+describe('typedWords (#1654)', () => {
+	it('cuts one attachment run into the last word', () => {
+		expect(typedWords('QA E4 worktree B@/tmp/up/shot 1.png', ['/tmp/up/shot 1.png'])).toBe('QA E4 worktree B');
+	});
+	it('cuts several attachments wherever they sit', () => {
+		const a = '/ws/uploads/a.png';
+		const b = '/ws/uploads/b notes.md';
+		expect(typedWords(`compare @${a} with @${b}\n\n@${a}`, [a, b])).toBe('compare with');
+	});
+	it('keeps a mention that is not an attachment, and is empty for attachments only', () => {
+		expect(typedWords('email @user today', ['/ws/a.png'])).toBe('email @user today');
+		expect(typedWords('@/ws/a.png', ['/ws/a.png'])).toBe('');
+		expect(typedWords('  plain words  ', undefined)).toBe('plain words');
 	});
 });

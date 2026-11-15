@@ -887,7 +887,8 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
     if source in {"user", "worktree"} and isinstance(prompt, str) and not (row.get("title") or "").strip():
         from app.core.session_title import derive_session_title
         from app.db import database
-        title = derive_session_title(prompt)
+        title = derive_session_title(prompt, [
+            p for p in payload.get("upload_paths") or [] if isinstance(p, str)])
         if title:
             await run_sync(database.update_session, session_id=session_id, title=title)
             from app.core.sync_engine import sync_engine

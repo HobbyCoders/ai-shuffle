@@ -60,6 +60,17 @@ describe('a chip keeps what it is through the real editor', () => {
             expect(uploads(picked(path))).toEqual([]);
         });
 
+    it('separates a chip placed straight after a word from it (#1654)', () => {
+        const editor = open({ type: 'doc', content: [{ type: 'paragraph', content: [
+            { type: 'text', text: 'QA E4 worktree B' },
+            { type: 'fileChip', attrs: attrs('/tmp/up/a.png') },
+            { type: 'fileChip', attrs: attrs('/tmp/up/b.png') },
+            { type: 'text', text: 'then more ' },
+            { type: 'fileChip', attrs: attrs('/tmp/up/c.png') },
+        ] }] });
+        expect(serializeToMessage(editor)).toBe('QA E4 worktree B @/tmp/up/a.png @/tmp/up/b.png then more @/tmp/up/c.png');
+    });
+
     it('still sends the picked path as text', () => {
         expect(serializeToMessage(picked('C:/notes.txt'))).toBe('@C:/notes.txt');
     });

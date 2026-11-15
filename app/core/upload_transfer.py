@@ -30,7 +30,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +254,26 @@ def admitted_upload_roots(session: Dict[str, Any], *, composer: bool = False) ->
     return allowed
 
 
+def recorded_upload_roots(session: Dict[str, Any]) -> List[Path]:
+    """Folders a recorded attachment of this session may still be in.
+
+    A sent message keeps its files where they were staged, but the session can
+    change after: attaching a project takes a chat out of the chat lane, so its
+    own roots no longer cover a file staged before (#1653). Only for a path
+    already proved to be this session's recorded upload by its event/index
+    identity: the session's roots plus every area this worker stages uploads
+    in, each checked against its own base.
+    """
+    from app.core.config import settings
+    from app.core.session_modes import owner_chat_dir
+
+    roots = admitted_upload_roots(session, composer=True)
+    owner_chat = _staging_root(owner_chat_dir() / UPLOADS_SUBDIR, settings.effective_workspace_dir.resolve())
+    if owner_chat is not None and owner_chat not in roots:
+        roots.append(owner_chat)
+    return roots
+
+
 def upload_root_of(raw: str, roots: List[Path]) -> Path:
     """The admitted root that contains ``raw`` after resolving links."""
     path = Path(raw)
@@ -426,7 +446,9 @@ def resolve_upload_references(payload: Dict[str, Any], session: Dict[str, Any]) 
         if metadata.get("not_sent") and pending:
             blob_ids.extend(blob["id"] for blob in pending)
         else:
-            validate_upload_paths([path], session)
+            # Admitted because the event records it, in the area it was staged
+            # in then, never by the client's spelling of it.
+            upload_root_of(path, recorded_upload_roots(session))
             if not Path(path).is_file():
                 raise UploadLiftError("Recorded attachment is no longer on this owner; reattach it.")
     resolved.pop("upload_references", None)
@@ -435,19 +457,41 @@ def resolve_upload_references(payload: Dict[str, Any], session: Dict[str, Any]) 
     return resolved
 
 
-def validate_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any]) -> None:
-    """Every queued path is either an owned file or the source of a session blob."""
+def validate_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any], *,
+                          recorded: Iterable[str] = ()) -> None:
+    """Every queued path is either an owned file or the source of a session blob.
+
+    ``recorded`` names paths :func:`resolve_upload_references` has already
+    admitted as this session's recorded uploads; only :func:`admit_turn_uploads`
+    passes it.
+    """
     from app.db import upload_blobs
     ids = payload.get("upload_blob_ids") or []
     blobs = upload_blobs.get_blobs(ids)
     if len(blobs) != len(ids) or any(blob["session_id"] != session["id"] for blob in blobs):
         raise UploadLiftError("Attachment blob does not belong to this session.")
-    sources = {blob["source_path"] for blob in blobs}
+    sources = {blob["source_path"] for blob in blobs} | set(recorded)
     for path in payload.get("upload_paths") or []:
         if path not in sources:
             validate_upload_paths([path], session)
             if not Path(path).is_file():
                 raise UploadLiftError("Attachment is no longer on this owner; reattach it.")
+
+
+def admit_turn_uploads(payload: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
+    """Resolve a turn's restored references, then check every path it carries.
+
+    The one admission a turn's attachments pass before it runs, on the worker
+    that runs it. A restored reference is admitted by its recorded identity
+    (:func:`resolve_upload_references`), so a file staged while the chat had no
+    project still goes with the message after one was attached (#1653); fresh
+    paths keep the session's current areas.
+    """
+    recorded = [ref["path"] for ref in payload.get("upload_references") or []
+                if isinstance(ref, dict) and isinstance(ref.get("path"), str)]
+    resolved = resolve_upload_references(payload, session)
+    validate_turn_uploads(resolved, session, recorded=recorded)
+    return resolved
 
 
 def lift_send_uploads(paths: List[str], project_id: Optional[str], session_id: str, *,
