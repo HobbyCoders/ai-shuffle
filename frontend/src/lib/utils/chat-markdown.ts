@@ -195,30 +195,53 @@ const chatMarked = new Marked({
  * defines link references is parsed whole (0), since a definition reaches
  * across blocks.
  *
- * A block boundary does not reset marked's inline state (#1627): after a raw
- * `<a>` or `<pre>`/`<code>`/`<kbd>`/`<script>` that has not closed, the full
- * parse keeps later URLs as text and later text raw, while a tail parsed on
- * its own would start fresh and could draw a player. So the split moves back
- * to the last boundary where that state is closed. Each inline HTML token
- * records the state after it; a markdown link around a tag can close it
- * again, which only makes this check move back further than it needs to.
+ * Raw HTML is never split after (#1627). Neither marked's inline state (an
+ * `<a>` not closed yet keeps later URLs as text) nor a block boundary says
+ * where the HTML parser and the sanitizer close an element: `<style>`,
+ * `<textarea>`, `<iframe>`, a comment, `<svg>`, `<template>`, `<table>`
+ * foster-parenting and the rest can swallow later blocks once the full text
+ * is parsed, while a tail rendered on its own would start fresh and could
+ * draw a player. So the split stays before the first block holding raw HTML,
+ * and the rest of the reply renders whole. The block before that one goes in
+ * the tail too: a fragment that starts with `<title>`, `<template>` or
+ * `<noscript>` has it moved out of the body by the sanitizer's parse, which a
+ * markdown block in front of it prevents. Only a lone void tag (`<br>`,
+ * `<wbr>`, `<hr>`) is let through: it holds nothing and opens nothing.
  */
 export function streamingSplit(text: string): number {
 	const tokens = chatMarked.lexer(text);
 	if (Object.keys(tokens.links).length > 0) return 0;
 	let offset = 0;
 	let last = 0;
-	let open = false;
 	for (const token of tokens) {
 		// The lexer normalises line endings; offsets hold only while each raw is the source.
 		if (!text.startsWith(token.raw, offset)) return 0;
-		if (token.type !== 'space' && !open) last = offset;
-		chatMarked.walkTokens([token], (t) => {
-			if (t.type === 'html' && 'inLink' in t) open = t.inLink || t.inRawBlock;
-		});
+		// `last` still marks the block before this one.
+		if (holdsRawHtml(token)) return last;
+		if (token.type !== 'space') last = offset;
 		offset += token.raw.length;
 	}
 	return last;
+}
+
+const VOID_TAG_RE = /^<\/?(?:br|wbr|hr)\b[^<>]*>$/i;
+
+/**
+ * True when a token or anything inside it is raw HTML other than a lone void
+ * tag. A plain walk that stops at the first hit: `marked.walkTokens` collects
+ * its callback's results by concatenation, which is quadratic on a long list.
+ */
+function holdsRawHtml(token: Token): boolean {
+	if (token.type === 'html') return !VOID_TAG_RE.test(token.raw.trim());
+	const t = token as Token & {
+		tokens?: Token[]; items?: Tokens.ListItem[];
+		header?: Tokens.TableCell[]; rows?: Tokens.TableCell[][];
+	};
+	if (t.tokens) for (const child of t.tokens) if (holdsRawHtml(child)) return true;
+	if (t.items) for (const item of t.items) if (holdsRawHtml(item)) return true;
+	if (t.header) for (const cell of t.header) for (const child of cell.tokens) if (holdsRawHtml(child)) return true;
+	if (t.rows) for (const row of t.rows) for (const cell of row) for (const child of cell.tokens) if (holdsRawHtml(child)) return true;
+	return false;
 }
 
 /**

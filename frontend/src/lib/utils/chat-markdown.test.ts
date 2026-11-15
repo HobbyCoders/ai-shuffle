@@ -2,7 +2,9 @@
  * Fence-meta parsing and the code-block chrome the transcript renders.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { marked } from 'marked';
 import { parseFenceMeta, renderCodeBlock, renderChatMarkdown, streamingSplit } from './chat-markdown';
+import { sanitizeHtml } from './sanitize';
 import { isHighlightReady, warmHighlighter } from './shiki';
 
 describe('parseFenceMeta', () => {
@@ -90,16 +92,19 @@ describe('streamingSplit (#1619)', () => {
 		['a closed paragraph', 'One.\n\nTwo', 'One.\n\n'],
 		['an open fence', 'One.\n\n```md\nx\n\n![a](/a.png)', 'One.\n\n'],
 		['a closed fence', '```md\nx\n\ny\n```\n\nAfter', '```md\nx\n\ny\n```\n\n'],
-		['an open <pre> block', 'One.\n\n<pre>\nx\n\n![a](/a.png)', 'One.\n\n'],
-		['an open comment', 'One.\n\n<!--\nx\n\n![a](/a.png)', 'One.\n\n'],
+		['an open <pre> block', 'Zero.\n\nOne.\n\n<pre>\nx\n\n![a](/a.png)', 'Zero.\n\n'],
+		['an open comment', 'Zero.\n\nOne.\n\n<!--\nx\n\n![a](/a.png)', 'Zero.\n\n'],
 		['a list', 'One.\n\n- a\n\n    ![a](/a.png)', 'One.\n\n'],
 		['no block before the last', 'Just one', ''],
 		['a reply that defines a reference', 'One.\n\n![x][r]\n\n[r]: /a.png\n\nTwo', ''],
 		['an unclosed raw <a> (#1627)', 'Intro <a href="/docs">label\n\nhttps://example.com/clip.mp4', ''],
-		['an unclosed raw <a> after a closed block (#1627)', 'One.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\n'],
-		['an unclosed raw <code> (#1627)', 'One.\n\nSee <code>x\n\n<b>raw</b>', 'One.\n\n'],
-		['a raw <a> that closed (#1627)', 'Intro <a href="/docs">label</a>\n\nhttps://example.com/clip.mp4', 'Intro <a href="/docs">label</a>\n\n'],
-		['a raw <a> closed in a later block (#1627)', 'A <a href="/d">x\n\ny</a>\n\nhttps://example.com/clip.mp4', 'A <a href="/d">x\n\ny</a>\n\n']
+		['an unclosed raw <a> after a closed block (#1627)', 'One.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', ''],
+		['raw HTML two blocks in (#1627)', 'One.\n\nTwo.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\n'],
+		['raw HTML, even closed, two blocks back (#1627)', 'Zero.\n\nOne.\n\nA <b>x</b>\n\nTwo\n\nThree', 'Zero.\n\n'],
+		['an HTML block (#1627)', 'One.\n\n<div>\nx\n</div>\n\nTwo', ''],
+		['a nested raw tag in a list (#1627)', 'Zero.\n\nOne.\n\n- a <span>x\n\nTwo', 'Zero.\n\n'],
+		['a lone <br> (#1627)', 'One<br>two\n\nThree', 'One<br>two\n\n'],
+		['a lone <hr> block (#1627)', '<hr>\n\nThree', '<hr>\n\n']
 	])('keeps the last block of %s in the tail', (_case, text, prefix) => {
 		expect(text.substring(0, streamingSplit(text))).toBe(prefix);
 	});
@@ -138,5 +143,107 @@ describe('streamingSplit (#1619)', () => {
 			expect(full.startsWith(settled), `settled blocks at ${n}`).toBe(true);
 			expect(settled + renderChatMarkdown(text.slice(split), false, {}), `render at ${n}`).toBe(full);
 		}
+	});
+});
+
+/**
+ * What the streaming render puts on screen, as the browser and the sanitizer
+ * see it (#1627): AssistantMessage sanitizes the prefix and the tail apart and
+ * mounts them one after the other; ThinkingBlock joins them, then sanitizes.
+ */
+describe('streamingSplit on the sanitized DOM (#1627)', () => {
+	marked.setOptions({ breaks: true, gfm: true });
+	const ACTIVE = 'video, audio, img, iframe, embed, object, a[href], source, picture, svg, math, input, button';
+
+	function dom(...parts: string[]): HTMLDivElement {
+		const root = document.createElement('div');
+		for (const part of parts) {
+			const box = document.createElement('div');
+			box.innerHTML = part;
+			root.append(...box.childNodes);
+		}
+		return root;
+	}
+	const reply = (md: string) => sanitizeHtml(renderChatMarkdown(md, false, {}));
+	const thinking = (md: string) => marked.parse(md) as string;
+
+	function check(text: string, at: string) {
+		const split = streamingSplit(text);
+		const head = text.slice(0, split);
+		const tail = text.slice(split);
+		const pairs: [string, HTMLDivElement, HTMLDivElement][] = [
+			['reply', dom(reply(head), reply(tail)), dom(reply(text))],
+			['thinking', dom(sanitizeHtml(thinking(head) + thinking(tail))), dom(sanitizeHtml(thinking(text)))]
+		];
+		for (const [path, streamed, settled] of pairs) {
+			expect(streamed.querySelectorAll(ACTIVE).length, `${path} active elements at ${at}`)
+				.toBeLessThanOrEqual(settled.querySelectorAll(ACTIVE).length);
+			// Whitespace between tags (left where the sanitizer drops a comment) shows nothing.
+			const shown = (root: HTMLDivElement) => root.innerHTML.replace(/>\s+</g, '><').trim();
+			expect(shown(streamed), `${path} DOM at ${at}`).toBe(shown(settled));
+		}
+	}
+
+	// Lengths around each newline and tag bracket: where a cut changes the blocks
+	// or splits a tag. Every length of these texts passes too, but a sanitizer
+	// pass in jsdom costs tens of milliseconds, too slow for every length here.
+	function cuts(doc: string): number[] {
+		const at = new Set([doc.length]);
+		for (let i = 0; i < doc.length; i++) if ('\n<>'.includes(doc[i])) for (const n of [i, i + 1, i + 2]) if (n >= 1 && n <= doc.length) at.add(n);
+		return [...at];
+	}
+
+	const media = 'https://example.com/clip.mp4\n\n![x](/a.png)\n\n[Clip](/api/generated-videos/clip.mp4)';
+	const openers = [
+		'<style>', '<STYLE>', '<sTyLe>', '<script>', '<textarea>', '<title>', '<xmp>', '<iframe>',
+		'<noembed>', '<noframes>', '<noscript>', '<plaintext>', '<!--', '<![CDATA[', '<svg>', '<math>',
+		'<template>', '<select>', '<table>', '<table><tr><td>', '<a href="/docs">', '<a href="', '<a href=\'',
+		'<pre>', '<code>', '<kbd>', '<div>', '<details>', '<object>', '<video>', '<audio src="/x.mp3">', '<?php', '<!DOCTYPE'
+	];
+	const cases = openers.flatMap((tag) => [
+		[`inline ${tag}`, `Intro ${tag}label\n\n${media}\n\nend`],
+		[`block ${tag}`, `Intro.\n\n${tag}\n\n${media}\n\nend`],
+		[`${tag} in a list`, `- a ${tag}x\n\n${media}`],
+		[`${tag} in a quote`, `> a ${tag}x\n\n${media}`],
+		[`${tag} in a table`, `| A |\n| - |\n| ${tag}x |\n\n${media}`]
+	]);
+
+	it.each(cases)('streams %s as the settled render shows it', (_case, doc) => {
+		check(doc, 'the whole text');
+	});
+
+	// Every prefix is every way of chunking the text, a tag cut across the
+	// chunk boundary included. A shorter reply keeps this to seconds.
+	const short = ['<style>', '<STYLE>', '<textarea>', '<iframe>', '<plaintext>', '<!--', '<svg>', '<template>', '<table>', '<a href="', '<a href="/d">']
+		.flatMap((tag) => [[`inline ${tag}`, `A.\n\nB ${tag}x\n\nhttps://e.co/a.mp4\n\n![y](/a.png)`], [`block ${tag}`, `A.\n\n${tag}\n\nhttps://e.co/a.mp4`]]);
+	it.each(short)('streams every prefix of %s as the settled render shows it', (_case, doc) => {
+		for (const n of cuts(doc)) check(doc.slice(0, n), `${n}`);
+	}, 30_000);
+
+	it('keeps the earlier every-prefix corpus equal on the sanitized DOM', () => {
+		const docs = [
+			'Intro\n\nTitle\n=====\n\nMore\n---\n\nend',
+			'a\n\n<!--\nnote\n\n![x](/api/v1/artifacts/a)\n-->\n\nb ![y](/a.png)',
+			'Lead\n| A | B |\n| - | - |\n| 1 | ![x](/a.png) |\n| 2 | 3 |\n\nafter',
+			'> quote\nlazy line\n> more\n\n![x](/api/v1/artifacts/a)\n\n> q2\n\nend',
+			'- a\n- b\n\n  continued ![x](/a.png)\n\n1. one\n2. two\n\n    code in item\n\npara',
+			'```md\n![x](/a.png)\n\n```\n\n~~~~\n~~~\n![y](/api/v1/artifacts/a)\n~~~~\n\ntext',
+			'Intro.\n\n<pre>\nfirst\n\n![x](/api/v1/artifacts/a)\n</pre>\n\nAfter ![z](/a.png)',
+			'<div>\nblock\n</div>\n\n***\n\n# H\nPara\n<details>\n\nx ![v](/clip.mp4)\n\n</details>',
+			'One<br>two\n\n![x](/a.png)\n\n<hr>\n\nhttps://example.com/clip.mp4'
+		];
+		for (const doc of docs) for (const n of cuts(doc)) check(doc.slice(0, n), `${n} of ${JSON.stringify(doc.slice(0, 20))}`);
+	}, 60_000);
+
+	// The split runs on every appended chunk, on the UI thread: it must stay
+	// linear on long lists and tables (review of #1627 measured seconds).
+	it.each([
+		['a 12,000-item list', '- item\n'.repeat(12000)],
+		['a 12,000-row table', '| A | B |\n| - | - |\n' + '| 1 | 2 |\n'.repeat(12000)],
+		['a 500 KB plain reply', 'Plain words in a paragraph.\n\n'.repeat(17000)]
+	])('splits %s in well under a second', (_case, doc) => {
+		const start = performance.now();
+		streamingSplit(doc);
+		expect(performance.now() - start).toBeLessThan(1000);
 	});
 });
