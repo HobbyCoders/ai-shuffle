@@ -50,6 +50,22 @@ export function typedWords(prompt: string, uploadPaths: readonly string[] | unde
 		.trim();
 }
 
+/** The file names of the attachments a prompt mentions, in order: what names a
+ *  message that is only attachments (the server's title rule). */
+export function attachmentNames(prompt: string, uploadPaths: readonly string[] | undefined): string {
+	if (!uploadPaths?.length) return '';
+	const names = splitUploadMentions(prompt, [...uploadPaths])
+		.flatMap(part => typeof part === 'string' ? [] : [uploadFileName(part.path)]);
+	return [...new Set(names)].join(', ');
+}
+
+/** What names a first message (chat title): its typed words, or the file names
+ *  when it is only attachments. Same result as `derive_session_title` on the
+ *  server before truncation (cases shared in `attachment-title-cases.json`). */
+export function firstMessageWords(prompt: string, uploadPaths: readonly string[] | undefined): string {
+	return typedWords(prompt, uploadPaths) || attachmentNames(prompt, uploadPaths) || prompt.trim();
+}
+
 /** What a sent bubble shows: words with chips in place, then any upload never mentioned. */
 export function userBubbleParts(content: string, uploadPaths: string[]): UploadMentionPart[] {
 	if (!uploadPaths.length) return [content];

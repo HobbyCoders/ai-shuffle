@@ -1,5 +1,8 @@
 """Tests for session title derivation (leading @attachment token strip)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.core.session_title import derive_session_title, strip_leading_attachment_tokens
@@ -153,5 +156,18 @@ class TestKnownAttachmentReferencesAnywhere:
     def test_unknown_mid_message_mention_is_kept(self):
         assert derive_session_title("email @user today", ["/ws/a.png"]) == "email @user today"
 
-    def test_attachments_only_is_not_emptied(self):
-        assert derive_session_title("@/ws/a.png", ["/ws/a.png"]) == "@/ws/a.png"
+    def test_attachments_only_is_named_by_its_files(self):
+        # Never empty, and never the raw path.
+        assert derive_session_title("@/ws/a.png", ["/ws/a.png"]) == "a.png"
+
+
+# The same cases the client's ``firstMessageWords`` is tested against
+# (message-presentation.test.ts), so the two title rules cannot drift.
+_SHARED_CASES = json.loads(
+    (Path(__file__).resolve().parents[2] / "frontend/src/lib/utils/attachment-title-cases.json").read_text("utf-8")
+)
+
+
+@pytest.mark.parametrize("case", _SHARED_CASES, ids=[c["name"] for c in _SHARED_CASES])
+def test_title_matches_the_client_rule(case):
+    assert derive_session_title(case["prompt"], case["paths"]) == case["title"]

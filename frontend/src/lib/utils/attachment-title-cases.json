@@ -1,0 +1,13 @@
+[
+  {"name": "attachment after the words", "prompt": "inspect @/ws/chat-uploads/photo.png", "paths": ["/ws/chat-uploads/photo.png"], "title": "inspect", "branchWords": "inspect"},
+  {"name": "attachment before the words", "prompt": "@/ws/chat-uploads/photo.png inspect it", "paths": ["/ws/chat-uploads/photo.png"], "title": "inspect it", "branchWords": "inspect it"},
+  {"name": "spaces and quotes in the path", "prompt": "check @/ws/chat-uploads/my \"best\" shot (1).png please", "paths": ["/ws/chat-uploads/my \"best\" shot (1).png"], "title": "check please", "branchWords": "check please"},
+  {"name": "several attachments", "prompt": "compare @/ws/u/a.png with @/ws/u/b.pdf", "paths": ["/ws/u/a.png", "/ws/u/b.pdf"], "title": "compare with", "branchWords": "compare with"},
+  {"name": "only an attachment", "prompt": "@/ws/chat-uploads/my photo.png", "paths": ["/ws/chat-uploads/my photo.png"], "title": "my photo.png", "branchWords": ""},
+  {"name": "only attachments", "prompt": "@/ws/u/b.pdf @/ws/u/a.png", "paths": ["/ws/u/a.png", "/ws/u/b.pdf"], "title": "b.pdf, a.png", "branchWords": ""},
+  {"name": "a mention that is not an attachment", "prompt": "ask @alice about @/ws/u/a.png", "paths": ["/ws/u/a.png"], "title": "ask @alice about", "branchWords": "ask @alice about"},
+  {"name": "a Windows path", "prompt": "read @C:\\Users\\me\\uploads\\notes.txt now", "paths": ["C:\\Users\\me\\uploads\\notes.txt"], "title": "read now", "branchWords": "read now"},
+  {"name": "one path the prefix of another", "prompt": "see @/ws/u/a.png.bak and @/ws/u/a.png", "paths": ["/ws/u/a.png", "/ws/u/a.png.bak"], "title": "see and", "branchWords": "see and"},
+  {"name": "attachment on its own line", "prompt": "fix this\n@/ws/u/a.png\nthanks", "paths": ["/ws/u/a.png"], "title": "fix this\n\nthanks", "branchWords": "fix this\n\nthanks"},
+  {"name": "no attachments", "prompt": "plain words", "paths": [], "title": "plain words", "branchWords": "plain words"}
+]

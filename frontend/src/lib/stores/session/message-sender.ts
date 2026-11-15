@@ -15,7 +15,7 @@ import { isCallActiveFor, sendVoiceText } from '$lib/services/voiceCall';
 import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { generateBranchName, generateBranchNameLocal } from '$lib/api/git';
-import { typedWords } from '$lib/utils/message-presentation';
+import { firstMessageWords, typedWords } from '$lib/utils/message-presentation';
 import { ATTACHMENTS_NEED_RUNS_ON } from '$lib/components/chat/attach-disable';
 import { keepStopRecovery, STOP_TURN_NOT_NAMED, stopPressedOn } from '$lib/utils/not-sent-hold';
 import { parkedSendTurnId } from '$lib/utils/work-log';
@@ -109,10 +109,10 @@ export function newSessionWorker(
 }
 
 /** A first message's chat title: its typed words without the attachments'
- *  `@path` mentions (#1654), or the prompt itself when it is only attachments
+ *  `@path` mentions (#1654), or their file names when it is only attachments
  *  (the server's title rule). */
 function firstMessageTitle(prompt: string, uploadPaths: readonly string[] | undefined): string {
-	const words = typedWords(prompt, uploadPaths) || prompt;
+	const words = firstMessageWords(prompt, uploadPaths);
 	return words.substring(0, 100) + (words.length > 100 ? '...' : '');
 }
 

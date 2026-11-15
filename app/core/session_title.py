@@ -31,8 +31,9 @@ not knowable from the text alone. Two signals, in order:
 
 Tokens are consumed one at a time until the text no longer opens with ``@``,
 so multi-attachment messages are fully unwrapped. The helper never empties a
-title: if the message is nothing but attachments, the original text comes
-back through, truncated.
+title: a message that is nothing but known attachments is titled by their
+file names; nothing but unknown tokens, the original text comes back through,
+truncated.
 
 A known path is also cut out wherever it sits: the composer puts a chip where
 the cursor was, usually after the typed words (``fix it @/ws/a.png``), and the
@@ -117,16 +118,33 @@ def strip_known_attachment_references(text: str, known_paths: Optional[Iterable[
     The spaces a removal leaves are folded into one. Like the leading strip, a
     message that is nothing but attachments comes back unchanged.
     """
+    return _cut_known_references(text, known_paths) or text
+
+
+def _cut_known_references(text: str, known_paths: Optional[Iterable[str]]) -> str:
+    """``text`` with every known ``@<path>`` cut out; may be empty."""
     known = sorted({p for p in known_paths or [] if p}, key=len, reverse=True)
-    if not known:
-        return text
     body = text
     for path in known:
         body = body.replace("@" + path, " ")
     if body == text:
         return text
-    body = _LINE_EDGE_SPACES.sub("\n", _SPACE_RUN.sub(" ", body)).strip()
-    return body or text
+    return _LINE_EDGE_SPACES.sub("\n", _SPACE_RUN.sub(" ", body)).strip()
+
+
+def _attachment_names(text: str, known_paths: Iterable[str]) -> str:
+    """The file names of the known attachments ``text`` mentions, in order."""
+    found = []
+    for path in {p for p in known_paths if p}:
+        at = text.find("@" + path)
+        if at != -1:
+            found.append((at, -len(path), path))
+    names: List[str] = []
+    for _, _, path in sorted(found):
+        name = re.split(r"[/\\]", path)[-1] or path
+        if name not in names:
+            names.append(name)
+    return ", ".join(names)
 
 
 _SPACE_RUN = re.compile(r"[ \t]{2,}")
@@ -148,7 +166,12 @@ def derive_session_title(
     50-char sites append the ellipsis to whatever the cut left.
     """
     known = list(known_paths or [])
-    body = strip_leading_attachment_tokens(strip_known_attachment_references(text, known), known)
+    typed = _cut_known_references(text, known)
+    if not typed:
+        # Only attachments: name it by their files, never the raw paths.
+        body = _attachment_names(text, known)
+    else:
+        body = strip_leading_attachment_tokens(typed, known)
     title = body[:max_chars].strip()
     if len(body) > max_chars:
         if word_boundary:

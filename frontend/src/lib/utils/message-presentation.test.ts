@@ -4,8 +4,10 @@ import {
 	MAX_COLLAPSED_USER_MESSAGE_LINES,
 	shouldCollapseUserMessage,
 	canRewindUserMessage,
-	typedWords
+	typedWords,
+	firstMessageWords
 } from './message-presentation';
+import sharedTitleCases from './attachment-title-cases.json';
 
 describe('canRewindUserMessage', () => {
 	const user = { id: 'user', role: 'user' as const, content: 'ordinary legacy prompt' };
@@ -52,5 +54,14 @@ describe('typedWords (#1654)', () => {
 		expect(typedWords('email @user today', ['/ws/a.png'])).toBe('email @user today');
 		expect(typedWords('@/ws/a.png', ['/ws/a.png'])).toBe('');
 		expect(typedWords('  plain words  ', undefined)).toBe('plain words');
+	});
+});
+
+// The same cases the server's derive_session_title is tested against
+// (tests/core/test_session_title.py), so the two title rules cannot drift.
+describe('first-message words match the server title rule', () => {
+	it.each(sharedTitleCases)('$name', ({ prompt, paths, title, branchWords }) => {
+		expect(firstMessageWords(prompt, paths)).toBe(title);
+		expect(typedWords(prompt, paths)).toBe(branchWords);
 	});
 });
