@@ -42,6 +42,7 @@ import {
 	summarizePullRequests,
 	sessionDeviceId,
 	sessionModeOf,
+	sessionStartedAt,
 	sessionTimestamp,
 	UNKNOWN_REMOTE_DEVICE,
 	sessionWorkMs,
@@ -491,6 +492,22 @@ describe('sessionTimestamp', () => {
 
 		row.updated_at = '2026-08-20T13:00:00Z';
 		expect(sessionTimestamp(row)).toBe(Date.parse('2026-08-20T13:00:00Z'));
+	});
+});
+
+describe('sessionStartedAt', () => {
+	it('is the start time, whatever the last activity was', () => {
+		const row = session({ created_at: '2026-08-19T12:00:00', updated_at: '2026-08-20T12:00:00Z' });
+		expect(sessionStartedAt(row)).toBe(Date.parse('2026-08-19T12:00:00Z'));
+
+		row.updated_at = '2026-08-21T12:00:00Z';
+		expect(sessionStartedAt(row)).toBe(Date.parse('2026-08-19T12:00:00Z'));
+	});
+
+	it('falls back to the last activity for a row with no start time, then to zero', () => {
+		expect(sessionStartedAt(session({ created_at: null as never, updated_at: '2026-08-20T12:00:00Z' })))
+			.toBe(Date.parse('2026-08-20T12:00:00Z'));
+		expect(sessionStartedAt(session({ created_at: null as never, updated_at: null as never }))).toBe(0);
 	});
 });
 

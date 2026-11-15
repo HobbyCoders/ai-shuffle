@@ -723,6 +723,25 @@ export function sessionTimestamp(s: Session): number {
 	return ms;
 }
 
+/** Memo for `sessionStartedAt`, same contract as `timestampMemo`. */
+const startedMemo = new WeakMap<object, { raw: string; ms: number }>();
+
+/** When the chat was started (ms). This is the row's place in the Needs you
+ *  and Active lanes: it never changes, so a reply cannot move a row. A row
+ *  with no start time yet falls back to its last activity. */
+export function sessionStartedAt(s: Session): number {
+	const raw = s.created_at || s.updated_at || '';
+	const memo = startedMemo.get(s);
+	if (memo && memo.raw === raw) return memo.ms;
+	let ms = 0;
+	if (raw) {
+		const t = parseUTC(raw).getTime();
+		ms = Number.isNaN(t) ? 0 : t;
+	}
+	startedMemo.set(s, { raw, ms });
+	return ms;
+}
+
 /** Memo for the live-turn start, same contract as `timestampMemo`. */
 const workStartMemo = new WeakMap<object, { raw: string; ms: number }>();
 

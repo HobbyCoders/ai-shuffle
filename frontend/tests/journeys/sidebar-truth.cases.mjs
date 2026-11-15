@@ -34,6 +34,9 @@
 //   new-chat-glide-ends-in-place  the list scrolls during that glide and the group
 //                     finishes where it is really laid out, with no jump when
 //                     the animation is removed (#1307)
+//   reply-keeps-row-in-place  a reply in an older chat leaves its row where it
+//                     was: rows sit in the order the chats were started, and
+//                     activity never moves one
 //
 // Hosted journeys build only the shared desktop UI and run it at desktop and
 // phone widths. `--mobile-shell` opens the phone variants of the failed-* cases
@@ -910,11 +913,68 @@ const NEW_CHAT_GLIDE_ENDS_IN_PLACE = {
 	}
 };
 
+/** The Active lane's rows, top to bottom. */
+const activeOrder = (page) => page.evaluate(() =>
+	[...document.querySelectorAll('[data-group="active"] [data-session-card]')].map((el) => el.getAttribute('data-session-card')));
+
+const REPLY_KEEPS_ROW_IN_PLACE = {
+	name: 'reply-keeps-row-in-place',
+	async setup(ctx) {
+		ctx.a = await makeChat(ctx, 'order-a');
+		ctx.b = await makeChat(ctx, 'order-b', { again: true });
+		ctx.c = await makeChat(ctx, 'order-c', { again: true });
+		await ctx.page.waitForTimeout(500);
+	},
+	async act({ page, mark, log, variant, a, b, c }) {
+		await showSidebar(page);
+		const ours = async () => (await activeOrder(page)).filter((id) => [a.id, b.id, c.id].includes(id));
+		const before = await ours();
+		expect(before.join() === [c.id, b.id, a.id].join(), `the chats are listed newest-started first: ${JSON.stringify(before)}`);
+
+		await mark('the chat started first gets a new reply');
+		await openRow(page, a.id);
+		// Every frame of the turn: the row must not visit the top and come back.
+		await page.evaluate((ids) => {
+			const watch = { running: true, orders: new Set() };
+			window.__journeyOrderWatch = watch;
+			const tick = () => {
+				if (!watch.running) return;
+				const order = [...document.querySelectorAll('[data-group="active"] [data-session-card], [data-group="needs-you"] [data-session-card]')]
+					.map((el) => el.getAttribute('data-session-card')).filter((id) => ids.includes(id));
+				if (order.length === ids.length) watch.orders.add(order.join());
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		}, [a.id, b.id, c.id]);
+		const token = `order-again-${uniq()}`;
+		await typeAndSend(page, `${token} ${scriptTag(variant, 'default', { latency_ms: 800 })}`);
+		await waitTurnSettled(page, { text: `You said: “${token}`, timeout: 120_000 });
+		await page.waitForTimeout(1000);
+		await showSidebar(page);
+		const seen = await page.evaluate(() => {
+			window.__journeyOrderWatch.running = false;
+			return [...window.__journeyOrderWatch.orders];
+		});
+		log(`orders seen during the reply: ${JSON.stringify(seen)}`);
+		const after = await ours();
+		expect(after.join() === before.join(), `the row stayed where it was after the reply: ${JSON.stringify(after)}`);
+		expect(seen.every((order) => order === before.join()), `the rows never changed order during the reply: ${JSON.stringify(seen)}`);
+	},
+	async verify({ page, a, b, c }) {
+		// A reload reads the rows afresh from the server, in the same order.
+		await page.reload();
+		// On a phone the list is closed after a reload; waitLane opens it first.
+		await waitLane(page, a.id, 'active', 60_000);
+		const order = (await activeOrder(page)).filter((id) => [a.id, b.id, c.id].includes(id));
+		expect(order.join() === [c.id, b.id, a.id].join(), `a reload keeps the same order: ${JSON.stringify(order)}`);
+	}
+};
+
 // Run in two halves (see lib/split.mjs): one file was a whole CI shard by itself.
 export const journey = {
 	name: 'sidebar-truth',
 	allow: [...DEV_INSTANCE_NOISE],
-	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, DELETE_OPEN_CHAT, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE]
+	cases: [ROLLBACK_SETTLE, ROLLBACK_REACTIVATE, ROLLBACK_RENAME, ROLLBACK_DELETE, DELETE_OPEN_CHAT, FAILED_OPEN, FAILED_UNOPENED, FAILED_CLAUDE, FAILED_SETTLED, FAILED_CLEARED, STOPPED, PROJECT_CHOICE_SURVIVES, PROJECT_ONCE, NEW_CHAT_FROM_ELSEWHERE, NEW_CHAT_FIRST_SEND, NEW_CHAT_GLIDE_HAS_NO_STEP, NEW_CHAT_GLIDE_ENDS_IN_PLACE, REPLY_KEEPS_ROW_IN_PLACE]
 };
 
 // The cases sidebar-truth.journey.mjs runs; sidebar-truth-2.journey.mjs runs every other
