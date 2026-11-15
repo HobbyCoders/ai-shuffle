@@ -169,6 +169,25 @@
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
+	// Opening or closing a group at the bottom of the panel moves its header out
+	// from under the pointer, and a row can take its place. A second click that
+	// fast on the same spot is the other half of a double-click on the header,
+	// not a wish to open that row. A click anywhere else goes through.
+	const GROUP_SETTLE_MS = 500;
+	const SAME_SPOT_PX = 10;
+	let headerClick = { at: 0, x: 0, y: 0 };
+	function dropStrayClick(event: MouseEvent) {
+		// Keyboard activation has no position and never follows a moving header.
+		if (event.detail === 0) return;
+		if (event.target instanceof Element && event.target.closest('.sect')) {
+			headerClick = { at: Date.now(), x: event.clientX, y: event.clientY };
+			return;
+		}
+		if (Date.now() - headerClick.at >= GROUP_SETTLE_MS) return;
+		if (Math.hypot(event.clientX - headerClick.x, event.clientY - headerClick.y) > SAME_SPOT_PX) return;
+		event.preventDefault();
+		event.stopPropagation();
+	}
 
 	// ---------------------------------------------------------------- clock
 	// One shared ticker drives every card's timer: 1s while something is live,
@@ -1017,7 +1036,7 @@
 
 		</div>
 
-		<div class="list" class:edge-guard={phone} bind:this={listRef}>
+		<div class="list" class:edge-guard={phone} bind:this={listRef} onclickcapture={dropStrayClick}>
 			{#if needsYouRows.length > 0}
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
