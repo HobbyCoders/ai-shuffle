@@ -218,6 +218,14 @@ describe('Talk turns into Send', () => {
 			expect(stops).toHaveBeenCalledOnce();
 		});
 
+		it('ignores the second click of a double click on Send that reaches Stop from the start screen (#1632)', async () => {
+			idle();
+			const { container } = render(ChatInput);
+			const stop = await sendDraft(container);
+			await fireEvent.click(stop, { detail: 2 });
+			expect(stops).not.toHaveBeenCalled();
+		});
+
 		it('ignores the stray tap before the background-agents confirmation, never after it', async () => {
 			// Running agents keep Stop shown, so they start with the turn here.
 			idle();

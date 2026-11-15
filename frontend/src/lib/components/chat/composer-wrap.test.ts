@@ -4,7 +4,7 @@
  * line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ARRIVAL_GUARD_MS, composerCircles, createArrivalGuard, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
+import { ARRIVAL_GUARD_MS, composerCircles, DOUBLE_PRESS_MS, createArrivalGuard, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
 
 const idle = { callAvailable: true, hasContent: false, working: false, busy: false };
 
@@ -258,6 +258,21 @@ describe('createArrivalGuard (#1632)', () => {
 		g.update(['mic', 'stop'], false);
 		expect(g.ignores('mic', 650)).toBe(true);
 		expect(g.ignores('stop', 650)).toBe(false);
+	});
+
+	it('ignores the rest of a double click on Stop that took Send\'s place, even when the user caused it', () => {
+		const g = guard();
+		g.update(['mic', 'send'], false);
+		clock = 300;
+		// The user's own send: settled, so a single press on Stop counts.
+		g.update(['mic', 'stop'], true);
+		expect(g.ignores('stop', 400)).toBe(false);
+		expect(g.ignores('stop', 400, 2)).toBe(true);
+		expect(g.ignores('stop', 300 + DOUBLE_PRESS_MS, 2)).toBe(false);
+		// A double click on a Stop that was already there is meant for it.
+		clock = 5000;
+		g.update(['mic', 'stop'], true);
+		expect(g.ignores('stop', 5050, 2)).toBe(false);
 	});
 
 	it('ignores a press on Stop just after it replaced the spinner', () => {

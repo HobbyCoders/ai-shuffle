@@ -235,6 +235,9 @@ export type RowButton = 'mic' | ComposerCircle;
  */
 export const ARRIVAL_GUARD_MS = 400;
 
+/** How long after a button moves in a double click's later press can still reach it. */
+export const DOUBLE_PRESS_MS = 500;
+
 /** Arrivals whose press would start or stop something: dictation, a call, the turn. */
 const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
 
@@ -243,31 +246,41 @@ const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
  * the row's right end, where the circles sit, so a button that slides over
  * takes a new seat. A change the user made themselves (typing turns Talk
  * into Send, a chat switch) is `settled`: they are looking at the row, and
- * nothing arrives unseen. Send is never guarded: a stray press on it sends
- * the draft that was typed to be sent.
+ * nothing arrives unseen, except under the rest of a double click or double
+ * tap: its later presses land where the first one was, so one that reaches a
+ * button which moved in since (Send became Stop) is never meant for it. Send
+ * is never guarded: a stray press on it sends the draft that was typed to be
+ * sent.
  */
 export function createArrivalGuard(now: () => number = () => performance.now()) {
 	let row: RowButton[] | null = null;
 	let arrivedAt: number[] = [];
+	let movedAt: number[] = [];
+	const seatTimes = (next: RowButton[], before: RowButton[] | null, times: number[], at: number) =>
+		next.map((button, i) => {
+			const seat = next.length - 1 - i;
+			if (!before) return -Infinity;
+			return before[before.length - 1 - seat] === button ? (times[seat] ?? -Infinity) : at;
+		}).reverse();
 	return {
 		/** The row as shown now. */
 		update(next: RowButton[], settled: boolean) {
 			const at = now();
-			const before = row;
-			arrivedAt = next.map((button, i) => {
-				const seat = next.length - 1 - i;
-				if (settled || !before) return -Infinity;
-				const was = before[before.length - 1 - seat];
-				return was === button ? (arrivedAt[seat] ?? -Infinity) : at;
-			}).reverse();
+			movedAt = seatTimes(next, row, movedAt, at);
+			arrivedAt = settled ? next.map(() => -Infinity) : seatTimes(next, row, arrivedAt, at);
 			row = [...next];
 		},
-		/** Whether a pointer press made at `pressedAt` on `button` came too soon after it arrived. */
-		ignores(button: RowButton, pressedAt: number): boolean {
+		/**
+		 * Whether a pointer press made at `pressedAt` on `button` came too soon
+		 * after it arrived. `clicks` is the press's click count (`event.detail`).
+		 */
+		ignores(button: RowButton, pressedAt: number, clicks = 1): boolean {
 			if (!row || !GUARDED.has(button)) return false;
 			const index = row.lastIndexOf(button);
 			if (index < 0) return false;
-			return pressedAt < (arrivedAt[row.length - 1 - index] ?? -Infinity) + ARRIVAL_GUARD_MS;
+			const seat = row.length - 1 - index;
+			if (clicks > 1 && pressedAt < (movedAt[seat] ?? -Infinity) + DOUBLE_PRESS_MS) return true;
+			return pressedAt < (arrivedAt[seat] ?? -Infinity) + ARRIVAL_GUARD_MS;
 		}
 	};
 }

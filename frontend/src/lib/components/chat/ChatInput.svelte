@@ -772,7 +772,7 @@
 		// it late does not let it through.
 		const now = performance.now();
 		const pressedAt = event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
-		if (!arrivals.ignores(kind, pressedAt)) return;
+		if (!arrivals.ignores(kind, pressedAt, event.detail)) return;
 		event.preventDefault();
 		event.stopPropagation();
 	}
