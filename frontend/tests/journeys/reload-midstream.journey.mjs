@@ -11,6 +11,7 @@
 //   link-reload    the chat opened by a link (/?session=<id>), then reloaded
 import { runJourney } from './runner.mjs';
 import {
+	CHAT,
 	SLOW_REPLY,
 	chatIdByToken,
 	countUserRows,
@@ -37,6 +38,13 @@ const replyCopies = (page) =>
 		).length;
 	}, SLOW_REPLY.start);
 
+/**
+ * How far the row's Done may lead the chat's own end of stream. Both come from
+ * the same `user_streaming_changed` message (CI traces: 3-20ms apart), so this
+ * only absorbs a frame or two; a Done during boot or mid-turn is seconds early.
+ */
+const TURN_END_SKEW_MS = 500;
+
 function reloadCase(name, { viaLink }) {
 	return {
 		name,
@@ -60,18 +68,37 @@ function reloadCase(name, { viaLink }) {
 		async act(ctx) {
 			const { page, mark, log, token } = ctx;
 			// Every status the chat's sidebar row shows from the new page's first
-			// frame until the reply ends: the turn runs all along, so it is never
-			// Done (#1527).
+			// frame until the reply ends, with the chat's own streaming state in
+			// that frame. The turn runs all along, so the row is never Done while
+			// the chat still streams or before it has picked the stream up (#1527).
+			// The turn's real end may reach the row a few hundred ms before the
+			// last words paint (the row follows the global socket, the words the
+			// event feed; nothing orders the two), so a Done once the chat itself
+			// saw the stream end is the turn ending, not the bug (#1586).
 			const id = await chatIdByToken(page, token);
-			await page.addInitScript(({ id, end }) => {
+			await page.addInitScript(({ id, end, chat }) => {
 				const seen = (window.__rowStatuses = []);
+				let chatStreamed = false;
+				let last = '';
+				let endSeenAt = 0;
 				const tick = () => {
+					// Watched a moment past the last words, so a Done painted with
+					// them is judged with the chat's own end that follows it.
+					if (!endSeenAt && (document.body?.textContent || '').includes(end)) endSeenAt = performance.now();
+					const done = endSeenAt && performance.now() - endSeenAt > 1000;
+					window.__rowWatchDone = !!done;
+					const streaming = document.querySelector(chat)?.getAttribute('data-ui-streaming') ?? null;
+					if (streaming === 'true') chatStreamed = true;
 					const status = document.querySelector(`[data-session-card="${CSS.escape(id)}"]`)?.getAttribute('data-status');
-					if (status && seen[seen.length - 1] !== status) seen.push(status);
-					if (!(document.body?.textContent || '').includes(end)) requestAnimationFrame(tick);
+					const key = `${status}|${streaming}`;
+					if (status && key !== last) {
+						last = key;
+						seen.push({ status, streaming, chatStreamed, at: Math.round(performance.now()) });
+					}
+					if (!done) requestAnimationFrame(tick);
 				};
 				requestAnimationFrame(tick);
-			}, { id, end: SLOW_REPLY.end });
+			}, { id, end: SLOW_REPLY.end, chat: CHAT });
 			await mark('reload');
 			const t0 = Date.now();
 			await page.reload({ waitUntil: 'domcontentloaded' });
@@ -85,9 +112,23 @@ function reloadCase(name, { viaLink }) {
 			expect((await countUserRows(page, token)) === 1, 'the message is back, once');
 
 			await page.getByText(SLOW_REPLY.end, { exact: false }).first().waitFor({ timeout: 90_000 });
+			await page.waitForFunction(() => window.__rowWatchDone === true, null, { timeout: 10_000 });
 			const statuses = await page.evaluate(() => window.__rowStatuses);
-			log(`sidebar row while the turn ran: ${statuses.join(' → ')}`);
-			expect(!statuses.includes('done'), `the running chat's row said Done after the reload: ${statuses.join(' → ')}`);
+			const shown = statuses.map((s) => `${s.status} (chat streaming=${s.streaming}${s.chatStreamed ? '' : ', not yet streamed'}) @${s.at}`).join(' → ');
+			log(`sidebar row while the turn ran: ${shown}`);
+			const firstDone = statuses.findIndex((s) => s.status === 'done');
+			if (firstDone >= 0) {
+				// Done only for the turn's real end: the chat had picked the stream
+				// up, sees it stop at about the same moment (both follow the same
+				// socket message; the row's store can paint a frame first), and
+				// nothing after says the turn still runs.
+				const early = statuses[firstDone];
+				const after = statuses.slice(firstDone);
+				const chatEnd = after.find((s) => s.streaming === 'false');
+				expect(early.chatStreamed && chatEnd && chatEnd.at - early.at <= TURN_END_SKEW_MS, `the running chat's row said Done after the reload while the chat still streamed: ${shown}`);
+				expect(after.every((s) => s.status === 'done'), `the row went back to working after Done: ${shown}`);
+				expect(!after.slice(after.indexOf(chatEnd)).some((s) => s.streaming === 'true'), `the chat streamed again after its row said Done: ${shown}`);
+			}
 			await waitTurnSettled(page, { messagesAtLeast: 2, timeout: 30_000 });
 			log(`reply settled ${Date.now() - t0}ms after reload`);
 			expect((await countUserRows(page, token)) === 1, 'the message shows once after the reply settled');
