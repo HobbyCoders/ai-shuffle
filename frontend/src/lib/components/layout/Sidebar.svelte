@@ -84,6 +84,7 @@
 	import {
 		branchLabel,
 		deriveStatus,
+		sessionStartedAt,
 		sessionTimestamp,
 		sessionDeviceId,
 		sessionPrState,
@@ -411,7 +412,17 @@
 	// `ts` is the row's last-activity time, resolved ONCE per row (R2). The
 	// comparator used to call sessionTimestamp() — a `Date` parse — on every
 	// comparison, i.e. O(n log n) date parses per recompute.
-	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number }
+	// `started` is when the chat was started, resolved once the same way. It is
+	// the row's place in Needs you and Active; `ts` stays the card's timer and
+	// the order of Settled, which is history paged by last activity.
+	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number; started: number }
+
+	// Needs you and Active list chats in the order they were started, newest on
+	// top, and a row keeps that place: a reply, a finished turn or a tool call
+	// never moves it. Ties fall to the id, so the store handing over the same
+	// rows in another order cannot swap two of them either.
+	const byStart = (a: CardRow, b: CardRow) =>
+		b.started - a.started || (a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0);
 
 	// Snoozes whose time has passed count as Active at once: the server's wake
 	// lands a moment later and changes nothing on screen. Keyed by a string so
@@ -469,7 +480,8 @@
 							groupToolCalls && rememberedProse.has(s.id)
 						)
 					}),
-					ts: sessionTimestamp(s)
+					ts: sessionTimestamp(s),
+					started: sessionStartedAt(s)
 				};
 			})
 			.sort((a, b) => b.ts - a.ts)
@@ -481,9 +493,11 @@
 	// now" (#2324): a settled row always lands in Settled, keeping its amber badge
 	// if the server still reports a wait.
 	// A snoozed row has its own lane, soonest wake first, until its time passes.
+	// Changing lane is the only way a row in Needs you or Active moves: inside
+	// the lane it sits by when it was started.
 	const laneOf = (r: CardRow) => sidebarGroup(r.status, rowActive(r.session), rowSnoozed(r.session));
-	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs'));
-	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active'));
+	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs').sort(byStart));
+	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active').sort(byStart));
 	const snoozedRows = $derived(
 		rows
 			.filter((r) => laneOf(r) === 'snoozed')
@@ -628,21 +642,22 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
-	// A project's place follows its most recent chat in ANY lane, archived-but-
-	// not-yet-gone included. Ranking on the lane's own rows made a project swap
-	// places, moving a screenful of rows, whenever its newest chat left the lane,
-	// and swap back if the server then refused the change.
-	const projectRecency = $derived.by(() => {
+	// A project's place follows its most recently STARTED chat in ANY lane,
+	// archived-but-not-yet-gone included. Activity in a chat never moves its
+	// project: only a new chat starting does. Ranking on the lane's own rows made
+	// a project swap places, moving a screenful of rows, whenever its newest chat
+	// left the lane, and swap back if the server then refused the change.
+	const projectStart = $derived.by(() => {
 		const latest = new Map<string, number>();
 		for (const s of visibleSessions) {
 			const key = projectKey(s);
-			const ts = sessionTimestamp(s);
-			if (ts > (latest.get(key) ?? -Infinity)) latest.set(key, ts);
+			const started = sessionStartedAt(s);
+			if (started > (latest.get(key) ?? -Infinity)) latest.set(key, started);
 		}
 		return latest;
 	});
 	// Inside a lane, rows sit under their project when the lane spans more than
-	// one, so no row has to repeat it. Rows keep their recency order inside it.
+	// one, so no row has to repeat it. Rows keep their start order inside it.
 	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
 		const groups = new Map<string, CardRow[]>();
 		for (const row of laneRows) {
@@ -654,17 +669,17 @@
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
 		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
-		const recency = (key: string) => projectRecency.get(key) ?? 0;
+		const started = (key: string) => projectStart.get(key) ?? 0;
 		return [...groups]
-			.sort(([a], [b]) => recency(b) - recency(a))
+			.sort(([a], [b]) => started(b) - started(a))
 			.map(([key, rows]) => ({
 				key,
 				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
 				rows
 			}));
 	}
-	// A project's place is its newest chat, so a chat starting in a project lower
-	// down lifts that whole group over the ones above it (#1307). That is a
+	// A project's place is its newest-started chat, so a chat starting in a project
+	// lower down lifts that whole group over the ones above it (#1307). That is a
 	// screenful of rows changing place with nothing the user touched, so they
 	// glide there. Position only: a group growing by a row must not stretch.
 	/** How far through its easing a group sinking out of sight reaches the list's bottom edge. */

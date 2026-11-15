@@ -226,7 +226,7 @@ describe('Archived sessions', () => {
 
 describe('A new chat changing the order of the project groups (#1307)', () => {
 	const row = (id: string, title: string, project: string | null, minute: number) =>
-		session(id, title, project, true, false, { updated_at: `2026-08-20T12:${minute}:00Z` });
+		session(id, title, project, true, false, { created_at: `2026-08-20T12:${minute}:00Z` });
 	const projectChat = row('project', 'Project chat', 'visible-project', 20);
 	const looseChat = row('loose', 'Loose chat', null, 10);
 	const newLooseChat = row('new', 'New loose chat', null, 30);
@@ -550,7 +550,7 @@ describe('Sidebar session groups', () => {
 		mocks.projectCatalogReady.set(false);
 		mocks.projects.set([]);
 		mocks.sessions.set([
-			session('newer', 'Project chat', 'late-project', true),
+			session('newer', 'Project chat', 'late-project', true, false, { created_at: '2026-08-20T12:01:00Z' }),
 			session('older', 'Loose chat', null, true),
 		]);
 
@@ -570,7 +570,7 @@ describe('Sidebar session groups', () => {
 	// A project swapping places moves a screenful of rows, so its newest chat
 	// leaving a lane, for good or until the server refuses it, must not do that.
 	it('keeps a project in its place when its newest chat leaves the lane', async () => {
-		const at = (minutes: number) => ({ updated_at: new Date(Date.now() - minutes * 60_000).toISOString() });
+		const at = (minutes: number) => ({ created_at: new Date(Date.now() - minutes * 60_000).toISOString() });
 		const visible = (id: string, title: string, isActive: boolean, minutes: number, extra = {}) =>
 			session(id, title, 'visible-project', isActive, false, { ...at(minutes), ...extra });
 		const other = (id: string, title: string, minutes: number) =>
@@ -743,7 +743,7 @@ describe('Sidebar session groups', () => {
 
 	it('marks the filter button and shows a clearable chip once a filter is applied', async () => {
 		mocks.sessions.set([
-			session('active', 'Active chat', 'visible-project', true),
+			session('active', 'Active chat', 'visible-project', true, false, { created_at: '2026-08-20T12:01:00Z' }),
 			session('other', 'Other project chat', 'other-project', false, false, { project_name: 'Other Project' }),
 			session('peer', 'Laptop chat', 'visible-project', false, false, {
 				is_remote: true,
@@ -770,7 +770,7 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
 		expect(cardIds()).toEqual(['active', 'peer']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		// Visible Project holds the newest chat, so it comes first in every lane.
+		// Visible Project holds the newest-started chat, so it comes first in every lane.
 		expect(cardIds()).toEqual(['active', 'peer', 'other']);
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
@@ -1036,12 +1036,15 @@ describe('Sidebar ordering (must never change silently)', () => {
 		]);
 	});
 
-	it('keeps Active cards in the same order, above the Settled group', () => {
+	it('lists Active cards by when they were started, newest first, above the Settled group', () => {
 		mocks.sessions.set([
-			session('a-old', 'Active older', 'visible-project', true, false, {
-				updated_at: '2026-08-20T08:00:00Z',
+			// Started first, and the one that last had activity.
+			session('a-first', 'Started first', 'visible-project', true, false, {
+				created_at: '2026-08-20T08:00:00Z',
+				updated_at: '2026-08-20T20:00:00Z',
 			}),
-			session('a-new', 'Active newer', 'visible-project', true, false, {
+			session('a-last', 'Started last', 'visible-project', true, false, {
+				created_at: '2026-08-20T18:00:00Z',
 				updated_at: '2026-08-20T18:00:00Z',
 			}),
 			session('s-one', 'Settled one', 'visible-project', false, false, {
@@ -1052,8 +1055,87 @@ describe('Sidebar ordering (must never change silently)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		const groups = document.querySelectorAll('.cards');
-		expect(cardIds(groups[0])).toEqual(['a-new', 'a-old']);
+		expect(cardIds(groups[0])).toEqual(['a-last', 'a-first']);
 		expect(cardIds(groups[1])).toEqual(['s-one']);
+	});
+});
+
+describe('Sidebar rows keep their place', () => {
+	const started = (hour: number) => `2026-08-20T${String(hour).padStart(2, '0')}:00:00Z`;
+	const chat = (id: string, project: string | null, hour: number, extra = {}) =>
+		session(id, `Chat ${id}`, project, true, false, { created_at: started(hour), updated_at: started(hour), ...extra });
+	const activeIds = () => cardIds(document.querySelector('[data-group="active"]') ?? undefined);
+
+	it('does not move a row when its chat gets a reply', async () => {
+		const rows = [chat('one', null, 8), chat('two', null, 9), chat('three', null, 10)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+
+		// The oldest chat is now the one with the newest activity, and the store
+		// hands it over first as well.
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z', turn_count: 9 }, rows[1], rows[2]]);
+		await tick();
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+	});
+
+	it('adds a new chat on top and leaves the rest as they were', async () => {
+		const rows = [chat('one', null, 8, { updated_at: started(22) }), chat('two', null, 9)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['two', 'one']);
+
+		mocks.sessions.set([...rows, chat('three', null, 12)]);
+		await tick();
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+	});
+
+	it('does not move a project group when one of its chats gets a reply', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [
+			chat('early', 'visible-project', 8),
+			chat('late', 'other-project', 10, { project_name: 'Other Project' }),
+		];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z' }, rows[1]]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+	});
+
+	it('keeps start order in Needs you too, whichever row asked last', async () => {
+		const rows = [chat('one', null, 8), chat('two', null, 9)];
+		mocks.sessions.set(rows);
+		mocks.backgroundPermissions.set(
+			new Map([
+				['two', { count: 1, kind: 'permission' as const }],
+				['one', { count: 1, kind: 'permission' as const }],
+			])
+		);
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		const needsIds = () => cardIds(document.querySelector('[data-group="needs-you"]') ?? undefined);
+		expect(needsIds()).toEqual(['two', 'one']);
+
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z' }, rows[1]]);
+		await tick();
+		expect(needsIds()).toEqual(['two', 'one']);
+	});
+
+	it('orders chats started at the same moment the same way whatever order they arrive in', async () => {
+		const rows = [chat('b', null, 8), chat('a', null, 8), chat('c', null, 8)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		const before = activeIds();
+
+		mocks.sessions.set([rows[2], rows[0], rows[1]]);
+		await tick();
+		expect(activeIds()).toEqual(before);
 	});
 });
 
