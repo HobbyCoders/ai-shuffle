@@ -159,7 +159,7 @@
     <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
     <kbd class="text-xs text-muted-foreground">esc</kbd>
    </div>
-   <div bind:this={list} class="max-h-[65vh] overflow-y-auto" aria-busy={searching}>
+   <div bind:this={list} class="spotlight-results max-h-[65vh] overflow-y-auto" aria-busy={searching}>
     {#if !trimmed}<p class="px-4 py-3 text-sm text-muted-foreground">Find settings, session messages, agents, MCP servers, plugins, notes and docs.</p>{/if}
     {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#each groups as group, groupIndex (group.id)}
@@ -193,7 +193,15 @@
  .spotlight-search:focus-within { outline: 2px solid var(--ring); outline-offset: -2px; }
  .spotlight-search input, .spotlight-search input:focus, .spotlight-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
  .spotlight-overlay { align-items: start; padding-top: 10dvh; }
- @media (max-width: 600px) { .spotlight-overlay { padding: 0; align-items: end; } .spotlight-item { min-height: 44px; } }
+ /* The phone sheet is bottom-anchored, so a sheet that grew with its results
+    moved its top edge (and the search field) each time a search answered
+    (#1600). A fixed height keeps it still; the results scroll inside. */
+ @media (max-width: 600px) {
+  .spotlight-overlay { padding: 0; align-items: end; }
+  .spotlight-overlay .ui-dialog { height: 85dvh; }
+  .spotlight-results { flex: 1 1 auto; min-height: 0; max-height: none; }
+  .spotlight-item { min-height: 44px; }
+ }
   .spotlight-item:hover {
     background: var(--hover-overlay);
   }
