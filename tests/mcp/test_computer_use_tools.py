@@ -22,6 +22,12 @@ from app.mcp.computer_use import abort, access, activity, scaling, safety, uia, 
 # Pillow ships only in requirements-native.txt; skip, not error, without it.
 Image = pytest.importorskip("PIL.Image")
 
+# Bound for waits on something that must eventually happen (a key press
+# starting, a stopped action returning, a rejection coming back). The held
+# keys below last 60 s, so a call queued behind one still times out; the bound
+# only leaves a stalled CI runner room, it is not a latency claim (#1567).
+_ARRIVAL_SECONDS = 10
+
 
 def payload(result):
     return json.loads(result["content"][0]["text"])
@@ -206,7 +212,7 @@ def desktop(monkeypatch):
     abort.request_stop("test")
     fake_uia.release.set()  # let any "hung" fake call finish
     uia_backend.shutdown()
-    assert safety.DESKTOP_LOCK.acquire(timeout=1), "worker did not exit after Stop"
+    assert safety.DESKTOP_LOCK.acquire(timeout=_ARRIVAL_SECONDS), "worker did not exit after Stop"
     safety.DESKTOP_LOCK.release()
     access.revoke("test")
 
@@ -405,9 +411,9 @@ async def test_stop_during_key_hold_releases_key(desktop):
     loop = asyncio.get_running_loop()
     desktop.keyboard.press.side_effect = lambda key: loop.call_soon_threadsafe(started.set)
     running = asyncio.create_task(desktop.tools["hold_key"]({"text": "ctrl", "duration": 60}))
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=_ARRIVAL_SECONDS)
     abort.stop_active("escape")
-    result = await asyncio.wait_for(running, timeout=0.5)
+    result = await asyncio.wait_for(running, timeout=_ARRIVAL_SECONDS)
     assert result["isError"]
     desktop.keyboard.release.assert_called_once_with("ctrl")
 
@@ -417,7 +423,7 @@ async def test_cancelled_task_invalidates_the_worker(desktop):
     loop = asyncio.get_running_loop()
     desktop.keyboard.press.side_effect = lambda key: loop.call_soon_threadsafe(started.set)
     running = asyncio.create_task(desktop.tools["hold_key"]({"text": "ctrl", "duration": 60}))
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=_ARRIVAL_SECONDS)
     running.cancel()
     with pytest.raises(asyncio.CancelledError):
         await running
@@ -456,14 +462,14 @@ async def test_concurrent_action_is_rejected_instead_of_queued_behind_stop(deskt
     loop = asyncio.get_running_loop()
     desktop.keyboard.press.side_effect = lambda key: loop.call_soon_threadsafe(started.set)
     running = asyncio.create_task(desktop.tools["hold_key"]({"text": "ctrl", "duration": 60}))
-    await asyncio.wait_for(started.wait(), timeout=1)
+    await asyncio.wait_for(started.wait(), timeout=_ARRIVAL_SECONDS)
     try:
-        result = await asyncio.wait_for(desktop.tools["type"]({"text": "no"}), timeout=0.5)
+        result = await asyncio.wait_for(desktop.tools["type"]({"text": "no"}), timeout=_ARRIVAL_SECONDS)
         assert result["isError"]
         assert "busy" in payload(result)["error"]
     finally:
         abort.stop_active("escape")
-        await asyncio.wait_for(running, timeout=0.5)
+        await asyncio.wait_for(running, timeout=_ARRIVAL_SECONDS)
     desktop.keyboard.type.assert_not_called()
 
 

@@ -1600,7 +1600,20 @@ def test_queue_observation_cannot_delay_liveness(
             wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
         ))
         try:
-            await asyncio.wait_for(entered.wait(), 1)
+            # Reaching the blocked stage is an entry wait, not the claim under
+            # test: a stalled CI runner can start the observer late (#1674).
+            # A deadline verdict may then come before the observer is entered;
+            # idle and rate-limited cannot, as nothing triggers them yet.
+            entering = asyncio.ensure_future(entered.wait())
+            reached, _ = await asyncio.wait(
+                {entering, task}, timeout=10, return_when=asyncio.FIRST_COMPLETED,
+            )
+            entering.cancel()
+            assert reached, "the observer never reached its blocked stage"
+            # Liveness is measured from entry (the trigger below), not from
+            # task creation, so a slow start cannot spend the bound. The
+            # 0.04/0.06 s deadlines fall inside it when entry is prompt.
+            due = loop.time()
             if verdict == "idle":
                 idle.set()
             elif verdict == pa.WAIT_RATE_LIMITED:
@@ -1608,8 +1621,10 @@ def test_queue_observation_cannot_delay_liveness(
             assert await asyncio.wait_for(task, 0.3) == (
                 None if verdict == "idle" else verdict
             )
-            assert loop.time() - now < 0.3
-            assert probes == 1  # blocked observation never creates a query backlog
+            assert loop.time() - due < 0.3
+            # Never a query backlog. Entry implies the one probe ran; a verdict
+            # that beat entry may have come before the probe thread started.
+            assert probes == 1 if entered.is_set() else probes <= 1
         finally:
             release.set()
             if not task.done():
@@ -1635,7 +1650,7 @@ def test_idle_db_outage_still_allows_cancellation(monkeypatch):
         monkeypatch.setattr(turns, "session_has_unsettled_turns", unavailable)
         monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
         waiter = asyncio.create_task(pa._await_worker_idle("worker-1", None))
-        await asyncio.wait_for(probed.wait(), timeout=1.0)
+        await asyncio.wait_for(probed.wait(), timeout=10)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter

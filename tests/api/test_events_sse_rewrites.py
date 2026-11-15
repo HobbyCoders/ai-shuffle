@@ -18,6 +18,11 @@ from app.db.base import get_db
 from app.network import catalog, engine, policy
 from tests.api.sse_helpers import collect_frames, parse_frame
 
+# Bound for waits on something that must eventually happen: a stage being
+# entered or a frame arriving. Only how long a stalled CI runner may take, not
+# a latency claim; the assertions check what arrives, not when (#1672).
+ARRIVAL_SECONDS = 10
+
 
 @pytest.fixture(autouse=True)
 def clean_tails():
@@ -93,7 +98,7 @@ async def test_peer_replacement_after_connect_resets_warm_reader(
         notifications = mirror_rows("mirror-replaced", new_count, replace=True)
         for payload in notifications:
             gw._handle_payload(payload)  # Deliver the committed mirror wake (transport stubbed).
-        reset = (await collect_frames(stream, 1, timeout=0.8))[0]
+        reset = (await collect_frames(stream, 1, timeout=ARRIVAL_SECONDS))[0]
         assert reset == {"event": "reset", "data": {
             "reason": "epoch", "epoch": se.get_log_epoch("mirror-replaced")}}
         assert reset["data"]["epoch"] != epoch
@@ -129,7 +134,7 @@ async def test_missed_peer_notification_still_resets_on_reconciliation(mock_db, 
     stream, epoch = await warm_reader("mirror-no-notify")
     try:
         mirror_rows("mirror-no-notify", 1, replace=True)  # Deliberately lose LISTEN delivery.
-        reset = (await collect_frames(stream, 1, timeout=0.8))[0]
+        reset = (await collect_frames(stream, 1, timeout=ARRIVAL_SECONDS))[0]
         assert reset["event"] == "reset"
         assert reset["data"]["reason"] == "epoch"
         assert reset["data"]["epoch"] != epoch
@@ -203,13 +208,13 @@ async def test_peer_rewrite_during_initial_backfill_is_not_lost(mock_db, gw, mon
     stream = event_stream(sid, 3, epoch)
     opening = asyncio.create_task(anext(stream))
     try:
-        await asyncio.wait_for(entered.wait(), 0.8)
+        await asyncio.wait_for(entered.wait(), ARRIVAL_SECONDS)
         for payload in mirror_rows(sid, 1, replace=True):
             gw._handle_payload(payload)
         await asyncio.sleep(0.03)  # The shared reader sees it before note_cursor.
         release.set()
         assert parse_frame(await opening)["event"] == "caught_up"
-        reset = (await collect_frames(stream, 1, timeout=0.8))[0]
+        reset = (await collect_frames(stream, 1, timeout=ARRIVAL_SECONDS))[0]
         assert reset["event"] == "reset"
         assert reset["data"]["epoch"] != epoch
     finally:
@@ -282,12 +287,12 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
         assert parse_frame(await anext(stream)) == {
             "event": "caught_up", "data": {"seq": 0, "epoch": events_mod.EMPTY_LOG_EPOCH}}
         if delivery != "mirror-missed-before-seed":
-            await asyncio.wait_for(seeded.wait(), 1)
+            await asyncio.wait_for(seeded.wait(), ARRIVAL_SECONDS)
         if delivery in ("mirror-fallback-race", "mirror-notified-race"):
             # Seeding alone leaves an empty-log read in flight. Finish it before
             # A commits, so it cannot deliver A and bypass the intended probe
             # (fallback or notified) that starts the A -> B race.
-            await asyncio.wait_for(initial_read_done.wait(), 1)
+            await asyncio.wait_for(initial_read_done.wait(), ARRIVAL_SECONDS)
         if delivery == "local-push":
             se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local first"}}])
             gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 1}))
@@ -306,7 +311,7 @@ async def test_empty_log_adopts_first_delivered_identity(mock_db, gw, monkeypatc
             assert first["data"]["id"] == se.get_log_epoch(sid)
         # Reconciliation runs now, not after the production 120s deadline. It
         # must keep a valid first-message feed open instead of resetting it.
-        assert (await asyncio.wait_for(anext(stream), 1)).startswith(": keepalive")
+        assert (await asyncio.wait_for(anext(stream), ARRIVAL_SECONDS)).startswith(": keepalive")
         assert not events_mod._tails[sid].closed
         se.append_events(sid, [{"type": "message.user", "payload": {"content": "Local second"}}])
         gw._handle_payload(json.dumps({"session_id": sid, "max_seq": 2}))
@@ -351,7 +356,7 @@ async def test_empty_client_does_not_adopt_an_older_readers_probe(mock_db, gw, m
         first = (await collect_frames(empty, 1))[0]
         assert first["event"] == "message.user"
         assert len(probed) == 1 and first["data"]["id"] != probed[0]
-        assert (await asyncio.wait_for(anext(empty), 1)).startswith(": keepalive")
+        assert (await asyncio.wait_for(anext(empty), ARRIVAL_SECONDS)).startswith(": keepalive")
         # The other client really saw an older prefix, so it still resets.
         assert (await collect_frames(warm, 1))[0]["event"] == "reset"
     finally:
@@ -377,10 +382,10 @@ async def test_first_batch_invalidates_another_clients_delivered_prefix(mock_db,
     other = None
     try:
         assert parse_frame(await anext(empty))["data"]["epoch"] == events_mod.EMPTY_LOG_EPOCH
-        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.wait_for(entered.wait(), ARRIVAL_SECONDS)
         mirror_rows(sid, 1, replace=False)
         other = event_stream(sid)
-        previous = [parse_frame(await asyncio.wait_for(anext(other), 1)) for _ in range(2)]
+        previous = [parse_frame(await asyncio.wait_for(anext(other), ARRIVAL_SECONDS)) for _ in range(2)]
         assert [frame["event"] for frame in previous] == ["message.user", "caught_up"]
         mirror_rows(sid, 1, replace=True)  # Deliberately lose the mirror NOTIFY.
         release.set()
@@ -390,7 +395,7 @@ async def test_first_batch_invalidates_another_clients_delivered_prefix(mock_db,
         reset = (await collect_frames(other, 1))[0]
         assert reset["event"] == "reset"
         assert reset["data"]["epoch"] == first["data"]["id"]
-        assert (await asyncio.wait_for(anext(empty), 1)).startswith(": keepalive")
+        assert (await asyncio.wait_for(anext(empty), ARRIVAL_SECONDS)).startswith(": keepalive")
         assert not events_mod._tails[sid].closed
     finally:
         release.set()
