@@ -1600,11 +1600,20 @@ def test_queue_observation_cannot_delay_liveness(
         monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
         monkeypatch.setattr(pa.rate_limit_breaker, "is_tripped", lambda _: tripped)
         now = loop.time()
-        task = asyncio.create_task(pa._await_worker_idle(
-            "blocked-observer", "provider", feed=SimpleNamespace(queued=notice),
-            first_frame_deadline=now + 0.04 if verdict == pa.WAIT_NO_FIRST_FRAME else None,
-            wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
-        ))
+        deadlines = {pa.WAIT_NO_FIRST_FRAME: now + 0.04, pa.WAIT_DEADLINE: now + 0.06}
+        answered_at: list[float] = []  # when the verdict was returned, not observed
+
+        async def watch() -> object:
+            result = await pa._await_worker_idle(
+                "blocked-observer", "provider", feed=SimpleNamespace(queued=notice),
+                first_frame_deadline=deadlines.get(pa.WAIT_NO_FIRST_FRAME)
+                if verdict == pa.WAIT_NO_FIRST_FRAME else None,
+                wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
+            )
+            answered_at.append(loop.time())
+            return result
+
+        task = asyncio.create_task(watch())
         try:
             # Reaching the blocked stage is an entry wait, not the claim under
             # test: a stalled CI runner can start the observer late (#1674).
@@ -1616,6 +1625,7 @@ def test_queue_observation_cannot_delay_liveness(
             )
             entering.cancel()
             assert reached, "the observer never reached its blocked stage"
+            triggered_at = loop.time()
             if verdict == "idle":
                 idle.set()
             elif verdict == pa.WAIT_RATE_LIMITED:
@@ -1626,12 +1636,17 @@ def test_queue_observation_cannot_delay_liveness(
             # The DB probe never runs on the event loop: there it would hold
             # every liveness check for as long as the query takes.
             assert loop_thread not in probe_threads, "the queue probe blocked the event loop"
-            if entered_at:
-                # Liveness bound from the moment the observer blocked (or the
-                # verdict's own deadline, if later), not from task creation, so
-                # a slow start cannot spend it, nor a held loop hide in it.
-                deadline = {pa.WAIT_NO_FIRST_FRAME: now + 0.04, pa.WAIT_DEADLINE: now + 0.06}
-                assert loop.time() - max(entered_at[0], deadline.get(verdict, 0.0)) < 0.3
+            # Response time runs from when the verdict became due to when it
+            # was returned: the trigger for idle/rate-limited, and for a
+            # deadline the later of that deadline and the observer blocking.
+            # Neither end is the test's own resume, so a slow start or a late
+            # resume on a busy runner cannot spend the bound.
+            if verdict in deadlines:
+                due = max(deadlines[verdict], *entered_at) if entered_at else None
+            else:
+                due = triggered_at
+            if due is not None:
+                assert answered_at[0] - due < 0.3
             # Never a query backlog. Entry implies the one probe ran; a verdict
             # that beat entry may have come before the probe thread started.
             assert probes == 1 if entered.is_set() else probes <= 1
