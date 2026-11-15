@@ -2232,17 +2232,22 @@ async def defer_started_report(starter_id, frame, admit=None, *, reason=None):
 
 
 async def report_settled_start(session_id, settled, outcome):
-    """Settlement hook: send a started chat's report to the assistant. Never raises."""
+    """Settlement hook: send a started chat's report to the assistant. Never
+    raises, except the cancellation of a shutdown: a report to another worker
+    cancelled before it was sent is kept on the started chat first (#1597)."""
+    frame = sender = None
+    dispatched = []
     try:
         built = await asyncio.to_thread(build_started_report, session_id, settled, outcome)
         if not built:
             return
-        home, device, frame = built
+        home, device, remote_frame = built
         if home:
             # The first delivery of this worker's own settled chat: nothing
             # retries it, so it may steer into a live turn without a receipt.
-            await deliver_started_report(home, frame, steer=True)
+            await deliver_started_report(home, remote_frame, steer=True)
             return
+        frame = remote_frame
         from app.core import provider_capability
         from app.network import control
         sender = await asyncio.to_thread(_report_sender, session_id)
@@ -2261,10 +2266,35 @@ async def report_settled_start(session_id, settled, outcome):
                 await defer_started_report(sender, frame, reason=reason)
             log.warning("Report of started chat %s kept on that chat, not sent: %s", session_id, reason)
             return
+        # Nothing durable says this report is owed, and the receiving worker
+        # keeps no receipt of it, so it is never resent.
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
-                           timeout=REMOTE_TIMEOUT)
+                           timeout=REMOTE_TIMEOUT, on_dispatch=lambda: dispatched.append(True))
+    except asyncio.CancelledError:
+        # A shutdown (or restart) cancelled the send. Before the request left,
+        # the report is kept on the started chat with the owner notified, as
+        # for a starter that cannot take it; after, it may have arrived and is
+        # never kept or sent twice.
+        if frame is not None and not dispatched:
+            await asyncio.shield(_keep_unsent_report(session_id, sender, frame))
+        raise
     except Exception:  # noqa: BLE001 — a report never breaks settlement
         log.warning("Could not report started chat %s back to the assistant", session_id, exc_info=True)
+
+
+async def _keep_unsent_report(session_id, sender, frame):
+    """Keep a report whose send was cancelled before it left on the started chat."""
+    from app.core import turn_scheduler
+    try:
+        if sender is None:
+            sender = await asyncio.to_thread(_report_sender, session_id)
+        async with turn_scheduler._terminal_delivery_lock(sender or session_id):
+            await record_started_report(sender, frame, started_here=True)
+            await defer_started_report(sender, frame,
+                                       reason="The app shut down before the report was sent to the assistant's worker.")
+        log.warning("Report of started chat %s kept on that chat: the app shut down before it was sent", session_id)
+    except Exception:  # noqa: BLE001 — shutting down: the database may already be closing
+        log.warning("Could not keep the unsent report of started chat %s", session_id, exc_info=True)
 
 
 def accept_remote_report(body, from_device):

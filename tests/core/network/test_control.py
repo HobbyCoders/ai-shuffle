@@ -299,6 +299,51 @@ async def test_control_retry_is_bounded_and_only_for_rejected_tokens(monkeypatch
     assert link.authenticate.await_count == auth_calls
 
 
+@pytest.mark.parametrize("body", [b"<html>Bad gateway page</html>", b'{"ok": tr', b"\xff\xfe\xfa"])
+async def test_an_unreadable_success_answer_may_have_been_applied(monkeypatch, body):
+    """#1598: a 2xx whose body is not JSON came after the action was dispatched."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    sent = []
+
+    def handle(request):
+        sent.append(request.url.path)
+        return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+    real_async = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda *a, **kw: real_async(**{**kw, "transport": httpx.MockTransport(handle)}))
+    link = transport.PeerLink("owner", ["http://a.local:8000"])
+    link.authenticate = AsyncMock()
+    monkeypatch.setitem(transport._links, "owner", link)
+    monkeypatch.setattr(engine, "require_context",
+                        lambda: SimpleNamespace(device_id="me", member=lambda _device_id: None))
+    dispatched = []
+    with pytest.raises(control.MaybeApplied, match="may still have been applied"):
+        await control.call("owner", "turns", {"session_id": "s"}, on_dispatch=lambda: dispatched.append(1))
+    assert sent == ["/api/v1/network/peer/control/turns"]
+    assert dispatched == [1]
+
+
+async def test_on_dispatch_is_not_called_when_nothing_reached_the_peer(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    link = transport.PeerLink("owner", ["http://a.local:8000"])
+    link.authenticate = AsyncMock(side_effect=transport.PeerConnectFailed("connect failed"))
+    link._request = AsyncMock()
+    monkeypatch.setitem(transport._links, "owner", link)
+    monkeypatch.setattr(control, "CONNECT_RETRY_DELAY", 0)
+    monkeypatch.setattr(engine, "require_context",
+                        lambda: SimpleNamespace(device_id="me", member=lambda _device_id: None))
+    dispatched = []
+    with pytest.raises(control.RunnerUnreachable) as raised:
+        await control.call("owner", "turns", {}, on_dispatch=lambda: dispatched.append(1))
+    assert not isinstance(raised.value, control.MaybeApplied)
+    assert dispatched == [] and link._request.await_count == 0
+
+
 @pytest.mark.parametrize("old_peer", [True, False])
 async def test_compact_first_remote_protocol_refuses_old_peer_before_admission(workers, monkeypatch, old_peer):
     from app.core import turn_manager

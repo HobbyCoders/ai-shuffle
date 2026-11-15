@@ -622,6 +622,58 @@ async def test_ordinary_owner_remote_start_reports_back(workers, monkeypatch, ki
         assert turn["payload"]["orchestration_report_device"] == b.device_id
 
 
+@pytest.mark.parametrize("cancelled_while", ["connecting", "sent"])
+async def test_a_report_cancelled_before_it_was_sent_is_kept_on_the_started_chat(
+        workers, monkeypatch, kicks, cancelled_while):
+    """#1597: a shutdown that cancels the first report while it is still
+    connecting keeps it on the started chat; once the request left it may have
+    arrived (the receiving worker keeps no receipt), so it is never kept or
+    sent again."""
+    import asyncio
+    from app.db import notifications, session_events
+    a, b, _ = network(workers, monkeypatch)
+    with b.active():
+        result = json.loads((await start(ARGS)).text)
+    new_id = result["session_id"]
+    with a.active():
+        [turn] = agent_turns(new_id)
+        assert turns.start_turn(turn["id"])
+        session_events.append_events(new_id, [{"type": "assistant.text_delta", "turn_id": turn["id"],
+                                               "payload": {"text": "Done."}}])
+        assert turns.settle_turn(turn["id"], "completed")
+
+    reached = asyncio.Event()
+
+    async def hang(*args, **kwargs):
+        reached.set()
+        await asyncio.Event().wait()
+
+    link = transport.PeerLink(b.device_id, ["http://b.local:8000"])
+    if cancelled_while == "connecting":
+        link.authenticate = hang
+        link._request = AsyncMock(side_effect=AssertionError("the report must not be sent"))
+    else:
+        link.authenticate = AsyncMock()
+        link._request = hang
+    monkeypatch.setitem(transport._links, b.device_id, link)
+    with a.active():
+        task = asyncio.create_task(orch.report_settled_start(new_id, turns.get_turn(turn["id"]), "completed"))
+        await asyncio.wait_for(reached.wait(), 10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        kept = [e for e in session_events.get_events(new_id) if e["event_type"] == "orchestration.report_deferred"]
+        noted = [n for n in notifications.list_notifications("admin") if n["session_id"] == new_id]
+    if cancelled_while == "connecting":
+        [event] = kept
+        assert event["payload"]["starter_session_id"] == "caller"
+        assert event["payload"]["child_turn_id"] == turn["id"]
+        assert "shut down before the report was sent" in event["payload"]["reason"]
+        assert noted
+    else:
+        assert kept == [] and noted == []
+
+
 async def test_chat_remote_start_without_a_project_is_refused(workers, monkeypatch, kicks):
     """Same rule as a code-capable Task: a ceiling chat (here one the preview
     cookie sends) must name the project. The owner's own no-project chat is a
