@@ -282,6 +282,7 @@ ENVIRONMENT_NOTE_HEADER = (
 # names that copy, so a later fold that removes it is detectable.
 ENVIRONMENT_DETAILS_UNCHANGED = "Recent commits and runtime facts: unchanged since last shown"
 _NOTE_CLOSE = "\n</system-reminder>"
+_NOTE_OPEN = "<system-reminder>\n" + ENVIRONMENT_NOTE_HEADER
 _DETAILS_START = re.compile(r"^(?:Recent commits:\n|Worker Python: )", re.MULTILINE)
 _UNCHANGED_LINE = re.compile(
     "^" + re.escape(ENVIRONMENT_DETAILS_UNCHANGED) + r" \[([0-9a-f]{12})\]\.$", re.MULTILINE,
@@ -324,7 +325,14 @@ def render_environment_note(lines: list[str], details: str, *, unchanged: bool =
     shown = (f"{ENVIRONMENT_DETAILS_UNCHANGED} [{details_fingerprint(details)}]."
              if unchanged else details)
     body = "\n".join([*lines, shown])
-    return f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}{_NOTE_CLOSE}"
+    return f"{_NOTE_OPEN}{body}{_NOTE_CLOSE}"
+
+
+def is_environment_note_block(text: str) -> bool:
+    """Whether a text block is a note the harness wrote: it opens with the
+    note's own tag and header (a Resume note rides after a blank line). A
+    quote of a note inside other text is not one."""
+    return text.lstrip("\n").startswith(_NOTE_OPEN)
 
 
 def _environment_notes(text: str) -> list[tuple[str, str]]:

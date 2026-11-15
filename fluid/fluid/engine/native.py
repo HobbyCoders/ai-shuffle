@@ -219,6 +219,7 @@ from fluid.providers.base import (
 from fluid.context.environment import (
     ENVIRONMENT_DETAILS_UNCHANGED,
     environment_note_parts,
+    is_environment_note_block,
     render_environment_note,
     scan_environment_notes,
     unsupported_environment_claim,
@@ -841,11 +842,13 @@ def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) 
 
 
 def _context_texts(history: list[Message]) -> list[str]:
-    """The user-role text blocks of a rendered history, in order: where the
-    harness's own notes live. Tool output and assistant text are left out,
-    so a quoted note there never counts as one the harness sent."""
+    """The environment notes the harness wrote into a rendered history, in
+    order: user-role text blocks that open with the note itself. Tool
+    output, assistant text and a note quoted inside other text are left
+    out, so none of them counts as a copy the harness sent."""
     return [block.text for message in history if message.role == "user"
-            for block in message.content if isinstance(block, Text)]
+            for block in message.content
+            if isinstance(block, Text) and is_environment_note_block(block.text)]
 
 
 def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
@@ -3372,28 +3375,28 @@ class NativeLoop(BackgroundLifecycleMixin):
             else:
                 read_window.record(self.ctx, path, *window)
 
-    def _environment_restore_tokens(self) -> int:
-        """Room reserved for a restored environment note, like the plan's."""
-        details = self._turn_environment_details
-        return (len(render_environment_note([], details)) + 3) // 4 if details else 0
+    @staticmethod
+    def _environment_restore_tokens(details: str) -> int:
+        """Room a restored environment note takes, sized like the plan's."""
+        return (len(render_environment_note([], details)) + 3) // 4
 
-    async def _environment_restore_node(
-        self, parent_id: str, texts: list[str],
-    ) -> SessionNode | None:
-        """A stored harness note restating the environment details, when the
-        newest "unchanged" line in ``texts`` (the request's context) names a
-        copy that context no longer shows: a fold between calls, or a
-        compaction or overflow escalation in this turn, removed it.
+    async def _environment_restore_details(
+        self, rendered: list[Message], clocked: list[Message],
+    ) -> str | None:
+        """The details a restored note must carry for this request, or None.
 
-        Written at most once per fold: the note renders verbatim (harness
-        notes are never stubbed) and is then the newest full copy, so the
-        next request finds nothing to restore. Appended like the plan note,
-        so earlier cached bytes never move.
+        Needed only when the newest "unchanged" line in the request's
+        context names a copy that context no longer shows: a fold between
+        calls, or a compaction or overflow escalation in this turn, removed
+        it. A request-only Resume note may make the claim but never holds
+        the copy, so only stored, rendered notes count as held.
         """
+        texts = _context_texts(rendered)
+        if clocked is not rendered and ENVIRONMENT_DETAILS_UNCHANGED in (self._resume_environment or ""):
+            texts = _context_texts(clocked)
         if not unsupported_environment_claim(texts):
             return None
-        details = self._turn_environment_details
-        if details is None:
+        if self._turn_environment_details is None:
             if not self._has_environment_section():
                 return None
             try:
@@ -3401,7 +3404,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             except Exception:  # never let a git hiccup block a call
                 log.debug("environment restore failed", exc_info=True)
                 return None
-            details = self._turn_environment_details = note[1]
+            self._turn_environment_details = note[1]
+        return self._turn_environment_details
+
+    @staticmethod
+    def _environment_restore_node(parent_id: str, details: str) -> SessionNode:
+        """The stored harness note restating ``details``.
+
+        Written at most once per fold: the note renders verbatim (harness
+        notes are never stubbed) and is then the newest full copy, so the
+        next request finds nothing to restore. Appended like the plan note,
+        so earlier cached bytes never move.
+        """
         return SessionNode(
             node_id=new_id("node"), parent_id=parent_id,
             message=Message(
@@ -4031,11 +4045,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             plan_note = await asyncio.to_thread(plan_reminder, self.ctx) if self._tool_wired("Plan") else None
             # Reserve the bounded restoration even if the compactor folds the
             # turn that held it. State is re-read, never inferred from a summary.
-            overhead_tokens = (
-                self._context_overhead_tokens()
-                + ((len(plan_note) + 3) // 4 if plan_note else 0)
-                + self._environment_restore_tokens()
-            )
+            overhead_tokens = self._context_overhead_tokens() + ((len(plan_note) + 3) // 4 if plan_note else 0)
             # Measured first: on a resumed engine it rehydrates the last
             # call's usage, which also seeds the cache signal's miss rate.
             measured_prompt = await self._measured_window_prompt(sid, nodes)
@@ -4104,18 +4114,34 @@ class NativeLoop(BackgroundLifecycleMixin):
                 promotions.extend(admitted)
                 rendered = self._compactor.view(nodes)
             clocked = self._with_resume_clock(nodes, rendered)
+            env_details = await self._environment_restore_details(rendered, clocked)
+            if env_details is not None and refusal is None:
+                # Room for a restore is charged only once the admitted view
+                # shows one is really needed: reserved on every call, it
+                # could digest a turn that fits, note and all. A view that
+                # cannot make that room drops the restore, never the call.
+                more, over = self._admission_promotions(
+                    nodes,
+                    overhead_tokens=overhead_tokens + self._environment_restore_tokens(env_details),
+                    measured=measured_prompt,
+                    measured_current=measured_current and self._measured_is_current(sid),
+                )
+                if more:
+                    promotions.extend(more)
+                    rendered = self._compactor.view(nodes)
+                    clocked = self._with_resume_clock(nodes, rendered)
+                    env_details = await self._environment_restore_details(rendered, clocked)
+                if over is not None:
+                    log.debug("session %s: no room to restore the environment details", sid)
+                    env_details = None
             # Compaction can retire the anchor. Account for only the clock
             # actually sent, including on later calls of this same Resume.
             # The plan note is history once written (below), not overhead.
             overhead_tokens = self._context_overhead_tokens()
             history = sanitize_assistant_history(repair_dangling_tool_calls(clocked))
-            # A request-only Resume note can claim the details are unchanged
-            # but never holds them: only stored, rendered notes count.
-            env_texts = _context_texts(rendered)
-            if clocked is not rendered and ENVIRONMENT_DETAILS_UNCHANGED in (self._resume_environment or ""):
-                env_texts = _context_texts(clocked)
-            env_node = await self._environment_restore_node(parent.node_id, env_texts)
-            if env_node is not None:
+            env_node: SessionNode | None = None
+            if env_details is not None:
+                env_node = self._environment_restore_node(parent.node_id, env_details)
                 history.append(env_node.message)
             plan_node: SessionNode | None = None
             plan_revision = (

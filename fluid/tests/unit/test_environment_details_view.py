@@ -22,6 +22,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from fluid.context.compaction import CompactionConfig
 from fluid.context.compiler import PromptInputs, compile_prompt
 from fluid.context.environment import (
     ENVIRONMENT_DETAILS_UNCHANGED,
@@ -32,6 +33,7 @@ from fluid.context.environment import (
     scan_environment_notes,
     unsupported_environment_claim,
 )
+from fluid.context.trim import estimate_tokens_of_messages
 from fluid.engine.native import NativeLoop, _context_texts, _plan_in_view
 from fluid.events import Resume, UserTurn
 from fluid.messages import Message, Text
@@ -58,7 +60,12 @@ class ScriptedProvider:
     async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
         script = self.scripts[min(len(self.requests), len(self.scripts) - 1)]
         self.requests.append(copy.deepcopy(request))
+        # Bill what the request really holds, so the compactor's measured
+        # scale stays near 1 as it would against a live provider.
+        billed = estimate_tokens_of_messages(request.messages) + len(str(request.system or "")) // 4
         for chunk in script:
+            if chunk.kind == "message_start":
+                chunk = StreamChunk("message_start", {"usage": {"input_tokens": billed}})
             yield chunk
 
 
@@ -68,6 +75,18 @@ def _tool_call(tuid: str, city: str) -> list[StreamChunk]:
         StreamChunk("block_start", {"index": 0, "block_type": "tool_use",
                                     "tool_name": "mcp__wx__get_weather", "tool_use_id": tuid}),
         StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps({"city": city})}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+def _dump_call(tuid: str) -> list[StreamChunk]:
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "tool_use",
+                                    "tool_name": "mcp__wx__dump", "tool_use_id": tuid}),
+        StreamChunk("tool_args_delta", {"index": 0, "partial_json": "{}"}),
         StreamChunk("block_stop", {"index": 0}),
         StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
         StreamChunk("message_stop", {}),
@@ -90,7 +109,11 @@ def _weather_server():
     async def get_weather(args: dict) -> dict:
         return {"content": [{"type": "text", "text": f"{args['city']}: sunny"}]}
 
-    return create_inproc_server("wx", [get_weather])
+    @tool("dump", "Dump a log", {"type": "object", "properties": {}})
+    async def dump(args: dict) -> dict:
+        return {"content": [{"type": "text", "text": "log " * 10_000}]}
+
+    return create_inproc_server("wx", [get_weather, dump])
 
 
 @pytest.fixture
@@ -110,7 +133,7 @@ def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", message], cwd=repo, check=True)
 
 
-def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str) -> NativeLoop:
+def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str, **kwargs) -> NativeLoop:
     compiled = compile_prompt(PromptInputs(
         base="b", cwd=str(repo), include_env=True,
         include_global_instructions=False, include_project_instructions=False,
@@ -121,7 +144,14 @@ def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str) 
     return NativeLoop(provider=provider, store=store, model="m", session_id=sid,
                       registry=registry, permissions=PermissionEngine("never_ask"),
                       system=compiled.text, system_sections=compiled,
-                      ctx=ToolCtx(cwd=str(repo), session_id=sid))
+                      ctx=ToolCtx(cwd=str(repo), session_id=sid), **kwargs)
+
+
+# About 15k tokens in blocks small enough to stay whole until a fold.
+_LARGE_FIRST_TURN = [Text("first"), *(Text(c * 20_000) for c in "xyz")]
+# A real compactor in a small window: turn 1 sits outside the recency guard.
+_SMALL_WINDOW = {"context_window": 32_000, "max_tokens": 8_000,
+                 "compaction": CompactionConfig(keep_recent_turns=1)}
 
 
 async def _session() -> tuple[MemoryStore, str]:
@@ -207,53 +237,84 @@ async def test_unchanged_details_ride_once_and_a_commit_brings_them_back(git_rep
     _assert_every_claim_is_backed(provider.requests)
 
 
-async def test_a_fold_between_two_calls_restores_the_details_once(git_repo: Path, monkeypatch) -> None:
-    """Review S1: a compaction inside the turn removed the only full copy
-    while the turn's own "unchanged" line stayed in view."""
+async def test_a_real_fold_between_two_calls_restores_the_details_once(git_repo: Path) -> None:
+    """Review S1, through the real compactor and admission: a large tool
+    result in turn 2 makes the compactor digest turn 1, the only full copy,
+    while the turn's own "unchanged" line stays in view."""
     store, sid = await _session()
     provider = ScriptedProvider([
         _text("one"),
-        _tool_call("t1", "Oslo"), _tool_call("t2", "Rome"), _text("two"),
+        _dump_call("t1"), _tool_call("t2", "Rome"), _text("two"),
         _tool_call("t3", "Lima"), _text("three"),
     ])
-    loop = _loop(git_repo, provider, store, sid)
-    real_apply = loop._compactor.apply
-    folded: set[str] = set()
-    applies = 0
-
-    def apply(nodes, **kwargs):
-        # Before turn 2's second call, fold turn 1 (which holds the full
-        # note) into a summary, as a real digest would.
-        nonlocal applies
-        applies += 1
-        rendered, promotions = real_apply(nodes, **kwargs)
-        if applies == 3:
-            folded.update(n.node_id for n in nodes[:2])
-        if not folded:
-            return rendered, promotions
-        kept = [n.message for n in nodes if n.node_id not in folded]
-        return [Message(role="user", content=[Text("[summary of earlier work]")]), *kept], promotions
-
-    monkeypatch.setattr(loop._compactor, "apply", apply)
-    await _turn(loop, UserTurn(content="first"))
+    loop = _loop(git_repo, provider, store, sid, **_SMALL_WINDOW)
+    await _turn(loop, UserTurn(content=_LARGE_FIRST_TURN))
     await _turn(loop, UserTurn(content="second"))
     await _turn(loop, UserTurn(content="third"))
 
     requests = provider.requests
     assert len(requests) == 6
     assert _claims(requests[1]) == 1  # turn 2 relied on turn 1's copy
+    assert "Worker Python:" in requests[1].messages[0].text()  # turn 1's full copy
+    # The real compactor digested turn 1 before turn 2's second call; the
+    # digest keeps no environment note ...
+    folded = requests[2].messages[0].text()
+    assert folded.startswith("[compacted turn") and "Worker Python:" not in folded
+    # ... and that call, not a later one, carries the details again.
     restored = _restored(requests[2].messages)
-    assert len(restored) == 1
-    assert _details(git_repo) in restored[0].text()
+    assert len(restored) == 1 and _details(git_repo) in restored[0].text()
     assert requests[2].messages[-1].text() == restored[0].text()  # appended, nothing patched
     _assert_every_claim_is_backed(requests)
     # Written once: later calls and the next turn find the restored copy.
-    stored = [n.message for n in await store.load_path(sid)]
-    assert len(_restored(stored)) == 1
-    assert _claims(requests[4]) == 1 and len(_restored(requests[5].messages)) == 1
-    # The fold rewrote history once; from then on each request extends the last.
-    for before, after in pairwise(requests[2:]):
+    assert len(_restored([n.message for n in await store.load_path(sid)])) == 1
+    assert _claims(requests[4]) == 1
+    for before, after in pairwise(requests[2:4]):
         assert after.messages[:len(before.messages)] == before.messages
+
+
+async def test_a_restore_is_reserved_only_when_one_is_appended(git_repo: Path) -> None:
+    """Review S6: a first turn just under the admission limit. Reserving
+    room for a restore on every call pushed it over, admission digested the
+    turn and the request went out with no environment note at all."""
+    async def run(last_block: int) -> tuple[ScriptedProvider, int]:
+        store, sid = await _session()
+        provider = ScriptedProvider([_text("ok")])
+        loop = _loop(git_repo, provider, store, sid, context_window=32_000, max_tokens=8192)
+        blocks = [Text("a" * 24_000), Text("b" * 24_000), Text("c" * 24_000), Text("d" * last_block)]
+        await _turn(loop, UserTurn(content=blocks))
+        # What admission weighs, before any reservation: system, tools and
+        # the turn's own message as the compactor renders it.
+        request_nodes = (await store.load_path(sid))[:-1]
+        return provider, loop._compactor.estimate_view_tokens(request_nodes, loop._context_overhead_tokens())
+
+    limit = 32_000 - 8_000  # the window less its clamped output reserve
+    room = NativeLoop._environment_restore_tokens(_details(git_repo))
+    _, probe = await run(21_000)
+    # Land the request inside the band a reservation on every call tipped over.
+    last = 21_000 + 4 * (limit - room // 2 - probe)
+    provider, estimate = await run(last)
+    [request] = provider.requests
+    sent = request.messages[-1].text()
+    assert ENVIRONMENT_NOTE_HEADER in sent and "Worker Python:" in sent
+    assert "d" * last in sent  # nothing was digested or cut
+    assert limit - room < estimate <= limit  # and the case is the near-limit one
+
+
+def test_only_notes_the_harness_wrote_count(git_repo: Path) -> None:
+    """A note quoted inside other text (a paste, a tool result) is neither
+    a held copy nor a claim; the harness's own blocks open with the note."""
+    lines, details = environment_note_parts(git_repo)
+    full = render_environment_note(lines, details)
+    claim = render_environment_note(lines, details, unchanged=True)
+    quoted_full = Message(role="user", content=[Text("look at this: " + full)])
+    own_claim = Message(role="user", content=[Text("next"), Text(claim)])
+    assert _context_texts([quoted_full, own_claim]) == [claim]
+    assert unsupported_environment_claim(_context_texts([quoted_full, own_claim]))
+    quoted_claim = Message(role="user", content=[Text("they said: " + claim)])
+    own_full = Message(role="user", content=[Text("first"), Text(full)])
+    assert not unsupported_environment_claim(_context_texts([own_full, quoted_claim]))
+    # The Resume note rides after a blank line on the anchor message.
+    assert _context_texts([Message(role="user", content=[Text("\n\n" + claim)])]) == ["\n\n" + claim]
 
 
 async def test_a_rewind_reads_its_own_path_not_the_old_head(git_repo: Path) -> None:
@@ -360,44 +421,24 @@ async def test_a_fresh_engine_with_other_runtime_facts_sends_them(git_repo: Path
     _assert_every_claim_is_backed(provider.requests)
 
 
-async def test_an_overflow_escalation_restores_the_details_before_the_retry(
-    git_repo: Path, monkeypatch,
-) -> None:
-    """The overflow retry re-enters the loop top, so the same per-request
-    check repairs a fold the escalation made."""
-    from fluid.context.compaction import Promotion
-
+async def test_an_overflow_escalation_restores_the_details_before_the_retry(git_repo: Path) -> None:
+    """The provider rejects turn 2's second call; the real overflow
+    escalation digests turn 1, the only full copy, and the retry re-enters
+    the loop top, where the same per-request check restores the details."""
     store, sid = await _session()
     overflow = [StreamChunk("error", {"message": "prompt is too long", "retriable": False})]
     provider = ScriptedProvider([_text("one"), _tool_call("t1", "Oslo"), overflow, _text("two")])
-    loop = _loop(git_repo, provider, store, sid)
-    real_apply = loop._compactor.apply
-    folded: set[str] = set()
-
-    def apply(nodes, **kwargs):
-        rendered, promotions = real_apply(nodes, **kwargs)
-        if not folded:
-            return rendered, promotions
-        kept = [n.message for n in nodes if n.node_id not in folded]
-        return [Message(role="user", content=[Text("[summary of earlier work]")]), *kept], promotions
-
-    real_escalate = loop._compactor.escalate
-
-    def escalate(nodes, **kwargs):
-        if len(provider.requests) < 3:  # admission asks too; only the overflow folds
-            return real_escalate(nodes, **kwargs)
-        folded.update(n.node_id for n in nodes[:2])  # turn 1, with the full note
-        return [Promotion(tier=2, reason="overflow")]
-
-    monkeypatch.setattr(loop._compactor, "apply", apply)
-    monkeypatch.setattr(loop._compactor, "escalate", escalate)
-    await _turn(loop, UserTurn(content="first"))
+    loop = _loop(git_repo, provider, store, sid, compaction=CompactionConfig(keep_recent_turns=1))
+    await _turn(loop, UserTurn(content=_LARGE_FIRST_TURN))
     await _turn(loop, UserTurn(content="second"))
 
     requests = provider.requests
     assert len(requests) == 4
     assert _claims(requests[1]) == 1
-    assert not _restored(requests[2].messages)  # the rejected call, before the fold
+    assert "Worker Python:" in requests[2].messages[0].text()  # the rejected call
+    assert not _restored(requests[2].messages)
+    folded = requests[3].messages[0].text()
+    assert folded.startswith("[compacted turn") and "Worker Python:" not in folded
     assert len(_restored(requests[3].messages)) == 1
     assert requests[3].messages[-1].text() == _restored(requests[3].messages)[0].text()
     _assert_every_claim_is_backed(requests)
