@@ -456,6 +456,44 @@ describe('Sidebar session groups', () => {
 		expect(mocks.save).not.toHaveBeenCalled();
 	});
 
+	it('drops the second half of a double-click that lands on a row after the header moved', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			const onOpenSession = vi.fn();
+			const onSettledOpenSession = vi.fn();
+			const { container } = render(Sidebar, { props: { ...sidebarProps, onOpenSession, onSettledOpenSession } });
+			const header = Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
+				.find(button => button.textContent?.includes('Settled'))!;
+			const opened = () => onOpenSession.mock.calls.length + onSettledOpenSession.mock.calls.length;
+			const spot = { detail: 1, clientX: 135, clientY: 872 };
+			// Start from a closed group, whatever the saved choice is.
+			if (header.getAttribute('aria-expanded') === 'true') await fireEvent.click(header);
+			expect(screen.queryByText('Settled chat')).toBeNull();
+
+			// The header opens the group and moves away; the same spot now holds a row.
+			await fireEvent.click(header, spot);
+			await fireEvent.click(screen.getByText('Settled chat'), { ...spot, detail: 2 });
+			expect(opened()).toBe(0);
+
+			// A click somewhere else in that moment is a choice, and so is a keyboard one.
+			await fireEvent.click(screen.getByText('Settled chat'), { detail: 1, clientX: 135, clientY: 700 });
+			expect(opened()).toBe(1);
+			await fireEvent.click(header, spot);
+			await fireEvent.click(header, spot);
+			await fireEvent.click(screen.getByText('Settled chat'));
+			expect(opened()).toBe(2);
+
+			// The same spot works again once the header has come to rest.
+			await fireEvent.click(header, spot);
+			await fireEvent.click(header, spot);
+			vi.setSystemTime(Date.now() + 1000);
+			await fireEvent.click(screen.getByText('Settled chat'), spot);
+			expect(opened()).toBe(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('groups sessions into Active and Settled by is_active', () => {
 		render(Sidebar, {
 			props: {

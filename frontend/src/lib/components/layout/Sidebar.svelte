@@ -169,6 +169,25 @@
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
 	}
+	// Opening or closing a group at the bottom of the panel moves its header out
+	// from under the pointer, and a row can take its place. A second click that
+	// fast on the same spot is the other half of a double-click on the header,
+	// not a wish to open that row. A click anywhere else goes through.
+	const GROUP_SETTLE_MS = 500;
+	const SAME_SPOT_PX = 10;
+	let headerClick = { at: 0, x: 0, y: 0 };
+	function dropStrayClick(event: MouseEvent) {
+		// Keyboard activation has no position and never follows a moving header.
+		if (event.detail === 0) return;
+		if (event.target instanceof Element && event.target.closest('.sect')) {
+			headerClick = { at: Date.now(), x: event.clientX, y: event.clientY };
+			return;
+		}
+		if (Date.now() - headerClick.at >= GROUP_SETTLE_MS) return;
+		if (Math.hypot(event.clientX - headerClick.x, event.clientY - headerClick.y) > SAME_SPOT_PX) return;
+		event.preventDefault();
+		event.stopPropagation();
+	}
 
 	// ---------------------------------------------------------------- clock
 	// One shared ticker drives every card's timer: 1s while something is live,
@@ -1017,7 +1036,7 @@
 
 		</div>
 
-		<div class="list" class:edge-guard={phone} bind:this={listRef}>
+		<div class="list" class:edge-guard={phone} bind:this={listRef} onclickcapture={dropStrayClick}>
 			{#if needsYouRows.length > 0}
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
@@ -1037,6 +1056,10 @@
 					</div>
 				{/if}
 			{/if}
+
+			<!-- Takes the list's spare height, so Snoozed and Settled sit at the
+			     bottom of the panel. With no spare height it is nothing at all. -->
+			<div class="lane-push" aria-hidden="true"></div>
 
 			{#if snoozedRows.length > 0}
 				{@render sect('snoozed', 'Snoozed', snoozedRows.length)}
@@ -1318,12 +1341,21 @@
 		position: relative;
 		flex: 1 1 auto;
 		min-height: 0;
+		/* A column, so the spacer below can push the quiet lanes to the bottom. */
+		display: flex;
+		flex-direction: column;
 		overflow-x: hidden;
 		overflow-y: auto;
 		padding: 0 8px 12px;
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
+	/* Nothing in the list gives up height to fit: a long list scrolls. */
+	.list > * { flex: none; }
+	/* Needs you and Active read from the top; Snoozed and Settled rest at the
+	   bottom of the panel while there is room, and follow the rows above them
+	   once the list is taller than the panel (or one of them is open and long). */
+	.list > .lane-push { flex: 1 0 0px; }
 	/* The phone card is 4px wider inside (10px inset, 8px gap) than the shared
 	   row, so a 4px list inset puts section labels on the 16px page gutter and
 	   titles at 38, the same x as the Notes, Agents and Projects lists. */

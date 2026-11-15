@@ -20,13 +20,18 @@
 // 856px list there is 342px). The responsive UI's sidebar is narrow at every
 // width, so only `--mobile-shell` showed the bug.
 //
+// Snoozed and Settled rest at the bottom of the panel: Needs you and Active
+// read from the top, and the spare height sits between the two. Guards: the
+// quiet groups sit right under Active again, a long list squeezes its rows to
+// fit instead of scrolling, or the last group cannot be scrolled into view.
+//
 // The chat is the case's own (created through the API, deleted by the runner
 // afterwards), so no seeded chat is touched. A short wake (the server's loop
 // and the page's local re-group at the due time) is covered by unit tests and
 // checked by hand: waiting a minute per variant is too slow for the suite.
 // `--mobile-shell` runs the swipe cases in the built `/mobile/` app.
 import { runJourney } from './runner.mjs';
-import { api, expect, gotoApp, showSidebar, waitChat } from './lib/app.mjs';
+import { api, chatState, expect, gotoApp, showSidebar, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobileShell = process.argv.includes('--mobile-shell');
@@ -140,6 +145,26 @@ async function expectRowInPlace(page, id) {
 
 const snoozePicker = (page) => page.getByRole('dialog', { name: 'Snooze chat' });
 
+/** Where the chat list's groups and rows sit, in page pixels. */
+async function listLayout(page) {
+	const sessions = await showChats(page);
+	return sessions.locator('.list').evaluate((list) => {
+		const box = (el) => el.getBoundingClientRect();
+		const rows = (group) => [...list.querySelectorAll(`[data-group="${group}"] [data-session-card]`)];
+		const heads = Object.fromEntries([...list.querySelectorAll('.sect')].map((el) => [el.querySelector('.lbl').textContent.trim(), box(el).top]));
+		return {
+			top: box(list).top,
+			// The list's own bottom padding stays under its last group.
+			bottom: box(list).bottom - parseFloat(getComputedStyle(list).paddingBottom),
+			fits: list.scrollHeight <= list.clientHeight,
+			end: box(list.lastElementChild).bottom,
+			heads,
+			activeEnd: Math.max(...rows('active').map((el) => box(el).bottom)),
+			rowHeights: rows('active').map((el) => Math.round(box(el).height))
+		};
+	});
+}
+
 /** A swipe-right case's own chat, on the responsive phone UI or the native shell. */
 async function swipeSetup({ page, status, log }, { settled = false } = {}) {
 	page.__mobileShell = mobileShell;
@@ -232,6 +257,81 @@ await runJourney({
 				// Hold: a late push or reload must not put it back in Snoozed.
 				await page.waitForTimeout(1500);
 				await waitLane(page, id, 'active', 1000);
+			}
+		},
+		{
+			name: `${mobileShell ? 'native-' : ''}quiet-groups-rest-at-the-bottom`,
+			...(mobileShell ? { viewports: ['phone'] } : {}),
+			async setup({ page, status, log }) {
+				page.__mobileShell = mobileShell;
+				if (mobileShell) {
+					await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+					expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+				} else {
+					await gotoApp(page, status);
+					await waitChat(page, { surface: 'new' });
+				}
+				const { session_id: snoozed } = await api(page, 'POST', '/sessions', {});
+				const { session_id: settled } = await api(page, 'POST', '/sessions', {});
+				await api(page, 'PATCH', `/sessions/${snoozed}/active`, { is_active: false, snoozed_until: new Date(Date.now() + 86_400_000).toISOString() });
+				await api(page, 'PATCH', `/sessions/${settled}/active`, { is_active: false });
+				// Tall enough that every seeded row fits with room to spare.
+				page.__viewport = page.viewportSize();
+				await page.setViewportSize({ width: page.__viewport.width, height: 1600 });
+				await waitLane(page, snoozed, 'snoozed');
+				const sessions = await showChats(page);
+				await sessions.getByRole('button', { name: /^Settled/ }).first().waitFor({ timeout: 30_000 });
+				log(`snoozed ${snoozed}, settled ${settled}`);
+			},
+			async act({ page, mark }) {
+				await mark('a list that fits: the quiet groups sit at the bottom');
+				const tall = await listLayout(page);
+				expect(tall.fits, 'the seeded list fits a 1600px tall window');
+				expect(Math.abs(tall.heads.Active - tall.top) <= 1, `Active starts at the top of the list, got ${tall.heads.Active - tall.top}px below it`);
+				expect(tall.heads.Snoozed < tall.heads.Settled, 'Snoozed sits above Settled');
+				expect(Math.abs(tall.end - tall.bottom) <= 1, `the last group ends at the bottom of the list, got ${Math.round(tall.bottom - tall.end)}px short`);
+				expect(tall.heads.Snoozed - tall.activeEnd > 100, `the spare height sits between Active and Snoozed, got ${Math.round(tall.heads.Snoozed - tall.activeEnd)}px`);
+
+				await mark('double-click Settled: its header moves, what takes its place is not clicked');
+				const chats = await showChats(page);
+				const header = chats.getByRole('button', { name: /^Settled/ }).first();
+				if (await header.getAttribute('aria-expanded') === 'true') {
+					await header.click();
+					await page.waitForTimeout(700);
+				}
+				const before = JSON.stringify(await chatState(page));
+				const box = await header.boundingBox();
+				const spot = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				const under = () => page.evaluate(({ x, y }) => {
+					const el = document.elementFromPoint(x, y);
+					return el?.closest('.sect') ? 'header' : el?.closest('[data-session-card]') ? 'row' : 'other';
+				}, spot);
+				await page.mouse.click(spot.x, spot.y);
+				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'true', await header.elementHandle());
+				expect(await under() !== 'header', 'opening Settled moves its header away from the pointer');
+				// The second half of the double-click, on the spot the header left.
+				await page.mouse.down({ clickCount: 2 });
+				await page.mouse.up({ clickCount: 2 });
+				await page.waitForTimeout(600);
+				// The chat first: on a phone, opening one closes the drawer and hides the header.
+				expect(JSON.stringify(await chatState(page)) === before, 'the open chat did not change');
+				expect(await header.getAttribute('aria-expanded') === 'true', 'Settled stays open');
+				// Closed again for the measurements below; by now a click is a click.
+				await header.click();
+				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'false', await header.elementHandle());
+
+				await mark('a list taller than the window: it scrolls, nothing is squeezed');
+				await page.setViewportSize({ width: page.__viewport.width, height: 420 });
+				const short = await listLayout(page);
+				expect(!short.fits, 'the seeded list overflows a 420px tall window');
+				expect(JSON.stringify(short.rowHeights) === JSON.stringify(tall.rowHeights), `rows keep their height, got ${short.rowHeights} for ${tall.rowHeights}`);
+				expect(short.heads.Snoozed - short.activeEnd < 16, `Snoozed follows the last active row, got ${Math.round(short.heads.Snoozed - short.activeEnd)}px after it`);
+				const sessions = await showChats(page);
+				await sessions.locator('.list').evaluate((list) => list.scrollTo({ top: list.scrollHeight }));
+				const scrolled = await listLayout(page);
+				expect(Math.abs(scrolled.end - scrolled.bottom) <= 1, `scrolling to the end shows the last group, got ${Math.round(scrolled.end - scrolled.bottom)}px past the bottom`);
+
+				await page.setViewportSize(page.__viewport);
 			}
 		},
 		{
