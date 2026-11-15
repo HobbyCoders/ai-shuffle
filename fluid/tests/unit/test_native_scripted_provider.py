@@ -356,6 +356,10 @@ async def test_a_text_reply_is_one_assistant_node_with_its_usage(server, kind):
     done = _terminal(events)
     assert isinstance(done, TurnComplete) and done.stop_reason == "end_turn"
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "Hello there."
+    # The transcript reads the answering model from the node (#1643): the id
+    # the provider reported (the fake chat/completions server names itself).
+    served = "fake-model" if kind in ("openrouter", "local") else MODELS[kind]
+    assert stored[1].provider_meta["model"] == served
     [usage] = _of(events, Usage)
     assert (usage.input_tokens, usage.output_tokens) == (10, 5)
     assert done.usage["input_tokens"] == 10 and done.usage["output_tokens"] == 5
