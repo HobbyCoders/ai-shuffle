@@ -326,6 +326,11 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn('-n 2', command)
         self.assertIn('-p scripts.ci.backend_shards', command)
 
+    def test_workflow_lint_knows_only_the_paid_runners_named_here(self):
+        # actionlint rejects any runner label that is neither GitHub's nor listed.
+        config = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config, {"self-hosted-runner": {"labels": sorted(set(PAID_RUNNERS.values()))}})
+
     def test_public_app_workflows_use_standard_hosted_runners(self):
         # These workflows are moving to hobbycoders-cloud in a separate PR.
         private_cloud = {

@@ -1,0 +1,6 @@
+# actionlint knows GitHub's own runner labels; any other must be named here.
+# The one entry is the paid runner scripts/ci/test-cost-policy.py allows the
+# UI journey shards.
+self-hosted-runner:
+  labels:
+    - blacksmith-4vcpu-ubuntu-2404
