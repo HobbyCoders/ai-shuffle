@@ -2,7 +2,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
 vi.mock('$lib/api/client', () => ({ api: mocks }));
 import { hydrateModelRegistry } from './models';
-import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, modelEffortOptions, UNKNOWN_EFFORT, NO_ADJUSTABLE_EFFORT } from './model-effort';
+import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, modelEffortOptions, selectionIsRequestedModel, effortFitNotice, UNKNOWN_EFFORT, NO_ADJUSTABLE_EFFORT } from './model-effort';
 import { effortRegistryFixture } from '$lib/test-stubs/effort-registry';
 const levels = (model: string) => resolveModelEffort(model).options.map(o => o.value);
 const capability = (id: string) => resolveModelEffort(`prov:or:${id}`);
@@ -117,5 +117,23 @@ describe('authoritative effort capabilities', () => {
   expect(resolveEffortModel('opus', 'claude-opus-4-7', 'opus', null, true)).toBe('claude-opus-4-7');
   // Different family, but the backend says it was not a reroute.
   expect(resolveEffortModel('opus', 'haiku', 'opus', null, false)).toBe('opus');
+ });
+});
+
+describe('selectionIsRequestedModel (#1635)', () => {
+ it('matches the pick the rerouted turn requested, and nothing picked since', () => {
+  expect(selectionIsRequestedModel('opus', 'opus')).toBe(true);
+  expect(selectionIsRequestedModel('prov:or:z-ai/glm-5.3-flash', 'z-ai/glm-5.3-flash', 'or')).toBe(true);
+  expect(selectionIsRequestedModel('prov:or:z-ai/glm-5.3-flash', 'z-ai/glm-5.3-flash', 'codex')).toBe(false);
+  expect(selectionIsRequestedModel('sonnet', 'opus')).toBe(false);
+  expect(selectionIsRequestedModel('prov:codex:gpt-5.6-sol', 'opus')).toBe(false);
+  expect(selectionIsRequestedModel('opus', null)).toBe(false);
+ });
+});
+
+describe('effortFitNotice (#1641)', () => {
+ it('names the fitted level, the model and the level it lacks', () => {
+  expect(effortFitNotice('xhigh', 'high', 'claude-opus-4-6')).toMatch(/^Effort set to High: .+ has no XHigh\.$/);
+  expect(effortFitNotice('max', null, 'claude-haiku-4-5')).toMatch(/^Effort set to Auto: .+ has no Max\.$/);
  });
 });

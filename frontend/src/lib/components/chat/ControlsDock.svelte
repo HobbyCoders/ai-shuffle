@@ -43,7 +43,7 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
-	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel } from '$lib/constants/model-effort';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel, selectionIsRequestedModel, effortFitNotice } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
@@ -327,8 +327,11 @@
 	// Compare actual vs what was REQUESTED for that same turn (both from the
 	// model_info note) — never the live selection, which the user may have
 	// changed since.
+	// ...and only while the selection is still that requested model: a model
+	// picked since is what the next message runs, so the chip names it (#1635).
 	const rerouted = $derived(
 		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider, $activeSession.liveRerouted)
+		&& selectionIsRequestedModel(modelValue, liveRequestedModel, $activeSession.liveProvider)
 	);
 	const hasModelRoute = $derived(Boolean($activeSession.sessionId || getClaudeAuth().auth_kind || decodeProviderModel(modelValue)));
 	const selectedModelLabel = $derived(hasModelRoute ? getModelLabel(modelValue) : 'Select model');
@@ -499,9 +502,18 @@
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
+	// The model the effort was last fitted to: a switch that changes the level
+	// says so (#1641). Plain, not reactive: only the effect reads it.
+	let fittedEffortModel: string | null = null;
 	$effect(() => {
 		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
+		const switched = fittedEffortModel !== null && fittedEffortModel !== effortModel;
+		if (effortCapability.known) fittedEffortModel = effortModel;
+		if (reconciled === effortValue) return;
+		activeSession.setEffortLevelOverride(reconciled, false);
+		if (switched && effortValue && !voiceLane) {
+			notify(effortFitNotice(effortValue, reconciled, effortModel), { severity: 'info', title: 'Effort' });
+		}
 	});
 
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
