@@ -357,19 +357,34 @@ async def attach_project(
     # caller's composer needs this worker's own project, else none (V2 only).
     response.project_id = await run_sync(
         _local_project_id, response.project_v2_id or identity.get("project_v2_id"), identity.get("origin"),
+        response.project_id,
     )
     return response
 
 
-def _local_project_id(project_v2_id: Optional[str], origin: Optional[str]) -> str:
-    """This worker's own project row for the attached project, matched by
-    origin as ``_own_checkout`` matches it; empty when it has none."""
-    from app.core import project_resolver, project_setup
+def _local_project_id(project_v2_id: Optional[str], origin: Optional[str],
+                      owner_project_id: Optional[str] = None) -> str:
+    """This worker's own checkout of the attached project; empty when it has none.
+
+    The chat's mirrored row keeps the owner's legacy id when this worker has a
+    project of that id, and the project upload gate then admits only that id.
+    So when the owner's id is this worker's own checkout of the same project
+    it wins; otherwise the checkout the cluster catalog lists for the origin,
+    which the gate admits through the shared id. The page's
+    ``localProjectForRow`` applies the same rule.
+    """
+    from app.api import cluster
+    from app.core import project_resolver
 
     pv2 = project_resolver.resolve_catalog_project(project_v2_id) if project_v2_id else None
     key = (pv2 or {}).get("origin") or origin
-    row = project_setup._own_rows_by_origin().get(key) if key else None
-    return (row or {}).get("id") or ""
+    if not key:
+        return ""
+    if owner_project_id:
+        for row in database.get_all_projects():
+            if row.get("id") == owner_project_id and project_resolver.origin_for_legacy_project(row) == key:
+                return owner_project_id
+    return cluster.local_checkout_for_origin(key) or ""
 
 
 async def _worker_name(device_id: str) -> str:

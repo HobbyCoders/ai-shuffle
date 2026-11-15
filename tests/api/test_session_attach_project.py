@@ -308,6 +308,104 @@ async def test_relay_failures_read_clearly(seeded, quiet, remote_owner, failure,
         assert exc.value.detail == "Worker B runs this chat and must be online to attach a project."
 
 
+@pytest.fixture
+def two_checkouts(seeded, tmp_path):
+    """This worker has two checkouts of one project, as the owner does."""
+    from app.api import cluster
+    from app.db import projects_v2
+
+    pv2 = projects_v2.upsert_project("git:example/two", "Two")
+    for project_id, name in (("two-a", "Alpha"), ("two-z", "Zeta")):
+        (tmp_path / project_id).mkdir()
+        db.create_project(project_id=project_id, name=name, description=None,
+                          path=str(tmp_path / project_id), link_group_id="git:example/two")
+    listed = cluster._build_cluster_catalog(
+        bases=[{"project_id": pv2["id"], "runner_id": "dev-b"}], pv2s=[pv2],
+        installs=[{"id": "dev-b", "online": True}], local_projects=db.get_all_projects(),
+        me=cluster._self_install_id(),
+    )
+    chosen = listed[0]["local_project_id"]
+    assert chosen in ("two-a", "two-z")
+    return pv2, chosen, ({"two-a", "two-z"} - {chosen}).pop()
+
+
+def _gates(monkeypatch):
+    """The project upload and @-file routes, with their writers and the
+    forward to the owner stubbed: only the session gate decides."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api import projects
+    from app.api.auth import require_auth
+    from app.core import upload_transfer
+    from app.network import control
+
+    monkeypatch.setattr(upload_transfer, "resolve_upload_target", lambda session: None)
+    monkeypatch.setattr(upload_transfer, "stage_admitted_session_upload",
+                        lambda session, name, content: {"path": name})
+    monkeypatch.setattr(projects, "_perform_project_upload", lambda project, **kw: {"path": kw["filename"]})
+    monkeypatch.setattr(control, "call", AsyncMock(return_value={"status": 200, "result": {"files": [], "path": ""}}))
+    app = FastAPI()
+    app.include_router(projects.router)
+    app.dependency_overrides[require_auth] = lambda: "owner"
+    return TestClient(app)
+
+
+@pytest.mark.parametrize("owner_id, page", [
+    ("other", "other"),        # the owner's id is this worker's other checkout
+    ("b-local-id", "chosen"),  # the owner's id is not a project here
+])
+@pytest.mark.asyncio
+async def test_page_row_and_gates_name_one_checkout(seeded, quiet, remote_owner, two_checkouts,
+                                                    monkeypatch, owner_id, page):
+    """The relay's answer, the chat's mirrored row and the upload and @-file
+    gates agree on which of this worker's checkouts the chat is."""
+    from app.network.catalog import prepare_session_mirror
+
+    pv2, chosen, other = two_checkouts
+    owner_id = {"other": other}.get(owner_id, owner_id)
+    page = {"other": other, "chosen": chosen}[page]
+    remote_owner.side_effect = lambda device, action, body: {
+        "session_id": body["session_id"], "project_id": owner_id,
+        "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
+    session = db.get_session("attach-chat")
+    with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
+        result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
+    assert result.project_id == page
+
+    # The owner's row as it reaches this worker.
+    with db.get_db() as conn:
+        mirrored = prepare_session_mirror(conn.cursor(), {"id": "attach-chat", "project_id": owner_id})
+        conn.cursor().execute(
+            "UPDATE sessions SET project_id = %s, project_v2_id = %s, mode = NULL WHERE id = %s",
+            (mirrored["project_id"], pv2["id"], "attach-chat"),
+        )
+    client = _gates(monkeypatch)
+    upload = client.post(f"/api/v1/projects/{page}/upload", data={"session_id": "attach-chat"},
+                         files={"file": ("notes.txt", b"hi")})
+    assert upload.status_code == 200, upload.text
+    listing = client.get(f"/api/v1/projects/{page}/files?session_id=attach-chat")
+    assert listing.status_code == 200, listing.text
+    if mirrored["project_id"]:
+        # Naming the other checkout would be refused: the row pins this one.
+        wrong = ({"two-a", "two-z"} - {page}).pop()
+        refused = client.post(f"/api/v1/projects/{wrong}/upload", data={"session_id": "attach-chat"},
+                              files={"file": ("notes.txt", b"hi")})
+        assert refused.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_project_sharing_the_owners_id_is_not_named(seeded, quiet, remote_owner, two_checkouts):
+    pv2, chosen, _ = two_checkouts
+    remote_owner.side_effect = lambda device, action, body: {
+        "session_id": body["session_id"], "project_id": "attach-proj",
+        "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
+    session = db.get_session("attach-chat")
+    with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
+        result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
+    assert result.project_id == chosen
+
+
 @pytest.mark.asyncio
 async def test_row_refusals_are_checked_here_before_relaying(seeded, quiet, remote_owner):
     with pytest.raises(HTTPException) as exc:

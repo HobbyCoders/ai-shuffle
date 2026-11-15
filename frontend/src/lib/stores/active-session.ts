@@ -1059,6 +1059,13 @@ function composeProject(): {project:string; projectV2Id:string | null} {
 function localProjectForRow(projectId: string | null, projectV2Id: string | null): string {
 	const known = projectV2Id ? appData.current.clusterProjects.filter(p => p.project_v2_id === projectV2Id) : [];
 	if (!known.length) return projectId || '';
+	// The row keeps the owner's id when this worker has a project of that id,
+	// and the upload gate then admits only it: keep it when it is this worker's
+	// checkout of the same project, else take the catalog's (as the server's
+	// `_local_project_id` does), never an unrelated project sharing the id.
+	const origins = new Set(known.map(p => p.origin));
+	const own = projectId ? appData.current.projects.find(p => p.id === projectId) : undefined;
+	if (own && origins.has(own.link_group_id || `local:${own.id}`)) return own.id;
 	const copies = known.map(p => p.local_project_id).filter((id): id is string => !!id);
 	if (projectId && copies.includes(projectId)) return projectId;
 	return copies[0] || '';

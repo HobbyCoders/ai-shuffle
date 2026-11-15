@@ -476,6 +476,39 @@ describe('attaching a project (#371)', () => {
 		}
 	});
 
+	it('with two checkouts of the project here, keeps the one the mirrored row names', () => {
+		// The row keeps the owner's id when it is a project here, and the
+		// upload gate then admits only it; the catalog lists the other copy.
+		const before = appData.current.projects;
+		appData.current.projects = [
+			{ id: 'two-a', name: 'Alpha', path: '/a', settings: {}, link_group_id: 'git:two', created_at: '', updated_at: '' },
+			{ id: 'two-z', name: 'Zeta', path: '/z', settings: {}, link_group_id: 'git:two', created_at: '', updated_at: '' },
+			{ id: 'app', name: 'Unrelated', path: '/u', settings: {}, link_group_id: 'git:other', created_at: '', updated_at: '' },
+		];
+		appData.current.clusterProjects = [
+			{ project_v2_id: 'v2-two', origin: 'git:two', name: 'Two', local_project_id: 'two-z', eligible: [] },
+		] as never;
+		try {
+			const adopt = (projectId: string | null) => {
+				activeSession.current.mode = 'chat';
+				activeSession.current.project = '';
+				activeSession.current.projectV2Id = null;
+				activeSession.adoptAttachedProject([
+					{ id: 'attach-me', mode: null, project_id: projectId, project_v2_id: 'v2-two', permission_mode: 'default' }
+				]);
+				return activeSession.current.project;
+			};
+			expect(adopt('two-a')).toBe('two-a');
+			// No project of the owner's id here (the row holds none): the catalog's.
+			expect(adopt(null)).toBe('two-z');
+			// An unrelated project sharing the id is not this project.
+			expect(adopt('app')).toBe('two-z');
+		} finally {
+			appData.current.projects = before;
+			appData.current.clusterProjects = [];
+		}
+	});
+
 	it('leaves a restored pick alone when nothing was attached', () => {
 		activeSession.reconcileSessionMode([{ id: 'attach-me', mode: 'chat', project_id: null, permission_mode: 'default' }]);
 		expect(activeSession.current.mode).toBe('chat');
