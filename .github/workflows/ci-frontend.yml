@@ -403,7 +403,12 @@ jobs:
         timeout-minutes: 13
         working-directory: browser-mcp
         run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # Ubuntu's AppArmor rule against unprivileged user namespaces stops
+          # Chromium's sandbox. This runner's kernel has no such rule, hence
+          # no such setting; it is lifted wherever it exists.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
           # Use the primary signed Ubuntu archive, not the hosted mirror's
           # slow Azure fallback. Keep suites, components and Signed-By intact.
           sudo sed -i -E 's|^URIs:.*|URIs: https://archive.ubuntu.com/ubuntu/|' /etc/apt/sources.list.d/ubuntu.sources
