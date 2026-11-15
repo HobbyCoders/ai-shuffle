@@ -38,6 +38,15 @@ from tests.unit.test_empty_completion_retry import (
 NOTHING_TO_RESUME = "nothing to resume: the last message is already an assistant reply"
 
 
+def _stub_environment(loop, note: str) -> None:
+    """Fix the per-turn environment note: Resume reads the joined text, a
+    UserTurn its parts (no details block here)."""
+    from unittest.mock import AsyncMock
+
+    loop._environment_reminder = AsyncMock(return_value=note)
+    loop._environment_reminder_parts = AsyncMock(return_value=(note, None))
+
+
 @pytest.fixture(autouse=True)
 def _no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """The empty-completion backoff is not what these tests are about."""
@@ -103,8 +112,7 @@ async def test_resume_continues_from_a_tool_result_head(tmp_path) -> None:
     # in-process turn state.
     mark = len(loop.bus.log(sid))
     _rescript(provider, [_text("It is sunny in Paris.")])
-    from unittest.mock import AsyncMock
-    loop._environment_reminder = AsyncMock(return_value="Current time: 2026-11-09T18:00:00+00:00 (UTC)")
+    _stub_environment(loop, "Current time: 2026-11-09T18:00:00+00:00 (UTC)")
     original = head.message.to_dict()
     await _turn(loop, Resume())
 
@@ -247,10 +255,9 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
 
     mark = len(loop.bus.log(sid))
     _rescript(provider, [_text("4")])
-    from unittest.mock import AsyncMock
     clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
     overhead = loop._context_overhead_tokens()
-    loop._environment_reminder = AsyncMock(return_value=clock)
+    _stub_environment(loop, clock)
     sent_overheads = []
     stream = provider.stream
     async def observe(request):
@@ -282,7 +289,7 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     assert loop._resume_environment is loop._resume_anchor is None
 
     next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
-    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    _stub_environment(loop, next_clock)
     await _turn(loop, UserTurn(content="a new question"))
     assert provider.requests[-1].messages[-1].text() == "a new question" + next_clock
     assert not any(clock in m.text() for m in provider.requests[-1].messages)
@@ -291,7 +298,6 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
 @pytest.mark.parametrize("duplicate", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
 async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(duplicate, retry):
-    from unittest.mock import AsyncMock
 
     store = MemoryStore()
     sid = (await store.create_session()).session_id
@@ -306,7 +312,7 @@ async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(dupli
     before = await store.load_path(sid)
     anchor_index = len(before) - 1
     clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
-    loop._environment_reminder = AsyncMock(return_value=clock)
+    _stub_environment(loop, clock)
     scripts = [_tool_call("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
                _tool_call("t2", "mcp__wx__get_weather", '{"city":"London"}'), _text("done")]
     if retry:
@@ -327,7 +333,6 @@ async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(dupli
     assert loop._resume_environment is loop._resume_anchor is None
 
 async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhead(monkeypatch):
-    from unittest.mock import AsyncMock
     from fluid.context.compaction import Promotion
     from fluid.context.trim import estimate_tokens_of_text
 
@@ -341,7 +346,7 @@ async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhea
     await _turn(loop, UserTurn(content="question"))
     first = (await store.load_path(sid))[0]
     clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
-    loop._environment_reminder = AsyncMock(return_value=clock)
+    _stub_environment(loop, clock)
     _rescript(provider, [_tool_call("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
                          _tool_call("t2", "mcp__wx__get_weather", '{"city":"London"}'), _text("done")])
     context_path = loop._context_path
@@ -378,7 +383,7 @@ async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhea
     assert all(clock not in n.message.text() for n in await store.load_path(sid))
     # Ordinary input after retirement gets its normal fresh note, not the old clock.
     next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
-    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    _stub_environment(loop, next_clock)
     await _turn(loop, UserTurn(content="next question"))
     assert provider.requests[-1].messages[-1].text() == "next question" + next_clock
     assert not any(clock in m.text() for m in provider.requests[-1].messages)
@@ -392,7 +397,7 @@ async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kin
     loop = NativeLoop(provider=provider, store=store, model="stealth/ox-alpha", session_id=sid)
     await _turn(loop, UserTurn(content="question"))
     clock = "Current time: old resume clock"
-    loop._environment_reminder = AsyncMock(return_value=clock)
+    _stub_environment(loop, clock)
     baseline = loop._context_overhead_tokens()
     entered = asyncio.Event()
     async def fail_or_wait(*args):
@@ -423,7 +428,7 @@ async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kin
     assert loop._context_overhead_tokens() == baseline
     assert all(clock not in n.message.text() for n in await store.load_path(sid))
     next_clock = "Current time: next ordinary turn"
-    loop._environment_reminder = AsyncMock(return_value=next_clock)
+    _stub_environment(loop, next_clock)
     await _turn(loop, UserTurn(content="next question"))
     assert provider.requests[-1].messages[-1].text() == "next question" + next_clock
     assert not any(clock in m.text() for m in provider.requests[-1].messages)

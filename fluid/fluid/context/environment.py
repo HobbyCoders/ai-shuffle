@@ -9,10 +9,8 @@ that line, never to an exception.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import platform as _platform
-import re
 import subprocess
 import sys
 from fluid.context.time_awareness import RELATIVE_TIME_RULE, turn_time_lines
@@ -89,6 +87,20 @@ def git_context(cwd: str) -> str | None:
     Returns ``None`` when ``cwd`` is not inside a git work tree (or git is
     unavailable), so callers can omit the section entirely.
     """
+    parts = git_context_parts(cwd)
+    if parts is None:
+        return None
+    lines, recent = parts
+    if recent:
+        lines.append("Recent commits:\n" + recent)
+    return "\n".join(lines) or None
+
+
+def git_context_parts(cwd: str) -> tuple[list[str], str | None] | None:
+    """:func:`git_context` in two parts: the branch and working-tree lines,
+    which change within a turn's work, and the recent commits (``git log
+    --oneline -5``), which change only on a commit. ``None`` outside a git
+    work tree."""
     if not is_git_work_tree(cwd):
         return None
     lines: list[str] = []
@@ -123,12 +135,7 @@ def git_context(cwd: str) -> str | None:
         lines.append(
             "Working tree: clean" if not changed else "Working tree: " + ", ".join(changed)
         )
-    recent = _run_git(cwd, "log", "--oneline", "-5")
-    if recent:
-        lines.append("Recent commits:\n" + recent)
-    if not lines:
-        return None
-    return "\n".join(lines)
+    return lines, _run_git(cwd, "log", "--oneline", "-5")
 
 
 # ─── project facts: manifests, package managers, verify commands ─────────────
@@ -273,125 +280,44 @@ def environment_block(
     return "\n".join(lines)
 
 
-ENVIRONMENT_NOTE_HEADER = (
-    "Environment as of this message (the system prompt's environment "
-    "section holds the facts that do not change):\n"
-)
-# Stands in for the recent commits and runtime facts on a turn where the
-# model's context still holds an identical copy. The bracketed fingerprint
-# names that copy, so a later fold that removes it is detectable.
-ENVIRONMENT_DETAILS_UNCHANGED = "Recent commits and runtime facts: unchanged since last shown"
-_NOTE_CLOSE = "\n</system-reminder>"
-_NOTE_OPEN = "<system-reminder>\n" + ENVIRONMENT_NOTE_HEADER
-_DETAILS_START = re.compile(r"^(?:Recent commits:\n|Worker Python: )", re.MULTILINE)
-_UNCHANGED_LINE = re.compile(
-    "^" + re.escape(ENVIRONMENT_DETAILS_UNCHANGED) + r" \[([0-9a-f]{12})\]\.$", re.MULTILINE,
-)
-
-
-def details_fingerprint(details: str) -> str:
-    """The short name an "unchanged" line gives the details it stands for."""
-    return hashlib.sha256(details.encode()).hexdigest()[:12]
+# Header of the environment details block: the recent commits and runtime
+# facts, which change far less often than the per-turn lines. The native
+# loop sends the block only when the path does not already hold this exact
+# copy, inside the host-pinned range, and the compactor keeps the newest
+# copy in view through any fold (CompactionConfig.pinned_blocks).
+ENVIRONMENT_DETAILS_HEADER = "# Environment details\n"
 
 
 def environment_note_parts(
     cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None,
-) -> tuple[list[str], str]:
-    """``(per-turn lines, details)`` of :func:`environment_note`.
+) -> tuple[str, str]:
+    """The volatile environment facts as two system-reminders: the per-turn
+    note (date, branch, working tree) and the details block (recent commits,
+    runtime facts) under :data:`ENVIRONMENT_DETAILS_HEADER`.
 
-    The per-turn lines are the date, branch and working-tree counts. The
-    details (recent commits, then the runtime facts) change far less often,
-    so a caller that can show the model still holds them can leave them out.
+    The counterpart of ``environment_block(include_volatile=False)``. Always
+    renders — the date alone is worth the line — and never raises.
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
     lines = turn_time_lines(**(time_context or {}))
     details: list[str] = []
-    git = git_context(cwd_str)
+    git = git_context_parts(cwd_str)
     if git is not None:
-        head, sep, commits = git.partition("Recent commits:\n")
-        if head.strip():
-            lines.append(head.rstrip("\n"))
-        if sep:
-            details.append(sep + commits)
+        head, recent = git
+        lines.extend(head)
+        if recent:
+            details.append("Recent commits:\n" + recent)
     from fluid.context.runtime_facts import runtime_facts
 
     details.append(runtime_facts(cwd_str))
-    return lines, "\n".join(details)
-
-
-def render_environment_note(lines: list[str], details: str, *, unchanged: bool = False) -> str:
-    """The note from its parts; ``unchanged`` replaces the details with a
-    fingerprinted line, for a context that already holds the same block."""
-    shown = (f"{ENVIRONMENT_DETAILS_UNCHANGED} [{details_fingerprint(details)}]."
-             if unchanged else details)
-    body = "\n".join([*lines, shown])
-    return f"{_NOTE_OPEN}{body}{_NOTE_CLOSE}"
-
-
-def is_environment_note_block(text: str) -> bool:
-    """Whether a text block is a note the harness wrote: it opens with the
-    note's own tag and header (a Resume note rides after a blank line). A
-    quote of a note inside other text is not one."""
-    return text.lstrip("\n").startswith(_NOTE_OPEN)
-
-
-def _environment_notes(text: str) -> list[tuple[str, str]]:
-    """``("full", details)`` / ``("unchanged", fingerprint)`` for each
-    complete note in ``text``, oldest first. A note cut before its closing
-    tag proves nothing and is skipped."""
-    notes: list[tuple[str, str]] = []
-    at = text.find(ENVIRONMENT_NOTE_HEADER)
-    while at >= 0:
-        body_start = at + len(ENVIRONMENT_NOTE_HEADER)
-        close = text.find(_NOTE_CLOSE, body_start)
-        following = text.find(ENVIRONMENT_NOTE_HEADER, body_start)
-        if close >= 0 and (following < 0 or close < following):
-            body = text[body_start:close]
-            claim = _UNCHANGED_LINE.search(body)
-            details = _DETAILS_START.search(body)
-            if claim is not None:
-                notes.append(("unchanged", claim.group(1)))
-            elif details is not None:
-                notes.append(("full", body[details.start():]))
-        at = following
-    return notes
-
-
-def scan_environment_notes(texts: list[str]) -> tuple[str | None, str | None]:
-    """``(held, claim)`` for the context ``texts`` (transcript order).
-
-    ``held`` is the exact details block of the newest complete full note;
-    ``claim`` the fingerprint of the newest "unchanged" line when it is
-    newer than that note (older claims are history, superseded by it).
-    """
-    claim: str | None = None
-    for text in reversed(texts):
-        if ENVIRONMENT_NOTE_HEADER not in text:
-            continue
-        for kind, value in reversed(_environment_notes(text)):
-            if kind == "full":
-                return value, claim
-            if claim is None:
-                claim = value
-    return None, claim
-
-
-def unsupported_environment_claim(texts: list[str]) -> bool:
-    """Whether the newest "unchanged" line names details the context no
-    longer shows (a fold removed them, or never held them)."""
-    held, claim = scan_environment_notes(texts)
-    return claim is not None and (held is None or details_fingerprint(held) != claim)
+    body = "\n".join(lines)
+    details_body = "\n".join(details)
+    note = f"<system-reminder>\nEnvironment as of this message:\n{body}\n</system-reminder>"
+    return note, f"<system-reminder>\n{ENVIRONMENT_DETAILS_HEADER}{details_body}\n</system-reminder>"
 
 
 def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:
-    """The volatile environment facts, as a system-reminder for one turn.
-
-    The counterpart of ``environment_block(include_volatile=False)``: today's
-    date and the git state (branch, working-tree counts, recent commits) as
-    they stand when the turn starts, plus the runtime facts. Always renders —
-    the date alone is worth the line — and never raises. The native engine
-    renders it from :func:`environment_note_parts` so the details ride only
-    the turns where they changed.
-    """
-    lines, details = environment_note_parts(cwd, time_context=time_context)
-    return render_environment_note(lines, details)
+    """Both parts of :func:`environment_note_parts` as one text, for a
+    request-only note that is never stored."""
+    note, details = environment_note_parts(cwd, time_context=time_context)
+    return f"{note}\n\n{details}"

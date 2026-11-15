@@ -2417,9 +2417,11 @@ class HarnessAdapter(ProviderAdapter):
             blocks = [self._env_note(), self._memory_turn_note(query), self._working_record_note(),
                       self._away_note(), self._scratch_turn_note(), self._plan_note()]
         else:
-            # Scratch sits right after memory: one message has one pinned range.
-            blocks = [self._env_note(), self._memory_turn_note(query), self._native_scratch_note(),
-                      self._working_record_note(), self._away_note()]
+            # Memory then scratch close the note: one message has one pinned
+            # range, and the engine extends it over its environment details
+            # block, which it adds right after this note.
+            blocks = [self._env_note(), self._working_record_note(), self._away_note(),
+                      self._memory_turn_note(query), self._native_scratch_note()]
         present = [block for block in blocks if block]
         return "\n\n".join(present) if present else None
 

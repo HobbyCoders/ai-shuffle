@@ -181,8 +181,7 @@ def runtime_facts(cwd: str) -> str:
 # same observations ("no pytest in the worker Python", "this worktree has no
 # node_modules") into FactStore entries with ``provenance="tool"`` and a stable
 # key, so a later session on the same project sees them in the # Memory
-# section (tagged "(unconfirmed)", which the header says to confirm with
-# Remember) without the model
+# section (rendered with a "confirm with Remember" hint) without the model
 # or the synthesizer having to do anything.
 
 # Keys are stable per fact class so a re-harvest updates in place. They must

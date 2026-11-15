@@ -217,12 +217,8 @@ from fluid.providers.base import (
     WireState,
 )
 from fluid.context.environment import (
-    ENVIRONMENT_DETAILS_UNCHANGED,
+    ENVIRONMENT_DETAILS_HEADER,
     environment_note_parts,
-    is_environment_note_block,
-    render_environment_note,
-    scan_environment_notes,
-    unsupported_environment_claim,
 )
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
@@ -822,6 +818,36 @@ LOST_TOOL_RESULT_TEXT = (
 )
 
 
+def _add_pinned_block(message: Message, block: str, fallback_index: int) -> None:
+    """Add ``block`` to ``message`` as its own Text inside the host-pinned range.
+
+    A message has one pinned range (``Message.context_pin``), so the block
+    goes right after the Text that ends the range and the range grows over
+    it; with no range, the block is the range. The compactor then keeps the
+    newest copy in view through any fold (``CompactionConfig.pinned_blocks``).
+    When the range ends inside a Text, the block goes at ``fallback_index``
+    unpinned: never trusted as held, so the next turn sends it again.
+    """
+    content = message.content
+    pin = message.context_pin if message.pinned_text() else None
+    end = 0
+    for index, item in enumerate(content):
+        if pin is not None and end == pin[1]:
+            break
+        if isinstance(item, Text):
+            end += len(item.text)
+    else:
+        index = len(content)
+    if pin is not None and end == pin[1]:
+        content.insert(index, Text(block))
+        message.context_pin = (pin[0], pin[1] + len(block))
+        return
+    content.insert(fallback_index, Text(block))
+    if pin is None:
+        start = sum(len(item.text) for item in content[:fallback_index] if isinstance(item, Text))
+        message.context_pin = (start, start + len(block))
+
+
 def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) -> bool:
     """Whether the newest plan statement in the view is the current plan.
 
@@ -830,25 +856,14 @@ def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) 
     rendered text: a fold replaces it with a summary that has no flag, and a
     plan that changes back to older text still needs restating after the
     newer note. The plan a turn's own request carries (added at turn start)
-    is matched on its text. Other harness notes (a restored environment
-    note) carry no revision and are passed over.
+    is matched on its text.
     """
     for message in reversed(history):
-        if is_harness_note(message) and PLAN_REVISION_META_KEY in message.provider_meta:
+        if is_harness_note(message):
             return message.provider_meta.get(PLAN_REVISION_META_KEY) == revision
         if plan_note in message.text():
             return True
     return False
-
-
-def _context_texts(history: list[Message]) -> list[str]:
-    """The environment notes the harness wrote into a rendered history, in
-    order: user-role text blocks that open with the note itself. Tool
-    output, assistant text and a note quoted inside other text are left
-    out, so none of them counts as a copy the harness sent."""
-    return [block.text for message in history if message.role == "user"
-            for block in message.content
-            if isinstance(block, Text) and is_environment_note_block(block.text)]
 
 
 def repair_dangling_tool_calls(history: list[Message]) -> list[Message]:
@@ -1299,11 +1314,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._resume_anchor: str | None = None
         self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
-        # The environment note's details (recent commits, runtime facts) as
-        # gathered for the running turn: what a restored note carries when a
-        # fold leaves an "unchanged" line without its copy. Never a record of
-        # what the model holds; that is read from the view every time.
-        self._turn_environment_details: str | None = None
         # System text of the request in flight / the last completed one, for
         # the cache probe's system diff (see _cache_probe_fields).
         self._pending_system_text: str | None = None
@@ -2653,7 +2663,6 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
         self._resume_environment = self._resume_anchor = None
-        self._turn_environment_details = None
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -2746,9 +2755,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
             if anchor is not None:
                 self._resume_anchor = anchor.node_id
-                # Request-only: it never counts as a copy the model holds.
-                self._resume_environment = await self._environment_reminder(
-                    await self._held_environment_details(sid, head.node_id, current=True))
+                # Request-only: never stored, so never a copy the path holds.
+                self._resume_environment = await self._environment_reminder()
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
@@ -2800,13 +2808,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
-        # Read on the path this turn extends: a fork or rewind parent, not
-        # the old head.
-        leaf = op.parent_node_id or meta.head_node_id
-        env_note = await self._environment_reminder(await self._held_environment_details(
-            sid, leaf, current=leaf == meta.head_node_id))
-        if env_note is not None:
+        env = await self._environment_reminder_parts()
+        details_block: str | None = None
+        details_at = len(content)
+        if env is not None:
+            env_note, details_block = env
             content.append(Text(env_note))
+            details_at = len(content)
+            # Held on the path this turn extends (the fork or rewind parent,
+            # else the head), live or carried verbatim by a fold: not resent.
+            if details_block is not None and await self.holds_pinned_block(
+                sid, ENVIRONMENT_DETAILS_HEADER, op.parent_node_id,
+            ) == details_block:
+                details_block = None
         queued = self._queued_peer_reminder()
         if queued is not None:
             content.append(Text(queued))
@@ -2833,6 +2847,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
+        if details_block is not None:
+            _add_pinned_block(user_node.message, details_block, details_at)
         await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
@@ -3375,83 +3391,17 @@ class NativeLoop(BackgroundLifecycleMixin):
             else:
                 read_window.record(self.ctx, path, *window)
 
-    @staticmethod
-    def _environment_restore_tokens(details: str) -> int:
-        """Room a restored environment note takes, sized like the plan's."""
-        return (len(render_environment_note([], details)) + 3) // 4
+    async def _environment_reminder(self) -> str | None:
+        """:meth:`_environment_reminder_parts` as one text, for a note that
+        is never stored (Resume)."""
+        parts = await self._environment_reminder_parts()
+        return "\n\n".join(part for part in parts if part) if parts else None
 
-    async def _environment_restore_details(
-        self, rendered: list[Message], clocked: list[Message],
-    ) -> str | None:
-        """The details a restored note must carry for this request, or None.
-
-        Needed only when the newest "unchanged" line in the request's
-        context names a copy that context no longer shows: a fold between
-        calls, or a compaction or overflow escalation in this turn, removed
-        it. A request-only Resume note may make the claim but never holds
-        the copy, so only stored, rendered notes count as held.
-        """
-        texts = _context_texts(rendered)
-        if clocked is not rendered and ENVIRONMENT_DETAILS_UNCHANGED in (self._resume_environment or ""):
-            texts = _context_texts(clocked)
-        if not unsupported_environment_claim(texts):
-            return None
-        if self._turn_environment_details is None:
-            if not self._has_environment_section():
-                return None
-            try:
-                note, _ = await asyncio.to_thread(self._gather_environment, True)
-            except Exception:  # never let a git hiccup block a call
-                log.debug("environment restore failed", exc_info=True)
-                return None
-            self._turn_environment_details = note[1]
-        return self._turn_environment_details
-
-    @staticmethod
-    def _environment_restore_node(parent_id: str, details: str) -> SessionNode:
-        """The stored harness note restating ``details``.
-
-        Written at most once per fold: the note renders verbatim (harness
-        notes are never stubbed) and is then the newest full copy, so the
-        next request finds nothing to restore. Appended like the plan note,
-        so earlier cached bytes never move.
-        """
-        return SessionNode(
-            node_id=new_id("node"), parent_id=parent_id,
-            message=Message(
-                role="user", content=[Text(render_environment_note([], details))],
-                provider_meta={HARNESS_NOTE_META_KEY: True},
-            ),
-        )
-
-    def _has_environment_section(self) -> bool:
-        sections = self.system_sections.sections if self.system_sections else ()
-        return any(s.kind == "environment" for s in sections)
-
-    async def _held_environment_details(
-        self, sid: str, leaf_node_id: str | None, *, current: bool,
-    ) -> str | None:
-        """The environment details the model's context shows on the path to
-        ``leaf_node_id``: the exact block of the newest complete full note in
-        the compacted view, or None (unknown history sends them in full).
-
-        ``current`` is True when the leaf is the session head, the path the
-        agent loop reads; a fork or rewind leaf is read whole, so the loop's
-        windowing state for the head is left alone.
-        """
-        if leaf_node_id is None or not self._has_environment_section():
-            return None
-        try:
-            nodes = (await self._context_path(sid, leaf_node_id) if current
-                     else await self.store.load_path(sid, leaf_node_id))
-            held, _ = scan_environment_notes(_context_texts(self._compactor.view(nodes)))
-            return held
-        except Exception:  # unknown history: the details are sent in full
-            log.debug("environment view read failed", exc_info=True)
-            return None
-
-    async def _environment_reminder(self, held: str | None = None) -> str | None:
-        """The volatile half of the environment block, re-rendered per turn.
+    async def _environment_reminder_parts(self) -> tuple[str, str | None] | None:
+        """The volatile half of the environment block, re-rendered per turn,
+        as ``(note, details block)``. The details block (recent commits and
+        runtime facts) is None when the facts have no block of their own; a
+        UserTurn sends it only when the path does not hold it.
 
         The compiled system prompt carries the FIXED environment facts (cwd,
         platform, shell, project manifests); the date and the git state change
@@ -3459,12 +3409,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         Only a
         prompt compiled with an environment section gets the full note — a
         host that injects its own environment keeps its date and git lines.
-        The date, branch and working tree ride every turn; the note's details
-        (recent commits and runtime facts) are replaced by a fingerprinted
-        "unchanged" line only when ``held`` — the block the compacted view
-        shows (:meth:`_held_environment_details`) — is exactly equal. A fold
-        that later removes that copy is repaired per request in the agent
-        loop (:meth:`_environment_restore_node`).
         The RUNTIME facts (which Python has pytest, which packages lack
         node_modules) are independent of that section: for any compiled
         prompt they ride their own small block on the first turn and
@@ -3474,7 +3418,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         are also harvested into the memory store (see
         :func:`fluid.context.runtime_facts.harvest_environment_facts`).
         """
-        has_env_section = self._has_environment_section()
+        sections = self.system_sections.sections if self.system_sections else ()
+        has_env_section = any(s.kind == "environment" for s in sections)
         try:
             note, facts = await asyncio.to_thread(
                 self._gather_environment, has_env_section
@@ -3483,9 +3428,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             log.debug("environment note failed", exc_info=True)
             return None
         if has_env_section:
-            lines, details = note
-            self._turn_environment_details = details
-            return render_environment_note(lines, details, unchanged=details == held)
+            return note
         if self.system_sections is None:
             # A bare system string (no compiled sections): the host did not
             # go through compile_prompt and gets no reminders from fluid.
@@ -3493,9 +3436,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         if facts == self._runtime_facts_sent:
             return None
         self._runtime_facts_sent = facts
-        return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>"
+        return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>", None
 
-    def _gather_environment(self, full: bool) -> tuple[tuple[list[str], str] | None, str]:
+    def _gather_environment(self, full: bool) -> tuple[tuple[str, str] | None, str]:
         """Thread-side half of :meth:`_environment_reminder`: the full note
         when the prompt has an environment section, plus the runtime facts
         text on their own for the change check. Also harvests the facts into
@@ -4113,36 +4056,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             if admitted:
                 promotions.extend(admitted)
                 rendered = self._compactor.view(nodes)
-            clocked = self._with_resume_clock(nodes, rendered)
-            env_details = await self._environment_restore_details(rendered, clocked)
-            if env_details is not None and refusal is None:
-                # Room for a restore is charged only once the admitted view
-                # shows one is really needed: reserved on every call, it
-                # could digest a turn that fits, note and all. A view that
-                # cannot make that room drops the restore, never the call.
-                more, over = self._admission_promotions(
-                    nodes,
-                    overhead_tokens=overhead_tokens + self._environment_restore_tokens(env_details),
-                    measured=measured_prompt,
-                    measured_current=measured_current and self._measured_is_current(sid),
-                )
-                if more:
-                    promotions.extend(more)
-                    rendered = self._compactor.view(nodes)
-                    clocked = self._with_resume_clock(nodes, rendered)
-                    env_details = await self._environment_restore_details(rendered, clocked)
-                if over is not None:
-                    log.debug("session %s: no room to restore the environment details", sid)
-                    env_details = None
+            history = self._with_resume_clock(nodes, rendered)
             # Compaction can retire the anchor. Account for only the clock
             # actually sent, including on later calls of this same Resume.
             # The plan note is history once written (below), not overhead.
             overhead_tokens = self._context_overhead_tokens()
-            history = sanitize_assistant_history(repair_dangling_tool_calls(clocked))
-            env_node: SessionNode | None = None
-            if env_details is not None:
-                env_node = self._environment_restore_node(parent.node_id, env_details)
-                history.append(env_node.message)
+            history = sanitize_assistant_history(repair_dangling_tool_calls(history))
             plan_node: SessionNode | None = None
             plan_revision = (
                 hashlib.sha256(plan_note.encode()).hexdigest()[:16] if plan_note else None
@@ -4158,7 +4077,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # never a turn start, so compaction keeps treating the real
                 # request as the open turn's first message.
                 plan_node = SessionNode(
-                    node_id=new_id("node"), parent_id=(env_node or parent).node_id,
+                    node_id=new_id("node"), parent_id=parent.node_id,
                     message=Message(
                         role="user", content=[Text(plan_note)],
                         provider_meta={
@@ -4211,11 +4130,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                     usage=partial, cost_usd=partial_cost, num_model_calls=num_calls,
                 ))
                 return
-            if env_node is not None:
-                # Same contract as the plan note below: stored only for a call
-                # that is really made, appended, never patched into history.
-                await self._append_node(sid, env_node)
-                parent = env_node
             if plan_node is not None:
                 # Stored only for a call that is really made; a retry of this
                 # call re-renders it from the path instead of writing again.

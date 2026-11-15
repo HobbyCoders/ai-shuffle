@@ -183,13 +183,15 @@ def _priced_before_the_turn(request, query: str) -> int:
     breakdown prices that block before the turn (``get_context_usage``'s
     pending catalog). Every other block must be the submitted prompt (with
     the host's note appended) or a recognized harness reminder. This fixture
-    expects memory, harness scratch and environment only; a new kind needs
-    an explicit pricing decision, not a blanket reminder exemption.
+    expects memory, harness scratch and environment only (the per-turn note
+    and its details block); a new kind needs an explicit pricing decision,
+    not a blanket reminder exemption.
     """
     from app.core.harness_reminders import HARNESS_REMINDER_OPENERS, strip_harness_reminders
     from fluid.tools.builtins.tool_search import parse_deferred_catalog
 
-    expected = {"# Memory\n", "# Harness scratch\n", "Environment as of this message ("}
+    expected = {"# Memory\n", "# Harness scratch\n", "Environment as of this message:\n",
+                "# Environment details\n"}
     assert expected <= set(HARNESS_REMINDER_OPENERS)
     seen = set()
     prompts = []
@@ -362,7 +364,7 @@ async def test_reported_breakdown_matches_the_first_request(
     if long_paths:
         environment = next(
             block.text for block in request.messages[-1].content
-            if getattr(block, "text", "").startswith("<system-reminder>\nEnvironment as of")
+            if getattr(block, "text", "").startswith("<system-reminder>\n# Environment details\n")
         )
         assert f"Worker Python: {json.dumps(python_path)}" in environment
         assert f"pytest executable on PATH: {json.dumps(pytest_path)}" in environment
