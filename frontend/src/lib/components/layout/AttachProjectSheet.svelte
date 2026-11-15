@@ -44,6 +44,10 @@
 
 	let { open, sessionId, agentName, blockedReason, owner = null, onClose }: Props = $props();
 
+	/** How long a relayed attach waits for this worker's mirrored row before
+	 *  closing with a notice (the row is applied here within seconds). */
+	const ATTACH_ROW_WAIT_MS = 15_000;
+
 	let picked = $state<string | null>(null);
 	let attaching = $state(false);
 	let error = $state<string | null>(null);
@@ -245,9 +249,18 @@
 			const target = owner
 				? { project_v2_id: pickedItem.projectV2Id ?? '' }
 				: { project_id: pickedItem.project };
+			const name = pickedItem.name;
 			const result = await attachProject(sessionId, target);
-			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
-			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
+			if (!owner) {
+				activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
+			} else if (await activeSession.waitForAttachedRow(sessionId, ATTACH_ROW_WAIT_MS) === 'pending') {
+				// The page holds a project only once this worker's own row does:
+				// the upload, file and Git routes here read that row.
+				notify(`${name} is attached on ${owner.name?.trim() || 'the worker that runs this chat'}. This page switches to it when it syncs.`);
+				onClose();
+				return;
+			}
+			notify(`${name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
 			error = getErrorMessage(e, 'Could not attach the project.');

@@ -68,8 +68,8 @@ class AttachProjectRequest(BaseModel):
 
 class AttachProjectResponse(BaseModel):
     session_id: str
-    #: The CALLER's worker's legacy id: empty after a relayed attach when this
-    #: worker has no checkout of the project (``project_v2_id`` names it).
+    #: This worker's legacy id after a local attach; always empty after a
+    #: relayed one, where ``project_v2_id`` alone names the project.
     project_id: str
     project_v2_id: Optional[str] = None
     mode: str
@@ -255,8 +255,8 @@ async def apply_attach_project(
     # Pages open on this worker take the change live. Another worker's sockets
     # get it only as a sessions refresh (``resources_changed``): its open page
     # adopts the project from the reloaded row (``adoptAttachedProject`` in the
-    # frontend's active-session store), and the tab that asked for a relayed
-    # attach applies the route's response. The legacy id here is this worker's.
+    # frontend's active-session store); the tab that asked for a relayed attach
+    # waits for that row too. The legacy id here is this worker's.
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_user_session_updated(
@@ -353,46 +353,13 @@ async def attach_project(
     except control.ControlRefused as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     response = AttachProjectResponse.model_validate(result)
-    # The owner answered with ITS legacy id; legacy ids are per install. The
-    # caller's composer needs this worker's own project, else none (V2 only).
-    response.project_id = await run_sync(
-        _local_project_id, response.project_v2_id or identity.get("project_v2_id"), identity.get("origin"),
-        response.project_id,
-    )
+    # The owner answered with ITS legacy id, and legacy ids are per install:
+    # the same id here can be an unrelated project. The shared id alone is
+    # what this worker's page holds for a chat another worker runs; it adopts
+    # it from its own mirrored row once that arrives, not from this answer.
+    response.project_id = ""
+    response.project_v2_id = response.project_v2_id or identity.get("project_v2_id")
     return response
-
-
-def _local_project_id(project_v2_id: Optional[str], origin: Optional[str],
-                      owner_project_id: Optional[str] = None) -> str:
-    """This worker's checkout of the attached project, or ``""`` for the shared
-    id alone.
-
-    The chat's mirrored row keeps the owner's legacy id whenever this worker
-    has a project of that id (``prepare_session_mirror``), and the project
-    upload and listing gates then admit only that id. So a local checkout is
-    named only where the row will agree: the owner's id when it is this
-    worker's checkout of the same project; the catalog's checkout when no
-    project here has the owner's id; and ``""`` when the owner's id belongs to
-    a DIFFERENT project here, which leaves the composer on the shared id (the
-    session upload route and the shared-id listing). The page's
-    ``localProjectForRow`` applies the same rule.
-    """
-    from app.api import cluster
-    from app.core import project_resolver
-
-    pv2 = project_resolver.resolve_catalog_project(project_v2_id) if project_v2_id else None
-    key = (pv2 or {}).get("origin") or origin
-    if not key:
-        return ""
-    catalogued = cluster.local_checkout_for_origin(key) or ""
-    if owner_project_id and database.get_project(owner_project_id) is not None:
-        if owner_project_id == catalogued or any(
-            row.get("id") == owner_project_id and project_resolver.origin_for_legacy_project(row) == key
-            for row in database.get_all_projects()
-        ):
-            return owner_project_id
-        return ""
-    return catalogued
 
 
 async def _worker_name(device_id: str) -> str:

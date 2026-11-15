@@ -265,6 +265,8 @@ export interface AttachRowFields {
 	project_id?: string | null;
 	project_v2_id?: string | null;
 	permission_mode?: string | null;
+	/** Another worker runs the session: its legacy id means nothing here. */
+	is_remote?: boolean;
 }
 
 /**

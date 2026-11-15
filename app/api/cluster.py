@@ -130,30 +130,6 @@ def _local_project_id_for_origin(
     return row["id"] if row else None
 
 
-def _local_rows_by_origin(local_projects: list, me: str) -> Dict[str, Dict[str, Any]]:
-    """THIS install's legacy row for each origin, as the catalog lists it.
-
-    Prefer ``instance_id = me`` over a NULL-instance legacy row.
-    """
-    from app.core.project_resolver import origin_for_legacy_project
-
-    out: Dict[str, Dict[str, Any]] = {}
-    for project in local_projects:
-        origin = origin_for_legacy_project(project)
-        if origin not in out or project.get("instance_id") == me:
-            out[origin] = project
-    return out
-
-
-def local_checkout_for_origin(origin: str) -> Optional[str]:
-    """The legacy id the cluster catalog names as this worker's checkout of
-    ``origin`` (its ``local_project_id``), else None. Callers that answer
-    with a local project id use this so they never name a different checkout
-    than the composer's pickers do."""
-    rows = _local_rows_by_origin(database.get_all_projects(), _self_install_id())
-    return _local_project_id_for_origin(origin, rows)
-
-
 def _build_cluster_catalog(
     *,
     bases: list,
@@ -171,7 +147,8 @@ def _build_cluster_catalog(
     for row in bases:
         by_pv2.setdefault(row.get("project_id") or "", []).append(row)
 
-    local_by_origin = _local_rows_by_origin(local_projects, me)
+    # Prefer instance_id = me over a NULL-instance legacy row.
+    local_by_origin: Dict[str, Dict[str, Any]] = {}
     # A project's first chat catalogues it under ``local:<id>`` while it has no
     # remote; linking it to its remote later changes its origin but leaves that
     # identity and its base checkout. Listing THIS worker's checkout of it
@@ -181,6 +158,9 @@ def _build_cluster_catalog(
     relinked: set[str] = set()
     for project in local_projects:
         origin = origin_for_legacy_project(project)
+        existing = local_by_origin.get(origin)
+        if existing is None or project.get("instance_id") == me:
+            local_by_origin[origin] = project
         synthesized = "local:" + str(project.get("id"))
         if origin != synthesized:
             relinked.add(synthesized)

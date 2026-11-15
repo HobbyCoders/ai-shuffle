@@ -413,104 +413,140 @@ describe('attaching a project (#371)', () => {
 		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', permissionModeOverride: 'default' });
 	});
 
-	it('a refreshed row from a relayed attach adopts this worker\'s own project, else the V2 id alone', () => {
-		// The mirror dropped the owner's legacy id: map the V2 id to this
-		// worker's copy when it has one.
-		appData.current.clusterProjects = [
-			{ project_v2_id: 'v2-here', origin: 'o', name: 'here', local_project_id: 'local-here', eligible: [] },
-		] as never;
-		try {
-			expect(activeSession.adoptAttachedProject([
-				{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-here', permission_mode: 'default' }
-			])).toBe(true);
-			expect(activeSession.current).toMatchObject({ mode: 'code', project: 'local-here', projectV2Id: 'v2-here', permissionModeOverride: 'default' });
+	it('a row this worker runs adopts its own project id', () => {
+		expect(activeSession.adoptAttachedProject([
+			{ id: 'attach-me', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default', is_remote: false }
+		])).toBe(true);
+		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', projectV2Id: 'v2-1' });
+	});
 
+	describe('a chat another worker runs', () => {
+		const adopt = (projectId: string | null, extra: Record<string, unknown> = {}) => {
 			activeSession.current.mode = 'chat';
 			activeSession.current.project = '';
 			activeSession.current.projectV2Id = null;
-			activeSession.adoptAttachedProject([
-				{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-elsewhere', permission_mode: 'default' }
+			const adopted = activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: projectId, project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true, ...extra }
 			]);
-			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-elsewhere' });
-			// Nothing attached: nothing to adopt.
-			expect(activeSession.adoptAttachedProject([{ id: 'attach-me', mode: null, project_id: null, project_v2_id: 'v2-elsewhere' }])).toBe(false);
-		} finally {
+			return { adopted, project: activeSession.current.project, projectV2Id: activeSession.current.projectV2Id };
+		};
+		afterEach(() => {
 			appData.current.clusterProjects = [];
-		}
+		});
+
+		it('adopts the shared id alone with the catalog not loaded, whatever legacy id the row holds (W1)', () => {
+			// A passive watcher: no catalog yet. The row's `app` may be an
+			// unrelated project here; naming it would send uploads into it.
+			appData.current.clusterProjects = [];
+			for (const projectId of ['app', 'same-here', null]) {
+				expect(adopt(projectId)).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			}
+			expect(activeSession.current).toMatchObject({ mode: 'code', permissionModeOverride: 'default' });
+		});
+
+		it('never names a local checkout, even one the catalog lists for the project', () => {
+			appData.current.clusterProjects = [
+				{ project_v2_id: 'v2-mine', origin: 'o1', name: 'mine', local_project_id: 'app', eligible: [] },
+				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'theirs-here', eligible: [] },
+			] as never;
+			for (const projectId of ['app', 'theirs-here', null]) {
+				expect(adopt(projectId)).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			}
+		});
+
+		it('a row the store knows is remote but whose list entry has no flag yet is treated as remote', () => {
+			activeSession.current.isRemote = true;
+			try {
+				expect(adopt('app', { is_remote: undefined })).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			} finally {
+				activeSession.current.isRemote = undefined;
+			}
+		});
+
+		it('a remote row with no shared id is not adopted: its legacy id names nothing here', () => {
+			activeSession.current.mode = 'chat';
+			expect(activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: 'app', project_v2_id: null, permission_mode: 'default', is_remote: true }
+			])).toBe(false);
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '' });
+		});
+
+		it('a later sessions refresh keeps the access the owner picked after the attach', () => {
+			adopt('app');
+			activeSession.current.permissionModeOverride = 'acceptEdits';
+			expect(activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true }
+			])).toBe(false);
+			expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
+		});
 	});
 
-	it('a mirrored legacy id that collides with an unrelated local project is not trusted', () => {
-		// The owner's project is `app`; this worker's unrelated `app` maps to
-		// another V2 project. The V2 mapping decides (review round 2 S7).
-		appData.current.clusterProjects = [
-			{ project_v2_id: 'v2-mine', origin: 'o1', name: 'mine', local_project_id: 'app', eligible: [] },
-			{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'theirs-here', eligible: [] },
-		] as never;
-		try {
-			const row = { id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default' };
-			// A local copy exists, but the row keeps `app` and the project gates
-			// would then refuse `theirs-here`: the shared id alone (round 4 U2).
-			expect(activeSession.adoptAttachedProject([row])).toBe(true);
-			expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs' });
+	describe('waiting for the mirrored row after a relayed attach (W2)', () => {
+		const noProjectRow = { id: 'attach-me', mode: 'chat', project_id: null, project_v2_id: null, permission_mode: 'bypassPermissions', is_remote: true };
+		const attachedRow = { id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true };
+		let rows: Record<string, unknown>[];
+		beforeEach(() => {
+			rows = [noProjectRow];
+			vi.spyOn(appData, 'loadSessions').mockImplementation(async () => {
+				appData.current.sessions = rows as never;
+			});
+		});
+		afterEach(() => {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+			appData.current.sessions = [];
+		});
+		/** What live-sync does on a `sessions` invalidation. */
+		const sync = async () => {
+			await appData.loadSessions();
+			activeSession.adoptAttachedProject(appData.current.sessions as never);
+		};
 
-			// No local copy of theirs: the V2 id alone, never the colliding `app`.
-			appData.current.clusterProjects = [
-				appData.current.clusterProjects[0],
-				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: null, eligible: [] },
-			] as never;
-			activeSession.current.mode = 'chat';
-			activeSession.current.project = '';
-			activeSession.current.projectV2Id = null;
-			activeSession.adoptAttachedProject([row]);
-			expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs' });
+		it('holds no project until this worker\'s row has it, then adopts the shared id', async () => {
+			let outcome: string | null = null;
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000).then((o) => { outcome = o; });
+			await Promise.resolve();
+			await Promise.resolve();
+			// The owning worker confirmed, but this worker's row is still a
+			// no-project chat: no project in state, so no project controls.
+			expect(appData.loadSessions).toHaveBeenCalledTimes(1);
+			expect(outcome).toBeNull();
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' });
 
-			// The mapping confirms the legacy id: kept.
-			appData.current.clusterProjects = [
-				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'app', eligible: [] },
-			] as never;
-			activeSession.current.mode = 'chat';
-			activeSession.current.project = '';
-			activeSession.current.projectV2Id = null;
-			activeSession.adoptAttachedProject([row]);
-			expect(activeSession.current).toMatchObject({ project: 'app', projectV2Id: 'v2-theirs' });
-		} finally {
-			appData.current.clusterProjects = [];
-		}
-	});
+			rows = [attachedRow];
+			await sync();
+			await wait;
+			expect(outcome).toBe('adopted');
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-theirs', permissionModeOverride: 'default' });
+		});
 
-	it('with two checkouts of the project here, keeps the one the mirrored row names', () => {
-		// The row keeps the owner's id when it is a project here, and the
-		// upload gate then admits only it; the catalog lists the other copy.
-		const before = appData.current.projects;
-		appData.current.projects = [
-			{ id: 'two-a', name: 'Alpha', path: '/a', settings: {}, link_group_id: 'git:two', created_at: '', updated_at: '' },
-			{ id: 'two-z', name: 'Zeta', path: '/z', settings: {}, link_group_id: 'git:two', created_at: '', updated_at: '' },
-			{ id: 'app', name: 'Unrelated', path: '/u', settings: {}, link_group_id: 'git:other', created_at: '', updated_at: '' },
-		];
-		appData.current.clusterProjects = [
-			{ project_v2_id: 'v2-two', origin: 'git:two', name: 'Two', local_project_id: 'two-z', eligible: [] },
-		] as never;
-		try {
-			const adopt = (projectId: string | null) => {
-				activeSession.current.mode = 'chat';
-				activeSession.current.project = '';
-				activeSession.current.projectV2Id = null;
-				activeSession.adoptAttachedProject([
-					{ id: 'attach-me', mode: null, project_id: projectId, project_v2_id: 'v2-two', permission_mode: 'default' }
-				]);
-				return activeSession.current.project;
-			};
-			expect(adopt('two-a')).toBe('two-a');
-			// No project of the owner's id here (the row holds none): the catalog's.
-			expect(adopt(null)).toBe('two-z');
-			// An unrelated project sharing the id is not this project, and the row
-			// holding it would make the gates refuse `two-z`: the shared id alone.
-			expect(adopt('app')).toBe('');
-			expect(activeSession.current.projectV2Id).toBe('v2-two');
-		} finally {
-			appData.current.projects = before;
-			appData.current.clusterProjects = [];
-		}
+		it('finishes at once when the row was adopted before the answer returned', async () => {
+			rows = [attachedRow];
+			await sync();
+			await expect(activeSession.waitForAttachedRow('attach-me', 15_000)).resolves.toBe('adopted');
+		});
+
+		it('gives up at the bound with the chat still project-free, and adopts when the row arrives later', async () => {
+			vi.useFakeTimers();
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000);
+			await vi.advanceTimersByTimeAsync(15_000);
+			await expect(wait).resolves.toBe('pending');
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
+
+			rows = [attachedRow];
+			await sync();
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-theirs' });
+		});
+
+		it('stops waiting when the page leaves the chat, and never applies the project to another one', async () => {
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000);
+			activeSession.current.sessionId = 'other-chat';
+			activeSession.setTitle('other-chat', 'Other');
+			await expect(wait).resolves.toBe('left');
+			rows = [attachedRow];
+			await sync();
+			expect(activeSession.current).toMatchObject({ sessionId: 'other-chat', mode: 'chat', project: '', projectV2Id: null });
+		});
 	});
 
 	it('leaves a restored pick alone when nothing was attached', () => {

@@ -1046,34 +1046,6 @@ function composeProject(): {project:string; projectV2Id:string | null} {
 	return resolved.project ? resolved : own;
 }
 
-/**
- * This worker's project for a row that names a shared V2 project. A mirrored
- * row's legacy id is only known to EXIST here, not to be the same project
- * (ids are per install; another worker's `app` can collide with an unrelated
- * local `app`), so the V2 mapping decides: the row's id when that mapping
- * confirms it, else this worker's own copy of the V2 project, else none (the
- * V2 id alone, as for a project this worker has no checkout of). A V2 project
- * the cluster list does not know (not loaded yet) leaves the row's id as it
- * was: a row this worker owns has its own id there.
- */
-function localProjectForRow(projectId: string | null, projectV2Id: string | null): string {
-	const known = projectV2Id ? appData.current.clusterProjects.filter(p => p.project_v2_id === projectV2Id) : [];
-	if (!known.length) return projectId || '';
-	// The row keeps the owner's id whenever this worker has a project of that
-	// id, and the upload and listing gates then admit only it. So: the row's id
-	// when it is this worker's checkout of the same project; the shared id
-	// alone when it names a different project here; the catalog's checkout
-	// when the row names none (as the server's `_local_project_id` does).
-	const copies = known.map(p => p.local_project_id).filter((id): id is string => !!id);
-	if (projectId) {
-		const origins = new Set(known.map(p => p.origin));
-		const own = appData.current.projects.find(p => p.id === projectId);
-		const same = copies.includes(projectId) || (!!own && origins.has(own.link_group_id || `local:${own.id}`));
-		return same ? projectId : '';
-	}
-	return copies[0] || '';
-}
-
 export const activeSession = {
 	get current() { return _state; },
 
@@ -1241,7 +1213,9 @@ export const activeSession = {
 	/**
 	 * The open session was a no-project chat and its refreshed row now has a
 	 * project (#371): attached from another tab, or by the worker that runs it
-	 * after a relayed attach. Take the row's project and access, and report
+	 * after a relayed attach (the only way such a chat's page takes its
+	 * project: the tab that asked waits for this row too). Take the row's
+	 * project and access, and report
 	 * whether it did. The attach reset access to Ask; a saved Bypass would
 	 * otherwise ride the next send and re-bind the session. A chat holds no
 	 * project of its own: anything in `project` there is a filled-in device
@@ -1256,7 +1230,12 @@ export const activeSession = {
 		if (!row || !attachedSinceSaved(saved, row)) return false;
 		const mode = reconciledSessionMode(sessionId, sessionsList) ?? 'code';
 		const projectV2Id = row.project_v2_id ?? null;
-		const project = localProjectForRow(row.project_id ?? null, projectV2Id);
+		// Legacy ids are per install: on a chat another worker runs, the row's
+		// id can name an unrelated project here, so the page holds the shared
+		// id alone (session upload, shared-id listing and Git all take it).
+		const remote = row.is_remote ?? !!_state.isRemote;
+		if (remote && !projectV2Id) return false;
+		const project = remote ? '' : row.project_id ?? '';
 		const permissionMode = normalizePermissionMode(row.permission_mode ?? 'default') ?? 'default';
 		const cached = sessionEphemeralCache.restore(sessionId!);
 		if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
@@ -1268,6 +1247,40 @@ export const activeSession = {
 		}));
 		persistSession();
 		return true;
+	},
+
+	/**
+	 * After a relayed attach (another worker runs the chat): wait until this
+	 * page has adopted the attached row from THIS worker's mirror, since the
+	 * project upload, listing and Git gates read that row, not the relay's
+	 * answer. Reloads sessions once now; the sessions sync (a mirrored row
+	 * invalidates `sessions` here) drives the rest. 'adopted' once the open chat
+	 * holds a project, 'left' when the page leaves that chat, 'pending' at
+	 * `timeoutMs` (the row adopts whenever it arrives).
+	 */
+	waitForAttachedRow(sessionId: string, timeoutMs: number): Promise<'adopted' | 'left' | 'pending'> {
+		return new Promise(resolve => {
+			let done = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let unsubscribe: (() => void) | null = null;
+			const finish = (outcome: 'adopted' | 'left' | 'pending') => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				unsubscribe?.();
+				resolve(outcome);
+			};
+			const check = (s: ActiveSessionState) => {
+				if (s.sessionId !== sessionId) finish('left');
+				else if (s.mode !== 'chat' && (s.project || s.projectV2Id)) finish('adopted');
+			};
+			unsubscribe = _subscribe(check);
+			if (done) { unsubscribe(); return; }
+			timer = setTimeout(() => finish('pending'), timeoutMs);
+			void appData.loadSessions()
+				.then(() => { if (!done) activeSession.adoptAttachedProject(appData.current.sessions); })
+				.catch(() => { /* the sessions sync or the bound ends the wait */ });
+		});
 	},
 
 	/** `user`: the owner picked it in the UI (not a catalog or default fix-up). */

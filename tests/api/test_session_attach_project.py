@@ -260,9 +260,9 @@ async def test_a_remote_chat_is_relayed_by_shared_identity(seeded, quiet, remote
     assert (device, action) == ("dev-b", "attach-project")
     # Legacy ids are per worker: only the shared identity crosses.
     assert body == {"session_id": "attach-chat", "project_v2_id": pv2["id"], "origin": pv2["origin"]}
-    # The caller's composer gets THIS worker's project, never the owner's id:
-    # its next send names a project this worker has.
-    assert result.project_id == "attach-proj" and result.project_v2_id == pv2["id"]
+    # Never a legacy id: the owner's means nothing here, and this worker's
+    # page takes the project from its own mirrored row, by shared id.
+    assert result.project_id == "" and result.project_v2_id == pv2["id"]
     assert result.permission_mode == "default"
     # Nothing is written here: the owner's row syncs back as for any change.
     assert db.get_session("attach-chat")["project_id"] is None
@@ -330,124 +330,90 @@ def two_checkouts(seeded, tmp_path):
 
 
 def _gates(monkeypatch):
-    """The project upload and @-file routes, with their writers and the
-    forward to the owner stubbed: only the session gate decides."""
+    """The routes the composer and Git panel call for a chat another worker
+    runs, by shared id: the session upload (real staging), the project
+    listing and Git status. The forward to the owner is recorded."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    from app.api import projects
+    from app.api import git, projects, sessions_uploads
     from app.api.auth import require_auth
     from app.core import upload_transfer
     from app.network import control
 
     monkeypatch.setattr(upload_transfer, "resolve_upload_target", lambda session: None)
-    monkeypatch.setattr(upload_transfer, "stage_admitted_session_upload",
-                        lambda session, name, content: {"path": name})
-    monkeypatch.setattr(projects, "_perform_project_upload", lambda project, **kw: {"path": kw["filename"]})
-    monkeypatch.setattr(control, "call", AsyncMock(return_value={"status": 200, "result": {"files": [], "path": ""}}))
+    project_writes = MagicMock()
+    monkeypatch.setattr(projects, "_perform_project_upload", project_writes)
+
+    async def owner_answers(device, action, body, **kw):
+        if action == "session-git":
+            return {"status": 200, "result": {"is_git_repo": True, "branch": "main"}}
+        return {"status": 200, "result": {"files": [], "path": ""}}
+
+    forwarded = AsyncMock(side_effect=owner_answers)
+    monkeypatch.setattr(control, "call", forwarded)
     app = FastAPI()
     app.include_router(projects.router)
+    app.include_router(git.router)
+    app.include_router(sessions_uploads.router, prefix="/api/v1/sessions")
     app.dependency_overrides[require_auth] = lambda: "owner"
-    return TestClient(app)
+    return TestClient(app), forwarded, project_writes
 
 
-@pytest.mark.parametrize("owner_id, page", [
-    ("other", "other"),        # the owner's id is this worker's other checkout
-    ("b-local-id", "chosen"),  # the owner's id is not a project here
-])
+@pytest.mark.parametrize("row_shape", ["same", "other-checkout", "colliding", "colliding-with-checkout", "none"])
 @pytest.mark.asyncio
-async def test_page_row_and_gates_name_one_checkout(seeded, quiet, remote_owner, two_checkouts,
-                                                    monkeypatch, owner_id, page):
-    """The relay's answer, the chat's mirrored row and the upload and @-file
-    gates agree on which of this worker's checkouts the chat is."""
+async def test_a_relayed_attach_works_by_shared_id_for_every_mirrored_row(
+        seeded, quiet, remote_owner, request, tmp_path, monkeypatch, row_shape):
+    """Whatever legacy id the chat's mirrored row ends up holding (this
+    worker's checkout of the project, its other checkout, an UNRELATED project
+    that shares the owner's id, or none), the relay answers with the shared id
+    alone, and what the page then calls by that id works: the session upload,
+    the shared-id listing and Git. Nothing lands in a project folder here."""
+    from app.core import upload_transfer
+    from app.db import projects_v2
     from app.network.catalog import prepare_session_mirror
 
-    pv2, chosen, other = two_checkouts
-    owner_id = {"other": other}.get(owner_id, owner_id)
-    page = {"other": other, "chosen": chosen}[page]
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    db.update_project("attach-proj", path=str(unrelated))
+    if row_shape in ("same", "other-checkout", "colliding-with-checkout"):
+        pv2, chosen, other = request.getfixturevalue("two_checkouts")
+    else:
+        pv2, chosen, other = projects_v2.upsert_project("git:example/elsewhere", "Elsewhere"), None, None
+    owner_id = {"same": chosen, "other-checkout": other, "none": "b-local-id"}.get(row_shape, "attach-proj")
     remote_owner.side_effect = lambda device, action, body: {
         "session_id": body["session_id"], "project_id": owner_id,
         "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
     session = db.get_session("attach-chat")
     with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
         result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
-    assert result.project_id == page
+    assert (result.project_id, result.project_v2_id) == ("", pv2["id"])
 
     # The owner's row as it reaches this worker.
     with db.get_db() as conn:
         mirrored = prepare_session_mirror(conn.cursor(), {"id": "attach-chat", "project_id": owner_id})
+        assert mirrored["project_id"] == (None if row_shape == "none" else owner_id)
         conn.cursor().execute(
             "UPDATE sessions SET project_id = %s, project_v2_id = %s, mode = NULL WHERE id = %s",
             (mirrored["project_id"], pv2["id"], "attach-chat"),
         )
-    client = _gates(monkeypatch)
-    upload = client.post(f"/api/v1/projects/{page}/upload", data={"session_id": "attach-chat"},
-                         files={"file": ("notes.txt", b"hi")})
-    assert upload.status_code == 200, upload.text
-    listing = client.get(f"/api/v1/projects/{page}/files?session_id=attach-chat")
-    assert listing.status_code == 200, listing.text
-    if mirrored["project_id"]:
-        # Naming the other checkout would be refused: the row pins this one.
-        wrong = ({"two-a", "two-z"} - {page}).pop()
-        refused = client.post(f"/api/v1/projects/{wrong}/upload", data={"session_id": "attach-chat"},
-                              files={"file": ("notes.txt", b"hi")})
-        assert refused.status_code == 404
-
-
-@pytest.mark.parametrize("checkout_here", [True, False])
-@pytest.mark.asyncio
-async def test_an_unrelated_project_sharing_the_owners_id_is_not_named(
-        seeded, quiet, remote_owner, request, tmp_path, monkeypatch, checkout_here):
-    """The owner's legacy id is a DIFFERENT project here, so the mirrored row
-    keeps that id and the project gates would refuse any checkout named for
-    it: the relay names the shared id alone, and the composer's session upload
-    and shared-id listing work without touching the unrelated project."""
-    from app.api import sessions_uploads
-    from app.core import upload_transfer
-    from app.db import projects_v2
-    from app.network.catalog import prepare_session_mirror
-
-    if checkout_here:
-        pv2, _, _ = request.getfixturevalue("two_checkouts")
-    else:
-        pv2 = projects_v2.upsert_project("git:example/elsewhere", "Elsewhere")
-    unrelated = tmp_path / "unrelated"
-    unrelated.mkdir()
-    db.update_project("attach-proj", path=str(unrelated))
-    remote_owner.side_effect = lambda device, action, body: {
-        "session_id": body["session_id"], "project_id": "attach-proj",
-        "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
-    session = db.get_session("attach-chat")
-    with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
-        result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
-    assert result.project_id == ""
-    assert result.project_v2_id == pv2["id"]
-
-    # The owner's row as it reaches this worker keeps the colliding id.
-    with db.get_db() as conn:
-        mirrored = prepare_session_mirror(conn.cursor(), {"id": "attach-chat", "project_id": "attach-proj"})
-        assert mirrored["project_id"] == "attach-proj"
-        conn.cursor().execute(
-            "UPDATE sessions SET project_id = %s, project_v2_id = %s, mode = NULL WHERE id = %s",
-            (mirrored["project_id"], pv2["id"], "attach-chat"),
-        )
-    client = _gates(monkeypatch)
-    client.app.include_router(sessions_uploads.router, prefix="/api/v1/sessions")
+    client, forwarded, project_writes = _gates(monkeypatch)
     monkeypatch.setattr(upload_transfer, "stage_admitted_session_upload",
                         lambda session, name, content: upload_transfer.stage_session_upload(session["id"], name, content))
-    project_writes = MagicMock()
-    monkeypatch.setattr("app.api.projects._perform_project_upload", project_writes)
 
-    # What the composer calls with no local project: the session upload route
-    # and the listing by shared id.
     upload = client.post("/api/v1/sessions/attach-chat/upload", files={"file": ("notes.txt", b"hi")})
     assert upload.status_code == 200, upload.text
-    staged = upload_transfer.session_upload_dir("attach-chat") / "notes.txt"
-    assert staged.read_bytes() == b"hi"
+    assert (upload_transfer.session_upload_dir("attach-chat") / "notes.txt").read_bytes() == b"hi"
     listing = client.get(f"/api/v1/projects/{pv2['id']}/files?session_id=attach-chat")
     assert listing.status_code == 200, listing.text
+    git_status = client.get(f"/api/v1/projects/{pv2['id']}/git/status?session_id=attach-chat")
+    assert git_status.status_code == 200, git_status.text
+    git_call = next(c for c in forwarded.await_args_list if c.args[1] == "session-git")
+    assert (git_call.args[0], git_call.args[2]["params"]["project_id"]) == ("dev-b", pv2["id"])
     project_writes.assert_not_called()
     assert list(unrelated.iterdir()) == []
+    for checkout in ("two-a", "two-z"):
+        assert not (tmp_path / checkout).exists() or list((tmp_path / checkout).iterdir()) == []
 
 
 @pytest.mark.asyncio
