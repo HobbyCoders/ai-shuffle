@@ -30,11 +30,11 @@ DEFAULT_MODELS: List[Dict[str, Any]] = antigravity.DEFAULT_MODELS
 
 _AUTH_MODES = [
     {"id": "oauth-personal", "label": "Personal Google sign-in", "headless": True,
-     "guarded": True, "warning": True},
+     "guarded": True},
     {"id": "oauth-business", "label": "Business Google sign-in", "headless": False,
-     "guarded": False, "warning": False},
+     "guarded": False},
     {"id": "gemini-api-key", "label": "Gemini API key", "headless": True,
-     "guarded": False, "warning": False},
+     "guarded": False},
 ]
 
 
@@ -78,8 +78,6 @@ async def meta(token: str = Depends(require_admin)):
         "provider_type": antigravity.PROVIDER_TYPE,
         "capability": antigravity.CAPABILITY,
         "auth_modes": _AUTH_MODES,
-        "warning": antigravity.WARNING_TEXT,
-        "terms_url": antigravity.TERMS_URL,
         "dashboard_url": antigravity.DASHBOARD_URL,
         "guard_default": True,
         "default_models": DEFAULT_MODELS,

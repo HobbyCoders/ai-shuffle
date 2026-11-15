@@ -32,7 +32,10 @@ Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
 in the agent's own HOME); ``-p /usage --output-format json`` prints
 FAKE_ACP_USAGE verbatim, or a quota reply in the community-reported shape
-(after FAKE_ACP_USAGE_SLEEP seconds, when set).
+(after FAKE_ACP_USAGE_SLEEP seconds, when set); ``models`` prints the model
+list as 1.5.9 does (agy_models_1.5.9.tsv, the real binary's output, or the
+file FAKE_ACP_MODELS_FILE names), or its sign-in error with exit 1 when not
+signed in (after FAKE_ACP_MODELS_SLEEP seconds, when set).
 """
 
 from __future__ import annotations
@@ -438,6 +441,25 @@ def usage() -> int:
     return 0
 
 
+def models() -> int:
+    import time
+    if os.environ.get("FAKE_ACP_MODELS_SLEEP"):  # a listing that does not answer
+        time.sleep(float(os.environ["FAKE_ACP_MODELS_SLEEP"]))
+    sys.stderr.write("Fetching available models...")
+    if not (os.environ.get("FAKE_ACP_SIGNED_IN") == "1" or os.path.exists(_MARKER)
+            or os.environ.get("GEMINI_API_KEY")):
+        sys.stderr.write(" Error: Please sign in to view available models. "
+                         "Launch the CLI without arguments to sign in.\n")
+        return 1
+    sys.stderr.write("\n")
+    path = os.environ.get("FAKE_ACP_MODELS_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "agy_models_1.5.9.tsv")
+    with open(path, encoding="utf-8") as listing:
+        sys.stdout.write(listing.read())
+    sys.stdout.flush()
+    return 0
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(INIT["agentInfo"]["version"], flush=True)
@@ -446,4 +468,6 @@ if __name__ == "__main__":
         sys.exit(login())
     if "-p" in sys.argv:
         sys.exit(usage())
+    if sys.argv[1:2] == ["models"]:
+        sys.exit(models())
     asyncio.run(main())

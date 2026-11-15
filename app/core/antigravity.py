@@ -69,19 +69,10 @@ _MANIFEST_OS = {"linux": "linux", "win32": "windows", "darwin": "darwin"}
 _MANIFEST_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 _ALLOWED_DOWNLOAD_HOSTS = ("storage.googleapis.com",)
 DASHBOARD_URL = "https://antigravity.google/docs/faq"
-TERMS_URL = "https://antigravity.google/terms"
 
 #: The status and sign-in answer: both are read on the provider's own screen.
 NOT_INSTALLED_HERE = ("Antigravity is not installed on this worker. "
                       "Install it under Antigravity agent below.")
-
-WARNING_TEXT = (
-    "Google's Antigravity terms (section 6) and FAQ restrict using a personal "
-    "Google sign-in (consumer plans) through third-party software, and Google "
-    "has suspended accounts for it. AI Shuffle runs Google's own unmodified "
-    "Antigravity agent and never touches its sign-in, but the account is yours "
-    "to risk. A Gemini API key or a business sign-in is the supported route."
-)
 
 GUARD_REFUSAL = (
     "This Antigravity provider uses a personal Google sign-in, which runs only in "
@@ -105,20 +96,17 @@ def _thinking(levels: List[str]) -> Dict[str, Any]:
     return {"version": 1, "effort_levels": levels, "default_effort": None}
 
 
-#: Models ``agy`` 1.5.6 offered a non-first-party client (spike, 2026-11-11),
-#: with the thinking levels (``thought_level``) the picker offers. 1.5.6
-#: listed low/high for Gemini 3.1 Pro; the others use Google's documented
-#: Gemini thinking levels. The agent's own list wins at session start; these
-#: seed the picker and model curation (``POST /model-providers/{id}/fetch-models``).
+#: The Gemini models ``agy models`` listed on 1.5.8 and 1.5.9 (2026-11-14),
+#: with their thinking levels. Only a stand-in: ``POST /model-providers/{id}/
+#: fetch-models`` asks the agent itself (:func:`refresh_models`) and every
+#: session start stores what it offers; these show only when neither has
+#: answered on this worker for the current credential.
 DEFAULT_MODELS: List[Dict[str, Any]] = [
-    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "reasoning_capabilities": _thinking(["low", "high"])},
     {"id": "gemini-4-argon", "label": "Gemini 4 Argon",
      "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+    {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen",
+     "reasoning_capabilities": _thinking(["low", "medium", "high", "xhigh"])},
     {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash",
-     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
-    {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash",
-     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
-    {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash",
      "reasoning_capabilities": _thinking(["low", "medium", "high"])},
 ]
 
@@ -227,8 +215,12 @@ def capture_binding(row: Mapping[str, Any]) -> Optional[Dict[str, Optional[str]]
 
 
 def catalog_in_scope(row: Mapping[str, Any], snapshot: Mapping[str, Any]) -> bool:
-    """A stored sign-in row's catalog counts only with this worker's current
-    sign-in tag; any other row's needs nothing more than its binding."""
+    """An Antigravity row's catalog counts only when its agent listed it (an
+    earlier version stored the built-in seed as ``upstream``), and a stored
+    sign-in row's only with this worker's current sign-in tag. Any other
+    row's needs nothing more than its binding."""
+    if row.get("provider_type") == PROVIDER_TYPE and snapshot.get("source") != "agent":
+        return False
     if not worker_scoped(row):
         return True
     tag = signin_tag(str(row.get("id") or ""))
@@ -1513,6 +1505,109 @@ async def reconcile_agents(row_ids: Any) -> None:
             # its sign-in here (``signin_epoch``) or its settings.
             reason = STOPPED_KEY_CHANGED if row.get("auth_mode") == agy_spec.GEMINI_API_KEY else STOPPED_SIGNIN_CHANGED
             await stop_agents(row_id, reason, keep_binding=spawn_binding(row))
+
+
+# ---------------------------------------------------------------------------
+# Model list through the binary's own `models` command
+# ---------------------------------------------------------------------------
+
+_MODELS_SECONDS = 20
+#: One listing per row and agent binding at a time; a second refresh waits
+#: for the one already running instead of starting another process.
+_listings: "Dict[tuple, asyncio.Task[Any]]" = {}
+
+
+async def list_models(row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Run ``agy models`` for the row, in its own home and environment (as an
+    agent for it would run); the models it lists, or None.
+
+    None when the agent is not installed, says it is not signed in (exit 1),
+    fails, prints nothing usable or does not answer in time. Starts no
+    session, so nothing is left in the agent's own session list.
+    """
+    try:
+        spec = build_spec(row)
+    except FileNotFoundError:
+        return None
+    home = home_for(str(row.get("id") or "default"))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            spec.argv[0], "models", cwd=home, env=spec.env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix",
+        )
+    except OSError:
+        return None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_SECONDS)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        # Also on cancellation: the process ends with the listing, and is
+        # reaped (bounded) so none is left behind.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, OSError):
+                pass
+    if proc.returncode != 0:
+        return None
+    return agy_spec.listed_models(_ANSI_RE.sub("", out.decode("utf-8", "replace"))) or None
+
+
+async def _refresh(row: Mapping[str, Any], bound: Mapping[str, Optional[str]]) -> Optional[Dict[str, Any]]:
+    from app.db.async_database import run_sync
+
+    row_id = str(row.get("id") or "")
+    listed, version = await asyncio.gather(list_models(row), _listing_version(row))
+    if not listed:
+        logger.warning("Google's agent did not list its models for provider %s; "
+                       "keeping the last list", row_id)
+        return None
+    return await run_sync(record_offered_models, row_id, listed, version, bound)
+
+
+async def _listing_version(row: Mapping[str, Any]) -> Optional[str]:
+    binary = find_binary()
+    return await binary_version(binary) if binary else None
+
+
+async def refresh_models(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Ask the row's agent for its models (``agy models``) and store them as
+    the row's catalog, like a session start does; the stored snapshot or None.
+
+    ``row`` must carry its token (``include_token=True``). The binding and
+    sign-in tag are captured before the agent runs: a credential change,
+    sign-out or new sign-in while it lists drops the list
+    (``model_catalogs.save_agent``). Never raises; a failure logs one warning
+    and leaves the stored list as it was.
+    """
+    from app.db.async_database import run_sync
+
+    def capture() -> tuple:
+        return capture_binding(row), spawn_binding(row)
+
+    try:
+        bound, spawned = await run_sync(capture)
+        if not bound:
+            return None
+        key = (str(row.get("id") or ""), spawned, bound.get("binding"), bound.get("signin"))
+        task = _listings.get(key)
+        if task is None:
+            task = asyncio.get_running_loop().create_task(_refresh(row, bound))
+            _listings[key] = task
+            task.add_done_callback(lambda done, k=key: _listings.pop(k, None) if _listings.get(k) is done else None)
+        # Shielded: one caller going away does not end the listing others wait on.
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — the stored list or the seed answers instead
+        logger.warning("Could not refresh the models of Antigravity provider %s", row.get("id"))
+        return None
 
 
 # ---------------------------------------------------------------------------

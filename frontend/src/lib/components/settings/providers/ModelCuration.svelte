@@ -336,8 +336,8 @@
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
 	{#if catalog?.fetched_at && catalog.source === 'agent'}
-		<!-- Refresh re-reads this list; only a chat start asks the agent again. -->
-		<p class="pv-msg listed" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} when a chat started, <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}. Each new chat updates it.</p>
+		<!-- Refresh asks the agent again; each chat start also updates the list. -->
+		<p class="pv-msg listed" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}. Refresh or a new chat updates it.</p>
 	{:else if catalog?.fetched_at}
 		<p class="pv-msg listed">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}</p>
 	{/if}
