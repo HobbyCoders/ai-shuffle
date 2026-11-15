@@ -1046,6 +1046,24 @@ function composeProject(): {project:string; projectV2Id:string | null} {
 	return resolved.project ? resolved : own;
 }
 
+/**
+ * This worker's project for a row that names a shared V2 project. A mirrored
+ * row's legacy id is only known to EXIST here, not to be the same project
+ * (ids are per install; another worker's `app` can collide with an unrelated
+ * local `app`), so the V2 mapping decides: the row's id when that mapping
+ * confirms it, else this worker's own copy of the V2 project, else none (the
+ * V2 id alone, as for a project this worker has no checkout of). A V2 project
+ * the cluster list does not know (not loaded yet) leaves the row's id as it
+ * was: a row this worker owns has its own id there.
+ */
+function localProjectForRow(projectId: string | null, projectV2Id: string | null): string {
+	const known = projectV2Id ? appData.current.clusterProjects.filter(p => p.project_v2_id === projectV2Id) : [];
+	if (!known.length) return projectId || '';
+	const copies = known.map(p => p.local_project_id).filter((id): id is string => !!id);
+	if (projectId && copies.includes(projectId)) return projectId;
+	return copies[0] || '';
+}
+
 export const activeSession = {
 	get current() { return _state; },
 
@@ -1228,11 +1246,7 @@ export const activeSession = {
 		if (!row || !attachedSinceSaved(saved, row)) return false;
 		const mode = reconciledSessionMode(sessionId, sessionsList) ?? 'code';
 		const projectV2Id = row.project_v2_id ?? null;
-		// A mirrored row keeps only a legacy id this worker has (the mirror drops
-		// the owner's); without one, this worker's own copy of the V2 project.
-		const project = row.project_id
-			|| (projectV2Id && appData.current.clusterProjects.find(p => p.project_v2_id === projectV2Id)?.local_project_id)
-			|| '';
+		const project = localProjectForRow(row.project_id ?? null, projectV2Id);
 		const permissionMode = normalizePermissionMode(row.permission_mode ?? 'default') ?? 'default';
 		const cached = sessionEphemeralCache.restore(sessionId!);
 		if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });

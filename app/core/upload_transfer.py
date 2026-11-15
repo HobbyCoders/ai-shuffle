@@ -308,16 +308,21 @@ def adopt_composer_uploads(paths: List[str], session: Dict[str, Any]) -> Dict[st
     cwd = project_resolver.resolve_existing_cwd(session) if (
         session.get("project_id") or session.get("project_v2_id")) and session.get("mode") != "chat" else None
     # Folders under the workspace are written from it, so one the session has
-    # not used yet is created on the way.
+    # not used yet is created on the way. Written from the RESOLVED workspace,
+    # the form chat_uploads_dir() and owner_chat_dir() return, so a workspace
+    # reached through a link (or a Windows junction) still yields a relative
+    # destination; session_upload_dir() is joined unresolved, so it is made
+    # relative to the form it was built from.
     workspace = settings.effective_workspace_dir
+    real_workspace = workspace.resolve()
     if cwd:
         base, stage = Path(cwd), UPLOADS_SUBDIR
     elif session.get("mode") == "chat":
-        base, stage = workspace, chat_uploads_dir().relative_to(workspace).as_posix()
+        base, stage = real_workspace, chat_uploads_dir().relative_to(real_workspace).as_posix()
     elif runs_in_owner_chat_folder(session):
-        base, stage = workspace, (owner_chat_dir() / UPLOADS_SUBDIR).relative_to(workspace).as_posix()
+        base, stage = real_workspace, (owner_chat_dir() / UPLOADS_SUBDIR).relative_to(real_workspace).as_posix()
     else:
-        base, stage = workspace, session_upload_dir(session["id"]).relative_to(workspace).as_posix()
+        base, stage = real_workspace, session_upload_dir(session["id"]).relative_to(workspace).as_posix()
     limit = _max_upload_size()
     mapping: Dict[str, str] = {}
     for raw in foreign:

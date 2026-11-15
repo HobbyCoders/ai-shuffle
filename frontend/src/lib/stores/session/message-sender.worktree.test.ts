@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from './message-sender';
 import type { ActiveSessionState } from '../active-session';
 import type { InternalMutableState } from './ws-message-handlers';
-import { ATTACHMENTS_NEED_LOCAL_CHECKOUT } from '$lib/components/chat/attach-disable';
+import { ATTACHMENTS_NEED_RUNS_ON } from '$lib/components/chat/attach-disable';
 import { composerPreferences } from '../composer-preferences';
 import { bindSessionOwner } from '../session-owner';
 import { bumpInitGeneration } from './session-init';
@@ -357,7 +357,7 @@ describe('autoCreateWorktree', () => {
 		const { sender, state } = setup({ project: '', projectV2Id: 'v2-remote' } as Partial<ActiveSessionState>);
 		await sender.autoCreateWorktree('look at this', ['/workspace/uploads/a.png']);
 		expect(post).not.toHaveBeenCalled();
-		expect(state().worktreeError).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+		expect(state().worktreeError).toBe(ATTACHMENTS_NEED_RUNS_ON);
 		expect(state().messages).toEqual([]);
 	});
 });

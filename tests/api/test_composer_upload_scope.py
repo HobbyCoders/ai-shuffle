@@ -185,6 +185,53 @@ def test_a_same_worker_no_project_chat_takes_a_project_file(workspace):
     upload_transfer.validate_upload_paths([str(copy)], session)
 
 
+@pytest.fixture
+def linked_workspace(mock_db, tmp_path, monkeypatch):
+    """The workspace configured through a symlink (a Windows junction's shape)."""
+    import app.core.config as config
+
+    real = tmp_path / "real-workspace"
+    real.mkdir()
+    link = tmp_path / "linked-workspace"
+    try:
+        os.symlink(real, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setitem(config._runtime_overrides, "workspace_dir", link)
+    chat_uploads_dir().mkdir(parents=True, exist_ok=True)
+    database.create_profile("scope-agent", "Agent", None, {"model": "opus"})
+    return link
+
+
+@pytest.mark.parametrize("shape", ["chat", "owner-chat", "staging"])
+def test_adoption_works_through_a_linked_workspace(linked_workspace, monkeypatch, shape):
+    """Review round 2 T1: the chat-lane and owner-chat folders are resolved,
+    the configured workspace was not, so adoption raised for an admitted file."""
+    from app.core import session_modes
+
+    project = _project(linked_workspace, "proj-a")
+    staged = project / "uploads" / "spec.md"
+    staged.write_bytes(b"spec")
+    if shape == "chat":
+        database.create_session(session_id="np", profile_id="scope-agent", mode="chat")
+        expected = chat_uploads_dir()
+    else:
+        database.create_session(session_id="np", profile_id="scope-agent")
+        owner_chat = shape == "owner-chat"
+        monkeypatch.setattr(session_modes, "runs_in_owner_chat_folder", lambda row, **kw: owner_chat)
+        monkeypatch.setattr(upload_transfer, "runs_in_owner_chat_folder", lambda row, **kw: owner_chat, raising=False)
+        expected = (session_modes.owner_chat_dir() / "uploads") if owner_chat else upload_transfer.session_upload_dir("np")
+    session = database.get_session("np")
+
+    mapping = upload_transfer.adopt_composer_uploads([str(staged)], session)
+
+    copy = Path(mapping[str(staged)])
+    assert copy.read_bytes() == b"spec"
+    assert copy.resolve().parent == expected.resolve()
+    # What the turn checks when it starts, with no composer allowance.
+    upload_transfer.validate_upload_paths([str(copy)], session)
+
+
 def test_adoption_refuses_a_path_outside_every_area(workspace, tmp_path):
     database.create_session(session_id="np-chat", profile_id="scope-agent", mode="chat")
     secret = tmp_path / "secret.env"

@@ -439,6 +439,43 @@ describe('attaching a project (#371)', () => {
 		}
 	});
 
+	it('a mirrored legacy id that collides with an unrelated local project is not trusted', () => {
+		// The owner's project is `app`; this worker's unrelated `app` maps to
+		// another V2 project. The V2 mapping decides (review round 2 S7).
+		appData.current.clusterProjects = [
+			{ project_v2_id: 'v2-mine', origin: 'o1', name: 'mine', local_project_id: 'app', eligible: [] },
+			{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'theirs-here', eligible: [] },
+		] as never;
+		try {
+			const row = { id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default' };
+			expect(activeSession.adoptAttachedProject([row])).toBe(true);
+			expect(activeSession.current).toMatchObject({ project: 'theirs-here', projectV2Id: 'v2-theirs' });
+
+			// No local copy of theirs: the V2 id alone, never the colliding `app`.
+			appData.current.clusterProjects = [
+				appData.current.clusterProjects[0],
+				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: null, eligible: [] },
+			] as never;
+			activeSession.current.mode = 'chat';
+			activeSession.current.project = '';
+			activeSession.current.projectV2Id = null;
+			activeSession.adoptAttachedProject([row]);
+			expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs' });
+
+			// The mapping confirms the legacy id: kept.
+			appData.current.clusterProjects = [
+				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'app', eligible: [] },
+			] as never;
+			activeSession.current.mode = 'chat';
+			activeSession.current.project = '';
+			activeSession.current.projectV2Id = null;
+			activeSession.adoptAttachedProject([row]);
+			expect(activeSession.current).toMatchObject({ project: 'app', projectV2Id: 'v2-theirs' });
+		} finally {
+			appData.current.clusterProjects = [];
+		}
+	});
+
 	it('leaves a restored pick alone when nothing was attached', () => {
 		activeSession.reconcileSessionMode([{ id: 'attach-me', mode: 'chat', project_id: null, permission_mode: 'default' }]);
 		expect(activeSession.current.mode).toBe('chat');
