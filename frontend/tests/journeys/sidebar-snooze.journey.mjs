@@ -322,8 +322,9 @@ await runJourney({
 				expect(under === 'row', `opening Settled leaves a row where its header was, got ${under}`);
 				await page.mouse.click(spot.x, spot.y, { clickCount: 2 });
 				await page.waitForTimeout(600);
-				expect(await header.getAttribute('aria-expanded') === 'true', 'Settled stays open');
+				// The chat first: on a phone, opening one closes the drawer and hides the header.
 				expect(JSON.stringify(await chatState(page)) === before, 'the open chat did not change');
+				expect(await header.getAttribute('aria-expanded') === 'true', 'Settled stays open');
 			}
 		},
 		{
