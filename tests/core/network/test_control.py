@@ -321,9 +321,9 @@ async def test_an_unreadable_success_answer_may_have_been_applied(monkeypatch, b
                         lambda: SimpleNamespace(device_id="me", member=lambda _device_id: None))
     dispatched = []
     with pytest.raises(control.MaybeApplied, match="may still have been applied"):
-        await control.call("owner", "turns", {"session_id": "s"}, on_dispatch=lambda: dispatched.append(1))
+        await control.call("owner", "turns", {"session_id": "s"}, on_dispatch=dispatched.append)
     assert sent == ["/api/v1/network/peer/control/turns"]
-    assert dispatched == [1]
+    assert dispatched == [True]
 
 
 async def test_on_dispatch_is_not_called_when_nothing_reached_the_peer(monkeypatch):
@@ -339,7 +339,7 @@ async def test_on_dispatch_is_not_called_when_nothing_reached_the_peer(monkeypat
                         lambda: SimpleNamespace(device_id="me", member=lambda _device_id: None))
     dispatched = []
     with pytest.raises(control.RunnerUnreachable) as raised:
-        await control.call("owner", "turns", {}, on_dispatch=lambda: dispatched.append(1))
+        await control.call("owner", "turns", {}, on_dispatch=dispatched.append)
     assert not isinstance(raised.value, control.MaybeApplied)
     assert dispatched == [] and link._request.await_count == 0
 

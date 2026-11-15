@@ -2236,7 +2236,9 @@ async def report_settled_start(session_id, settled, outcome):
     raises, except the cancellation of a shutdown: a report to another worker
     cancelled before it was sent is kept on the started chat first (#1597)."""
     frame = sender = None
-    dispatched = []
+    # Whether the report's request may have reached that worker (control.call
+    # clears it again after an attempt that provably did not).
+    dispatched = [False]
     try:
         built = await asyncio.to_thread(build_started_report, session_id, settled, outcome)
         if not built:
@@ -2269,13 +2271,13 @@ async def report_settled_start(session_id, settled, outcome):
         # Nothing durable says this report is owed, and the receiving worker
         # keeps no receipt of it, so it is never resent.
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
-                           timeout=REMOTE_TIMEOUT, on_dispatch=lambda: dispatched.append(True))
+                           timeout=REMOTE_TIMEOUT, on_dispatch=lambda sent: dispatched.__setitem__(0, sent))
     except asyncio.CancelledError:
         # A shutdown (or restart) cancelled the send. Before the request left,
         # the report is kept on the started chat with the owner notified, as
         # for a starter that cannot take it; after, it may have arrived and is
         # never kept or sent twice.
-        if frame is not None and not dispatched:
+        if frame is not None and not dispatched[0]:
             await asyncio.shield(_keep_unsent_report(session_id, sender, frame))
         raise
     except Exception:  # noqa: BLE001 — a report never breaks settlement

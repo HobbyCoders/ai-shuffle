@@ -622,14 +622,17 @@ async def test_ordinary_owner_remote_start_reports_back(workers, monkeypatch, ki
         assert turn["payload"]["orchestration_report_device"] == b.device_id
 
 
-@pytest.mark.parametrize("cancelled_while", ["connecting", "sent"])
+@pytest.mark.parametrize("cancelled_while", ["connecting", "sent", "after_connect_error", "after_token_rejected"])
 async def test_a_report_cancelled_before_it_was_sent_is_kept_on_the_started_chat(
         workers, monkeypatch, kicks, cancelled_while):
-    """#1597: a shutdown that cancels the first report while it is still
-    connecting keeps it on the started chat; once the request left it may have
-    arrived (the receiving worker keeps no receipt), so it is never kept or
-    sent again."""
+    """#1597: a shutdown that cancels the first report while nothing can have
+    reached the assistant's worker keeps it on the started chat: while it is
+    still connecting, or authenticating again after an attempt that provably
+    was not applied (no connection at the first address; a rejected token).
+    Once the request left it may have arrived (the receiving worker keeps no
+    receipt), so it is never kept or sent again."""
     import asyncio
+    import httpx
     from app.db import notifications, session_events
     a, b, _ = network(workers, monkeypatch)
     with b.active():
@@ -648,13 +651,32 @@ async def test_a_report_cancelled_before_it_was_sent_is_kept_on_the_started_chat
         reached.set()
         await asyncio.Event().wait()
 
-    link = transport.PeerLink(b.device_id, ["http://b.local:8000"])
+    def then_hang(first):
+        calls = []
+
+        async def step(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                if isinstance(first, BaseException):
+                    raise first
+                return first
+            await hang()
+        return step
+
+    link = transport.PeerLink(b.device_id, ["http://b1.local:8000", "http://b2.local:8000"])
     if cancelled_while == "connecting":
         link.authenticate = hang
         link._request = AsyncMock(side_effect=AssertionError("the report must not be sent"))
-    else:
+    elif cancelled_while == "sent":
         link.authenticate = AsyncMock()
         link._request = hang
+    else:
+        # The first attempt fails without reaching the handler; the shutdown
+        # lands while authenticating at the next address or again here.
+        link.authenticate = then_hang(None)
+        link._request = AsyncMock(side_effect=httpx.ConnectError("refused")
+                                  if cancelled_while == "after_connect_error"
+                                  else transport.PeerTokenRejected("token rejected"))
     monkeypatch.setitem(transport._links, b.device_id, link)
     with a.active():
         task = asyncio.create_task(orch.report_settled_start(new_id, turns.get_turn(turn["id"]), "completed"))
@@ -664,14 +686,16 @@ async def test_a_report_cancelled_before_it_was_sent_is_kept_on_the_started_chat
             await task
         kept = [e for e in session_events.get_events(new_id) if e["event_type"] == "orchestration.report_deferred"]
         noted = [n for n in notifications.list_notifications("admin") if n["session_id"] == new_id]
-    if cancelled_while == "connecting":
-        [event] = kept
-        assert event["payload"]["starter_session_id"] == "caller"
-        assert event["payload"]["child_turn_id"] == turn["id"]
-        assert "shut down before the report was sent" in event["payload"]["reason"]
-        assert noted
-    else:
+    if cancelled_while == "sent":
         assert kept == [] and noted == []
+        return
+    [event] = kept
+    assert event["payload"]["starter_session_id"] == "caller"
+    assert event["payload"]["child_turn_id"] == turn["id"]
+    assert "shut down before the report was sent" in event["payload"]["reason"]
+    assert noted
+    if cancelled_while != "connecting":
+        assert link._request.await_count == 1
 
 
 async def test_chat_remote_start_without_a_project_is_refused(workers, monkeypatch, kicks):

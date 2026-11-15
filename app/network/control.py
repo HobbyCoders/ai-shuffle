@@ -98,14 +98,16 @@ def owner_of(session_row: Dict[str, Any]) -> Optional[str]:
 
 
 async def call(device_id: str, action: str, body: Optional[Dict[str, Any]] = None, *, timeout: float | None = None,
-               secure: bool = False, on_dispatch: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
+               secure: bool = False, on_dispatch: Optional[Callable[[bool], None]] = None) -> Dict[str, Any]:
     """POST a control action to the owner with a device token.
 
     ``secure`` sends only to the peer's HTTPS addresses, and raises
     ``InsecureRoute`` when it has none, for a payload carrying private inputs.
-    ``on_dispatch`` is called just before the action's own request starts:
-    until then nothing reached the peer, so a caller cancelled earlier knows
-    the action was not sent.
+    ``on_dispatch(True)`` is called just before each request for the action
+    itself starts, and ``on_dispatch(False)`` when that request failed in a way
+    that proves the peer did not apply it (no connection, or a rejected token).
+    A caller cancelled while the last value is False (or before any call)
+    knows the action was not applied; True means it may have been.
     """
     ctx = engine.require_context()
     known = ctx.member(device_id)
@@ -200,7 +202,7 @@ class _RouteFailed(Exception):
 
 async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, route: str, action: str,
                 payload: Any, timeout: float | None,
-                on_dispatch: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
+                on_dispatch: Optional[Callable[[bool], None]] = None) -> Dict[str, Any]:
     """POST the action at one address.
 
     Raises ``_RouteFailed`` only when nothing was dispatched: authentication
@@ -213,9 +215,12 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
         await link.authenticate(client, ctx, at=route)
     except transport.PeerError as exc:
         raise _RouteFailed(exc) from exc
-    for attempt in range(2):
+    def dispatching(sent: bool) -> None:
         if on_dispatch is not None:
-            on_dispatch()
+            on_dispatch(sent)
+
+    for attempt in range(2):
+        dispatching(True)
         try:
             return await link._request(
                 client, "POST", f"/api/v1/network/peer/control/{action}", json_body=payload, base=route,
@@ -225,6 +230,7 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
             # A worker restart invalidates tokens before their advertised
             # expiry. A 401 is pre-dispatch, so retrying cannot duplicate
             # a mutation. Never retry timeouts or other action failures.
+            dispatching(False)
             if attempt:
                 raise
             try:
@@ -232,6 +238,9 @@ async def _post(link: "transport.PeerLink", client: httpx.AsyncClient, ctx, rout
             except transport.PeerError as exc:
                 raise _RouteFailed(exc) from exc
         except transport.CONNECT_ERRORS as exc:
+            # Raised only while opening the connection, before any byte of
+            # the request was written.
+            dispatching(False)
             raise _RouteFailed(exc) from exc
     raise AssertionError("unreachable")  # pragma: no cover
 
