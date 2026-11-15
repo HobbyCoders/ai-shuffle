@@ -351,6 +351,20 @@
 			]
 		},
 		{
+			"why": "a long unbroken agent name saves and duplicates within the id limit, and truncates in the Subagents tab and the new-chat agent word",
+			"journeys": ["agent-long-name"],
+			"globs": [
+				"frontend/tests/journeys/agent-long-name.journey.mjs",
+				"frontend/src/lib/components/deck/cards/ProfileCard.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/agentList.ts",
+				"frontend/src/lib/components/deck/cards/profiles/AgentProfileTab.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/AgentSubagentsTab.svelte",
+				"frontend/src/lib/components/chat/ProfileSelector.svelte",
+				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
+				"app/api/agents.py"
+			]
+		},
+		{
 			"why": "an agent's edits save through the preview cookie a dev instance is reached with, and read back after a reload",
 			"journeys": ["agent-model-pin"],
 			"globs": [

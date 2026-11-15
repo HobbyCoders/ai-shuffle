@@ -2,7 +2,10 @@
 import { describe, expect, it } from 'vitest';
 import type { Profile } from '$lib/api/client';
 import {
+	AGENT_ID_MAX,
+	AGENT_NAME_MAX,
 	FOLDER_NONE,
+	duplicateAgentName,
 	defaultModelBinding,
 	isPinned,
 	pinnedModel,
@@ -109,6 +112,39 @@ describe('uniqueAgentId', () => {
 		expect(uniqueAgentId('Release Notes!', [])).toBe('release-notes');
 		expect(uniqueAgentId('Scribe copy', ['scribe-copy', 'scribe-copy-2'])).toBe('scribe-copy-3');
 		expect(uniqueAgentId('  ', [])).toBe('agent');
+	});
+
+	// #1616: the server rejects ids over 50 characters (422), so a long name never saved.
+	it('cuts a long name to the 50-character id limit, suffix included', () => {
+		const long = 'a'.repeat(80);
+		const id = uniqueAgentId(long, []);
+		expect(id).toBe('a'.repeat(AGENT_ID_MAX));
+		const second = uniqueAgentId(long, [id]);
+		expect(second).toBe(`${'a'.repeat(AGENT_ID_MAX - 2)}-2`);
+		expect(second).toHaveLength(AGENT_ID_MAX);
+		// Suffixes 2..10 taken: each base is cut so base + suffix is exactly 50.
+		const suffixed = (n: number) => `${'a'.repeat(AGENT_ID_MAX - String(n).length - 1)}-${n}`;
+		const taken = [id, ...[2, 3, 4, 5, 6, 7, 8, 9, 10].map(suffixed)];
+		expect(taken[1]).toBe(second);
+		const eleventh = uniqueAgentId(long, taken);
+		expect(eleventh).toBe(`${'a'.repeat(AGENT_ID_MAX - 3)}-11`);
+		expect(eleventh).toHaveLength(AGENT_ID_MAX);
+	});
+
+	it('never leaves a dash where the cut falls', () => {
+		// 49 letters then a space: the slug's dash at index 49 is cut off, not kept.
+		const id = uniqueAgentId(`${'b'.repeat(49)} tail words here`, []);
+		expect(id).toBe('b'.repeat(49));
+		expect(uniqueAgentId(`${'b'.repeat(47)} x`, [`${'b'.repeat(47)}-x`])).toBe(`${'b'.repeat(47)}-2`);
+	});
+});
+
+describe('duplicateAgentName', () => {
+	it('adds " copy" within the 100-character name limit', () => {
+		expect(duplicateAgentName('Scribe')).toBe('Scribe copy');
+		const name = duplicateAgentName('c'.repeat(AGENT_NAME_MAX));
+		expect(name).toHaveLength(AGENT_NAME_MAX);
+		expect(name.endsWith(' copy')).toBe(true);
 	});
 });
 

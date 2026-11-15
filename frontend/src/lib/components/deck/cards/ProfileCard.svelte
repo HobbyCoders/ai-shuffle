@@ -64,6 +64,7 @@
 		profileModels,
 		sectionAgents,
 		uniqueAgentId,
+		duplicateAgentName,
 		type AgentFilter
 	} from './profiles/agentList';
 	import {
@@ -810,7 +811,7 @@
 		if (!source) return;
 		await flushPendingPersist();
 		const latest = profiles.find((p) => p.id === source.id) ?? source;
-		const name = `${latest.name} copy`;
+		const name = duplicateAgentName(latest.name);
 		const id = uniqueAgentId(name, profiles.map((p) => p.id));
 		const config = JSON.parse(JSON.stringify(latest.config ?? {}));
 		const data: { id: string; name: string; description?: string; config: Record<string, unknown> } = {
