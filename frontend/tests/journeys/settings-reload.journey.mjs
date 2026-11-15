@@ -102,26 +102,22 @@ const failedLoadCase = {
 };
 
 /**
- * As failLate, but only until the person presses a Try again button: the
- * server's periodic sync_reconcile makes the page re-read its data at any
- * moment, and a re-read that worked between lifting the failure and the
- * click would recover the row on its own and take the button away mid-click.
- * Answers that were held back when the press came are let through instead.
+ * As failLate, but a request sent while Try again is retrying goes through.
+ * The server's periodic sync_reconcile makes the page re-read its data at any
+ * moment (#1572); lifting the failure before the click let such a re-read
+ * recover the row on its own and take the button away mid-click. Each request
+ * is judged when it is seen, and only the retry handler shows "Retrying…"
+ * (aria-disabled), so a re-read already in flight at the press still fails
+ * and a Try again that sends nothing cannot recover the row.
  */
-const failUntilRetry = async (page, url) => {
-	await page.addInitScript(() => {
-		document.addEventListener('pointerdown', (e) => {
-			if (e.target instanceof Element && e.target.closest('[data-retry-load]')) window.__retryPressed = true;
-		}, true);
-	});
-	const pressed = () => page.evaluate(() => window.__retryPressed === true).catch(() => false);
-	await page.context().route(url, async (route) => {
-		if (route.request().method() !== 'GET' || await pressed()) return route.continue();
+const failUnlessRetrying = (page, url) =>
+	page.context().route(url, async (route) => {
+		if (route.request().method() !== 'GET') return route.continue();
+		const retrying = await page.locator('[data-retry-load][aria-disabled="true"]').count().catch(() => 0);
+		if (retrying > 0) return route.continue().catch(() => {});
 		await new Promise((done) => setTimeout(done, 1500));
-		if (await pressed()) return route.continue().catch(() => {});
 		await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Synthetic failure' }) }).catch(() => {});
 	});
-};
 
 // Only the instructions fail: their row offers the retry itself.
 const instructionsFailCase = {
@@ -133,7 +129,7 @@ const instructionsFailCase = {
 	],
 	async setup(ctx) {
 		await reloadCase('Security').setup(ctx);
-		await failUntilRetry(ctx.page, INSTRUCTIONS);
+		await failUnlessRetrying(ctx.page, INSTRUCTIONS);
 	},
 	async act(ctx) {
 		await reloadCase('Security').act(ctx);
