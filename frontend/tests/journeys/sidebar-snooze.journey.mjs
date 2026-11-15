@@ -260,10 +260,17 @@ await runJourney({
 			}
 		},
 		{
-			name: 'quiet-groups-rest-at-the-bottom',
+			name: `${mobileShell ? 'native-' : ''}quiet-groups-rest-at-the-bottom`,
+			...(mobileShell ? { viewports: ['phone'] } : {}),
 			async setup({ page, status, log }) {
-				await gotoApp(page, status);
-				await waitChat(page, { surface: 'new' });
+				page.__mobileShell = mobileShell;
+				if (mobileShell) {
+					await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+					expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+				} else {
+					await gotoApp(page, status);
+					await waitChat(page, { surface: 'new' });
+				}
 				const { session_id: snoozed } = await api(page, 'POST', '/sessions', {});
 				const { session_id: settled } = await api(page, 'POST', '/sessions', {});
 				await api(page, 'PATCH', `/sessions/${snoozed}/active`, { is_active: false, snoozed_until: new Date(Date.now() + 86_400_000).toISOString() });
