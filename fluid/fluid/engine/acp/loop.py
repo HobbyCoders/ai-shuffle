@@ -752,6 +752,13 @@ class AcpLoop:
             return None
         return str(current) if current else "its default model"
 
+    def _answering_model(self) -> str | None:
+        """The model id the agent ran this turn on, when it is known."""
+        instead = self._model_not_offered()
+        if instead is None:
+            return self.model or self._current_config("model")
+        return instead if instead != "its default model" else None
+
     def _read_session_state(self, result: Mapping[str, Any]) -> None:
         options = result.get("configOptions")
         if isinstance(options, list):
@@ -967,9 +974,14 @@ class AcpLoop:
         for event in trailing:
             await self._emit(event)
         parent = user_node
+        answered = self._answering_model()
         for role, blocks in segments:
+            # The reply names the model that answered: the transcript reads it
+            # back as the message's model (#1643).
+            meta = {"model": answered} if role == "assistant" and answered else {}
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
-                               message=Message(role="assistant" if role == "assistant" else "user", content=blocks))
+                               message=Message(role="assistant" if role == "assistant" else "user",
+                                               content=blocks, provider_meta=meta))
             await self.store.append(sid, node)
             parent = node
         usage, cost = self._usage(result, mapper)

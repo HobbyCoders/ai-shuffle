@@ -55,7 +55,7 @@ import { registerReloadBlocker } from '$lib/services/app-update';
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
 import { resolveModelEffort } from '$lib/constants/model-effort';
-import { dropEffortRequest, noteEffortRequest, settleEffortRequest } from './session/effort-echo';
+import { noteEffortRequest } from './session/effort-echo';
 import { sessionOwnerEpoch } from './session-owner';
 import { notify } from './notifications';
 import { getOrCreateDeviceId } from './device-id';
@@ -893,20 +893,20 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		// cannot overwrite a newer pick at the running worker.
 		const queueKey = `${ownerEpoch}:${sessionId}`;
 		const previous = runSettingQueues.get(queueKey);
+		// An effort request names itself, so the worker's announcement of it can
+		// be told from another tab's and skipped once outdated here (#1633).
+		const requestId = field === 'effort' ? noteEffortRequest(sessionId) : null;
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
 			return api.put<{ effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
-				`/sessions/${sessionId}/run-settings`, { [field]: value }
+				`/sessions/${sessionId}/run-settings`, { [field]: value, ...(requestId ? { request_id: requestId } : {}) }
 			);
 		};
-		const echo = field === 'effort' ? noteEffortRequest(sessionId, value as string | null) : null;
 		const pending = previous ? previous.catch(() => {}).then(apply) : Promise.resolve(apply());
 		runSettingQueues.set(queueKey, pending);
 		try {
 			const saved = await pending;
-			if (!saved && echo) dropEffortRequest(sessionId, echo);
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
-			if (echo) settleEffortRequest(sessionId, echo, saved.effort);
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
 			// An answer to an older pick only reports what was saved then: it must
@@ -924,7 +924,6 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
 		} catch (error) {
-			if (echo) dropEffortRequest(sessionId, echo);
 			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
 				// The chat still runs the model before this pick, which lacks the
 				// level; the picked model offers it. A model pick applies with the

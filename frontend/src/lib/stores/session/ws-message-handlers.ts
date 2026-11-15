@@ -33,7 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
-import { consumeOwnEffortEcho } from './effort-echo';
+import { isOutdatedOwnEffortEcho } from './effort-echo';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -639,11 +639,11 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// included (#1579): adopt it on screen and in the cached copy a
 				// switch-back restores, or this composer's next send carries the
 				// older level and pins it again. The row patch below covers the rest.
-				// This tab's own pick is applied from its response, behind a check
-				// that drops an outdated one; its announcement is skipped (#1633).
+				// The announcement of this tab's own pick that a newer pick from
+				// this tab has replaced is skipped, matched by its request id (#1633).
 				if (updatedSessionId && 'effort' in updates
 					&& (updates.effort === null || typeof updates.effort === 'string')
-					&& !consumeOwnEffortEcho(updatedSessionId, updates.effort as string | null)) {
+					&& !isOutdatedOwnEffortEcho(updatedSessionId, syncData?.request_id)) {
 					const effort = updates.effort as string | null;
 					const cached = sessionEphemeralCache.restore(updatedSessionId);
 					if (cached) sessionEphemeralCache.save(updatedSessionId, { ...cached, effortLevelOverride: effort });

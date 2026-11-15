@@ -9,7 +9,7 @@
  * notifications, error banners).
  */
 
-import { dropEffortRequest, noteEffortRequest, settleEffortRequest } from './effort-echo';
+import { noteEffortRequest, resetEffortEchoes } from './effort-echo';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createMessageHandlers,
@@ -2252,29 +2252,74 @@ describe('ws-message-handlers', () => {
 			});
 			handlers = createMessageHandlers(deps);
 			return {
-				announce(sessionId: string, effort: string | null) {
-					handlers.handleMessage({ event_type: 'session_updated', session_id: sessionId, data: { updates: { effort } } });
+				announce(sessionId: string, effort: string | null, requestId?: string) {
+					handlers.handleMessage({
+						event_type: 'session_updated', session_id: sessionId,
+						data: { updates: { effort }, ...(requestId ? { request_id: requestId } : {}) },
+					});
 				},
 				get state() { return state; },
 			};
 		}
 
-		it("skips the late announcement of this tab's own older pick, not another device's (#1633)", () => {
-			const b = openAtMedium();
-			// This tab asked for Low, then held XHigh for a model that has not run.
-			const low = noteEffortRequest('session-1', 'low');
-			settleEffortRequest('session-1', low, 'low');
-			b.state.effortLevelOverride = 'xhigh';
-			b.announce('session-1', 'low');
-			expect(b.state.effortLevelOverride).toBe('xhigh');
-			// Its one announcement is used up: the same level from elsewhere applies.
-			b.announce('session-1', 'low');
-			expect(b.state.effortLevelOverride).toBe('low');
-			// A failed request is announced nowhere and is forgotten.
-			const failed = noteEffortRequest('session-1', 'max');
-			dropEffortRequest('session-1', failed);
-			b.announce('session-1', 'max');
-			expect(b.state.effortLevelOverride).toBe('max');
+		describe("this tab's own announcements, matched by request id (#1633)", () => {
+			afterEach(() => resetEffortEchoes());
+
+			it('skips an own announcement a newer own pick replaced, even one delayed for long', () => {
+				const b = openAtMedium();
+				const low = noteEffortRequest('session-1');
+				noteEffortRequest('session-1'); // then held XHigh for a model that has not run
+				b.state.effortLevelOverride = 'xhigh';
+				vi.useFakeTimers();
+				try {
+					vi.advanceTimersByTime(60_000);
+					b.announce('session-1', 'low', low);
+				} finally {
+					vi.useRealTimers();
+				}
+				expect(b.state.effortLevelOverride).toBe('xhigh');
+			});
+
+			it("applies another tab's pick of the same level after this tab's announcement went missing", () => {
+				const a = openAtMedium();
+				// A saved Low while its socket was down: that announcement never arrives.
+				noteEffortRequest('session-1');
+				// After reconnecting, tab B picks Medium, then Low.
+				a.announce('session-1', 'medium', 'tab-b-1');
+				expect(a.state.effortLevelOverride).toBe('medium');
+				a.announce('session-1', 'low', 'tab-b-2');
+				expect(a.state.effortLevelOverride).toBe('low');
+			});
+
+			it("applies this tab's newest pick and an announcement without an id", () => {
+				const b = openAtMedium();
+				const first = noteEffortRequest('session-1');
+				const second = noteEffortRequest('session-1');
+				b.announce('session-1', 'low', first); // sent twice quickly: the first is outdated
+				expect(b.state.effortLevelOverride).toBe('medium');
+				b.announce('session-1', 'high', second);
+				expect(b.state.effortLevelOverride).toBe('high');
+				// An older worker names no request: treated as another tab's pick.
+				b.announce('session-1', 'max');
+				expect(b.state.effortLevelOverride).toBe('max');
+			});
+
+			it('keeps a bounded number of ids per session', () => {
+				const b = openAtMedium();
+				const oldest = noteEffortRequest('session-1');
+				for (let i = 0; i < 40; i += 1) noteEffortRequest('session-1');
+				// Forgotten: applied like another tab's pick rather than kept forever.
+				b.announce('session-1', 'low', oldest);
+				expect(b.state.effortLevelOverride).toBe('low');
+			});
+
+			it('counts requests per chat', () => {
+				const b = openAtMedium();
+				const mine = noteEffortRequest('session-1');
+				noteEffortRequest('session-2');
+				b.announce('session-1', 'high', mine);
+				expect(b.state.effortLevelOverride).toBe('high');
+			});
 		});
 
 		it('device B drops its Medium when device A picks Auto, so its next send pins nothing', () => {

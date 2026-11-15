@@ -832,7 +832,7 @@ async def _start_background_turn(
     # provider, and fail on the wrong leg with the wrong credentials.
     if overrides:
         try:
-            await run_sync(
+            pin_dropped = await run_sync(
                 database.set_session_run_binding,
                 session_id,
                 model=overrides.get("model"),
@@ -856,6 +856,14 @@ async def _start_background_turn(
                 else:
                     await run_sync(database.set_session_run_binding, session_id,
                                    context_window=window)
+                    pin_dropped = False
+            if pin_dropped:
+                # The new model cannot hold the saved pin, so it was cleared
+                # (#1640). Open composers still send it as their base, and a
+                # send whose base is outdated would have its window ignored.
+                from app.core.turn_manager import announce_window_pin
+
+                await announce_window_pin(session_id, None)
         except Exception:
             logger.exception(
                 f"[Background] run-binding persist failed for session {session_id}"

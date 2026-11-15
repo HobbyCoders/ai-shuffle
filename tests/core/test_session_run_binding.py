@@ -556,6 +556,76 @@ class TestSubmitPersistsTheBinding:
         assert call(session_id="s-drop", updates={"context_window": None},
                     source_device_id=None) in broadcast.await_args_list
 
+    def test_the_clear_never_erases_a_pin_saved_for_a_newer_model(self, mock_db, monkeypatch):
+        """Review S2: the clear is judged against Haiku; meanwhile another writer
+        saves Opus with a deliberately chosen 1M pin. That pin must survive."""
+        from app.core import model_registry
+
+        make_profile("agent", {})
+        db.create_session("s-race", profile_id="agent", model="claude-haiku-4-5",
+                          context_window=1_000_000)
+        judged = model_registry.session_context_window_maximum
+
+        def judge_then_race(row):
+            maximum = judged(row)
+            db.set_session_run_binding("s-race", model="claude-opus-4-6", context_window=1_000_000)
+            return maximum
+
+        monkeypatch.setattr(model_registry, "session_context_window_maximum", judge_then_race)
+        from app.db import sessions as sessions_db
+
+        assert sessions_db.drop_pin_above_model_maximum("s-race") is False
+        row = db.get_session("s-race")
+        assert (row["model"], row["context_window"]) == ("claude-opus-4-6", 1_000_000)
+
+    async def test_voice_model_change_drops_and_announces_the_pin(self, mock_db, monkeypatch):
+        """Review S3: the voice PATCH changes the model without a window."""
+        from unittest.mock import AsyncMock
+        from app.api import voice, voice_context
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session(session_id="s-voice-drop", profile_id="agent", mode="voice",
+                          provider_id="realtime-provider", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        monkeypatch.setattr(voice, "_load_voice_session",
+                            AsyncMock(return_value=db.get_session("s-voice-drop")))
+        monkeypatch.setattr(voice_context, "check_session_access", lambda request, row: None)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await voice_context.update_voice_session_context(
+                None, "s-voice-drop", voice_context.VoiceContextPatch(model="claude-haiku-4-5"))
+        row = db.get_session("s-voice-drop")
+        assert (row["model"], row["context_window"]) == ("claude-haiku-4-5", None)
+        broadcast.assert_awaited_once_with(
+            session_id="s-voice-drop", updates={"context_window": None}, source_device_id=None)
+
+        # A pin the new model can hold stays, and nothing is announced.
+        db.set_session_run_binding("s-voice-drop", context_window=200_000)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await voice_context.update_voice_session_context(
+                None, "s-voice-drop", voice_context.VoiceContextPatch(model="claude-opus-4-6"))
+        assert db.get_session("s-voice-drop")["context_window"] == 200_000
+        broadcast.assert_not_awaited()
+
+    async def test_background_query_that_drops_the_pin_tells_open_clients(self, mock_db, tmp_path):
+        """Review S4: the API lane bypasses turn_manager, so it announces itself."""
+        from unittest.mock import AsyncMock
+        import app.core.query_background as qb
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session("s-bg-drop", profile_id="agent", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        with patch.object(qb, "_run_background_query", new=AsyncMock()), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await qb.start_background_query(
+                "hi", "agent", session_id="s-bg-drop",
+                overrides={"cwd": str(tmp_path), "model": "claude-haiku-4-5"})
+            await asyncio.sleep(0)
+        assert db.get_session("s-bg-drop")["context_window"] is None
+        broadcast.assert_any_await(
+            session_id="s-bg-drop", updates={"context_window": None}, source_device_id=None)
+
     def test_zero_base_means_no_pin_seen(self, mock_db):
         make_profile("agent", {})
         db.create_session("s-none", profile_id="agent", model="opus")

@@ -4578,6 +4578,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 INTERRUPTED_META_KEY: (
                                     "transport_failure" if transport else "provider_error"
                                 ),
+                                # Kept output names its model too (#1643).
+                                "model": result.served_model or self.model,
                             },
                         ),
                     )

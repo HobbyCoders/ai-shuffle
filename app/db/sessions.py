@@ -1080,17 +1080,19 @@ def set_session_run_binding(
             values,
         )
     if clean_model and clean_context_window is None:
-        return _drop_pin_above_model_maximum(session_id)
+        return drop_pin_above_model_maximum(session_id)
     return False
 
 
-def _drop_pin_above_model_maximum(session_id: str) -> bool:
+def drop_pin_above_model_maximum(session_id: str) -> bool:
     """Clear a saved context window the chat's (new) model cannot hold.
 
     Only a pin strictly larger than the model's known maximum is cleared; a
     smaller pin stays the ceiling it is, and an unknown maximum changes nothing.
-    The clear is conditional on the pin read, so a newer pick made meanwhile
-    is never erased.
+    The clear is conditional on the pin AND every field the maximum was judged
+    from (the model, launched model, provider, agent and mode), so a newer
+    model or pick saved meanwhile, such as another model with a valid larger
+    pin, is never erased.
     """
     try:
         row = get_session(session_id)
@@ -1103,12 +1105,14 @@ def _drop_pin_above_model_maximum(session_id: str) -> bool:
         if maximum is None or pin <= maximum:
             return False
         _ph = ph()
+        judged = ("model", "launched_model", "provider_id", "profile_id", "mode")
+        same = " AND ".join(f"{column} IS NOT DISTINCT FROM {_ph}" for column in judged)
         with get_db() as conn:
             cursor = get_cursor(conn)
             cursor.execute(
                 f"UPDATE sessions SET context_window = NULL "
-                f"WHERE id = {_ph} AND context_window = {_ph}",
-                (session_id, pin),
+                f"WHERE id = {_ph} AND context_window = {_ph} AND {same}",
+                (session_id, pin, *(row.get(column) for column in judged)),
             )
             cleared = (cursor.rowcount or 0) > 0
         if cleared:
@@ -1130,17 +1134,22 @@ def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:
         )
 
 
-def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> None:
+def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> bool:
     """Apply a validated sparse voice PATCH: missing is unchanged, null clears.
 
     The Realtime funding provider is deliberately outside this allowlist. Turn
     binding retains its separate None-means-inherit contract.
+
+    A model change that names no window drops a saved pin the new model cannot
+    hold, as :func:`set_session_run_binding` does (#1640); the voice row's
+    funding provider is not the text model's, which the maximum check knows.
+    Returns whether that pin was dropped.
     """
     allowed = {"model", "effort", "permission_mode", "context_window", "fast"}
     if changes.keys() - allowed:
         raise ValueError("Unsupported voice context field")
     if not changes:
-        return
+        return False
     placeholder = ph()
     assignments = ", ".join(f"{field} = {placeholder}" for field in changes)
     with get_db() as conn:
@@ -1149,6 +1158,9 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
             f"UPDATE sessions SET {assignments} WHERE id = {placeholder}",
             [*changes.values(), session_id],
         )
+    if changes.get("model") and "context_window" not in changes:
+        return drop_pin_above_model_maximum(session_id)
+    return False
 
 
 def set_session_context_usage(session_id: str, data: Dict[str, Any]) -> None:

@@ -376,6 +376,42 @@ async def test_effort_pick_and_auto_are_announced_to_open_clients(mock_db, monke
         session_id="announce", updates={"effort": None}, source_device_id=None)
 
 
+@pytest.mark.asyncio
+async def test_the_announcement_names_the_request_it_answers(mock_db, monkeypatch):
+    """#1633: the asking tab tells its own announcement from another tab's by
+    the id it sent. The id stays on this worker: the owner's action gets the
+    settings alone, so an older owner never refuses an unknown field."""
+    from app.core.sync_engine import sync_engine
+
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "announce"}))
+    monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
+    remote = AsyncMock(return_value={"effort": "low", "fast": False})
+    monkeypatch.setattr(api.control, "call", remote)
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated", broadcast)
+
+    await api.update_run_settings(None, "announce", api.RunSettingsRequest(effort="low", request_id="tab-a-7"))
+    remote.assert_awaited_once_with("remote", "run-settings", {"session_id": "announce", "effort": "low"})
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"effort": "low"}, source_device_id=None, request_id="tab-a-7")
+
+    with pytest.raises(ValidationError):
+        api.RunSettingsRequest(effort="low", request_id="x" * 65)
+
+
+@pytest.mark.asyncio
+async def test_session_updated_carries_the_request_id_beside_the_updates(monkeypatch):
+    """The id is not a row field: it rides next to ``updates``, never in it."""
+    from app.core.sync_engine import sync_engine
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_event", AsyncMock(side_effect=lambda event, **kw: sent.append(event)))
+    await sync_engine.broadcast_session_updated("s", {"effort": "low"}, request_id="r1")
+    await sync_engine.broadcast_session_updated("s", {"effort": "low"})
+    assert sent[0].data == {"updates": {"effort": "low"}, "request_id": "r1"}
+    assert sent[1].data == {"updates": {"effort": "low"}}
+
+
 # --- fast mode handed down the delegation tree --------------------------------
 
 @pytest.fixture

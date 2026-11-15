@@ -843,7 +843,7 @@ describe('live effort and Fast mode selection', () => {
 		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
 		const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
 		const pending = activeSession.setEffortLevelOverride('low');
-		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low' });
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: 'low', request_id: expect.any(String) });
 		expect(activeSession.current.effortLevelOverride).toBe('high');
 		acknowledge({ effort: 'low', fast: false });
 		await pending;
@@ -902,7 +902,7 @@ describe('live effort and Fast mode selection', () => {
 		expect(put).toHaveBeenCalledTimes(1);
 		acknowledge({ effort: 'low', fast: false });
 		await Promise.all([first, second]);
-		expect(put).toHaveBeenLastCalledWith('/sessions/live-knobs/run-settings', { effort: 'medium' });
+		expect(put).toHaveBeenLastCalledWith('/sessions/live-knobs/run-settings', { effort: 'medium', request_id: expect.any(String) });
 		expect(activeSession.current.effortLevelOverride).toBe('medium');
 	});
 
@@ -911,7 +911,7 @@ describe('live effort and Fast mode selection', () => {
 		activeSession.current.fastMode = true;
 		await activeSession.setEffortLevelOverride(null);
 		await activeSession.setFastMode(false);
-		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null });
+		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { effort: null, request_id: expect.any(String) });
 		expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { fast: false });
 		expect(activeSession.current.effortLevelOverride).toBeNull();
 		expect(activeSession.current.fastMode).toBe(false);

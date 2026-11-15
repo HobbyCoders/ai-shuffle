@@ -659,7 +659,7 @@ async def submit_async(
     if not no_kick:
         _kick(session_id)
     if window_pin:
-        await _announce_window_pin(session_id, window_pin["context_window"])
+        await announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
 
 
@@ -743,11 +743,13 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
-async def _announce_window_pin(session_id: str, window: Optional[int]) -> None:
+async def announce_window_pin(session_id: str, window: Optional[int]) -> None:
     """Push the chat's saved context-window pin (None: no pin) to its open clients.
 
     The same ``session_updated`` push a picker change sends (#1895): a client
     adopts it as its pin, so its next send's ``context_window_base`` matches.
+    Every writer that can change the pin outside the picker announces with it:
+    a send here, a background API query and a voice context PATCH (#1640).
     """
     try:
         from app.core.sync_engine import sync_engine
@@ -755,7 +757,7 @@ async def _announce_window_pin(session_id: str, window: Optional[int]) -> None:
         await sync_engine.broadcast_session_updated(
             session_id=session_id, updates={"context_window": window}, source_device_id=None,
         )
-    except Exception:  # noqa: BLE001 — the turn is queued either way.
+    except Exception:  # noqa: BLE001 — the pin is saved either way.
         logger.warning("Could not announce the context window of %s", session_id, exc_info=True)
 
 

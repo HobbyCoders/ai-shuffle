@@ -722,13 +722,22 @@ class SyncEngine:
         self,
         session_id: str,
         updates: Dict[str, Any],
-        source_device_id: Optional[str] = None
+        source_device_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ):
-        """Broadcast session metadata updates"""
+        """Broadcast session metadata updates.
+
+        ``request_id`` names the client request the updates answer, when it
+        gave one (the run-settings echo, #1633). It sits beside ``updates``,
+        so it never patches a session row.
+        """
+        data: Dict[str, Any] = {"updates": updates}
+        if request_id:
+            data["request_id"] = request_id
         event = SyncEvent(
             event_type="session_updated",
             session_id=session_id,
-            data={"updates": updates},
+            data=data,
             source_device_id=source_device_id
         )
         await self.broadcast_event(event, exclude_device_id=source_device_id)

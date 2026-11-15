@@ -437,7 +437,7 @@ async def test_a_stream_cut_after_a_tool_call_is_an_error_and_leaves_no_open_too
     # of an interrupted reply, answered by its error result — never a call
     # left without one, and never a finished reply.
     assert [m.role for m in stored] == ["user", "assistant", "user"]
-    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert stored[1].provider_meta == {"interrupted": "provider_error", "model": "claude-sonnet-4-5"}
     assert [b.id for b in stored[1].content if isinstance(b, FluidToolUse)] == ["toolu_c1"]
     [stored_result] = stored[2].content
     assert isinstance(stored_result, FluidToolResult) and stored_result.is_error

@@ -690,7 +690,7 @@ async def test_a_reply_cut_without_its_terminal_event_is_an_error_not_an_answer(
     # What streamed is kept, marked as interrupted rather than finished.
     assert _roles(stored) == ["user", "assistant"]
     assert stored[1].text() == "The answer is"
-    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert stored[1].provider_meta == {"interrupted": "provider_error", "model": MODELS[kind]}
     assert error.node_id is not None
 
 
@@ -782,7 +782,7 @@ async def test_a_socket_dropped_mid_reply_keeps_the_text_and_says_so(server):
     assert "connection was interrupted" in error.message
     assert "again after 2 automatic retries" in error.message
     assert _roles(stored) == ["user", "assistant"] and stored[1].text() == "Partial"
-    assert stored[1].provider_meta == {"interrupted": "transport_failure"}
+    assert stored[1].provider_meta == {"interrupted": "transport_failure", "model": MODELS["anthropic"]}
     # No tool call closed, so the same request was re-sent within the budget.
     assert len(server.requests) == 1 + native_mod.TRANSPORT_DROP_MAX_RETRIES
     assert [r.cause for r in _of(events, ProviderRetry)] == ["connection_dropped"] * 2
@@ -1200,7 +1200,7 @@ async def test_text_streamed_before_a_failure_is_kept_as_interrupted(server, sha
     assert streamed == "Half an answer"
     assert _roles(stored) == ["user", "assistant"]
     assert stored[1].text() == streamed
-    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert stored[1].provider_meta == {"interrupted": "provider_error", "model": MODELS[kind]}
     assert error.node_id is not None and len(server.requests) == 1
 
 
@@ -1592,7 +1592,7 @@ async def test_openrouters_documented_mid_stream_error_is_an_error_not_an_answer
     assert (error.status, error.provider_message) == (500, "Provider disconnected unexpectedly")
     assert _roles(stored) == ["user", "assistant"]
     assert stored[1].text() == "Half an ans"
-    assert stored[1].provider_meta == {"interrupted": "provider_error"}
+    assert stored[1].provider_meta == {"interrupted": "provider_error", "model": MODELS["openrouter"]}
     assert len(server.requests) == 1  # never replayed after content
 
 
@@ -1625,7 +1625,7 @@ async def test_a_finish_reason_of_error_without_an_error_object_is_still_an_erro
 
     error = _terminal(events)
     assert isinstance(error, ErrorEvent) and "ended the stream with an error" in error.message
-    assert stored[-1].provider_meta == {"interrupted": "provider_error"}
+    assert stored[-1].provider_meta == {"interrupted": "provider_error", "model": MODELS["openrouter"]}
 
 
 # ─── Resume after a reply cut off by a provider error ───────────────────────

@@ -1,68 +1,69 @@
 /**
- * This tab's own effort picks, so their `session_updated` announcements are
- * not applied twice (#1633).
+ * This tab's own effort requests, so an outdated announcement of one cannot
+ * undo a newer pick (#1633).
  *
- * Every acknowledged run-settings effort request is announced once to the
- * sockets of the worker the tab talks to, the picking tab's own included. The
- * tab already applies its own pick from the response, behind a generation
- * check that drops an outdated one. The announcement has no such check: one
- * that lands after a newer pick (for instance a level held for a model that
- * has not run yet) would put the older level back. So each request is noted
- * here and its one announcement is consumed instead of applied. Picks from
- * other tabs and devices name values this tab did not ask for and still apply.
+ * Every run-settings effort request carries a fresh `request_id`, and the
+ * worker that took it echoes that id on its `session_updated` announcement.
+ * The tab already applies its own pick from the response, behind a generation
+ * check. The announcement has none, so one that lands after a newer pick from
+ * this tab (a level held for a model that has not run yet, a quick second
+ * pick) would put the older level back. Such an announcement is skipped.
+ *
+ * Only the id identifies a request: a value never does, so another tab's pick
+ * of the same level is always applied, and an announcement that never arrives
+ * (a dropped socket) cannot swallow a later one. Ids are kept per session, the
+ * newest few only, so nothing grows without bound. An announcement without an
+ * id (an older worker) is treated as another tab's pick.
  */
 
-const SETTLED_TTL_MS = 15_000;
+/** Requests remembered per session; older ones are forgotten first. */
+const PER_SESSION = 32;
+/** Sessions remembered; the least recently used is forgotten first. */
+const SESSIONS = 64;
 
-interface Echo {
-	values: Array<string | null>;
-	settledAt: number | null;
+interface SessionRequests {
+	/** request id → order it was sent in (1, 2, …). */
+	ids: Map<string, number>;
+	latest: number;
 }
 
-const echoes = new Map<string, Echo[]>();
+const sessions = new Map<string, SessionRequests>();
 
-function prune(sessionId: string, now = Date.now()) {
-	const list = (echoes.get(sessionId) ?? []).filter(
-		(e) => e.settledAt === null || now - e.settledAt < SETTLED_TTL_MS
-	);
-	if (list.length) echoes.set(sessionId, list);
-	else echoes.delete(sessionId);
-	return list;
+function newRequestId(): string {
+	const cryptoApi = globalThis.crypto as Crypto | undefined;
+	if (cryptoApi?.randomUUID) return cryptoApi.randomUUID();
+	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-/** Note an effort request about to be sent; returns its handle. */
-export function noteEffortRequest(sessionId: string, value: string | null): Echo {
-	const echo: Echo = { values: [value], settledAt: null };
-	echoes.set(sessionId, [...prune(sessionId), echo]);
-	return echo;
+/** Note an effort request about to be sent; returns the id to send with it. */
+export function noteEffortRequest(sessionId: string): string {
+	let entry = sessions.get(sessionId);
+	if (entry) sessions.delete(sessionId);
+	else entry = { ids: new Map(), latest: 0 };
+	sessions.set(sessionId, entry); // most recently used last
+	while (sessions.size > SESSIONS) sessions.delete(sessions.keys().next().value as string);
+	const id = newRequestId();
+	entry.latest += 1;
+	entry.ids.set(id, entry.latest);
+	while (entry.ids.size > PER_SESSION) entry.ids.delete(entry.ids.keys().next().value as string);
+	return id;
 }
 
-/** The request was acknowledged with `saved` (the level the server kept). */
-export function settleEffortRequest(sessionId: string, echo: Echo, saved: string | null) {
-	if (!echo.values.includes(saved)) echo.values.push(saved);
-	echo.settledAt = Date.now();
-	prune(sessionId);
-}
-
-/** The request failed: no announcement will come for it. */
-export function dropEffortRequest(sessionId: string, echo: Echo) {
-	const list = (echoes.get(sessionId) ?? []).filter((e) => e !== echo);
-	if (list.length) echoes.set(sessionId, list);
-	else echoes.delete(sessionId);
-}
-
-/** Whether an announced effort is this tab's own earlier pick; consumes it. */
-export function consumeOwnEffortEcho(sessionId: string, value: string | null): boolean {
-	const list = prune(sessionId);
-	const index = list.findIndex((e) => e.values.includes(value));
-	if (index < 0) return false;
-	list.splice(index, 1);
-	if (list.length) echoes.set(sessionId, list);
-	else echoes.delete(sessionId);
-	return true;
+/**
+ * Whether an announced effort answers one of this tab's own requests that a
+ * newer request from this tab has since replaced. Such an announcement must
+ * not be applied. This tab's newest request, another tab's request and an
+ * announcement without an id all return false and are applied as usual.
+ */
+export function isOutdatedOwnEffortEcho(sessionId: string, requestId: unknown): boolean {
+	if (typeof requestId !== 'string' || !requestId) return false;
+	const entry = sessions.get(sessionId);
+	const order = entry?.ids.get(requestId);
+	if (!entry || order === undefined) return false;
+	return order < entry.latest;
 }
 
 /** Test hook. */
 export function resetEffortEchoes() {
-	echoes.clear();
+	sessions.clear();
 }

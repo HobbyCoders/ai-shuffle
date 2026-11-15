@@ -145,6 +145,8 @@ async def test_streaming_turn_maps_chunks_usage_and_instructions(tmp_path: Path)
         # The stored transcript holds the user turn and the reply.
         nodes = await d.loop.store.load_path(d.loop.session_id)
         assert [n.message.role for n in nodes] == ["user", "assistant"]
+        # The reply names the model that answered (#1643).
+        assert nodes[1].message.provider_meta == {"model": "gemini-3.8-flash"}
     finally:
         await d.close()
 
@@ -735,5 +737,8 @@ async def test_a_model_the_agent_does_not_offer_is_named_in_the_turn(tmp_path: P
         assert (served[0].requested_model, served[0].served_model) == ("gemini-4-hydrogen", "gemini-3.1-pro")
         assert served[0].rerouted and served[0].reason == "not_offered"
         assert served[0].turn_id == end.turn_id
+        # The stored reply names the model that ran, not the one asked for.
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        assert nodes[-1].message.provider_meta == {"model": "gemini-3.1-pro"}
     finally:
         await d.close()

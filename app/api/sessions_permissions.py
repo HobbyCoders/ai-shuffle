@@ -28,6 +28,17 @@ class RunSettingsUpdate(BaseModel):
     context_window: Optional[int] = Field(None, strict=True, gt=0)
 
 
+class RunSettingsRequest(RunSettingsUpdate):
+    """The REST body: the settings plus the caller's own ``request_id``.
+
+    The id is echoed on this worker's ``session_updated`` announcement of the
+    change, so the tab that asked can recognise its own announcement (#1633).
+    It never reaches the owning worker: its ``run-settings`` action takes the
+    settings alone, so an older owner does not refuse an unknown field.
+    """
+    request_id: Optional[str] = Field(None, min_length=1, max_length=64)
+
+
 async def _store_live_overrides(session_id: str, runtime) -> None:
     """Write the live turn's new binding to its row as well as the runtime.
 
@@ -271,7 +282,8 @@ async def read_fast_waiting_turn(session: dict, session_id: str) -> Optional[str
         return None
 
 
-async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool) -> None:
+async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool,
+                                 request_id: Optional[str] = None) -> None:
     """Tell this worker's open clients of the chat about a saved setting pick.
 
     Without it another tab, the phone or the other worker's browser keeps its
@@ -280,6 +292,8 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
     an explicit Auto (``None``) included. Every socket gets it, the picker's own
     too: the REST call names no device, and the value is the one the picker
     already applied. A client that does not know a field reloads the row.
+    ``request_id`` names the request the announcement answers, when the
+    caller gave one, so the asking tab can tell its own from another's.
     """
     if not isinstance(result, dict):
         return
@@ -293,7 +307,8 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_session_updated(
-            session_id=session_id, updates=updates, source_device_id=None)
+            session_id=session_id, updates=updates, source_device_id=None,
+            **({"request_id": request_id} if request_id else {}))
     except Exception:  # noqa: BLE001 — the pick is saved either way
         logger.warning("Could not announce the run settings of %s", session_id, exc_info=True)
 
@@ -311,10 +326,12 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
 
 @router.put("/{session_id}/run-settings")
 async def update_run_settings(
-    request: Request, session_id: str, body: RunSettingsUpdate,
+    request: Request, session_id: str, body: RunSettingsRequest,
     token: str = Depends(require_auth),
 ):
     session = await require_session(request, session_id)
+    request_id = getattr(body, "request_id", None)
+    body = RunSettingsUpdate.model_validate(body.model_dump(exclude_unset=True, exclude={"request_id"}))
     owner = await run_sync(control.owner_of, session)
     try:
         if owner is not None:
@@ -328,7 +345,8 @@ async def update_run_settings(
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set)
+    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set,
+                                 request_id=request_id)
     return result
 
 
