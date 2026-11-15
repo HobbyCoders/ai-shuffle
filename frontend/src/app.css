@@ -1307,7 +1307,15 @@ html.desktop.desktop-blurred :is(.sb-head, .topbar) {
 html.desktop .topbar {
 	background: var(--sidebar);
 	color: var(--sidebar-foreground);
-	border-bottom-color: var(--sidebar-border);
+	/* The OS paints the caption buttons as an opaque block the full height
+	   of the strip, so a border inside the strip stops short at the buttons
+	   and the column under them reads as walled off. The hairline is drawn
+	   on the row just below the strip instead, where it runs to the window
+	   edge. The transparent border keeps the strip's content box unchanged. */
+	border-bottom-color: transparent;
+}
+html.desktop .topbar:not(.no-rule) {
+	box-shadow: 0 1px 0 var(--sidebar-border);
 }
 html.desktop .topbar .tb-icon:hover {
 	background: var(--sidebar-accent);
