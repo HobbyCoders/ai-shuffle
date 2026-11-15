@@ -1108,6 +1108,59 @@ describe('Sidebar rows keep their place', () => {
 		expect(activeIds()).toEqual(['late', 'early']);
 	});
 
+	it('does not move the Active projects when a page of older Settled history arrives', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [
+			chat('early', 'visible-project', 8),
+			chat('late', 'other-project', 9, { project_name: 'Other Project' }),
+		];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		// Settled pages come by last activity, so an older page can hold a chat
+		// started after every chat loaded so far.
+		const history = session('history', 'Settled later start', 'visible-project', false, false, {
+			created_at: started(10),
+			updated_at: started(10),
+		});
+		mocks.sessions.set([...rows, history]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		// And a later refresh of the same rows changes nothing either.
+		mocks.sessions.set([history, { ...rows[1] }, { ...rows[0] }]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+	});
+
+	it('keeps two projects started at the same moment in place when a row leaves the lane', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		// Whichever project the tie favours, its newest chat is the one that leaves.
+		for (const leaving of ['visible-project', 'other-project']) {
+			const staying = leaving === 'visible-project' ? 'other-project' : 'visible-project';
+			const rows = [
+				chat(`${leaving}-newest`, leaving, 10, { project_name: 'Other Project' }),
+				chat(`${staying}-newest`, staying, 10, { project_name: 'Other Project' }),
+				chat(`${leaving}-older`, leaving, 8, { project_name: 'Other Project' }),
+			];
+			mocks.sessions.set(rows);
+			const view = render(Sidebar, { props: sidebarProps });
+			const before = activeIds();
+
+			mocks.sessions.set([{ ...rows[0], is_active: false }, rows[1], rows[2]]);
+			await tick();
+			expect(activeIds()).toEqual(before.filter((id) => id !== `${leaving}-newest`));
+			view.unmount();
+		}
+	});
+
 	it('keeps start order in Needs you too, whichever row asked last', async () => {
 		const rows = [chat('one', null, 8), chat('two', null, 9)];
 		mocks.sessions.set(rows);
@@ -2120,7 +2173,9 @@ describe('Sidebar unified conversation history', () => {
 		appMode.set(mode);
 		mocks.sessions.set(fixture());
 		render(Sidebar, { props: sidebarProps });
-		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+		// All four share one start time, so the two groups fall to their project
+		// key ("No project" sorts first), not to which row the list holds first.
+		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
 		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
 	});
 	it('says one thing when there is nothing at all, with no empty Settled lane', () => {
@@ -2140,7 +2195,7 @@ describe('Sidebar unified conversation history', () => {
 		await tick();
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
 	});
 });
 

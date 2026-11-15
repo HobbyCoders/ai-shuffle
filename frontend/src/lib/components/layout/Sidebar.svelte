@@ -642,36 +642,48 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
-	// A project's place follows its most recently STARTED chat in ANY lane,
-	// archived-but-not-yet-gone included. Activity in a chat never moves its
-	// project: only a new chat starting does. Ranking on the lane's own rows made
-	// a project swap places, moving a screenful of rows, whenever its newest chat
-	// left the lane, and swap back if the server then refused the change.
+	// A project's place is the newest START among its chats in Needs you and
+	// Active. Activity in a chat never moves its project: only a new chat does.
+	// Two things must not move it either, so the place is a high-water mark kept
+	// for as long as this list is mounted, and read from those two lanes alone:
+	// - its newest chat leaving the lane (settled, or archived and not yet gone).
+	//   Ranking on what is left made a project swap places, moving a screenful of
+	//   rows, and swap back if the server then refused the change;
+	// - a page of Settled history arriving. Active is loaded whole, Settled comes
+	//   in pages by last activity, so an older page can hold a chat started after
+	//   everything loaded so far.
+	const projectStartSeen = new Map<string, number>();
 	const projectStart = $derived.by(() => {
-		const latest = new Map<string, number>();
 		for (const s of visibleSessions) {
+			if (!rowActive(s)) continue;
 			const key = projectKey(s);
 			const started = sessionStartedAt(s);
-			if (started > (latest.get(key) ?? -Infinity)) latest.set(key, started);
+			if (started > (projectStartSeen.get(key) ?? -Infinity)) projectStartSeen.set(key, started);
 		}
-		return latest;
+		return new Map(projectStartSeen);
 	});
 	// Inside a lane, rows sit under their project when the lane spans more than
-	// one, so no row has to repeat it. Rows keep their start order inside it.
+	// one, so no row has to repeat it. Rows keep the lane's order inside it.
 	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
 		const groups = new Map<string, CardRow[]>();
+		// A project with no chat in Needs you or Active (a Settled day can hold
+		// one) goes by the newest start among its rows here.
+		const newestHere = new Map<string, number>();
 		for (const row of laneRows) {
 			const key = projectKey(row.session);
 			const group = groups.get(key);
 			if (group) group.push(row);
 			else groups.set(key, [row]);
+			if (row.started > (newestHere.get(key) ?? -Infinity)) newestHere.set(key, row.started);
 		}
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
 		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
-		const started = (key: string) => projectStart.get(key) ?? 0;
+		const started = (key: string) => projectStart.get(key) ?? newestHere.get(key) ?? 0;
+		// Projects started at the same moment fall to their key, never to which
+		// row the lane happens to list first: that changes when a row leaves.
 		return [...groups]
-			.sort(([a], [b]) => started(b) - started(a))
+			.sort(([a], [b]) => started(b) - started(a) || (a < b ? -1 : a > b ? 1 : 0))
 			.map(([key, rows]) => ({
 				key,
 				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
