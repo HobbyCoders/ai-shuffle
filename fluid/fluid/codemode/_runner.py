@@ -1349,6 +1349,16 @@ def _main() -> None:
     pipe_in = sys.stdin.buffer
     pipe_out = sys.stdout.buffer
     sys.stdout = sys.stderr
+    # The host interrupts a cell past its deadline with SIGINT so the cell
+    # ends with a KeyboardInterrupt and still reports what it printed
+    # (#1549). A host that ignores SIGINT hands that disposition down, so put
+    # Python's handler back explicitly.
+    try:
+        import signal as _signal
+
+        _signal.signal(_signal.SIGINT, _signal.default_int_handler)
+    except (ImportError, AttributeError, ValueError, OSError):
+        pass
     sys.stdin = io.StringIO()
     nonce_box = {"n": ""}
     send, read_frame = _framing(pipe_in, pipe_out, nonce_box)

@@ -47,6 +47,9 @@ _GB = 1024 * 1024 * 1024
 # Child stderr kept for the death diagnostic: this many bytes, of which the
 # last few lines are quoted.
 _STDERR_TAIL_BYTES = 4096
+# Seconds a cell past its deadline gets, once interrupted, to send the done
+# frame that carries what it printed before the kernel is restarted (#1549).
+_INTERRUPT_GRACE_S = 2.0
 _STDERR_TAIL_LINES = 5
 
 # Environment variables the kernel child never receives. Tools run host-side,
@@ -371,6 +374,11 @@ class SubprocessKernel:
         return note + ")"
 
     # ── exec ──
+    def host_bound(self, timeout: float) -> float:
+        """Seconds one host call of a cell with ``timeout`` may take, 0 for
+        unbounded (time spent waiting on a human is credited back)."""
+        return self._host_bound(timeout)
+
     def _host_bound(self, timeout: float) -> float:
         """Seconds one host call may take, 0 for unbounded."""
         ceiling = float(self.config.host_call_timeout or 0)
@@ -453,14 +461,29 @@ class SubprocessKernel:
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
             except TimeoutError:
+                try:
+                    printed = await self._interrupted_output()
+                except asyncio.CancelledError:
+                    await self._restart_and_restore()
+                    raise
                 note = await self._restart_and_restore()
                 self._restart_note = ""  # said here; not repeated next cell
+                if printed is None:
+                    said = "; any output it printed before the timeout was lost"
+                elif printed.get("stdout"):
+                    said = "; the output above is what it printed before the timeout"
+                else:
+                    said = ""
+                printed = printed or {}
                 return KernelResult(
+                    stdout=printed.get("stdout") or "",
                     error=(
                         f"execution exceeded {timeout:.1f}s wall clock; "
-                        f"kernel restarted{note}"
+                        f"kernel restarted{note}{said}"
                     ),
                     host_calls=host_calls,
+                    stdout_full=printed.get("stdout_full") or "",
+                    stdout_total=int(printed.get("stdout_total") or 0),
                 )
             except (asyncio.IncompleteReadError, ConnectionError):
                 proc = self._proc
@@ -529,6 +552,39 @@ class SubprocessKernel:
                 return KernelResult(
                     error=f"kernel produced no result{note}", host_calls=host_calls
                 )
+
+    async def _interrupted_output(self) -> dict | None:
+        """Interrupt a cell past its deadline and read its done frame.
+
+        POSIX only: SIGINT raises KeyboardInterrupt in the cell, which the
+        runner turns into an ordinary cell failure whose done frame carries
+        the stdout printed so far, capped as usual (#1549). Windows has no
+        signal to send a pipe-only child, and a cell that swallows the
+        interrupt or is stuck in native code sends nothing in time; either
+        way this returns None and the caller says the output was lost. The
+        kernel is restarted afterwards in every case.
+        """
+        proc = self._proc
+        if sys.platform == "win32" or proc is None or proc.returncode is not None:
+            return None
+        try:
+            os.kill(proc.pid, signal.SIGINT)
+        except OSError:
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _INTERRUPT_GRACE_S
+        while (left := deadline - loop.time()) > 0:
+            try:
+                frame = await asyncio.wait_for(self._read_frame(), left)
+            except (TimeoutError, asyncio.IncompleteReadError, ConnectionError, ValueError):
+                return None
+            if not isinstance(frame, dict):
+                return None
+            if frame.get("kind") == "done":
+                return frame
+            # A host call sent just before the interrupt: the child is already
+            # unwinding out of its wait for the reply, so read on.
+        return None
 
     # ── frame IO ──
     async def _send(self, obj: dict) -> None:

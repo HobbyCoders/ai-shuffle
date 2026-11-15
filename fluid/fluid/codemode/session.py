@@ -223,6 +223,25 @@ class _HumanWait:
         return self._total + (self._now() - self._since)
 
 
+# Seconds an in-kernel Bash call keeps clear of the kernel's per-call
+# ceiling (a quarter of it when the ceiling is short): Bash's own timeout then
+# fires first, kills the tree and drains the pipe, so the output printed before
+# the timeout comes back instead of being cancelled away with the call (#1549).
+_BASH_CEILING_MARGIN_S = 10.0
+
+
+def _bash_under_ceiling(kwargs: dict, bound: float) -> dict:
+    """``kwargs`` with Bash's timeout held under the per-call ceiling ``bound``."""
+    if bound <= 0 or not isinstance(kwargs, dict):
+        return kwargs
+    from fluid.tools.builtins.bash import DEFAULT_TIMEOUT_S, MIN_TIMEOUT_S, clamp_timeout
+
+    limit = bound - min(_BASH_CEILING_MARGIN_S, bound / 4)
+    if limit < MIN_TIMEOUT_S or clamp_timeout(kwargs.get("timeout", DEFAULT_TIMEOUT_S)) <= limit:
+        return kwargs
+    return {**kwargs, "timeout": limit}
+
+
 def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
     """Spill a cut cell's stdout; the one-line pointer, or "" without one.
 
@@ -583,7 +602,12 @@ class CodeModeSession:
         # so the model can actually see them (JSON-path parity).
         collected_images: list[Any] = []
 
+        host_bound = getattr(kernel, "host_bound", None)
+        bound = float(host_bound(timeout)) if callable(host_bound) else 0.0
+
         async def _host_call(name: str, kwargs: dict) -> HostReply:
+            if name == "Bash":
+                kwargs = _bash_under_ceiling(kwargs, bound)
             spec = self._registry.get(name)
             record = {
                 "name": name,
