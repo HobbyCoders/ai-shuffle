@@ -633,11 +633,12 @@ async def _create_v2_branch_session(
     if target_instance_id == settings.effective_instance_id:
         target_instance_id = None
 
-    # Without a project dir here, only the install owner's composer chips can
-    # travel to another worker (each lifted from its own staging area).
+    # Without a project dir here, only the install owner's composer chips have
+    # a source: lifted to another worker, or copied into this worker's checkout
+    # below (a request naming the project by its shared id alone). The route's
+    # own check states the same rule.
     if body.pending_upload_paths and not (body.project_id and project) and not (
-        target_instance_id and composer
-        and await run_sync(upload_transfer.composer_staged, body.pending_upload_paths)
+        composer and await run_sync(upload_transfer.composer_staged, body.pending_upload_paths)
     ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -20,6 +20,7 @@ that contains it, with links resolved, never a wider folder.
 """
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -423,6 +424,73 @@ async def test_the_route_still_refuses_a_non_owner_without_a_checkout(remote_pro
             await call(body)
     assert exc.value.status_code == 400 and exc.value.detail == ATTACHMENTS_NEED_LOCAL_CHECKOUT
     assert database.get_sessions() == []
+
+
+@pytest.fixture
+def local_checkout(remote_project, tmp_path, monkeypatch):
+    """This worker checks the project out for the new branch."""
+    from app.core import checkout_manager
+
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    monkeypatch.setattr(checkout_manager, "require_worktree_project", lambda pv2: None)
+    monkeypatch.setattr(checkout_manager, "local_branch_exists", lambda pv2, branch: False)
+    return checkout
+
+
+_MIGRATE = swt._migrate_uploads_to_dir
+
+
+@contextmanager
+def _checks_out_here(checkout):
+    """``_Patches``, but this worker checks out the branch and copies the
+    files in (``_Patches`` alone refuses any local disk work)."""
+    from unittest.mock import patch
+
+    from app.core import checkout_manager
+
+    with _Patches(), \
+            patch.object(checkout_manager, "ensure_checkout", lambda pv2, branch, **kw: str(checkout)), \
+            patch.object(swt, "_migrate_uploads_to_dir", _MIGRATE):
+        yield
+
+
+def _shared_id_only(remote_project, chip, prompt):
+    # "Set up & send" put the project here, but the draft still names it by
+    # its shared id alone; no worker picked (review round 3 U1).
+    return _body(project_id=None, project_v2_id=remote_project["pv2"]["id"], target_instance_id=None,
+                 prompt=prompt, pending_upload_paths=[chip])
+
+
+async def test_the_route_copies_a_chip_into_this_workers_checkout_named_by_its_shared_id(
+        remote_project, local_checkout, monkeypatch):
+    chip = _chat_chip()
+    call = _route(monkeypatch, _OWNER, None, legacy=False)
+    with _checks_out_here(local_checkout):
+        resp = await call(_shared_id_only(remote_project, chip, f"read {chip}"))
+    landed = local_checkout / "uploads" / "shot.png"
+    assert landed.read_bytes() == b"chat-lane-bytes"
+    assert resp.upload_migration_errors is None and resp.query_started
+    turn = turns_db.get_queued_turns(resp.session_id)[0]
+    assert turn["payload"]["upload_paths"] == [str(landed)]
+    assert turn["prompt"] == f"read {landed}"
+    # Nothing travelled: the chat runs here.
+    assert upload_blobs_db.list_blobs_for_session(resp.session_id) == []
+
+
+async def test_a_non_owner_naming_a_local_project_by_its_shared_id_is_still_refused(
+        remote_project, local_checkout, monkeypatch):
+    from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
+
+    chip = _chat_chip()
+    principal, client = _paired(False)
+    call = _route(monkeypatch, principal, client, legacy=False)
+    with _checks_out_here(local_checkout):
+        with pytest.raises(HTTPException) as exc:
+            await call(_shared_id_only(remote_project, chip, "read"))
+    assert exc.value.status_code == 400 and exc.value.detail == ATTACHMENTS_NEED_LOCAL_CHECKOUT
+    assert database.get_sessions() == []
+    assert not (local_checkout / "uploads").exists()
 
 
 async def _ws_new_chat(principal, upload_paths, *, mode="code"):
