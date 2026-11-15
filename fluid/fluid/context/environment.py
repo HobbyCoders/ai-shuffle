@@ -9,8 +9,10 @@ that line, never to an exception.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform as _platform
+import re
 import subprocess
 import sys
 from fluid.context.time_awareness import RELATIVE_TIME_RULE, turn_time_lines
@@ -275,9 +277,20 @@ ENVIRONMENT_NOTE_HEADER = (
     "Environment as of this message (the system prompt's environment "
     "section holds the facts that do not change):\n"
 )
-# Stands in for the recent commits and runtime facts on a turn where they
-# match the copy the model still holds.
-ENVIRONMENT_DETAILS_UNCHANGED = "Recent commits and runtime facts: unchanged since last shown."
+# Stands in for the recent commits and runtime facts on a turn where the
+# model's context still holds an identical copy. The bracketed fingerprint
+# names that copy, so a later fold that removes it is detectable.
+ENVIRONMENT_DETAILS_UNCHANGED = "Recent commits and runtime facts: unchanged since last shown"
+_NOTE_CLOSE = "\n</system-reminder>"
+_DETAILS_START = re.compile(r"^(?:Recent commits:\n|Worker Python: )", re.MULTILINE)
+_UNCHANGED_LINE = re.compile(
+    "^" + re.escape(ENVIRONMENT_DETAILS_UNCHANGED) + r" \[([0-9a-f]{12})\]\.$", re.MULTILINE,
+)
+
+
+def details_fingerprint(details: str) -> str:
+    """The short name an "unchanged" line gives the details it stands for."""
+    return hashlib.sha256(details.encode()).hexdigest()[:12]
 
 
 def environment_note_parts(
@@ -287,7 +300,7 @@ def environment_note_parts(
 
     The per-turn lines are the date, branch and working-tree counts. The
     details (recent commits, then the runtime facts) change far less often,
-    so a caller that knows the model still holds them can leave them out.
+    so a caller that can show the model still holds them can leave them out.
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
     lines = turn_time_lines(**(time_context or {}))
@@ -305,10 +318,61 @@ def environment_note_parts(
     return lines, "\n".join(details)
 
 
-def render_environment_note(lines: list[str], details: str | None) -> str:
-    """The note from its parts; ``details=None`` says they are unchanged."""
-    body = "\n".join([*lines, details if details is not None else ENVIRONMENT_DETAILS_UNCHANGED])
-    return f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}\n</system-reminder>"
+def render_environment_note(lines: list[str], details: str, *, unchanged: bool = False) -> str:
+    """The note from its parts; ``unchanged`` replaces the details with a
+    fingerprinted line, for a context that already holds the same block."""
+    shown = (f"{ENVIRONMENT_DETAILS_UNCHANGED} [{details_fingerprint(details)}]."
+             if unchanged else details)
+    body = "\n".join([*lines, shown])
+    return f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}{_NOTE_CLOSE}"
+
+
+def _environment_notes(text: str) -> list[tuple[str, str]]:
+    """``("full", details)`` / ``("unchanged", fingerprint)`` for each
+    complete note in ``text``, oldest first. A note cut before its closing
+    tag proves nothing and is skipped."""
+    notes: list[tuple[str, str]] = []
+    at = text.find(ENVIRONMENT_NOTE_HEADER)
+    while at >= 0:
+        body_start = at + len(ENVIRONMENT_NOTE_HEADER)
+        close = text.find(_NOTE_CLOSE, body_start)
+        following = text.find(ENVIRONMENT_NOTE_HEADER, body_start)
+        if close >= 0 and (following < 0 or close < following):
+            body = text[body_start:close]
+            claim = _UNCHANGED_LINE.search(body)
+            details = _DETAILS_START.search(body)
+            if claim is not None:
+                notes.append(("unchanged", claim.group(1)))
+            elif details is not None:
+                notes.append(("full", body[details.start():]))
+        at = following
+    return notes
+
+
+def scan_environment_notes(texts: list[str]) -> tuple[str | None, str | None]:
+    """``(held, claim)`` for the context ``texts`` (transcript order).
+
+    ``held`` is the exact details block of the newest complete full note;
+    ``claim`` the fingerprint of the newest "unchanged" line when it is
+    newer than that note (older claims are history, superseded by it).
+    """
+    claim: str | None = None
+    for text in reversed(texts):
+        if ENVIRONMENT_NOTE_HEADER not in text:
+            continue
+        for kind, value in reversed(_environment_notes(text)):
+            if kind == "full":
+                return value, claim
+            if claim is None:
+                claim = value
+    return None, claim
+
+
+def unsupported_environment_claim(texts: list[str]) -> bool:
+    """Whether the newest "unchanged" line names details the context no
+    longer shows (a fold removed them, or never held them)."""
+    held, claim = scan_environment_notes(texts)
+    return claim is not None and (held is None or details_fingerprint(held) != claim)
 
 
 def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:

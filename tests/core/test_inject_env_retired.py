@@ -269,11 +269,10 @@ async def _turn_reminder(compiled, cwd):
         system_sections=compiled,
         ctx=types.SimpleNamespace(cwd=str(cwd), extra={}),
         _runtime_facts_sent=None,
-        _environment_details_sent=None,
-        _environment_details_seen=None,
         _harvest_runtime_facts=lambda: None,
     )
     loop._gather_environment = types.MethodType(NativeLoop._gather_environment, loop)
+    loop._has_environment_section = types.MethodType(NativeLoop._has_environment_section, loop)
     return await NativeLoop._environment_reminder(loop)
 
 
