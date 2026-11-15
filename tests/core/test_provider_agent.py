@@ -1571,17 +1571,23 @@ def test_queue_observation_cannot_delay_liveness(
         tripped = False
 
         probes = 0
+        loop_thread = threading.get_ident()
+        probe_threads: list[int] = []
+        entered_at: list[float] = []  # when the observer blocked, on loop.time()
 
         def probe(*args: object) -> bool:
             nonlocal probes
             probes += 1
+            probe_threads.append(threading.get_ident())
             if blocked_stage == "probe":
+                entered_at.append(loop.time())  # a monotonic read, safe off-loop
                 loop.call_soon_threadsafe(entered.set)
                 assert release.wait(2)
             return True
 
         async def notice(queued: bool) -> None:
             if blocked_stage == "notice":
+                entered_at.append(loop.time())
                 entered.set()
                 await asyncio.Future()
 
@@ -1610,10 +1616,6 @@ def test_queue_observation_cannot_delay_liveness(
             )
             entering.cancel()
             assert reached, "the observer never reached its blocked stage"
-            # Liveness is measured from entry (the trigger below), not from
-            # task creation, so a slow start cannot spend the bound. The
-            # 0.04/0.06 s deadlines fall inside it when entry is prompt.
-            due = loop.time()
             if verdict == "idle":
                 idle.set()
             elif verdict == pa.WAIT_RATE_LIMITED:
@@ -1621,7 +1623,15 @@ def test_queue_observation_cannot_delay_liveness(
             assert await asyncio.wait_for(task, 0.3) == (
                 None if verdict == "idle" else verdict
             )
-            assert loop.time() - due < 0.3
+            # The DB probe never runs on the event loop: there it would hold
+            # every liveness check for as long as the query takes.
+            assert loop_thread not in probe_threads, "the queue probe blocked the event loop"
+            if entered_at:
+                # Liveness bound from the moment the observer blocked (or the
+                # verdict's own deadline, if later), not from task creation, so
+                # a slow start cannot spend it, nor a held loop hide in it.
+                deadline = {pa.WAIT_NO_FIRST_FRAME: now + 0.04, pa.WAIT_DEADLINE: now + 0.06}
+                assert loop.time() - max(entered_at[0], deadline.get(verdict, 0.0)) < 0.3
             # Never a query backlog. Entry implies the one probe ran; a verdict
             # that beat entry may have come before the probe thread started.
             assert probes == 1 if entered.is_set() else probes <= 1
