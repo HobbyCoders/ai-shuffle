@@ -11,7 +11,7 @@
 	import { MediaQuery } from 'svelte/reactivity';
 	import { activeView, settingsTargetForView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
-	import { projects, sessions } from '$lib/stores/app-data.svelte';
+	import { clusterProjects, projects, sessions } from '$lib/stores/app-data.svelte';
 	import { pendingDeepLink } from '$lib/stores/pending-deep-link';
 	import { activeSession } from '$lib/stores/active-session';
 	import { newChatSetup, newChatSetupNeed } from '$lib/stores/project-setup';
@@ -268,9 +268,16 @@
 		return viewTitles[$activeView.type] || '';
 	});
 
-	// Project name for header context
+	// Project name for header context. A chat another worker runs carries no
+	// local project id when this worker has no checkout of its project, so it
+	// is named by the shared project id, as the context pills do (#1659).
 	const headerProjectName = $derived(
-		activeTab ? $projects.find(p => p.id === activeTab.project)?.name : undefined
+		activeTab
+			? $projects.find(p => p.id === activeTab.project)?.name ??
+				(activeTab.projectV2Id
+					? $clusterProjects.find(p => p.project_v2_id === activeTab.projectV2Id)?.name
+					: undefined)
+			: undefined
 	);
 
 	// Breadcrumbs for the desktop top bar: `project › session title` in a chat,

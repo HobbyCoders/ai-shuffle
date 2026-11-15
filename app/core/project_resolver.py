@@ -69,6 +69,39 @@ def origin_for_legacy_project(project_row: Dict[str, Any]) -> str:
     return project_row.get("link_group_id") or ("local:" + str(project_row.get("id")))
 
 
+def is_checkout_of(project_row: Optional[Dict[str, Any]], project_v2_id: Optional[str]) -> bool:
+    """Whether a legacy ``projects`` row is a checkout of the shared project ``project_v2_id``.
+
+    Legacy ids are per-worker slugs: another worker's ``app`` can be an
+    unrelated project here. The shared id is derived from the origin alone
+    (:func:`projects_v2.project_v2_id_for_origin`), so this needs no replicated
+    ``projects_v2`` row. Two remote-less projects with the same legacy id on
+    two workers share the synth ``local:<id>`` origin and cannot be told apart.
+    """
+    if not project_row or not project_v2_id:
+        return False
+    return projects_v2.project_v2_id_for_origin(origin_for_legacy_project(project_row)) == project_v2_id
+
+
+def local_rows_by_origin(rows, self_ids) -> Dict[str, Dict[str, Any]]:
+    """``{origin: row}``: the one local checkout that stands for each shared project.
+
+    The single rule for which of this worker's checkouts names a shared
+    project (cluster catalog, a relayed attach, setup and peer views): a row
+    registered by this worker (``instance_id`` in ``self_ids``) before any
+    other row, otherwise the first in ``rows`` order (callers pass
+    ``get_all_projects``, ordered by name).
+    """
+    own = {str(i) for i in self_ids if i}
+    out: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        origin = origin_for_legacy_project(row)
+        existing = out.get(origin)
+        if existing is None or (row.get("instance_id") in own and existing.get("instance_id") not in own):
+            out[origin] = row
+    return out
+
+
 def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
     """Follow a late-linked placeholder for project-level reads, never sessions.
 

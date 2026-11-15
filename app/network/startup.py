@@ -639,7 +639,19 @@ async def start() -> List[asyncio.Task]:
     _tasks.append(asyncio.create_task(managed_connection.supervise(), name="managed-account-connection"))
     # Off the loop: records committed before a crash were never written to the files.
     _tasks.append(asyncio.create_task(reconcile_memory(), name="memory-reconcile"))
+    _tasks.append(asyncio.create_task(reconcile_mirrored_projects(), name="mirrored-project-reconcile"))
     return list(_tasks)
+
+
+async def reconcile_mirrored_projects() -> None:
+    """Clear another worker's legacy project id from chats mirrored before #1659."""
+    try:
+        from app.network import catalog
+        ctx = engine.context()
+        if ctx is not None:
+            await run_sync(catalog.reconcile_mirrored_project_ids, ctx.device_id)
+    except Exception:  # noqa: BLE001 - the next mirrored update applies the rule too
+        logger.warning("Reconciling mirrored chats' projects failed", exc_info=True)
 
 
 async def reconcile_memory() -> None:

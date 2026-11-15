@@ -471,6 +471,72 @@ def _provenance_from(cursor, record: Dict[str, Any], origin_device_id: Optional[
     return bool(owner) and owner == origin_device_id
 
 
+def _runs_here(cursor, record: Dict[str, Any], device_id: Optional[str]) -> bool:
+    """Whether this worker runs the chat (its own row, never a mirror of another's)."""
+    owner = record.get("owner_device_id")
+    if device_id and owner == device_id:
+        return True
+    cursor.execute("SELECT owner_device_id, instance_id FROM sessions WHERE id = %s", (record.get("id"),))
+    local = cursor.fetchone()
+    if local is not None and local["owner_device_id"]:
+        return bool(device_id) and local["owner_device_id"] == device_id
+    if owner:
+        return False
+    instance = (local["instance_id"] if local is not None else record.get("instance_id")) or ""
+    return instance in ("", _my_instance_id())
+
+
+def _legacy_id_stands(cursor, record: Dict[str, Any], local_project: Dict[str, Any],
+                      device_id: Optional[str]) -> bool:
+    """Whether a mirrored chat keeps the owner's legacy project id here (#1659).
+
+    The one rule for a chat another worker runs: its row names a legacy
+    project id only when this worker's project of that id is a checkout of the
+    chat's shared project. Otherwise the row names none and every reader here
+    (sidebar, header, uploads, listings, Git) falls back to the shared id, as
+    it already does when the owner's id does not exist here. The rule never
+    substitutes another local checkout: the owner's id is the one Git relays,
+    the upload gate and the page agree on. A copy without a shared id (an
+    older owner), or the row of a chat this worker runs, keeps the id.
+    """
+    project_v2_id = record.get("project_v2_id")
+    if not project_v2_id or _runs_here(cursor, record, device_id):
+        return True
+    from app.core.project_resolver import is_checkout_of
+
+    return is_checkout_of(local_project, project_v2_id)
+
+
+def reconcile_mirrored_project_ids(device_id: Optional[str]) -> int:
+    """Apply :func:`_legacy_id_stands` to chats mirrored before it existed.
+
+    Only rows another worker runs (``owner_device_id`` set and not this
+    device) are touched, and only the legacy id is cleared; the shared id
+    stays. Runs at network start. Returns the number of rows cleared.
+    """
+    if not device_id:
+        return 0
+    from app.core.project_resolver import is_checkout_of
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT s.id, s.project_v2_id, p.id AS project_id, p.link_group_id FROM sessions s "
+            "JOIN projects p ON p.id = s.project_id "
+            "WHERE s.project_v2_id IS NOT NULL AND s.owner_device_id IS NOT NULL AND s.owner_device_id <> %s",
+            (device_id,))
+        stale = [row["id"] for row in cursor.fetchall()
+                 if not is_checkout_of({"id": row["project_id"], "link_group_id": row["link_group_id"]},
+                                       row["project_v2_id"])]
+        for session_id in stale:
+            # Mirror state only: updated_at stays the owner's.
+            cursor.execute("UPDATE sessions SET project_id = NULL WHERE id = %s AND owner_device_id <> %s",
+                           (session_id, device_id))
+    if stale:
+        logger.info("Cleared another worker's legacy project id from %d mirrored chat(s)", len(stale))
+    return len(stale)
+
+
 def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: Optional[str] = None,
                            device_id: Optional[str] = None) -> Dict[str, Any]:
     """A mirrored session must not reference local-only rows it cannot see.
@@ -481,8 +547,9 @@ def prepare_session_mirror(cursor, record: Dict[str, Any], *, origin_device_id: 
     record = dict(record)
     project_id = record.get("project_id")
     if project_id:
-        cursor.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,))
-        if cursor.fetchone() is None:
+        cursor.execute("SELECT id, link_group_id FROM projects WHERE id = %s", (project_id,))
+        local_project = cursor.fetchone()
+        if local_project is None or not _legacy_id_stands(cursor, record, dict(local_project), device_id):
             record["project_id"] = None
     profile_id = record.get("profile_id")
     if profile_id:

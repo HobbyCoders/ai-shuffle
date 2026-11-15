@@ -141,14 +141,17 @@ def _build_cluster_catalog(
     """Join one checkout SELECT + pv2 + installs in Python. Drop pv2
     rows with no active base checkout on an approved online install. Never
     expose foreign ``path``."""
-    from app.core.project_resolver import origin_for_legacy_project
+    from app.core.config import settings
+    from app.core.project_resolver import local_rows_by_origin, origin_for_legacy_project
 
     by_pv2: Dict[str, list] = {}
     for row in bases:
         by_pv2.setdefault(row.get("project_id") or "", []).append(row)
 
-    # Prefer instance_id = me over a NULL-instance legacy row.
-    local_by_origin: Dict[str, Dict[str, Any]] = {}
+    # The same checkout a relayed attach and setup pick (local_rows_by_origin).
+    # ``me`` is the registry id (the device id in a network); project rows
+    # carry the instance id, so both count as this worker.
+    local_by_origin = local_rows_by_origin(local_projects, (me, settings.effective_instance_id))
     # A project's first chat catalogues it under ``local:<id>`` while it has no
     # remote; linking it to its remote later changes its origin but leaves that
     # identity and its base checkout. Listing THIS worker's checkout of it
@@ -158,9 +161,6 @@ def _build_cluster_catalog(
     relinked: set[str] = set()
     for project in local_projects:
         origin = origin_for_legacy_project(project)
-        existing = local_by_origin.get(origin)
-        if existing is None or project.get("instance_id") == me:
-            local_by_origin[origin] = project
         synthesized = "local:" + str(project.get("id"))
         if origin != synthesized:
             relinked.add(synthesized)

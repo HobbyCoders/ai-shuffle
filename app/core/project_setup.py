@@ -167,13 +167,9 @@ def _own_project_rows() -> List[Dict[str, Any]]:
 
 
 def _own_rows_by_origin() -> Dict[str, Dict[str, Any]]:
-    out: Dict[str, Dict[str, Any]] = {}
-    me = _me()
-    for row in _own_project_rows():
-        origin = _origin_of(row)
-        if origin not in out or row.get("instance_id") == me:
-            out[origin] = row
-    return out
+    from app.core.project_resolver import local_rows_by_origin
+
+    return local_rows_by_origin(_own_project_rows(), (_me(),))
 
 
 def _superseded_local_origins(rows: List[Dict[str, Any]]) -> set:
