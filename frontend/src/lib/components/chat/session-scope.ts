@@ -16,7 +16,7 @@
  */
 
 import type { Install } from '$lib/api/installs';
-import { presenceOf } from '$lib/stores/worker-presence';
+import { matches, presenceOf } from '$lib/stores/worker-presence';
 
 
 export interface AccessMode {
@@ -124,12 +124,15 @@ export function attachOwnerOf(
 	fallbackName: string | null = null
 ): AttachOwner | null {
 	if (!isRemote) return null;
-	const id = row?.owner_device_id || row?.instance_id || '';
+	const raw = row?.owner_device_id || row?.instance_id || '';
 	const fromRow = typeof row?.device_online === 'boolean' ? row.device_online : null;
+	// The catalog names holders by the registry's id; a legacy row may carry
+	// the worker's instance id instead, so take the id of the install it matches.
+	const install = raw ? installs?.find((i) => matches(i, raw)) : undefined;
 	return {
-		id,
+		id: install?.id || raw,
 		name: row?.device_name ?? fallbackName,
-		online: (id ? presenceOf(installs, [id]) : null) ?? fromRow
+		online: (raw ? presenceOf(installs, [raw]) : null) ?? fromRow
 	};
 }
 

@@ -167,6 +167,21 @@ describe('Attach a project', () => {
 		it('offers nothing while the owning worker is offline', () => {
 			expect(attachChoice(remote('v2-b'), catalog, { ...ownerB, online: false })).toEqual({ pickable: false, note: null });
 		});
+
+		it('matches an ownerless row by the worker’s legacy instance id', () => {
+			// The row names the worker by its instance id; the registry and the
+			// catalog by its device id. The relay (`owner_of`) finds it either way.
+			const installs = [{ id: 'dev-b', legacy_instance_id: 'inst-b', device_name: 'Worker B', online: true }] as Install[];
+			const owner = attachOwnerOf({ owner_device_id: null, instance_id: 'inst-b' }, true, installs, 'Worker B');
+			expect(owner).toEqual({ id: 'dev-b', name: 'Worker B', online: true });
+			expect(attachChoice(remote('v2-b'), catalog, owner)).toEqual({ pickable: true, note: null });
+			expect(attachChoice(local('v2-a'), catalog, owner)).toEqual({ pickable: false, note: 'only on Worker A' });
+			// A row that already names the device keeps its id, name and presence.
+			expect(attachOwnerOf({ owner_device_id: 'dev-b', device_name: 'B' }, true, installs))
+				.toEqual({ id: 'dev-b', name: 'B', online: true });
+			// Not in the registry (or not loaded): the row's own id, as before.
+			expect(attachOwnerOf({ instance_id: 'inst-x' }, true, installs)?.id).toBe('inst-x');
+		});
 	});
 
 	it('warns that attaching is one-way, naming the agent and the project', () => {
