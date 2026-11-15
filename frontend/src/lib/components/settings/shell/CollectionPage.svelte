@@ -123,6 +123,7 @@
 	let paneResetPending = false;
 	function resetPane() {
 		paneResetPending = true;
+		detailPlace = 0;
 		pane?.scrollTo?.({ top: 0 });
 	}
 	$effect(() => {
@@ -172,6 +173,53 @@
 			// A shorter screen (turned sideways) keeps the row on it.
 			const gap = Math.max(0, Math.min(rowGap!, scroller.clientHeight - now.height));
 			scroller.scrollTo?.({ top: scroller.scrollTop + now.top - gap });
+		});
+	});
+	// An open detail scrolls in its own pane when split and in the page's
+	// scroller otherwise (settings.css), so a window that crosses between the two
+	// moves its place across: the detail keeps its own offset, never the list's.
+	// Both are read as the reader scrolls; layout has already changed by the
+	// time the switch is seen.
+	const split = $derived(!replace && !settingsNav.stacked);
+	let detailPlace = 0;
+	let listPlace = 0;
+	const laidOut = () => !!pane?.getClientRects().length;
+	const paneSplit = () => !!pane && getComputedStyle(pane).overflowY === 'auto';
+	function paneTop(scroller: HTMLElement): number {
+		return pane!.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+	}
+	function onPaneScroll() {
+		paneResetPending = false;
+		if (laidOut() && paneSplit()) detailPlace = pane!.scrollTop;
+	}
+	$effect(() => {
+		const scroller = el && scrollParent(el);
+		if (!scroller) return;
+		const onscroll = () => {
+			if (!laidOut()) return;
+			if (paneSplit() || shownItem === null) listPlace = scroller.scrollTop;
+			else detailPlace = Math.max(0, scroller.scrollTop - paneTop(scroller));
+		};
+		scroller.addEventListener('scroll', onscroll, { passive: true });
+		return () => scroller.removeEventListener('scroll', onscroll);
+	});
+	let lastSplit: boolean | undefined;
+	$effect(() => {
+		const now = split;
+		const before = lastSplit;
+		lastSplit = now;
+		if (before === undefined || before === now || untrack(() => shownItem) === null) return;
+		void tick().then(() => {
+			const scroller = el && scrollParent(el);
+			// Hidden (no box): nothing can scroll; a pending reset waits for the pane.
+			if (!scroller || !pane || !laidOut()) return;
+			if (now) {
+				scroller.scrollTo?.({ top: listPlace });
+				pane.scrollTo?.({ top: detailPlace });
+				paneResetPending = false;
+			} else {
+				scroller.scrollTo?.({ top: paneTop(scroller) + detailPlace });
+			}
 		});
 	});
 	/** The item's list row, relative to the scroller's top, if shown. */
@@ -309,7 +357,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={() => (paneResetPending = false)}>
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={onPaneScroll}>
 		<!-- A detail that is only a state ("Not found", "Loading…", no access)
 		     has no Back of its own. Where it replaces the list, this one shows
 		     (settings.css); everywhere else it is not displayed. -->

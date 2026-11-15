@@ -411,6 +411,74 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  {
+  // Review of #1607/#1608: an open detail moves between its own pane (split)
+  // and the page scroller (stacked, one pane) when the window changes size.
+  // It keeps its own place each way, never the list's offset.
+  name: 'layout-switch-keeps-detail-place', viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await stubHooks(page);
+   await page.setViewportSize({ width: 1440, height: 900 });
+   await gotoApp(page, status);
+   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await settingsNav(page).waitFor();
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+  },
+  async act({ page, mark }) {
+   const title = name => page.locator('[data-settings-heading="detail"]').filter({ hasText: name }).filter({ visible: true }).first();
+   const row = name => page.locator('.st-lcol [data-settings-item]').filter({ hasText: new RegExp(`^\\s*${name}\\b`) }).filter({ visible: true }).first();
+   // The title's distance below the top of whatever shows the detail.
+   const place = () => title('Check hook 9').evaluate(el => {
+    const view = document.querySelector('.settings-viewport');
+    const pane = el.closest('.st-dpane');
+    const box = view.getBoundingClientRect();
+    const bar = [...document.querySelectorAll('[role="banner"]')].find(b => b.checkVisibility());
+    const barBottom = bar ? bar.getBoundingClientRect().bottom : box.top;
+    const split = !el.closest('.settings-shell').hasAttribute('data-stacked') && !el.closest('.st-coll').dataset.replace;
+    return { title: Math.round(el.getBoundingClientRect().top - Math.max(box.top, barBottom)), page: Math.round(view.scrollTop), pane: Math.round(pane.scrollTop), split };
+   });
+   // Split: list beside the detail. Otherwise stacked or one pane at a time.
+   const sizes = async (width, height, split) => {
+    await page.setViewportSize({ width, height });
+    await page.waitForFunction(s => {
+     const coll = document.querySelector('.settings-shell .st-coll');
+     return !!coll && (!coll.closest('.settings-shell').hasAttribute('data-stacked') && !coll.dataset.replace) === s;
+    }, split, { timeout: 5000 });
+    await page.waitForTimeout(400);
+    return place();
+   };
+
+   await mark('open hook 9 beside the list, scroll the list to its end');
+   await row('Check hook 9').click();
+   await title('Check hook 9').waitFor();
+   await page.evaluate(() => { const v = document.querySelector('.settings-viewport'); v.scrollTo({ top: v.scrollHeight }); });
+   await page.waitForTimeout(300);
+   const start = await place();
+   expect(start.split && start.page > 100 && start.pane === 0, `list scrolled, pane at its top (${JSON.stringify(start)})`);
+   const top = start.title;
+
+   await mark('phone size: the detail shows from its top, not the list offset');
+   let at = await sizes(390, 844, false);
+   expect(at.title >= 0 && at.title <= top + 40, `stacked detail at its top (${JSON.stringify(at)}, split title ${top})`);
+
+   await mark('back to wide, then sideways phone');
+   await sizes(1440, 900, true);
+   at = await sizes(844, 390, false);
+   expect(at.title >= 0 && at.title <= top + 40, `one-pane detail at its top (${JSON.stringify(at)})`);
+
+   await mark('scroll the detail one pane at a time, widen: the pane keeps that place');
+   await page.evaluate(() => document.querySelector('.settings-viewport').scrollBy({ top: 200 }));
+   await page.waitForTimeout(200);
+   const before = await place();
+   at = await sizes(1440, 900, true);
+   expect(Math.abs(at.title - before.title) <= 40 && at.pane > 100, `split pane keeps the detail's place (${JSON.stringify(before)} -> ${JSON.stringify(at)})`);
+
+   await mark('narrow to a phone: the page shows the same place');
+   at = await sizes(390, 844, false);
+   expect(Math.abs(at.title - before.title) <= 40, `stacked keeps the detail's place (${JSON.stringify(before)} -> ${JSON.stringify(at)})`);
+  }
+ },
+ {
   name: 'wide-split-unchanged', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page, { users: [user] });
