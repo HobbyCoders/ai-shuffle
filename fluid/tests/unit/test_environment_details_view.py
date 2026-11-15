@@ -26,7 +26,11 @@ from pathlib import Path
 import pytest
 from fluid.context.compaction import CompactionConfig
 from fluid.context.compiler import PromptInputs, compile_prompt
-from fluid.context.environment import ENVIRONMENT_DETAILS_HEADER, environment_note_parts
+from fluid.context.environment import (
+    ENVIRONMENT_DETAILS_HEADER,
+    ENVIRONMENT_NOTE_HEADER,
+    environment_note_parts,
+)
 from fluid.context.trim import estimate_tokens_of_messages
 from fluid.engine.native import NativeLoop, _add_pinned_block
 from fluid.events import Resume, UserTurn
@@ -117,9 +121,10 @@ def _commit(repo: Path, message: str) -> None:
 _UNPINNED = replace(CompactionConfig(), pinned_blocks=("# Harness scratch\n",))
 
 
-def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str, **kwargs) -> NativeLoop:
+def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str, *,
+          include_env: bool = True, **kwargs) -> NativeLoop:
     compiled = compile_prompt(PromptInputs(
-        base="b", cwd=str(repo), include_env=True,
+        base="b", cwd=str(repo), include_env=include_env,
         include_global_instructions=False, include_project_instructions=False,
         include_skills=False, include_agents=False, include_plugins=False,
     ))
@@ -272,8 +277,11 @@ async def test_details_under_a_pin_ending_mid_text_are_pinned_so_a_revert_is_res
     _assert_holds(three, details_a)
     assert "none in venv/.venv" in _blocks(three.messages)[-1]
     stored = (await store.load_path(sid))[2].message
-    assert stored.pinned_text() == memory + details_b
-    assert "trailing host text" not in stored.pinned_text()
+    pinned = stored.pinned_text()
+    assert pinned.startswith(memory) and pinned.endswith(details_b)
+    note = pinned[len(memory):-len(details_b)]  # the turn note joins the range too
+    assert note.startswith(_OPEN + ENVIRONMENT_NOTE_HEADER) and note.endswith(_CLOSE)
+    assert "trailing host text" not in pinned
 
 
 async def test_a_real_fold_between_two_calls_keeps_the_details_in_view(git_repo: Path) -> None:
@@ -388,6 +396,75 @@ async def test_an_oversized_open_turn_digest_keeps_the_details(git_repo: Path) -
     assert "d" * 24_000 not in pinned.messages[-1].text()  # the turn was digested
     _assert_holds(pinned, _details(git_repo))
     assert not _blocks(control.messages)
+
+
+async def test_an_oversized_open_turn_digest_keeps_the_turn_note(git_repo: Path) -> None:
+    """#1656: the digest of an oversized open turn also keeps its per-turn
+    note (date, branch, working tree), so the request still says when and
+    where it is. A follow-up call in the same turn extends that request."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_call("get_weather", "t1", {"city": "Oslo"}), _text("ok")])
+    loop = _loop(git_repo, provider, store, sid, context_window=32_000, max_tokens=8192)
+    blocks = [Text("a" * 24_000), Text("b" * 24_000), Text("c" * 24_000), Text("d" * 24_000)]
+    await _turn(loop, UserTurn(content=blocks))
+    first, second = provider.requests
+    sent = first.messages[-1].text()
+    assert sent.startswith("[compacted turn")  # the open turn was digested
+    assert "Environment as of this message:" in sent
+    assert "Current time:" in sent and "Current branch: main" in sent
+    _assert_holds(first, _details(git_repo))
+    assert second.messages[:len(first.messages)] == first.messages
+
+
+async def test_an_oversized_open_turn_digest_keeps_the_runtime_facts(git_repo: Path) -> None:
+    """#1656 without an environment section (a subagent host): the runtime
+    facts ride once, so the digest of their turn must carry them."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_text("ok"), _text("two")])
+    loop = _loop(git_repo, provider, store, sid, include_env=False,
+                 context_window=32_000, max_tokens=8192)
+    await _turn(loop, UserTurn(content=[Text(c * 24_000) for c in "abcd"]))
+    await _turn(loop, UserTurn(content="second"))
+    first, second = provider.requests
+    folded = first.messages[-1].text()
+    assert folded.startswith("[compacted turn") and "Runtime facts as of this message (" in folded
+    assert "Environment as of this message:" not in folded
+    assert "Runtime facts as of this message (" not in second.messages[-1].text()  # not resent
+    assert second.messages[:len(first.messages)] == first.messages
+
+
+async def test_an_older_fold_carries_no_stale_note(git_repo: Path) -> None:
+    """Only the fold covering the newest note keeps it: a fold of an older
+    turn, decided while the live turn holds its own note, carries none."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_text("one"), _call("dump", "t1", {}), _text("two")])
+    loop = _loop(git_repo, provider, store, sid, **_small_window())
+    await _turn(loop, UserTurn(content=_LARGE_FIRST_TURN))
+    await _turn(loop, UserTurn(content="second"))
+    last = provider.requests[-1]
+    assert last.messages[0].text().startswith("[compacted turn")
+    notes = [m for m in last.messages if "Environment as of this message:" in m.text()]
+    assert notes == [last.messages[1]]  # the live turn's own note only
+
+
+async def test_a_resume_onto_a_digested_turn_keeps_its_stored_note(git_repo: Path) -> None:
+    """#1656, Resume path: the oversized turn failed and is resumed by a fresh
+    engine. Admission digests it again, which retires the request-only clock
+    (#1358), but the digest still carries the note the turn was stored with."""
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
+    provider = ScriptedProvider([failed, _text("ok")])
+    window = {"context_window": 32_000, "max_tokens": 8192}
+    big = [Text(c * 24_000) for c in "abcd"]
+    await _turn(_loop(git_repo, provider, store, sid, **window), UserTurn(content=big))
+    await _turn(_loop(git_repo, provider, store, sid, **window), Resume())
+    first, resumed = provider.requests
+    for request in (first, resumed):
+        sent = request.messages[-1].text()
+        assert sent.startswith("[compacted turn")
+        assert "Environment as of this message:" in sent and "Current branch: main" in sent
+        _assert_holds(request, _details(git_repo))
+    assert resumed.messages == first.messages
 
 
 async def test_an_overflow_escalation_keeps_the_details_in_view(git_repo: Path) -> None:

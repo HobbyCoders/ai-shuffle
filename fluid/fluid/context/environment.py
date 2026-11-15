@@ -287,6 +287,11 @@ def environment_block(
 # copy in view through any fold (CompactionConfig.pinned_blocks).
 ENVIRONMENT_DETAILS_HEADER = "# Environment details\n"
 
+# Header of the per-turn note (date, branch, working tree). The native loop
+# stores the note inside the host-pinned range, so a fold or digest of its
+# turn carries the newest note verbatim (CompactionConfig.pinned_blocks).
+ENVIRONMENT_NOTE_HEADER = "Environment as of this message:\n"
+
 
 def environment_note_parts(
     cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None,
@@ -312,7 +317,7 @@ def environment_note_parts(
     details.append(runtime_facts(cwd_str))
     body = "\n".join(lines)
     details_body = "\n".join(details)
-    note = f"<system-reminder>\nEnvironment as of this message:\n{body}\n</system-reminder>"
+    note = f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}\n</system-reminder>"
     return note, f"<system-reminder>\n{ENVIRONMENT_DETAILS_HEADER}{details_body}\n</system-reminder>"
 
 

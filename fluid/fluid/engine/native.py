@@ -2809,12 +2809,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
         env = await self._environment_reminder_parts()
+        env_note: str | None = None
         details_block: str | None = None
         details_at = len(content)
         if env is not None:
+            # Both go inside the host-pinned range once the node exists, so
+            # a digest of this turn keeps them in view (#1656).
             env_note, details_block = env
-            content.append(Text(env_note))
-            details_at = len(content)
             # Held on the path this turn extends (the fork or rewind parent,
             # else the head), live or carried verbatim by a fold: not resent.
             if details_block is not None and await self.holds_pinned_block(
@@ -2847,6 +2848,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
+        if env_note is not None:
+            _add_pinned_block(user_node.message, env_note, details_at)
+            details_at += 1
         if details_block is not None:
             _add_pinned_block(user_node.message, details_block, details_at)
         await self._append_node(sid, user_node)
