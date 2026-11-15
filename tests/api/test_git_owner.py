@@ -57,6 +57,18 @@ def test_routes_before_touching_viewer_checkout(remote, monkeypatch, method, pat
     local_git.assert_not_called()
 
 
+def test_viewer_legacy_id_reaches_the_owner_as_the_shared_id(remote, monkeypatch):
+    # The viewer's copy names its own checkout ("project-a"); the owner has no
+    # such slug, so the relay names the project by its shared id instead.
+    row, client = remote
+    row["project_id"] = "project-a"
+    call = AsyncMock(return_value={"status": 409, "detail": "Owner guard"})
+    monkeypatch.setattr(control, "call", call)
+    response = client.get("/api/v1/projects/project-a/git/status?session_id=session-b")
+    assert response.status_code == 409, response.text
+    assert call.call_args.args[2]["params"]["project_id"] == "pv2-shared"
+
+
 def test_create_pr_routes_with_saved_session(remote, monkeypatch):
     _, client = remote
     call = AsyncMock(return_value={"status": 409, "detail": "Owner guard"})

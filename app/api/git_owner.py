@@ -191,6 +191,10 @@ def session_git_action(endpoint):
             await _guard_mutation(endpoint.__name__, bound.arguments, endpoint)
             return await endpoint(*bound.args, **bound.kwargs)
         params = jsonable_encoder({k: v for k, v in values.items() if k not in {"request", "token"}})
+        # Legacy project ids are per-worker slugs: name the project to the owner
+        # by its shared id, which the owner maps to its own checkout.
+        if session.get("project_v2_id"):
+            params["project_id"] = session["project_v2_id"]
         try:
             result = await control.call(owner, "session-git", {
                 "action": endpoint.__name__, "session_id": session_id, "params": params,
