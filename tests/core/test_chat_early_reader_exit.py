@@ -22,6 +22,28 @@ from tests.core.test_session_runtime import _runtime_env
 SID = "runtime-early-reader-exit"
 
 
+class _DrainDeadlineAfter:
+    """session_admission's asyncio, but the abandoned-drain deadline starts once ``started`` is set.
+
+    These tests patch that deadline to a fraction of a second, and the engine
+    reaches the write they hold only while the abandoned drain pulls it. Started
+    with the drain, the deadline raced runner speed: a starved runner retired a
+    healthy engine before the write existed (#1468, #1584). Retiring before
+    that write is issued is not the case these tests cover.
+    """
+
+    def __init__(self, started, deadline):
+        self.started, self.deadline = started, deadline
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def wait(self, fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
+        if timeout == self.deadline:
+            await asyncio.to_thread(self.started.wait, 5)
+        return await asyncio.wait(fs, timeout=timeout, return_when=return_when)
+
+
 @pytest.mark.parametrize("exit_at_frame", ["cancelled", "recording_failed"])
 async def test_yielded_pump_drains_engine_and_persistence_before_release(mock_db, tmp_path, monkeypatch, exit_at_frame):
     yielded, engine_release = asyncio.Event(), asyncio.Event()
@@ -182,11 +204,14 @@ async def test_abandoned_never_releasing_engine_is_fenced_and_evicted(mock_db, t
             closing = asyncio.create_task(events.aclose())
         try:
             assert engine._turn_task is not None and not engine._turn_task.done()
-            finished, _ = await asyncio.wait({closing}, timeout=0.5)
+            # The drain deadline is patched to 0.02 s; unpatched it is 15 s, and
+            # a wedged engine with no fence would pin admission forever. 5 s
+            # tells those apart and leaves a busy CI runner room (#1584).
+            finished, _ = await asyncio.wait({closing}, timeout=5)
             assert closing in finished, "an abandoned engine pinned admission after the drain deadline"
             await closing
             if reader == "direct":
-                await asyncio.wait_for(origin.exited.wait(), 0.5)
+                await asyncio.wait_for(origin.exited.wait(), 5)
             assert SID not in admission._holders
             assert pool.peek(SID) is None, "the next request could reuse the wedged engine"
             await asyncio.wait_for(provider_cancelled.wait(), 5)
@@ -250,6 +275,7 @@ async def test_engine_deadline_does_not_release_issued_threaded_session_update(m
 
     monkeypatch.setattr(database, "update_session", delayed_update)
     monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.02)
+    monkeypatch.setattr(admission, "asyncio", _DrainDeadlineAfter(saving, 0.02))
     engine = NativeLoop(provider=CompletingProvider(), store=MemoryStore(), model="m")
     adapter = HarnessAdapter()
     adapter._engine, adapter._connected = engine, True
@@ -374,6 +400,7 @@ async def test_slow_real_away_receipt_settles_before_successor(mock_db, tmp_path
 
     monkeypatch.setattr(away_mode, "record_context_delivery", delayed_receipt)
     monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", 0.02)
+    monkeypatch.setattr(admission, "asyncio", _DrainDeadlineAfter(receipt_started, 0.02))
     engine = NativeLoop(provider=CompletingProvider(), store=MemoryStore(), model="m")
     adapter = HarnessAdapter()
     adapter._engine, adapter._connected = engine, True
@@ -505,25 +532,9 @@ async def test_permission_insert_during_engine_retirement_settles_before_success
         finally:
             insert_done.set()
 
-    class DeadlineAfterInsert:
-        """session_admission's asyncio, but the abandoned-drain deadline starts once the insert is issued.
-
-        The engine reaches the permission insert only while the abandoned drain
-        pulls it, so that deadline used to race runner speed (#1468). Retiring
-        before the insert exists is not the case covered here.
-        """
-
-        def __getattr__(self, name):
-            return getattr(asyncio, name)
-
-        async def wait(self, fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
-            if timeout == drain_deadline:
-                await asyncio.to_thread(insert_started.wait, 5)
-            return await asyncio.wait(fs, timeout=timeout, return_when=return_when)
-
     monkeypatch.setattr(interactions, "create_interaction", delayed_insert)
     monkeypatch.setattr(admission, "_ABANDONED_DRAIN_SECONDS", drain_deadline)
-    monkeypatch.setattr(admission, "asyncio", DeadlineAfterInsert())
+    monkeypatch.setattr(admission, "asyncio", _DrainDeadlineAfter(insert_started, drain_deadline))
     handler = PermissionHandler()
 
     async def can_use_tool(name, tool_input, context):
