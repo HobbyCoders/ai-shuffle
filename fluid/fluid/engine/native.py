@@ -216,7 +216,10 @@ from fluid.providers.base import (
     ProviderRequest,
     WireState,
 )
-from fluid.context.environment import environment_note
+from fluid.context.environment import (
+    ENVIRONMENT_DETAILS_HEADER,
+    environment_note_parts,
+)
 from fluid.providers.pricing import PricingResolver
 from fluid.tools import read_window
 from fluid.providers.pricing import estimate_cost as estimate_cost_from_table
@@ -813,6 +816,36 @@ LOST_TOOL_RESULT_TEXT = (
     "[interrupted: this tool call never completed (e.g. the server restarted "
     "mid-call); its result was lost]"
 )
+
+
+def _add_pinned_block(message: Message, block: str, fallback_index: int) -> None:
+    """Add ``block`` to ``message`` as its own Text inside the host-pinned range.
+
+    A message has one pinned range (``Message.context_pin``), so the block
+    goes where the range ends and the range grows over it. A range that ends
+    inside a Text splits that Text there, so the unowned rest stays outside
+    the range. With no range, the block is the range, at ``fallback_index``.
+    The compactor then keeps the newest copy in view through any fold
+    (``CompactionConfig.pinned_blocks``).
+    """
+    content = message.content
+    if not message.pinned_text():
+        start = sum(len(item.text) for item in content[:fallback_index] if isinstance(item, Text))
+        content.insert(fallback_index, Text(block))
+        message.context_pin = (start, start + len(block))
+        return
+    pin_start, pin_end = message.context_pin
+    offset = 0
+    for index, item in enumerate(content):
+        if not isinstance(item, Text):
+            continue
+        if offset + len(item.text) >= pin_end:
+            cut = pin_end - offset
+            rest = item.text[cut:]
+            content[index:index + 1] = [Text(item.text[:cut]), Text(block), *([Text(rest)] if rest else [])]
+            break
+        offset += len(item.text)
+    message.context_pin = (pin_start, pin_end + len(block))
 
 
 def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) -> bool:
@@ -2722,6 +2755,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
             if anchor is not None:
                 self._resume_anchor = anchor.node_id
+                # Request-only: never stored, so never a copy the path holds.
                 self._resume_environment = await self._environment_reminder()
             await self._emit(TurnStarted(
                 session_id=sid, node_id=head.node_id, turn_id=turn_id,
@@ -2774,9 +2808,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
-        env_note = await self._environment_reminder()
-        if env_note is not None:
+        env = await self._environment_reminder_parts()
+        details_block: str | None = None
+        details_at = len(content)
+        if env is not None:
+            env_note, details_block = env
             content.append(Text(env_note))
+            details_at = len(content)
+            # Held on the path this turn extends (the fork or rewind parent,
+            # else the head), live or carried verbatim by a fold: not resent.
+            if details_block is not None and await self.holds_pinned_block(
+                sid, ENVIRONMENT_DETAILS_HEADER, op.parent_node_id,
+            ) == details_block:
+                details_block = None
         queued = self._queued_peer_reminder()
         if queued is not None:
             content.append(Text(queued))
@@ -2803,6 +2847,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
+        if details_block is not None:
+            _add_pinned_block(user_node.message, details_block, details_at)
         await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
@@ -3346,7 +3392,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                 read_window.record(self.ctx, path, *window)
 
     async def _environment_reminder(self) -> str | None:
-        """The volatile half of the environment block, re-rendered per turn.
+        """:meth:`_environment_reminder_parts` as one text, for a note that
+        is never stored (Resume)."""
+        parts = await self._environment_reminder_parts()
+        return "\n\n".join(part for part in parts if part) if parts else None
+
+    async def _environment_reminder_parts(self) -> tuple[str, str | None] | None:
+        """The volatile half of the environment block, re-rendered per turn,
+        as ``(note, details block)``. The details block (recent commits and
+        runtime facts) is None when the facts have no block of their own; a
+        UserTurn sends it only when the path does not hold it.
 
         The compiled system prompt carries the FIXED environment facts (cwd,
         platform, shell, project manifests); the date and the git state change
@@ -3381,9 +3436,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         if facts == self._runtime_facts_sent:
             return None
         self._runtime_facts_sent = facts
-        return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>"
+        return f"<system-reminder>\n{_RUNTIME_FACTS_HEADER}{facts}\n</system-reminder>", None
 
-    def _gather_environment(self, full: bool) -> tuple[str | None, str]:
+    def _gather_environment(self, full: bool) -> tuple[tuple[str, str] | None, str]:
         """Thread-side half of :meth:`_environment_reminder`: the full note
         when the prompt has an environment section, plus the runtime facts
         text on their own for the change check. Also harvests the facts into
@@ -3397,7 +3452,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             values = time_context(self.ctx.extra.get("time_turn_source", "wakeup")) if callable(time_context) else {}
         except Exception:
             values = {}
-        note = environment_note(self.ctx.cwd, time_context=values or {}) if full else None
+        note = environment_note_parts(self.ctx.cwd, time_context=values or {}) if full else None
         self._harvest_runtime_facts()
         return note, facts
 

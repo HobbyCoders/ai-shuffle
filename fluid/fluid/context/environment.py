@@ -87,6 +87,20 @@ def git_context(cwd: str) -> str | None:
     Returns ``None`` when ``cwd`` is not inside a git work tree (or git is
     unavailable), so callers can omit the section entirely.
     """
+    parts = git_context_parts(cwd)
+    if parts is None:
+        return None
+    lines, recent = parts
+    if recent:
+        lines.append("Recent commits:\n" + recent)
+    return "\n".join(lines) or None
+
+
+def git_context_parts(cwd: str) -> tuple[list[str], str | None] | None:
+    """:func:`git_context` in two parts: the branch and working-tree lines,
+    which change within a turn's work, and the recent commits (``git log
+    --oneline -5``), which change only on a commit. ``None`` outside a git
+    work tree."""
     if not is_git_work_tree(cwd):
         return None
     lines: list[str] = []
@@ -121,12 +135,7 @@ def git_context(cwd: str) -> str | None:
         lines.append(
             "Working tree: clean" if not changed else "Working tree: " + ", ".join(changed)
         )
-    recent = _run_git(cwd, "log", "--oneline", "-5")
-    if recent:
-        lines.append("Recent commits:\n" + recent)
-    if not lines:
-        return None
-    return "\n".join(lines)
+    return lines, _run_git(cwd, "log", "--oneline", "-5")
 
 
 # ─── project facts: manifests, package managers, verify commands ─────────────
@@ -271,27 +280,44 @@ def environment_block(
     return "\n".join(lines)
 
 
-def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:
-    """The volatile environment facts, as a system-reminder for one turn.
+# Header of the environment details block: the recent commits and runtime
+# facts, which change far less often than the per-turn lines. The native
+# loop sends the block only when the path does not already hold this exact
+# copy, inside the host-pinned range, and the compactor keeps the newest
+# copy in view through any fold (CompactionConfig.pinned_blocks).
+ENVIRONMENT_DETAILS_HEADER = "# Environment details\n"
 
-    The counterpart of ``environment_block(include_volatile=False)``: today's
-    date and the git state (branch, working-tree counts, recent commits) as
-    they stand when the turn starts. Always renders — the date alone is worth
-    the line — and never raises.
+
+def environment_note_parts(
+    cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None,
+) -> tuple[str, str]:
+    """The volatile environment facts as two system-reminders: the per-turn
+    note (date, branch, working tree) and the details block (recent commits,
+    runtime facts) under :data:`ENVIRONMENT_DETAILS_HEADER`.
+
+    The counterpart of ``environment_block(include_volatile=False)``. Always
+    renders — the date alone is worth the line — and never raises.
     """
     cwd_str = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
     lines = turn_time_lines(**(time_context or {}))
-    git = git_context(cwd_str)
+    details: list[str] = []
+    git = git_context_parts(cwd_str)
     if git is not None:
-        lines.append(git)
+        head, recent = git
+        lines.extend(head)
+        if recent:
+            details.append("Recent commits:\n" + recent)
     from fluid.context.runtime_facts import runtime_facts
 
-    lines.append(runtime_facts(cwd_str))
+    details.append(runtime_facts(cwd_str))
     body = "\n".join(lines)
-    return (
-        "<system-reminder>\n"
-        "Environment as of this message (the system prompt's environment "
-        "section holds the facts that do not change):\n"
-        f"{body}\n"
-        "</system-reminder>"
-    )
+    details_body = "\n".join(details)
+    note = f"<system-reminder>\nEnvironment as of this message:\n{body}\n</system-reminder>"
+    return note, f"<system-reminder>\n{ENVIRONMENT_DETAILS_HEADER}{details_body}\n</system-reminder>"
+
+
+def environment_note(cwd: str | os.PathLike[str] = ".", *, time_context: dict | None = None) -> str:
+    """Both parts of :func:`environment_note_parts` as one text, for a
+    request-only note that is never stored."""
+    note, details = environment_note_parts(cwd, time_context=time_context)
+    return f"{note}\n\n{details}"

@@ -14,9 +14,29 @@ def test_read_only_code_mode_omits_unavailable_workflows():
     text = ha._code_mode_section(frozenset({"Read"}))
     for absent in ("Task", "Monitor", "Grep(", "SessionSearch", "Skill", "save_skill"):
         assert absent not in text
-    assert "MissingFile" in text and "independent calls" in text
-    assert "permission-gated" in text and "validation barriers abort" in text
     assert len(text) < len(ha.CODE_MODE_SECTION)
+    # The batching, failure and MissingFile rules ride run_python's own
+    # description on every call; the section no longer restates them, so a
+    # read-only model must still receive them in run_python's schema.
+    rules = ("MissingFile", "independent calls", "permission-gated",
+             "validation barriers abort")
+    for rule in rules:
+        assert rule not in text, rule
+    from fluid.codemode.session import CodeModeSession
+    from fluid.engine.native import NativeLoop
+    from fluid.providers.base import ProviderCaps
+    from fluid.store.base import MemoryStore
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolRegistry
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = NativeLoop(
+        provider=types.SimpleNamespace(name="anthropic", caps=ProviderCaps()),
+        store=MemoryStore(), model="claude-sonnet-5", registry=registry,
+        codemode=CodeModeSession(registry), allowed_tools=["Read"])
+    desc = next(t["description"] for t in loop._tools_api() if t["name"] == "run_python")
+    for rule in rules:
+        assert rule in desc, rule
 
 
 @pytest.mark.parametrize("full", [False, True], ids=["restricted", "full"])

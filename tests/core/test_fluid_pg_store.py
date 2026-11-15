@@ -46,6 +46,39 @@ async def test_memory_pin_survives_store_reload_without_changing_content(mock_db
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("odd", ["", "nul\x00text"])
+async def test_details_split_into_a_mid_text_pin_round_trip_with_memory_and_scratch(mock_db, odd):
+    """The engine splits a Text where the host pin ends and pins the details
+    there; the store's re-pin keeps memory, scratch and details readable."""
+    from app.core import memory_reminder as mr
+    from app.core.pg_session_store import _scrub_pg_illegal
+    from fluid.context.compaction import newest_pinned_block
+    from fluid.context.environment import ENVIRONMENT_DETAILS_HEADER
+    from fluid.engine.native import _add_pinned_block
+    from fluid.state import SCRATCH_HEADER
+
+    memory = mr.wrap("# Memory\n- [m1 r1; session] A synthetic fact")
+    scratch = mr.wrap(SCRATCH_HEADER + "Use the session scratch folder")
+    details = mr.wrap(ENVIRONMENT_DETAILS_HEADER + "Worker Python: x")
+    prefix = "Owner prompt " + odd + "\n\n"
+    node = _node("pinned", None, prefix + memory + scratch + "\nhost tail " + odd)
+    node.message.context_pin = (len(prefix), len(prefix + memory + scratch))
+    _add_pinned_block(node.message, details, 1)
+    assert node.message.pinned_text() == memory + scratch + details
+    store = PgFluidStore()
+    await store.create_session("ses_pg_split_pin")
+    await store.append("ses_pg_split_pin", node)
+    path = await PgFluidStore().load_path("ses_pg_split_pin")
+    message = path[0].message
+    assert message.text() == _scrub_pg_illegal(node.message.text())
+    assert message.pinned_text() == memory + scratch + details
+    assert mr.newest_full_node(path) == "pinned"
+    assert mr.held_from_path(path, "pinned") is not None
+    assert newest_pinned_block(path, SCRATCH_HEADER) == scratch
+    assert newest_pinned_block(path, ENVIRONMENT_DETAILS_HEADER) == details
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("odd", [
     "postgres://example:synthetic-password@example.invalid/db", "nul\x00text", "surrogate\ud800text",
 ])

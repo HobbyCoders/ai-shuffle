@@ -198,7 +198,10 @@ class CompactionConfig:
     # header stays in view the same way, on its own, so a session with no
     # # Memory chain keeps it too. A host may trust a pinned copy on the path
     # only while its header is listed here (newest_pinned_block).
-    pinned_blocks: tuple[str, ...] | None = ("# Harness scratch\n",)
+    # fluid.state.SCRATCH_HEADER and fluid.context.environment.
+    # ENVIRONMENT_DETAILS_HEADER (the native loop's recent commits and
+    # runtime facts, sent only when the path holds no identical copy).
+    pinned_blocks: tuple[str, ...] | None = ("# Harness scratch\n", "# Environment details\n")
     # Intake: user Text blocks longer than this always render as a stub.
     intake_stub_chars: int = 25_000
     intake_preview_chars: int = 500

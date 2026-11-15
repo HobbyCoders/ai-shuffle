@@ -64,8 +64,15 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # lose avatar_color. Remeasured with scripts/measure_prompt_catalog.py on
 # 2026-11-14: pre-Plan full 136,573 -> 136,345 (main had drifted from 136,469
 # within the allowance); eager and both delegated budgets unchanged.
-MEASURED_FULL = 136_345
-MEASURED_EAGER = 53_138
+# Leaner prefix (Nov 2026): the native "# Code mode" section stopped repeating
+# what run_python's own description says on every call (the batching rule, the
+# failure rule, the MissingFile note, the kernel and ResultRef mechanics) and
+# names "the stdout cap run_python states" instead of a stale number of its
+# own. Remeasured with scripts/measure_prompt_catalog.py on 2026-11-15:
+# pre-Plan full 136,345 -> 135,468, eager 53,138 -> 52,253. Delegated budgets
+# unchanged (the section is native-only).
+MEASURED_FULL = 135_468
+MEASURED_EAGER = 52_253
 MEASURED_DELEGATED_APPEND = 14_877
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327
 
@@ -258,6 +265,24 @@ def test_no_long_sentence_repeats_in_the_eager_prefix(native):
                  if len(part.strip()) >= 80]
     repeated = {text: count for text, count in collections.Counter(sentences).items()
                 if count > 1 and text not in allowed}
+    assert not repeated, repeated
+
+
+def test_code_mode_section_does_not_repeat_run_pythons_description():
+    """run_python's description rides every native code-mode call next to the
+    system prompt, so a rule stated in both is paid for twice per call. The
+    system prompt may point at it ("the stdout cap run_python states"), not
+    restate it."""
+    import re
+
+    from fluid.codemode.session import _run_python_desc
+
+    compiled, _full, _specs = compile_fixture(native=True)
+    system = "\n\n".join(s.text for s in compiled.sections if s.kind != "tools")
+    desc = _run_python_desc()
+    sentences = {part.strip() for part in re.split(r"(?<=[.!?])\s+|\n", desc)
+                 if len(part.strip()) >= 60}
+    repeated = sorted(text for text in sentences if text in system)
     assert not repeated, repeated
 
 
