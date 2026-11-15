@@ -369,8 +369,9 @@ jobs:
           pip install -r requirements.txt
           pip install -e ./fluid
           # As in CI Backend: the hosted tool cache can hold group/world-writable
-          # stdlib files, which the app's import provenance checks refuse.
-          chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+          # stdlib files, which the app's import provenance checks refuse. Root
+          # owns that cache on this runner, so tightening it needs sudo.
+          sudo chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
       - name: Install JavaScript dependencies
         if: steps.plan.outputs.files != ''
         run: |
