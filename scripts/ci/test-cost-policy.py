@@ -10,6 +10,7 @@ request runs the ones its changed files need.
 """
 from pathlib import Path
 import json
+import re
 import unittest
 from unittest.mock import patch
 
@@ -37,6 +38,9 @@ DAILY_OR_MANUAL = "${{ github.event_name == 'schedule' && '-daily' || github.eve
 # Linux jobs pin the image: ubuntu-latest moved to 26.04, which lacks the
 # preinstalled PostgreSQL 16 the backend jobs use. Moving on is deliberate.
 LINUX_RUNNER = "ubuntu-24.04"
+# The one paid runner, for the one job named here: the UI journey shards are
+# most of CI's minutes. Any other job or label is a deliberate change here.
+PAID_RUNNERS = {("ci-frontend.yml", "journeys"): "blacksmith-4vcpu-ubuntu-2404"}
 RECORD_PASS = "./.github/workflows/record-pass.yml"
 FORBIDDEN = {"pull_request", "pull_request_target", "merge_group", "schedule", "workflow_run",
              "check_run", "check_suite", "issue_comment", "pull_request_review"}
@@ -112,7 +116,9 @@ class CostPolicyTests(unittest.TestCase):
                                if (name, key) == ("ci-frontend.yml", "journey-plan") else {"contents": "read"})
                     self.assertEqual(job.get("permissions", {"contents": "read"}), allowed)
                     runner = job.get("runs-on")
-                    if runner == "${{ matrix.os }}":
+                    if (name, key) in PAID_RUNNERS:
+                        self.assertEqual(runner, PAID_RUNNERS[name, key])
+                    elif runner == "${{ matrix.os }}":
                         self.assertEqual(job["strategy"]["matrix"]["os"],
                             "${{ fromJSON((github.event_name == 'pull_request' || inputs.main_suite == true) && "
                             "'[\"windows-latest\"]' || '[\"windows-latest\", \"macos-latest\"]') }}")
@@ -320,6 +326,11 @@ class CostPolicyTests(unittest.TestCase):
         self.assertIn('-n 2', command)
         self.assertIn('-p scripts.ci.backend_shards', command)
 
+    def test_workflow_lint_knows_only_the_paid_runners_named_here(self):
+        # actionlint rejects any runner label that is neither GitHub's nor listed.
+        config = yaml.safe_load((ROOT / ".github/actionlint.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(config, {"self-hosted-runner": {"labels": sorted(set(PAID_RUNNERS.values()))}})
+
     def test_public_app_workflows_use_standard_hosted_runners(self):
         # These workflows are moving to hobbycoders-cloud in a separate PR.
         private_cloud = {
@@ -331,13 +342,17 @@ class CostPolicyTests(unittest.TestCase):
             if path.name in private_cloud:
                 continue
             text = path.read_text(encoding="utf-8")
+            paid = {key: runner for (name, key), runner in PAID_RUNNERS.items() if name == path.name}
             with self.subTest(workflow=path.name):
-                self.assertNotIn("blacksmith", text.lower())
-                for job in workflow(path.name)["jobs"].values():
+                # A paid label appears once per job allowed it, and nowhere else.
+                self.assertEqual(len(re.findall(r"blacksmith-", text.lower())), len(paid))
+                for key, job in workflow(path.name)["jobs"].items():
                     if "runs-on" not in job:  # Reusable workflow call.
                         continue
                     runner = job["runs-on"]
-                    if runner == "${{ matrix.os }}":
+                    if key in paid:
+                        self.assertEqual(runner, paid[key])
+                    elif runner == "${{ matrix.os }}":
                         matrix = job["strategy"]["matrix"]["os"]
                         if isinstance(matrix, list):
                             self.assertLessEqual(set(matrix), allowed)
