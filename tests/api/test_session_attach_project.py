@@ -394,16 +394,60 @@ async def test_page_row_and_gates_name_one_checkout(seeded, quiet, remote_owner,
         assert refused.status_code == 404
 
 
+@pytest.mark.parametrize("checkout_here", [True, False])
 @pytest.mark.asyncio
-async def test_an_unrelated_project_sharing_the_owners_id_is_not_named(seeded, quiet, remote_owner, two_checkouts):
-    pv2, chosen, _ = two_checkouts
+async def test_an_unrelated_project_sharing_the_owners_id_is_not_named(
+        seeded, quiet, remote_owner, request, tmp_path, monkeypatch, checkout_here):
+    """The owner's legacy id is a DIFFERENT project here, so the mirrored row
+    keeps that id and the project gates would refuse any checkout named for
+    it: the relay names the shared id alone, and the composer's session upload
+    and shared-id listing work without touching the unrelated project."""
+    from app.api import sessions_uploads
+    from app.core import upload_transfer
+    from app.db import projects_v2
+    from app.network.catalog import prepare_session_mirror
+
+    if checkout_here:
+        pv2, _, _ = request.getfixturevalue("two_checkouts")
+    else:
+        pv2 = projects_v2.upsert_project("git:example/elsewhere", "Elsewhere")
+    unrelated = tmp_path / "unrelated"
+    unrelated.mkdir()
+    db.update_project("attach-proj", path=str(unrelated))
     remote_owner.side_effect = lambda device, action, body: {
         "session_id": body["session_id"], "project_id": "attach-proj",
         "project_v2_id": body["project_v2_id"], "mode": "code", "permission_mode": "default"}
     session = db.get_session("attach-chat")
     with patch.object(attach_api, "require_session", AsyncMock(return_value=session)):
         result = await attach_project(_request(), "attach-chat", AttachProjectRequest(project_v2_id=pv2["id"]), "token")
-    assert result.project_id == chosen
+    assert result.project_id == ""
+    assert result.project_v2_id == pv2["id"]
+
+    # The owner's row as it reaches this worker keeps the colliding id.
+    with db.get_db() as conn:
+        mirrored = prepare_session_mirror(conn.cursor(), {"id": "attach-chat", "project_id": "attach-proj"})
+        assert mirrored["project_id"] == "attach-proj"
+        conn.cursor().execute(
+            "UPDATE sessions SET project_id = %s, project_v2_id = %s, mode = NULL WHERE id = %s",
+            (mirrored["project_id"], pv2["id"], "attach-chat"),
+        )
+    client = _gates(monkeypatch)
+    client.app.include_router(sessions_uploads.router, prefix="/api/v1/sessions")
+    monkeypatch.setattr(upload_transfer, "stage_admitted_session_upload",
+                        lambda session, name, content: upload_transfer.stage_session_upload(session["id"], name, content))
+    project_writes = MagicMock()
+    monkeypatch.setattr("app.api.projects._perform_project_upload", project_writes)
+
+    # What the composer calls with no local project: the session upload route
+    # and the listing by shared id.
+    upload = client.post("/api/v1/sessions/attach-chat/upload", files={"file": ("notes.txt", b"hi")})
+    assert upload.status_code == 200, upload.text
+    staged = upload_transfer.session_upload_dir("attach-chat") / "notes.txt"
+    assert staged.read_bytes() == b"hi"
+    listing = client.get(f"/api/v1/projects/{pv2['id']}/files?session_id=attach-chat")
+    assert listing.status_code == 200, listing.text
+    project_writes.assert_not_called()
+    assert list(unrelated.iterdir()) == []
 
 
 @pytest.mark.asyncio

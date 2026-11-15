@@ -448,8 +448,10 @@ describe('attaching a project (#371)', () => {
 		] as never;
 		try {
 			const row = { id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default' };
+			// A local copy exists, but the row keeps `app` and the project gates
+			// would then refuse `theirs-here`: the shared id alone (round 4 U2).
 			expect(activeSession.adoptAttachedProject([row])).toBe(true);
-			expect(activeSession.current).toMatchObject({ project: 'theirs-here', projectV2Id: 'v2-theirs' });
+			expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs' });
 
 			// No local copy of theirs: the V2 id alone, never the colliding `app`.
 			appData.current.clusterProjects = [
@@ -501,8 +503,10 @@ describe('attaching a project (#371)', () => {
 			expect(adopt('two-a')).toBe('two-a');
 			// No project of the owner's id here (the row holds none): the catalog's.
 			expect(adopt(null)).toBe('two-z');
-			// An unrelated project sharing the id is not this project.
-			expect(adopt('app')).toBe('two-z');
+			// An unrelated project sharing the id is not this project, and the row
+			// holding it would make the gates refuse `two-z`: the shared id alone.
+			expect(adopt('app')).toBe('');
+			expect(activeSession.current.projectV2Id).toBe('v2-two');
 		} finally {
 			appData.current.projects = before;
 			appData.current.clusterProjects = [];

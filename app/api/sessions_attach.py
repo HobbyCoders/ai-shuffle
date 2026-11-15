@@ -364,13 +364,17 @@ async def attach_project(
 
 def _local_project_id(project_v2_id: Optional[str], origin: Optional[str],
                       owner_project_id: Optional[str] = None) -> str:
-    """This worker's own checkout of the attached project; empty when it has none.
+    """This worker's checkout of the attached project, or ``""`` for the shared
+    id alone.
 
-    The chat's mirrored row keeps the owner's legacy id when this worker has a
-    project of that id, and the project upload gate then admits only that id.
-    So when the owner's id is this worker's own checkout of the same project
-    it wins; otherwise the checkout the cluster catalog lists for the origin,
-    which the gate admits through the shared id. The page's
+    The chat's mirrored row keeps the owner's legacy id whenever this worker
+    has a project of that id (``prepare_session_mirror``), and the project
+    upload and listing gates then admit only that id. So a local checkout is
+    named only where the row will agree: the owner's id when it is this
+    worker's checkout of the same project; the catalog's checkout when no
+    project here has the owner's id; and ``""`` when the owner's id belongs to
+    a DIFFERENT project here, which leaves the composer on the shared id (the
+    session upload route and the shared-id listing). The page's
     ``localProjectForRow`` applies the same rule.
     """
     from app.api import cluster
@@ -380,11 +384,15 @@ def _local_project_id(project_v2_id: Optional[str], origin: Optional[str],
     key = (pv2 or {}).get("origin") or origin
     if not key:
         return ""
-    if owner_project_id:
-        for row in database.get_all_projects():
-            if row.get("id") == owner_project_id and project_resolver.origin_for_legacy_project(row) == key:
-                return owner_project_id
-    return cluster.local_checkout_for_origin(key) or ""
+    catalogued = cluster.local_checkout_for_origin(key) or ""
+    if owner_project_id and database.get_project(owner_project_id) is not None:
+        if owner_project_id == catalogued or any(
+            row.get("id") == owner_project_id and project_resolver.origin_for_legacy_project(row) == key
+            for row in database.get_all_projects()
+        ):
+            return owner_project_id
+        return ""
+    return catalogued
 
 
 async def _worker_name(device_id: str) -> str:
