@@ -292,6 +292,34 @@ await runJourney({
 				expect(Math.abs(tall.end - tall.bottom) <= 1, `the last group ends at the bottom of the list, got ${Math.round(tall.bottom - tall.end)}px short`);
 				expect(tall.heads.Snoozed - tall.activeEnd > 100, `the spare height sits between Active and Snoozed, got ${Math.round(tall.heads.Snoozed - tall.activeEnd)}px`);
 
+				await mark('double-click Settled: its header moves, what takes its place is not clicked');
+				const chats = await showChats(page);
+				const header = chats.getByRole('button', { name: /^Settled/ }).first();
+				if (await header.getAttribute('aria-expanded') === 'true') {
+					await header.click();
+					await page.waitForTimeout(700);
+				}
+				const before = JSON.stringify(await chatState(page));
+				const box = await header.boundingBox();
+				const spot = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				const under = () => page.evaluate(({ x, y }) => {
+					const el = document.elementFromPoint(x, y);
+					return el?.closest('.sect') ? 'header' : el?.closest('[data-session-card]') ? 'row' : 'other';
+				}, spot);
+				await page.mouse.click(spot.x, spot.y);
+				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'true', await header.elementHandle());
+				expect(await under() !== 'header', 'opening Settled moves its header away from the pointer');
+				// The second half of the double-click, on the spot the header left.
+				await page.mouse.down({ clickCount: 2 });
+				await page.mouse.up({ clickCount: 2 });
+				await page.waitForTimeout(600);
+				// The chat first: on a phone, opening one closes the drawer and hides the header.
+				expect(JSON.stringify(await chatState(page)) === before, 'the open chat did not change');
+				expect(await header.getAttribute('aria-expanded') === 'true', 'Settled stays open');
+				// Closed again for the measurements below; by now a click is a click.
+				await header.click();
+				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'false', await header.elementHandle());
+
 				await mark('a list taller than the window: it scrolls, nothing is squeezed');
 				await page.setViewportSize({ width: page.__viewport.width, height: 420 });
 				const short = await listLayout(page);
@@ -304,27 +332,6 @@ await runJourney({
 				expect(Math.abs(scrolled.end - scrolled.bottom) <= 1, `scrolling to the end shows the last group, got ${Math.round(scrolled.end - scrolled.bottom)}px past the bottom`);
 
 				await page.setViewportSize(page.__viewport);
-				await sessions.locator('.list').evaluate((list) => list.scrollTo({ top: 0 }));
-
-				await mark('double-click Settled: its header moves, the row under the pointer does not open');
-				const header = sessions.getByRole('button', { name: /^Settled/ }).first();
-				if (await header.getAttribute('aria-expanded') === 'true') await header.click();
-				await page.waitForTimeout(700);
-				const before = JSON.stringify(await chatState(page));
-				const box = await header.boundingBox();
-				const spot = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-				await page.mouse.click(spot.x, spot.y);
-				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'true', await header.elementHandle());
-				const under = await page.evaluate(({ x, y }) => {
-					const el = document.elementFromPoint(x, y);
-					return el?.closest('.sect') ? 'header' : el?.closest('[data-session-card]') ? 'row' : 'other';
-				}, spot);
-				expect(under === 'row', `opening Settled leaves a row where its header was, got ${under}`);
-				await page.mouse.click(spot.x, spot.y, { clickCount: 2 });
-				await page.waitForTimeout(600);
-				// The chat first: on a phone, opening one closes the drawer and hides the header.
-				expect(JSON.stringify(await chatState(page)) === before, 'the open chat did not change');
-				expect(await header.getAttribute('aria-expanded') === 'true', 'Settled stays open');
 			}
 		},
 		{
