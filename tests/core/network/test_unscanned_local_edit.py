@@ -124,8 +124,8 @@ def test_unscanned_local_delete_is_published_and_kept_by_the_peer(workers):
     assert _tag_name(b) == "from-a"
     converge([a, b])
     assert _tag_name(a) == _tag_name(b) == "from-a"
-    # The signed delete lost by clock: the peer that wrote the winner keeps it.
-    assert _losers(a) == [("<deleted>", b.device_id)]
+    # The signed delete lost by clock: both workers keep it as the loser.
+    assert _losers(a) == _losers(b) == [("<deleted>", b.device_id)]
     _scan_is_quiet(a, b)
 
 
@@ -141,7 +141,7 @@ def test_unscanned_local_delete_with_the_higher_clock_is_not_resurrected(workers
     assert _tag_name(b) is None
     converge([a, b])
     assert _tag_name(a) is None and _tag_name(b) is None
-    assert _losers(a) == [("from-a", a.device_id)]
+    assert _losers(a) == _losers(b) == [("from-a", a.device_id)]
     _scan_is_quiet(a, b)
 
 
@@ -279,3 +279,99 @@ def test_published_row_still_takes_the_peer_op(workers):
     assert not _conflicts(b)
     with b.active():
         assert engine.scan_all() == 0
+
+
+def test_peer_delete_loses_to_a_higher_clock_unscanned_edit(workers):
+    a, b = _pair(workers)
+    with a.active():
+        database.delete_tag("t1")
+        engine.scan_all()
+    _advance_clock(b)
+    with b.active():
+        database.update_tag("t1", name="from-b")
+    exchange(a, b)
+    assert _tag_name(b) == "from-b"
+    converge([a, b])
+    assert _tag_name(a) == _tag_name(b) == "from-b"
+    assert _losers(a) == _losers(b) == [("<deleted>", a.device_id)]
+    _scan_is_quiet(a, b)
+
+
+# -- A restored worker (#1570): no local op may take a sequence number its own
+# -- retained ops already hold.
+
+def _restored_with_proof(workers):
+    """B is restored from a backup; A holds ops B signed after it."""
+    from tests.core.network.test_restored_worker_ordering import _restore
+    a, b = _pair(workers)
+    backup = b.raw.serialize()
+    with b.active():
+        for n in range(3):
+            database.update_tag("t1", name=f"lost-{n}")
+            engine.scan_all()
+    converge([a, b])
+    with a.active(), database.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT envelope FROM sync_ops WHERE origin_device_id = %s ORDER BY seq", (b.device_id,))
+        signed = [store._load(row["envelope"], {}) for row in cursor.fetchall()]
+    _restore(b, backup)
+    with b.active(), database.get_db() as conn:
+        held = store.own_watermark(conn.cursor(), b.device_id, 1)
+    proof = [op for op in signed if op["origin_seq"] > held]
+    assert proof
+    return a, b, proof, held
+
+
+def _old_stream_unchanged(b, held):
+    """Nothing was signed into the restored incarnation past what it held."""
+    with b.active():
+        assert engine.context().identity.incarnation == 2
+        ops = [store._load(row["envelope"], {}) for row in b.sql(
+            "SELECT envelope FROM sync_ops WHERE origin_device_id = ?", (b.device_id,))]
+    assert not [op for op in ops if op["origin_incarnation"] == 1 and op["origin_seq"] > held]
+
+
+def _peer_edit(a, name):
+    with a.active():
+        database.update_tag("t1", name=name)
+        engine.scan_all()
+        ops = [store._load(row["envelope"], {}) for row in a.sql(
+            "SELECT envelope FROM sync_ops WHERE origin_device_id = ? ORDER BY seq", (a.device_id,))]
+    return [ops[-1]]
+
+
+def test_restored_worker_unscanned_edit_waits_for_the_new_stream(workers):
+    a, b, proof, held = _restored_with_proof(workers)
+    with b.active():
+        database.update_tag("t1", name="after-restore")
+        result = engine.apply_batch(proof)
+        assert result.own_ahead == max(op["origin_seq"] for op in proof)
+    _old_stream_unchanged(b, held)
+    with b.active():
+        assert engine.scan_all() == 1  # signed in the new stream
+    converge([a, b])
+    assert _tag_name(a) == _tag_name(b) == "after-restore"
+
+
+def test_restored_worker_proof_through_the_one_by_one_path(workers, monkeypatch):
+    monkeypatch.setattr(engine, "_apply_chunk", lambda chunk, ctx, result: False)
+    a, b, proof, held = _restored_with_proof(workers)
+    with b.active():
+        database.update_tag("t1", name="after-restore")
+        engine.apply_batch(proof)
+    _old_stream_unchanged(b, held)
+
+
+def test_restored_worker_proof_after_peer_ops_in_a_later_chunk(workers, monkeypatch):
+    """The peer's op for the edited record comes first, in its own chunk; the
+    proof comes later. The edit is not signed into the old stream: the peer
+    version replaces it and it is kept as B's conflict."""
+    monkeypatch.setattr(engine, "APPLY_CHUNK", 2)
+    a, b, proof, held = _restored_with_proof(workers)
+    peer = _peer_edit(a, "from-a")
+    with b.active():
+        database.update_tag("t1", name="after-restore")
+        engine.apply_batch(peer + [peer[0]] + proof)
+    _old_stream_unchanged(b, held)
+    assert _tag_name(b) == "from-a"
+    assert ("after-restore", b.device_id) in _losers(b)
