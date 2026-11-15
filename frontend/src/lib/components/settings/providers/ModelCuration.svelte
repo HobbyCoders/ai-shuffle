@@ -45,6 +45,7 @@
 		curatedEntries,
 		describeFetchFailure,
 		filterRows,
+		keepShownRows,
 		mediaKindLabel,
 		precheckRecommended,
 		rowsForSetup,
@@ -101,6 +102,8 @@
 	let sharedFetchedAt: string | null = null;
 
 	let rows = $state<CurationRow[]>([]);
+	/** The key the rows on screen were drawn for: a new key starts afresh. */
+	let rowsBinding: string | null | undefined;
 	let loading = $state(false);
 	let saving = $state(false);
 	let error = $state('');
@@ -126,9 +129,15 @@
 		// An empty one is deliberate (every model unticked), not an uncurated
 		// default to draw the preset roster as ticked over, which left the
 		// presets impossible to tick again (#1524). Setup keeps the pre-tick.
-		rows = canRefresh && mode === 'setup'
+		const next = canRefresh && mode === 'setup'
 			? listed
 			: listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
+		// Without a catalog the saved list is all there is: keep a row unticked
+		// on screen meanwhile, so it can be ticked again at once (#1650).
+		const binding = current?.catalog_binding;
+		const keep = !catalog && mode !== 'setup' && binding === rowsBinding;
+		rows = keep ? keepShownRows(untrack(() => rows), next) : next;
+		rowsBinding = binding;
 		selectionRevision = current?.revision;
 		hiddenMedia = catalog?.hidden ?? [];
 		if (candidate) typeable = canRefresh && !!catalog && catalog.models.length === 0;
@@ -150,7 +159,9 @@
 		try {
 			// Setup validates the current key: an old snapshot is not auth evidence.
 			// For Kimi Code the server returns its fixed preset locally, without upstream I/O.
-			const live = refresh || mode === 'setup' || wizard;
+			// A fetch still running from an earlier visit to this tab is joined, not
+			// restarted, and shows as running (#1649).
+			const live = refresh || mode === 'setup' || wizard || providers.modelFetchRunning(id);
 			let res = live ? null : await getModelCatalog(id);
 			if (!live) {
 				const sameBinding = !!liveCatalog?.binding && liveCatalog.binding === current?.catalog_binding;
@@ -308,38 +319,56 @@
 		if (mode === 'manage') await load(false);
 	});
 
+	/** Antigravity's agent has given no list yet: these are the built-in models (#1649). */
+	const agentSilent = $derived(current?.provider_type === 'antigravity' && source === 'preset');
 	const title = $derived(mode === 'setup' ? 'Models' : 'Offered in pickers');
 	const count = $derived(rows.length ? `${checked} of ${rows.length}` : undefined);
+	const fetchedCount = $derived(`${rows.length} ${rows.length === 1 ? 'model' : 'models'}`);
+	// Setup says where the list came from on this one line, not on a line
+	// inserted above the list when it lands, which moved the buttons (#1648).
 	const setupHint = $derived(
 		loading
 			? 'Fetching models'
 			: source === 'preset'
 				? 'Preset catalog, pick what to offer'
-				: `Fetched ${rows.length} ${rows.length === 1 ? 'model' : 'models'}, pick what to offer`
+				: source === 'agent'
+					? `The agent listed ${fetchedCount}, pick what to offer`
+					: `Fetched ${fetchedCount}, pick what to offer`
 	);
 </script>
 
 <RowGroup {title} {count} bare>
 	{#snippet actions()}
 		{#if canRefresh}
-		<button
-			type="button"
-			class="st-btn icon ghost sm"
-			aria-label="Refresh model list"
-			title="Refresh model list"
-			disabled={loading || saving}
-			onclick={() => load()}
-		>
-			<RefreshCw />
-		</button>
+			{#if mode === 'manage' && loading}
+				<span class="fetching" role="status" data-testid="curation-fetching">Fetching list</span>
+			{/if}
+			<button
+				type="button"
+				class="st-btn icon ghost sm"
+				class:spin={mode === 'manage' && loading}
+				aria-label="Refresh model list"
+				aria-busy={mode === 'manage' && loading}
+				title={loading ? 'Fetching the model list' : 'Refresh model list'}
+				disabled={loading || saving}
+				onclick={() => load()}
+			>
+				<RefreshCw />
+			</button>
 		{/if}
 	{/snippet}
 	{#if mode === 'setup' && !failure}<p class="pv-msg" aria-live="polite">{setupHint}</p>{/if}
-	{#if catalog?.fetched_at && catalog.source === 'agent'}
+	{#if mode === 'setup'}
+		<!-- The setup line above says where the list came from (#1648). -->
+	{:else if catalog?.fetched_at && catalog.source === 'agent'}
 		<!-- Refresh asks the agent again; each chat start also updates the list. -->
 		<p class="pv-msg listed" data-testid="curation-agent-list">Listed by the agent{catalog.agent_version ? ` ${catalog.agent_version}` : ''} <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}. Refresh or a new chat updates it.</p>
 	{:else if catalog?.fetched_at}
 		<p class="pv-msg listed">Last refreshed <time datetime={catalog.fetched_at}>{new Date(catalog.fetched_at).toLocaleString()}</time> on {listedOn}</p>
+	{:else if loading && !catalog}
+		<p class="pv-msg listed" data-testid="curation-list-pending">Fetching the model list. The models below are the saved ones until it arrives.</p>
+	{:else if agentSilent}
+		<p class="pv-msg listed" data-testid="curation-agent-silent">The agent has not listed its models yet, so these are the built-in ones. Refresh or a new chat asks it again.</p>
 	{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	{#if failure}
@@ -372,12 +401,13 @@
 			<button type="button" class="st-btn" disabled={saving || !typed.trim()} onclick={addTyped}>Add model</button>
 		</div>
 	{/if}
-	{#if rows.length > 0}
+	<!-- Setup holds the filter's place while loading, so the list does not move when it lands (#1648). -->
+	{#if rows.length > 0 || (mode === 'setup' && loading)}
 		<div class="filter">
-			<TextField bind:value={filter} type="search" placeholder="Filter models" label="Filter models" width={260} />
+			<TextField bind:value={filter} type="search" placeholder="Filter models" label="Filter models" width={260} disabled={rows.length === 0} />
 		</div>
 	{/if}
-	<div class="st-card pv-card">
+	<div class="st-card pv-card" class:setup-card={mode === 'setup'}>
 		{#if loading && rows.length === 0}
 			<p class="pv-empty">Loading models</p>
 		{:else if rows.length === 0}
@@ -390,7 +420,10 @@
 					<label class="pv-mrow">
 						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
 						<span class="id">{r.id}</span>
-						{#if r.label && r.label !== r.id}<span class="lbl">{r.label}</span>{:else}<span></span>{/if}
+						{#if r.unlisted}
+							<!-- Kept as ticked, but a chat on it is rerouted to a listed model (#1634). -->
+							<span class="lbl" data-testid="curation-unlisted" title="The agent's last list does not include this model; a chat on it uses another model.">Not listed by the agent</span>
+						{:else if r.label && r.label !== r.id}<span class="lbl">{r.label}</span>{:else}<span></span>{/if}
 					</label>
 				{/each}
 				{#if shown.length === 0 && !hiddenMatch}
@@ -429,6 +462,35 @@
 <style>
 	.filter {
 		margin: 0 0 8px;
+	}
+	/* Setup's list box keeps one height from "Loading models" to the full list,
+	   so the buttons below it stay where they are (#1648). */
+	.setup-card {
+		height: 320px;
+		display: flex;
+		flex-direction: column;
+	}
+	.setup-card :global(.pv-mlist) {
+		flex: 1 1 auto;
+		min-height: 0;
+		max-height: none;
+	}
+	.fetching {
+		font-size: 12px;
+		color: var(--st-mfg);
+	}
+	.spin :global(svg) {
+		animation: curation-spin 1s linear infinite;
+	}
+	@keyframes curation-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.spin :global(svg) {
+			animation: none;
+		}
 	}
 	/* The same gap as the filter and typed row keep below themselves. */
 	.listed {

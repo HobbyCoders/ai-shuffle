@@ -26,7 +26,8 @@ FAKE_ACP_MODES (comma-separated mode ids it offers; default
 ``{model: [thought levels]}`` it offers, in place of 1.5.6's three models with
 low/high; a session keeps the model and level it was set to),
 FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
-``config_option_update`` before answering it).
+``config_option_update`` before answering it), FAKE_ACP_TURN_ERROR (the
+reason the ``error`` turn logs under HOME as agy does; empty logs none).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
@@ -44,6 +45,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import uuid
 
 LOG = os.environ.get("FAKE_ACP_LOG")
@@ -330,6 +332,7 @@ class Agent:
             await self.say(sid, "planned")
             return {"stopReason": "end_turn"}
         if word == "error":
+            log_turn_error()
             await self.say(sid, "\n⚠ Agent execution terminated due to error.\n")
             return {"stopReason": "end_turn"}
         if word == "die":
@@ -439,6 +442,20 @@ def usage() -> int:
         {"model": "gemini-3.8-flash", "remainingFraction": 1.0, "resetTime": "2026-11-12T10:00:00Z"},
     ]}), flush=True)
     return 0
+
+
+def log_turn_error() -> None:
+    """Write the reason where agy 1.5.8 does: its own log under HOME, not
+    stderr. FAKE_ACP_TURN_ERROR names it; empty logs nothing."""
+    reason = os.environ.get("FAKE_ACP_TURN_ERROR",
+                            "INVALID_ARGUMENT (code 400): request contains an invalid argument.")
+    if not reason:
+        return
+    folder = os.path.join(os.environ.get("HOME") or ".", ".gemini", "antigravity-cli", "log")
+    os.makedirs(folder, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    with open(os.path.join(folder, f"acp-server-{stamp}-{os.getpid()}.log"), "a", encoding="utf-8") as log:
+        log.write(f"E1115 12:00:00.000000 {os.getpid()} errorreport.go:57] agent executor error: {reason}\n")
 
 
 def models() -> int:

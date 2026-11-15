@@ -10,6 +10,7 @@
 	import {
 		cancelAntigravityLogin,
 		completeAntigravityLogin,
+		getAntigravityLogin,
 		startAntigravityLogin,
 		type AntigravityLogin
 	} from '$lib/api/antigravity';
@@ -28,9 +29,13 @@
 		/** ``note``: why nothing was started (already signed in). */
 		onSignedIn: (note?: string) => void;
 		onCancel?: () => void;
+		/** The sign-in ended elsewhere (another tab finished, cancelled or let it expire). */
+		onEnded?: () => void;
 	}
 
-	let { rowId, startLabel = 'Start sign-in', pending = null, onSignedIn, onCancel }: Props = $props();
+	let { rowId, startLabel = 'Start sign-in', pending = null, onSignedIn, onCancel, onEnded }: Props = $props();
+	/** How often a waiting panel reads the sign-in's state (a memory read on the worker). */
+	const WATCH_MS = 3000;
 
 	let login = $state<AntigravityLogin | null>(null);
 	let code = $state('');
@@ -108,6 +113,33 @@
 		if (id) void cancelAntigravityLogin(rowId, id).catch(() => {});
 		onCancel?.();
 	}
+
+	// A sign-in completed, cancelled or expired in another tab must not leave
+	// this panel waiting for a code (#1533). Focus alone missed it: poll the
+	// cheap state read while the code entry shows, never the agent probe.
+	$effect(() => {
+		const id = login?.state === 'awaiting_code' ? login.login_id : null;
+		if (!id) return;
+		const timer = setInterval(async () => {
+			if (busy) return;
+			let answer;
+			try {
+				answer = await getAntigravityLogin(rowId, id);
+			} catch {
+				return; // a dropped read says nothing; the next one may
+			}
+			// Our own Finish or Cancel since owns the panel.
+			if (busy || login?.login_id !== id || login.state !== 'awaiting_code') return;
+			if (answer.state === 'awaiting_code' || answer.state === 'completing') return;
+			dismissed = id;
+			login = null;
+			owned = false;
+			code = '';
+			error = answer.message || 'This sign-in ended in another tab or expired. Start the sign-in again if you still need it.';
+			onEnded?.();
+		}, WATCH_MS);
+		return () => clearInterval(timer);
+	});
 
 	// Leaving mid-sign-in ends the agent's sign-in process on the worker.
 	onDestroy(() => {

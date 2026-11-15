@@ -141,6 +141,8 @@ let _initialLoadStarted = false;
 // Retry/open callers join the flight; data changes require a newer snapshot.
 let _refreshInFlight: Promise<void> | null = null;
 let _refreshInvalidated = false;
+/** One model-list fetch per provider at a time, outliving the Models tab that started it (#1649). */
+const _modelFetches = new Map<string, Promise<FetchModelsResult>>();
 
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 	createSubscribers<ProvidersState>(
@@ -576,8 +578,22 @@ export const providers = {
 	 * Fetch the provider's live catalog and share a bounded discovery snapshot.
 	 * Curation is unchanged; throws only when discovery itself fails.
 	 */
-	async fetchProviderModels(id: string): Promise<FetchModelsResult> {
-		return apiFetchProviderModels(id);
+	fetchProviderModels(id: string): Promise<FetchModelsResult> {
+		// A second caller (the tab reopened mid-fetch) joins the running fetch.
+		let pending = _modelFetches.get(id);
+		if (!pending) {
+			const started = apiFetchProviderModels(id).finally(() => {
+				if (_modelFetches.get(id) === started) _modelFetches.delete(id);
+			});
+			_modelFetches.set(id, started);
+			pending = started;
+		}
+		return pending;
+	},
+
+	/** Whether a model-list fetch for this provider is still running. */
+	modelFetchRunning(id: string): boolean {
+		return _modelFetches.has(id);
 	},
 
 	// ------------------------------------------------------------------------
@@ -597,6 +613,7 @@ export const providers = {
 	/** Reset the whole store (test/teardown helper). */
 	clear() {
 		_refreshInFlight = null;
+		_modelFetches.clear();
 		_refreshInvalidated = false;
 		_state = { ...initialState };
 		_initialLoadStarted = false;

@@ -186,8 +186,9 @@ class AcpAgentSpec:
             return mode
         return _ACP_NORMAL_MODE if _ACP_NORMAL_MODE in available else None
 
-    def turn_failure(self, text: str) -> str | None:
-        """An error the agent reported as message text instead of an RPC error."""
+    def turn_failure(self, text: str, pid: int | None = None) -> str | None:
+        """An error the agent reported as message text instead of an RPC error.
+        ``pid``: the agent process, for a spec that reads its own log."""
         return None
 
     def auth_message(self, exc: AcpError) -> str:
@@ -999,7 +1000,7 @@ class AcpLoop:
             await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                          usage=usage, cost_usd=cost))
             return
-        reported = self.spec.turn_failure(mapper.text)
+        reported = self.spec.turn_failure(mapper.text, pid=conn.pid)
         if reported:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=reported,
                                         provider_message=" | ".join(conn.stderr_tail[-3:]) or None,

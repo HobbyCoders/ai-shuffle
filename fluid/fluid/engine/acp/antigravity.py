@@ -16,11 +16,16 @@ docs/internal/antigravity-acp-spike.md.
   it does not advertise the standard ``sessionCapabilities.systemPrompt``).
 * A failed model call is reported as message text
   ("Agent execution terminated due to error.") with ``stopReason: end_turn``.
+  The reason is not on stderr: 1.5.8 writes it to its own log under ``HOME``
+  (``.gemini/antigravity-cli/log/acp-server-<time>-<pid>.log``, an
+  ``agent executor error: ...`` line), which ``turn_failure`` reads (#1587).
 """
 
 from __future__ import annotations
 
+import glob
 import os
+import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -52,6 +57,16 @@ EFFORT_TO_THOUGHT = {"minimal": "low", "low": "low", "medium": "medium", "high":
 THOUGHT_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh",
                      "extra": "xhigh", "max": "max"}
 _ERROR_TEXT = "Agent execution terminated due to error"
+# Where the agent logs a failed turn's reason, inside its HOME (agy 1.5.8).
+_LOG_DIR = (".gemini", "antigravity-cli", "log")
+_EXECUTOR_ERROR = re.compile(r"agent executor error:\s*(.+?)\s*$")
+_LOG_TAIL_BYTES = 64 * 1024
+_REASON_CHARS = 400
+# A reason that names the credential or the quota keeps that hint; anything
+# else (a rejected request, a server error) is shown as it is.
+_AUTH_REASON = re.compile(r"UNAUTHENTICATED|PERMISSION_DENIED|API[_ ]?key|\bcode 40[13]\b|"
+                          r"invalid_grant|not (?:signed|logged) in|credential", re.I)
+_QUOTA_REASON = re.compile(r"RESOURCE_EXHAUSTED|\bcode 429\b|quota|rate limit", re.I)
 # Environment the agent may inherit from the host; everything else (API keys,
 # database URLs, tokens) is left out.
 _PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
@@ -255,10 +270,43 @@ class AntigravitySpec(AcpAgentSpec):
                        models: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
         return offered_models(options, models) or None
 
-    def turn_failure(self, text: str) -> str | None:
-        if _ERROR_TEXT in (text or ""):
-            return ("Antigravity ended the turn with an error. Check the provider's sign-in or "
-                    "API key, and its quota.")
+    def turn_failure(self, text: str, pid: int | None = None) -> str | None:
+        if _ERROR_TEXT not in (text or ""):
+            return None
+        reason = self.logged_reason(pid)
+        if reason is None:
+            return "Antigravity ended the turn with an error and logged no reason."
+        if _AUTH_REASON.search(reason):
+            return f"Antigravity ended the turn: {reason}. Check the provider's sign-in or API key."
+        if _QUOTA_REASON.search(reason):
+            return f"Antigravity ended the turn: {reason}. Check the provider's quota."
+        return f"Antigravity ended the turn with an error: {reason}"
+
+    def logged_reason(self, pid: int | None = None) -> str | None:
+        """The last ``agent executor error`` the agent logged: its own log
+        (named with ``pid``); with no pid (the agent already exited), the
+        newest one. Another process's log (another chat on the same row) is
+        never read for a live agent. None when there is no such line."""
+        home = (self.env or {}).get("HOME")
+        if not home:
+            return None
+        folder = os.path.join(home, *_LOG_DIR)
+        logs = glob.glob(os.path.join(glob.escape(folder), "acp-server-*.log"))
+        candidates = [path for path in logs if path.endswith(f"-{pid}.log")] if pid else logs
+        try:
+            path = max(candidates, key=os.path.getmtime) if candidates else None
+            if path is None:
+                return None
+            with open(path, "rb") as handle:
+                handle.seek(max(0, os.path.getsize(path) - _LOG_TAIL_BYTES))
+                lines = handle.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return None
+        for line in reversed(lines):
+            match = _EXECUTOR_ERROR.search(line)
+            if match and match.group(1):
+                reason = match.group(1).rstrip(". ")
+                return reason if len(reason) <= _REASON_CHARS else reason[:_REASON_CHARS - 1] + "…"
         return None
 
     def auth_message(self, exc: AcpError) -> str:

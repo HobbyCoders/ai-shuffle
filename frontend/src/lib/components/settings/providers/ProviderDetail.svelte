@@ -73,12 +73,14 @@
 
 	/** Throws on the first failure: the Danger zone shows it and the page stays. */
 	async function removeAll() {
-		for (const c of provider.credentials) {
+		// Each delete can close this detail; capture its props first (#1651).
+		const { credentials, gateway } = provider;
+		for (const c of credentials) {
 			if (c.draft) continue;
 			if (c.flavor === 'fal') await providers.clearFalKey();
 			else if (c.row) await providers.deleteProvider(c.row.id);
 		}
-		if (provider.gateway) settingsNav.clearSelection('providers');
+		if (gateway) settingsNav.clearSelection('providers');
 	}
 
 	const danger = $derived<DangerAction[]>(

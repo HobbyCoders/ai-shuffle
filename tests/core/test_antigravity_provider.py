@@ -1606,6 +1606,37 @@ def test_personal_sign_in_runs_the_binary_flow(client):
     assert client.get(f"{BASE}/providers/{row['id']}/status").json()["state"] == "signed_out"
 
 
+def test_a_sign_in_ended_elsewhere_reads_as_ended(client):
+    """An open panel polls this cheap read (no agent run) and leaves its
+    waiting state once another tab's completion failed (#1533)."""
+    row = _create(client)
+    started = client.post(f"{BASE}/providers/{row['id']}/login").json()
+    url = f"{BASE}/providers/{row['id']}/login/{started['login_id']}"
+    assert client.get(url).json() == started
+    probes = []
+    real_probe = ag.probe
+
+    async def counting_probe(r):
+        probes.append(r)
+        return await real_probe(r)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(ag, "probe", counting_probe)
+        assert client.get(url).json()["state"] == "awaiting_code"
+        assert probes == []  # the read never runs the agent
+    # Another tab sends a wrong code: the sign-in fails and is dropped.
+    bad = client.post(f"{url}/complete", json={"code": "wrong"}).json()
+    assert bad["state"] == "failed"
+    ended = client.get(url).json()
+    assert ended["state"] == "ended" and ended["login_id"] == started["login_id"]
+    # Another row's id never reads this sign-in.
+    other = _create(client)
+    again = client.post(f"{BASE}/providers/{row['id']}/login").json()
+    assert client.get(f"{BASE}/providers/{other['id']}/login/{again['login_id']}").json()["state"] == "ended"
+    client.post(f"{BASE}/providers/{row['id']}/login/{again['login_id']}/complete", json={"code": "wrong"})
+    assert client.get(f"{BASE}/providers/{row['id']}/login/{again['login_id']}").json()["state"] == "ended"
+
+
 async def test_a_wrong_code_on_a_signed_in_worker_is_not_a_sign_in(mock_db, fake_agy, monkeypatch):
     """The agent's own refusal of the code wins over the check after it,
     which still finds the earlier sign-in."""

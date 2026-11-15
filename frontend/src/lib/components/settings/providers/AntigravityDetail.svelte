@@ -188,9 +188,12 @@
 			button: 'Remove',
 			question: `Remove ${credential.name}?`,
 			onConfirm: async () => {
-				if (!keyRow) await signOutAntigravity(row.id).catch(() => {});
-				await providers.deleteProvider(row.id);
-				settingsNav.selectItem(provider.item, 'providers');
+				// Deleting closes this detail; capture its props first (#1651).
+				const id = row.id;
+				const back = provider.item;
+				if (!keyRow) await signOutAntigravity(id).catch(() => {});
+				await providers.deleteProvider(id);
+				settingsNav.selectItem(back, 'providers');
 			}
 		}
 	]);
@@ -322,6 +325,7 @@
 						pending={status?.login ?? null}
 						onSignedIn={(note) => { signingIn = false; notice = note ?? ''; void loadStatus(); if (!note) flashSaved(); }}
 						onCancel={signingIn ? () => (signingIn = false) : undefined}
+						onEnded={() => void loadStatus()}
 					/>
 				{/if}
 			{/if}

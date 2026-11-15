@@ -528,7 +528,11 @@ async def test_plan_in_band_error_and_agent_exit(tmp_path: Path) -> None:
         plan = [e for e in d.events if isinstance(e, ToolUse) and e.name == "TodoWrite"]
         assert plan and plan[0].input["todos"][1]["status"] == "in_progress"
         end = await d.turn("error")
-        assert isinstance(end, ErrorEvent) and "ended the turn with an error" in end.message
+        # The provider's own reason, read from the agent's log under its HOME
+        # (not stderr), and no sign-in/quota guess for a rejected request (#1587).
+        assert isinstance(end, ErrorEvent)
+        assert end.message == ("Antigravity ended the turn with an error: "
+                               "INVALID_ARGUMENT (code 400): request contains an invalid argument")
         end = await d.turn("die")
         assert isinstance(end, ErrorEvent)
         # A dead agent is restarted (and resumed) on the next turn.
@@ -536,6 +540,30 @@ async def test_plan_in_band_error_and_agent_exit(tmp_path: Path) -> None:
         assert _received(tmp_path, "session/resume")
     finally:
         await d.close()
+
+
+@pytest.mark.parametrize(("logged", "expected"), [
+    ("", "Antigravity ended the turn with an error and logged no reason."),
+    ("RESOURCE_EXHAUSTED (code 429): quota exceeded for model.",
+     "Antigravity ended the turn: RESOURCE_EXHAUSTED (code 429): quota exceeded for model. Check the provider's quota."),
+    ("UNAUTHENTICATED (code 401): request had invalid authentication credentials",
+     "Antigravity ended the turn: UNAUTHENTICATED (code 401): request had invalid authentication credentials. "
+     "Check the provider's sign-in or API key."),
+])
+def test_turn_failure_keeps_the_hint_only_for_auth_or_quota(tmp_path: Path, logged: str, expected: str) -> None:
+    spec = _spec(tmp_path)
+    folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
+    folder.mkdir(parents=True, exist_ok=True)
+    # Another process's log (another chat on the row) is not this agent's reason.
+    (folder / "acp-server-20261115-120000-111.log").write_text(
+        "E1115 errorreport.go:57] agent executor error: INVALID_ARGUMENT (code 400): someone else's\n")
+    if logged:
+        (folder / "acp-server-20261115-120001-222.log").write_text(
+            "I1115 server.go:12] serving\n"
+            "E1115 errorreport.go:57] agent executor error: an earlier turn\n"
+            f"E1115 errorreport.go:57] agent executor error: {logged}\n")
+    assert spec.turn_failure("⚠ Agent execution terminated due to error.", pid=222) == expected
+    assert spec.turn_failure("all fine", pid=222) is None
 
 
 async def test_set_model_mid_session_and_images(tmp_path: Path) -> None:

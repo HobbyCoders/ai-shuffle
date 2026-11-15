@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	updateModelProvider: vi.fn(),
 	activateModelProvider: vi.fn(),
+	fetchProviderModels: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
@@ -30,7 +31,8 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		...actual,
 		listModelProviders: mocks.listModelProviders,
 		updateModelProvider: mocks.updateModelProvider,
-		activateModelProvider: mocks.activateModelProvider
+		activateModelProvider: mocks.activateModelProvider,
+		fetchProviderModels: mocks.fetchProviderModels
 	};
 });
 
@@ -326,5 +328,27 @@ describe('providers store — fal.ai and Claude mode', () => {
 		expect(providers.current.claudeForbidden).toBe(true);
 		expect(providers.current.claudeError).toBe(null);
 		get.mockRestore();
+	});
+});
+
+describe('fetchProviderModels', () => {
+	it('shares one running fetch per provider and says when it is running (#1649)', async () => {
+		let finish: (v: unknown) => void = () => {};
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => { finish = r; }));
+		const first = providers.fetchProviderModels('p1');
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		expect(providers.modelFetchRunning('p2')).toBe(false);
+		// The Models tab reopened mid-fetch joins it instead of starting another.
+		const second = providers.fetchProviderModels('p1');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(1);
+		finish({ source: 'agent', models: [] });
+		expect(await second).toEqual(await first);
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		// A failed fetch ends too, so the next Refresh starts a new one.
+		mocks.fetchProviderModels.mockRejectedValueOnce(new Error('offline'));
+		await expect(providers.fetchProviderModels('p1')).rejects.toThrow('offline');
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
 	});
 });
