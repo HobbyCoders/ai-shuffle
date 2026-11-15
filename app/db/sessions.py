@@ -990,7 +990,7 @@ def set_session_run_binding(
     clear_effort: bool = False,
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
-) -> None:
+) -> bool:
     """Persist the run binding a turn actually used onto its session.
 
     Agents do not pin a model, so the session row carries the choice. The
@@ -1016,6 +1016,12 @@ def set_session_run_binding(
     effort binding (the live settings endpoint's model-default choice).
     ``fast_pinned`` marks a delegated worker whose fast mode the owner set in
     the worker's own chat, so a parent's later toggle leaves it alone.
+
+    A model write that names no window also drops a saved context-window pin
+    larger than the new model's full window (#1640): the options builder
+    already ignores such a pin, and the API must not report a window the chat
+    no longer has. Returns whether that pin was dropped, so a caller can tell
+    open composers.
     """
     _ph = ph()
     updates: List[str] = []
@@ -1065,7 +1071,7 @@ def set_session_run_binding(
         values.append(json.dumps(normalize_workspace_project_ids(workspace_project_ids)))
 
     if not updates:
-        return
+        return False
     values.append(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
@@ -1073,6 +1079,45 @@ def set_session_run_binding(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
             values,
         )
+    if clean_model and clean_context_window is None:
+        return _drop_pin_above_model_maximum(session_id)
+    return False
+
+
+def _drop_pin_above_model_maximum(session_id: str) -> bool:
+    """Clear a saved context window the chat's (new) model cannot hold.
+
+    Only a pin strictly larger than the model's known maximum is cleared; a
+    smaller pin stays the ceiling it is, and an unknown maximum changes nothing.
+    The clear is conditional on the pin read, so a newer pick made meanwhile
+    is never erased.
+    """
+    try:
+        row = get_session(session_id)
+        pin = (row or {}).get("context_window")
+        if not pin:
+            return False
+        from app.core.model_registry import session_context_window_maximum
+
+        maximum = session_context_window_maximum(row)
+        if maximum is None or pin <= maximum:
+            return False
+        _ph = ph()
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                f"UPDATE sessions SET context_window = NULL "
+                f"WHERE id = {_ph} AND context_window = {_ph}",
+                (session_id, pin),
+            )
+            cleared = (cursor.rowcount or 0) > 0
+        if cleared:
+            logger.info("Cleared context window %s on session %s: its model's maximum is %s",
+                        pin, session_id, maximum)
+        return cleared
+    except Exception:  # noqa: BLE001 — the model binding is already saved.
+        logger.warning("Could not check the context window of session %s", session_id, exc_info=True)
+        return False
 
 
 def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:

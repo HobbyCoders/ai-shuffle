@@ -511,6 +511,51 @@ class TestSubmitPersistsTheBinding:
         assert broadcast.await_args_list == expected
         assert db.get_session("s-push")["is_active"]
 
+    @pytest.mark.parametrize("pin, model, kept", [
+        # #1640: Opus 4.6 at 1M, then Haiku 4.5 (200k): the 1M pin goes.
+        (1_000_000, "claude-haiku-4-5", None),
+        # A pin the new model can hold stays the ceiling it is.
+        (200_000, "claude-haiku-4-5", 200_000),
+        (1_000_000, "claude-opus-4-7", 1_000_000),
+    ])
+    def test_model_switch_drops_a_pin_the_new_model_cannot_hold(
+            self, mock_db, authenticated_client, pin, model, kept):
+        make_profile("agent", {})
+        db.create_session("s-shrink", profile_id="agent", model="claude-opus-4-6",
+                          context_window=pin)
+        dropped = db.set_session_run_binding("s-shrink", model=model)
+        assert dropped is (kept is None)
+        assert db.get_session("s-shrink")["context_window"] == kept
+        response = authenticated_client.get("/api/v1/sessions/s-shrink")
+        assert response.status_code == 200
+        assert response.json()["context_window"] == kept
+
+    def test_a_window_written_with_the_model_is_not_dropped(self, mock_db):
+        make_profile("agent", {})
+        db.create_session("s-both", profile_id="agent", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        assert db.set_session_run_binding(
+            "s-both", model="claude-opus-4-7", context_window=400_000) is False
+        assert db.get_session("s-both")["context_window"] == 400_000
+
+    async def test_send_that_drops_the_pin_tells_open_clients(self, mock_db):
+        """#1640: open composers hold the dropped pin as their base; they learn
+        it is gone, or their next window would be dropped as outdated."""
+        from unittest.mock import AsyncMock, call
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session("s-drop", profile_id="agent", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await turn_manager.submit_async(
+                "s-drop", "user", prompt="hi", profile_id="agent",
+                overrides={"model": "claude-haiku-4-5"}, no_kick=True,
+            )
+        assert db.get_session("s-drop")["context_window"] is None
+        assert call(session_id="s-drop", updates={"context_window": None},
+                    source_device_id=None) in broadcast.await_args_list
+
     def test_zero_base_means_no_pin_seen(self, mock_db):
         make_profile("agent", {})
         db.create_session("s-none", profile_id="agent", model="opus")

@@ -627,6 +627,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						contextWindowPin: updates.context_window as number,
 					}));
 					onPersistSession();
+				} else if (updates.context_window === null && updatedSessionId
+					&& updatedSessionId === getState().sessionId) {
+					// The pin was dropped (a switch to a model with a smaller window,
+					// #1640): the next send's base must say "no pin" too.
+					update(s => ({ ...s, contextWindowPin: null }));
+					onPersistSession();
 				}
 				// An effort pick saved from another tab or device, Auto (null)
 				// included (#1579): adopt it on screen and in the cached copy a
