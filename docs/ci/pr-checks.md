@@ -1279,11 +1279,22 @@ record).
   rename lists both paths). The union of every matching `map.json` rule is
   selected; a file matching an `all` rule (the harness, `select.mjs`, this
   workflow, `scripts/devloop/**`, the core chat surface and the session event
-  stream) selects everything.
+  stream) selects everything. An `all` rule's `except` globs leave a file to
+  the other rules: the dev instance rule excepts the shard weights
+  (`journey_weights.json` only decides which runner a journey file runs on),
+  `journey_issues.py` (main-only issue reporting after the journeys) and a
+  manual real-CLI probe nothing imports.
+- A journey helper module (`frontend/tests/journeys/lib/**`, the map's
+  `by_import`) selects the journey files that import it, directly or through
+  other modules or a `.cases.mjs` file; when `runner.mjs` or `run-all.mjs`
+  reaches it, every journey. The imports are read from the files (relative
+  static, re-export and literal dynamic imports), so a new import moves the
+  selection with it.
 - When a merge queue guards main, a pull request runs `select.mjs --ci
-  --before-queue` instead: the same rules without the `all` rules and without
-  the unmapped fallback below, so always a subset of the full selection. The
-  queue's run makes the full one before main moves.
+  --before-queue` instead: the same rules without the `all` rules, without a
+  helper module the runner reaches and without the unmapped fallback below,
+  so always a subset of the full selection. The queue's run makes the full
+  one before main moves.
 - A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
   `frontend/static/**`) that **no** rule covers also selects everything: the
   map says what a file needs, it does not prove an unlisted UI file needs

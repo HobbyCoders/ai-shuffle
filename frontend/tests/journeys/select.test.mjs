@@ -195,3 +195,56 @@ test('a split journey: its shared cases or either half selects both halves', () 
 		}
 	}
 });
+
+test("an `all` rule's except globs leave a file to the other rules", () => {
+	const map = {
+		all: [{ why: 'dev instance', globs: ['scripts/devloop/**'], except: ['scripts/devloop/journey_weights.json'] }],
+		rules: [{ why: 'one surface', journeys: [journeys[0]], globs: ['scripts/devloop/journey_weights.json'] }]
+	};
+	assert.equal(selectForCi(['scripts/devloop/ci.py'], map, journeys).all, true);
+	assert.deepEqual(selectForCi(['scripts/devloop/journey_weights.json'], map, journeys).journeys, [journeys[0]]);
+	// An excepted UI source file with no other rule is uncovered, so the CI selection still widens.
+	const ui = { unmapped_runs_all: { why: 'uncovered UI source', globs: ['frontend/src/**'] },
+		all: [{ why: 'core', globs: ['frontend/src/lib/**'], except: ['frontend/src/lib/x.ts'] }], rules: [] };
+	assert.equal(selectForCi(['frontend/src/lib/x.ts'], ui, journeys).all, true);
+	assert.deepEqual(selectJourneys(['frontend/src/lib/x.ts'], ui, journeys).journeys, []);
+	// The checked-in exceptions: shard weights, main-only issue reporting and a manual probe run no journey.
+	for (const file of ['scripts/devloop/journey_weights.json', 'scripts/devloop/journey_issues.py', 'scripts/devloop/real_claude_hook_limit_probe.py']) {
+		assert.deepEqual(selectForCi([file]).journeys, [], file);
+	}
+	assert.equal(selectForCi(['scripts/devloop/journey_retry.py']).all, true);
+	// An except glob must match a tracked file too.
+	const checked = validMap();
+	checked.all = [{ why: 'with except', globs: ['frontend/tests/journeys/select.mjs'], except: [missingGlob] }];
+	assert.deepEqual(checkMap(checked), [`glob matches no tracked file: ${missingGlob} (with except)`]);
+});
+
+test('a journey helper module selects the journeys that import it, and every journey when the runner does', () => {
+	const map = loadMap();
+	const lib = (name) => `frontend/tests/journeys/lib/${name}`;
+	// Imported by two journey files directly.
+	assert.deepEqual(selectForCi([lib('voice.mjs')]).journeys, ['voice-call', 'voice-provider-endings']);
+	// Imported through a shared cases file: both halves of each split journey that uses it.
+	const stopQueue = selectForCi([lib('stop-queue.mjs')]);
+	assert.equal(stopQueue.all, false);
+	for (const name of ['queue-while-busy', 'queue-while-busy-2', 'stop-with-queued-messages', 'stop-with-queued-messages-2']) {
+		assert.ok(stopQueue.journeys.includes(name), name);
+	}
+	// The runner imports app.mjs, and app.mjs imports trace.mjs: every journey.
+	for (const file of [lib('app.mjs'), lib('trace.mjs')]) {
+		const every = selectForCi([file]);
+		assert.equal(every.all, true, file);
+		assert.match(every.reasons[journeys[0]][0], /runner\.mjs imports it/);
+		// Before a merge queue that is left to the queue, like an `all` rule.
+		assert.deepEqual(selectBeforeQueue([file]).journeys, [], file);
+	}
+	assert.deepEqual(selectBeforeQueue([lib('voice.mjs')]).journeys, ['voice-call', 'voice-provider-endings']);
+	// A module nothing imports, and a unit test beside them, select nothing.
+	assert.deepEqual(selectForCi([lib('__nothing_imports_this__.mjs')]).journeys, []);
+	assert.deepEqual(selectForCi([lib('verdict.test.mjs')]).journeys, []);
+	// Without roots the map check fails, and every root must be a tracked file.
+	const broken = { ...validMap(), by_import: { why: 'helpers', globs: map.by_import.globs } };
+	assert.deepEqual(checkMap(broken), ['by_import has no "roots" (helpers)']);
+	broken.by_import.roots = ['frontend/tests/journeys/__missing_root__.mjs'];
+	assert.deepEqual(checkMap(broken), ['by_import root is not a tracked file: frontend/tests/journeys/__missing_root__.mjs']);
+});

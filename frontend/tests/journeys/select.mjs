@@ -21,13 +21,17 @@
 //                                                   tracked file, every journey is reachable
 //   node tests/journeys/select.mjs --check --map <path>  validate another map against this checkout
 //
+// map.json's `all` rules select every journey (minus their `except` globs);
+// `by_import` files (the helpers in lib/) select the journeys that import them,
+// or every journey when one of its `roots` (the runner) does.
+//
 // Exit code 0; 2 on a bad map or a git error. Files no rule covers select
 // nothing (a docs or backend-only change needs no journey). With --ci an
 // uncovered UI source file selects everything instead: the map names what a
 // file needs, it does not prove an unlisted UI file needs nothing.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -69,9 +73,46 @@ export function globToRegExp(glob) {
 /** Unit test files (foo.test.ts) never need a journey: the code they test does. */
 const isTestFile = (file) => /\.test\.[a-z]+$/.test(file);
 
+const matches = (globs, file) => (globs ?? []).some((g) => globToRegExp(g).test(file));
+
+/** Does this `all` rule cover `file`: one of its globs and none of its `except` globs? */
+const allRuleCovers = (rule, file) => matches(rule.globs, file) && !matches(rule.except, file);
+
+const JOURNEY_DIR = 'frontend/tests/journeys';
+const BEFORE_QUEUE = Symbol('before the merge queue');
+const RELATIVE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)['"](\.{1,2}\/[^'"]+)['"]/g;
+
+/**
+ * Every repo-relative module `entry` reaches through relative imports (static,
+ * re-exports and literal dynamic imports), itself included. Comments that look
+ * like imports only widen the answer. An unreadable module ends its branch.
+ */
+function reachable(entry, cache) {
+	if (cache.has(entry)) return cache.get(entry);
+	const seen = new Set();
+	const queue = [entry];
+	while (queue.length) {
+		const file = queue.pop();
+		if (seen.has(file)) continue;
+		seen.add(file);
+		let source;
+		try {
+			source = readFileSync(join(REPO, file), 'utf8');
+		} catch {
+			continue;
+		}
+		for (const [, spec] of source.matchAll(RELATIVE_IMPORT)) queue.push(posix.join(posix.dirname(file), spec));
+	}
+	cache.set(entry, seen);
+	return seen;
+}
+
 /**
  * The journeys `files` need: { journeys: [...], reasons: { journey: [why …] } }.
- * A file matching an `all` rule selects every journey.
+ * A file matching an `all` rule (and none of its `except` globs) selects every
+ * journey. A file matching `by_import` selects the journeys whose files import
+ * it, directly or through other modules, and every journey when one of its
+ * `roots` (what every journey runs under: the runner) does.
  */
 export function selectJourneys(files, map = loadMap(), journeys = allJourneys()) {
 	const picked = new Map();
@@ -80,11 +121,22 @@ export function selectJourneys(files, map = loadMap(), journeys = allJourneys())
 		if (!picked.has(name)) picked.set(name, new Set());
 		picked.get(name).add(why);
 	};
+	const imports = new Map();
 	for (const file of files) {
 		if (isTestFile(file)) continue;
 		for (const rule of map.all) {
-			if (rule.globs.some((g) => globToRegExp(g).test(file))) {
+			if (allRuleCovers(rule, file)) {
 				for (const name of journeys) add(name, `${file}: ${rule.why}`);
+			}
+		}
+		if (map.by_import && matches(map.by_import.globs, file)) {
+			const why = `${file}: ${map.by_import.why}`;
+			const everyRun = (map.by_import.roots ?? []).find((root) => reachable(root, imports).has(file));
+			// Before a merge queue, a module every journey runs under is left to the queue, like an `all` rule.
+			if (everyRun && map.by_import[BEFORE_QUEUE]) continue;
+			for (const name of journeys) {
+				if (everyRun) add(name, `${why} (${everyRun.split('/').pop()} imports it)`);
+				else if (reachable(`${JOURNEY_DIR}/${name}.journey.mjs`, imports).has(file)) add(name, why);
 			}
 		}
 		for (const rule of map.rules) {
@@ -101,9 +153,11 @@ export function selectJourneys(files, map = loadMap(), journeys = allJourneys())
 	return { journeys: names, reasons: Object.fromEntries(names.map((n) => [n, [...picked.get(n)]])) };
 }
 
-/** Does any rule of the map (an `all` rule or a journey rule) cover `file`? */
+/** Does any rule of the map (an `all` rule, `by_import` or a journey rule) cover `file`? */
 export function isMapped(file, map = loadMap()) {
-	return [...map.all, ...map.rules].some((rule) => rule.globs.some((g) => globToRegExp(g).test(file)));
+	return map.all.some((rule) => allRuleCovers(rule, file))
+		|| matches(map.by_import?.globs, file)
+		|| map.rules.some((rule) => matches(rule.globs, file));
 }
 
 export const MAP_FILE = 'frontend/tests/journeys/map.json';
@@ -153,12 +207,17 @@ export function selectForCi(files, map = loadMap(), journeys = allJourneys(), pr
 /**
  * What a pull request runs when a merge queue checks the merged result again
  * before main moves: the journeys a rule names for the changed files, and no
- * more. The `all` rules and the unmapped fallback are left to the queue's run,
- * which selects with selectForCi. Every journey the change needs still passes
+ * more. The `all` rules, the unmapped fallback and a `by_import` module one of
+ * its roots reaches are left to the queue's run, which selects with selectForCi. Every journey the change needs still passes
  * before main moves, once per pull request instead of once per push.
  */
 export function selectBeforeQueue(files, map = loadMap(), journeys = allJourneys(), previousMap = null) {
-	const named = (each) => each && { ...each, all: [], unmapped_runs_all: undefined };
+	const named = (each) => each && {
+		...each,
+		all: [],
+		unmapped_runs_all: undefined,
+		by_import: each.by_import && { ...each.by_import, [BEFORE_QUEUE]: true }
+	};
 	return selectForCi(files, named(map), journeys, named(previousMap));
 }
 
@@ -183,9 +242,15 @@ export function checkMap(map = loadMap(), journeys = allJourneys()) {
 	const tracked = [...git(['ls-files']).split('\n'), ...git(['ls-files', '--others', '--exclude-standard']).split('\n')].filter(Boolean);
 	const rules = [...map.all.map((r) => ({ ...r, journeys: ['(all)'] })), ...map.rules];
 	if (map.unmapped_runs_all) rules.push({ ...map.unmapped_runs_all, journeys: ['(all)'] });
+	if (map.by_import) {
+		rules.push({ ...map.by_import, journeys: ['(all)'] });
+		const roots = map.by_import.roots ?? [];
+		if (!roots.length) problems.push(`by_import has no "roots" (${map.by_import.why})`);
+		for (const root of roots) if (!tracked.includes(root)) problems.push(`by_import root is not a tracked file: ${root}`);
+	}
 	for (const rule of rules) {
 		if (!rule.why) problems.push(`a rule has no "why": ${JSON.stringify(rule.globs)}`);
-		for (const glob of rule.globs) {
+		for (const glob of [...rule.globs, ...(rule.except ?? [])]) {
 			const re = globToRegExp(glob);
 			if (!tracked.some((f) => re.test(f))) problems.push(`glob matches no tracked file: ${glob} (${rule.why})`);
 		}

@@ -51,7 +51,10 @@ failure from the journey's point of view). Finish edits, then run.
 `select.mjs` reads [`map.json`](map.json): changed-file globs → journeys.
 Files that every journey goes through (the chat surface, session stores, the
 event stream, the harness itself, the dev instance's seed) are under `all` and
-run everything; the rest name the journeys they affect. Unit test files and
+run everything, apart from an `all` rule's `except` globs; the rest name the
+journeys they affect. A helper under `lib/` runs the journeys that import it
+(through other modules and `.cases.mjs` files too), or every journey when
+`runner.mjs` does (`by_import` in the map). Unit test files and
 files no rule covers (docs, unrelated backend) select nothing. `--check`
 fails when a glob matches no file or a journey has no rule, so a rename
 cannot silently drop coverage; run it when you add a journey or move files.
