@@ -330,7 +330,10 @@ jobs:
       fail-fast: false
       matrix:
         shard: ${{ fromJSON(needs.journey-plan.outputs.shards) }}
-    runs-on: ubuntu-24.04
+    # The one job on a paid runner: the journeys are most of CI's minutes, so
+    # they are where a faster machine pays. Blacksmith's 4-vCPU Ubuntu 24.04
+    # image stands in for GitHub's; every other job stays on the free runners.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 35
     env:
       JOURNEY_SELECTION: ${{ needs.journey-plan.outputs.only }}
