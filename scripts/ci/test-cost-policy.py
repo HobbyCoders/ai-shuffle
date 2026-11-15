@@ -27,7 +27,9 @@ ANDROID = {"android.yml", "ci-android-minified.yml"}
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
-    "ci.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
+    # merge_group: a merge queue for main runs the checks once on the merged
+    # result; nothing starts on it until the repository has such a queue.
+    "ci.yml": {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
 }
