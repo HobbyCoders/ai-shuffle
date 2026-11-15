@@ -69,7 +69,7 @@
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { swipeArmDistance } from '$lib/utils/swipe-arm';
+	import { FLICK_WINDOW_MS, flickVelocity, sampleTime, swipeArmDistance, type SwipeSample } from '$lib/utils/swipe-arm';
 	import {
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
@@ -443,8 +443,8 @@
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
 	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
-	let lastX = 0;
-	let lastT = 0;
+	/** Recent finger positions, for the release speed (see flickVelocity). */
+	let samples: SwipeSample[] = [];
 	let velocity = 0;
 	let longTimer: ReturnType<typeof setTimeout> | null = null;
 	let laneTimer: ReturnType<typeof setTimeout> | null = null;
@@ -468,9 +468,9 @@
 		if (slideX !== null) return;
 		pointerId = event.pointerId;
 		pointerType = event.pointerType;
-		startX = lastX = event.clientX;
+		startX = event.clientX;
 		startY = event.clientY;
-		lastT = performance.now();
+		samples = [{ t: sampleTime(event), x: event.clientX }];
 		velocity = 0;
 		axis = null;
 		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
@@ -509,11 +509,12 @@
 			frameRef?.setPointerCapture?.(event.pointerId);
 		}
 		event.preventDefault();
-		const t = performance.now();
-		const elapsed = t - lastT;
-		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
-		lastX = event.clientX;
-		lastT = t;
+		// Speed over the last few moves by their own times: a busy page hands
+		// moves over late and in bunches, and one sample alone swings (#1637).
+		const t = sampleTime(event);
+		samples.push({ t, x: event.clientX });
+		while (samples.length > 2 && t - samples[1].t > FLICK_WINDOW_MS) samples.shift();
+		velocity = flickVelocity(samples);
 		// A row with no right-swipe action does not move that way.
 		if (swipe.right === null) dx = Math.min(0, dx);
 		const lim = armDistance * EASE_PAST_ARM;

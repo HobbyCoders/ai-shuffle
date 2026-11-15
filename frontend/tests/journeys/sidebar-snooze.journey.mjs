@@ -18,7 +18,18 @@
 // screen a slow 170px swipe opens the picker (right) and settles (left).
 // Guards: the arm point grows with the row again (40% of the phone app's
 // 856px list there is 342px). The responsive UI's sidebar is narrow at every
-// width, so only `--mobile-shell` showed the bug.
+// width, so only `--mobile-shell` showed the bug. The phone app's drawer has
+// the same rule (#1636): a slow 150px drag opens it from the chat and closes
+// it from a group header on the Fold's inner screen as on its cover screen,
+// and an 80px one does neither. Guards: the settle point grows with the
+// screen again (30% of 884px is 265px). That case runs only with
+// `--mobile-shell`, as the drawer is the phone app's.
+//
+// A quick flick commits short of the arm point however busy the page is
+// (#1637): 80px as eight moves 8ms apart, sent without waiting, so the page
+// handles them late and in bunches. Guards: the release speed comes from the
+// last move's handling time again, which read 0.6 to 4px/ms for a 1.25px/ms
+// finger, so most flicks sprang back.
 //
 // Snoozed and Settled rest at the bottom of the panel: Needs you and Active
 // read from the top, and the spare height sits between the two. Guards: the
@@ -110,6 +121,73 @@ async function swipeRow(page, id, direction, beforeLift, { travel: fixed } = {})
 		await touch('touchEnd', []);
 	} finally {
 		await cdp.detach();
+	}
+}
+
+/**
+ * A slow finger drag `travel` px sideways from (x, y): 8px steps at most
+ * 0.3px/ms, held before lifting, so only distance can complete it.
+ */
+async function dragScreen(page, x, y, travel) {
+	const steps = Math.ceil(Math.abs(travel) / 8);
+	const cdp = await page.context().newCDPSession(page);
+	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
+	try {
+		await touch('touchStart', [{ x, y }]);
+		for (let step = 1; step <= steps; step++) {
+			await touch('touchMove', [{ x: x + (travel * step) / steps, y }]);
+			await page.waitForTimeout(30);
+		}
+		await page.waitForTimeout(150);
+		await touch('touchEnd', []);
+	} finally {
+		await cdp.detach();
+	}
+}
+
+/**
+ * A quick 80px flick across the row: eight moves 8ms apart (1.25px/ms), each
+ * sent without waiting for the last, so the page handles them in bunches.
+ */
+async function flickRow(page, id, direction) {
+	await showChats(page);
+	if (page.__mobileShell) await expectDrawer(page, true, 'the drawer never settled open before the flick');
+	const row = page.locator(CARD(id));
+	await row.scrollIntoViewIfNeeded();
+	const box = await row.boundingBox();
+	const y = box.y + box.height / 2;
+	const from = direction > 0 ? box.x + 40 : box.x + box.width - 40;
+	const cdp = await page.context().newCDPSession(page);
+	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
+	try {
+		await touch('touchStart', [{ x: from, y }]);
+		const sent = [];
+		for (let step = 1; step <= 8; step++) {
+			sent.push(touch('touchMove', [{ x: from + direction * 10 * step, y }]));
+			await page.waitForTimeout(8);
+		}
+		await Promise.all(sent);
+		await touch('touchEnd', []);
+	} finally {
+		await cdp.detach();
+	}
+}
+
+/**
+ * The phone app's drawer, once it has settled open or shut and finished its
+ * slide: a touch that lands while it is still sliding in can hit the scrim.
+ */
+async function expectDrawer(page, open, what) {
+	try {
+		await page.waitForFunction((want) => {
+			const drawer = document.getElementById('mobile-nav-drawer');
+			if (!drawer || drawer.classList.contains('open') !== want || drawer.classList.contains('dragging')) return false;
+			if (drawer.getAnimations().length > 0) return false;
+			const box = drawer.getBoundingClientRect();
+			return want ? Math.abs(box.left) < 1 : box.right <= 1;
+		}, open, { timeout: 5_000 });
+	} catch {
+		throw new Error(what);
 	}
 }
 
@@ -422,6 +500,75 @@ await runJourney({
 				await waitSaved(page, id, (row) => !row.is_active && !row.snoozed_until, 'the left swipe never settled the chat');
 			}
 		},
+		{
+			// A quick flick the page handles late and in bunches still commits
+			// (#1637), at full speed and under the CPU throttle.
+			name: `${mobileShell ? 'native' : 'responsive'}-flick-commits`,
+			viewports: mobileShell ? ['phone', 'fold-inner'] : ['phone'],
+			setup: (ctx) => swipeSetup(ctx),
+			async act({ page, mark }) {
+				const id = page.__snoozeChat;
+				await waitLane(page, id, 'active');
+				const picker = snoozePicker(page);
+				for (let round = 1; round <= 3; round++) {
+					await mark(`quick 80px flick right (${round} of 3): the picker opens`);
+					await flickRow(page, id, 1);
+					await picker.waitFor({ timeout: 5_000 }).catch(() => {
+						throw new Error(`a quick 80px flick right did not open the picker (round ${round})`);
+					});
+					// Escape, or a scrim tap once the sheet has finished sliding in.
+					await page.keyboard.press('Escape');
+					if (!(await picker.waitFor({ state: 'hidden', timeout: 2_000 }).then(() => true, () => false))) {
+						const sheet = await picker.boundingBox();
+						await page.touchscreen.tap(sheet.x + sheet.width / 2, Math.max(8, sheet.y / 2));
+						await picker.waitFor({ state: 'hidden', timeout: 5_000 }).catch(() => {
+							throw new Error(`the picker would not close after flick ${round}`);
+						});
+					}
+					await expectRowInPlace(page, id);
+					expect(await laneOf(page, id) === 'active', 'a dismissed picker leaves the row in Active');
+				}
+				await mark('quick 80px flick left: the row settles');
+				await flickRow(page, id, -1);
+				await waitLane(page, id, 'settled', 10_000).catch(() => {
+					throw new Error('a quick 80px flick left did not settle the row');
+				});
+				await waitSaved(page, id, (row) => !row.is_active && !row.snoozed_until, 'the left flick never settled the chat');
+			}
+		},
+		...(mobileShell ? [{
+			// The phone app's drawer asks the same finger travel on a wide
+			// screen as on a phone (#1636): a slow 150px drag opens and closes
+			// it, an 80px one does neither.
+			name: 'native-drawer-fixed-travel',
+			viewports: ['fold-inner', 'fold-cover'],
+			setup: (ctx) => swipeSetup(ctx),
+			async act({ page, mark, log }) {
+				const { width, height } = page.viewportSize();
+				log(`screen ${width}px wide`);
+				const header = page.locator('#mobile-nav-drawer').getByRole('button', { name: /^Active/ }).first();
+				await page.locator('#mobile-nav-drawer .drawer-close').click();
+				await expectDrawer(page, false, 'the drawer never closed from its close button');
+
+				await mark('slow 80px drag right on the chat: the drawer stays shut');
+				await dragScreen(page, 40, height / 2, 80);
+				await expectDrawer(page, false, 'an 80px drag opened the drawer');
+
+				await mark('slow 150px drag right on the chat: the drawer opens');
+				await dragScreen(page, 40, height / 2, 150);
+				await expectDrawer(page, true, `a slow 150px drag did not open the drawer on a ${width}px screen`);
+
+				const box = await header.boundingBox();
+				const from = Math.min(box.x + box.width - 40, width - 40);
+				await mark('slow 80px drag left on a group header: the drawer stays open');
+				await dragScreen(page, from, box.y + box.height / 2, -80);
+				await expectDrawer(page, true, 'an 80px drag closed the drawer');
+
+				await mark('slow 150px drag left on a group header: the drawer closes');
+				await dragScreen(page, from, box.y + box.height / 2, -150);
+				await expectDrawer(page, false, `a slow 150px drag did not close the drawer on a ${width}px screen`);
+			}
+		}] : []),
 		{
 			name: `${mobileShell ? 'native' : 'responsive'}-swipe-right-settled`,
 			viewports: ['phone'],

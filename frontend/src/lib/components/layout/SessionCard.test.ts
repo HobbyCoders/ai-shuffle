@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -778,6 +778,26 @@ describe('SessionCard swipe gestures', () => {
 		await up(frame, { x: 210 });
 		await vi.advanceTimersByTimeAsync(450);
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
+	});
+
+	it('commits a flick whose moves are handled late and in bunches (#1637)', async () => {
+		// 80px in 64ms as eight moves 8ms apart by their own times, handled in
+		// pairs on a busy page: the last move alone would read 10px in 15ms.
+		const handled = [1000, 1017, 1019, 1033, 1035, 1050, 1052, 1066, 1081, 1081];
+		vi.spyOn(performance, 'now').mockImplementation(() => handled.shift() ?? 1081);
+		const at = (el: Element, kind: 'pointerDown' | 'pointerMove' | 'pointerUp', x: number, t: number) => {
+			const event = createEvent[kind](el, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: x, clientY: 20 });
+			Object.defineProperty(event, 'timeStamp', { value: t });
+			return fireEvent(el, event);
+		};
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await at(card, 'pointerDown', 50, 1000);
+		for (let i = 1; i <= 8; i++) await at(frame, 'pointerMove', 50 + i * 10, 1000 + i * 8);
+		expect(frame.classList.contains('armed')).toBe(false);
+		await at(frame, 'pointerUp', 130, 1066);
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
 	});
 
 	describe('on a wide row', () => {
