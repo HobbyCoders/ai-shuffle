@@ -1244,7 +1244,6 @@
 	<button
 		type="button"
 		class="usage-indicator"
-		class:idle={!showPercent && !(displayBreakdown.totalUsed > 0)}
 		title={windowKnown
 			? `${usedOfMax} tokens${displayBreakdown.overLimit ? ', over the limit' : ''}${nextWindowText ? ` · ${nextWindowText}` : ''} — click for details`
 			: `${usedText} tokens used · context window unknown — click for details`}
@@ -1424,24 +1423,9 @@
 		cursor: pointer;
 		transition: background-color 0.13s ease;
 	}
-	/* Nothing used yet: no ring, so a new chat never shows an empty grey circle.
-	   It stays mounted and reachable, because it is also the way to the account's
-	   usage limits: it shows (with its tooltip) when the keyboard reaches it, the
-	   pointer is on its own spot, or its popover is open. Not when the pointer is
-	   merely over the composer: the model picker opens inside it, and the empty
-	   ring used to appear beside the model chip. A touch screen has no hover, so
-	   there it stays. */
-	@media (hover: hover) {
-		.usage-indicator.idle {
-			opacity: 0;
-			transition: opacity 0.12s ease;
-		}
-		.usage-indicator.idle:hover,
-		.usage-indicator.idle:focus-visible,
-		.usage-indicator.idle[aria-expanded='true'] {
-			opacity: 1;
-		}
-	}
+	/* Nothing used yet: the empty ring still shows, on every device. It is the
+	   only way to the account's usage limits from a new chat, and a control that
+	   appears only under the pointer cannot be found. */
 
 	.usage-indicator:hover {
 		background: var(--scrim);
@@ -1459,8 +1443,11 @@
 		transform: rotate(-90deg);
 		transform-origin: center;
 	}
+	/* The track alone is the whole meter on a new chat, so it has to read on the
+	   composer surface: a hairline border colour does not. Same strength as the
+	   phone controls sheet's ring, and neutral like the fill below. */
 	.ring-track {
-		stroke: var(--border-strong);
+		stroke: color-mix(in oklch, var(--foreground) 28%, transparent);
 	}
 	/* Healthy usage is neutral, not the theme's primary: a usage meter only
 	   changes colour when it means something (warning, then danger). It is
@@ -1475,6 +1462,7 @@
 		transition: stroke-dashoffset 0.3s ease, stroke 0.2s ease;
 	}
 	@supports (color: oklch(from red l 0 h / 0.8)) {
+		.ring-track { stroke: oklch(from var(--foreground) l 0 h / 0.28); }
 		.ring-progress { stroke: oklch(from var(--foreground) l 0 h / 0.8); }
 	}
 	.usage-ring.warning .ring-progress {
