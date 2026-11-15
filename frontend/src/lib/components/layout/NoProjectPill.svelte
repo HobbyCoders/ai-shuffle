@@ -13,7 +13,8 @@
 	import { profiles, sessions } from '$lib/stores/app-data.svelte';
 	import { archivedChats } from '$lib/stores/archived-chats';
 	import { subagentChats } from '$lib/stores/subagent-chats';
-	import { attachBlockedReason, noProjectPillVisible, type AttachOwner, type AttachState } from '$lib/components/chat/session-scope';
+	import { watchWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
+	import { attachBlockedReason, attachOwnerOf, noProjectPillVisible, type AttachState } from '$lib/components/chat/session-scope';
 	import AttachProjectSheet from './AttachProjectSheet.svelte';
 
 	interface Props {
@@ -29,16 +30,13 @@
 	const row = $derived($sessions.find((s) => s.id === sessionId) ?? null);
 	const isRemote = $derived(!!(row?.is_remote ?? $activeSession.isRemote));
 	// The worker that runs the chat: the attach is relayed to it, and the sheet
-	// offers its projects. instance_id only counts on a row with no owner.
-	const owner = $derived<AttachOwner | null>(
-		isRemote
-			? {
-					id: row?.owner_device_id || row?.instance_id || '',
-					name: row?.device_name ?? $activeSession.ownerDeviceName ?? null,
-					online: typeof row?.device_online === 'boolean' ? row.device_online : null
-				}
-			: null
-	);
+	// offers its projects.
+	const owner = $derived(attachOwnerOf(row, isRemote, $workerInstalls, $activeSession.ownerDeviceName ?? null));
+	// Keep that presence fresh while the sheet is open.
+	$effect(() => {
+		if (!open || !isRemote) return;
+		return watchWorkerPresence();
+	});
 	const attachState = $derived<AttachState>({
 		sessionId,
 		hasProject: $activeSession.mode !== 'chat' || !!$activeSession.project || !!$activeSession.projectV2Id,

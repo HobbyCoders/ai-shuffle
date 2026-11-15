@@ -9,12 +9,14 @@ import {
 	accessModes,
 	attachBlockedReason,
 	attachChoice,
+	attachOwnerOf,
 	attachWarning,
 	effectiveAccessMode,
 	noProjectPermission,
 	noProjectPillVisible,
 	type AttachState
 } from './session-scope';
+import type { Install } from '$lib/api/installs';
 
 const values = (opts: { hasProject: boolean; autoSupported: boolean }) => accessModes(opts).map((m) => m.value);
 
@@ -108,6 +110,29 @@ describe('Attach a project', () => {
 		expect(attachBlockedReason({ ...remote, subagent: true })).toBe('This session can’t take a project.');
 	});
 
+	describe('the worker that runs the chat', () => {
+		const install = (id: string, online: boolean) => ({ id, device_name: 'Worker B', online }) as Install;
+		const row = { owner_device_id: 'dev-b', device_name: 'Worker B', device_online: true };
+
+		it('is null for a chat this worker runs', () => {
+			expect(attachOwnerOf(row, false, [install('dev-b', true)])).toBeNull();
+		});
+
+		it('reads the live registry before the board row, which waits for a sessions reload', () => {
+			// The row still says online; the registry already knows it went away.
+			const owner = attachOwnerOf(row, true, [install('dev-b', false)]);
+			expect(owner).toEqual({ id: 'dev-b', name: 'Worker B', online: false });
+			expect(attachBlockedReason({ ...idle, isRemote: true, ownerOffline: owner?.online === false, ownerName: owner?.name }))
+				.toBe('Worker B is offline. It must be online to attach a project.');
+		});
+
+		it('falls back to the row, then to unknown', () => {
+			expect(attachOwnerOf(row, true, null)?.online).toBe(true);
+			expect(attachOwnerOf({ ...row, device_online: false }, true, [install('dev-z', true)])?.online).toBe(false);
+			expect(attachOwnerOf({ instance_id: 'inst-b' }, true, null, 'Named')).toEqual({ id: 'inst-b', name: 'Named', online: null });
+		});
+	});
+
 	describe('which projects the sheet can pick', () => {
 		const holder = (install_id: string, device_name: string, is_self = false) => ({ install_id, device_name, online: true, is_self });
 		const catalog = [
@@ -129,9 +154,12 @@ describe('Attach a project', () => {
 		it('offers the owning worker’s projects for a session another worker runs', () => {
 			expect(attachChoice(local('v2-both'), catalog, ownerB).pickable).toBe(true);
 			expect(attachChoice(remote('v2-b'), catalog, ownerB).pickable).toBe(true);
-			// This worker has it, the owner does not: greyed, saying where it is.
-			expect(attachChoice(local('v2-a'), catalog, ownerB)).toEqual({ pickable: false, note: 'on this worker' });
-			expect(attachChoice(remote('v2-c'), catalog, ownerB)).toEqual({ pickable: false, note: 'on Worker C' });
+			// This worker has it, the owner does not: greyed, naming where it is.
+			// Never "this worker", which reads as the chat's worker here.
+			expect(attachChoice(local('v2-a'), catalog, ownerB)).toEqual({ pickable: false, note: 'only on Worker A' });
+			expect(attachChoice(remote('v2-c'), catalog, ownerB)).toEqual({ pickable: false, note: 'only on Worker C' });
+			const unnamedSelf = [{ project_v2_id: 'v2-a', eligible: [{ install_id: 'dev-a', online: true, is_self: true }] }];
+			expect(attachChoice(local('v2-a'), unnamedSelf, ownerB)).toEqual({ pickable: false, note: 'only on this worker' });
 			// Not in the catalog at all: say it is not on the owner.
 			expect(attachChoice(local(null), catalog, ownerB)).toEqual({ pickable: false, note: 'not on Worker B' });
 		});

@@ -252,8 +252,11 @@ async def apply_attach_project(
     except Exception:  # noqa: BLE001 — a stale client is refreshed on its next turn
         logger.warning("Could not release the live client for %s", session_id, exc_info=True)
 
-    # Relayed to the user's other workers too, so a page open on the worker
-    # that asked for a relayed attach updates without a reload.
+    # Pages open on this worker take the change live. Another worker's sockets
+    # get it only as a sessions refresh (``resources_changed``): its open page
+    # adopts the project from the reloaded row (``adoptAttachedProject`` in the
+    # frontend's active-session store), and the tab that asked for a relayed
+    # attach applies the route's response. The legacy id here is this worker's.
     try:
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_user_session_updated(
@@ -341,9 +344,11 @@ async def attach_project(
             "applied. Reopen this chat to check before trying again.",
         ) from exc
     except control.RunnerUnreachable as exc:
+        # The transport detail is for the log, not the owner's sentence.
+        logger.warning("Attach relay for %s could not reach %s: %s", session_id, owner, exc)
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"{await _worker_name(owner)} runs this chat and must be online to attach a project. {exc}",
+            f"{await _worker_name(owner)} runs this chat and must be online to attach a project.",
         ) from exc
     except control.ControlRefused as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc

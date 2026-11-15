@@ -303,6 +303,9 @@ async def test_relay_failures_read_clearly(seeded, quiet, remote_owner, failure,
     if failure == "maybe":
         # Never reported as a clean failure that is safe to retry.
         assert "must be online" not in exc.value.detail
+    if failure == "unreachable":
+        # The transport detail stays in the log, out of the owner's sentence.
+        assert exc.value.detail == "Worker B runs this chat and must be online to attach a project."
 
 
 @pytest.mark.asyncio

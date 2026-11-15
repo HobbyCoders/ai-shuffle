@@ -144,7 +144,8 @@ describe('AttachProjectSheet', () => {
 		// This worker's own projects are greyed: Worker B has no checkout of them.
 		expect(radio(/ai-shuffle/).getAttribute('aria-disabled')).toBe('true');
 		expect(radio(/ai-shuffle/).textContent).toContain('not on Worker B');
-		expect(radio(/site/).textContent).toContain('on this worker');
+		expect(radio(/site/).textContent).toContain('only on Worker A');
+		expect(radio(/site/).textContent).not.toContain('this worker');
 		expect(radio(/remote-only/).getAttribute('aria-disabled')).toBeNull();
 		// No "attach from the other worker" block any more.
 		expect(screen.queryByText(/from the worker that runs this session/)).toBeNull();

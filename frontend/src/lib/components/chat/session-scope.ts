@@ -15,6 +15,9 @@
  *   worker has a checkout of.
  */
 
+import type { Install } from '$lib/api/installs';
+import { presenceOf } from '$lib/stores/worker-presence';
+
 
 export interface AccessMode {
 	value: 'default' | 'auto' | 'acceptEdits' | 'bypassPermissions';
@@ -107,6 +110,29 @@ export interface AttachOwner {
 	online: boolean | null;
 }
 
+/**
+ * The worker that runs a session another worker runs, or null for one this
+ * worker runs. instance_id only counts on a row with no owner. Its presence
+ * is the live registry's when known: the board row's `device_online` waits
+ * for the next sessions reload, so it can still say online after the worker
+ * has gone. Else the row's flag, else unknown.
+ */
+export function attachOwnerOf(
+	row: { owner_device_id?: string | null; instance_id?: string | null; device_name?: string | null; device_online?: boolean } | null,
+	isRemote: boolean,
+	installs: Install[] | null,
+	fallbackName: string | null = null
+): AttachOwner | null {
+	if (!isRemote) return null;
+	const id = row?.owner_device_id || row?.instance_id || '';
+	const fromRow = typeof row?.device_online === 'boolean' ? row.device_online : null;
+	return {
+		id,
+		name: row?.device_name ?? fallbackName,
+		online: (id ? presenceOf(installs, [id]) : null) ?? fromRow
+	};
+}
+
 interface CatalogHolder {
 	install_id: string;
 	device_name?: string | null;
@@ -134,16 +160,24 @@ export function attachChoice(
 	// Offline, the catalog lists nothing for it; the blocked reason says why.
 	if (owner.online === false) return { pickable: false, note: null };
 	if (holders.some((e) => e.install_id === owner.id)) return { pickable: true, note: null };
-	const elsewhere = holders.filter((e) => e.install_id !== owner.id);
+	// Two workers are in play here, so "this worker" would read as the chat's
+	// worker: name them instead.
+	const names = workerNames(holders.filter((e) => e.install_id !== owner.id));
 	return {
 		pickable: false,
-		note: elsewhere.length ? whereNote(elsewhere) : `not on ${owner.name?.trim() || 'that worker'}`
+		note: names.length ? `only on ${names.join(', ')}` : `not on ${owner.name?.trim() || 'that worker'}`
 	};
 }
 
 function whereNote(holders: CatalogHolder[]): string {
 	const names = holders.map((e) => (e.is_self ? 'this worker' : e.device_name?.trim())).filter(Boolean);
 	return names.length ? `on ${names.join(', ')}` : 'on another worker';
+}
+
+function workerNames(holders: CatalogHolder[]): string[] {
+	return holders
+		.map((e) => e.device_name?.trim() || (e.is_self ? 'this worker' : ''))
+		.filter(Boolean);
 }
 
 /**
