@@ -88,8 +88,8 @@ def effort_route(provider: Mapping[str, Any] | None) -> str:
 # Exact native API entries, not gateway or subscription inferences.
 # https://platform.claude.com/docs/en/build-with-claude/effort.md
 _ANTHROPIC = {name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "high") for name in (
-    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
-    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5")}
+    "claude-fable-5-2", "claude-mythos-5-2", "claude-fable-5-1", "claude-mythos-5-1",
+    "claude-fable-5", "claude-mythos-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-5")}
 _ANTHROPIC.update({name: _capability(list(ANTHROPIC_EFFORT_LEVELS), "medium")
                    for name in ("claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5")})
 _ANTHROPIC.update({name: _capability(["low", "medium", "high", "max"], "high")
@@ -100,9 +100,11 @@ _ALIASES = {"haiku": "claude-haiku-5-5", "sonnet": "claude-sonnet-5", "opus": "c
 # https://code.claude.com/docs/en/model-config.md#adjust-effort-level
 _CLI = {name: dict(_ANTHROPIC[name]) for name in (
     "claude-haiku-5-5", "claude-opus-5-5", "claude-sonnet-5-5",
-    "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
+    "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5",
     "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6")}
 _CLI["claude-opus-4-7"]["default_effort"] = "xhigh"
+# Claude Code defaults Fable 5.2 to medium; the API defaults it to high.
+_CLI["claude-fable-5-2"]["default_effort"] = "medium"
 for _name in _ANTHROPIC:
     _CLI.setdefault(_name, _capability([]))
 for _name in ("claude-haiku-4-5", "claude-haiku-4-5-20251001"):
