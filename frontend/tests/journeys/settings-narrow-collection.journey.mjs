@@ -479,6 +479,68 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  {
+  // Review of the layout switch: the list scrolled while stacked (the detail
+  // pane not shown), then a detail opened and the window widened to split.
+  // The list comes back where the reader left it, not at its top.
+  name: 'stacked-list-place-survives-widen', viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await stubHooks(page);
+   await page.setViewportSize({ width: 390, height: 844 });
+   await gotoApp(page, status);
+   await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await settingsNav(page).waitFor();
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+  },
+  async act({ page, mark }) {
+   const row = name => page.locator('.st-lcol [data-settings-item]').filter({ hasText: new RegExp(`^\\s*${name}\\b`) }).filter({ visible: true }).first();
+   const title = name => page.locator('[data-settings-heading="detail"]').filter({ hasText: name }).filter({ visible: true }).first();
+   const view = () => page.evaluate(() => Math.round(document.querySelector('.settings-viewport').scrollTop));
+   await mark('scroll the stacked list, open hook 15');
+   await page.evaluate(() => document.querySelector('.settings-viewport').scrollTo({ top: 700 }));
+   await page.waitForTimeout(300);
+   const listAt = await view();
+   expect(listAt > 400, `the stacked list scrolls (${listAt})`);
+   await row('Check hook 15').click();
+   await title('Check hook 15').waitFor();
+   await page.waitForTimeout(300);
+
+   await mark('widen to split: the list is where it was');
+   await page.setViewportSize({ width: 1440, height: 500 });
+   await page.waitForFunction(() => { const c = document.querySelector('.settings-shell .st-coll'); return !!c && !c.closest('.settings-shell').hasAttribute('data-stacked') && !c.dataset.replace; }, null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   const at = await row('Check hook 15').evaluate(el => {
+    const v = document.querySelector('.settings-viewport');
+    const box = v.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return { page: Math.round(v.scrollTop), row: [Math.round(r.top), Math.round(r.bottom)], view: [Math.round(box.top), Math.round(box.bottom)], pane: Math.round(document.querySelector('.settings-viewport .st-dpane').scrollTop) };
+   });
+   expect(at.page > 100 && at.row[0] >= at.view[0] - 1 && at.row[1] <= at.view[1] + 1, `split list keeps the reader's place, hook 15 on screen (stacked ${listAt} -> ${JSON.stringify(at)})`);
+   expect(at.pane === 0, `the detail beside it is at its top (${at.pane})`);
+
+   // Split -> stacked -> split with no scrolling: both come back. The browser
+   // clamping the page in between is not the reader's place.
+   await mark('scroll the detail pane, turn to the phone and back');
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await page.waitForTimeout(400);
+   const placed = await page.evaluate(async () => {
+    const pane = document.querySelector('.settings-viewport .st-dpane');
+    pane.scrollTo({ top: Math.min(90, pane.scrollHeight - pane.clientHeight) });
+    await new Promise(r => setTimeout(r, 300));
+    return { page: Math.round(document.querySelector('.settings-viewport').scrollTop), pane: Math.round(pane.scrollTop) };
+   });
+   expect(placed.pane > 20, `the split detail pane scrolls (${JSON.stringify(placed)})`);
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.waitForFunction(() => document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await page.waitForFunction(() => !document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   const back = await page.evaluate(() => ({ page: Math.round(document.querySelector('.settings-viewport').scrollTop), pane: Math.round(document.querySelector('.settings-viewport .st-dpane').scrollTop) }));
+   expect(Math.abs(back.page - placed.page) <= 1 && Math.abs(back.pane - placed.pane) <= 1, `both panes return after the round trip (${JSON.stringify(placed)} -> ${JSON.stringify(back)})`);
+  }
+ },
+ {
   name: 'wide-split-unchanged', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page, { users: [user] });

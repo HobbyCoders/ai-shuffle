@@ -183,6 +183,7 @@
 	const split = $derived(!replace && !settingsNav.stacked);
 	let detailPlace = 0;
 	let listPlace = 0;
+	let switching = false;
 	const laidOut = () => !!pane?.getClientRects().length;
 	const paneSplit = () => !!pane && getComputedStyle(pane).overflowY === 'auto';
 	function paneTop(scroller: HTMLElement): number {
@@ -190,15 +191,21 @@
 	}
 	function onPaneScroll() {
 		paneResetPending = false;
-		if (laidOut() && paneSplit()) detailPlace = pane!.scrollTop;
+		if (!switching && split && laidOut() && paneSplit()) detailPlace = pane!.scrollTop;
 	}
 	$effect(() => {
 		const scroller = el && scrollParent(el);
 		if (!scroller) return;
 		const onscroll = () => {
-			if (!laidOut()) return;
+			// Settings hidden behind another view: nothing here has a box.
+			if (!el?.getClientRects().length) return;
+			// Mid-switch the browser clamps the page to the new layout and the
+			// transfer below lands where it can: neither is the reader's place.
+			if (switching || (pane && paneSplit() !== split)) return;
+			// The list shows (beside the detail, or alone while the detail pane is
+			// not displayed): its place. Otherwise the detail fills the page.
 			if (paneSplit() || shownItem === null) listPlace = scroller.scrollTop;
-			else detailPlace = Math.max(0, scroller.scrollTop - paneTop(scroller));
+			else if (laidOut()) detailPlace = Math.max(0, scroller.scrollTop - paneTop(scroller));
 		};
 		scroller.addEventListener('scroll', onscroll, { passive: true });
 		return () => scroller.removeEventListener('scroll', onscroll);
@@ -209,7 +216,10 @@
 		const before = lastSplit;
 		lastSplit = now;
 		if (before === undefined || before === now || untrack(() => shownItem) === null) return;
+		switching = true;
 		void tick().then(() => {
+			// Scroll events from these moves are delivered before the next frame.
+			requestAnimationFrame(() => requestAnimationFrame(() => (switching = false)));
 			const scroller = el && scrollParent(el);
 			// Hidden (no box): nothing can scroll; a pending reset waits for the pane.
 			if (!scroller || !pane || !laidOut()) return;
