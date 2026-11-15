@@ -113,22 +113,20 @@
 		if (lastScrolled !== undefined && lastScrolled !== current) resetPane();
 		lastScrolled = current;
 	});
-	// The pane scrolls on its own only while the list is beside it (no
-	// data-replace). A reset asked for while it cannot scroll (a phone turned
-	// sideways shows one pane at a time) does nothing, and the browser brings
-	// the old offset back once the pane scrolls again. So the reset waits until
-	// the pane next scrolls on its own, unless the pane has scrolled since.
+	// The pane scrolls on its own only while the list is beside it (split: not
+	// stacked, no data-replace; settings.css). A reset asked for while it cannot
+	// scroll (stacked, one pane at a time, or Settings hidden behind another
+	// view) does nothing, and the browser brings the old offset back once the
+	// pane scrolls again. So the reset stays pending until the pane is split and
+	// laid out again (#1612: hidden, the page measures 0 wide), unless the
+	// pane has scrolled since; the reset's own scroll clears it too.
 	let paneResetPending = false;
 	function resetPane() {
 		paneResetPending = true;
 		pane?.scrollTo?.({ top: 0 });
 	}
-	let lastReplace: boolean | undefined;
 	$effect(() => {
-		const now = replace;
-		const before = lastReplace;
-		lastReplace = now;
-		if (before === undefined || before === now || now) return;
+		if (replace || settingsNav.stacked || containerWidth <= 0) return;
 		void tick().then(() => {
 			if (paneResetPending) pane?.scrollTo?.({ top: 0 });
 		});
@@ -139,10 +137,9 @@
 	// its top, not at the list's offset, and Back returns to where the list was.
 	// Pre-effect: the list's offset is read before the detail replaces it.
 	// Stacked Back keeps the item selected and only steps back to the list, so
-	// the item on screen, not the selection, is what changes. Stacked, the
-	// detail pane can also scroll on its own (settings.css pins it), and
-	// reopening the same item does not change the selection, so the pane
-	// starts at its top here too. Beside the list (split panes) none of this
+	// the item on screen, not the selection, is what changes. The pane keeps
+	// the offset it had while split, so it is reset here too (pending until it
+	// scrolls on its own again). Beside the list (split panes) none of this
 	// runs: the pane reset above handles a newly picked item.
 	const shownItem = $derived(
 		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
