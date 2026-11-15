@@ -212,11 +212,14 @@ def test_the_block_joins_the_hosts_pinned_range() -> None:
     alone = Message(role="user", content=[Text("hi"), Text("note")])
     _add_pinned_block(alone, block, 2)
     assert alone.pinned_text() == block and alone.content[2].text == block
-    # A range ending inside a text: unpinned, so never trusted as held.
+    # A range ending inside a text splits it there: the block is pinned and
+    # the unowned rest stays outside the range.
     inner = Message(role="user", content=[Text(prompt + "trailing owner text")],
                     context_pin=(len("hello\n\n"), len(prompt)))
     _add_pinned_block(inner, block, 1)
-    assert inner.pinned_text() == memory and inner.content[1].text == block
+    assert [b.text for b in inner.content] == [prompt, block, "trailing owner text"]
+    assert inner.pinned_text() == memory + block
+    assert inner.text() == prompt + block + "trailing owner text"
 
 
 # ─── producing path ──────────────────────────────────────────────────────────
@@ -239,6 +242,38 @@ async def test_unchanged_details_ride_once_and_a_commit_brings_them_back(git_rep
     _assert_holds(two, first)
     _assert_holds(three, _details(git_repo))
     assert "later" in _blocks(three.messages)[-1]
+
+
+async def test_details_under_a_pin_ending_mid_text_are_pinned_so_a_revert_is_resent(
+    git_repo: Path,
+) -> None:
+    """A -> B -> A: B arrives on a turn whose host pin ends inside a Text.
+    B must be pinned there, so the later A is seen as a change and resent
+    instead of leaving the stale B as the newest block in view."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_text("ok")])
+    loop = _loop(git_repo, provider, store, sid)
+    await _turn(loop, UserTurn(content="first"))
+    details_a = _details(git_repo)
+    python = git_repo / "venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    details_b = _details(git_repo)
+    assert details_b != details_a
+    memory = _OPEN + "# Memory\n- [m1 r1; session] A synthetic fact" + _CLOSE
+    prompt = f"second\n\n{memory}"
+    await _turn(loop, UserTurn(content=prompt + "\ntrailing host text",
+                               context_pin=(len("second\n\n"), len(prompt))))
+    python.unlink()
+    await _turn(loop, UserTurn(content="third"))
+    one, two, three = provider.requests
+    assert _sent(one) and _sent(two) and _sent(three)
+    _assert_holds(two, details_b)
+    _assert_holds(three, details_a)
+    assert "none in venv/.venv" in _blocks(three.messages)[-1]
+    stored = (await store.load_path(sid))[2].message
+    assert stored.pinned_text() == memory + details_b
+    assert "trailing host text" not in stored.pinned_text()
 
 
 async def test_a_real_fold_between_two_calls_keeps_the_details_in_view(git_repo: Path) -> None:

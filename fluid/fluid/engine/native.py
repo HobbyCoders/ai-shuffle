@@ -822,30 +822,30 @@ def _add_pinned_block(message: Message, block: str, fallback_index: int) -> None
     """Add ``block`` to ``message`` as its own Text inside the host-pinned range.
 
     A message has one pinned range (``Message.context_pin``), so the block
-    goes right after the Text that ends the range and the range grows over
-    it; with no range, the block is the range. The compactor then keeps the
-    newest copy in view through any fold (``CompactionConfig.pinned_blocks``).
-    When the range ends inside a Text, the block goes at ``fallback_index``
-    unpinned: never trusted as held, so the next turn sends it again.
+    goes where the range ends and the range grows over it. A range that ends
+    inside a Text splits that Text there, so the unowned rest stays outside
+    the range. With no range, the block is the range, at ``fallback_index``.
+    The compactor then keeps the newest copy in view through any fold
+    (``CompactionConfig.pinned_blocks``).
     """
     content = message.content
-    pin = message.context_pin if message.pinned_text() else None
-    end = 0
-    for index, item in enumerate(content):
-        if pin is not None and end == pin[1]:
-            break
-        if isinstance(item, Text):
-            end += len(item.text)
-    else:
-        index = len(content)
-    if pin is not None and end == pin[1]:
-        content.insert(index, Text(block))
-        message.context_pin = (pin[0], pin[1] + len(block))
-        return
-    content.insert(fallback_index, Text(block))
-    if pin is None:
+    if not message.pinned_text():
         start = sum(len(item.text) for item in content[:fallback_index] if isinstance(item, Text))
+        content.insert(fallback_index, Text(block))
         message.context_pin = (start, start + len(block))
+        return
+    pin_start, pin_end = message.context_pin
+    offset = 0
+    for index, item in enumerate(content):
+        if not isinstance(item, Text):
+            continue
+        if offset + len(item.text) >= pin_end:
+            cut = pin_end - offset
+            rest = item.text[cut:]
+            content[index:index + 1] = [Text(item.text[:cut]), Text(block), *([Text(rest)] if rest else [])]
+            break
+        offset += len(item.text)
+    message.context_pin = (pin_start, pin_end + len(block))
 
 
 def _plan_in_view(history: list[Message], plan_note: str, revision: str | None) -> bool:

@@ -4,6 +4,9 @@ from dataclasses import replace
 
 import pytest
 
+from fluid.context.compaction import newest_pinned_block
+from fluid.context.environment import ENVIRONMENT_DETAILS_HEADER
+from fluid.engine.native import _add_pinned_block
 from fluid.messages import Message, Text
 from fluid.providers.base import ProviderRequest
 from fluid.providers.anthropic.serialize import build_request_body as anthropic
@@ -11,6 +14,7 @@ from fluid.providers.openai_responses.serialize import build_request_body as res
 from fluid.providers.openrouter.serialize import build_request_body as openrouter
 from fluid.providers.local.serialize import build_request_body as local
 from fluid.store.base import SessionNode
+from fluid.state import SCRATCH_HEADER
 from fluid.store.jsonl import JsonlStore
 
 
@@ -60,3 +64,24 @@ async def test_pin_survives_jsonl_restart(tmp_path, odd, location):
     reloaded = await JsonlStore(tmp_path).load_path(session.session_id)
     assert reloaded[0].message.pinned_text() == note
     assert reloaded[0].message.to_dict() == message.to_dict()
+
+
+@pytest.mark.asyncio
+async def test_a_details_block_split_into_a_mid_text_pin_survives_jsonl_restart(tmp_path):
+    open_, close = "<system" + "-reminder>\n", "\n</system" + "-reminder>"
+    memory = open_ + "# Memory\n- [m1 r1; session] A synthetic fact" + close
+    scratch = open_ + SCRATCH_HEADER + "Use /tmp/scratch" + close
+    details = open_ + ENVIRONMENT_DETAILS_HEADER + "Worker Python: x" + close
+    prefix = "prompt\n\n"
+    message = Message(role="user", content=[Text(prefix + memory + scratch + "\nhost tail")],
+                      context_pin=(len(prefix), len(prefix + memory + scratch)))
+    _add_pinned_block(message, details, 1)
+    assert message.pinned_text() == memory + scratch + details
+    store = JsonlStore(tmp_path)
+    session = await store.create_session()
+    await store.append(session.session_id, SessionNode(node_id="pinned", parent_id=None, message=message))
+    reloaded = await JsonlStore(tmp_path).load_path(session.session_id)
+    assert reloaded[0].message.to_dict() == message.to_dict()
+    assert reloaded[0].message.pinned_text() == memory + scratch + details
+    assert newest_pinned_block(reloaded, SCRATCH_HEADER) == scratch
+    assert newest_pinned_block(reloaded, ENVIRONMENT_DETAILS_HEADER) == details
