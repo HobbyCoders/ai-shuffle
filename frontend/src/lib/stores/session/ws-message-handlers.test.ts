@@ -9,6 +9,7 @@
  * notifications, error banners).
  */
 
+import { dropEffortRequest, noteEffortRequest, settleEffortRequest } from './effort-echo';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
 	createMessageHandlers,
@@ -2257,6 +2258,24 @@ describe('ws-message-handlers', () => {
 				get state() { return state; },
 			};
 		}
+
+		it("skips the late announcement of this tab's own older pick, not another device's (#1633)", () => {
+			const b = openAtMedium();
+			// This tab asked for Low, then held XHigh for a model that has not run.
+			const low = noteEffortRequest('session-1', 'low');
+			settleEffortRequest('session-1', low, 'low');
+			b.state.effortLevelOverride = 'xhigh';
+			b.announce('session-1', 'low');
+			expect(b.state.effortLevelOverride).toBe('xhigh');
+			// Its one announcement is used up: the same level from elsewhere applies.
+			b.announce('session-1', 'low');
+			expect(b.state.effortLevelOverride).toBe('low');
+			// A failed request is announced nowhere and is forgotten.
+			const failed = noteEffortRequest('session-1', 'max');
+			dropEffortRequest('session-1', failed);
+			b.announce('session-1', 'max');
+			expect(b.state.effortLevelOverride).toBe('max');
+		});
 
 		it('device B drops its Medium when device A picks Auto, so its next send pins nothing', () => {
 			const b = openAtMedium();

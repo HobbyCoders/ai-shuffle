@@ -54,6 +54,8 @@ import { registerReloadBlocker } from '$lib/services/app-update';
 
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
+import { resolveModelEffort } from '$lib/constants/model-effort';
+import { dropEffortRequest, noteEffortRequest, settleEffortRequest } from './session/effort-echo';
 import { sessionOwnerEpoch } from './session-owner';
 import { notify } from './notifications';
 import { getOrCreateDeviceId } from './device-id';
@@ -885,6 +887,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	let selected = value;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
+	let held = false;
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -896,13 +899,19 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
+		const echo = field === 'effort' ? noteEffortRequest(sessionId, value as string | null) : null;
 		const pending = previous ? previous.catch(() => {}).then(apply) : Promise.resolve(apply());
 		runSettingQueues.set(queueKey, pending);
 		try {
 			const saved = await pending;
+			if (!saved && echo) dropEffortRequest(sessionId, echo);
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
+			if (echo) settleEffortRequest(sessionId, echo, saved.effort);
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
+			// An answer to an older pick only reports what was saved then: it must
+			// not overwrite a newer pick here or in the cached copy (#1633).
+			if (generation !== runSettingGenerations[field]) return;
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
@@ -915,16 +924,27 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
 		} catch (error) {
-			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
+			if (echo) dropEffortRequest(sessionId, echo);
+			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
+				// The chat still runs the model before this pick, which lacks the
+				// level; the picked model offers it. A model pick applies with the
+				// next message, so the level does too: keep it, and the send
+				// carries it (#1633).
+				held = true;
+			} else if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
 				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
-			return;
+			if (!held) return;
 		} finally {
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
 		}
 	}
 	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
+	if (held && sessionId) {
+		const cached = sessionEphemeralCache.restore(sessionId);
+		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, effortLevelOverride: selected as string | null });
+	}
 	if (field === 'context_window') {
 		selected = sessionId ? selected : contextChoiceFromWindow(value as number, selectedModel);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
@@ -946,6 +966,20 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
 	}));
 	persistSession();
+}
+
+/**
+ * The refusal an effort pick gets when only the chat's running model lacks the
+ * level (#1633): the picked model, which runs from the next message, offers
+ * it. Auto and every other refusal (connecting, busy, control refused) are not
+ * held.
+ */
+const LEVEL_REFUSAL = 'This model does not support the selected effort level';
+function isHoldableEffortRefusal(error: unknown, value: unknown, selectedModel: string): boolean {
+	if (typeof value !== 'string') return false;
+	const failure = error as { status?: unknown; detail?: unknown } | null;
+	if (failure?.status !== 409 || failure.detail !== LEVEL_REFUSAL) return false;
+	return resolveModelEffort(selectedModel).options.some((option) => option.value === value);
 }
 
 /** A send or restore owns the composer; defaults must not touch it. */

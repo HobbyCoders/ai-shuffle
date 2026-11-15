@@ -916,6 +916,33 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.effortLevelOverride).toBeNull();
 		expect(activeSession.current.fastMode).toBe(false);
 	});
+
+	describe('a level for a picked model that has not run yet (#1633)', () => {
+		const LEVEL_REFUSAL = { status: 409, detail: 'This model does not support the selected effort level' };
+		beforeEach(() => { activeSession.current.modelOverride = 'claude-fable-5-1'; });
+		afterEach(() => { activeSession.current.modelOverride = null; });
+
+		it('keeps a level the running model lacks but the picked model offers', async () => {
+			const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+			sessionEphemeralCache.save('live-knobs', { effortLevelOverride: 'high' } as never);
+			vi.spyOn(api, 'put').mockRejectedValue(LEVEL_REFUSAL);
+			await activeSession.setEffortLevelOverride('xhigh');
+			expect(error).not.toHaveBeenCalled();
+			expect(activeSession.current.effortLevelOverride).toBe('xhigh');
+			expect(sessionEphemeralCache.restore('live-knobs')?.effortLevelOverride).toBe('xhigh');
+		});
+
+		it('still refuses a level the picked model lacks, and Auto', async () => {
+			const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+			activeSession.current.modelOverride = 'claude-haiku-4-5';
+			vi.spyOn(api, 'put').mockRejectedValue(LEVEL_REFUSAL);
+			await activeSession.setEffortLevelOverride('xhigh');
+			expect(activeSession.current.effortLevelOverride).toBe('high');
+			await activeSession.setEffortLevelOverride(null);
+			expect(activeSession.current.effortLevelOverride).toBe('high');
+			expect(error).toHaveBeenCalledTimes(2);
+		});
+	});
 });
 
 describe('activeSession.resolveInteractionByRequestId (#606 item 4)', () => {
