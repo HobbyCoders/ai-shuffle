@@ -101,6 +101,28 @@ const failedLoadCase = {
 	}
 };
 
+/**
+ * As failLate, but only until the person presses a Try again button: the
+ * server's periodic sync_reconcile makes the page re-read its data at any
+ * moment, and a re-read that worked between lifting the failure and the
+ * click would recover the row on its own and take the button away mid-click.
+ * Answers that were held back when the press came are let through instead.
+ */
+const failUntilRetry = async (page, url) => {
+	await page.addInitScript(() => {
+		document.addEventListener('pointerdown', (e) => {
+			if (e.target instanceof Element && e.target.closest('[data-retry-load]')) window.__retryPressed = true;
+		}, true);
+	});
+	const pressed = () => page.evaluate(() => window.__retryPressed === true).catch(() => false);
+	await page.context().route(url, async (route) => {
+		if (route.request().method() !== 'GET' || await pressed()) return route.continue();
+		await new Promise((done) => setTimeout(done, 1500));
+		if (await pressed()) return route.continue().catch(() => {});
+		await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ detail: 'Synthetic failure' }) }).catch(() => {});
+	});
+};
+
 // Only the instructions fail: their row offers the retry itself.
 const instructionsFailCase = {
 	...failedLoadCase,
@@ -111,7 +133,7 @@ const instructionsFailCase = {
 	],
 	async setup(ctx) {
 		await reloadCase('Security').setup(ctx);
-		await failLate(ctx.page, INSTRUCTIONS);
+		await failUntilRetry(ctx.page, INSTRUCTIONS);
 	},
 	async act(ctx) {
 		await reloadCase('Security').act(ctx);
@@ -121,7 +143,6 @@ const instructionsFailCase = {
 		expect((await page.getByRole('button', { name: 'Try again' }).count()) === 1, 'one Try again, in the instructions row');
 		expect((await page.locator('.settings-shell p.st-msg.err').filter({ visible: true }).count()) === 0, 'no notice is inserted between the groups');
 		await ctx.mark('Try again with the mouse');
-		await page.context().unroute(INSTRUCTIONS);
 		await row('security.secInstr').getByRole('button', { name: 'Try again' }).click();
 		await row('security.secInstr').locator('.st-rh').filter({ hasNotText: 'Could not load' }).waitFor({ timeout: 10_000 });
 		expect((await page.getByRole('button', { name: 'Try again' }).count()) === 0, 'the retry recovered the row');
