@@ -376,6 +376,17 @@
 			]
 		},
 			{
+				"why": "attaching a project to a chat with no project: a rewound attachment resends after it, and the sheet belongs to the chat it was opened in",
+				"journeys": ["attach-project"],
+				"globs": [
+					"frontend/tests/journeys/attach-project.journey.mjs",
+					"frontend/src/lib/components/layout/NoProjectPill.svelte",
+					"frontend/src/lib/components/layout/AttachProjectSheet.svelte",
+					"app/core/upload_transfer.py",
+					"app/api/sessions_attach.py"
+				]
+			},
+			{
 				"why": "a rewound sent message comes back whole: its words after a reload and its attachments as chips",
 				"journeys": ["rewind-restore"],
 				"globs": [

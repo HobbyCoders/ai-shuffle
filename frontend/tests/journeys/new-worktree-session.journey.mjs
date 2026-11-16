@@ -35,7 +35,7 @@
 //                   the generated name, and a ~25-character generated name is
 //                   shown whole whenever the row has room for it
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { pick, withChatSetup } from './lib/app.mjs';
+import { api, pick, withChatSetup } from './lib/app.mjs';
 import { readFile, access, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import { expectComposerPositions } from './lib/timeline.mjs';
@@ -653,22 +653,32 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	const words = `${label}-${uniq()}`;
 	const file = `note-${uniq()}.txt`;
 	const box = page.getByRole('textbox', { name: 'Message' });
-	// Words first: Auto names the branch from the message, so it starts with
-	// this run's own words, not the upload path every attachment shares.
+	// Words, then the file straight after the last one (no space typed): the
+	// branch and title must still be named from the words alone (#1654).
 	await mark('type the first message');
 	await box.click();
-	await box.pressSequentially(`${words} ${fakeAiTag(variant)} `.trimStart());
+	await box.pressSequentially(`${words} ${fakeAiTag(variant)}`.trim());
 	await mark('attach a file');
 	await page.locator('input[type="file"]').first().setInputFiles({ name: file, mimeType: 'text/plain', buffer: Buffer.from('branch attachment\n') });
 	await box.locator('[data-file-chip]').first().waitFor({ timeout: 20_000 });
 	if ((await box.locator('[data-file-chip]').count()) !== 1) throw new Error('the chip left the composer before Send');
 	await mark('send');
 	const t0 = Date.now();
+	const namingAsked = [];
+	const onNaming = (req) => { if (req.url().includes('/git/generate-branch-name')) namingAsked.push(req.postDataJSON()?.message ?? ''); };
+	page.on('request', onNaming);
 	const createdResponse = page.waitForResponse((r) => r.url().includes('/sessions/with-worktree') && r.request().method() === 'POST');
 	await page.getByRole('button', { name: 'Send', exact: true }).click();
 	await awaitReply(ctx, label, t0);
 	const response = await createdResponse;
 	const created = await response.json();
+	page.off('request', onNaming);
+	const sentPrompt = response.request().postDataJSON().prompt;
+	const firstAt = sentPrompt ? sentPrompt.indexOf('@') : -1;
+	if (firstAt > 0 && !/\s/.test(sentPrompt[firstAt - 1])) throw new Error(`the typed words and the attachment are not apart in the prompt: ${JSON.stringify(sentPrompt.slice(0, 120))}`);
+	for (const message of namingAsked) {
+		if (message.includes('@') || message.includes(file)) throw new Error(`the branch was named from the attachment path: ${JSON.stringify(message.slice(0, 120))}`);
+	}
 	const destination = join(created.worktree_path, 'uploads', file);
 	if (await readFile(destination, 'utf8') !== 'branch attachment\n') throw new Error('first-message migrated bytes differ');
 	// Main's promptless-create + WS flow still references the compose original;
@@ -680,6 +690,11 @@ async function sendWithAttachmentThenRewind(ctx, label) {
 	if (await page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed/i).first().isVisible()) {
 		throw new Error('the server refused the attachment');
 	}
+	// The chat title and the branch are named from the typed words, never the file (#1654).
+	const stem = file.replace(/\.txt$/, '');
+	if (created.branch_name.includes(stem) || /uploads/.test(created.branch_name)) throw new Error(`the branch is named from the attachment: ${created.branch_name}`);
+	const { title } = await api(page, 'GET', `/sessions/${created.session_id}`);
+	if (!title.includes(words) || title.includes(stem) || /\/uploads\//.test(title)) throw new Error(`the chat title is not the typed words: ${JSON.stringify(title)}`);
 	await mark('rewind the first message');
 	await page.getByTitle('Rewind to before this message', { exact: true }).last().focus();
 	await page.keyboard.press('Enter');
