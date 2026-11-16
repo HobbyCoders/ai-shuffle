@@ -10,7 +10,7 @@ import { page } from '$app/state';
 type Entry = Record<string, unknown>;
 const h = vi.hoisted(() => ({ stack: [] as Record<string, unknown>[], index: 0 }));
 /** SvelteKit numbers every entry and keeps that number across a reload. */
-const numberEntry = vi.hoisted(() => () => history.replaceState({ 'sveltekit:history': 1000 + h.index }, ''));
+const numberEntry = vi.hoisted(() => () => history.replaceState({ 'sveltekit:metadata': { historyIndex: 1000 + h.index } }, ''));
 const active = vi.hoisted(() => ({ store: null as unknown as ReturnType<typeof writable<{ sessionId: string | null }>> }));
 
 vi.mock('$app/navigation', async () => {
@@ -273,13 +273,14 @@ describe('a reload, which SvelteKit answers by emptying the current entry', () =
 
 	it('does not claim an entry whose number it does not know', () => {
 		atClaudeDetail();
-		history.replaceState({ 'sveltekit:history': 5 }, '');
+		history.replaceState({ 'sveltekit:metadata': { historyIndex: 5 } }, '');
 		reload();
 		expect(h.stack).toHaveLength(5);
 	});
 
 	it('reads the number from where SvelteKit still puts it', () => {
-		const constants = readFileSync(resolve('node_modules/@sveltejs/kit/src/runtime/client/constants.js'), 'utf8');
-		expect(constants).toContain("HISTORY_INDEX = 'sveltekit:history'");
+		const client = resolve('node_modules/@sveltejs/kit/src/runtime/client');
+		expect(readFileSync(`${client}/constants.js`, 'utf8')).toContain("HISTORY_METADATA_KEY = 'sveltekit:metadata'");
+		expect(readFileSync(`${client}/client.js`, 'utf8')).toContain('historyIndex: (current_history_index += replace ? 0 : 1)');
 	});
 });

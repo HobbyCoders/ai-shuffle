@@ -6,6 +6,7 @@ import { archivedChats } from '$lib/stores/archived-chats';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import type { Session } from '$lib/api/client';
 import { pushState, replaceState } from '$app/navigation';
+import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 import { page } from '$app/state';
 import { get } from 'svelte/store';
 
@@ -84,8 +85,9 @@ function pushChatHistory(sessionId: string): void {
 	const push = () => {
 		const base = (page.state ?? {}) as App.PageState & ChatHistoryState & { mobileDrawer?: boolean };
 		try {
-			if (base.chatSession !== from) replaceState('', { ...base, chatSession: from } as App.PageState);
-			pushState('', { ...base, chatSession: sessionId } as App.PageState);
+			// Both are queued in this order and land in it (SvelteKit 3 applies them asynchronously).
+			if (base.chatSession !== from) ignoreRouterNotReady(replaceState('', { ...base, chatSession: from } as App.PageState));
+			ignoreRouterNotReady(pushState('', { ...base, chatSession: sessionId } as App.PageState));
 			historyChat = sessionId;
 		} catch {
 			// Router not ready (tests, early boot): the link still opens the chat.

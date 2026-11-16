@@ -343,7 +343,7 @@ describe('AppTopBar drawer lifecycle', () => {
 	it('pushes a history entry on open, closes on Back, and pops its own entry when closed in the app', async () => {
 		const nav = await import('$app/navigation');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {
@@ -380,7 +380,7 @@ describe('AppTopBar drawer lifecycle', () => {
 		vi.useFakeTimers();
 		const nav = await import('$app/navigation');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		// The real Back is asynchronous: the router hears popstate later.
@@ -417,7 +417,7 @@ describe('AppTopBar drawer lifecycle', () => {
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
 			// The drawer's entry was never pushed (router not ready): it opens at once.
-			push.mockImplementation(() => {});
+			push.mockImplementation(async () => {});
 			await fireEvent.click(menuButton());
 			await tick();
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));

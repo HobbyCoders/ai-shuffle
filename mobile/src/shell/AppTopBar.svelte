@@ -30,6 +30,7 @@
 	import { tick, untrack, type Snippet } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { page } from '$app/state';
 	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
 	import { phonePanelActions } from '$lib/components/layout/view/ViewPanel.svelte';
@@ -175,7 +176,7 @@
 
 	function pushDrawerEntry() {
 		try {
-			pushState('', { ...(page.state ?? {}), mobileDrawer: true });
+			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileDrawer: true }));
 		} catch {
 			// Router not ready (early boot, tests): Back just won't close it.
 		}
