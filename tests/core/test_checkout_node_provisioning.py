@@ -172,6 +172,22 @@ def test_runs_svelte_kit_sync_when_a_svelte_config_exists(tmp_path, no_real_npx)
     assert no_real_npx == [str(dest / "frontend")]
 
 
+def test_runs_svelte_kit_sync_for_a_kit_dependency_without_a_svelte_config(tmp_path, no_real_npx):
+    """SvelteKit 3 has no svelte.config file; the dependency marks the app."""
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    _mk_package(source, "frontend", node_modules=True)
+    package = _mk_package(dest, "frontend")
+    (package / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"@sveltejs/kit": "^3.2.0"}}', encoding="utf-8"
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["synced"] == ["frontend"]
+    assert no_real_npx == [str(dest / "frontend")]
+
+
 def test_does_not_run_sync_without_a_svelte_config(tmp_path, no_real_npx):
     source = tmp_path / "src"
     dest = tmp_path / "wt"

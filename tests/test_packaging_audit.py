@@ -83,9 +83,9 @@ def test_node_refresh_does_not_skip_existing_dist(tmp_path, monkeypatch):
     [
         ("v18.20.8", False),
         ("v20.18.0", False),
-        ("v20.19.0", True),
-        ("v22.11.0", False),
-        ("v22.12.0", True),
+        ("v20.19.0", False),
+        ("v22.16.0", False),
+        ("v22.17.0", True),
         ("v24.0.0", True),
     ],
 )

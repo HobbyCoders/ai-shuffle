@@ -234,7 +234,7 @@ Self-hosting controls where the app runs and its data is stored. Configured clou
 
 ## For contributors
 
-The app uses Python 3.12+, FastAPI, PostgreSQL 16, Svelte 5/SvelteKit, TypeScript, and Tailwind. Building the web and tool packages requires Node.js 22.12+. The desktop shell uses Electron; Android uses Kotlin.
+The app uses Python 3.12+, FastAPI, PostgreSQL 16, Svelte 5/SvelteKit, TypeScript, and Tailwind. Building the web and tool packages requires Node.js 22.17+. The desktop shell uses Electron; Android uses Kotlin.
 
 | Directory | Responsibility |
 | --- | --- |

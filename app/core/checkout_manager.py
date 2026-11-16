@@ -952,6 +952,26 @@ _SVELTE_CONFIG_NAMES = (
 # Without it svelte-check and vite fail on a fresh checkout.
 _SVELTE_SYNC_TIMEOUT_SECONDS = 300
 
+
+def _is_sveltekit_package(package: Path) -> bool:
+    """Whether ``package`` is a SvelteKit app that needs `svelte-kit sync`.
+
+    SvelteKit 2 projects have a svelte.config file. SvelteKit 3 configures the
+    kit in vite.config instead, so the dependency itself is the other signal.
+    """
+    try:
+        if any((package / name).is_file() for name in _SVELTE_CONFIG_NAMES):
+            return True
+        manifest = json.loads((package / "package.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(manifest, dict):
+        return False
+    return any(
+        isinstance(manifest.get(section), dict) and "@sveltejs/kit" in manifest[section]
+        for section in ("dependencies", "devDependencies")
+    )
+
 # The project's lockfile, and npm's own record of what a node_modules actually
 # holds (npm writes the latter on every install).
 _LOCKFILE_NAME = "package-lock.json"
@@ -1262,14 +1282,7 @@ def provision_node_modules(
             # No modules means sync cannot work either.
             continue
 
-        try:
-            has_svelte_config = any(
-                (package / name).is_file() for name in _SVELTE_CONFIG_NAMES
-            )
-        except OSError:  # pragma: no cover - defensive
-            has_svelte_config = False
-
-        if not has_svelte_config:
+        if not _is_sveltekit_package(package):
             continue
         if _run_svelte_kit_sync(package):
             summary["synced"].append(label)

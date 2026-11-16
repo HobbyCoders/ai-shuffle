@@ -31,7 +31,7 @@ Please be respectful and constructive in all interactions. We're building this t
 ### Prerequisites
 
 - **Python 3.12+**
-- **Node.js 22.12+**
+- **Node.js 22.17+**
 - **Git**
 - **GitHub CLI** — [Download](https://cli.github.com/)
 

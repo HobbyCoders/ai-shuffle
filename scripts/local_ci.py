@@ -587,7 +587,7 @@ def frontend(ctx: Context) -> None:
     path = npm_ready("frontend")
     run(["npx", "svelte-kit", "sync"], cwd=path)
     run(["npx", "svelte-check", "--tsconfig", "./tsconfig.json"], cwd=path)
-    if ctx.mode == "full" or ctx.changed(["frontend/package*.json", "frontend/vite.config.js", "frontend/svelte.config.js"]):
+    if ctx.mode == "full" or ctx.changed(["frontend/package*.json", "frontend/vite.config.js", "frontend/svelte-options.js"]):
         run(["npm", "run", "build"], cwd=path)
     run(["npm", "test"] if ctx.mode == "full" else ["node", "scripts/vitest-changed.mjs", ctx.base], cwd=path)
     run(["npm", "run", "contract:check"], cwd=path)
