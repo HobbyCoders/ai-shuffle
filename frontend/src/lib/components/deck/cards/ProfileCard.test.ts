@@ -333,6 +333,78 @@ describe('autosave and identity', () => {
 	});
 });
 
+describe('a name over the 100 limit (code points, as the server counts)', () => {
+	const settle = () => new Promise((r) => setTimeout(r, 900));
+	const nameField = () => screen.getByLabelText('Name') as HTMLInputElement;
+	const tooLong = () => screen.queryByText(/^Too long: \d+ of 100 characters\. Shorten it to save\.$/);
+	const headerSays = (text: string) => screen.getAllByRole('status').some((s) => s.textContent?.includes(text));
+	const savedNames = () => mocks.put.mock.calls.map(([, payload]) => payload.name as string);
+
+	async function open() {
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+	}
+
+	it('keeps every letter when a combining mark is typed at the limit, and does not save (S4)', async () => {
+		await open();
+		const full = 'a'.repeat(100);
+		await fireEvent.input(nameField(), { target: { value: full } });
+		await waitFor(() => expect(savedNames()).toContain(full), { timeout: 2000 });
+		const accented = 'a'.repeat(50) + '\u0301' + 'a'.repeat(50);
+		await fireEvent.input(nameField(), { target: { value: accented } });
+		await settle();
+		expect(nameField().value).toBe(accented);
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(nameField().getAttribute('aria-invalid')).toBe('true');
+		expect(headerSays('Name too long')).toBe(true);
+		expect(savedNames()).not.toContain(accented);
+		expect(savedNames().every((n) => Array.from(n).length <= 100)).toBe(true);
+	});
+
+	it('leaves an over-long paste whole, blocks the save, and saves again once shortened (S5)', async () => {
+		await open();
+		const pasted = 'x'.repeat(150);
+		await fireEvent.input(nameField(), { target: { value: pasted } });
+		await settle();
+		// Nothing rewrote the field, so the browser's own Undo still has the paste to undo.
+		expect(nameField().value).toBe(pasted);
+		expect(tooLong()?.textContent).toContain('150 of 100');
+		expect(mocks.put).not.toHaveBeenCalled();
+		// What Undo does to the field (back to the old name) saves as usual.
+		await fireEvent.input(nameField(), { target: { value: 'Researcher' } });
+		await settle();
+		expect(tooLong()).toBeNull();
+		expect(headerSays('Name too long')).toBe(false);
+	});
+
+	it('counts an emoji as one: 99 letters and an emoji save, one more is refused', async () => {
+		await open();
+		const atLimit = 'a'.repeat(99) + '😀';
+		await fireEvent.input(nameField(), { target: { value: atLimit } });
+		await waitFor(() => expect(savedNames()).toContain(atLimit), { timeout: 2000 });
+		expect(tooLong()).toBeNull();
+		const over = 'a'.repeat(100) + '😀';
+		await fireEvent.input(nameField(), { target: { value: over } });
+		await settle();
+		expect(nameField().value).toBe(over);
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(savedNames()).not.toContain(over);
+	});
+
+	it('leaves an IME composition at the limit whole and does not save it', async () => {
+		await open();
+		const field = nameField();
+		await fireEvent.compositionStart(field);
+		await fireEvent.input(field, { target: { value: 'a'.repeat(99) + 'にほ' }, isComposing: true });
+		await fireEvent.compositionEnd(field);
+		await fireEvent.input(field, { target: { value: 'a'.repeat(99) + 'にほ' } });
+		await settle();
+		expect(field.value).toBe('a'.repeat(99) + 'にほ');
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(mocks.put).not.toHaveBeenCalled();
+	});
+});
+
 describe('create, duplicate, delete', () => {
 	it('creates a blank agent once it has a name', async () => {
 		render(ProfileCard);

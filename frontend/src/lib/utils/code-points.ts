@@ -29,23 +29,3 @@ export function cutCodePoints(text: string, max: number): string {
 	}
 	return out;
 }
-
-/**
- * An edited field value held to `max` code points, the way a native
- * `maxlength` drops what does not fit: the text just typed or pasted (before
- * the caret) is cut, the text after the caret is kept, and the caret stays
- * at the end of what was kept. `caret` and the returned caret are UTF-16
- * offsets, as `selectionEnd` and `setSelectionRange` use.
- */
-export function limitEdit(value: string, caret: number, max: number): { value: string; caret: number } {
-	if (codePoints(value) <= max) return { value, caret };
-	const after = value.slice(caret);
-	const room = max - codePoints(after);
-	if (room < 0) {
-		// The text after the caret alone is over the limit: keep the start.
-		const cut = cutCodePoints(value, max);
-		return { value: cut, caret: Math.min(caret, cut.length) };
-	}
-	const before = cutCodePoints(value.slice(0, caret), room);
-	return { value: before + after, caret: before.length };
-}

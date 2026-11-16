@@ -7,7 +7,6 @@
 	import PathText from './PathText.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { controlAria, getRowContext } from './row-context';
-	import { limitEdit } from '$lib/utils/code-points';
 
 	interface Props {
 		value: string;
@@ -26,12 +25,6 @@
 		label?: string;
 		autocomplete?: HTMLInputElement['autocomplete'];
 		maxlength?: number;
-		/**
-		 * Longest value in code points (the unit a server `max_length` counts;
-		 * a native maxlength counts UTF-16 units). Typed or pasted text past it
-		 * is cut before `oninput` sees it; an IME composition is cut when it ends.
-		 */
-		maxchars?: number;
 		/** Keyboard hint, e.g. 'numeric' for token counts typed as text. */
 		inputmode?: 'text' | 'numeric' | 'decimal' | 'email' | 'url' | 'tel' | 'search' | 'none';
 		/** The value was refused: sets aria-invalid. */
@@ -54,7 +47,6 @@
 		label,
 		autocomplete = 'off',
 		maxlength,
-		maxchars,
 		inputmode,
 		invalid = false,
 		errorId
@@ -70,24 +62,6 @@
 	});
 	/** Value when the field took focus; a blur or Enter commits only real changes. */
 	let committed: string | null = null;
-
-	/** An IME composition is in progress: its text is not final yet. */
-	let composing = false;
-
-	/** Holds the field to `maxchars`, then reports the value. Skipped mid-composition. */
-	function edited(el: HTMLInputElement, composing: boolean) {
-		if (maxchars !== undefined) {
-			if (composing) return;
-			const caret = el.selectionEnd ?? el.value.length;
-			const held = limitEdit(el.value, caret, maxchars);
-			if (held.value !== el.value) {
-				el.value = held.value;
-				el.setSelectionRange(held.caret, held.caret);
-			}
-			value = held.value;
-		}
-		oninput?.(value);
-	}
 
 	function commit() {
 		if (committed === null || value === committed) return;
@@ -110,12 +84,7 @@
 	disabled={disabled || access.readOnly}
 	{...aria}
 	onfocus={() => (committed = value)}
-	oninput={(e) => edited(e.currentTarget, composing)}
-	oncompositionstart={() => (composing = true)}
-	oncompositionend={(e) => {
-		composing = false;
-		if (maxchars !== undefined) edited(e.currentTarget, false);
-	}}
+	oninput={() => oninput?.(value)}
 	onblur={commit}
 	onkeydown={(e) => {
 		onkeydown?.(e);

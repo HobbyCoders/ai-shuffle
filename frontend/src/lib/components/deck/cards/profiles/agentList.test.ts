@@ -7,6 +7,7 @@ import {
 	AGENT_NAME_MAX,
 	FOLDER_NONE,
 	duplicateAgentName,
+	agentNameProblem,
 	defaultModelBinding,
 	isPinned,
 	pinnedModel,
@@ -191,6 +192,15 @@ describe('duplicateAgentName against existing names', () => {
 		const name = 'a'.repeat(90) + family;
 		const taken = [name, name + ' copy'];
 		expect(duplicateAgentName(name, taken)).toBe('a'.repeat(90) + ' copy 2');
+	});
+});
+
+describe('agentNameProblem', () => {
+	it('asks for a name, then for one within 100 code points', () => {
+		expect(agentNameProblem('  ')).toBe('Required to save.');
+		expect(agentNameProblem('Scribe')).toBeNull();
+		expect(agentNameProblem('😀'.repeat(AGENT_NAME_MAX))).toBeNull();
+		expect(agentNameProblem('😀'.repeat(AGENT_NAME_MAX + 1))).toBe('Too long: 101 of 100 characters. Shorten it to save.');
 	});
 });
 

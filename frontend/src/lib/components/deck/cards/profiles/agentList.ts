@@ -109,6 +109,17 @@ export const AGENT_ID_MAX = 50;
 /** Longest agent name the server accepts (`ProfileBase.name` max_length, in code points). */
 export const AGENT_NAME_MAX = 100;
 
+/**
+ * Why `name` cannot be saved yet, or null. The limit counts code points, as
+ * the server's `max_length` does; the field never cuts what was typed.
+ */
+export function agentNameProblem(name: string): string | null {
+	if (!name.trim()) return 'Required to save.';
+	const n = codePoints(name);
+	if (n > AGENT_NAME_MAX) return `Too long: ${n} of ${AGENT_NAME_MAX} characters. Shorten it to save.`;
+	return null;
+}
+
 /** `base` cut so it plus `suffix` fits AGENT_ID_MAX, never ending on a dash. */
 function fitId(base: string, suffix = ''): string {
 	return base.slice(0, AGENT_ID_MAX - suffix.length).replace(/-+$/, '') + suffix;
