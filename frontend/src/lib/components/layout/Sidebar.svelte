@@ -1528,6 +1528,13 @@
 	.act:hover { background: var(--row-selected); }
 	.act.primary { background: var(--action); color: var(--action-foreground); }
 	.act.primary:hover { background: var(--action-hover); }
+	/* A finger needs 44px, also when a crowded bar drops the labels (#1615):
+	   in the phone app and in the browser on any touch screen, including a
+	   touch laptop whose main pointer is its trackpad. */
+	.phone .act, .phone .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
+	@media (pointer: coarse), (any-pointer: coarse) {
+		.act, .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
+	}
 	/* A narrow sidebar cannot fit every labelled button (the bar's content box
 	   is about 248px at the desktop default width, 374px on a 390px phone).
 	   Each button carries an aria-label, so the words go first: Snooze's, then

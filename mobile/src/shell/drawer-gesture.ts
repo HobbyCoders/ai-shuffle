@@ -11,6 +11,13 @@
 export const AXIS_SLOP = 8;
 /** Past this share of the screen width, letting go completes the move. */
 export const SETTLE_FRACTION = 0.3;
+/**
+ * ...capped at this many pixels. The drawer is full width, so on a wide inner
+ * screen (a foldable unfolded, a spanned dual-screen device) 30% of it would
+ * ask for a 265px-plus drag. 30% of a 426px phone is 128px, so phones keep the
+ * distance they had and a wide screen asks for the same drag a phone does.
+ */
+export const SETTLE_MAX_PX = 128;
 /** A flick this fast (px/ms) completes the move whatever the distance. */
 export const FLICK_VELOCITY = 0.5;
 
@@ -32,13 +39,18 @@ export function dragOffset(dx: number, width: number, swipe: DrawerSwipe): numbe
 	return swipe === 'open' ? Math.min(Math.max(dx, 0), width) : Math.max(Math.min(dx, 0), -width);
 }
 
+/** How far the drawer must travel for letting go to complete the move. */
+export function settleDistance(width: number): number {
+	return Math.min(width * SETTLE_FRACTION, SETTLE_MAX_PX);
+}
+
 /**
  * On release, does the move complete? Either the drawer travelled far enough
  * or the finger was still moving fast in the swipe's direction.
  */
 export function completes(offset: number, velocity: number, width: number, swipe: DrawerSwipe): boolean {
 	const sign = swipe === 'open' ? 1 : -1;
-	return offset * sign > width * SETTLE_FRACTION || velocity * sign > FLICK_VELOCITY;
+	return offset * sign > settleDistance(width) || velocity * sign > FLICK_VELOCITY;
 }
 
 /** Elements whose own horizontal gesture outranks the drawer's. */
