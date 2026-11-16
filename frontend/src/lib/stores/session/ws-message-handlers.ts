@@ -33,7 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
-import { isOutdatedOwnEffortEcho } from './effort-echo';
+import { isOutdatedOwnEffortEcho, noteRunSettingsAnnouncement } from './effort-echo';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -618,6 +618,12 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				// A context-window pick saved from another tab, device or worker:
 				// adopt it, so this composer neither shows nor sends the older one.
+				// Every announced run setting is a server confirmation: a failed
+				// newer pick here settles on it, not on an older answer (#1641 S7).
+				if (updatedSessionId) noteRunSettingsAnnouncement(updatedSessionId, {
+					...('context_window' in updates ? { context_window: updates.context_window as number | null } : {}),
+					...('effort' in updates ? { effort: updates.effort as string | null } : {}),
+				}, syncData?.request_id);
 				const pickedChoice = contextChoiceFromWindow(
 					updates.context_window as number | null | undefined,
 					getState().modelOverride || getDefaultModel()

@@ -53,7 +53,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +441,7 @@ def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
                                     **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
                 sent += 1
                 if pin:
-                    # Released in a worker thread: ``_queue_changed`` announces it.
+                    # Released in a worker thread: ``_off_loop`` announces it.
                     turn_manager.note_window_pin(session_id, pin["context_window"])
             except Exception:  # noqa: BLE001 — one refused message must not stop the rest
                 logger.warning("Could not send a held message of %s here", session_id, exc_info=True)
@@ -508,11 +508,15 @@ async def _queue_changed(session_id: str) -> None:
     from app.core.session_runtime import _broadcast_queue_after_start
 
     await _broadcast_queue_after_start(session_id)
-    # A released message may have saved a model that dropped the pin, or
-    # another window: open composers adopt it, or their next send is stale.
+
+
+async def _off_loop(fn: Callable[..., Any], session_id: str, *args: Any) -> Any:
+    """Run a releasing ``fn`` in a thread. A released message may have saved a
+    model that dropped the pin: open composers are told once the thread ends,
+    even if this await was cancelled first, or their next send is stale."""
     from app.core import turn_manager
 
-    await turn_manager.announce_noted_window_pin(session_id)
+    return await turn_manager.run_off_loop_announcing_pin(asyncio.to_thread, fn, session_id, session_id, *args)
 
 
 def _resend_safe(target_id: str) -> bool:
@@ -900,7 +904,7 @@ def cancel(session_id: str) -> bool:
 
 async def cancel_async(session_id: str) -> bool:
     pending = pending_for(session_id)
-    released = await asyncio.to_thread(_cancel_counting, session_id)
+    released = await _off_loop(_cancel_counting, session_id)
     if released is not None:
         from app.core import turn_manager
 
@@ -1366,7 +1370,7 @@ async def _end_here(session_id: str, pending: PendingHandoff, reason: str, *, re
     wake-up that fires after them. Holds no lock while it waits to retry."""
     for attempt in itertools.count():
         try:
-            (sent, unsent), wake = await asyncio.to_thread(_end_here_sync, session_id, pending, reason, release)
+            (sent, unsent), wake = await _off_loop(_end_here_sync, session_id, pending, reason, release)
             break
         except Exception:  # noqa: BLE001 — the move stays queued; retried below
             log = logger.error if attempt == len(END_RETRY_DELAYS) else logger.warning
@@ -1595,7 +1599,7 @@ async def cancel_move(session_id: str) -> Dict[str, Any]:
 
 async def _cancel_move_reserved(session_id: str, pending: Optional[PendingHandoff]) -> Dict[str, Any]:
     handoff_id = pending.handoff_id if pending else None
-    released = await asyncio.to_thread(_cancel_counting, session_id)
+    released = await _off_loop(_cancel_counting, session_id)
     if released is None:
         moving = _moving.get(session_id)
         if moving is not None:

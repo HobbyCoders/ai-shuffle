@@ -83,14 +83,11 @@ async def build_session_options_off_loop(
 
     Binding a provider's default model can clear a context-window pin that
     model cannot hold; the thread has no loop to tell open composers, so this
-    announces it, even when the build fails after the bind (#1640).
+    announces it once the thread ends, even when the build fails after the
+    bind or this await is cancelled first (#1640).
     """
-    try:
-        # Looked up at call time, so a patched module attribute is the one run.
-        return await run(build_session_options, **kwargs)
-    finally:
-        session_id = kwargs.get("session_id")
-        if session_id:
-            from app.core import turn_manager
+    from app.core import turn_manager
 
-            await turn_manager.announce_noted_window_pin(session_id)
+    # Looked up at call time, so a patched module attribute is the one run.
+    return await turn_manager.run_off_loop_announcing_pin(
+        run, lambda **kw: build_session_options(**kw), kwargs.get("session_id"), **kwargs)

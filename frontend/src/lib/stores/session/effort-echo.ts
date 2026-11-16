@@ -63,7 +63,61 @@ export function isOutdatedOwnEffortEcho(sessionId: string, requestId: unknown): 
 	return order < entry.latest;
 }
 
+/** A fresh id for a run-settings request that is not an effort pick. */
+export function newRunSettingsRequestId(): string {
+	return newRequestId();
+}
+
+/**
+ * Run-settings announcements in the order this tab received them, per
+ * session. The worker announces a change before it answers the request, and
+ * one socket delivers announcements in the order they were sent, so whatever
+ * arrives after a request's own announcement was saved after that request.
+ */
+type AnnouncedField = 'effort' | 'context_window';
+interface SessionAnnouncements {
+	seq: number;
+	/** request id → seq of the announcement that echoed it. */
+	echoes: Map<string, number>;
+	latest: Partial<Record<AnnouncedField, { seq: number; value: string | number | null }>>;
+}
+const announcements = new Map<string, SessionAnnouncements>();
+
+/** Note a received `session_updated` announcement of run settings. */
+export function noteRunSettingsAnnouncement(
+	sessionId: string, updates: Partial<Record<AnnouncedField, string | number | null>>, requestId: unknown,
+) {
+	const fields = (['effort', 'context_window'] as const).filter(f => f in updates);
+	if (!fields.length) return;
+	let entry = announcements.get(sessionId);
+	if (entry) announcements.delete(sessionId);
+	else entry = { seq: 0, echoes: new Map(), latest: {} };
+	announcements.set(sessionId, entry);
+	while (announcements.size > SESSIONS) announcements.delete(announcements.keys().next().value as string);
+	entry.seq += 1;
+	if (typeof requestId === 'string' && requestId) {
+		entry.echoes.set(requestId, entry.seq);
+		while (entry.echoes.size > PER_SESSION) entry.echoes.delete(entry.echoes.keys().next().value as string);
+	}
+	for (const field of fields) entry.latest[field] = { seq: entry.seq, value: updates[field] ?? null };
+}
+
+/**
+ * The newest value of `field` the worker announced after the announcement of
+ * request `requestId`: a change saved after that request, by any tab. Nothing
+ * when the request's own announcement has not arrived (anything seen so far
+ * was saved before it) or nothing came after it.
+ */
+export function announcedAfter(sessionId: string, field: AnnouncedField, requestId: string | null): { value: string | number | null } | undefined {
+	const entry = requestId ? announcements.get(sessionId) : undefined;
+	const echoed = requestId ? entry?.echoes.get(requestId) : undefined;
+	const latest = entry?.latest[field];
+	if (echoed === undefined || !latest || latest.seq <= echoed) return undefined;
+	return { value: latest.value };
+}
+
 /** Test hook. */
 export function resetEffortEchoes() {
 	sessions.clear();
+	announcements.clear();
 }

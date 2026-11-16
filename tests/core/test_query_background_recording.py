@@ -499,14 +499,25 @@ async def test_start_background_query_stamps_run_binding(mock_db):
     from app.db import database
 
     async def _fake_run_sync(fn, *a, **k):
+        if fn.__qualname__.startswith("run_off_loop_announcing_pin"):
+            # The binding save runs wrapped so its pin change is announced
+            # (#1640); run the wrapper so the save itself is recorded.
+            return fn(*a, **k)
         run_sync_calls.append((fn, a, k))
         if fn is database.get_session:
             return {"id": sid, "sdk_session_id": None}
         return {"id": "row-1"}
 
+    def _fake_bind(*a, **k):
+        run_sync_calls.append((database.set_session_run_binding, a, k))
+        return False
+
     with ExitStack() as stack:
         stack.enter_context(patch.object(
             qb, "run_sync", new=AsyncMock(side_effect=_fake_run_sync)
+        ))
+        stack.enter_context(patch.object(
+            database, "set_session_run_binding", new=_fake_bind
         ))
         stack.enter_context(patch.object(
             qb, "get_profile", return_value={"id": "default"}
@@ -522,7 +533,7 @@ async def test_start_background_query_stamps_run_binding(mock_db):
 
     binding = [
         (a, k) for fn, a, k in run_sync_calls
-        if fn is database.set_session_run_binding
+        if fn is _fake_bind or fn is database.set_session_run_binding
     ]
     assert binding, "API lane never persisted the run binding (v79)"
     args, kwargs = binding[0]

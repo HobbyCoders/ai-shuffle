@@ -55,7 +55,7 @@ import { registerReloadBlocker } from '$lib/services/app-update';
 // Caches and helpers
 import { sessionEphemeralCache } from './session-cache';
 import { resolveModelEffort } from '$lib/constants/model-effort';
-import { noteEffortRequest } from './session/effort-echo';
+import { announcedAfter, newRunSettingsRequestId, noteEffortRequest } from './session/effort-echo';
 import { sessionOwnerEpoch } from './session-owner';
 import { notify } from './notifications';
 import { getOrCreateDeviceId } from './device-id';
@@ -882,9 +882,10 @@ type RunSettingsReply = { effort: string | null; fast: boolean; context_window: 
  * The newest answer the worker gave for a field that a newer pick outran, kept
  * per chat queue. That answer IS the saved value (and its announcement is
  * skipped here as this tab's own), so when the newer pick then fails without
- * being held, the composer settles on it instead of the value before both.
+ * being held, the composer settles on it instead of the value before both,
+ * or on a change the worker announced after it (another tab's pick).
  */
-const unappliedRunSettings: Partial<Record<'effort' | 'fast' | 'context_window', { queueKey: string; saved: RunSettingsReply }>> = {};
+const unappliedRunSettings: Partial<Record<'effort' | 'fast' | 'context_window', { queueKey: string; saved: RunSettingsReply; requestId: string | null }>> = {};
 
 async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
 	const generation = ++runSettingGenerations[field];
@@ -905,7 +906,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		if (!previous) delete unappliedRunSettings[field];
 		// An effort request names itself, so the worker's announcement of it can
 		// be told from another tab's and skipped once outdated here (#1633).
-		const requestId = field === 'effort' ? noteEffortRequest(sessionId) : null;
+		// A window request names itself too, so a later announcement can be
+		// placed after its own; it stays out of the effort echo check.
+		const requestId = field === 'effort' ? noteEffortRequest(sessionId)
+			: field === 'context_window' ? newRunSettingsRequestId() : null;
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
 			return api.put<RunSettingsReply>(
@@ -936,7 +940,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			// not overwrite a newer pick here or in the cached copy (#1633). Keep
 			// it in case that newer pick fails.
 			if (generation !== runSettingGenerations[field]) {
-				unappliedRunSettings[field] = { queueKey, saved };
+				unappliedRunSettings[field] = { queueKey, saved, requestId };
 				return;
 			}
 			delete unappliedRunSettings[field];
@@ -957,9 +961,11 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			if (current) delete unappliedRunSettings[field];
 			if (!held) {
 				// The latest pick failed: settle on the last value the worker
-				// did save for an earlier pick, if this newer pick hid it.
+				// did save for an earlier pick, if this newer pick hid it, or on
+				// a change the worker announced after that save (#1641 S7).
 				if (!current || outrun?.queueKey !== queueKey) return;
-				adopt(outrun.saved);
+				const later = field === 'fast' ? undefined : announcedAfter(sessionId, field, outrun.requestId);
+				adopt(later ? { ...outrun.saved, [field]: later.value } : outrun.saved);
 			}
 		} finally {
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);

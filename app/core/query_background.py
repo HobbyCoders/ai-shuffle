@@ -740,6 +740,19 @@ async def _run_background_query_impl(
     logger.debug(f"[Background] Query completed for session {session_id}")
 
 
+def _bind_noting_pin(session_id: str, **binding: Any) -> bool:
+    """``set_session_run_binding`` in a worker thread, noting a pin it changed
+    (:func:`turn_manager.note_window_pin`) for its caller to announce."""
+    from app.core.turn_manager import note_window_pin
+
+    dropped = database.set_session_run_binding(session_id, **binding)
+    if binding.get("context_window"):
+        note_window_pin(session_id, binding["context_window"])
+    elif dropped:
+        note_window_pin(session_id, None)
+    return dropped
+
+
 async def start_background_query(
     prompt: str,
     profile_id: str,
@@ -831,9 +844,17 @@ async def _start_background_turn(
     # binding and empty overrides, fall back to the bare launched_model with no
     # provider, and fail on the wrong leg with the wrong credentials.
     if overrides:
+        from app.core import turn_manager
+
         try:
-            pin_dropped = await run_sync(
-                database.set_session_run_binding,
+            # A pin the save drops (#1640) is noted in the thread and announced
+            # when it ends, even if this request is cancelled while it runs.
+            # Open composers still send the old pin as their base, and a send
+            # whose base is outdated would have its window ignored.
+            await turn_manager.run_off_loop_announcing_pin(
+                run_sync,
+                _bind_noting_pin,
+                session_id,
                 session_id,
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
@@ -854,16 +875,9 @@ async def _start_background_turn(
                 if window is None:
                     overrides = {k: v for k, v in overrides.items() if k != "context_window"}
                 else:
-                    await run_sync(database.set_session_run_binding, session_id,
-                                   context_window=window)
-                    pin_dropped = False
-            if pin_dropped:
-                # The new model cannot hold the saved pin, so it was cleared
-                # (#1640). Open composers still send it as their base, and a
-                # send whose base is outdated would have its window ignored.
-                from app.core.turn_manager import announce_window_pin
-
-                await announce_window_pin(session_id, None)
+                    await turn_manager.run_off_loop_announcing_pin(
+                        run_sync, _bind_noting_pin, session_id, session_id,
+                        context_window=window)
         except Exception:
             logger.exception(
                 f"[Background] run-binding persist failed for session {session_id}"

@@ -60,6 +60,18 @@ def _build_options(profile, *, session_id=None, overrides=None):
 # ---------------------------------------------------------------------------
 
 
+async def _drain_pin_flushes(*, until=None):
+    """Wait for the pin announcements worker threads handed to the loop
+    (first, for ``until()`` to hold, when given)."""
+    for _ in range(500 if until else 0):
+        if turn_manager._pin_flushes or until():
+            break
+        await asyncio.sleep(0.01)
+    while turn_manager._pin_flushes:
+        await asyncio.gather(*list(turn_manager._pin_flushes))
+        await asyncio.sleep(0)  # Let the done callbacks drop finished tasks.
+
+
 class TestBindingStampedAtCreation:
     def test_stamps_model_effort_and_permission_mode(self, mock_db):
         make_profile("agent", {})
@@ -508,7 +520,9 @@ class TestSubmitPersistsTheBinding:
         if pushed is not None:
             expected.append(call(session_id="s-push", updates={"context_window": pushed}, source_device_id=None))
             assert db.get_session("s-push")["context_window"] == pushed
-        assert broadcast.await_args_list == expected
+        # Separate fields, so their order does not matter: the pin goes out as
+        # soon as the save's thread ends, the reactivation after it.
+        assert sorted(map(repr, broadcast.await_args_list)) == sorted(map(repr, expected))
         assert db.get_session("s-push")["is_active"]
 
     @pytest.mark.parametrize("pin, model, kept", [
@@ -555,6 +569,42 @@ class TestSubmitPersistsTheBinding:
         assert db.get_session("s-drop")["context_window"] is None
         assert call(session_id="s-drop", updates={"context_window": None},
                     source_device_id=None) in broadcast.await_args_list
+
+    async def test_send_cancelled_while_its_save_runs_still_tells_open_clients(self, mock_db):
+        """Review round 3, same shape as the options build: the send's await is
+        cancelled before its thread drops the pin; the drop is announced when
+        the thread ends."""
+        import threading
+        from unittest.mock import AsyncMock
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session("s-drop-cancel", profile_id="agent", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        go, started = threading.Event(), threading.Event()
+        real = turn_manager._submit_blocking
+
+        def slow_submit(*args, **kwargs):
+            started.set()
+            go.wait(5)
+            return real(*args, **kwargs)
+
+        with patch.object(turn_manager, "_submit_blocking", slow_submit), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            task = asyncio.create_task(turn_manager.submit_async(
+                "s-drop-cancel", "user", prompt="hi", profile_id="agent",
+                overrides={"model": "claude-haiku-4-5"}, no_kick=True,
+            ))
+            await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert broadcast.await_count == 0
+            go.set()
+            await _drain_pin_flushes(until=lambda: broadcast.await_count > 0)
+        assert db.get_session("s-drop-cancel")["context_window"] is None
+        broadcast.assert_awaited_once_with(
+            session_id="s-drop-cancel", updates={"context_window": None}, source_device_id=None)
 
     def test_the_clear_never_erases_a_pin_saved_for_a_newer_model(self, mock_db, monkeypatch):
         """Review S2: the clear is judged against Haiku; meanwhile another writer
@@ -647,6 +697,7 @@ class TestSubmitPersistsTheBinding:
             await sdk_options.build_session_options_off_loop(
                 asyncio.to_thread, profile=db.get_profile("agent"), project=None,
                 overrides={"cwd": str(tmp_path)}, session_id="s-default-drop")
+            await _drain_pin_flushes()
         row = db.get_session("s-default-drop")
         assert (row["model"], row["context_window"]) == ("prov:small:tiny", None)
         broadcast.assert_awaited_once_with(
@@ -665,13 +716,44 @@ class TestSubmitPersistsTheBinding:
                 patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
             with pytest.raises(ValueError):
                 await sdk_options.build_session_options_off_loop(asyncio.to_thread, session_id="s-x")
-            await turn_manager.announce_noted_window_pin("s-x")
+            await _drain_pin_flushes()
         broadcast.assert_awaited_once_with(session_id="s-x", updates={"context_window": None}, source_device_id=None)
+
+    async def test_options_build_cancelled_before_it_notes_still_announces(self, mock_db):
+        """Review round 3: the awaiting coroutine is cancelled while the build
+        thread still runs; the pin that thread clears afterwards is announced
+        when the thread ends, not lost with the cancelled await."""
+        import threading
+        from unittest.mock import AsyncMock
+        from app.core import sdk_options
+        from app.core.sync_engine import sync_engine
+
+        go = threading.Event()
+        started = threading.Event()
+
+        def build(**kwargs):
+            started.set()
+            go.wait(5)
+            turn_manager.note_window_pin(kwargs["session_id"], None)
+            return None, None
+
+        with patch.object(sdk_options, "build_session_options", build), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            task = asyncio.create_task(
+                sdk_options.build_session_options_off_loop(asyncio.to_thread, session_id="s-cancel"))
+            await asyncio.to_thread(started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert broadcast.await_count == 0
+            go.set()
+            await _drain_pin_flushes(until=lambda: broadcast.await_count > 0)
+        broadcast.assert_awaited_once_with(session_id="s-cancel", updates={"context_window": None}, source_device_id=None)
 
     async def test_held_message_released_after_a_move_tells_open_clients(self, mock_db):
         """Review S8: a message held through a queued move is sent by the
         synchronous release in a worker thread; the pin its model drops is
-        announced when the hand-off reports the queue change."""
+        announced once that thread ends."""
         from unittest.mock import AsyncMock
         from app.core import session_handoff
         from app.core.sync_engine import sync_engine
@@ -679,17 +761,16 @@ class TestSubmitPersistsTheBinding:
         make_profile("agent", {})
         db.create_session("s-held-drop", profile_id="agent", model="claude-opus-4-6",
                           context_window=1_000_000)
-        sent, unsent = await asyncio.to_thread(session_handoff._submit_here, "s-held-drop", [
-            {"source": "user", "prompt": "hi", "profile_id": "agent",
-             "overrides": {"model": "claude-haiku-4-5"}},
-        ])
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            sent, unsent = await session_handoff._off_loop(session_handoff._submit_here, "s-held-drop", [
+                {"source": "user", "prompt": "hi", "profile_id": "agent",
+                 "overrides": {"model": "claude-haiku-4-5"}},
+            ])
+            await _drain_pin_flushes()
+            # Announced once: a later flush has nothing to say.
+            await turn_manager.announce_noted_window_pin("s-held-drop")
         assert (sent, unsent) == (1, [])
         assert db.get_session("s-held-drop")["context_window"] is None
-        with patch("app.core.session_runtime._broadcast_queue_after_start", new=AsyncMock()), \
-                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
-            await session_handoff._queue_changed("s-held-drop")
-            # Announced once: a later queue change has nothing to say.
-            await session_handoff._queue_changed("s-held-drop")
         broadcast.assert_awaited_once_with(
             session_id="s-held-drop", updates={"context_window": None}, source_device_id=None)
 

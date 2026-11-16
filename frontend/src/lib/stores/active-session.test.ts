@@ -65,6 +65,7 @@ import { auth } from '$lib/stores/auth.svelte';
 import { composerPreferences } from './composer-preferences';
 import { sessionEphemeralCache } from './session-cache';
 import { notify } from './notifications';
+import { noteRunSettingsAnnouncement, resetEffortEchoes } from './session/effort-echo';
 import { selectedContextWindow, standardContextCap } from './session/context-window';
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
@@ -770,7 +771,7 @@ describe('live effort and Fast mode selection', () => {
 			let acknowledge!: (value: { context_window: number }) => void;
 			const put = vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
 			const pending = activeSession.setContextWindowChoice('standard');
-			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 200_000 });
+			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 200_000, request_id: expect.any(String) });
 			expect(activeSession.current.contextWindowChoice).toBe('1m');
 			expect(patchRow).not.toHaveBeenCalled();
 			acknowledge({ context_window: 200_000 });
@@ -792,7 +793,7 @@ describe('live effort and Fast mode selection', () => {
 			const put = vi.spyOn(api, 'put').mockResolvedValue({ context_window: 450_000 });
 			try {
 				await activeSession.setContextStandardCap(450_400);
-				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 450_000 });
+				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 450_000, request_id: expect.any(String) });
 				expect(activeSession.current.contextWindowChoice).toBe('standard');
 				expect(activeSession.current.contextWindowPin).toBe(450_000);
 				expect(composerPreferences.contextCapForModel('fable')).toBe(450_000);
@@ -808,7 +809,7 @@ describe('live effort and Fast mode selection', () => {
 			const put = vi.spyOn(api, 'put').mockResolvedValue({ context_window: 600_000 });
 			try {
 				await activeSession.setContextWindowChoice('standard');
-				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 600_000 });
+				expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { context_window: 600_000, request_id: expect.any(String) });
 			} finally {
 				composerPreferences.rememberContextCap('fable', null);
 			}
@@ -907,6 +908,7 @@ describe('live effort and Fast mode selection', () => {
 	});
 
 	describe('a newer pick fails after an earlier one was saved', () => {
+		beforeEach(() => resetEffortEchoes());
 		const deferred = () => {
 			let acknowledge!: (value: { effort: string; fast: boolean }) => void;
 			const promise = new Promise<{ effort: string; fast: boolean }>(resolve => { acknowledge = resolve; });
@@ -985,6 +987,51 @@ describe('live effort and Fast mode selection', () => {
 			await Promise.all([first, second]);
 			await activeSession.setEffortLevelOverride('max');
 			expect(activeSession.current.effortLevelOverride).toBe('medium');
+		});
+
+		// Review round 3: an announcement is a server confirmation too. The
+		// worker announces a save before answering it, and one socket keeps the
+		// order, so what follows this tab's own announcement was saved later.
+		const lowThenFailedMedium = async (announce: (lowId: string) => void) => {
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			sessionEphemeralCache.save('live-knobs', { effortLevelOverride: 'xhigh' } as never);
+			const low = deferred();
+			let lowId = '';
+			vi.spyOn(api, 'put').mockImplementationOnce(((_path: string, body: { request_id: string }) => {
+				lowId = body.request_id;
+				return low.promise;
+			}) as never).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			const first = activeSession.setEffortLevelOverride('low');
+			const second = activeSession.setEffortLevelOverride('medium');
+			await vi.waitFor(() => expect(lowId).not.toBe(''));
+			low.acknowledge({ effort: 'low', fast: false });
+			await first;
+			announce(lowId);
+			await second;
+		};
+
+		it('settles on another tab\'s level saved after the earlier pick', async () => {
+			await lowThenFailedMedium(lowId => {
+				noteRunSettingsAnnouncement('live-knobs', { effort: 'low' }, lowId);
+				noteRunSettingsAnnouncement('live-knobs', { effort: 'high' }, undefined);
+			});
+			expect(activeSession.current.effortLevelOverride).toBe('high');
+			expect(sessionEphemeralCache.restore('live-knobs')?.effortLevelOverride).toBe('high');
+		});
+
+		it('keeps the earlier pick when another tab\'s level was saved before it', async () => {
+			await lowThenFailedMedium(lowId => {
+				noteRunSettingsAnnouncement('live-knobs', { effort: 'high' }, undefined);
+				noteRunSettingsAnnouncement('live-knobs', { effort: 'low' }, lowId);
+			});
+			expect(activeSession.current.effortLevelOverride).toBe('low');
+		});
+
+		it('keeps the earlier pick when its own announcement never arrived', async () => {
+			await lowThenFailedMedium(() => {
+				noteRunSettingsAnnouncement('live-knobs', { effort: 'high' }, undefined);
+			});
+			expect(activeSession.current.effortLevelOverride).toBe('low');
 		});
 	});
 

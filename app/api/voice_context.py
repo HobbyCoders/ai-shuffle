@@ -143,6 +143,17 @@ def _persist(session_id: str, body: VoiceContextPatch) -> tuple[dict, bool]:
     return database.get_session(session_id) or {}, pin_dropped
 
 
+def _persist_noting_pin(session_id: str, body: VoiceContextPatch) -> dict:
+    """:func:`_persist` in a worker thread, noting a dropped pin
+    (:func:`turn_manager.note_window_pin`) for the route to announce."""
+    from app.core.turn_manager import note_window_pin
+
+    updated, pin_dropped = _persist(session_id, body)
+    if pin_dropped:
+        note_window_pin(session_id, None)
+    return updated
+
+
 @router.patch(
     "/sessions/{session_id}/context",
     response_model=VoiceContextResponse,
@@ -165,11 +176,12 @@ async def update_voice_session_context(
     _validate_patch(body)
     if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):
         raise HTTPException(400, "Chat conversations use the default permission ceiling.")
-    updated, pin_dropped = await run_sync(_persist, session_id, body)
-    if pin_dropped:
-        from app.core.turn_manager import announce_window_pin
+    from app.core import turn_manager
 
-        await announce_window_pin(session_id, None)
+    # A dropped pin is announced when the thread ends, even if this request is
+    # cancelled while it runs.
+    updated = await turn_manager.run_off_loop_announcing_pin(
+        run_sync, _persist_noting_pin, session_id, session_id, body)
     return VoiceContextResponse(
         session_id=session_id,
         model=updated.get("model"),

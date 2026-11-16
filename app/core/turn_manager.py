@@ -34,7 +34,7 @@ import asyncio
 import time
 import logging
 import threading
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
 
 from app.core.db_polling import DB_POLL_ERRORS, DBPollWarnings
 from app.core import message_admission
@@ -552,8 +552,8 @@ def submit(
 
     ``window_pin`` is :func:`_submit_blocking`'s collector. This form has no
     event loop to push the pin from, so a caller that passes it notes it
-    (:func:`note_window_pin`) and announces it from its own (hand-off release
-    does, #1640).
+    (:func:`note_window_pin`) and runs under :func:`run_off_loop_announcing_pin`
+    (hand-off release does, #1640).
     """
     reactivated: dict[str, Any] = {}
     try:
@@ -632,11 +632,14 @@ async def submit_async(
         from app.core import owner_confirm
 
         held = await owner_confirm.on_owner_message(session_id, prompt)
-    window_pin: Dict[str, Optional[int]] = {}
     reactivated: dict[str, Any] = {}
     try:
-        turn_id = await asyncio.to_thread(
-            _submit_blocking,
+        # A pin the save drops is announced once the thread ends, even if this
+        # await is cancelled first or the submit raises after the save.
+        turn_id = await run_off_loop_announcing_pin(
+            asyncio.to_thread,
+            _submit_noting_pin,
+            session_id,
             session_id,
             source,
             prompt=prompt,
@@ -649,7 +652,6 @@ async def submit_async(
             command_id=command_id,
             parent_turn_id=parent_turn_id,
             instance_id=instance_id,
-            window_pin=window_pin,
             reactivated=reactivated,
             caller=caller,
             person_entered=person_entered,
@@ -665,9 +667,18 @@ async def submit_async(
         await owner_confirm.park(session_id, held.get("park") or ())
     if not no_kick:
         _kick(session_id)
-    if window_pin:
-        await announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
+
+
+def _submit_noting_pin(session_id: str, source: str, **kwargs: Any) -> str:
+    """:func:`_submit_blocking` in a worker thread, noting a pin change it
+    made (:func:`note_window_pin`) for :func:`run_off_loop_announcing_pin`."""
+    window_pin: Dict[str, Optional[int]] = {}
+    try:
+        return _submit_blocking(session_id, source, window_pin=window_pin, **kwargs)
+    finally:
+        if window_pin:
+            note_window_pin(session_id, window_pin["context_window"])
 
 
 def _reactivate_for_send(
@@ -751,11 +762,13 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
 
 
 # A pin a worker thread changed with no event loop to announce from, by
-# session (None: the pin was cleared). The async caller that ran the thread
-# announces it (:func:`announce_noted_window_pin`): hand-off release and the
-# options build's provider-default bind note here (#1640).
+# session (None: the pin was cleared). The thread ran under
+# :func:`run_off_loop_announcing_pin`, which announces it once the thread
+# ends: hand-off release and the options build's provider-default bind note
+# here (#1640).
 _noted_pins: Dict[str, Optional[int]] = {}
 _NOT_NOTED = object()
+_pin_flushes: Set["asyncio.Task[None]"] = set()
 
 
 def note_window_pin(session_id: str, window: Optional[int]) -> None:
@@ -768,6 +781,49 @@ async def announce_noted_window_pin(session_id: str) -> None:
     window = _noted_pins.pop(session_id, _NOT_NOTED)
     if window is not _NOT_NOTED:
         await announce_window_pin(session_id, window)  # type: ignore[arg-type]
+
+
+def _start_pin_flush(session_id: str) -> None:
+    task = asyncio.get_running_loop().create_task(announce_noted_window_pin(session_id))
+    _pin_flushes.add(task)
+    task.add_done_callback(_pin_flushes.discard)
+
+
+async def run_off_loop_announcing_pin(run: Callable[..., Awaitable[Any]], fn: Callable[..., Any],
+                                      session_id: Optional[str], /, *args: Any, **kwargs: Any) -> Any:
+    """``await run(fn, *args, **kwargs)`` (``run`` is ``run_sync`` or
+    ``asyncio.to_thread``), then announce a pin change ``fn`` noted.
+
+    The announcement is tied to the thread ending, not to this await: a
+    caller cancelled while ``fn`` still runs would otherwise leave a pin the
+    thread clears afterwards unannounced. The thread itself hands it to the
+    loop when it finishes, whether it returned, raised or was abandoned.
+    """
+    loop = asyncio.get_running_loop()
+
+    def call(*call_args: Any, **call_kwargs: Any) -> Any:
+        try:
+            return fn(*call_args, **call_kwargs)
+        finally:
+            if session_id:
+                try:
+                    loop.call_soon_threadsafe(_start_pin_flush, session_id)
+                except RuntimeError:
+                    pass  # The loop is closed: nobody is left to tell.
+
+    try:
+        result = await run(call, *args, **kwargs)
+    except asyncio.CancelledError:
+        raise  # The thread hands its note to the loop when it ends.
+    except BaseException:
+        if session_id:
+            await announce_noted_window_pin(session_id)
+        raise
+    # Also announced here, so it is sent before the caller goes on; the
+    # thread's hand-off then finds nothing left (each note is sent once).
+    if session_id:
+        await announce_noted_window_pin(session_id)
+    return result
 
 
 async def announce_window_pin(session_id: str, window: Optional[int]) -> None:
