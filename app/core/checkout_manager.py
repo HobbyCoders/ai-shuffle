@@ -1016,6 +1016,15 @@ def _is_inside(path: Path, root: Path) -> bool:
     return True
 
 
+def shares_generated_types_with_another_checkout(modules: Path, checkout: Path) -> bool:
+    """Whether ``modules`` is a SvelteKit 3 tree that lives outside ``checkout``.
+
+    True for a link provisioned before SvelteKit 3 arrived: every sync, check
+    or build through it reads and overwrites the other checkout's types.
+    """
+    return _keeps_generated_types_in_node_modules(modules) and not _is_inside(modules, checkout)
+
+
 # The project's lockfile, and npm's own record of what a node_modules actually
 # holds (npm writes the latter on every install).
 _LOCKFILE_NAME = "package-lock.json"
@@ -1235,7 +1244,8 @@ def provision_node_modules(
     reported as setup-required; checkout creation never silently installs them.
     A SvelteKit 3 app is never linked: its generated types live in node_modules
     and belong to one checkout, so it always needs its own install. A package
-    that shares a sibling's tree gets the same link inside the worktree.
+    that shares a sibling's SvelteKit 3 tree gets the same link inside the
+    worktree; every other tree is shared across checkouts as before.
     A caller that obtained explicit setup approval may pass allow_install=True.
     Then runs the installed local ``svelte-kit sync`` where configured; no npx
     fallback may download missing tools.
@@ -1274,9 +1284,17 @@ def provision_node_modules(
             elif not source_modules.is_dir():
                 summary["skipped"].append(f"{label}: source has no node_modules")
                 continue
-            elif (owner := _sibling_modules_owner(source, source_modules)) is not None:
-                # The source package uses a sibling's tree. Mirror that inside
-                # the worktree; never reach through to the source checkout's.
+            elif (
+                owner := _sibling_modules_owner(source, source_modules)
+            ) is not None and (
+                _keeps_generated_types_in_node_modules(source_modules)
+                or _keeps_generated_types_in_node_modules(dest / owner / "node_modules")
+            ):
+                # The source package uses a sibling's tree, and that tree (or
+                # the one this worktree has in its place) is SvelteKit 3's.
+                # Mirror the link inside the worktree; never reach through to
+                # the source checkout's. Any other shared tree links below, as
+                # it always has.
                 own = dest / owner / "node_modules"
                 if not own.is_dir() or not _is_inside(own, dest):
                     summary["skipped"].append(
@@ -1349,7 +1367,7 @@ def provision_node_modules(
 
         if not _is_sveltekit_package(package):
             continue
-        if _keeps_generated_types_in_node_modules(dest_modules) and not _is_inside(dest_modules, dest):
+        if shares_generated_types_with_another_checkout(dest_modules, dest):
             # A tree linked from another checkout (an older worktree): sync
             # would write this checkout's types over that checkout's.
             summary["errors"].append(

@@ -8,6 +8,7 @@ that are TRUE for this worker, once per session, and never varies per turn.
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import pytest
@@ -85,6 +86,26 @@ def test_card_drops_facts_that_are_not_true(tmp_path, monkeypatch):
     assert "cannot open the running UI" in card
     assert "LAN address" in card  # browser rule still stated without a host
     assert "may run on a different host" in card
+
+
+def test_a_sveltekit_3_tree_linked_from_another_checkout_is_not_reported_installed(tmp_path):
+    """A worktree linked before SvelteKit 3: its sync would overwrite the other checkout's types."""
+    other = tmp_path / "parent" / "frontend" / "node_modules"
+    (other / ".bin").mkdir(parents=True)
+    (other / "@sveltejs" / "kit").mkdir(parents=True)
+    kit = other / "@sveltejs" / "kit" / "package.json"
+    root = _shuffle_checkout(tmp_path)
+    os.symlink(other, root / "frontend" / "node_modules", target_is_directory=True)
+
+    kit.write_text('{"version": "3.2.0"}')
+    facts = "\n".join(env._node_dependency_facts(root))
+    assert "node_modules in frontend is linked from another checkout" in facts
+    assert "Delete the link itself" in facts and "installed in frontend" not in facts
+
+    # SvelteKit 2 generates into the package's own .svelte-kit: sharing is fine.
+    kit.write_text('{"version": "2.70.4"}')
+    facts = "\n".join(env._node_dependency_facts(root))
+    assert "installed in frontend" in facts and "linked from another checkout" not in facts
 
 
 def test_generic_repo_gets_only_generic_facts(tmp_path, monkeypatch):
