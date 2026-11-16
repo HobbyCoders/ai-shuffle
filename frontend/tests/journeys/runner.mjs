@@ -37,7 +37,7 @@ import { trackCaseChats } from './lib/case-chats.mjs';
 import { checkExpectShift, classifyKnownBug, designedShifts } from './lib/verdict.mjs';
 
 const require = createRequire(import.meta.url);
-const HERE = dirname(fileURLToPath(import.meta.url)); // select.mjs: not a journey helper (the checkout root: a digest and playwright-core)
+const HERE = dirname(fileURLToPath(import.meta.url));
 const CHECKOUT = resolve(HERE, '../../..');
 
 /**
@@ -257,7 +257,7 @@ export async function runJourney(spec) {
 	}
 	const out = join(process.env.JOURNEY_OUT || join(tmpdir(), 'journeys'), spec.name);
 	mkdirSync(out, { recursive: true });
-	const { chromium } = require(process.env.PLAYWRIGHT_MODULE || resolve(CHECKOUT, 'browser-mcp/node_modules/playwright-core')); // select.mjs: not a journey helper (playwright-core)
+	const { chromium } = require(process.env.PLAYWRIGHT_MODULE || resolve(CHECKOUT, 'browser-mcp/node_modules/playwright-core'));
 	const extra = spec.browser ? await spec.browser(status) : {};
 	const browser = await chromium.launch({
 		headless: process.env.JOURNEY_HEADED !== '1',

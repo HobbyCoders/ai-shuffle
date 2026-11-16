@@ -1279,32 +1279,11 @@ record).
   rename lists both paths). The union of every matching `map.json` rule is
   selected; a file matching an `all` rule (the harness, `select.mjs`, this
   workflow, `scripts/devloop/**`, the core chat surface and the session event
-  stream) selects everything. An `all` rule's `except` globs leave a file to
-  the other rules: the dev instance rule excepts the shard weights
-  (`journey_weights.json` only decides which runner a journey file runs on),
-  `journey_issues.py` (main-only issue reporting after the journeys) and a
-  manual real-CLI probe nothing imports.
-- A journey helper module (`frontend/tests/journeys/lib/**`, the map's
-  `by_import`) selects the journey files that import it, directly or through
-  other modules or a `.cases.mjs` file; when `runner.mjs` or `run-all.mjs`
-  reaches it, every journey. The imports are read from the files (relative
-  static, re-export and literal dynamic imports, comments allowed around the
-  specifier), so a new import moves the selection with it. The walk only errs
-  toward more: when any journey's or root's imports cannot be fully followed
-  (an import in code whose target is missing, as after a helper is deleted or
-  renamed while something still imports it, an unreadable file, an `import()`
-  or `require()` whose argument is not one plain string, or a path built from
-  the module's own location), the helper selects every journey. The README in
-  `frontend/tests/journeys` lists every load form and how it is treated. An import
-  quoted in a comment is followed when its target exists and ignored when it
-  does not. A deleted helper nothing imports any more selects nothing; the
-  journeys that dropped it changed and select themselves.
+  stream) selects everything.
 - When a merge queue guards main, a pull request runs `select.mjs --ci
-  --before-queue` instead: the same rules without the `all` rules, without a
-  helper module the runner reaches (or, when the import walk is incomplete,
-  with only the journeys it did follow) and without the unmapped fallback below,
-  so always a subset of the full selection. The queue's run makes the full
-  one before main moves.
+  --before-queue` instead: the same rules without the `all` rules and without
+  the unmapped fallback below, so always a subset of the full selection. The
+  queue's run makes the full one before main moves.
 - A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
   `frontend/static/**`) that **no** rule covers also selects everything: the
   map says what a file needs, it does not prove an unlisted UI file needs

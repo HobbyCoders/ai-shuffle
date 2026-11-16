@@ -8,7 +8,7 @@ import { runJourney } from './runner.mjs';
 import { PROJECT, composer, expect, gotoApp, openNewChat, openFromSidebar, pick, scriptTag, sendButton, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const checkout = resolve(dirname(fileURLToPath(import.meta.url)), '../../..'); // select.mjs: not a journey helper (the checkout a Python fixture runs in)
+const checkout = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const produce = String.raw`
 import json, sys
 from pathlib import Path
