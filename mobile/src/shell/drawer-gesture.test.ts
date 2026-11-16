@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canStartDrawerSwipe, completes, dragOffset, lockAxis } from './drawer-gesture';
+import { canStartDrawerSwipe, completes, dragOffset, lockAxis, settleDistance, SETTLE_MAX_PX } from './drawer-gesture';
 
 describe('drawer gesture helpers', () => {
 	it('waits out the slop, then takes only horizontal moves in the swipe direction', () => {
@@ -24,6 +24,21 @@ describe('drawer gesture helpers', () => {
 		expect(completes(-121, 0, 400, 'close')).toBe(true);
 		expect(completes(-40, 0.8, 400, 'close')).toBe(false);
 		expect(completes(-40, -0.8, 400, 'close')).toBe(true);
+	});
+
+	it('caps the settle distance on wide screens so a phone-length drag still completes', () => {
+		// Phones keep 30% of the width.
+		expect(settleDistance(360)).toBeCloseTo(108);
+		expect(settleDistance(390)).toBeCloseTo(117);
+		// A foldable's inner screen and a spanned dual screen ask for the cap.
+		expect(settleDistance(884)).toBe(SETTLE_MAX_PX);
+		expect(settleDistance(1114)).toBe(SETTLE_MAX_PX);
+		for (const width of [884, 1114]) {
+			expect(completes(150, 0, width, 'open')).toBe(true);
+			expect(completes(-150, 0, width, 'close')).toBe(true);
+			expect(completes(100, 0.1, width, 'open')).toBe(false);
+			expect(completes(-100, -0.1, width, 'close')).toBe(false);
+		}
 	});
 
 	it('leaves fields, dialogs and session rows their own gestures', () => {

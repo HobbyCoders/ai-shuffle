@@ -119,8 +119,18 @@
 	.phone .preset { height: 44px; font-size: 14.5px; }
 	.preset:hover { background: var(--row-hover); }
 	.preset:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
+	/* Each choice stays on one line in the narrowest sidebar: the time keeps
+	   its width and the name gives way first. */
+	.preset .name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
 	.preset .when {
+		flex-shrink: 0;
 		margin-left: auto;
+		white-space: nowrap;
 		color: var(--muted-foreground);
 		font-variant-numeric: tabular-nums;
 	}
