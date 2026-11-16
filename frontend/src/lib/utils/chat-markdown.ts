@@ -237,8 +237,12 @@ const PLAIN_TAGS = new Set([
 ]);
 /** Void elements: an opening tag holds nothing and leaves nothing open. */
 const VOID_TAGS = new Set(['br', 'wbr', 'hr', 'img']);
-/** A whole tag: optional slash, the exact name, then attributes or the end. */
-const TAG_RE = /^<(\/?)([a-z][a-z0-9-]*)(?=[\s/>])[^<>]*>$/i;
+/**
+ * A whole tag: optional slash, the exact name, then attributes or the end. A
+ * quoted value may hold `<` and `>`. Each step starts on a different first
+ * character (plain, `"` or `'`), so the match never backtracks: linear time.
+ */
+const TAG_RE = /^<(\/?)([a-z][a-z0-9-]*)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>$/i;
 
 /**
  * Walk a token's raw HTML in document order, keeping the stack of plain

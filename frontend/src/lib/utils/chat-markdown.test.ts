@@ -108,6 +108,15 @@ describe('streamingSplit (#1619)', () => {
 		['a closed <style> (#1627 review)', 'Zero.\n\nOne <style>x</style>\n\nTwo\n\nThree', ''],
 		['a bogus </hr> block (#1627 review)', 'Zero.\n\nOne.\n\n</hr>\n\n<title>t</title>\n\nTail.', 'Zero.\n\n'],
 		['an inline </wbr> (#1627 review)', 'Zero.\n\nOne </wbr> x\n\nTwo', ''],
+		['a quoted attribute holding > (#1627 review)', 'A <a href="/d" title="x>y">x</a>.\n\nTwo\n\nThree', 'A <a href="/d" title="x>y">x</a>.\n\nTwo\n\n'],
+		['a quoted attribute holding < (#1627 review)', "A <a title='a<b'>x</a>\n\nTwo\n\nThree", "A <a title='a<b'>x</a>\n\nTwo\n\n"],
+		['an unquoted value and a bare attribute (#1627 review)', 'A <a href=/d hidden>x</a>\n\nTwo\n\nThree', 'A <a href=/d hidden>x</a>\n\nTwo\n\n'],
+		['a newline inside a tag (#1627 review)', 'A <a\nhref="/d">x</a>\n\nTwo\n\nThree', 'A <a\nhref="/d">x</a>\n\nTwo\n\n'],
+		['an unterminated quote, which marked keeps as text (#1627 review)', 'A <a title="x>y\n\nTwo\n\nThree', 'A <a title="x>y\n\nTwo\n\n'],
+		['a stray quote in a tag (#1627 review)', 'A <a href="/d" title="a"b">x</a>\n\nTwo', ''],
+		['a comment holding > (#1627 review)', 'Zero.\n\nOne <!-- a > b -->\n\nTwo\n\nThree', ''],
+		['tags in inline code (#1627 review)', 'A `<style>` x\n\nTwo\n\nThree', 'A `<style>` x\n\nTwo\n\n'],
+		['tags in a fence (#1627 review)', '```\n<style>\n```\n\nTwo\n\nThree', '```\n<style>\n```\n\nTwo\n\n'],
 		['a tag that only starts with a void name (#1627 review)', 'Zero.\n\nOne.\n\n<hr-foo>\n\nTwo', 'Zero.\n\n'],
 		['an HTML block (#1627)', 'One.\n\n<div>\nx\n</div>\n\nTwo', ''],
 		['an unclosed raw tag in a list (#1627)', 'Zero.\n\nOne.\n\n- a <span>x\n\nTwo', 'Zero.\n\nOne.\n\n'],
@@ -226,7 +235,9 @@ describe('streamingSplit on the sanitized DOM (#1627)', () => {
 		'<b>x</b>', '<B>x</B>', '<a href="/d">x</a>', '<a href="/d">x</a >', '<code>x</code>', '<kbd>x</kbd>',
 		'<b><i>x</b></i>', '<span>x', '</b>', '<style>x</style>', '<script>x</script>', '<textarea>x</textarea>',
 		'<title>x</title>', '<xmp>x</xmp>', '<iframe>x</iframe>', '<pre>x</pre>', '<!-- x -->', '<br>', '<br/>',
-		'<wbr>', '<hr>', '<img src="/a.png">', '</hr>', '</wbr>', '</br>', '<hr-foo>', '<hr foo>'
+		'<wbr>', '<hr>', '<img src="/a.png">', '</hr>', '</wbr>', '</br>', '<hr-foo>', '<hr foo>',
+		'<a href="/d" title="x>y">x</a>', "<a title='a<b'>x</a>", '<a href=/d hidden>x</a>', '<a\nhref="/d">x</a>',
+		'<a title="x>y', '<a href="/d" title="a"b">x</a>', '<!-- a > b -->', '`<style>`', '<b title="<i>">x</b>'
 	];
 	const closedCases = closed.flatMap((tag) => [
 		[`inline ${tag}`, `Zero.\n\nIntro ${tag} more\n\n${media}\n\n<title style="display:block">Visible</title>\n\nend`],
@@ -275,7 +286,10 @@ describe('streamingSplit on the sanitized DOM (#1627)', () => {
 	it.each([
 		['a 12,000-item list', '- item\n'.repeat(12000)],
 		['a 12,000-row table', '| A | B |\n| - | - |\n' + '| 1 | 2 |\n'.repeat(12000)],
-		['a 500 KB plain reply', 'Plain words in a paragraph.\n\n'.repeat(17000)]
+		['a 500 KB plain reply', 'Plain words in a paragraph.\n\n'.repeat(17000)],
+		['a 200 KB tag that never closes', 'A <a ' + 'x=y '.repeat(50000) + '\n\nTwo'],
+		['a 200 KB tag with an open quote', 'A <a title="' + 'x>'.repeat(100000) + '\n\nTwo'],
+		['a 200 KB closed tag', 'A <a ' + 'x="y>" '.repeat(28000) + '>z</a>\n\nTwo\n\nThree']
 	])('splits %s in well under a second', (_case, doc) => {
 		const start = performance.now();
 		streamingSplit(doc);

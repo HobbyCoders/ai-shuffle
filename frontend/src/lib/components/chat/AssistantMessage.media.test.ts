@@ -292,6 +292,7 @@ describe('media markdown while a reply streams (#1619)', () => {
 		['plain text', 'Intro important.'],
 		['a closed <b>', 'Intro <b>important</b>.'],
 		['a closed raw <a>', 'Intro <a href="/docs">label</a>.'],
+		['a closed raw <a> with > in a quoted attribute', 'Intro <a href="/docs" title="x>y">label</a>.'],
 		['a <br>', 'Intro<br>important.']
 	])('keeps a playing video and its time while later words stream after %s', async (_case, intro) => {
 		reducedMotion();
