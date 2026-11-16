@@ -4,7 +4,7 @@
  * line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ARRIVAL_GUARD_MS, composerCircles, DOUBLE_PRESS_MS, createArrivalGuard, createPressTracker, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
+import { ARRIVAL_GUARD_MS, composerCircles, DOUBLE_PRESS_MS, createArrivalGuard, createPressTracker, RELEASE_TO_CLICK_MS, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
 
 const idle = { callAvailable: true, hasContent: false, working: false, busy: false };
 
@@ -348,12 +348,51 @@ describe('createPressTracker (#1632)', () => {
 		expect(t.take(2, 1100, talk)).toBeNull();
 	});
 
-	it('gives no press to a click from no pointer, a stale press or one after the click', () => {
+	it('gives no press to a click from no pointer, or to one made before the press', () => {
 		const t = createPressTracker<object>();
 		t.down(1, 100, talk);
 		expect(t.take(-1, 200, talk)).toBeNull();
 		expect(t.take(1, 50, talk)).toBeNull();
-		expect(t.take(1, 100 + 10_001, talk)).toBeNull();
+	});
+
+	it('keeps a press however long it is held, until its release', () => {
+		const t = createPressTracker<object>();
+		t.down(1, 1100, talk);
+		// Other pointers coming and going do not drop a live press.
+		t.down(2, 9000, stop);
+		t.up(2, 9050);
+		t.down(3, 9000 + RELEASE_TO_CLICK_MS + 5000, stop);
+		t.up(1, 1100 + 30_000);
+		expect(t.take(1, 1100 + 30_000, talk)).toEqual({ at: 1100, target: talk, releasedAt: 1100 + 30_000 });
+	});
+
+	it('drops a press released without a click once its click can no longer come', () => {
+		// Pressed on Talk, dragged off, released elsewhere: no click follows.
+		const t = createPressTracker<object>();
+		t.down(1, 100, talk);
+		t.up(1, 300);
+		expect(t.take(1, 300 + RELEASE_TO_CLICK_MS + 1, talk)).toBeNull();
+		expect(t.take(undefined, 300 + RELEASE_TO_CLICK_MS + 1, talk)).toBeNull();
+		// Abandoned presses do not pile up: the next press sweeps them out.
+		for (let id = 10; id < 20; id++) { t.down(id, 400 + id, talk); t.up(id, 450 + id); }
+		t.down(99, 5000, stop);
+		expect(t.size).toBe(1);
+		t.clear();
+		expect(t.size).toBe(0);
+	});
+
+	it('keeps two pointers down at once apart, and a reused pointer id takes its new press', () => {
+		const t = createPressTracker<object>();
+		t.down(1, 100, talk);
+		t.down(2, 150, stop);
+		t.up(2, 200);
+		expect(t.take(2, 200, stop)).toEqual({ at: 150, target: stop, releasedAt: 200 });
+		t.up(1, 400);
+		expect(t.take(1, 400, talk)).toEqual({ at: 100, target: talk, releasedAt: 400 });
+		// A mouse or pen reuses its id: a new press replaces the old one.
+		t.down(1, 1000, stop);
+		t.down(1, 2000, talk);
+		expect(t.take(1, 2050, talk)).toEqual({ at: 2000, target: talk });
 	});
 
 	it('matches a click without a pointer id only to the latest press on the same button', () => {

@@ -780,6 +780,24 @@
 	function forgetPress(event: PointerEvent) {
 		presses.cancel(event.pointerId);
 	}
+	// A press ends wherever its pointer comes up or is cancelled, on the row or
+	// off it; leaving the page abandons every press, as does the row going.
+	$effect(() => {
+		const up = (event: PointerEvent) => presses.up(event.pointerId, eventTime(event));
+		const clear = () => presses.clear();
+		const hidden = () => { if (document.visibilityState === 'hidden') presses.clear(); };
+		window.addEventListener('pointerup', up, true);
+		window.addEventListener('pointercancel', forgetPress, true);
+		window.addEventListener('blur', clear);
+		document.addEventListener('visibilitychange', hidden);
+		return () => {
+			window.removeEventListener('pointerup', up, true);
+			window.removeEventListener('pointercancel', forgetPress, true);
+			window.removeEventListener('blur', clear);
+			document.removeEventListener('visibilitychange', hidden);
+			presses.clear();
+		};
+	});
 	function ignoreArrivingPress(event: MouseEvent) {
 		// detail is 0 for a click from the keyboard (Enter, Space): never ignored.
 		if (event.detail === 0) return;
@@ -2125,7 +2143,7 @@
 					     independently. StopButton confirms first when background
 					     agents are live. A circle that is not shown takes no room:
 					     the others move over (owner decision, 2026-11-14). -->
-					<div class="send-cluster" bind:this={sendClusterRef} onpointerdowncapture={notePress} onpointercancelcapture={forgetPress} onclickcapture={ignoreArrivingPress}>
+					<div class="send-cluster" bind:this={sendClusterRef} onpointerdowncapture={notePress} onclickcapture={ignoreArrivingPress}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}

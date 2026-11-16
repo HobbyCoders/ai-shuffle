@@ -323,15 +323,26 @@ await runJourney({
 				const box = await stopButton(page).boundingBox();
 				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
 				await page.evaluate(() => { window.__row.clicks = []; window.__row.downs = []; });
-				await page.waitForFunction(() => !document.querySelector('.send-cluster .stop-btn'), null, { polling: 'raf', timeout: 60_000 });
-				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
-				// Lift 420ms after the row changed: past the 400ms window.
-				await page.waitForFunction(() => performance.now() >= window.__row.changedBefore(window.__row.downs[0] ?? 0) + 420, null, { polling: 'raf', timeout: 5000 });
-				await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+				// The row change that took Stop away, read in the frame it shows.
+				await page.waitForFunction(() => {
+					if (document.querySelector('.send-cluster .stop-btn')) return false;
+					window.__row.stopGoneAt = window.__row.changedBefore(performance.now() + 1);
+					return true;
+				}, null, { polling: 'raf', timeout: 60_000 });
+				// The touch carries its own times, so however late it reaches the
+				// page it was made 50ms after the row changed and lifted at 450ms
+				// (the window is 400ms): no Node-to-browser hop sits inside it.
+				const { changed, origin } = await page.evaluate(() => ({
+					changed: window.__row.stopGoneAt, origin: performance.timeOrigin
+				}));
+				const epoch = (ms) => (origin + changed + ms) / 1000;
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at], timestamp: epoch(50) });
+				// Lift no earlier than the time the touch claims.
+				await page.waitForFunction((end) => performance.now() >= end, changed + 460, { polling: 'raf', timeout: 5000 });
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: epoch(450) });
 				await page.waitForTimeout(1500);
 				const { click, down, changedAt } = await page.evaluate(() => {
-					const down = window.__row.downs[0];
-					return { click: window.__row.clicks[0], down, changedAt: window.__row.changedBefore(down ?? 0) };
+					return { click: window.__row.clicks[0], down: window.__row.downs[0], changedAt: window.__row.stopGoneAt };
 				});
 				const pressed = down === undefined ? null : Math.round(down - changedAt);
 				const lifted = click ? Math.round(click.made - changedAt) : null;

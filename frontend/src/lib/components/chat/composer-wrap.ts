@@ -288,33 +288,59 @@ export function createArrivalGuard(now: () => number = () => performance.now()) 
 	};
 }
 
-/** Where and when a pointer press on the action row began. */
-export interface RowPress<T> { at: number; target: T | null }
+/** Where and when a pointer press on the action row began, and when it ended. */
+export interface RowPress<T> { at: number; target: T | null; releasedAt?: number }
 
-/** Presses older than this are dropped: a click never follows its press that late. */
-const PRESS_KEPT_MS = 10_000;
+/**
+ * How long after its release a press can still be the one behind a click. A
+ * click follows its pointerup at once; the gap covers a touch whose click
+ * comes from the tap gesture a little later. Measured in event times, so a
+ * busy main thread does not stretch or shrink it.
+ */
+export const RELEASE_TO_CLICK_MS = 1000;
 
 /**
  * The pointer presses on the action row, so a click is judged by when its
- * press began rather than when it was released (#1632). Each pointer keeps
- * only its latest press; a cancelled press (a scroll, the system taking the
- * touch) is forgotten, and a press is used once. A click with no press of
- * its own (keyboard, assistive technology, a script) gets none.
+ * press began rather than when it was released (#1632). A press lasts until
+ * it is released or cancelled, however long it is held. Each pointer keeps
+ * only its latest press and a press is used once. A released press that got
+ * no click (the finger slid off) is dropped once its click can no longer
+ * come; `clear` drops everything when the page loses focus or the row goes.
+ * A click with no press of its own (keyboard, assistive technology, a
+ * script) gets none.
  */
 export function createPressTracker<T>() {
 	const presses = new Map<number, RowPress<T>>();
 	let last: { id: number; press: RowPress<T> } | null = null;
+	const spent = (press: RowPress<T>, at: number) =>
+		press.releasedAt !== undefined && at - press.releasedAt > RELEASE_TO_CLICK_MS;
+	const drop = (id: number) => {
+		presses.delete(id);
+		if (last?.id === id) last = null;
+	};
 	return {
+		/** A pointer went down on the row (`target`: the button under it). */
 		down(pointerId: number, at: number, target: T | null) {
-			for (const [id, press] of presses) if (at - press.at > PRESS_KEPT_MS) presses.delete(id);
-			const press = { at, target };
+			for (const [id, press] of presses) if (spent(press, at)) drop(id);
+			const press: RowPress<T> = { at, target };
 			presses.set(pointerId, press);
 			last = { id: pointerId, press };
 		},
-		cancel(pointerId: number) {
-			presses.delete(pointerId);
-			if (last?.id === pointerId) last = null;
+		/** A pointer went up anywhere. */
+		up(pointerId: number, at: number) {
+			const press = presses.get(pointerId);
+			if (press && press.releasedAt === undefined) press.releasedAt = at;
 		},
+		/** The press ended without a click (a scroll, the system took the touch). */
+		cancel(pointerId: number) {
+			drop(pointerId);
+		},
+		clear() {
+			presses.clear();
+			last = null;
+		},
+		/** How many presses are kept (for tests). */
+		get size() { return presses.size; },
 		/**
 		 * The press behind a click on `target`. `pointerId` is the click's own
 		 * (undefined where a click carries none: then only the latest press on
@@ -328,9 +354,8 @@ export function createPressTracker<T>() {
 			}
 			if (id < 0) return null;
 			const press = presses.get(id);
-			if (!press || press.at > clickAt || clickAt - press.at > PRESS_KEPT_MS) return null;
-			presses.delete(id);
-			if (last?.id === id) last = null;
+			if (!press || press.at > clickAt || spent(press, clickAt)) return null;
+			drop(id);
 			return press;
 		}
 	};

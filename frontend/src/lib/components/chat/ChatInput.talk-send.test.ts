@@ -353,6 +353,7 @@ describe('a button sliding into a freed seat (#1632)', () => {
 	/** A tap: pressed at `down`, released (the click) at `up`. */
 	async function tap(el: Element, down: number, up: number, pointerId = 1) {
 		await fire('pointerdown', el, down, { pointerId });
+		await fire('pointerup', el, up, { pointerId });
 		await fire('click', el, up, { pointerId });
 	}
 
@@ -380,6 +381,14 @@ describe('a button sliding into a freed seat (#1632)', () => {
 		// Pressed after the window: a real press on Talk.
 		await tap(talk, ARRIVED + 450, ARRIVED + 520);
 		expect(hits).toEqual([ARRIVED + 520]);
+		// However long it is held, a press that began inside the window is held back.
+		cleanup();
+		clock.mockReturnValue(ARRIVED);
+		const late = await talkReplacesStop();
+		const lateHits = reached(late.talk);
+		clock.mockReturnValue(ARRIVED + 60_000);
+		await tap(late.talk, ARRIVED + 100, ARRIVED + 100 + 30_000);
+		expect(lateHits).toEqual([]);
 	});
 
 	it('never lets a press that began on Stop act on the Talk that replaced it', async () => {
