@@ -285,4 +285,29 @@ describe('media markdown while a reply streams (#1619)', () => {
 		await waitFor(() => expect(view.container.textContent).toContain('four'));
 		expect(players(view.container)[0]).toBe(img);
 	});
+
+	// A player the reader started must not be replaced on every later delta,
+	// with closed inline HTML before it too (#1627 review).
+	it.each([
+		['plain text', 'Intro important.'],
+		['a closed <b>', 'Intro <b>important</b>.'],
+		['a closed raw <a>', 'Intro <a href="/docs">label</a>.'],
+		['a <br>', 'Intro<br>important.']
+	])('keeps a playing video and its time while later words stream after %s', async (_case, intro) => {
+		reducedMotion();
+		// The first streamed render is all tail; from the next delta the split holds.
+		let text = `${intro}\n\nhttps://example.com/clip.mp4\n\nOne\n\nTwo two`;
+		const view = await stream([text.slice(0, -4), ' two'], 'two');
+		const video = view.container.querySelector('video') as HTMLVideoElement;
+		expect(video).toBeTruthy();
+		video.currentTime = 7;
+		for (const word of [' three', ' four', ' five', ' six']) {
+			text += word;
+			await view.rerender({ content: text, streaming: true, sessionId: 'remote-chat' });
+		}
+		await waitFor(() => expect(view.container.textContent).toContain('six'));
+		expect(view.container.querySelector('video')).toBe(video);
+		expect(video.isConnected).toBe(true);
+		expect(video.currentTime).toBe(7);
+	});
 });

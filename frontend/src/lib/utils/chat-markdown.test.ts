@@ -98,11 +98,19 @@ describe('streamingSplit (#1619)', () => {
 		['no block before the last', 'Just one', ''],
 		['a reply that defines a reference', 'One.\n\n![x][r]\n\n[r]: /a.png\n\nTwo', ''],
 		['an unclosed raw <a> (#1627)', 'Intro <a href="/docs">label\n\nhttps://example.com/clip.mp4', ''],
-		['an unclosed raw <a> after a closed block (#1627)', 'One.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', ''],
-		['raw HTML two blocks in (#1627)', 'One.\n\nTwo.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\n'],
-		['raw HTML, even closed, two blocks back (#1627)', 'Zero.\n\nOne.\n\nA <b>x</b>\n\nTwo\n\nThree', 'Zero.\n\n'],
+		['an unclosed raw <a> after a closed block (#1627)', 'One.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\n'],
+		['raw HTML two blocks in (#1627)', 'One.\n\nTwo.\n\nIntro <a href="/docs">label\n\nhttps://example.com/clip.mp4', 'One.\n\nTwo.\n\n'],
+		['closed inline HTML (#1627 review)', 'Zero.\n\nOne.\n\nA <b>x</b>\n\nTwo\n\nThree', 'Zero.\n\nOne.\n\nA <b>x</b>\n\nTwo\n\n'],
+		['a closed raw <a> (#1627 review)', 'A <a href="/d">x</a>.\n\nTwo\n\nThree', 'A <a href="/d">x</a>.\n\nTwo\n\n'],
+		['a raw <a> closed two blocks later (#1627 review)', 'A <a href="/d">x\n\ny</a>\n\nTwo\n\nThree', 'A <a href="/d">x\n\ny</a>\n\nTwo\n\n'],
+		['misnested inline tags (#1627 review)', 'Zero.\n\nOne.\n\n<b><i>x</b></i>\n\nTwo', 'Zero.\n\n'],
+		['a closing tag with a space (#1627 review)', 'Zero.\n\nOne <a href="/d">x</a >\n\nhttps://e.co/a.mp4', ''],
+		['a closed <style> (#1627 review)', 'Zero.\n\nOne <style>x</style>\n\nTwo\n\nThree', ''],
+		['a bogus </hr> block (#1627 review)', 'Zero.\n\nOne.\n\n</hr>\n\n<title>t</title>\n\nTail.', 'Zero.\n\n'],
+		['an inline </wbr> (#1627 review)', 'Zero.\n\nOne </wbr> x\n\nTwo', ''],
+		['a tag that only starts with a void name (#1627 review)', 'Zero.\n\nOne.\n\n<hr-foo>\n\nTwo', 'Zero.\n\n'],
 		['an HTML block (#1627)', 'One.\n\n<div>\nx\n</div>\n\nTwo', ''],
-		['a nested raw tag in a list (#1627)', 'Zero.\n\nOne.\n\n- a <span>x\n\nTwo', 'Zero.\n\n'],
+		['an unclosed raw tag in a list (#1627)', 'Zero.\n\nOne.\n\n- a <span>x\n\nTwo', 'Zero.\n\nOne.\n\n'],
 		['a lone <br> (#1627)', 'One<br>two\n\nThree', 'One<br>two\n\n'],
 		['a lone <hr> block (#1627)', '<hr>\n\nThree', '<hr>\n\n']
 	])('keeps the last block of %s in the tail', (_case, text, prefix) => {
@@ -210,6 +218,33 @@ describe('streamingSplit on the sanitized DOM (#1627)', () => {
 
 	it.each(cases)('streams %s as the settled render shows it', (_case, doc) => {
 		check(doc, 'the whole text');
+	});
+
+	// Closed tags, plain or not, and bogus closing forms of void tags: the
+	// split may move past the plain ones, never past the rest (#1627 review).
+	const closed = [
+		'<b>x</b>', '<B>x</B>', '<a href="/d">x</a>', '<a href="/d">x</a >', '<code>x</code>', '<kbd>x</kbd>',
+		'<b><i>x</b></i>', '<span>x', '</b>', '<style>x</style>', '<script>x</script>', '<textarea>x</textarea>',
+		'<title>x</title>', '<xmp>x</xmp>', '<iframe>x</iframe>', '<pre>x</pre>', '<!-- x -->', '<br>', '<br/>',
+		'<wbr>', '<hr>', '<img src="/a.png">', '</hr>', '</wbr>', '</br>', '<hr-foo>', '<hr foo>'
+	];
+	const closedCases = closed.flatMap((tag) => [
+		[`inline ${tag}`, `Zero.\n\nIntro ${tag} more\n\n${media}\n\n<title style="display:block">Visible</title>\n\nend`],
+		[`block ${tag}`, `Zero.\n\nOne.\n\n${tag}\n\n<title style="display:block">Visible caption</title>\n\n${media}`]
+	]);
+	// At each block boundary and at the end: where the split can move.
+	it.each(closedCases)('streams %s as the settled render shows it', (_case, doc) => {
+		for (let n = doc.indexOf('\n\n'); n !== -1; n = doc.indexOf('\n\n', n + 1)) check(doc.slice(0, n + 2), `${n + 2}`);
+		check(doc, 'the whole text');
+	}, 30_000);
+
+	it('keeps a title after a bogus </hr> or </wbr> visible while streaming (#1627 review)', () => {
+		for (const tag of ['</hr>', '</wbr>']) {
+			const text = `Zero.\n\nOne.\n\n${tag}\n\n<title style="display:block">Visible caption</title>\n\nTail.`;
+			check(text, tag);
+			const split = streamingSplit(text);
+			expect(dom(reply(text.slice(0, split)), reply(text.slice(split))).textContent).toContain('Visible caption');
+		}
 	});
 
 	// Every prefix is every way of chunking the text, a tag cut across the

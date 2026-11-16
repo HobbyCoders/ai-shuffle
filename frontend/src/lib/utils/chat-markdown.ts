@@ -195,53 +195,84 @@ const chatMarked = new Marked({
  * defines link references is parsed whole (0), since a definition reaches
  * across blocks.
  *
- * Raw HTML is never split after (#1627). Neither marked's inline state (an
- * `<a>` not closed yet keeps later URLs as text) nor a block boundary says
- * where the HTML parser and the sanitizer close an element: `<style>`,
- * `<textarea>`, `<iframe>`, a comment, `<svg>`, `<template>`, `<table>`
- * foster-parenting and the rest can swallow later blocks once the full text
- * is parsed, while a tail rendered on its own would start fresh and could
- * draw a player. So the split stays before the first block holding raw HTML,
- * and the rest of the reply renders whole. The block before that one goes in
- * the tail too: a fragment that starts with `<title>`, `<template>` or
- * `<noscript>` has it moved out of the body by the sanitizer's parse, which a
- * markdown block in front of it prevents. Only a lone void tag (`<br>`,
- * `<wbr>`, `<hr>`) is let through: it holds nothing and opens nothing.
+ * Raw HTML (#1627): a block boundary does not say where the HTML parser and
+ * the sanitizer close an element. `<style>`, `<textarea>`, `<iframe>`, a
+ * comment, `<svg>`, `<template>`, `<table>` foster-parenting and the rest can
+ * swallow later blocks once the full text is parsed, while a tail rendered on
+ * its own would start fresh and could draw a player; an unclosed `<a>` keeps
+ * later URLs as text. So the split only lands where every raw tag before it
+ * is a plain inline element, properly nested and closed again (`<b>`,
+ * `<a>`, `<code>`…), or an opening void tag (`<br>`, `<img>`…), which opens
+ * nothing. Media before closed tags like these stays put while later blocks
+ * stream. Any other raw HTML, a stray or misnested closing tag, or an HTML
+ * block other than a lone void tag ends splitting: the rest of the reply
+ * renders whole, and the block before it goes in the tail too, so the
+ * sanitizer never parses a fragment that starts with raw HTML (it moves a
+ * leading `<title>`, `<template>` or `<noscript>` out of the body).
  */
 export function streamingSplit(text: string): number {
 	const tokens = chatMarked.lexer(text);
 	if (Object.keys(tokens.links).length > 0) return 0;
+	const open: string[] = [];
 	let offset = 0;
 	let last = 0;
+	let before = 0;
 	for (const token of tokens) {
 		// The lexer normalises line endings; offsets hold only while each raw is the source.
 		if (!text.startsWith(token.raw, offset)) return 0;
-		// `last` still marks the block before this one.
-		if (holdsRawHtml(token)) return last;
-		if (token.type !== 'space') last = offset;
+		if (token.type !== 'space' && open.length === 0) {
+			before = last;
+			last = offset;
+		}
+		if (!followTags(token, open)) return last === offset ? before : last;
 		offset += token.raw.length;
 	}
 	return last;
 }
 
-const VOID_TAG_RE = /^<\/?(?:br|wbr|hr)\b[^<>]*>$/i;
+/** Inline elements the HTML parser closes where their closing tag says, holding nothing raw. */
+const PLAIN_TAGS = new Set([
+	'a', 'abbr', 'b', 'bdi', 'bdo', 'cite', 'code', 'data', 'del', 'dfn', 'em', 'i', 'ins', 'kbd',
+	'mark', 'q', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var'
+]);
+/** Void elements: an opening tag holds nothing and leaves nothing open. */
+const VOID_TAGS = new Set(['br', 'wbr', 'hr', 'img']);
+/** A whole tag: optional slash, the exact name, then attributes or the end. */
+const TAG_RE = /^<(\/?)([a-z][a-z0-9-]*)(?=[\s/>])[^<>]*>$/i;
 
 /**
- * True when a token or anything inside it is raw HTML other than a lone void
- * tag. A plain walk that stops at the first hit: `marked.walkTokens` collects
- * its callback's results by concatenation, which is quadratic on a long list.
+ * Walk a token's raw HTML in document order, keeping the stack of plain
+ * elements still open. False at the first tag that is not plain, a closing
+ * tag that is not the bare `</name>` of the innermost open element, or an HTML block that
+ * is more than one opening void tag. A plain walk that stops at the first
+ * hit: `marked.walkTokens` collects results by concatenation, which is
+ * quadratic on a long list.
  */
-function holdsRawHtml(token: Token): boolean {
-	if (token.type === 'html') return !VOID_TAG_RE.test(token.raw.trim());
+function followTags(token: Token, open: string[]): boolean {
+	if (token.type === 'html') {
+		const tag = TAG_RE.exec(token.raw.trim());
+		if (!tag) return false;
+		const name = tag[2].toLowerCase();
+		if (tag[1]) {
+			// Only the bare form: marked keeps a link open past `</a >`, the parser does not.
+			if (token.block || open[open.length - 1] !== name || token.raw.trim().toLowerCase() !== `</${name}>`) return false;
+			open.pop();
+			return true;
+		}
+		if (VOID_TAGS.has(name)) return true;
+		if (token.block || !PLAIN_TAGS.has(name)) return false;
+		open.push(name);
+		return true;
+	}
 	const t = token as Token & {
 		tokens?: Token[]; items?: Tokens.ListItem[];
 		header?: Tokens.TableCell[]; rows?: Tokens.TableCell[][];
 	};
-	if (t.tokens) for (const child of t.tokens) if (holdsRawHtml(child)) return true;
-	if (t.items) for (const item of t.items) if (holdsRawHtml(item)) return true;
-	if (t.header) for (const cell of t.header) for (const child of cell.tokens) if (holdsRawHtml(child)) return true;
-	if (t.rows) for (const row of t.rows) for (const cell of row) for (const child of cell.tokens) if (holdsRawHtml(child)) return true;
-	return false;
+	if (t.tokens) for (const child of t.tokens) if (!followTags(child, open)) return false;
+	if (t.items) for (const item of t.items) if (!followTags(item, open)) return false;
+	if (t.header) for (const cell of t.header) for (const child of cell.tokens) if (!followTags(child, open)) return false;
+	if (t.rows) for (const row of t.rows) for (const cell of row) for (const child of cell.tokens) if (!followTags(child, open)) return false;
+	return true;
 }
 
 /**
