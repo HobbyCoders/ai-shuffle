@@ -13,7 +13,10 @@ Pinned here:
   the marker naming the file;
 - a direct Bash call keeps the 12,000 cap, also when it runs inside a call a
   cell made (a worker started from a bridged tool does not inherit the cell's
-  limit).
+  limit);
+- the larger value cannot escape through a cell's error text: a long
+  traceback (message, notes, chained causes) is cut tail-heavy and spilled,
+  and the final exception line stays visible; a short one is unchanged.
 """
 
 from __future__ import annotations
@@ -138,3 +141,85 @@ async def test_a_direct_call_inside_a_bridged_call_keeps_the_12k_cap(tmp_path) -
     await registry.dispatch("Outer", {}, ctx, raw_shell_output=True)
     assert len(seen[0]) <= _util._TRUNCATE_LIMIT + 1000
     assert "full output saved to" in seen[0]
+
+
+# ── the larger value must not escape through a cell's error text ────────────
+
+
+class _Loop:
+    """The minimal ``loop`` surface ``CodeModeSession.run_python`` reads."""
+
+    def __init__(self, registry: ToolRegistry, ctx: ToolCtx) -> None:
+        self.registry = registry
+        self.ctx = ctx
+        self.hooks = None
+        self.permissions = PermissionEngine("never_ask")
+        self.events: list = []
+
+    async def _emit(self, event) -> None:
+        self.events.append(event)
+
+
+async def _run_python(tmp_path: Path, code: str):
+    from fluid.codemode.session import CodeModeSession
+
+    registry = _registry()
+    ctx = _ctx(tmp_path)
+    session = CodeModeSession(registry)
+    try:
+        outcome = await session.run_python(
+            sid="s1", turn_id="t1", input={"code": code, "timeout": 30},
+            loop=_Loop(registry, ctx),
+        )
+    finally:
+        await session.aclose()
+    return outcome, ctx
+
+
+async def test_an_exception_carrying_the_bash_value_is_bounded(tmp_path) -> None:
+    from fluid.codemode.session import _CELL_ERROR_CAP
+
+    code = (
+        "from tools.Bash import Bash\n"
+        f"r = Bash(command={_json_command(300)!r})\n"
+        "raise ValueError(str(r.output) + 'END-OF-MESSAGE')\n"
+    )
+    outcome, _ = await _run_python(tmp_path, code)
+    assert outcome.is_error
+    assert len(outcome.text) < _CELL_ERROR_CAP + 2_000
+    assert "ValueError: " in outcome.text
+    assert "END-OF-MESSAGE" in outcome.text  # the tail survives
+    saved = Path(re.search(r"full error saved to (.+?\.txt)", outcome.text).group(1))
+    assert '"n": 150' in saved.read_text(encoding="utf-8")
+
+
+async def test_a_long_note_on_a_chained_exception_keeps_the_final_type(tmp_path) -> None:
+    from fluid.codemode.session import _CELL_ERROR_CAP
+
+    code = (
+        "from tools.Bash import Bash\n"
+        f"r = Bash(command={_json_command(300)!r})\n"
+        "try:\n"
+        "    raise ValueError(str(r.output))\n"
+        "except ValueError as e:\n"
+        "    err = RuntimeError('parse step failed')\n"
+        "    err.add_note(str(r.output))\n"
+        "    raise err from e\n"
+    )
+    outcome, _ = await _run_python(tmp_path, code)
+    assert outcome.is_error
+    assert len(outcome.text) < _CELL_ERROR_CAP + 2_000
+    assert "[the cell ended with: RuntimeError: parse step failed]" in outcome.text
+    assert "full error saved to" in outcome.text
+
+
+async def test_a_short_traceback_is_unchanged(tmp_path) -> None:
+    from fluid.codemode.session import _bound_cell_error
+
+    outcome, ctx = await _run_python(tmp_path, "x = {}\nx['missing']\n")
+    assert outcome.is_error
+    assert "KeyError: 'missing'" in outcome.text
+    assert "saved to" not in outcome.text and "the cell ended with" not in outcome.text
+    error = 'Traceback (most recent call last):\n  File "<cell>", line 2\nKeyError: 1\n'
+    assert _bound_cell_error(error, ctx) == error
+    assert spill.session_stats(ctx) == {}

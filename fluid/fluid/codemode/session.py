@@ -249,6 +249,52 @@ def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
     )
 
 
+# A cell's error text (traceback, exception message, notes, chained causes)
+# is bounded on its own: an exception can carry any value the cell holds
+# (``raise ValueError(diff)``), and it reaches the model outside the stdout
+# cap. The tail keeps the larger share, since the exception type and the last
+# frames come last.
+_CELL_ERROR_CAP = 8_000
+_CELL_ERROR_HEAD_SHARE = 1 / 4
+
+
+def _final_exception_line(error: str) -> str:
+    """The line naming the exception that ended the cell ("Type: message").
+
+    In a traceback it is the first unindented line after the last frame (a
+    frame is a ``  File`` line plus its indented source and caret lines);
+    without frames it is the first line.
+    """
+    lines = error.splitlines()
+    start = 0
+    for i, line in enumerate(lines):
+        if line.startswith('  File "'):
+            start = i + 1
+    for line in lines[start:]:
+        if line and not line.startswith(" "):
+            return line
+    return ""
+
+
+def _bound_cell_error(error: str, ctx: Any) -> str:
+    """``error`` whole when short; otherwise head + spill marker + tail.
+
+    A cut that hid the final exception line (a long chained message or note
+    pushed it into the middle) leads with that line, shortened, so the type
+    of the failure is always visible.
+    """
+    if len(error) <= _CELL_ERROR_CAP:
+        return error
+    bounded = spill.cut(
+        error, _CELL_ERROR_CAP, ctx=ctx, tool="run_python",
+        head_share=_CELL_ERROR_HEAD_SHARE, saved_as="full error",
+    )
+    final = _final_exception_line(error)[:200]
+    if final and final not in bounded:
+        bounded = f"[the cell ended with: {final}]\n{bounded}"
+    return bounded
+
+
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
@@ -701,7 +747,8 @@ class CodeModeSession:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
-            text = (text + "\n" if parts else "") + f"Error: {result.error}"
+            error = _bound_cell_error(result.error, getattr(loop, "ctx", None))
+            text = (text + "\n" if parts else "") + f"Error: {error}"
         # Every cell can print sliced or persisted shell data, even without a
         # host call this time. Frame at the model boundary, not in Python strings.
         text = fence_shell_output(text, "code-mode output (may include shell stdout/stderr)")
