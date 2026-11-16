@@ -187,7 +187,8 @@ async def test_bash_in_a_cell_under_a_too_short_ceiling_is_refused_up_front(tmp_
     assert out.is_error and "Bash was not run" in out.text and "per-call ceiling is 3s" in out.text
     assert "cancelled before it returned" not in out.text
     assert not marker.exists()
-    assert not [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
+    results = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
+    assert all(r.is_error and "Bash was not run" in r.output for r in results)
 
 
 # ─── review round 1 ──────────────────────────────────────────────────────────
@@ -404,3 +405,68 @@ async def test_a_cancel_during_the_first_start_leaves_a_kernel_that_starts_again
         assert (await kernel.exec("1 + 1", timeout=10, on_host_call=_null_host)).value_repr == "2"
     finally:
         await kernel.stop()
+
+
+# ─── review round 3: the cap holds on the FINAL input ───────────────────────
+
+class _RewriteLoop(_Loop):
+    """A loop whose PreToolUse hook and approval can each rewrite Bash's input."""
+
+    def __init__(self, cwd: str, *, hook_input: dict | None, approved_input: dict | None) -> None:
+        super().__init__(cwd)
+        from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+
+        self.hooks = HookBus()
+        self.approved_input = approved_input
+
+        async def pre(event: str, payload: dict) -> HookDecision:
+            if hook_input is not None:
+                return HookDecision(action="modify", replacement_input=dict(hook_input))
+            return HookDecision(permission_decision="ask")  # force the approval path
+
+        self.hooks.on(PRE_TOOL_USE, pre)
+
+    async def _await_permission(self, sid, turn_id, name, call_id, tool_input, risk):
+        return "allow", None, dict(self.approved_input or tool_input)
+
+
+@pytest.mark.parametrize("where", ["hook", "approval"])
+async def test_a_rewrite_cannot_lift_bash_over_the_ceiling(tmp_path, where) -> None:
+    """With host ceiling 4 s the cap is 1 s; a hook or an approval that puts
+    timeout 60 back must not let the kernel cancel Bash and drop BEFORE."""
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=4))
+    restored = {"command": "echo BEFORE; sleep 30", "timeout": 60}
+    loop = _RewriteLoop(
+        str(tmp_path),
+        hook_input=restored if where == "hook" else None,
+        approved_input=restored if where == "approval" else None,
+    )
+    code = "from tools.Bash import Bash\nBash(command='echo BEFORE; sleep 30', timeout=1)\n"
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 2})
+    finally:
+        await session.aclose()
+    results = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
+    assert len(results) == 1 and "timed out after 1s" in results[0].output
+    assert "BEFORE" in results[0].output and "cancelled before it returned" not in results[0].output
+    assert "BEFORE" in out.text
+
+
+async def test_a_rewrite_under_a_too_short_ceiling_is_still_refused(tmp_path) -> None:
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=3))
+    marker = tmp_path / "ran"
+    loop = _RewriteLoop(
+        str(tmp_path), hook_input=None,
+        approved_input={"command": f"touch {marker}; sleep 30", "timeout": 60},
+    )
+    code = "from tools.Bash import Bash\nBash(command='true', timeout=1)\n"
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 1})
+    finally:
+        await session.aclose()
+    assert out.is_error and "Bash was not run" in out.text
+    assert not marker.exists()

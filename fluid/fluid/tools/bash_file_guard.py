@@ -148,11 +148,20 @@ def classify(command: str) -> FileWork | None:
 
 
 def resumed_user_text(nodes, sources: dict[str, str]) -> str:
-    """Latest proven user intent; stored notices/peers cannot grant or erase it."""
+    """Latest proven user intent; stored notices/peers cannot grant or erase it.
+
+    A message the host wrote (a harness note, or one whose whole text is a
+    pinned host note, as a Resume stores) is never the user's intent, even
+    when the turn that stored it was started by the user."""
     from fluid.messages import ToolResultBlock
+    from fluid.messages.content import is_harness_note
 
     for node in reversed(nodes):
-        if node.message.role != "user":
+        message = node.message
+        if message.role != "user" or is_harness_note(message) or (
+            message.context_pin is not None
+            and message.pinned_text().strip() == message.text().strip()
+        ):
             continue
         results = [b for b in node.message.content if isinstance(b, ToolResultBlock)]
         for result in reversed(results):

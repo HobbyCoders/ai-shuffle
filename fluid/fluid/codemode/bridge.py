@@ -94,6 +94,8 @@ OnInputRequired = Callable[
 # A hook answered ``continue: false`` on an in-kernel call: the engine is told
 # the reason and ends the turn once the running cell returns.
 OnStop = Callable[[str], None]
+# ``(tool_name, final_input) -> (input_to_run, refusal_or_None)``.
+InputGate = Callable[[str, dict[str, Any]], tuple[dict[str, Any], str | None]]
 
 
 _RESULT_FIELD_TYPES: dict[str, tuple[type, ...]] = {
@@ -153,8 +155,10 @@ class HostBridge:
         tool_filter: Callable[[str], bool] | None = None,
         result_budget: int | None = None,
         on_stop: OnStop | None = None,
+        input_gate: InputGate | None = None,
     ) -> None:
         self._registry = registry
+        self._input_gate = input_gate
         self._permissions = permissions
         self._hooks = hooks
         self._on_stop = on_stop
@@ -307,6 +311,13 @@ class HostBridge:
                             + input_error
                         ),
                     )
+
+        # Last word on the input, after every rewrite (hook, approval): what
+        # this returns is exactly what runs, or the call is refused.
+        if self._input_gate is not None:
+            tool_input, refused = self._input_gate(tool_name, tool_input)
+            if refused is not None:
+                return HostReply(error=refused)
 
         # The call is allowed, whatever decided it; observers hear of it
         # before it runs, as on the JSON path.

@@ -592,12 +592,22 @@ class CodeModeSession:
             def on_stop(reason: str) -> None:
                 loop._hook_stop_reason = reason
 
+        host_bound = getattr(kernel, "host_bound", None)
+        bound = float(host_bound(timeout)) if callable(host_bound) else 0.0
+
+        def _input_gate(name: str, tool_input: dict) -> tuple[dict, str | None]:
+            # On the final input, after hooks and approval rewrites (#1549).
+            if name != "Bash":
+                return tool_input, None
+            return _bash_under_ceiling(tool_input, bound)
+
         bridge = HostBridge(
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission,
             on_input_required=on_input_required, ctx=loop.ctx,
             tool_filter=self.tool_filter,
             on_stop=on_stop,
+            input_gate=_input_gate,
             # What this surface actually delivers: a result over the ref
             # threshold reaches the cell as a ResultRef stub, not as text the
             # model reads (see ToolCtx.result_budget).
@@ -613,14 +623,7 @@ class CodeModeSession:
         # so the model can actually see them (JSON-path parity).
         collected_images: list[Any] = []
 
-        host_bound = getattr(kernel, "host_bound", None)
-        bound = float(host_bound(timeout)) if callable(host_bound) else 0.0
-
         async def _host_call(name: str, kwargs: dict) -> HostReply:
-            if name == "Bash":
-                kwargs, refused = _bash_under_ceiling(kwargs, bound)
-                if refused is not None:
-                    return HostReply(error=refused)
             spec = self._registry.get(name)
             record = {
                 "name": name,

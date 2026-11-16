@@ -667,6 +667,30 @@ async def test_a_resume_over_an_unpinned_copy_stores_the_facts(git_repo: Path) -
     assert provider.requests[-1].messages[:len(resumed.messages)] == resumed.messages
 
 
+async def test_two_failed_resumes_keep_the_owners_intent_and_one_facts_block(git_repo: Path) -> None:
+    """The facts note a Resume stores is the host's, not the owner's: a second
+    Resume after another failure still recovers the owner's message as the
+    user's intent (the Bash guard's explicit-request exemption reads it)."""
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
+    provider = ScriptedProvider([failed, failed, _text("ok")])
+    asked = "Please run `cat README.md` for me"
+    window = {"context_window": 32_000, "max_tokens": 8192}
+    big = [Text(asked), *(Text(c * 24_000) for c in "abcd")]
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content=big))
+    _unpin(store, sid)  # legacy: the facts sit unpinned, so admission digests them away
+    first = _loop(git_repo, provider, store, sid, include_env=False, **window)
+    await _turn(first, Resume())  # stores the facts note, then fails again
+    assert first.ctx.extra["bash_file_guard_user_text"].startswith(asked)
+    second = _loop(git_repo, provider, store, sid, include_env=False, **window)
+    await _turn(second, Resume())
+    assert second.ctx.extra["bash_file_guard_user_text"].startswith(asked)
+    notes = [n for n in store._nodes[sid].values() if n.message.text().startswith("<system")]
+    assert len(notes) == 1  # the second Resume relies on the first one's note
+    assert _facts(provider.requests[-1]) == 1
+    assert provider.requests[-1].messages == provider.requests[-2].messages
+
+
 async def test_a_resume_over_held_facts_stores_nothing(git_repo: Path) -> None:
     """The ordinary retry: the path holds the facts, so the resumed request is
     the failed one, byte for byte, and no node is written."""

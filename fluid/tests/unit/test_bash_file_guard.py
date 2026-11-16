@@ -357,3 +357,28 @@ def test_last_match_path_allow_is_honored_without_permission_side_effects(tmp_pa
     assert guard_input("Bash", {"command": "cat f"}, registry,
         ToolCtx(cwd=str(tmp_path)), permissions=permissions).startswith("Use Read")
     assert permissions._streak == 0 and permissions._always_allowed == {}
+
+
+def test_host_written_notes_are_never_the_recovered_user_intent() -> None:
+    """A Resume's TurnStarted names the note it stored, with the owner's source.
+    Neither a harness note nor a fully pinned host note may stand in for the
+    owner's message when the next Resume recovers the user's intent."""
+    from fluid.messages import Message, Text
+    from fluid.messages.content import HARNESS_NOTE_META_KEY
+    from fluid.store.base import SessionNode
+    from fluid.tools.bash_file_guard import resumed_user_text
+
+    asked = "Run `cat README.md`"
+    context = "[host] restored state"
+    facts = "Runtime facts as of this message (x):\nok"
+    nodes = [
+        SessionNode(node_id="u", parent_id=None, message=Message(role="user", content=[Text(asked)])),
+        SessionNode(node_id="c", parent_id="u", message=Message(
+            role="user", content=[Text(context)]).pin_context(context)),
+        SessionNode(node_id="f", parent_id="c", message=Message(
+            role="user", content=[Text(facts)],
+            provider_meta={HARNESS_NOTE_META_KEY: True}).pin_context(facts)),
+    ]
+    sources = {"u": "user", "c": "user", "f": "user"}
+    assert resumed_user_text(nodes, sources) == asked
+    assert explicitly_requested("cat README.md", resumed_user_text(nodes, sources))
