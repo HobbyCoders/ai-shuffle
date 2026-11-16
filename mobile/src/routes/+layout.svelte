@@ -3,7 +3,7 @@
 	import '@fontsource-variable/jetbrains-mono';
 	import '../app.css';
 	import type { Snippet } from 'svelte';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { installMobileShell } from '../shell/register';
 	import RootLayout from '$lib/components/layout/RootLayout.svelte';
 
@@ -15,7 +15,7 @@
 </script>
 
 <!-- Public, explicit sample route: never bootstrap worker auth, sync, or API clients. -->
-{#if $page.url.pathname.replace(/\/$/, '').endsWith('/demo')}
+{#if page.url.pathname.replace(/\/$/, '').endsWith('/demo')}
 	{@render children()}
 {:else}
 	<RootLayout mobileApp>

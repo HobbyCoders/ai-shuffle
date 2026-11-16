@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const transport = vi.hoisted(() => ({put:vi.fn()}));
 vi.mock('$lib/api/client', () => ({api:transport}));
-vi.mock('$app/environment', () => ({browser:true}));
+vi.mock('$app/env', () => ({browser:true}));
 import {fetchSttCapability, invalidateSttCapability} from './sttStream';
 import {resourceSync} from './resource-sync';
 import {bindSessionOwner} from '$lib/stores/session-owner';

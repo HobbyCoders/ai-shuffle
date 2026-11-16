@@ -8,7 +8,7 @@ import { createLiveDictation } from './tiptap/liveDictation';
 import type { SttStreamHandlers } from '$lib/services/sttStream';
 
 const mocks = vi.hoisted(() => ({ start: vi.fn(), capability: vi.fn() }));
-vi.mock('$app/environment', () => ({ browser: true }));
+vi.mock('$app/env', () => ({ browser: true }));
 vi.mock('$lib/services/keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
 vi.mock('$lib/utils/earcon', () => ({ playEarcon: vi.fn(), primeEarcons: vi.fn(), setEarconsEnabled: vi.fn() }));

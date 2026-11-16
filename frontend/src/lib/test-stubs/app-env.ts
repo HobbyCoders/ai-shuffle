@@ -1,8 +1,8 @@
 /**
- * Test stub for SvelteKit's `$app/environment` virtual module.
+ * Test stub for SvelteKit's `$app/env` virtual module.
  *
  * The kit plugin provides this at build/dev time, but vitest runs unit tests
- * without it, so any store importing `{ browser }` from '$app/environment'
+ * without it, so any store importing `{ browser }` from '$app/env'
  * fails to resolve. Aliased in vitest.config.ts. Tests run in jsdom, so
  * `browser` is true.
  */

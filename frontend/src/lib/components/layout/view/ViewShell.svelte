@@ -36,6 +36,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	import { getAllContexts, getContext, onMount, tick, untrack, type Snippet } from 'svelte';
 	import { page } from '$app/state';
 	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { viewPanel } from '$lib/stores/view-panel.svelte';
@@ -121,7 +122,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 				if (cancelled || detailHistory.retiring) return;
 				try {
 					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
-						pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState);
+						ignoreRouterNotReady(pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState));
 					}
 					pushed = true;
 				} catch { /* Routerless tests still have an in-page back. */ }

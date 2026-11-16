@@ -16,8 +16,9 @@
  *        finished mobile/build into build/mobile
  *
  * The two builds write disjoint outputs (frontend/build and frontend/.svelte-kit,
- * mobile/build and mobile/.svelte-kit), but mobile reads the frontend's generated
- * tsconfig for its shared sources and Vite config. SvelteKit rewrites that file
+ * mobile/build and mobile/.svelte-kit), but both apps share one node_modules
+ * tree, and SvelteKit generates the tsconfig and route types each one extends
+ * into it (node_modules/$app). SvelteKit rewrites those files
  * during desktop config resolution AND in postbuild analysis/prerender workers,
  * even after a CLI sync. Finish desktop before starting mobile so none of those
  * writes can race mobile's reads. The copy waits for both, because the desktop

@@ -14,7 +14,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * seeds every other one.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 
 const STORAGE_KEY = 'aihub.pinnedModels';
 const SERVER_PREFERENCE_KEY = 'model_favorites';

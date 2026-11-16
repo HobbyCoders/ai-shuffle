@@ -16,7 +16,7 @@
  * Everything here is inert in a browser: `desktop` is null and `initDesktop`
  * returns a no-op.
  */
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 
 // The stores this module drives are imported lazily inside initDesktop():
 // importing this file must stay side-effect free, because components such as

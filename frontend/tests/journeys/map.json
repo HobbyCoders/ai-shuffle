@@ -53,7 +53,7 @@
 				"frontend/package.json",
 				"frontend/package-lock.json",
 				"frontend/vite.config.*",
-				"frontend/svelte.config.*"
+				"frontend/svelte-options.js"
 			]
 		},
 		{

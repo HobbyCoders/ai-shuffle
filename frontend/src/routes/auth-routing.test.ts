@@ -50,7 +50,7 @@ let cleanup: typeof import('@testing-library/svelte')['cleanup'];
 let fireEvent: typeof import('@testing-library/svelte')['fireEvent'];
 let waitFor: typeof import('@testing-library/svelte')['waitFor'];
 let auth: (typeof import('$lib/stores/auth.svelte'))['auth'];
-let router: typeof import('$lib/test-stubs/app-stores');
+let router: typeof import('$lib/test-stubs/app-state.svelte');
 let statusRequests: Mock<() => Promise<Response>>;
 const signedIn = { authenticated: true, setup_required: false, onboarding_complete: true };
 const anonymous = { authenticated: false, setup_required: false, onboarding_complete: true };
@@ -63,7 +63,7 @@ function deferred() {
 	const promise = new Promise<Response>((done) => { resolve = done; });
 	return { promise, resolve };
 }
-function navigate(path: string) { router.page.update(p => ({ ...p, url: new URL(path, 'http://localhost') })); }
+function navigate(path: string) { router.page.url = new URL(path, 'http://localhost'); }
 function resume() { document.dispatchEvent(new Event('visibilitychange')); }
 
 beforeEach(async () => {
@@ -75,7 +75,7 @@ beforeEach(async () => {
 	vi.stubGlobal('fetch', vi.fn((url: string) => url === '/api/v1/auth/status'
 		? statusRequests() : Promise.resolve(Response.json([]))));
 	mocks.init.mockResolvedValue(undefined); mocks.hydrate.mockResolvedValue(undefined); mocks.history.mockResolvedValue(undefined);
-	router = await import('$lib/test-stubs/app-stores');
+	router = await import('$lib/test-stubs/app-state.svelte');
 	mocks.goto.mockImplementation(async (path: string) => navigate(path));
 	auth = (await import('$lib/stores/auth.svelte')).auth;
 	Harness = (await import('$lib/test-stubs/AuthRouteHarness.svelte')).default;
@@ -97,7 +97,7 @@ it.each(['503', 'network', 'empty-json', 'invalid-boolean', 'html'])('keeps a fa
 	statusRequests.mockResolvedValueOnce(Response.json(signedIn));
 	resume();
 	await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
-	expect(get(router.page).url.pathname).toBe('/');
+	expect(router.page.url.pathname).toBe('/');
 	expect(mocks.goto).not.toHaveBeenCalled();
 });
 
@@ -144,7 +144,7 @@ it.each([
 	expect(mocks.goto).not.toHaveBeenCalled(); expect(mocks.init).not.toHaveBeenCalled();
 	statusRequests.mockResolvedValueOnce(Response.json(status));
 	resume();
-	await waitFor(() => expect(get(router.page).url.pathname).toBe(target));
+	await waitFor(() => expect(router.page.url.pathname).toBe(target));
 	await waitFor(() => expect(view.queryByText(DENIED)).toBeNull());
 	if (target === '/') await waitFor(() => expect(mocks.init).toHaveBeenCalledOnce());
 });
@@ -155,7 +155,7 @@ it('replaces a previously authenticated route with the local-network notice when
 	statusRequests.mockResolvedValueOnce(Response.json(anonymous)); resume();
 	await waitFor(() => expect(view.getByText(DENIED)).toBeTruthy());
 	expect(mocks.goto).not.toHaveBeenCalled();
-	expect(get(router.page).url.pathname).toBe('/');
+	expect(router.page.url.pathname).toBe('/');
 });
 
 it('keeps the existing authenticated page mounted through a failed refresh', async () => {

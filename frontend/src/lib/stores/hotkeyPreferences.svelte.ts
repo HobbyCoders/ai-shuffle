@@ -11,7 +11,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { createSubscribers } from './store-utils';
 
 // ============================================

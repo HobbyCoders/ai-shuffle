@@ -11,7 +11,7 @@ import { compatible } from '$lib/services/preference-values';
 import type { BrowserViewport } from '$lib/browser-panel/workspace';
 import { validViewport } from '$lib/browser-panel/workspace';
 import { preferenceSync } from '$lib/services/preferences';
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 import { sidePanel, sessionPanelKey } from './side-panel.svelte';

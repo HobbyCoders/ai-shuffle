@@ -19,7 +19,7 @@ installation and protected backups unchanged.
   vendored `fluid` package (`pip install -e ./fluid`) requires 3.12, so the
   backend test suite (`pytest tests`) needs a 3.12 virtual environment; a
   newer interpreter cannot install it.
-- **Node.js 22.12+** — [Download](https://nodejs.org/) (for building frontend)
+- **Node.js 22.17+** — [Download](https://nodejs.org/) (for building frontend)
 - **GitHub CLI** — [Download](https://cli.github.com/) (used for PR reviews, issue management, etc.)
 - **Claude Code CLI** — if you choose Claude, install it from setup or
   Settings > Providers > Claude with Anthropic's own installer, then

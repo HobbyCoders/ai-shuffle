@@ -172,6 +172,219 @@ def test_runs_svelte_kit_sync_when_a_svelte_config_exists(tmp_path, no_real_npx)
     assert no_real_npx == [str(dest / "frontend")]
 
 
+def test_runs_svelte_kit_sync_for_a_kit_dependency_without_a_svelte_config(tmp_path, no_real_npx):
+    """SvelteKit 3 has no svelte.config file; the dependency marks the app."""
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    _mk_package(source, "frontend", node_modules=True)
+    package = _mk_package(dest, "frontend")
+    (package / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"@sveltejs/kit": "^3.2.0"}}', encoding="utf-8"
+    )
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["synced"] == ["frontend"]
+    assert no_real_npx == [str(dest / "frontend")]
+
+
+# ─── SvelteKit 3: generated types live in node_modules ──────────────────────
+
+
+def _install_kit(modules, version):
+    kit = modules / "@sveltejs" / "kit"
+    kit.mkdir(parents=True, exist_ok=True)
+    (kit / "package.json").write_text(json.dumps({"version": version}), encoding="utf-8")
+
+
+def _kit3_sync(package_dir):
+    """What SvelteKit 3's sync writes: a tsconfig whose paths are relative to itself."""
+    generated = package_dir / "node_modules" / "$app"
+    generated.mkdir(parents=True, exist_ok=True)
+    (generated / "tsconfig.json").write_text(
+        json.dumps({"compilerOptions": {"paths": {"$lib": ["../../src/lib"]}}}), encoding="utf-8"
+    )
+    return True
+
+
+def _lib_dir(package):
+    """Where TypeScript resolves the package's `$lib`: relative to the REAL generated tsconfig."""
+    generated = (package / "node_modules" / "$app" / "tsconfig.json").resolve()
+    paths = json.loads(generated.read_text(encoding="utf-8"))["compilerOptions"]["paths"]
+    return (generated.parent / paths["$lib"][0]).resolve()
+
+
+def test_a_sveltekit_3_tree_is_never_shared_so_lib_resolves_inside_the_worktree(
+    tmp_path, monkeypatch, no_real_npm
+):
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    parent = _mk_package(source, "frontend", node_modules=True)
+    _install_kit(parent / "node_modules", "3.2.0")
+    _kit3_sync(parent)
+    before = (parent / "node_modules" / "$app" / "tsconfig.json").stat().st_mtime_ns
+    child = _mk_package(dest, "frontend")
+    (child / "package.json").write_text(
+        '{"name": "x", "devDependencies": {"@sveltejs/kit": "^3.2.0"}}', encoding="utf-8"
+    )
+    monkeypatch.setattr(cm, "_run_svelte_kit_sync", _kit3_sync)
+
+    # Not authorized to install: nothing is linked and nothing is generated.
+    summary = cm.provision_node_modules(str(source), str(dest))
+    assert summary["linked"] == []
+    assert not (child / "node_modules").exists()
+    assert any("frontend: setup required (SvelteKit 3" in s for s in summary["skipped"])
+
+    # Authorized: the worktree gets its own tree, and its own generated types.
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
+    assert summary["linked"] == []
+    assert len(summary["installed"]) == 1
+    assert no_real_npm == [str(child)]
+    assert not (child / "node_modules").is_symlink()
+    assert _lib_dir(child) == (child / "src" / "lib").resolve()
+    assert _lib_dir(parent) == (parent / "src" / "lib").resolve()
+    assert (parent / "node_modules" / "$app" / "tsconfig.json").stat().st_mtime_ns == before
+
+
+def test_a_sveltekit_2_tree_is_still_linked(tmp_path):
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    parent = _mk_package(source, "frontend", node_modules=True)
+    _install_kit(parent / "node_modules", "2.70.4")
+    _mk_package(dest, "frontend", svelte=True)
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["frontend"]
+    assert summary["synced"] == ["frontend"]
+
+
+@pytest.fixture(params=["symlink", "junction"])
+def links(request, monkeypatch):
+    """Every link provisioning makes, as (target, link) pairs.
+
+    ``junction`` stands in for a Windows dev host as far as Linux can: a
+    junction resolves to its target like a symlink does, but ``is_symlink()``
+    is false for it, so no decision may depend on that call. Creating a real
+    junction (``_winapi.CreateJunction``) is not exercised here.
+    """
+    made = []
+    real = cm._link_directory
+
+    def record(target, link):
+        made.append((target, link))
+        real(target, link)
+
+    monkeypatch.setattr(cm, "_link_directory", record)
+    if request.param == "junction":
+        monkeypatch.setattr(cm.Path, "is_symlink", lambda self: False)
+    return made
+
+
+def _source_with_shared_tree(tmp_path, kit_version):
+    """A source checkout where mobile/node_modules -> frontend/node_modules."""
+    source = tmp_path / "src"
+    parent = _mk_package(source, "frontend", node_modules=True)
+    if kit_version:
+        _install_kit(parent / "node_modules", kit_version)
+    _mk_package(source, "mobile")
+    os.symlink(parent / "node_modules", source / "mobile" / "node_modules", target_is_directory=True)
+    return source
+
+
+@pytest.mark.parametrize("kit_version", ["2.70.4", None], ids=["sveltekit-2", "no-sveltekit"])
+def test_a_shared_sibling_tree_without_sveltekit_3_still_links_across_checkouts(
+    tmp_path, links, no_real_npm, kit_version
+):
+    """Any project's layout, not only this one: both packages keep the source's tree."""
+    source = _source_with_shared_tree(tmp_path, kit_version)
+    dest = tmp_path / "wt"
+    _mk_package(dest, "frontend")
+    _mk_package(dest, "mobile")
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["frontend", "mobile"]
+    assert summary["skipped"] == [] and summary["errors"] == []
+    assert no_real_npm == []
+    assert links == [
+        (source / "frontend" / "node_modules", dest / "frontend" / "node_modules"),
+        (source / "mobile" / "node_modules", dest / "mobile" / "node_modules"),
+    ]
+    shared = (source / "frontend" / "node_modules").resolve()
+    assert (dest / "frontend" / "node_modules").resolve() == shared
+    assert (dest / "mobile" / "node_modules").resolve() == shared
+
+
+def test_a_shared_sveltekit_3_sibling_tree_links_inside_the_worktree(tmp_path, links, no_real_npm):
+    """mobile/node_modules -> frontend/node_modules must stay inside each checkout."""
+    source = _source_with_shared_tree(tmp_path, "3.2.0")
+    dest = tmp_path / "wt"
+    _mk_package(dest, "frontend")
+    _mk_package(dest, "mobile")
+
+    # The sibling has no tree here yet: nothing reaches into the source checkout.
+    summary = cm.provision_node_modules(str(source), str(dest))
+    assert summary["linked"] == [] and links == []
+    assert not (dest / "frontend" / "node_modules").exists()
+    assert not (dest / "mobile" / "node_modules").exists()
+    assert any("frontend: setup required (SvelteKit 3" in s for s in summary["skipped"])
+    assert any("mobile: setup required (shares frontend/node_modules" in s for s in summary["skipped"])
+
+    summary = cm.provision_node_modules(str(source), str(dest), allow_install=True)
+    assert summary["linked"] == ["mobile"]
+    assert no_real_npm == [str(dest / "frontend")]  # never an install in mobile
+    assert links == [(dest / "frontend" / "node_modules", dest / "mobile" / "node_modules")]
+    assert (dest / "mobile" / "node_modules").resolve() == (dest / "frontend" / "node_modules").resolve()
+
+
+def test_a_worktree_that_moved_to_sveltekit_3_links_its_own_sibling_tree(tmp_path, links, no_real_npm):
+    """Mixed: the source is still on SvelteKit 2, the branch installed SvelteKit 3."""
+    source = _source_with_shared_tree(tmp_path, "2.70.4")
+    dest = tmp_path / "wt"
+    child = _mk_package(dest, "frontend", node_modules=True)
+    _install_kit(child / "node_modules", "3.2.0")
+    _mk_package(dest, "mobile")
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["mobile"]
+    assert no_real_npm == []
+    assert links == [(child / "node_modules", dest / "mobile" / "node_modules")]
+    assert (dest / "mobile" / "node_modules").resolve() == (child / "node_modules").resolve()
+
+
+def test_an_unrelated_package_still_links_beside_a_sveltekit_3_app(tmp_path, links):
+    """Mixed: only the SvelteKit 3 tree is kept local; its neighbours are shared."""
+    source = _source_with_shared_tree(tmp_path, "3.2.0")
+    _mk_package(source, "tools", node_modules=True)
+    dest = tmp_path / "wt"
+    for name in ("frontend", "mobile", "tools"):
+        _mk_package(dest, name)
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["linked"] == ["tools"]
+    assert links == [(source / "tools" / "node_modules", dest / "tools" / "node_modules")]
+    assert len(summary["skipped"]) == 2
+
+
+def test_sync_never_writes_through_a_tree_linked_from_another_checkout(tmp_path, no_real_npx):
+    """A worktree provisioned before SvelteKit 3 may still hold such a link."""
+    source = tmp_path / "src"
+    dest = tmp_path / "wt"
+    parent = _mk_package(source, "frontend", node_modules=True)
+    _install_kit(parent / "node_modules", "3.2.0")
+    child = _mk_package(dest, "frontend", svelte=True)
+    cm._link_directory(parent / "node_modules", child / "node_modules")
+
+    summary = cm.provision_node_modules(str(source), str(dest))
+
+    assert summary["synced"] == []
+    assert no_real_npx == []
+    assert any("belongs to another checkout" in e for e in summary["errors"])
+
+
 def test_does_not_run_sync_without_a_svelte_config(tmp_path, no_real_npx):
     source = tmp_path / "src"
     dest = tmp_path / "wt"

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
-import { tick } from 'svelte';
+import { flushSync, tick } from 'svelte';
 import type { Writable } from 'svelte/store';
 
 // The drawer hosts the real Sidebar in the app; here a stub exposes each of its
@@ -343,7 +343,7 @@ describe('AppTopBar drawer lifecycle', () => {
 	it('pushes a history entry on open, closes on Back, and pops its own entry when closed in the app', async () => {
 		const nav = await import('$app/navigation');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {
@@ -380,7 +380,7 @@ describe('AppTopBar drawer lifecycle', () => {
 		vi.useFakeTimers();
 		const nav = await import('$app/navigation');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation((_url, state) => {
+		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		// The real Back is asynchronous: the router hears popstate later.
@@ -397,10 +397,21 @@ describe('AppTopBar drawer lifecycle', () => {
 			// A slow pop: elapsed time alone never opens it.
 			vi.advanceTimersByTime(2000);
 			expect(props.onOpenFeature).not.toHaveBeenCalled();
-			page.state = {};
+			// SvelteKit 3 updates page.state some time after popstate: the
+			// event alone, with the drawer's entry still in the state, opens nothing.
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
+			expect(props.onOpenFeature).not.toHaveBeenCalled();
+			// The state change itself opens nothing yet: the router is still
+			// finishing the pop when the update is applied.
+			page.state = {};
+			flushSync();
+			expect(props.onOpenFeature).not.toHaveBeenCalled();
+			await tick();
+			await tick();
 			expect(props.onOpenFeature).toHaveBeenCalledExactlyOnceWith('settings', 'system');
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
 			// A newer navigation calls a waiting target off: tap the target,
@@ -413,11 +424,32 @@ describe('AppTopBar drawer lifecycle', () => {
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub open session' }));
 			page.state = {};
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
 			expect(props.onOpenSession).toHaveBeenCalledWith('s-2');
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
+			// Called off after the pop landed but before the target opened.
+			await fireEvent.click(menuButton());
+			await tick();
+			page.state = { mobileDrawer: true };
+			await tick();
+			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));
+			page.state = {};
+			flushSync();
+			await fireEvent.click(menuButton());
+			await tick();
+			await tick();
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
+			page.state = { mobileDrawer: true };
+			await tick();
+			await fireEvent.click(screen.getAllByRole('button', { name: 'Close menu' })[0]);
+			page.state = {};
+			await tick();
+			await tick();
+			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
+
 			// The drawer's entry was never pushed (router not ready): it opens at once.
-			push.mockImplementation(() => {});
+			push.mockImplementation(async () => {});
 			await fireEvent.click(menuButton());
 			await tick();
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));

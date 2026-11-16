@@ -11,7 +11,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * Follows the same pattern as chatPreferences.svelte.ts.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { createSubscribers } from './store-utils';
 
 // ============================================

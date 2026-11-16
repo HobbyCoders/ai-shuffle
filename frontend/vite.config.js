@@ -1,13 +1,75 @@
+import adapter from '@sveltejs/adapter-static';
 import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 import { appVersion } from './app-version.js';
 import { assetsInlineLimit } from './asset-inline.js';
+import { svelteOptions } from './svelte-options.js';
+
+/**
+ * The named chunk a module belongs to, or nothing to leave it to Rolldown.
+ *
+ * @param {string} id
+ * @returns {string | undefined}
+ */
+function vendorChunkName(id) {
+	// Docs markdown: ~404 kB of raw strings, wanted only by
+	// readers who actually open Docs. One chunk instead of ~35
+	// so opening Docs is a single request.
+	if (id.includes('/src/lib/docs/content/')) return 'docs-content';
+
+	if (id.includes('node_modules')) {
+		if (id.includes('@tiptap') || id.includes('prosemirror')) return 'vendor-tiptap';
+		if (id.includes('marked')) return 'vendor-marked';
+		if (id.includes('dompurify')) return 'vendor-dompurify';
+		if (id.includes('lucide-svelte')) return 'vendor-lucide';
+		// Shiki's runtime (core + textmate + JS regex engine +
+		// themes) is one cacheable chunk, loaded on first code
+		// block. NOTE: @shikijs/langs is deliberately excluded —
+		// each grammar must stay its own chunk so a transcript
+		// only pays for the languages it actually contains.
+		if (id.includes('@shikijs/langs') || id.includes('shiki/dist/langs')) return;
+		if (
+			id.includes('/shiki/') ||
+			id.includes('@shikijs/core') ||
+			id.includes('@shikijs/engine-javascript') ||
+			id.includes('@shikijs/themes') ||
+			id.includes('@shikijs/types') ||
+			id.includes('@shikijs/vscode-textmate')
+		) {
+			return 'vendor-shiki';
+		}
+	}
+}
 
 export default defineConfig({
 	// Worktrees may share installed packages; keep generated caches in this tree.
 	cacheDir: '.svelte-kit/vite-cache',
-	plugins: [tailwindcss(), sveltekit()],
+	plugins: [
+		tailwindcss(),
+		// SvelteKit 3 takes its config here; there is no svelte.config.js.
+		sveltekit({
+			...svelteOptions,
+			adapter: adapter({
+				pages: 'build',
+				assets: 'build',
+				fallback: 'index.html',
+				precompress: false,
+				strict: true
+			}),
+			// SvelteKit 3 dropped the built-in `$lib`; this keeps it.
+			alias: {
+				$lib: 'src/lib'
+			},
+			paths: {
+				base: ''
+			},
+			// No timer: services/app-update-watch.ts decides when to ask for a newer build.
+			version: {
+				pollInterval: 0
+			}
+		})
+	],
 	define: {
 		__APP_VERSION__: JSON.stringify(appVersion)
 	},
@@ -23,41 +85,19 @@ export default defineConfig({
 		// budget again rather than a rubber stamp: if a chunk crosses it,
 		// something eagerly-imported grew and it's worth a look.
 		chunkSizeWarningLimit: 800,
-		rollupOptions: {
+		rolldownOptions: {
 			output: {
 				// Split heavy vendor libs into their own chunks. This
 				// improves browser caching (deploys that don't touch these
 				// deps keep the same chunk hash) and keeps the main bundle
-				// smaller. Rollup may still merge chunks when dependency
+				// smaller. Rolldown may still merge chunks when dependency
 				// graphs overlap, but the hints materially help here.
-				manualChunks(id) {
-					// Docs markdown: ~404 kB of raw strings, wanted only by
-					// readers who actually open Docs. One chunk instead of ~35
-					// so opening Docs is a single request.
-					if (id.includes('/src/lib/docs/content/')) return 'docs-content';
-
-					if (id.includes('node_modules')) {
-						if (id.includes('@tiptap') || id.includes('prosemirror')) return 'vendor-tiptap';
-						if (id.includes('marked')) return 'vendor-marked';
-						if (id.includes('dompurify')) return 'vendor-dompurify';
-						if (id.includes('lucide-svelte')) return 'vendor-lucide';
-						// Shiki's runtime (core + textmate + JS regex engine +
-						// themes) is one cacheable chunk, loaded on first code
-						// block. NOTE: @shikijs/langs is deliberately excluded —
-						// each grammar must stay its own chunk so a transcript
-						// only pays for the languages it actually contains.
-						if (id.includes('@shikijs/langs') || id.includes('shiki/dist/langs')) return;
-						if (
-							id.includes('/shiki/') ||
-							id.includes('@shikijs/core') ||
-							id.includes('@shikijs/engine-javascript') ||
-							id.includes('@shikijs/themes') ||
-							id.includes('@shikijs/types') ||
-							id.includes('@shikijs/vscode-textmate')
-						) {
-							return 'vendor-shiki';
-						}
-					}
+				//
+				// A `codeSplitting` group, not `manualChunks`: SvelteKit 3 sets
+				// `codeSplitting` itself, and Rolldown then ignores `manualChunks`.
+				// Vite appends this group to SvelteKit's own.
+				codeSplitting: {
+					groups: [{ name: vendorChunkName }]
 				}
 			}
 		}

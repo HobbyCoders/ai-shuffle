@@ -15,7 +15,7 @@
 	 */
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import { agentGate, auth, isAuthenticated } from '$lib/stores/auth.svelte';
 	import { theme } from '$lib/stores/theme.svelte';
 	import { pwa } from '$lib/stores/pwa.svelte';
@@ -50,7 +50,7 @@
 	let { children, mobileApp = false }: Props = $props();
 
 	let initialized = $state(false);
-	const currentPath = $derived<string>($page.url.pathname);
+	const currentPath = $derived<string>(page.url.pathname);
 	let mounted = $state(false);
 	let bootstrapPreparation: Promise<unknown> | undefined;
 	// Notifications loaded after a reload get their buttons back
@@ -92,7 +92,7 @@
 		const { status, loading, error } = $auth;
 		// Widened: SvelteKit types the pathname per app, and the mobile app has
 		// only the root route.
-		const path: string = $page.url.pathname;
+		const path: string = page.url.pathname;
 		// The mobile app has no auth routes: a lost session is reported below.
 		if (mobileApp) return null;
 		if (!initialized || loading || error || !status || path === '/pair') return null;

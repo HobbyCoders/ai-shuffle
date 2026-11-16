@@ -14,7 +14,7 @@
 
 import { writable, get } from 'svelte/store';
 import { apiBase, authHeaders, requestCredentials } from '$lib/api/runtime';
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { loadVoiceSettings } from '$lib/api/voice';
 import { registerShortcut, type ShortcutRegistration } from './keyboard';
 import { hotkeyPreferences, type HotkeyConfig } from '$lib/stores/hotkeyPreferences.svelte';

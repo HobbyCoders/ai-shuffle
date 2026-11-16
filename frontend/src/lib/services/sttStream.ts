@@ -17,7 +17,7 @@
  */
 
 import { apiBase, withAuth, wsUrl } from '$lib/api/runtime';
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { SttTranscript } from './sttTranscript';
 import { resourceSync } from './resource-sync';
 import { sessionOwnerBoundary } from '$lib/stores/session-owner';

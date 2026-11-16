@@ -1,6 +1,6 @@
 // Selected desktop details must gain a usable Back step when resized into a stack.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, sidebarRow } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -46,7 +46,7 @@ await runJourney({
 			await mark('Back closes Files detail');
 			await page.locator('.topbar').getByRole('button', { name: 'Back to Files', exact: true }).click();
 			await page.locator('[data-view-shell="Files"][data-pane="panel"]').waitFor();
-			expect(!(await page.evaluate(() => history.state?.['sveltekit:states']?.viewPanelDetail)), 'no hidden Notes detail marker remains after Files Back');
+			expect(!(await page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'))), 'no hidden Notes detail marker remains after Files Back');
 		}
 	}, {
 		name: 'selected-desktop-detail-resized-to-phone',
@@ -151,5 +151,72 @@ await runJourney({
 				expect(await page.getByPlaceholder('Search agents').isVisible(), 'native Back returns to the list');
 			}
 		}
-	}]
+	}, ...(mobileShell ? [{
+		// A chat picked in the drawer waits for the drawer's own entry to be
+		// popped before it pushes its own. The drawer's marker must never be
+		// copied onto a chat entry, or Back would land on a chat that still
+		// claims the drawer.
+		name: 'native-drawer-chat-switch-back',
+		viewports: ['phone'],
+		async setup({ page, status }) {
+			await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+			expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+			await menu(page).waitFor();
+		},
+		async act({ page, mark }) {
+			const open = (key) => waitOpen(page, SEEDED[key]);
+			const pickInDrawer = async (key) => {
+				await menu(page).click();
+				const sessions = page.getByRole('complementary', { name: 'Chats' });
+				const row = sidebarRow(sessions, SEEDED[key]);
+				await row.scrollIntoViewIfNeeded();
+				await row.click();
+				await open(key);
+				await drawerClosed(page);
+			};
+			await mark('switch chats through the drawer three times');
+			await pickInDrawer('no_project');
+			await pickInDrawer('worktree');
+			await pickInDrawer('other_project');
+			expect(!(await entryState(page)).includes('mobileDrawer'), 'the chat entry carries no drawer marker');
+
+			await mark('reopen the drawer: Back closes it and keeps the chat');
+			await menu(page).click();
+			await page.waitForFunction(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('mobileDrawer'));
+			await page.goBack();
+			await drawerClosed(page);
+			await open('other_project');
+
+			await mark('Back opens the chat under it with the drawer closed, twice');
+			await page.goBack();
+			await open('worktree');
+			expect(!(await entryState(page)).includes('mobileDrawer'), 'the entry under the chat carries no drawer marker');
+			await drawerClosed(page);
+			await page.goBack();
+			await open('no_project');
+			await drawerClosed(page);
+
+			await mark('Forward returns to the later chat');
+			await page.goForward();
+			await open('worktree');
+			await drawerClosed(page);
+		}
+	}] : [])]
 });
+
+function menu(page) {
+	return page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ });
+}
+function entryState(page) {
+	return page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? ''));
+}
+async function drawerClosed(page) {
+	await page.waitForFunction(() => document.querySelector('button[aria-label^="Open menu"]')?.getAttribute('aria-expanded') === 'false', null, { timeout: 5000 });
+	// A marker copied onto the entry would reopen nothing, but hold the drawer's history step: give it a moment to show.
+	await page.waitForTimeout(300);
+	expect(await menu(page).getAttribute('aria-expanded') === 'false', 'the drawer is closed');
+}
+/** The open chat, by the title the phone's one bar shows. */
+async function waitOpen(page, title) {
+	await page.waitForFunction((want) => document.querySelector('.topbar')?.textContent?.includes(want), title, { timeout: 15_000 });
+}

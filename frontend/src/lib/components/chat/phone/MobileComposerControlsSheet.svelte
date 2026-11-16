@@ -48,6 +48,7 @@
 	import { tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
@@ -438,7 +439,7 @@
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
 		try {
-			pushState('', { ...(page.state ?? {}), mobileControls: true, mobileControlsPage: target });
+			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true, mobileControlsPage: target }));
 			pageEntry = true;
 		} catch {
 			// Router not ready (tests): Back closes the panel instead.
@@ -458,7 +459,7 @@
 				void focusPanel();
 				if (!historyEntry) {
 					try {
-						pushState('', { ...(page.state ?? {}), mobileControls: true });
+						ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true }));
 						historyEntry = true;
 					} catch {
 						// Router not ready (tests): Back just won't close the panel.

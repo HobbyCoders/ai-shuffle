@@ -3,7 +3,7 @@ import { get } from 'svelte/store';
 
 const settings = vi.hoisted(() => vi.fn());
 vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: settings }));
-vi.mock('$app/environment', () => ({ browser: true }));
+vi.mock('$app/env', () => ({ browser: true }));
 vi.mock('./keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
 vi.mock('$lib/utils/earcon', () => ({ playEarcon: vi.fn(), primeEarcons: vi.fn(), setEarconsEnabled: vi.fn() }));
