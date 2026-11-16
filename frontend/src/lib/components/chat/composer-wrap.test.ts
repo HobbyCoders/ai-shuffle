@@ -447,6 +447,46 @@ describe('createArrivalGuard: Stop back in its own seat', () => {
 		expect(g.ignores('stop', 1150 + DOUBLE_PRESS_MS, 2)).toBe(false);
 	});
 
+	it('holds back a double tap whose first press was ignored on the button in between, whatever its click count', () => {
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']]);
+		expect(g.ignores('talk', 1050)).toBe(true);
+		g.noteIgnored('talk', 1050);
+		clock = 1150;
+		g.update(['mic', 'talk', 'stop'], false);
+		expect(g.ignores('stop', 1170)).toBe(true);
+		// The second press, ignored too, does not move the window on.
+		g.noteIgnored('stop', 1170);
+		expect(g.ignores('stop', 1049 + DOUBLE_PRESS_MS)).toBe(true);
+		expect(g.ignores('stop', 1050 + DOUBLE_PRESS_MS)).toBe(false);
+	});
+
+	it('lets a first press reach the returned Stop when nothing was ignored in its seat', () => {
+		const g = handoff();
+		// A press ignored in another seat (the mic, where Talk was) is not Stop's.
+		g.noteIgnored('talk', 1160);
+		expect(g.ignores('stop', 1170)).toBe(false);
+		// Nor is an ignored press from before the double tap's window.
+		const h = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']]);
+		h.noteIgnored('talk', 1010);
+		clock = 1300;
+		h.update(['mic', 'talk', 'stop'], false);
+		expect(h.ignores('stop', 1010 + DOUBLE_PRESS_MS)).toBe(false);
+	});
+
+	it('still lets the same button through once its own wait is over, after an ignored press on it', () => {
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']]);
+		g.noteIgnored('talk', 1050);
+		expect(g.ignores('talk', 1000 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('forgets an ignored press when the row is placed again (another chat)', () => {
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']]);
+		g.noteIgnored('talk', 1050);
+		clock = 1150;
+		g.update(['mic', 'talk', 'stop'], true);
+		expect(g.ignores('stop', 1170)).toBe(false);
+	});
+
 	it('guards Stop as an arrival once the other button had the seat for the whole wait', () => {
 		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [1000 + ARRIVAL_GUARD_MS, ['mic', 'talk', 'stop']]);
 		expect(g.ignores('stop', 1000 + ARRIVAL_GUARD_MS + 20)).toBe(true);

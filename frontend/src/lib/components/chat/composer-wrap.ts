@@ -263,6 +263,13 @@ const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
  * running, while mic and Talk start something and lose nothing by waiting. A
  * double click still counts the swap: its later press began on the other
  * button.
+ *
+ * A press that was ignored in a seat also holds back the next press there
+ * within DOUBLE_PRESS_MS when another button has the seat by then (`noteIgnored`):
+ * that is the second tap of a double tap, whatever click count the browser
+ * gives it (a touch tap often reports 1), and it was no more meant for the
+ * new button than the first was. Without this the second tap would reach a
+ * Stop that is back in its seat and stop the queued turn.
  */
 export function createArrivalGuard(now: () => number = () => performance.now()) {
 	let row: RowButton[] | null = null;
@@ -270,6 +277,16 @@ export function createArrivalGuard(now: () => number = () => performance.now()) 
 	let movedAt: number[] = [];
 	// The button each seat held before its current one, and when that one had arrived.
 	let before: ({ button: RowButton; arrivedAt: number } | undefined)[] = [];
+	// The last press ignored in each seat: on which button, and when it was made.
+	let ignored: ({ button: RowButton; at: number } | undefined)[] = [];
+	const seatOf = (button: RowButton) => {
+		const index = row ? row.lastIndexOf(button) : -1;
+		return index < 0 ? -1 : row!.length - 1 - index;
+	};
+	const followsIgnored = (seat: number, button: RowButton, pressedAt: number) => {
+		const last = ignored[seat];
+		return !!last && last.button !== button && pressedAt >= last.at && pressedAt < last.at + DOUBLE_PRESS_MS;
+	};
 	return {
 		/** The row as shown now. */
 		update(next: RowButton[], settled: boolean) {
@@ -299,17 +316,31 @@ export function createArrivalGuard(now: () => number = () => performance.now()) 
 			movedAt = moved;
 			arrivedAt = settled ? next.map(() => -Infinity) : arrived;
 			before = settled ? [] : earlier;
+			if (settled) ignored = [];
 			row = [...next];
 		},
 		/**
+		 * A pointer press made at `pressedAt` on `button` was ignored, for any
+		 * reason. A double tap's first press stands: its second does not move
+		 * the window on.
+		 */
+		noteIgnored(button: RowButton, pressedAt: number) {
+			const seat = seatOf(button);
+			if (seat < 0) return;
+			const last = ignored[seat];
+			if (last && pressedAt >= last.at && pressedAt < last.at + DOUBLE_PRESS_MS) return;
+			ignored[seat] = { button, at: pressedAt };
+		},
+		/**
 		 * Whether a pointer press made at `pressedAt` on `button` came too soon
-		 * after it arrived. `clicks` is the press's click count (`event.detail`).
+		 * after it arrived, or follows a press ignored on another button in its
+		 * seat. `clicks` is the press's click count (`event.detail`).
 		 */
 		ignores(button: RowButton, pressedAt: number, clicks = 1): boolean {
 			if (!row || !GUARDED.has(button)) return false;
-			const index = row.lastIndexOf(button);
-			if (index < 0) return false;
-			const seat = row.length - 1 - index;
+			const seat = seatOf(button);
+			if (seat < 0) return false;
+			if (followsIgnored(seat, button, pressedAt)) return true;
 			if (clicks > 1 && pressedAt < (movedAt[seat] ?? -Infinity) + DOUBLE_PRESS_MS) return true;
 			return pressedAt < (arrivedAt[seat] ?? -Infinity) + ARRIVAL_GUARD_MS;
 		}

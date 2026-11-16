@@ -365,6 +365,9 @@ export const stopButton = (page) => page.getByRole('button', { name: /^Stop/ });
  * moment a button exists must wait the same way, or its press is dropped.
  */
 export async function waitSeated(page, label, { timeout = 30_000 } = {}) {
+	// Each call watches afresh: the row is not watched between calls, so what an
+	// earlier call saw says nothing about a button that left and came back since.
+	await page.evaluate(() => { window.__seatedRow = {}; });
 	await page.waitForFunction(({ label, ms }) => {
 		const row = [...document.querySelectorAll('.send-cluster button')]
 			.filter((b) => b.getClientRects().length).map((b) => b.getAttribute('aria-label') ?? '');

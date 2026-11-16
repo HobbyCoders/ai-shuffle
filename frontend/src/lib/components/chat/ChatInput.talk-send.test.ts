@@ -480,24 +480,63 @@ describe('a button sliding into a freed seat (#1632)', () => {
 		expect(hits).toEqual([ARRIVED + 160]);
 	});
 
-	it('stops the queued turn when Stop is pressed just after it came back at a queue handoff', async () => {
-		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
-		const { container, talk } = await talkReplacesStop();
-		// Talk shows for a moment between the two turns and is still held back...
-		const talkHits = reached(talk);
-		await tap(talk, ARRIVED + 50, ARRIVED + 90);
-		expect(talkHits).toEqual([]);
-		// ...and 150 ms after the turn ended the queued one starts in the same
-		// chat: Stop is back in the seat it held.
+	/** The queued turn starts 150 ms after the turn ended: Stop is back in the seat it held. */
+	async function stopComesBack(container: HTMLElement) {
 		clock.mockReturnValue(ARRIVED + 150);
 		startTurn();
 		await waitFor(() => expect(circles(container)).toContain('Stop generating'));
 		clock.mockReturnValue(ARRIVED + 5000);
-		const back = container.querySelector('.stop-btn')!;
+		return container.querySelector('.stop-btn')!;
+	}
+
+	it('stops the queued turn when Stop is pressed just after it came back at a queue handoff', async () => {
+		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		const { container } = await talkReplacesStop();
+		const back = await stopComesBack(container);
 		await tap(back, ARRIVED + 170, ARRIVED + 230);
 		expect(stops).toHaveBeenCalledTimes(1);
 		await tap(back, ARRIVED + 450, ARRIVED + 510, 2);
 		expect(stops).toHaveBeenCalledTimes(2);
+	});
+
+	it('never lets the second touch of a double tap stop the queued turn on a Stop that came back', async () => {
+		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		const { container, talk } = await talkReplacesStop();
+		// The first touch lands on Talk, there for a moment between the turns, and
+		// is held back. Both touches report a click count of 1, as touch taps do.
+		const talkHits = reached(talk);
+		await tap(talk, ARRIVED + 50, ARRIVED + 90);
+		expect(talkHits).toEqual([]);
+		const back = await stopComesBack(container);
+		await tap(back, ARRIVED + 170, ARRIVED + 230, 2);
+		expect(stops).not.toHaveBeenCalled();
+		// The keyboard is never held back, and a press after the double tap's
+		// window is a press on Stop.
+		await fire('click', back, ARRIVED + 240, { detail: 0 });
+		expect(stops).toHaveBeenCalledTimes(1);
+		await tap(back, ARRIVED + 560, ARRIVED + 620, 3);
+		expect(stops).toHaveBeenCalledTimes(2);
+	});
+
+	it('does the same when the first touch began on the Stop that then left', async () => {
+		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		startTurn();
+		const { container } = render(ChatInput, { props: { compact: true } });
+		await waitFor(() => expect(circles(container)).toContain('Stop generating'));
+		await fire('pointerdown', container.querySelector('.stop-btn')!, ARRIVED - 20, { pointerId: 4 });
+		Object.assign(activeSession.current, { isStreaming: false, liveTurnId: null });
+		activeSession.setDraft('');
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']));
+		const talk = container.querySelector('.call-circle')!;
+		const talkHits = reached(talk);
+		await fire('pointerup', talk, ARRIVED + 40, { pointerId: 4 });
+		await fire('click', talk, ARRIVED + 40, { pointerId: 4 });
+		expect(talkHits).toEqual([]);
+		const back = await stopComesBack(container);
+		await tap(back, ARRIVED + 170, ARRIVED + 230, 5);
+		expect(stops).not.toHaveBeenCalled();
+		await tap(back, ARRIVED + 500, ARRIVED + 560, 6);
+		expect(stops).toHaveBeenCalledTimes(1);
 	});
 
 	it('still holds Stop back when Talk had the seat for longer than the wait', async () => {

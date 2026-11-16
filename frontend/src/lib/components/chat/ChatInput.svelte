@@ -815,6 +815,9 @@
 		const began = press ? (press.target === button ? press.at : null) : clickAt;
 		if (began !== null && !arrivals.ignores(kind, began, event.detail)
 			&& !(kind === 'stop' && isStrayStopPress(began))) return;
+		// The seat remembers it: a double tap's second press must not reach a
+		// button that has the seat by then (Stop back at a queue handoff).
+		arrivals.noteIgnored(kind, press?.at ?? clickAt);
 		event.preventDefault();
 		event.stopPropagation();
 	}
