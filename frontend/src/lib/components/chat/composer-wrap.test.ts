@@ -403,3 +403,77 @@ describe('createPressTracker (#1632)', () => {
 		expect(t.take(undefined, 300, stop)).toBeNull();
 	});
 });
+
+describe('createArrivalGuard at a queue handoff', () => {
+	let clock = 0;
+	const guard = () => createArrivalGuard(() => clock);
+	afterEach(() => { clock = 0; });
+	// Stop leaves for ~150 ms between a turn and the queued one, then comes back.
+	const handoff = () => {
+		const g = guard();
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], false);
+		clock = 1150;
+		g.update(['mic', 'talk', 'stop'], false);
+		return g;
+	};
+
+	it('never ignores Stop coming back to the seat it held moments ago', () => {
+		const g = handoff();
+		expect(g.ignores('stop', 1170)).toBe(false);
+		expect(g.ignores('stop', 1450)).toBe(false);
+		expect(g.ignores('stop', 1170, 2)).toBe(false);
+		expect(g.ignores('talk', 1170)).toBe(false);
+	});
+
+	it('still ignores a press on the brief Talk in between', () => {
+		const g = guard();
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], false);
+		expect(g.ignores('talk', 1050)).toBe(true);
+		expect(g.ignores('mic', 1050)).toBe(true);
+	});
+
+	it('keeps a returning button\'s own guard when it had only just arrived', () => {
+		const g = guard();
+		g.update(['mic', 'send'], false);
+		clock = 1000;
+		g.update(['mic', 'stop'], false);
+		clock = 1100;
+		g.update(['mic', 'talk'], false);
+		clock = 1200;
+		g.update(['mic', 'stop'], false);
+		expect(g.ignores('stop', 1300)).toBe(true);
+		expect(g.ignores('stop', 1000 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('guards a button that returns after the window, or to a seat another button held', () => {
+		const g = guard();
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], false);
+		clock = 1000 + ARRIVAL_GUARD_MS;
+		g.update(['mic', 'talk', 'stop'], false);
+		expect(g.ignores('stop', clock + 20)).toBe(true);
+		// Send held the seat before: Stop taking it is an arrival.
+		const h = guard();
+		h.update(['mic', 'send'], false);
+		clock = 5000;
+		h.update(['mic', 'talk'], false);
+		clock = 5100;
+		h.update(['mic', 'stop'], false);
+		expect(h.ignores('stop', 5120)).toBe(true);
+	});
+
+	it('forgets who held a seat once the row is placed again', () => {
+		const g = guard();
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], true);
+		clock = 1100;
+		g.update(['mic', 'talk', 'stop'], false);
+		expect(g.ignores('stop', 1120)).toBe(true);
+	});
+});

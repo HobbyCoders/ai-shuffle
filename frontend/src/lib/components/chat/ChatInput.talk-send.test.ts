@@ -480,6 +480,28 @@ describe('a button sliding into a freed seat (#1632)', () => {
 		expect(hits).toEqual([ARRIVED + 160]);
 	});
 
+	it('stops the turn when Stop is pressed just after it came back at a queue handoff', async () => {
+		const stops = vi.spyOn(activeSession, 'stopGeneration').mockImplementation(() => {});
+		const { container, stop } = await talkReplacesStop();
+		// The brief Talk between the two turns is still held back...
+		const talk = container.querySelector('.call-circle')!;
+		const talkHits = reached(talk);
+		await tap(talk, ARRIVED + 50, ARRIVED + 90);
+		expect(talkHits).toEqual([]);
+		// ...and 150 ms later the queued turn starts: Stop is back in its seat.
+		clock.mockReturnValue(ARRIVED + 150);
+		startTurn('local-idle');
+		await waitFor(() => expect(circles(container)).toContain('Stop generating'));
+		clock.mockReturnValue(ARRIVED + 5000);
+		const back = container.querySelector('.stop-btn')!;
+		expect(back).toBeTruthy();
+		await tap(back, ARRIVED + 170, ARRIVED + 230);
+		expect(stops).toHaveBeenCalledTimes(1);
+		await tap(back, ARRIVED + 450, ARRIVED + 510);
+		expect(stops).toHaveBeenCalledTimes(2);
+		void stop;
+	});
+
 	describe('a call starting or ending in a working chat', () => {
 		afterEach(() => voiceCallState.set(callIdle));
 		const callIdle = { ...get(voiceCallState) };
