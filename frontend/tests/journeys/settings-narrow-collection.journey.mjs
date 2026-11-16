@@ -538,6 +538,80 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
    await page.waitForTimeout(400);
    const back = await page.evaluate(() => ({ page: Math.round(document.querySelector('.settings-viewport').scrollTop), pane: Math.round(document.querySelector('.settings-viewport .st-dpane').scrollTop) }));
    expect(Math.abs(back.page - placed.page) <= 1 && Math.abs(back.pane - placed.pane) <= 1, `both panes return after the round trip (${JSON.stringify(placed)} -> ${JSON.stringify(back)})`);
+
+   // A scroll made right after a switch, before the next frame, is the
+   // reader's place too (review: a timed guard dropped it).
+   await mark('turn and back, scrolling the pane the moment it is split again');
+   const target = Math.max(1, Math.round(placed.pane / 2));
+   await page.evaluate(t => {
+    const shell = document.querySelector('.settings-shell .st-coll').closest('.settings-shell');
+    const mo = new MutationObserver(() => {
+     if (shell.hasAttribute('data-stacked')) return;
+     mo.disconnect();
+     setTimeout(() => document.querySelector('.settings-viewport .st-dpane').scrollTo({ top: t }), 0);
+    });
+    mo.observe(shell, { attributes: true, attributeFilter: ['data-stacked'] });
+   }, target);
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.waitForFunction(() => document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await page.waitForFunction(() => !document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   const moved = await page.evaluate(() => Math.round(document.querySelector('.settings-viewport .st-dpane').scrollTop));
+   expect(Math.abs(moved - target) <= 1, `the pane is where it was scrolled to (${moved}, wanted ${target})`);
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.waitForFunction(() => document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await page.waitForFunction(() => !document.querySelector('.settings-shell .st-coll')?.closest('.settings-shell').hasAttribute('data-stacked'), null, { timeout: 5000 });
+   await page.waitForTimeout(400);
+   const kept = await page.evaluate(() => Math.round(document.querySelector('.settings-viewport .st-dpane').scrollTop));
+   expect(Math.abs(kept - target) <= 1, `that scroll is kept across the next turn (${kept}, wanted ${target}, not ${placed.pane})`);
+  }
+ },
+ {
+  // Review: a switch made while Settings is hidden is applied once it shows.
+  name: 'one-pane-hidden-widen-keeps-place', viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await stubHooks(page);
+   await page.setViewportSize({ width: 800, height: 500 });
+   await gotoApp(page, status);
+   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await settingsNav(page).waitFor();
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+  },
+  async act({ page, mark }) {
+   const row = name => page.locator('.st-lcol [data-settings-item]').filter({ hasText: new RegExp(`^\\s*${name}\\b`) }).filter({ visible: true }).first();
+   const title = name => page.locator('[data-settings-heading="detail"]').filter({ hasText: name }).filter({ visible: true }).first();
+   await mark('open hook 12 one pane at a time and scroll it');
+   await row('Check hook 12').click();
+   await title('Check hook 12').waitFor();
+   await page.waitForFunction(() => document.querySelector('.settings-shell .st-coll')?.dataset.replace === 'detail', null, { timeout: 5000 });
+   await page.waitForTimeout(300);
+   const offset = await page.evaluate(async () => {
+    const v = document.querySelector('.settings-viewport');
+    v.scrollTo({ top: v.scrollTop + 300 });
+    await new Promise(r => setTimeout(r, 300));
+    const p = v.querySelector('.st-dpane');
+    return Math.round(v.getBoundingClientRect().top - p.getBoundingClientRect().top);
+   });
+   expect(offset > 100, `the detail scrolls in the page (${offset})`);
+
+   await mark('switch to a chat, widen');
+   await openFromSidebar(page, SEEDED.no_project);
+   await page.waitForFunction(() => !document.querySelector('.settings-shell')?.checkVisibility(), null, { timeout: 5000 });
+   await page.setViewportSize({ width: 1280, height: 500 });
+   await page.waitForTimeout(500);
+   await mark('come back to Settings, same item');
+   await page.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
+   await title('Check hook 12').waitFor();
+   await page.waitForFunction(() => !document.querySelector('.settings-shell .st-coll')?.dataset.replace, null, { timeout: 5000 });
+   await page.waitForTimeout(300);
+   const at = await page.evaluate(() => { const p = document.querySelector('.settings-viewport .st-dpane'); return { top: Math.round(p.scrollTop), max: p.scrollHeight - p.clientHeight }; });
+   const want = Math.min(offset, at.max);
+   expect(Math.abs(at.top - want) <= 1, `hook 12 beside the list keeps its place (${JSON.stringify(at)}, wanted ${want})`);
   }
  },
  {

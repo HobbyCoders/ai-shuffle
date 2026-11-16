@@ -113,34 +113,23 @@
 		if (lastScrolled !== undefined && lastScrolled !== current) resetPane();
 		lastScrolled = current;
 	});
-	// The pane scrolls on its own only while the list is beside it (split: not
-	// stacked, no data-replace; settings.css). A reset asked for while it cannot
-	// scroll (stacked, one pane at a time, or Settings hidden behind another
-	// view) does nothing, and the browser brings the old offset back once the
-	// pane scrolls again. So the reset stays pending until the pane is split and
-	// laid out again (#1612: hidden, the page measures 0 wide), unless the
-	// pane has scrolled since; the reset's own scroll clears it too.
-	let paneResetPending = false;
+	// The pane scrolls on its own only beside the list (split; settings.css).
+	// Elsewhere the reset does nothing and the browser brings the old offset
+	// back once the pane scrolls again, so it is applied by place() below.
 	function resetPane() {
-		paneResetPending = true;
-		detailPlace = 0;
+		detailPlace = null;
+		panePending = true;
 		pane?.scrollTo?.({ top: 0 });
+		place();
 	}
-	$effect(() => {
-		if (replace || settingsNav.stacked || containerWidth <= 0) return;
-		void tick().then(() => {
-			if (paneResetPending) pane?.scrollTo?.({ top: 0 });
-		});
-	});
 
 	// Where the detail replaces the list (stacked on a phone, or one pane at a
 	// time), both scroll in the page's own scroller. An opened detail starts at
 	// its top, not at the list's offset, and Back returns to where the list was.
 	// Pre-effect: the list's offset is read before the detail replaces it.
 	// Stacked Back keeps the item selected and only steps back to the list, so
-	// the item on screen, not the selection, is what changes. The pane keeps
-	// the offset it had while split, so it is reset here too (pending until it
-	// scrolls on its own again). Beside the list (split panes) none of this
+	// the item on screen, not the selection, is what changes, so the detail's
+	// place is reset here too. Beside the list (split panes) none of this
 	// runs: the pane reset above handles a newly picked item.
 	const shownItem = $derived(
 		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
@@ -177,60 +166,77 @@
 	});
 	// An open detail scrolls in its own pane when split and in the page's
 	// scroller otherwise (settings.css), so a window that crosses between the two
-	// moves its place across: the detail keeps its own offset, never the list's.
-	// Both are read as the reader scrolls; layout has already changed by the
-	// time the switch is seen.
+	// moves its place across: the detail keeps its own place, never the list's,
+	// measured from its title (what sits above the title differs by layout).
+	// The rule: a saved place is where its scroller is, read on every scroll
+	// while Settings is shown in a settled layout, except a scroller at the end
+	// of its range short of the saved place: the page got shorter and the
+	// browser clamped it; the reader did not move. place() applies saved places and never writes them
+	// (landing on one reads back the same place); one it cannot apply waits
+	// while Settings is hidden (0 wide) and runs once it has a width again.
 	const split = $derived(!replace && !settingsNav.stacked);
-	let detailPlace = 0;
+	/** How far the reader is past the detail's title; null: at the detail's top. */
+	let detailPlace: number | null = null;
 	let listPlace = 0;
-	let switching = false;
-	const laidOut = () => !!pane?.getClientRects().length;
-	const paneSplit = () => !!pane && getComputedStyle(pane).overflowY === 'auto';
+	let panePending = false;
+	let pagePending = false;
+	/** Shown, and laid out at the width its mode was worked out for, not mid-resize. */
+	let measuredWidth = 0;
+	const settled = () => containerWidth > 0 && el?.getBoundingClientRect().width === measuredWidth;
 	function paneTop(scroller: HTMLElement): number {
 		return pane!.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
 	}
+	function titleInPane(): number {
+		const title = pane!.querySelector('[data-settings-heading="detail"]');
+		return title ? title.getBoundingClientRect().top - pane!.getBoundingClientRect().top + pane!.scrollTop : 0;
+	}
+	/** The detail's place within the pane's content, never above its top. */
+	const detailOffset = () => (detailPlace === null ? 0 : Math.max(0, titleInPane() + detailPlace));
+	/** Records `offset` into the pane's content: at (or above) its top is its top. */
+	const readDetail = (offset: number) => (detailPlace = offset <= 0 ? null : offset - titleInPane());
+	function clamped(node: HTMLElement, saved: number): boolean {
+		return node.scrollTop >= node.scrollHeight - node.clientHeight - 1 && saved > node.scrollTop + 1;
+	}
+	function place() {
+		const scroller = el && scrollParent(el);
+		if (!scroller || !pane || !settled()) return;
+		if (split) {
+			if (panePending) pane.scrollTo?.({ top: detailOffset() });
+			if (pagePending) scroller.scrollTo?.({ top: listPlace });
+			panePending = pagePending = false;
+		} else if (pagePending) {
+			if (shownItem !== null) scroller.scrollTo?.({ top: paneTop(scroller) + detailOffset() });
+			pagePending = false;
+		}
+	}
 	function onPaneScroll() {
-		paneResetPending = false;
-		if (!switching && split && laidOut() && paneSplit()) detailPlace = pane!.scrollTop;
+		if (split && settled() && !clamped(pane!, detailOffset())) readDetail(pane!.scrollTop);
 	}
 	$effect(() => {
 		const scroller = el && scrollParent(el);
 		if (!scroller) return;
 		const onscroll = () => {
-			// Settings hidden behind another view: nothing here has a box.
-			if (!el?.getClientRects().length) return;
-			// Mid-switch the browser clamps the page to the new layout and the
-			// transfer below lands where it can: neither is the reader's place.
-			if (switching || (pane && paneSplit() !== split)) return;
-			// The list shows (beside the detail, or alone while the detail pane is
-			// not displayed): its place. Otherwise the detail fills the page.
-			if (paneSplit() || shownItem === null) listPlace = scroller.scrollTop;
-			else if (laidOut()) detailPlace = Math.max(0, scroller.scrollTop - paneTop(scroller));
+			if (!settled()) return;
+			const list = split || shownItem === null;
+			if (clamped(scroller, list ? listPlace : paneTop(scroller) + detailOffset())) return;
+			if (list) listPlace = scroller.scrollTop;
+			else readDetail(scroller.scrollTop - paneTop(scroller));
 		};
 		scroller.addEventListener('scroll', onscroll, { passive: true });
 		return () => scroller.removeEventListener('scroll', onscroll);
 	});
-	let lastSplit: boolean | undefined;
+	// Stacked and one-pane are told apart by two observers, so a turn can pass
+	// through the other one first: every change of layout places again.
+	const mode = $derived(settingsNav.stacked ? 'stacked' : replace ? 'one' : 'split');
+	let lastMode: string | undefined;
 	$effect(() => {
-		const now = split;
-		const before = lastSplit;
-		lastSplit = now;
-		if (before === undefined || before === now || untrack(() => shownItem) === null) return;
-		switching = true;
-		void tick().then(() => {
-			// Scroll events from these moves are delivered before the next frame.
-			requestAnimationFrame(() => requestAnimationFrame(() => (switching = false)));
-			const scroller = el && scrollParent(el);
-			// Hidden (no box): nothing can scroll; a pending reset waits for the pane.
-			if (!scroller || !pane || !laidOut()) return;
-			if (now) {
-				scroller.scrollTo?.({ top: listPlace });
-				pane.scrollTo?.({ top: detailPlace });
-				paneResetPending = false;
-			} else {
-				scroller.scrollTo?.({ top: paneTop(scroller) + detailPlace });
-			}
-		});
+		const now = mode;
+		if (lastMode !== undefined && lastMode !== now && untrack(() => shownItem) !== null) {
+			panePending = pagePending = true;
+		}
+		lastMode = now;
+		// Also re-runs when Settings gets a width again after being hidden.
+		if (containerWidth > 0) void tick().then(place);
 	});
 	/** The item's list row, relative to the scroller's top, if shown. */
 	function rowBox(scroller: HTMLElement, item: string | null): { top: number; height: number } | null {
@@ -308,6 +314,7 @@
 		if (!el || typeof ResizeObserver === 'undefined') return;
 		const ro = new ResizeObserver((entries) => {
 			containerWidth = entries[0]?.contentRect.width ?? 0;
+			measuredWidth = el?.getBoundingClientRect().width ?? 0;
 		});
 		ro.observe(el);
 		return () => ro.disconnect();

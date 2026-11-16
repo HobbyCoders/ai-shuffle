@@ -299,6 +299,10 @@ describe('CollectionPage scroll on a phone (#1582)', () => {
 			if (!coll.hasAttribute('data-replace') && !settingsNav.stacked && !state.hidden) state.top = o.top ?? state.top;
 		});
 		pane.scrollTo = paneScroll as unknown as typeof pane.scrollTo;
+		Object.defineProperty(pane, 'scrollTop', { get: () => state.top, configurable: true });
+		// Like a browser's: the title moves up as the pane scrolls.
+		const title = pane.querySelector<HTMLElement>('[data-settings-heading="detail"]')!;
+		title.getBoundingClientRect = () => ({ top: pane.getBoundingClientRect().top - state.top }) as DOMRect;
 		/** The reader scrolls the pane. */
 		const read = (top: number) => {
 			state.top = top;
@@ -393,7 +397,54 @@ describe('CollectionPage scroll on a phone (#1582)', () => {
 		await settle();
 		resize(coll, 1000);
 		await settle();
-		expect(paneScroll).not.toHaveBeenCalled();
+		expect(paneScroll.mock.calls.every(([o]) => o.top === 300)).toBe(true);
+		expect(state.top).toBe(300);
+	});
+
+	it('keeps a scroll made right after a layout switch as the place, not where the switch put it', async () => {
+		const { scroller } = inScroller();
+		const { coll, state, read } = rotatingPane(scroller);
+		resize(coll, 1000);
+		settingsNav.selectItem('a');
+		await settle();
+		read(80);
+		resize(coll, 460);
+		await settle();
+		resize(coll, 1000);
+		await settle();
+		expect(state.top).toBe(80);
+		read(160); // Before any frame has passed.
+		resize(coll, 460);
+		await settle();
+		resize(coll, 1000);
+		await settle();
+		expect(state.top).toBe(160);
+	});
+
+	it('moves the place across once Settings is shown again after a switch while hidden', async () => {
+		const { scroller, setTop } = inScroller();
+		const { coll, state } = rotatingPane(scroller);
+		// Like a browser's: the pane's box moves up as the page scrolls.
+		const pane = scroller.querySelector<HTMLElement>('.st-dpane')!;
+		pane.getBoundingClientRect = () => ({ top: -scroller.scrollTop }) as DOMRect;
+		resize(coll, 460);
+		settingsNav.selectItem('a');
+		await settle();
+		expect(coll.dataset.replace).toBe('detail');
+		setTop(300); // The reader scrolls the detail in the page.
+		scroller.dispatchEvent(new Event('scroll'));
+
+		// Hidden behind another view: 0 wide, so no longer one pane, but no box.
+		state.hidden = true;
+		resize(coll, 0);
+		await settle();
+		expect(state.top).toBe(0);
+
+		// Shown again, wide: the same item, beside the list, at its place.
+		state.hidden = false;
+		resize(coll, 1000);
+		await settle();
+		expect(coll.hasAttribute('data-replace')).toBe(false);
 		expect(state.top).toBe(300);
 	});
 
