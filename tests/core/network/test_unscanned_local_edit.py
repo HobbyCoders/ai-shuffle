@@ -1004,3 +1004,72 @@ def test_the_scanner_still_republishes_for_a_quorum_change(workers, own_data_key
     with b.active():
         assert engine.scan_collection(collection) == 1
     assert [op["record_id"] for op in _own_ops(b, collection)[signed:]] == [record_id]
+
+
+# -- The desktop launch barrier (``sync_once(catch_up=True)``) can run while
+# -- the outbox is still held after a start: a peer op for a row with an
+# -- unsigned change then waits. The streams are compared at that point, as
+# -- they are after the pull, instead of failing the launch sync for that peer.
+
+async def _launch_catch_up(monkeypatch, a, b):
+    """B's launch barrier exchanges with A."""
+    import httpx
+    from app.network import transport
+    from tests.core.network.test_ownership_revocation import Network
+    net = Network(monkeypatch, a=a)
+    with b.active():
+        link = transport.PeerLink(a.device_id, [net.url("a")])
+        async with httpx.AsyncClient() as client:
+            return await link.sync_once(client, engine.context(), catch_up=True)
+
+
+async def test_launch_catch_up_signs_an_unscanned_edit_once_streams_are_compared(workers, monkeypatch):
+    a, b = _pair(workers)
+    with a.active():
+        database.update_tag("t1", name="from-a")
+        database.create_tag("later", "later")
+        engine.scan_all()
+    with b.active():
+        database.update_tag("t1", name="from-b")  # not scanned before the restart
+        engine.hold_outbox(True)  # the hold is one flag for the test process: set it last
+    try:
+        await _launch_catch_up(monkeypatch, a, b)
+        assert engine.outbox_held() is False
+    finally:
+        engine.hold_outbox(False)
+    assert _tag_name(b, "later") == "later"
+    assert [op["record_id"] for op in _own_ops(b)] == ["t1"]
+    _settle(a, b)
+    # The two edits met as a conflict (equal clocks: the device id decides),
+    # so B's is the winner or the kept loser, never silently replaced.
+    winner = _tag_name(a)
+    assert winner == _tag_name(b) and winner in ("from-a", "from-b")
+    for worker in (a, b):
+        assert [c["losing_record"]["name"] for c in _conflicts(worker)] == [
+            "from-b" if winner == "from-a" else "from-a"]
+
+
+async def test_launch_catch_up_keeps_the_hold_without_rollback_proof(workers, monkeypatch):
+    """A claims more of B's stream than B holds but cannot prove it: the hold
+    stays, nothing is signed and the launch reports the peer as not caught up."""
+    from app.network import transport
+    a, b = _pair(workers)
+    with a.active():
+        database.update_tag("t1", name="from-a")
+        engine.scan_all()
+    with b.active():
+        database.update_tag("t1", name="from-b")
+        with database.get_db() as conn:
+            held = store.own_watermark(conn.cursor(), b.device_id, 1)
+    with a.active():
+        with database.get_db() as conn:
+            store.set_watermark(conn.cursor(), b.device_id, 1, held + 1)
+    with b.active():
+        engine.hold_outbox(True)
+    try:
+        with pytest.raises(transport.PeerError):
+            await _launch_catch_up(monkeypatch, a, b)
+        assert engine.outbox_held() is True
+    finally:
+        engine.hold_outbox(False)
+    assert _own_ops(b) == [] and _tag_name(b) == "from-b"
