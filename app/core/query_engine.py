@@ -704,7 +704,7 @@ async def _execute_query_turn(
     # than silently running the worktree session in the main checkout.
     # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
     # through the shared sdk_options seam, the same as the WebSocket path.
-    from app.core.sdk_options import build_session_options
+    from app.core.sdk_options import build_session_options_off_loop
     from app.core.query_options import ensure_pending_checkout
     # Async wait for an in-flight ensure_worktree. Must stay on the event
     # loop: a sync poll would occupy a run_sync worker for 30s.
@@ -714,8 +714,8 @@ async def _execute_query_turn(
     # branch session, materializes the checkout (git fetch + git worktree add
     # via subprocess.run, up to 90s) plus several DB reads. Running it inline
     # blocked every other coroutine in the process for the whole spawn.
-    options, agents_dict = await async_database.run_sync(
-        build_session_options,
+    options, agents_dict = await build_session_options_off_loop(
+        async_database.run_sync,
         profile=profile,
         project=project,
         overrides=overrides,
@@ -1263,7 +1263,7 @@ async def _stream_query_turn(
 
     # Build options with user-scoped credential resolution.
     # WorktreeUnavailableError → refuse to run (never silently in main).
-    from app.core.sdk_options import build_session_options
+    from app.core.sdk_options import build_session_options_off_loop
     from app.core.query_options import ensure_pending_checkout
     # Async wait for an in-flight ensure_worktree. Must stay on the event
     # loop: a sync poll would occupy a run_sync worker for 30s.
@@ -1272,8 +1272,8 @@ async def _stream_query_turn(
     try:
         # Off the event loop — see execute_query: the build can run git
         # fetch/worktree add and several DB reads synchronously.
-        options, agents_dict = await async_database.run_sync(
-            build_session_options,
+        options, agents_dict = await build_session_options_off_loop(
+            async_database.run_sync,
             profile=profile,
             project=project,
             overrides=overrides,
@@ -2085,7 +2085,7 @@ async def _stream_to_websocket_turn(
     # can_use_tool/hooks default to None inside build_options_from_profile, so
     # the shared seam yields byte-for-byte identical options; hooks are attached
     # separately below (after can_use_tool is set, with an stderr callback).
-    from app.core.sdk_options import build_session_options
+    from app.core.sdk_options import build_session_options_off_loop
     from app.core.query_options import ensure_pending_checkout
     # Async wait for an in-flight ensure_worktree. Must stay on the event
     # loop: a sync poll would occupy a run_sync worker for 30s.
@@ -2104,8 +2104,8 @@ async def _stream_to_websocket_turn(
     try:
         # Off the event loop — see execute_query: the build can run git
         # fetch/worktree add and several DB reads synchronously.
-        options, agents_dict = await async_database.run_sync(
-            build_session_options,
+        options, agents_dict = await build_session_options_off_loop(
+            async_database.run_sync,
             profile=profile,
             project=project,
             overrides=overrides,

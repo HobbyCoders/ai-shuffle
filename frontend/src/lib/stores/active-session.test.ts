@@ -906,6 +906,88 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.effortLevelOverride).toBe('medium');
 	});
 
+	describe('a newer pick fails after an earlier one was saved', () => {
+		const deferred = () => {
+			let acknowledge!: (value: { effort: string; fast: boolean }) => void;
+			const promise = new Promise<{ effort: string; fast: boolean }>(resolve => { acknowledge = resolve; });
+			return { promise, acknowledge };
+		};
+		const failures = [
+			['an HTTP refusal', { status: 409, detail: 'The session is still connecting. Try again in a moment.' }],
+			['a network error', new TypeError('Failed to fetch')],
+		] as const;
+		for (const [name, failure] of failures) {
+			it(`settles on the saved earlier pick after ${name}`, async () => {
+				vi.spyOn(notify, 'error').mockImplementation(() => '');
+				sessionEphemeralCache.save('live-knobs', { effortLevelOverride: 'high' } as never);
+				const low = deferred();
+				vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise).mockRejectedValueOnce(failure);
+				const first = activeSession.setEffortLevelOverride('low');
+				const second = activeSession.setEffortLevelOverride('medium');
+				low.acknowledge({ effort: 'low', fast: false });
+				await Promise.all([first, second]);
+				expect(activeSession.current.effortLevelOverride).toBe('low');
+				expect(sessionEphemeralCache.restore('live-knobs')?.effortLevelOverride).toBe('low');
+			});
+		}
+
+		it('lets the latest saved pick win when only a middle pick fails', async () => {
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise)
+				.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+				.mockResolvedValueOnce({ effort: 'max', fast: false });
+			const picks = [activeSession.setEffortLevelOverride('low'), activeSession.setEffortLevelOverride('medium'), activeSession.setEffortLevelOverride('max')];
+			low.acknowledge({ effort: 'low', fast: false });
+			await Promise.all(picks);
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+			expect(notify.error).not.toHaveBeenCalled();
+		});
+
+		it('settles on the first pick when the two after it fail', async () => {
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise)
+				.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+				.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			const picks = [activeSession.setEffortLevelOverride('low'), activeSession.setEffortLevelOverride('medium'), activeSession.setEffortLevelOverride('max')];
+			low.acknowledge({ effort: 'low', fast: false });
+			await Promise.all(picks);
+			expect(activeSession.current.effortLevelOverride).toBe('low');
+			expect(notify.error).toHaveBeenCalledTimes(1);
+		});
+
+		it('keeps a held newer level over the saved earlier pick (#1633)', async () => {
+			activeSession.current.modelOverride = 'claude-fable-5-1';
+			try {
+				const low = deferred();
+				vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise)
+					.mockRejectedValueOnce({ status: 409, detail: 'This model does not support the selected effort level' });
+				const first = activeSession.setEffortLevelOverride('low');
+				const second = activeSession.setEffortLevelOverride('xhigh');
+				low.acknowledge({ effort: 'low', fast: false });
+				await Promise.all([first, second]);
+				expect(activeSession.current.effortLevelOverride).toBe('xhigh');
+			} finally {
+				activeSession.current.modelOverride = null;
+			}
+		});
+
+		it('does not reuse a settled answer for a later failed pick', async () => {
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise)
+				.mockResolvedValueOnce({ effort: 'medium', fast: false })
+				.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			const first = activeSession.setEffortLevelOverride('low');
+			const second = activeSession.setEffortLevelOverride('medium');
+			low.acknowledge({ effort: 'low', fast: false });
+			await Promise.all([first, second]);
+			await activeSession.setEffortLevelOverride('max');
+			expect(activeSession.current.effortLevelOverride).toBe('medium');
+		});
+	});
+
 	it('supports explicit default effort and turning Fast mode off', async () => {
 		const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: null, fast: false });
 		activeSession.current.fastMode = true;

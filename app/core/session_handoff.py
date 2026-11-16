@@ -434,11 +434,15 @@ def _submit_here(session_id: str, held: List[Dict[str, Any]]) -> Released:
     _releasing.session = session_id
     try:
         for entry in held:
+            pin: Dict[str, Optional[int]] = {}
             try:
                 turn_manager.submit(session_id, str(entry.get("source") or "user"), no_kick=True,
-                                    caller=_held_caller(entry),
+                                    caller=_held_caller(entry), window_pin=pin,
                                     **{key: entry[key] for key in _SUBMIT_KEYS if key in entry})
                 sent += 1
+                if pin:
+                    # Released in a worker thread: ``_queue_changed`` announces it.
+                    turn_manager.note_window_pin(session_id, pin["context_window"])
             except Exception:  # noqa: BLE001 — one refused message must not stop the rest
                 logger.warning("Could not send a held message of %s here", session_id, exc_info=True)
                 unsent.append(entry)
@@ -504,6 +508,11 @@ async def _queue_changed(session_id: str) -> None:
     from app.core.session_runtime import _broadcast_queue_after_start
 
     await _broadcast_queue_after_start(session_id)
+    # A released message may have saved a model that dropped the pin, or
+    # another window: open composers adopt it, or their next send is stale.
+    from app.core import turn_manager
+
+    await turn_manager.announce_noted_window_pin(session_id)
 
 
 def _resend_safe(target_id: str) -> bool:

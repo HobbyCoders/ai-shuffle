@@ -877,6 +877,14 @@ function fastModeForModel(model: string | null, current: boolean): boolean {
 let permissionSelectionGeneration = 0;
 const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
+type RunSettingsReply = { effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null };
+/**
+ * The newest answer the worker gave for a field that a newer pick outran, kept
+ * per chat queue. That answer IS the saved value (and its announcement is
+ * skipped here as this tab's own), so when the newer pick then fails without
+ * being held, the composer settles on it instead of the value before both.
+ */
+const unappliedRunSettings: Partial<Record<'effort' | 'fast' | 'context_window', { queueKey: string; saved: RunSettingsReply }>> = {};
 
 async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
 	const generation = ++runSettingGenerations[field];
@@ -893,25 +901,22 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		// cannot overwrite a newer pick at the running worker.
 		const queueKey = `${ownerEpoch}:${sessionId}`;
 		const previous = runSettingQueues.get(queueKey);
+		// Nothing in flight: every earlier answer has been settled on already.
+		if (!previous) delete unappliedRunSettings[field];
 		// An effort request names itself, so the worker's announcement of it can
 		// be told from another tab's and skipped once outdated here (#1633).
 		const requestId = field === 'effort' ? noteEffortRequest(sessionId) : null;
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
+			return api.put<RunSettingsReply>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value, ...(requestId ? { request_id: requestId } : {}) }
 			);
 		};
 		const pending = previous ? previous.catch(() => {}).then(apply) : Promise.resolve(apply());
 		runSettingQueues.set(queueKey, pending);
-		try {
-			const saved = await pending;
-			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
+		const adopt = (saved: RunSettingsReply) => {
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
-			// An answer to an older pick only reports what was saved then: it must
-			// not overwrite a newer pick here or in the cached copy (#1633).
-			if (generation !== runSettingGenerations[field]) return;
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
@@ -923,18 +928,39 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				...cached, [stateKey]: selected,
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
+		};
+		try {
+			const saved = await pending;
+			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
+			// An answer to an older pick only reports what was saved then: it must
+			// not overwrite a newer pick here or in the cached copy (#1633). Keep
+			// it in case that newer pick fails.
+			if (generation !== runSettingGenerations[field]) {
+				unappliedRunSettings[field] = { queueKey, saved };
+				return;
+			}
+			delete unappliedRunSettings[field];
+			adopt(saved);
 		} catch (error) {
+			const current = sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field];
 			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
 				// The chat still runs the model before this pick, which lacks the
 				// level; the picked model offers it. A model pick applies with the
 				// next message, so the level does too: keep it, and the send
 				// carries it (#1633).
 				held = true;
-			} else if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
+			} else if (current) {
 				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
-			if (!held) return;
+			const outrun = unappliedRunSettings[field];
+			if (current) delete unappliedRunSettings[field];
+			if (!held) {
+				// The latest pick failed: settle on the last value the worker
+				// did save for an earlier pick, if this newer pick hid it.
+				if (!current || outrun?.queueKey !== queueKey) return;
+				adopt(outrun.saved);
+			}
 		} finally {
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
 		}

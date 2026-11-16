@@ -186,7 +186,7 @@ async def _run_background_query_impl(
 
     # Build options + wire plugin/DB hooks (incl. blocking PreToolUse guards)
     # through the shared sdk_options seam, the same as the WebSocket path.
-    from app.core.sdk_options import build_session_options
+    from app.core.sdk_options import build_session_options_off_loop
     from app.core.query_options import WorktreeUnavailableError, ensure_pending_checkout
     session_row = await run_sync(database.get_session, session_id)
     # Async wait for an in-flight ensure_worktree. Must stay on the event
@@ -196,8 +196,8 @@ async def _run_background_query_impl(
     try:
         # Off the event loop — the build can run git fetch/worktree add and
         # several DB reads synchronously (see query_engine.execute_query).
-        options, agents_dict = await asyncio.to_thread(
-            build_session_options,
+        options, agents_dict = await build_session_options_off_loop(
+            asyncio.to_thread,
             profile=profile,
             project=project,
             overrides=overrides,

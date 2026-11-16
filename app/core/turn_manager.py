@@ -528,6 +528,7 @@ def submit(
     no_kick: bool = False,
     caller: Optional[str] = None,
     person_entered: Any = False,
+    window_pin: Optional[Dict[str, Optional[int]]] = None,
 ) -> str:
     """Enqueue a new turn and kick the scheduler — the SYNCHRONOUS form.
 
@@ -548,6 +549,11 @@ def submit(
     That hand-off needs a database both runners share. A chat a paired worker
     runs (its own database) never sees a row queued here; send that work to
     the owner instead (see the note at the top of ``turn_claim``, #1443).
+
+    ``window_pin`` is :func:`_submit_blocking`'s collector. This form has no
+    event loop to push the pin from, so a caller that passes it notes it
+    (:func:`note_window_pin`) and announces it from its own (hand-off release
+    does, #1640).
     """
     reactivated: dict[str, Any] = {}
     try:
@@ -564,6 +570,7 @@ def submit(
             command_id=command_id,
             parent_turn_id=parent_turn_id,
             instance_id=instance_id,
+            window_pin=window_pin,
             reactivated=reactivated,
             caller=caller,
             person_entered=person_entered,
@@ -743,13 +750,34 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
+# A pin a worker thread changed with no event loop to announce from, by
+# session (None: the pin was cleared). The async caller that ran the thread
+# announces it (:func:`announce_noted_window_pin`): hand-off release and the
+# options build's provider-default bind note here (#1640).
+_noted_pins: Dict[str, Optional[int]] = {}
+_NOT_NOTED = object()
+
+
+def note_window_pin(session_id: str, window: Optional[int]) -> None:
+    """Remember a pin change made off the loop for its caller to announce."""
+    _noted_pins[session_id] = window
+
+
+async def announce_noted_window_pin(session_id: str) -> None:
+    """Announce a pin change :func:`note_window_pin` recorded, once."""
+    window = _noted_pins.pop(session_id, _NOT_NOTED)
+    if window is not _NOT_NOTED:
+        await announce_window_pin(session_id, window)  # type: ignore[arg-type]
+
+
 async def announce_window_pin(session_id: str, window: Optional[int]) -> None:
     """Push the chat's saved context-window pin (None: no pin) to its open clients.
 
     The same ``session_updated`` push a picker change sends (#1895): a client
     adopts it as its pin, so its next send's ``context_window_base`` matches.
     Every writer that can change the pin outside the picker announces with it:
-    a send here, a background API query and a voice context PATCH (#1640).
+    a send here (including a message released after a hand-off), a background
+    API query, a voice context PATCH and the provider-default bind (#1640).
     """
     try:
         from app.core.sync_engine import sync_engine

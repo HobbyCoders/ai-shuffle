@@ -1504,10 +1504,16 @@ def build_options_from_profile(
             # from the model name and run without the row's key or base URL.
             if provider_id and session_id and _binding_row is not None:
                 try:
-                    database.set_session_run_binding(
+                    if database.set_session_run_binding(
                         session_id,
                         model=f"{PROVIDER_MODEL_PREFIX}{provider_id}:{model_to_use}",
-                    )
+                    ):
+                        # The bound model cannot hold the saved pin, which was
+                        # judged against the agent's model until now. This
+                        # build runs off the loop: the caller announces it.
+                        from app.core import turn_manager
+
+                        turn_manager.note_window_pin(session_id, None)
                 except Exception:  # noqa: BLE001 — this turn still runs on it
                     logger.exception(
                         "[Provider] could not bind default model for session %s",

@@ -16,7 +16,7 @@ keep that logic at the call site and use this seam only for the shared build.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from app.core.agent_types import AgentOptions
 
@@ -72,3 +72,25 @@ def build_session_options(
             options, project_id=hook_project_id, stderr_callback=stderr_callback
         )
     return options, agents_dict
+
+
+async def build_session_options_off_loop(
+    run: Callable[..., Awaitable[Tuple[AgentOptions, Optional[Dict[str, Any]]]]],
+    **kwargs: Any,
+) -> Tuple[AgentOptions, Optional[Dict[str, Any]]]:
+    """:func:`build_session_options` in a worker thread (``run`` is
+    ``run_sync`` or ``asyncio.to_thread``), then the pin change it noted.
+
+    Binding a provider's default model can clear a context-window pin that
+    model cannot hold; the thread has no loop to tell open composers, so this
+    announces it, even when the build fails after the bind (#1640).
+    """
+    try:
+        # Looked up at call time, so a patched module attribute is the one run.
+        return await run(build_session_options, **kwargs)
+    finally:
+        session_id = kwargs.get("session_id")
+        if session_id:
+            from app.core import turn_manager
+
+            await turn_manager.announce_noted_window_pin(session_id)

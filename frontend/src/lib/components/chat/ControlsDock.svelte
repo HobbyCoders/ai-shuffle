@@ -502,19 +502,42 @@
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
-	// The model the effort was last fitted to: a switch that changes the level
-	// says so (#1641). Plain, not reactive: only the effect reads it.
-	let fittedEffortModel: string | null = null;
+	// A model picked here, in this chat: only that pick says when it changes
+	// the effort level (#1641). Opening a chat, its binding loading, a reroute
+	// or another tab's change fit the level silently. Plain, not reactive: only
+	// the effect reads them.
+	let modelPick: { model: string } | null = null;
+	let fitNoticeId: string | null = null;
+	function dismissFitNotice() {
+		if (fitNoticeId) notify.dismissLive(fitNoticeId);
+		fitNoticeId = null;
+	}
+	function pickModel(value: string | null) {
+		dismissFitNotice();
+		const pick = { model: effortModel };
+		modelPick = pick;
+		activeSession.setModelOverride(value);
+		// The effect below has run by now; the pick speaks for that run only.
+		void tick().then(() => { if (modelPick === pick) modelPick = null; });
+	}
 	$effect(() => {
-		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		const switched = fittedEffortModel !== null && fittedEffortModel !== effortModel;
-		if (effortCapability.known) fittedEffortModel = effortModel;
-		if (reconciled === effortValue) return;
+		// The notice describes one chat: switching chats or closing the dock
+		// takes it, and a pick not yet fitted, away.
+		void voiceSessionId;
+		return () => { modelPick = null; dismissFitNotice(); };
+	});
+	$effect(() => {
+		// Read once: the fit below updates the store, and so ``effortValue``.
+		const previous = effortValue;
+		const reconciled = reconcileModelEffort(previous, effortCapability);
+		const switched = modelPick !== null && modelPick.model !== effortModel;
+		if (switched) modelPick = null;
+		if (reconciled === previous) return;
 		activeSession.setEffortLevelOverride(reconciled, false);
-		if (switched && effortValue && !voiceLane) {
+		if (switched && previous && !voiceLane) {
 			// A passing banner: the fit is a local adjustment, not an event worth
 			// keeping in every device's notification history.
-			notify.banner(effortFitNotice(effortValue, reconciled, effortModel), { severity: 'info', persist: false, duration_ms: 6000 });
+			fitNoticeId = notify.banner(effortFitNotice(previous, reconciled, effortModel), { severity: 'info', persist: false, duration_ms: 6000 });
 		}
 	});
 
@@ -713,7 +736,7 @@
 						onSelect={(v) => {
 							// Choosing a model closes the picker, as on the phone; the
 							// context-window controls are in the same panel when reopened (#1526).
-							activeSession.setModelOverride(v);
+							pickModel(v);
 							dismissPopover();
 						}}
 						onRequestClose={dismissPopover}
@@ -784,7 +807,7 @@
 	modelLabel={modelButtonLabel}
 		{modelLocked}
 	modelNotice={modelNotice}
-	onModelSelect={(value) => activeSession.setModelOverride(value)}
+	onModelSelect={(value) => pickModel(value)}
 	contextChoice={$activeSession.contextWindowChoice}
 	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 	contextStandardTokens={contextStandardTokens}

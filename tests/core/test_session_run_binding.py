@@ -626,6 +626,73 @@ class TestSubmitPersistsTheBinding:
         broadcast.assert_any_await(
             session_id="s-bg-drop", updates={"context_window": None}, source_device_id=None)
 
+    async def test_provider_default_bind_that_drops_the_pin_tells_open_clients(self, mock_db, tmp_path):
+        """Review S8: a turn that names no model binds the provider default in
+        the off-loop options build; a pin that model cannot hold is announced."""
+        from unittest.mock import AsyncMock
+        from app.core import sdk_options
+        from app.core.sync_engine import sync_engine
+
+        encryption.set_encryption_key("pw", db)
+        db.create_model_provider(
+            provider_id="small", name="Small", provider_type="openrouter",
+            base_url="https://openrouter.ai/api", auth_token=encryption.encrypt_value("gw-secret"),
+            models=[{"id": "tiny", "label": "Tiny", "context_window": 128_000}], enabled=True,
+        )
+        make_profile("agent", {})
+        db.create_session("s-default-drop", profile_id="agent", context_window=1_000_000)
+        with patch.object(qo, "_default_provider_model_without_claude", lambda **kwargs: ("small", "tiny")), \
+                patch.object(qo, "get_security_instructions", return_value=""), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await sdk_options.build_session_options_off_loop(
+                asyncio.to_thread, profile=db.get_profile("agent"), project=None,
+                overrides={"cwd": str(tmp_path)}, session_id="s-default-drop")
+        row = db.get_session("s-default-drop")
+        assert (row["model"], row["context_window"]) == ("prov:small:tiny", None)
+        broadcast.assert_awaited_once_with(
+            session_id="s-default-drop", updates={"context_window": None}, source_device_id=None)
+
+    async def test_failed_options_build_still_announces_a_noted_pin(self, mock_db):
+        from unittest.mock import AsyncMock
+        from app.core import sdk_options
+        from app.core.sync_engine import sync_engine
+
+        def build(**kwargs):
+            turn_manager.note_window_pin(kwargs["session_id"], None)
+            raise ValueError("bad provider")
+
+        with patch.object(sdk_options, "build_session_options", build), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            with pytest.raises(ValueError):
+                await sdk_options.build_session_options_off_loop(asyncio.to_thread, session_id="s-x")
+            await turn_manager.announce_noted_window_pin("s-x")
+        broadcast.assert_awaited_once_with(session_id="s-x", updates={"context_window": None}, source_device_id=None)
+
+    async def test_held_message_released_after_a_move_tells_open_clients(self, mock_db):
+        """Review S8: a message held through a queued move is sent by the
+        synchronous release in a worker thread; the pin its model drops is
+        announced when the hand-off reports the queue change."""
+        from unittest.mock import AsyncMock
+        from app.core import session_handoff
+        from app.core.sync_engine import sync_engine
+
+        make_profile("agent", {})
+        db.create_session("s-held-drop", profile_id="agent", model="claude-opus-4-6",
+                          context_window=1_000_000)
+        sent, unsent = await asyncio.to_thread(session_handoff._submit_here, "s-held-drop", [
+            {"source": "user", "prompt": "hi", "profile_id": "agent",
+             "overrides": {"model": "claude-haiku-4-5"}},
+        ])
+        assert (sent, unsent) == (1, [])
+        assert db.get_session("s-held-drop")["context_window"] is None
+        with patch("app.core.session_runtime._broadcast_queue_after_start", new=AsyncMock()), \
+                patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await session_handoff._queue_changed("s-held-drop")
+            # Announced once: a later queue change has nothing to say.
+            await session_handoff._queue_changed("s-held-drop")
+        broadcast.assert_awaited_once_with(
+            session_id="s-held-drop", updates={"context_window": None}, source_device_id=None)
+
     def test_zero_base_means_no_pin_seen(self, mock_db):
         make_profile("agent", {})
         db.create_session("s-none", profile_id="agent", model="opus")
