@@ -787,13 +787,13 @@
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
 		},
 		{
-			"why": "the Agents page card and its model tab: data-pages checks the Agents header, shell-geometry the agent detail and collapsed list",
+			"why": "the Agents page card: data-pages opens Agents and checks an agent's header, shell-geometry opens an agent's detail and the collapsed list",
 			"journeys": ["data-pages", "shell-geometry"],
-			"globs": ["frontend/src/lib/components/deck/cards/ProfileCard.svelte", "frontend/src/lib/components/deck/cards/profiles/AgentModelsTab.svelte"]
+			"globs": ["frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
-			"why": "Settings > Cloud: shell-geometry checks its slow-licence loading state, settings-reload reloads every Settings page",
-			"journeys": ["shell-geometry", "settings-reload"],
+			"why": "Settings > Cloud: shell-geometry checks its title and content gap and its slow-licence loading state",
+			"journeys": ["shell-geometry"],
 			"globs": ["frontend/src/lib/components/settings/pages/CloudPage.svelte"]
 		}
 	]
