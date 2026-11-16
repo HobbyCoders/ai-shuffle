@@ -19,7 +19,9 @@
 //               announces another turn (`start`) before the feed shows it, then
 //               the original send is refused. The refused row goes, Stop stays
 //               while the feed is still behind, and the announced turn streams
-//               and settles once the feed catches up (#1258).
+//               and settles once the feed catches up (#1258). The feed catches
+//               up in two gated steps (all but the turn's end, then the end), so
+//               the streaming frame never depends on the slow reply's length.
 import { randomBytes } from 'node:crypto';
 import { fakeAiTag, runJourney } from './runner.mjs';
 import { PROJECT, SLOW_REPLY, chatState, composer, countUserRows, expect, openNewChat, pickAccess, scriptTag, stopButton, typeAndSend, uniq, waitTurnSettled, withChatSetup } from './lib/app.mjs';
@@ -29,6 +31,8 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const REFUSAL = 'refused by the journey';
 const FALLBACK_REFUSED_STEP = 'the server refuses the fallback send';
 const REFUSED_STEP = 'the socket announces another turn ahead of the feed, then refuses this send';
+const CAUGHT_UP_STEP = "the feed catches up to the announced turn, its end still held: the turn streams";
+const ENDED_STEP = "the announced turn's end arrives: the turn settles";
 
 /** A correlation id in the server's accepted form (`client-` and 32 hex digits). */
 const clientMessageId = () => `client-${randomBytes(16).toString('hex')}`;
@@ -61,26 +65,54 @@ function refusal(frame) {
 }
 
 /**
- * Gate the event feed in the page: while `window.__journeyFeed.hold` is true,
- * every feed body's chunks are queued; `release()` lets them through in order.
+ * Gate the event feed in the page, one SSE event at a time, in order:
+ *   - `mode = 'hold'`: every event waits;
+ *   - `releaseUntilEnd()`: events go through up to a turn's end
+ *     (`turn.completed`, `turn.aborted`, `turn.parked`), which waits, and so
+ *     does everything behind it;
+ *   - `release()`: everything goes through.
+ * Splitting by event, not by network chunk, matters: a turn that finished on
+ * the server while the feed was held may reach the page in one chunk, deltas
+ * and end together, and the end must still be held apart from the deltas.
  */
 async function gateFeed(page) {
 	await page.addInitScript(() => {
-		const gate = { hold: false, waiting: [], held: 0 };
-		gate.release = () => { gate.hold = false; for (const go of gate.waiting.splice(0)) go(); };
+		const END = /^event: turn\.(completed|aborted|parked)\s*$/m;
+		const gate = { mode: 'open', waiting: [], held: 0, endsHeld: 0 };
+		const wake = () => { for (const go of gate.waiting.splice(0)) go(); };
+		gate.releaseUntilEnd = () => { gate.mode = 'until-end'; wake(); };
+		gate.release = () => { gate.mode = 'open'; wake(); };
+		const blocked = (event) => gate.mode === 'hold' || (gate.mode === 'until-end' && END.test(event));
 		window.__journeyFeed = gate;
 		const original = window.fetch.bind(window);
 		window.fetch = async (input, init) => {
 			const response = await original(input, init);
 			const url = typeof input === 'string' ? input : input?.url || '';
 			if (!/\/sessions\/[^/]+\/events\?/.test(url) || !response.body) return response;
+			const decoder = new TextDecoder();
+			const encoder = new TextEncoder();
+			let buffer = '';
 			const body = response.body.pipeThrough(new TransformStream({
 				async transform(chunk, controller) {
-					if (gate.hold) {
-						gate.held += 1;
-						await new Promise((go) => gate.waiting.push(go));
+					buffer += decoder.decode(chunk, { stream: true });
+					let cut;
+					while ((cut = buffer.indexOf('\n\n')) >= 0) {
+						const event = buffer.slice(0, cut + 2);
+						buffer = buffer.slice(cut + 2);
+						if (blocked(event)) {
+							gate.held += 1;
+							let countedEnd = false;
+							while (blocked(event)) {
+								if (!countedEnd && gate.mode === 'until-end') { gate.endsHeld += 1; countedEnd = true; }
+								await new Promise((go) => gate.waiting.push(go));
+							}
+						}
+						controller.enqueue(encoder.encode(event));
 					}
-					controller.enqueue(chunk);
+				},
+				flush(controller) {
+					buffer += decoder.decode();
+					if (buffer) controller.enqueue(encoder.encode(buffer));
 				}
 			}));
 			return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
@@ -183,6 +215,7 @@ const startAheadOfFeedRefused = {
 	async setup(ctx) {
 		const { page } = ctx;
 		ctx.hook = await hookChatSocket(page);
+		ctx.seen = {}; // act's ctx is a copy: what verify reads lives here
 		await gateFeed(page);
 		await openNewChat(ctx, { project: PROJECT });
 		await pickAccess(page, 'Bypass');
@@ -210,7 +243,7 @@ const startAheadOfFeedRefused = {
 			};
 			return true;
 		};
-		await page.evaluate(() => { window.__journeyFeed.hold = true; });
+		await page.evaluate(() => { window.__journeyFeed.mode = 'hold'; });
 		await mark('send while the feed is held');
 		await typeAndSend(page, words);
 		expect(await until(page, () => !!ctx.deliver), 'the send went out over the socket');
@@ -228,22 +261,45 @@ const startAheadOfFeedRefused = {
 		expect(await stopShown(page), 'Stop stays for the announced turn while the feed is behind');
 		const held = await page.evaluate(() => window.__journeyFeed.held);
 		expect(held > 0, `the feed had frames held behind the socket (${held})`);
-		await mark('the feed catches up: the announced turn streams and settles');
+		// The feed catches up in two steps, so the live reply is held by the gate,
+		// not by the slow reply outlasting the steps above: everything up to the
+		// turn's end goes through first, and the announced turn's reply must show
+		// while it is still live, however long ago the server finished it; then
+		// the end goes through. (`streaming` alone proves nothing here: the send's
+		// optimistic flip has held it true since Send.)
+		ctx.seen.before = before;
+		await mark(CAUGHT_UP_STEP);
+		await page.evaluate(() => window.__journeyFeed.releaseUntilEnd());
+		await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 30_000 });
+		let live = null;
+		for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
+			live = await chatState(page);
+			if (Number(live?.messages || 0) >= before + 2) break;
+			await page.waitForTimeout(100);
+		}
+		expect(Number(live?.messages || 0) >= before + 2 && live?.streaming === 'true', `the announced turn's reply shows while the turn is live: ${JSON.stringify(live)}`);
+		expect(await stopShown(page), 'Stop shows while the announced turn streams');
+		const endsHeld = await page.evaluate(() => window.__journeyFeed.endsHeld);
+		await mark(ENDED_STEP);
 		await page.evaluate(() => window.__journeyFeed.release());
 		await waitTurnSettled(page, { messagesAtLeast: before + 2, text: SLOW_REPLY.end });
 		expect(!(await stopShown(page)), 'Stop is gone once the announced turn settled');
 		expect((await countUserRows(page, words)) === 0, 'the refused row does not come back');
 		expect((await composerText(page)) === words, `the composer has the refused words back: "${await composerText(page)}"`);
-		log(`held ${held} feed chunk(s); refused ${ctx.swapped.client_message_id}`);
+		log(`held ${held} feed event(s); turn end held ${endsHeld} time(s) while the reply showed; refused ${ctx.swapped.client_message_id}`);
 	},
-	verify({ recording }) {
+	verify({ recording, seen: { before } }) {
 		const refused = markTime(recording, REFUSED_STEP);
-		const caughtUp = markTime(recording, 'the feed catches up: the announced turn streams and settles');
+		const caughtUp = markTime(recording, CAUGHT_UP_STEP);
 		// From the refusal until the feed shows the turn, Stop never leaves.
 		expect(anyFrame(recording, (s) => Number(s.stop) > 0, { from: markTime(recording, 'send while the feed is held') }), 'Stop showed after Send');
 		const gaps = spans(recording, (s) => !(Number(s.stop) > 0), { from: refused }).filter((g) => g.start < caughtUp);
 		expect(gaps.length === 0, `Stop left before the feed caught up: ${JSON.stringify(gaps)}`);
-		expect(anyFrame(recording, (s) => s.streaming === 'true', { from: caughtUp }), 'the announced turn streamed once the feed caught up');
+		// The turn's end was still held, so this frame cannot be skipped past:
+		// the announced reply on screen while the turn is live.
+		const ended = markTime(recording, ENDED_STEP);
+		const liveReply = (s) => s.streaming === 'true' && Number(s.messages) >= before + 2;
+		expect(spans(recording, liveReply, { from: caughtUp }).some((s) => s.start < ended), 'the announced turn streamed once the feed caught up, before its end arrived');
 	}
 };
 
