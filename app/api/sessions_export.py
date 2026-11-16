@@ -16,7 +16,7 @@ from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
     api_user_may_use_profile,
-    key_project_is_shared_project,
+    key_project_holds_session,
     require_transcript_session,
     resolve_api_user_profile,
     SessionImportResponse,
@@ -170,20 +170,18 @@ def _import_project(project_id: Optional[str], project_v2_id: Optional[str]) -> 
     """``(project_id, project_v2_id)`` an unrestricted import files the chat under.
 
     A legacy id is one worker's slug and may name another project here, so a
-    file that names a shared project (``project_v2_id``) is filed by that id
-    alone: under this install's checkout of it, or none, keeping the shared id
-    when this install knows the project (#1659). Only an older file with no
-    shared id falls back to its slug, when that project exists here.
+    file that names a shared project (``project_v2_id``) keeps that id and is
+    filed under this install's checkout of it, or none (#1659). The shared id
+    stays even when this install has not heard of the project yet: it is the
+    chat's only project identity. Only an older file with no shared id falls
+    back to its slug, when that project exists here.
     """
     from app.core import project_resolver
     from app.db.base import get_db
 
     if project_v2_id:
         with get_db() as conn:
-            local = project_resolver.local_project_for_shared(conn.cursor(), project_v2_id)
-        if local or project_resolver.resolve_catalog_project(project_v2_id):
-            return local, project_v2_id
-        return None, None
+            return project_resolver.local_project_for_shared(conn.cursor(), project_v2_id), project_v2_id
     if project_id and database.get_project(project_id):
         return project_id, None
     return None, None
@@ -676,12 +674,13 @@ async def import_session(
     project_id = session_data.get('project_id') or None
     project_v2_id = session_data.get('project_v2_id') or None
     if api_user and api_user.get('project_id'):
-        # The shared id decides when the file has one: a slug equal to the
-        # key's may name another project on the exporting worker (#1659).
-        if project_v2_id:
-            allowed = await run_sync(key_project_is_shared_project, api_user['project_id'], project_v2_id)
+        # The one rule (#1659): the shared id decides when the file has one; a
+        # slug equal to the key's may name another project on the exporting worker.
+        file_project = {"project_id": project_id, "project_v2_id": project_v2_id}
+        if project_id or project_v2_id:
+            allowed = await run_sync(key_project_holds_session, api_user['project_id'], file_project)
         else:
-            allowed = not project_id or project_id == api_user['project_id']
+            allowed = True
         if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

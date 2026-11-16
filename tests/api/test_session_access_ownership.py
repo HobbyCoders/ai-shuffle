@@ -82,17 +82,36 @@ class TestSharedRule:
         with pytest.raises(HTTPException):
             check_session_access_for_api_user({"id": "key-a", "project_id": "gone", "profile_ids": []}, mirrored)
 
+    def test_shared_id_decides_before_the_slug(self, mock_db):
+        """The chat's shared id decides whenever it has one; the slug only without (#1659)."""
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        p = project_v2_id_for_origin("git:acme/p")
+        database.create_project("sandbox", "Q", None, "/q", link_group_id="git:acme/q")
+        database.create_project("mine", "P", None, "/p", link_group_id="git:acme/p")
+        database.create_project("mine-too", "P2", None, "/p2", link_group_id="git:acme/p")
+        # Before reconciliation the row still carries the sender's colliding slug:
+        # a key scoped to this worker's unrelated "sandbox" must not pass on it.
+        unreconciled = {"id": "s", "api_user_id": "key-a", "project_id": "sandbox", "project_v2_id": p}
+        with pytest.raises(HTTPException) as exc:
+            check_session_access_for_api_user({"id": "key-a", "project_id": "sandbox", "profile_ids": []}, unreconciled)
+        assert exc.value.status_code == 403
+        # Two local checkouts of P with different slugs: either key may open it.
+        held = {"id": "s", "api_user_id": "key-a", "project_id": "mine", "project_v2_id": p}
+        check_session_access_for_api_user({"id": "key-a", "project_id": "mine-too", "profile_ids": []}, held)
+        check_session_access_for_api_user({"id": "key-a", "project_id": "mine", "profile_ids": []}, held)
+
     def test_async_guard_reads_the_database_only_off_the_loop(self):
         """Async callers must not block the event loop on the pool (#1659).
 
-        A slug decides in memory; only a shared-id-only chat with a
-        project-limited key needs the database, and that runs via run_sync.
+        A chat with no shared id is decided by its slug in memory; a shared id
+        with a project-limited key needs the database, and that runs via run_sync.
         """
         from app.api import sessions_helpers
 
         key = {"id": "key-a", "project_id": "q", "profile_ids": []}
-        by_slug = {"id": "s", "api_user_id": "key-a", "project_id": "q", "project_v2_id": "pv2"}
-        shared_only = {"id": "s", "api_user_id": "key-a", "project_id": None, "project_v2_id": "pv2"}
+        by_slug = {"id": "s", "api_user_id": "key-a", "project_id": "q", "project_v2_id": None}
+        shared = {"id": "s", "api_user_id": "key-a", "project_id": "q", "project_v2_id": "pv2"}
         offloaded = []
 
         async def fake_run_sync(fn, *args):
@@ -100,11 +119,31 @@ class TestSharedRule:
             return fn(*args)
 
         with patch.object(sessions_helpers, "run_sync", fake_run_sync), \
-                patch.object(sessions_helpers, "key_project_is_shared_project", return_value=True) as lookup:
+                patch.object(sessions_helpers, "key_project_holds_session", return_value=True) as lookup:
             asyncio.run(sessions_helpers.check_session_access_for_api_user_async(key, by_slug))
             assert offloaded == [] and not lookup.called
-            asyncio.run(sessions_helpers.check_session_access_for_api_user_async(key, shared_only))
+            asyncio.run(sessions_helpers.check_session_access_for_api_user_async(key, shared))
             assert offloaded == [sessions_helpers.check_session_access_for_api_user] and lookup.called
+
+    def test_voice_routes_run_the_guard_through_the_async_runner(self):
+        """Voice's own wrapper of the guard goes off the loop like the rest (#1659)."""
+        import inspect
+        from app.api import sessions_helpers, voice
+
+        source = inspect.getsource(voice)
+        assert source.count("run_session_access_check(_check_voice_session_access") == 3
+        assert source.count("    _check_voice_session_access(") == 0
+        key = {"id": "key-a", "project_id": "q", "profile_ids": []}
+        shared = {"id": "s", "api_user_id": "key-a", "project_id": None, "project_v2_id": "pv2"}
+        offloaded = []
+
+        async def fake_run_sync(fn, *args):
+            offloaded.append(fn)
+            return None
+
+        with patch.object(sessions_helpers, "run_sync", fake_run_sync):
+            asyncio.run(sessions_helpers.run_session_access_check(voice._check_voice_session_access, key, shared))
+        assert offloaded == [voice._check_voice_session_access]
 
     def test_worker_session_belongs_to_the_owner_of_its_parent(self):
         rows = {

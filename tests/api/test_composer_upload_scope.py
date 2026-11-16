@@ -590,3 +590,26 @@ def test_a_linked_chat_uploads_folder_admits_nothing(workspace):
     (workspace / "secret.txt").write_bytes(b"x")
     assert workspace.resolve() not in upload_transfer.composer_staging_roots()
     assert not upload_transfer.composer_staged([str(chat / "secret.txt")])
+
+
+def test_a_colliding_slug_never_admits_another_projects_uploads(workspace):
+    """#1659: the chat's slug names an unrelated project here; its shared id is
+    another project. Only that project's folders are upload areas."""
+    from app.core.project_resolver import origin_for_legacy_project
+    from app.db.base import get_db
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    unrelated = _project(workspace, "sandbox")
+    mine = workspace / "mine"
+    (mine / "uploads").mkdir(parents=True)
+    database.create_project("mine", "mine", None, str(mine), link_group_id="git:acme/p")
+    shared = project_v2_id_for_origin(origin_for_legacy_project(database.get_project("mine")))
+    database.create_session(session_id="mirrored", profile_id="scope-agent")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET project_id = 'sandbox', project_v2_id = %s, mode = 'code' "
+                              "WHERE id = 'mirrored'", (shared,))
+
+    roots = upload_transfer.admitted_upload_roots(database.get_session("mirrored"))
+
+    assert (unrelated / "uploads").resolve() not in roots
+    assert (mine / "uploads").resolve() in roots

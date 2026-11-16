@@ -83,6 +83,50 @@ def is_checkout_of(project_row: Optional[Dict[str, Any]], project_v2_id: Optiona
     return projects_v2.project_v2_id_for_origin(origin_for_legacy_project(project_row)) == project_v2_id
 
 
+def project_shared_ids(project_row: Optional[Dict[str, Any]]) -> list:
+    """Every shared project id a chat may carry and belong to local project ``project_row``.
+
+    The project's own shared id (from its origin) plus the late-linked
+    placeholders proven to resolve to it (:func:`catalog_project_read_ids`).
+    """
+    if not project_row:
+        return []
+    shared = projects_v2.project_v2_id_for_origin(origin_for_legacy_project(project_row))
+    return catalog_project_read_ids({"id": shared})
+
+
+def session_in_project(session: Optional[Dict[str, Any]], project_row: Optional[Dict[str, Any]]) -> bool:
+    """THE rule for "is this chat in that local project" (#1659).
+
+    A chat's project is its shared id (``project_v2_id``) when it has one; the
+    legacy slug (``project_id``) decides only for a chat with no shared id.
+    Legacy slugs are per-worker: another worker's ``sandbox`` may be an
+    unrelated project here, and two checkouts of one project may have
+    different slugs. :func:`session_project_predicate` is the same rule in SQL.
+    """
+    if not session or not project_row:
+        return False
+    if session.get("project_v2_id"):
+        return session["project_v2_id"] in project_shared_ids(project_row)
+    return bool(session.get("project_id")) and session["project_id"] == project_row.get("id")
+
+
+def session_project_predicate(project_id: str, ph: str, prefix: str = "") -> Tuple[str, list]:
+    """``(sql, params)``: :func:`session_in_project` for local project ``project_id`` as SQL.
+
+    ``prefix`` is the sessions table alias with its dot (``"s."``). Both arms
+    are index-backed (``idx_sessions_project_v2_updated`` and
+    ``idx_sessions_project_updated``). A project that does not exist here
+    matches only chats with no shared id that name its slug.
+    """
+    slug = f"({prefix}project_v2_id IS NULL AND {prefix}project_id = {ph})"
+    ids = project_shared_ids(projects_db.get_project(project_id))
+    if not ids:
+        return slug, [project_id]
+    return (f"({prefix}project_v2_id IN ({', '.join([ph] * len(ids))}) OR {slug})",
+            [*ids, project_id])
+
+
 def local_rows_by_origin(rows, self_ids) -> Dict[str, Dict[str, Any]]:
     """``{origin: row}``: the one local checkout that stands for each shared project.
 
@@ -126,6 +170,25 @@ def local_project_for_shared(cursor, project_v2_id: Optional[str]) -> Optional[s
     shared = resolve_catalog_project(project_v2_id)
     row = by_origin.get(shared.get("origin")) if shared else None
     return row["id"] if row else None
+
+
+def local_project_for_session(session: Optional[Dict[str, Any]]) -> Optional[str]:
+    """This worker's legacy project id for ``session``'s project, or None.
+
+    :func:`session_in_project` decides: the chat's own slug when it names
+    that project here, else this worker's checkout of its shared id. Use it
+    wherever a local chat is made from another (fork) so a cleared or
+    colliding slug never files the new chat under the wrong project (#1659).
+    """
+    if not session:
+        return None
+    slug = session.get("project_id")
+    if slug and session_in_project(session, projects_db.get_project(slug)):
+        return slug
+    if not session.get("project_v2_id"):
+        return None
+    with get_db() as conn:
+        return local_project_for_shared(conn.cursor(), session["project_v2_id"])
 
 
 def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:

@@ -386,6 +386,24 @@ class TestImport:
         row = database.get_session(r.json()["session_id"])
         assert (row["project_id"], row["project_v2_id"]) == (None, shared)
 
+    def test_import_before_the_shared_project_is_known_keeps_it(self, client, world):
+        """S8 (#1659): the catalog row for P has not arrived yet. Only the
+        untrusted slug is cleared; the shared id stays, so a key scoped to
+        this worker's colliding "proj-a" never gains the chat."""
+        from app.api.sessions_helpers import check_session_access_for_api_user
+        from app.db.projects_v2 import project_v2_id_for_origin
+        from fastapi import HTTPException
+
+        unseen = project_v2_id_for_origin("git:acme/not-yet-synced")
+        r = _upload(client, _export(session={"project_id": "proj-a", "project_v2_id": unseen}))
+        assert r.status_code == 200, r.text
+        row = database.get_session(r.json()["session_id"])
+        assert (row["project_id"], row["project_v2_id"]) == (None, unseen)
+        with pytest.raises(HTTPException) as exc:
+            check_session_access_for_api_user({"id": "k", "project_id": "proj-a", "profile_ids": []},
+                                              {**row, "api_user_id": "k"})
+        assert exc.value.status_code == 403
+
     @pytest.mark.parametrize("payload,detail", [
         ({"session": {}}, "Invalid export format. Missing 'session' or 'messages' field."),
         ({"session": [], "messages": []},

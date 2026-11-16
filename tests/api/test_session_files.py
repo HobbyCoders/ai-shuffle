@@ -30,7 +30,9 @@ def api(monkeypatch):
     monkeypatch.setattr(projects.database, "get_session", lambda sid: row if sid == SESSION else None)
     monkeypatch.setattr(projects, "_check_listing_project_access", lambda request, project_id: None)
     monkeypatch.setattr(projects, "check_session_access_for_api_user", lambda api_user, session: None)
-    monkeypatch.setattr(projects, "_is_shared_copy_of_project", lambda session, project_id: project_id == LOCAL)
+    monkeypatch.setattr(projects, "session_in_project",
+                        lambda session, project: (project or {}).get("id") == LOCAL or session.get("project_v2_id") == (project or {}).get("id"))
+    monkeypatch.setattr(projects.database, "get_project", lambda pid: {"id": pid})
     monkeypatch.setattr(control, "owner_of", lambda session: session.get("owner_device_id"))
     app = FastAPI()
     app.include_router(projects.router)

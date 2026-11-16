@@ -99,7 +99,8 @@ async def test_enable_requires_an_open_pr():
     assert am.status("s1") == {"enabled": False, "pr_number": None}
 
 
-def test_a_mirrored_chat_merges_in_this_workers_checkout_of_its_project(mock_db, tmp_path):
+@pytest.mark.parametrize("slug", [None, "sandbox"])
+def test_a_mirrored_chat_merges_in_this_workers_checkout_of_its_project(mock_db, tmp_path, slug):
     """#1659: a chat another worker runs names only its shared project here.
 
     It must resolve this worker's checkout of that project, never an
@@ -114,8 +115,8 @@ def test_a_mirrored_chat_merges_in_this_workers_checkout_of_its_project(mock_db,
     database.create_session("s1", "default", title="t")
     with get_db() as conn:
         conn.cursor().execute(
-            "UPDATE sessions SET project_id = NULL, project_v2_id = %s, pr_number = 7, pr_state = 'open' WHERE id = 's1'",
-            (project_v2_id_for_origin("git:acme/shared"),))
+            "UPDATE sessions SET project_id = %s, project_v2_id = %s, pr_number = 7, pr_state = 'open' WHERE id = 's1'",
+            (slug, project_v2_id_for_origin("git:acme/shared")))
     with patch("app.core.github_service.github_service.get_repo_from_remote",
                side_effect=lambda path: "acme/shared" if path.endswith("shared") else "acme/unrelated"):
         target = am._session_target("s1")

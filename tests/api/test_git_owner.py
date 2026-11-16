@@ -60,13 +60,33 @@ def test_routes_before_touching_viewer_checkout(remote, monkeypatch, method, pat
 def test_viewer_legacy_id_reaches_the_owner_as_the_shared_id(remote, monkeypatch):
     # The viewer's copy names its own checkout ("project-a"); the owner has no
     # such slug, so the relay names the project by its shared id instead.
+    from app.db import database
+    from app.db.projects_v2 import project_v2_id_for_origin
+
     row, client = remote
-    row["project_id"] = "project-a"
+    database.create_project("project-a", "A", None, "/a", link_group_id="git:acme/shared")
+    row.update(project_id="project-a", project_v2_id=project_v2_id_for_origin("git:acme/shared"))
     call = AsyncMock(return_value={"status": 409, "detail": "Owner guard"})
     monkeypatch.setattr(control, "call", call)
     response = client.get("/api/v1/projects/project-a/git/status?session_id=session-b")
     assert response.status_code == 409, response.text
-    assert call.call_args.args[2]["params"]["project_id"] == "pv2-shared"
+    assert call.call_args.args[2]["params"]["project_id"] == row["project_v2_id"]
+
+
+def test_colliding_slug_is_not_the_sessions_project(remote, monkeypatch):
+    # #1659: the row still names "project-a" (the owner's slug, before this
+    # worker cleared it), but "project-a" here is another project. The shared
+    # id decides, so the route's project is refused before any relay.
+    from app.db import database
+
+    row, client = remote
+    database.create_project("project-a", "Unrelated", None, "/a", link_group_id="git:acme/unrelated")
+    row["project_id"] = "project-a"
+    call = AsyncMock()
+    monkeypatch.setattr(control, "call", call)
+    response = client.get("/api/v1/projects/project-a/git/status?session_id=session-b")
+    assert response.status_code == 403, response.text
+    call.assert_not_called()
 
 
 def test_create_pr_routes_with_saved_session(remote, monkeypatch):

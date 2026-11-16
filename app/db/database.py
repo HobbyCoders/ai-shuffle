@@ -1902,6 +1902,10 @@ def _run_column_migrations(cursor: Any) -> None:
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "project_v2_id"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS project_v2_id TEXT")
         migrations_applied.append("sessions.project_v2_id")
+    if table_exists(cursor, "sessions") and column_exists(cursor, "sessions", "project_v2_id"):
+        # Project-filtered lists match the shared id first (#1659).
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_v2_updated "
+                       "ON sessions(project_v2_id, updated_at DESC)")
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "branch"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS branch TEXT")
         migrations_applied.append("sessions.branch")

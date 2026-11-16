@@ -372,21 +372,16 @@ def api_user_owns_session(api_user: dict, session: dict) -> bool:
     return False
 
 
-def key_project_is_shared_project(project_id: str, project_v2_id: str) -> bool:
-    """Whether local project ``project_id`` is a checkout of shared project ``project_v2_id``.
+def key_project_holds_session(project_id: str, session: dict) -> bool:
+    """Whether local project ``project_id`` is ``session``'s project.
 
-    Same origin comparison as ``require_origin_access``, following a
-    late-linked placeholder; a missing project is never a match.
+    :func:`app.core.project_resolver.session_in_project`: the shared id
+    decides when the chat has one, the slug only without (#1659). A missing
+    project is never a match.
     """
     from app.core import project_resolver
 
-    project = database.get_project(project_id)
-    if not project:
-        return False
-    if project_resolver.is_checkout_of(project, project_v2_id):
-        return True
-    shared = project_resolver.resolve_catalog_project(project_v2_id)
-    return bool(shared) and shared.get("origin") == project_resolver.origin_for_legacy_project(project)
+    return project_resolver.session_in_project(session, database.get_project(project_id))
 
 
 def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
@@ -410,16 +405,15 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
             detail="Access denied to this session"
         )
 
-    # Check project restriction. A chat another worker runs may carry only
-    # its shared project id here (#1659): the key's project must be that
-    # project. Only a chat with no project identity at all passes, and only
-    # because it is the caller's own.
+    # Check project restriction: the key's project must be the chat's project
+    # by the one rule (shared id first, slug only without one, #1659). Only a
+    # chat with no project identity at all passes, because it is the caller's own.
     key_project = api_user.get("project_id")
     if key_project:
-        if session.get("project_id"):
+        if session.get("project_v2_id"):
+            allowed = key_project_holds_session(key_project, session)
+        elif session.get("project_id"):
             allowed = key_project == session["project_id"]
-        elif session.get("project_v2_id"):
-            allowed = key_project_is_shared_project(key_project, session["project_v2_id"])
         else:
             allowed = True
         if not allowed:
@@ -438,21 +432,25 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
 
 def _guard_reads_database(api_user: Optional[dict], session: dict) -> bool:
     """Whether the project check needs the database: a project-limited key
-    and a chat known only by its shared project id (#1659)."""
-    return bool(api_user and api_user.get("project_id")
-                and not session.get("project_id") and session.get("project_v2_id"))
+    and a chat with a shared project id, which decides first (#1659)."""
+    return bool(api_user and api_user.get("project_id") and session.get("project_v2_id"))
+
+
+async def run_session_access_check(check, api_user: Optional[dict], session: dict) -> None:
+    """Run ``check`` (``check_session_access_for_api_user`` or a wrapper of it) from async code.
+
+    The shared-project lookup reads the database, so that case runs off the
+    event loop; every other case is decided in memory.
+    """
+    if _guard_reads_database(api_user, session):
+        await run_sync(check, api_user, session)
+    else:
+        check(api_user, session)
 
 
 async def check_session_access_for_api_user_async(api_user: Optional[dict], session: dict) -> None:
-    """:func:`check_session_access_for_api_user` for async callers.
-
-    The shared-project lookup reads the database, so that case runs off the
-    event loop; every other case is decided in memory, as before.
-    """
-    if _guard_reads_database(api_user, session):
-        await run_sync(check_session_access_for_api_user, api_user, session)
-    else:
-        check_session_access_for_api_user(api_user, session)
+    """:func:`check_session_access_for_api_user` for async callers."""
+    await run_session_access_check(check_session_access_for_api_user, api_user, session)
 
 
 def check_session_access(request: Request, session: dict) -> None:

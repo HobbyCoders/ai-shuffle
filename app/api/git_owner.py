@@ -146,8 +146,11 @@ async def _guard_mutation(action_name, values, endpoint=None):
 
 
 def _check_project(session, project_id):
-    from app.core.project_resolver import resolve_project_v2
-    if project_id in (session.get("project_id"), session.get("project_v2_id")):
+    from app.core.project_resolver import resolve_project_v2, session_in_project
+    # The shared id decides first; a slug only for a chat with none (#1659).
+    if project_id and project_id == session.get("project_v2_id"):
+        return
+    if session_in_project(session, database.get_project(project_id)):
         return
     project = resolve_project_v2({"project_id": project_id})
     if project and project["id"] == session.get("project_v2_id"):

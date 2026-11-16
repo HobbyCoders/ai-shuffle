@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 
 from app.core.detached_tasks import spawn_detached
+from app.core.project_resolver import local_project_for_session
 from app.core.provider import session_admission
 from app.db import database
 from app.db.async_database import run_maintenance, run_sync
@@ -320,7 +321,7 @@ async def get_rewind_checkpoints(session_id: str, http_request: Request = None):
 
         # Get working directory for project
         working_dir = get_working_dir_for_project(
-            session.get("project_id"), session.get("worktree_id"), session_id
+            local_project_for_session(session), session.get("worktree_id"), session_id
         )
 
         # Get checkpoints from JSONL rewind service
@@ -828,10 +829,9 @@ async def _execute_rewind(
 
     working_dir = None
     if session.get("sdk_session_id") and not request.target_uuid.startswith("db-"):
-        working_dir = await run_sync(
-            get_working_dir_for_project,
-            session.get("project_id"), session.get("worktree_id"), session_id,
-        )
+        working_dir = await run_sync(lambda: get_working_dir_for_project(
+            local_project_for_session(session), session.get("worktree_id"), session_id,
+        ))
 
     sdk_session_id = session.get("sdk_session_id")
     if not sdk_session_id:
@@ -1479,7 +1479,7 @@ async def execute_rewind_legacy(session_id: str, request: RewindRequest, http_re
             check_session_access(http_request, session)
 
         working_dir = get_working_dir_for_project(
-            session.get("project_id"), session.get("worktree_id"), session_id
+            local_project_for_session(session), session.get("worktree_id"), session_id
         )
         return _get_checkpoints(session.get("sdk_session_id"), working_dir)
 

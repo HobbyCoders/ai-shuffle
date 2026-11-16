@@ -208,3 +208,29 @@ def test_fork_copies_app_event_log_with_turn_ids(fork_client):
     # Parent log stays put.
     assert se.get_max_seq(PARENT_SID) == 9
     assert se.get_max_seq(fork_sid) == 9
+
+
+@pytest.mark.parametrize("parent_slug", ["sandbox", None])
+def test_fork_files_under_the_local_checkout_of_the_shared_project(fork_client, parent_slug):
+    """#1659: a mirrored chat's slug may name an unrelated project here, or be
+    cleared; its fork is this worker's chat in this worker's checkout of the
+    shared project, not under the colliding slug."""
+    from app.core.project_resolver import origin_for_legacy_project
+    from app.db import database
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    _seed_parent()
+    database.create_project("sandbox", "unrelated here", None, "/sandbox")
+    database.create_project("mine", "mine", None, "/mine", link_group_id="github.com/acme/p")
+    shared = project_v2_id_for_origin(origin_for_legacy_project(database.get_project("mine")))
+    from app.db.base import get_cursor, get_db
+
+    with get_db() as conn:
+        get_cursor(conn).execute("UPDATE sessions SET project_id = %s, project_v2_id = %s WHERE id = %s",
+                                 (parent_slug, shared, PARENT_SID))
+
+    resp = fork_client.post(f"/{PARENT_SID}/fork", json={})
+    assert resp.status_code == 200, resp.text
+    row = sessions_db.get_session(resp.json()["session_id"])
+    assert row["project_id"] == "mine"
+    assert row["project_v2_id"] == shared

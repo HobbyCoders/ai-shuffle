@@ -42,7 +42,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.api.auth import get_api_user_from_request, require_auth
-from app.api.sessions_helpers import check_session_access_for_api_user
+from app.api.sessions_helpers import check_session_access_for_api_user, run_session_access_check
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.voice_models import (
@@ -805,7 +805,7 @@ async def _require_voice_session(
     someone else (see :func:`_check_voice_session_access`).
     """
     row = await _load_voice_session(session_id, check_eligible=check_eligible)
-    _check_voice_session_access(get_api_user_from_request(request), row)
+    await run_session_access_check(_check_voice_session_access, get_api_user_from_request(request), row)
     return row
 
 
@@ -1205,7 +1205,7 @@ async def prepare_voice_attachment(
     if not row:
         raise HTTPException(404, "Session not found.")
     api_user = get_api_user_from_request(http_request)
-    _check_voice_session_access(api_user, row)
+    await run_session_access_check(_check_voice_session_access, api_user, row)
     if row.get("mode") != "voice":
         await run_sync(_check_attachable_conversation, row)
         await run_sync(_refuse_preview_elsewhere, http_request, row)
@@ -1613,7 +1613,7 @@ async def voice_audio_socket(websocket: WebSocket, session_id: str, token: Optio
             return
         settings = await _require_voice_enabled()
         row = await _load_voice_session(session_id, check_eligible=True)
-        _check_voice_session_access(api_user, row)
+        await run_session_access_check(_check_voice_session_access, api_user, row)
         _reject_when_capped(session_id)
         config = session_config(row, settings)
         if transport_for(config["model"]) != "stream":

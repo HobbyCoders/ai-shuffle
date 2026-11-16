@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 
 from app.db import database
 from app.db.async_database import run_sync
+from app.core import project_resolver
 from app.core.mobile_tool_identity import record_creator
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
@@ -253,6 +254,13 @@ async def fork_session(
 
     # Get the original session
     original_session = await require_transcript_session(request, session_id)
+    # The fork is this worker's chat: file it under this worker's checkout of
+    # the original's project (shared id first, #1659), never a slug that names
+    # an unrelated project here or was cleared on a mirrored copy.
+    original_session = {
+        **original_session,
+        "project_id": await run_sync(project_resolver.local_project_for_session, original_session),
+    }
 
     sdk_session_id = original_session.get("sdk_session_id")
     if not sdk_session_id:

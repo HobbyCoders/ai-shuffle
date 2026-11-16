@@ -29,6 +29,10 @@ def _principal(kind="api_user", principal_id=KEY_ID):
             "account_id": None, "owner": f"{kind}:{principal_id}"}
 
 
+
+async def _allow_async(user, row):
+    return None
+
 @pytest.fixture
 def keys(monkeypatch):
     """Authenticate every socket as KEY_ID; ``revoked`` makes its re-check fail."""
@@ -94,7 +98,7 @@ def sync_client(keys):
     keys.monkeypatch.setattr(ws_sync, "sync_engine", sync)
     keys.monkeypatch.setattr(ws_sync, "database", SimpleNamespace(
         get_session=lambda sid: {"id": sid}, get_session_messages=lambda sid: []))
-    keys.monkeypatch.setattr(ws_sync, "check_session_access_for_api_user", lambda user, row: None)
+    keys.monkeypatch.setattr(ws_sync, "check_session_access_for_api_user_async", _allow_async)
 
     async def inline(fn, *a, **k):
         return fn(*a, **k)
@@ -166,7 +170,7 @@ def test_browser_panel_socket_closes_when_the_key_is_revoked(keys):
 
     m = keys.monkeypatch
     m.setattr(browser_panel, "database", SimpleNamespace(get_session=lambda sid: {"id": sid}))
-    m.setattr(browser_panel, "check_session_access_for_api_user", lambda user, row: None)
+    m.setattr(browser_panel, "check_session_access_for_api_user_async", _allow_async)
     m.setattr(browser_panel.control, "owner_of", lambda row: None)
 
     async def serve(websocket, session_id):

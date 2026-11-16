@@ -9,6 +9,7 @@ from app.api.auth import get_api_user_from_request
 from app.api.common import check_project_access, require_origin_access
 from app.api.sessions_helpers import check_session_access
 from app.core.config import settings
+from app.core.project_resolver import session_in_project
 from app.core.project_utils import get_project_working_dir, get_worktree_working_dir
 from app.db import database
 
@@ -38,7 +39,7 @@ def command_context(
             check_session_access(request, session)
         if user and session.get("api_user_id") not in (None, user.get("id")):
             raise HTTPException(403, "Access denied to this session")
-        if project_id and project_id != session.get("project_id"):
+        if project_id and not session_in_project(session, database.get_project(project_id)):
             raise HTTPException(400, "Project does not match this session")
         if worktree_id and worktree_id != session.get("worktree_id"):
             raise HTTPException(400, "Worktree does not match this session")

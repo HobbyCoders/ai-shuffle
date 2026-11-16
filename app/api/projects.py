@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app.core.models import Project, ProjectCreate, ProjectUpdate
 from app.core.config import settings
+from app.core.project_resolver import session_in_project
 from app.core.project_utils import enclosing_repo_root, get_project_working_dir, get_project_working_dir_as_path, get_worktree_working_dir, is_absolute_project_path
 from app.core.platform import is_local_mode
 from app.db import database
@@ -572,27 +573,11 @@ async def unlink_project(project_id: str, token: str = Depends(require_admin)):
     return await run_sync(_unlink)
 
 
-def _is_shared_copy_of_project(session: dict, project_id: str) -> bool:
-    """Whether a session with no local project id belongs to this project.
-
-    A chat that runs on another worker is keyed by the shared project id only,
-    while this worker's composer still names its own copy of the same project.
-    """
-    if session.get("project_id") or not session.get("project_v2_id"):
-        return False
-    from app.core.project_resolver import origin_for_legacy_project
-    from app.db import projects_v2
-
-    project = database.get_project(project_id)
-    shared = projects_v2.get_project_v2(session["project_v2_id"])
-    return bool(project and shared) and origin_for_legacy_project(project) == shared["origin"]
-
-
 def _get_project_session(session_id: str, project_id: str, api_user: Optional[dict]) -> Optional[dict]:
     """Load a session for a project-scoped route; 404 if it is another project's, 403 if denied."""
     session = database.get_session(session_id)
     if session:
-        if session.get("project_id") != project_id and not _is_shared_copy_of_project(session, project_id):
+        if not session_in_project(session, database.get_project(project_id)):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session not found: {session_id}"

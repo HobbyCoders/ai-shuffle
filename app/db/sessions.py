@@ -244,6 +244,12 @@ def get_session_by_sdk_id(sdk_session_id: str) -> Optional[SessionRow]:
         return row_to_dict(cursor.fetchone())
 
 
+def _project_predicate(project_id: str, _ph: str, prefix: str = ""):
+    """A chat is in a project by its shared id first, its slug only without one (#1659)."""
+    from app.core.project_resolver import session_project_predicate
+    return session_project_predicate(project_id, _ph, prefix)
+
+
 def get_sessions(
     project_id: Optional[str] = None,
     profile_id: Optional[str] = None,
@@ -275,8 +281,9 @@ def get_sessions(
         params = [*inst_params]
 
     if project_id:
-        query += f" AND s.project_id = {_ph}" if tag_id else f" AND project_id = {_ph}"
-        params.append(project_id)
+        project_sql, project_params = _project_predicate(project_id, _ph, "s." if tag_id else "")
+        query += f" AND {project_sql}"
+        params.extend(project_params)
     if profile_id:
         query += f" AND s.profile_id = {_ph}" if tag_id else f" AND profile_id = {_ph}"
         params.append(profile_id)
@@ -349,8 +356,9 @@ def get_sessions_paginated(
         col_prefix = ""
 
     if project_id:
-        base_query += f" AND {col_prefix}project_id = {_ph}"
-        params.append(project_id)
+        project_sql, project_params = _project_predicate(project_id, _ph, col_prefix)
+        base_query += f" AND {project_sql}"
+        params.extend(project_params)
     if profile_id:
         base_query += f" AND {col_prefix}profile_id = {_ph}"
         params.append(profile_id)
@@ -419,8 +427,9 @@ def _session_list_scope(
         col_prefix = ""
 
     if project_id:
-        base_query += f" AND {col_prefix}project_id = {_ph}"
-        params.append(project_id)
+        project_sql, project_params = _project_predicate(project_id, _ph, col_prefix)
+        base_query += f" AND {project_sql}"
+        params.extend(project_params)
     if profile_id:
         base_query += f" AND {col_prefix}profile_id = {_ph}"
         params.append(profile_id)
@@ -3150,8 +3159,10 @@ def search_sessions(
 
         # Add filters
         if project_id:
-            sql += f" AND project_id = {_ph}"
-            params.append(project_id)
+            # The match CTEs carry no project_v2_id: filter by session id.
+            project_sql, project_params = _project_predicate(project_id, _ph)
+            sql += f" AND id IN (SELECT id FROM sessions WHERE {project_sql})"
+            params.extend(project_params)
         if profile_id:
             sql += f" AND profile_id = {_ph}"
             params.append(profile_id)
@@ -3296,8 +3307,10 @@ def search_sessions_paginated(
         filter_params: List[Any] = []
 
         if project_id:
-            filter_sql += f" AND project_id = {_ph}"
-            filter_params.append(project_id)
+            # The match CTEs carry no project_v2_id: filter by session id.
+            project_sql, project_params = _project_predicate(project_id, _ph)
+            filter_sql += f" AND id IN (SELECT id FROM sessions WHERE {project_sql})"
+            filter_params.extend(project_params)
         if profile_id:
             filter_sql += f" AND profile_id = {_ph}"
             filter_params.append(profile_id)

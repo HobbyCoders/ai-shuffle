@@ -28,12 +28,26 @@
 //   unreachable-from-new  the sync check keeps failing (#814): after a few
 //                      failures the chat shows what it has with a "Can't
 //                      reach" notice, and Retry clears it once the owner answers
+//   shared-project-header  #1659: the owner filed the chat under its own
+//                      "dev-sandbox", which is another project here. The row
+//                      names no local id, only the shared id of "Dev other":
+//                      the header crumb and the Git panel name "Dev other",
+//                      never the colliding local "Dev sandbox". The row is
+//                      changed on the private database (as the viewer stores a
+//                      mirror after #1659) and restored after; it is not marked
+//                      remote, since Git status needs a worker that answers.
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { runJourney } from './runner.mjs';
 import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { expectComposerPositions, expectNeverDecreases, frames, markTime } from './lib/timeline.mjs';
 
 const PEER = 'Peer worker';
+/** The shared project the mirrored chat belongs to, and this worker's project that has the owner's slug. */
+const OTHER_PROJECT = 'Dev other';
+const LOCAL_COLLIDING_PROJECT = 'Dev sandbox';
 const OPEN = 'open the mirrored chat from the sidebar';
 /** "Syncing" answers before the owner reports the opening checkpoint caught up. */
 const SYNCING_POLLS = 2;
@@ -95,6 +109,43 @@ async function simulateMirroredChat(page, status, key, { untitled = false, faili
 		},
 		{ id: seededChatId(status, key), peer: PEER, syncingPolls: failing ? 0 : SYNCING_POLLS, untitled, failing }
 	);
+}
+
+// The viewer's stored copy of a chat whose owner filed it under its own
+// "dev-sandbox" (another project here): no local id, only the shared id of
+// "dev-other" (#1659). On the private database only; 'restore' undoes it.
+const SHARED_PROJECT_ROW = String.raw`
+import os, sys
+from pathlib import Path
+home = Path(sys.argv[1]).resolve()
+assert home.name == 'data' and home.parent.name.startswith('ai-shuffle-preview-')
+assert (home / '.branch-preview').exists() or (home.parent / '.branch-preview').exists()
+os.environ['DATA_DIR'] = str(home)
+from app.core.config import settings
+assert settings.effective_data_dir.resolve() == home
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from app.core.project_resolver import origin_for_legacy_project
+from app.db.projects_v2 import project_v2_id_for_origin
+chat, stage = sys.argv[2:4]
+with psycopg2.connect(**settings.get_database_connection()) as conn:
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        slug = 'dev-other' if stage == 'shared' else 'dev-sandbox'
+        cur.execute('SELECT id, link_group_id FROM projects WHERE id = %s', (slug,))
+        shared = project_v2_id_for_origin(origin_for_legacy_project(dict(cur.fetchone())))
+        cur.execute('UPDATE sessions SET project_id = %s, project_v2_id = %s WHERE id = %s',
+                    (None if stage == 'shared' else slug, shared, chat))
+        assert cur.rowcount == 1
+`;
+
+function fileUnderSharedProject(status, sessionId, stage) {
+	const local = join(status.checkout, '.venv', 'bin', 'python');
+	const python = existsSync(local) ? local : (process.env.PYTHON || 'python3');
+	execFileSync(python, ['-c', SHARED_PROJECT_ROW, status.data_dir, sessionId, stage], {
+		cwd: status.checkout,
+		env: { ...process.env, PYTHONPATH: join(status.checkout, 'fluid'), PYTHONDONTWRITEBYTECODE: '1' },
+		encoding: 'utf8'
+	});
 }
 
 const syncPolls = (page) => page.evaluate(() => window.__mirrorSyncPolls ?? 0);
@@ -232,6 +283,44 @@ await runJourney({
 			verify({ recording }) {
 				expectComposerPositions(recording, ['centre']);
 				expectSyncedInTheHero(recording);
+			}
+		},
+		{
+			name: 'shared-project-header',
+			async setup(ctx) {
+				const { page, status } = ctx;
+				fileUnderSharedProject(status, seededChatId(status, 'long'), 'shared');
+				await gotoApp(page, status);
+				await waitChat(page, { surface: 'new' });
+				await page.waitForTimeout(1000);
+			},
+			async act({ page, mark, variant }) {
+				await mark(OPEN);
+				await openFromSidebar(page, SEEDED.long);
+				await waitChatOpen(page, { messagesAtLeast: 50 });
+				const crumb = page.locator('.crumb.project:visible');
+				if (variant.viewport === 'desktop') {
+					await crumb.first().waitFor({ timeout: 10_000 });
+					const text = (await crumb.first().textContent())?.trim();
+					expect(text === OTHER_PROJECT, `the header crumb names ${OTHER_PROJECT}, got ${JSON.stringify(text)}`);
+				} else {
+					expect(await crumb.count() === 0 || (await crumb.first().textContent())?.trim() === OTHER_PROJECT,
+						'a phone header crumb, if any, names the shared project');
+				}
+				const gitButton = page.getByRole('button', { name: /^Git actions/ }).first();
+				await gitButton.waitFor({ timeout: 15_000 });
+				await gitButton.click();
+				const project = page.locator('.git-panel .gp-project');
+				await project.waitFor({ timeout: 10_000 });
+				const label = (await project.textContent())?.trim();
+				expect(label === `${OTHER_PROJECT} /`, `the Git panel names ${OTHER_PROJECT}, got ${JSON.stringify(label)}`);
+				const named = await page.locator('.crumb.project:visible, .git-panel .gp-project').allTextContents();
+				expect(!named.some((text) => text.includes(LOCAL_COLLIDING_PROJECT)),
+					`neither header names the colliding local ${LOCAL_COLLIDING_PROJECT}: ${JSON.stringify(named)}`);
+				await page.keyboard.press('Escape');
+			},
+			verify({ status }) {
+				fileUnderSharedProject(status, seededChatId(status, 'long'), 'restore');
 			}
 		},
 		{

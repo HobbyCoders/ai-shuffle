@@ -1508,6 +1508,10 @@ def create_postgres_schema(cursor: Any) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_updated ON sessions(project_id, updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_apiuser_updated ON sessions(project_id, api_user_id, updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_profile_updated ON sessions(project_id, profile_id, updated_at DESC)")
+    # Project-filtered lists match a chat's shared project id first (#1659);
+    # an older database gains the column (and this index) in the column pass.
+    if column_exists(cursor, "sessions", "project_v2_id"):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project_v2_updated ON sessions(project_v2_id, updated_at DESC)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_title ON sessions(title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_sdk_session_id ON sessions(sdk_session_id)")
     # Note: idx_sessions_instance is created by _run_column_migrations after the

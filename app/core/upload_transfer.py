@@ -238,9 +238,12 @@ def admitted_upload_roots(session: Dict[str, Any], *, composer: bool = False) ->
             roots.append((base / UPLOADS_SUBDIR, base))
         # New Chat stages uploads in this project's base checkout before the
         # explicit branch exists. The subsequent WS send still names that copy.
-        if session.get("project_id"):
+        # This worker's checkout of the chat's project (shared id first, #1659),
+        # never a slug that names another project here.
+        local_project = project_resolver.local_project_for_session(session)
+        if local_project:
             from app.db import database
-            project = database.get_project(session["project_id"])
+            project = database.get_project(local_project)
             if project:
                 base = _project_dir(project)
                 roots.append((base / UPLOADS_SUBDIR, base))
