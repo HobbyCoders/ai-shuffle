@@ -259,8 +259,10 @@ log = logging.getLogger(__name__)
 DEFAULT_TURN_WATCHDOG_SECONDS = 900.0
 # Header of the runtime-facts block (see _environment_reminder); the resume
 # path finds the last one sent by this exact text.
+# The compactor pins it by its opening words (CompactionConfig.pinned_blocks).
+_RUNTIME_FACTS_PIN = "Runtime facts as of this message ("
 _RUNTIME_FACTS_HEADER = (
-    "Runtime facts as of this message (worker-side, read-only checks; "
+    _RUNTIME_FACTS_PIN + "worker-side, read-only checks; "
     "shown on the first turn and again only when they change):\n"
 )
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
@@ -2808,6 +2810,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
+        sections = self.system_sections.sections if self.system_sections else ()
+        if not any(s.kind == "environment" for s in sections):
+            # The runtime facts ride once, so check the path this turn
+            # extends, not engine memory: a fork or rewind, or a legacy
+            # unpinned copy a digest drops, does not hold them (#1656).
+            self._runtime_facts_sent = await self._held_runtime_facts(sid, op.parent_node_id)
         env = await self._environment_reminder_parts()
         env_note: str | None = None
         details_block: str | None = None
@@ -3333,29 +3341,25 @@ class NativeLoop(BackgroundLifecycleMixin):
         A fresh engine over an existing session would otherwise re-send the
         runtime-facts block on its first turn even when nothing changed —
         every park/wake is a fresh engine in the app, so that would be most
-        turns. The block's body is recovered from the newest user node that
-        carries it.
+        turns. The body comes only from a host-pinned copy on the rendered
+        path, which every digest and fold carries. An unpinned copy (stored
+        before the block was pinned) can be digested away, so it does not
+        count: the block is sent once more, pinned (#1656).
         """
         if self._runtime_facts_sent is not None or self._runtime_facts_rehydrated:
             return
         self._runtime_facts_rehydrated = True
-        if head_node_id is None:
-            return
-        try:
-            nodes = await self.store.load_path(sid, head_node_id)
-        except Exception:  # a store that cannot replay just re-sends once
-            return
-        for node in reversed(nodes):
-            if node.message.role != "user":
-                continue
-            for block in node.message.content:
-                text = getattr(block, "text", None)
-                if not isinstance(text, str) or _RUNTIME_FACTS_HEADER not in text:
-                    continue
-                start = text.index(_RUNTIME_FACTS_HEADER) + len(_RUNTIME_FACTS_HEADER)
-                end = text.find("\n</system-reminder>", start)
-                self._runtime_facts_sent = text[start:end if end >= 0 else None].strip("\n")
-                return
+        if head_node_id is not None:
+            self._runtime_facts_sent = await self._held_runtime_facts(sid, head_node_id)
+
+    async def _held_runtime_facts(self, sid: str, leaf_node_id: str | None) -> str | None:
+        """The body of the pinned runtime-facts block on the path to the leaf."""
+        block = await self.holds_pinned_block(sid, _RUNTIME_FACTS_PIN, leaf_node_id)
+        if block is None or _RUNTIME_FACTS_HEADER not in block:
+            return None
+        start = block.index(_RUNTIME_FACTS_HEADER) + len(_RUNTIME_FACTS_HEADER)
+        end = block.find("\n</system-reminder>", start)
+        return block[start:end if end >= 0 else None].strip("\n")
 
     async def _rehydrate_read_files(self, sid: str, head_node_id: str | None) -> None:
         """Seed the read-before-edit ledger from the stored transcript (once).

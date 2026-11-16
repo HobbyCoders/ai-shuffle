@@ -30,6 +30,10 @@ from fluid.tools.shell import resolve_shell
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
+# Seconds a timed-out command's cleanup may take on top of its timeout: the
+# tree kill plus draining what is left in the pipe. A command's whole run is
+# then bounded by ``timeout + KILL_GRACE_S`` (code mode relies on it, #1549).
+KILL_GRACE_S = 2.0
 # Bytes of a command's output kept in memory while it runs: the first half
 # and the last half, the middle dropped as it streams. Far above what the
 # model sees inline, so the spill file holds the whole output of all but a
@@ -241,6 +245,24 @@ async def kill_tree(proc: asyncio.subprocess.Process) -> None:
     await proc.wait()
 
 
+def _kill_group(proc: asyncio.subprocess.Process) -> None:
+    """POSIX: SIGKILL the command's process group even when the shell itself
+    has exited. ``kill_tree`` stops at an exited root, but a background child
+    (``server &``) is still in the group, holding the pipe open."""
+    if sys.platform == "win32":
+        return
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+async def _kill_and_drain(proc: asyncio.subprocess.Process, capture: _Capture) -> None:
+    """Kill a timed-out command's tree and read what is left in its pipe."""
+    await kill_tree(proc)
+    _kill_group(proc)
+    assert proc.stdout is not None
+    await _read_capped(proc.stdout, capture)
+
+
 def clamp_timeout(value: Any) -> float:
     """The timeout a call gets: the model's number held inside the bounds.
 
@@ -356,14 +378,20 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
     capture = _Capture()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     try:
+        # One deadline for the whole run: a command that closes its output
+        # early and then hangs gets the time left, not a fresh timeout.
         await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=timeout)
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        await asyncio.wait_for(proc.wait(), timeout=max(0.0, deadline - loop.time()))
     except TimeoutError:
-        await kill_tree(proc)
         with contextlib.suppress(TimeoutError, OSError):
-            # What the command wrote just before the kill is still in the pipe.
-            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=2.0)
+            # The kill and the drain share one bounded grace. What the command
+            # wrote just before the kill is still in the pipe; a background
+            # child that outlived the shell holds it open, so it is killed
+            # with the group too (see _kill_group).
+            await asyncio.wait_for(_kill_and_drain(proc, capture), timeout=KILL_GRACE_S)
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.

@@ -603,3 +603,73 @@ async def test_an_unpinning_compactor_sends_the_details_every_turn(git_repo: Pat
     await _turn(loop, UserTurn(content="first"))
     await _turn(loop, UserTurn(content="second"))
     assert [_sent(r) for r in provider.requests] == [True, True]
+
+
+# ─── runtime facts stored before they were pinned (review S3) ───────────────
+
+_FACTS = "Runtime facts as of this message ("
+
+
+def _unpin(store: MemoryStore, sid: str) -> None:
+    """Rewrite the stored session the way a pre-#1656 host wrote it: the
+    runtime facts sit in the turn, outside the host-pinned range."""
+    nodes = store._nodes[sid]
+    for node_id, node in nodes.items():
+        if node.message.context_pin is not None:
+            nodes[node_id] = replace(node, message=replace(node.message, context_pin=None))
+    assert any(_FACTS in n.message.text() for n in nodes.values())
+
+
+async def test_a_digested_unpinned_copy_does_not_count_as_held(git_repo: Path) -> None:
+    """A fresh engine (a wake or a hand-off) over a legacy transcript whose
+    unpinned facts were digested away sends them once more, pinned, and then
+    relies on that copy."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_text("ok")])
+    window = {"context_window": 32_000, "max_tokens": 8192}
+    big = [Text(c * 24_000) for c in "abcd"]
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content=big))
+    _unpin(store, sid)
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content="two"))
+    upgraded = provider.requests[-1]
+    assert upgraded.messages[0].text().startswith("[compacted turn")
+    assert _FACTS not in upgraded.messages[0].text()  # the legacy copy is gone
+    assert _FACTS in upgraded.messages[-1].text()  # so the turn carries one
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content="three"))
+    last = provider.requests[-1]
+    assert _FACTS not in last.messages[-1].text()  # the pinned copy is held
+    assert sum(m.text().count(_FACTS) for m in last.messages) == 1
+    assert last.messages[:len(upgraded.messages)] == upgraded.messages
+
+
+async def test_a_resume_over_an_unpinned_copy_sends_the_facts(git_repo: Path) -> None:
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
+    provider = ScriptedProvider([failed, _text("ok")])
+    window = {"context_window": 32_000, "max_tokens": 8192}
+    big = [Text(c * 24_000) for c in "abcd"]
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content=big))
+    _unpin(store, sid)
+    loop = _loop(git_repo, provider, store, sid, include_env=False, **window)
+    # Admission digests the resumed turn too, which retires the request-only
+    # Resume note (#1358): that one request cannot show the facts.
+    await _turn(loop, Resume())
+    await _turn(loop, UserTurn(content="next"))  # so the next turn stores them
+    assert _FACTS in provider.requests[-1].messages[-1].text()
+
+
+async def test_a_fork_before_the_runtime_facts_sends_them(git_repo: Path) -> None:
+    """Without an environment section the engine remembers what it sent; a
+    fork onto a path that never held the facts must still send them."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_text("ok")])
+    loop = _loop(git_repo, provider, store, sid, include_env=False)
+    await store.append(sid, SessionNode(node_id="root", parent_id=None, message=Message(
+        role="user", content=[Text("imported, no facts")])))
+    await store.append(sid, SessionNode(node_id="reply", parent_id="root", message=Message(
+        role="assistant", content=[Text("ok")])))
+    await _turn(loop, UserTurn(content="first"))
+    await _turn(loop, UserTurn(content="second"))
+    assert _FACTS not in provider.requests[-1].messages[-1].text()
+    await _turn(loop, UserTurn(content="fork", parent_node_id="reply"))
+    assert sum(m.text().count(_FACTS) for m in provider.requests[-1].messages) == 1

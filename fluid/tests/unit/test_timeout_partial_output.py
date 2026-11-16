@@ -9,7 +9,10 @@ says its output was lost.
 
 from __future__ import annotations
 
+import asyncio
 import sys
+import time
+from pathlib import Path
 
 import pytest
 
@@ -128,7 +131,7 @@ async def test_bash_in_a_cell_times_out_under_the_ceiling_with_its_output(tmp_pa
         await session.aclose()
     results = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
     assert len(results) == 1 and results[0].is_error
-    assert "timed out after 3s" in results[0].output
+    assert "timed out after 1s" in results[0].output  # 4 - kill grace 2 - margin 1
     assert "FATAL: db locked" in results[0].output and "partial output" in results[0].output
     assert "cancelled before it returned" not in results[0].output
     assert "FATAL: db locked" in out.text
@@ -138,6 +141,159 @@ def test_bash_under_ceiling_only_lowers_a_timeout_that_would_be_cancelled() -> N
     assert _bash_under_ceiling({"command": "x"}, 0) == {"command": "x"}  # unbounded
     assert _bash_under_ceiling({"command": "x"}, 900) == {"command": "x"}  # default 120 fits
     assert _bash_under_ceiling({"command": "x", "timeout": 600}, 900)["timeout"] == 600
-    assert _bash_under_ceiling({"command": "x"}, 100) == {"command": "x", "timeout": 90}
-    assert _bash_under_ceiling({"command": "x", "timeout": 10}, 8) == {"command": "x", "timeout": 6}
+    assert _bash_under_ceiling({"command": "x"}, 100) == {"command": "x", "timeout": 88}
+    assert _bash_under_ceiling({"command": "x", "timeout": 10}, 8) == {"command": "x", "timeout": 4}
     assert _bash_under_ceiling({"command": "x", "timeout": 5}, 1) == {"command": "x", "timeout": 5}
+
+
+# ─── review round 1 ──────────────────────────────────────────────────────────
+
+def _py(code: str) -> str:
+    return f'"{sys.executable}" -c "{code}"'
+
+
+# Prints, closes both output streams two seconds later, then hangs.
+_CLOSES_EARLY = _py(
+    "import os, time; print('FATAL: closed early', flush=True); time.sleep(2); "
+    "os.close(1); os.close(2); time.sleep(60)"
+)
+
+
+@posix_only
+async def test_bash_timeout_bounds_the_whole_run_when_output_closes_early(tmp_path) -> None:
+    """S1: the timeout is one deadline for reading and waiting together, not
+    a fresh one for the wait after the output closes."""
+    started = time.monotonic()
+    out = await bash.handler({"command": _CLOSES_EARLY, "timeout": 3}, bash_ctx(tmp_path))
+    elapsed = time.monotonic() - started
+    assert out.is_error and "timed out after 3s" in out.text
+    assert "FATAL: closed early" in out.text
+    assert elapsed < 4.5  # a fresh 3 s wait after the close would make it 5 s
+
+
+@posix_only
+async def test_bash_timeout_kills_a_background_child_holding_the_pipe(tmp_path) -> None:
+    """The shell exits at once but its background child keeps the pipe open:
+    the timeout kills the child too, and cleanup stays inside the grace."""
+    pidfile = tmp_path / "child.pid"
+    command = f"echo START; sh -c 'echo $$ > {pidfile}; exec sleep 60' & echo END"
+    started = time.monotonic()
+    out = await bash.handler({"command": command, "timeout": 2}, bash_ctx(tmp_path))
+    elapsed = time.monotonic() - started
+    assert out.is_error and "START" in out.text and "END" in out.text
+    assert elapsed < 3.5  # a drain left waiting on the child would make it 4 s
+    assert not _alive(int(pidfile.read_text().strip()))
+
+
+def _alive(pid: int) -> bool:
+    for _ in range(50):
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except (FileNotFoundError, ProcessLookupError):
+            return False
+        if state in ("Z", "X"):
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def bash_ctx(tmp_path) -> ToolCtx:
+    return ToolCtx(cwd=str(tmp_path), extra={"harness_state_root": tmp_path / "state"})
+
+
+@posix_only
+async def test_bash_in_a_cell_with_output_closed_early_returns_before_the_ceiling(tmp_path) -> None:
+    """S1 through the real session: Bash's total run, kill grace included,
+    ends before the kernel's per-call ceiling cancels it."""
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=8))
+    loop = _Loop(str(tmp_path))
+    code = f"from tools.Bash import Bash\nBash(command={_CLOSES_EARLY!r}, timeout=60)\n"
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 2})
+    finally:
+        await session.aclose()
+    results = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
+    assert len(results) == 1 and "timed out after 4s" in results[0].output
+    assert "FATAL: closed early" in results[0].output
+    assert "cancelled before it returned" not in out.text and "FATAL: closed early" in out.text
+
+
+def _bash_session() -> CodeModeSession:
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    return CodeModeSession(registry, config=KernelConfig())
+
+
+async def _run(session: CodeModeSession, loop: _Loop, code: str, timeout: float = 20):
+    return await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": timeout})
+
+
+async def _started(loop: _Loop, name: str = "Bash") -> None:
+    for _ in range(200):
+        if any(getattr(e, "name", None) == name and not isinstance(e, ToolResult) for e in loop.events):
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{name} never started: {loop.events!r}")
+
+
+_SLOW_CELL = (
+    "from tools.Bash import Bash\n"
+    "Bash(command='sleep 30')\n"
+    "print('RAN AFTER CANCEL')\n"
+)
+
+
+@pytest.mark.parametrize("cancels", [1, 2])
+async def test_a_cell_cancelled_during_a_host_call_does_not_run_on(tmp_path, cancels) -> None:
+    """S2: the child waits for the cancelled call's reply. Without a restart it
+    takes the next cell as that reply and runs the cancelled cell's rest. A
+    second cancel lands while the kernel restarts."""
+    session = _bash_session()
+    loop = _Loop(str(tmp_path))
+    try:
+        await _run(session, loop, "keep = 7")
+        task = asyncio.ensure_future(_run(session, loop, _SLOW_CELL))
+        await _started(loop)
+        for _ in range(cancels):
+            task.cancel()
+            await asyncio.sleep(0.05)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        nxt = await _run(session, loop, "print('NEW CELL', keep)")
+    finally:
+        await session.aclose()
+    assert "NEW CELL 7" in nxt.text
+    assert "RAN AFTER CANCEL" not in nxt.text
+
+
+async def test_a_cancel_during_the_interrupt_grace_resets_the_kernel(tmp_path) -> None:
+    """A cell past its deadline that ignores the interrupt keeps the kernel in
+    the grace; a cancel there (twice) still leaves a working kernel."""
+    session = _bash_session()
+    loop = _Loop(str(tmp_path))
+    stubborn = (
+        "while True:\n"
+        "    try:\n"
+        "        while True:\n"
+        "            pass\n"
+        "    except KeyboardInterrupt:\n"
+        "        pass\n"
+    )
+    try:
+        await _run(session, loop, "keep = 7")
+        task = asyncio.ensure_future(_run(session, loop, stubborn, timeout=0.5))
+        await asyncio.sleep(1.2)  # past the deadline, inside the 2 s grace
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        nxt = await _run(session, loop, "print('NEW CELL', keep)")
+        # And a host call then works on the restarted kernel.
+        bash_cell = await _run(session, loop, "from tools.Bash import Bash\nprint(Bash(command='echo OK'))")
+    finally:
+        await session.aclose()
+    assert "NEW CELL 7" in nxt.text
+    assert "OK" in bash_cell.text

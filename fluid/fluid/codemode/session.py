@@ -224,9 +224,10 @@ class _HumanWait:
 
 
 # Seconds an in-kernel Bash call keeps clear of the kernel's per-call
-# ceiling (a quarter of it when the ceiling is short): Bash's own timeout then
-# fires first, kills the tree and drains the pipe, so the output printed before
-# the timeout comes back instead of being cancelled away with the call (#1549).
+# ceiling beyond its kill grace (a quarter of the ceiling when that is short):
+# Bash's whole run, timeout plus kill and drain, then ends before the ceiling,
+# so the output printed before the timeout comes back instead of being
+# cancelled away with the call (#1549).
 _BASH_CEILING_MARGIN_S = 10.0
 
 
@@ -234,9 +235,9 @@ def _bash_under_ceiling(kwargs: dict, bound: float) -> dict:
     """``kwargs`` with Bash's timeout held under the per-call ceiling ``bound``."""
     if bound <= 0 or not isinstance(kwargs, dict):
         return kwargs
-    from fluid.tools.builtins.bash import DEFAULT_TIMEOUT_S, MIN_TIMEOUT_S, clamp_timeout
+    from fluid.tools.builtins.bash import DEFAULT_TIMEOUT_S, KILL_GRACE_S, MIN_TIMEOUT_S, clamp_timeout
 
-    limit = bound - min(_BASH_CEILING_MARGIN_S, bound / 4)
+    limit = bound - KILL_GRACE_S - min(_BASH_CEILING_MARGIN_S, bound / 4)
     if limit < MIN_TIMEOUT_S or clamp_timeout(kwargs.get("timeout", DEFAULT_TIMEOUT_S)) <= limit:
         return kwargs
     return {**kwargs, "timeout": limit}

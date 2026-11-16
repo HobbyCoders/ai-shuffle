@@ -464,7 +464,7 @@ class SubprocessKernel:
                 try:
                     printed = await self._interrupted_output()
                 except asyncio.CancelledError:
-                    await self._restart_and_restore()
+                    await self._reset_after_cancel()
                     raise
                 note = await self._restart_and_restore()
                 self._restart_note = ""  # said here; not repeated next cell
@@ -503,7 +503,7 @@ class SubprocessKernel:
                 # still executing it and would answer the NEXT exec with this
                 # cell's result, so the pipe is only kept in step by
                 # restarting the kernel; the checkpoint restores its state.
-                await self._restart_and_restore()
+                await self._reset_after_cancel()
                 raise
             remaining -= loop.time() - started
             if remaining <= 0:
@@ -518,6 +518,12 @@ class SubprocessKernel:
                         on_host_call, name, frame.get("kwargs") or {},
                         host_bound, host_wait_credit,
                     )
+                except asyncio.CancelledError:
+                    # Cancelled while serving the call: the child is blocked
+                    # on its reply and would take the NEXT exec frame as that
+                    # reply, then run the rest of this cancelled cell.
+                    await self._reset_after_cancel()
+                    raise
                 except TimeoutError:
                     reply = HostReply(error=(
                         f"{name} did not return within {host_bound:.0f}s and "
@@ -529,7 +535,11 @@ class SubprocessKernel:
                         "the wait happens outside the turn."
                     ))
                 # Host-service time is not charged against the compute budget.
-                await self._send(_reply_frame(reply))
+                try:
+                    await self._send(_reply_frame(reply))
+                except asyncio.CancelledError:
+                    await self._reset_after_cancel()
+                    raise
             elif kind == "done":
                 # Read the pending notice BEFORE checkpointing: a checkpoint
                 # that fails restarts the kernel, and that restart belongs to
@@ -552,6 +562,40 @@ class SubprocessKernel:
                 return KernelResult(
                     error=f"kernel produced no result{note}", host_calls=host_calls
                 )
+
+    async def _reset_after_cancel(self) -> None:
+        """Restart and restore a kernel whose cell was cancelled mid-flight.
+
+        A second cancel can land during the restart. The child (old or the
+        half-booted new one) is then killed without awaiting and dropped, so
+        the next exec finds no live kernel and restarts it from the
+        checkpoint itself instead of talking to a desynced pipe.
+        """
+        try:
+            await self._restart_and_restore()
+        except BaseException:
+            self._drop_child()
+            raise
+
+    def _drop_child(self) -> None:
+        """Kill and forget the child without awaiting anything."""
+        proc, self._proc = self._proc, None
+        job, self._job_handle = self._job_handle, None
+        drain, self._stderr_task = self._stderr_task, None
+        if proc is not None and proc.returncode is None:
+            if sys.platform != "win32":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            try:
+                proc.kill()
+            except (ProcessLookupError, OSError):
+                pass
+        if drain is not None:
+            drain.cancel()
+        if job is not None:
+            _win_close_handle(job)
 
     async def _interrupted_output(self) -> dict | None:
         """Interrupt a cell past its deadline and read its done frame.
