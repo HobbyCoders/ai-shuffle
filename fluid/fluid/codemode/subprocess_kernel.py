@@ -34,7 +34,7 @@ import secrets
 import signal
 import struct
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -170,7 +170,7 @@ class SubprocessKernel:
 
     # ── lifecycle ──
     async def start(self) -> None:
-        await self._spawn()
+        await self._or_drop_child(self._spawn())
 
     async def _spawn(self) -> None:
         spawn_kwargs: dict = {}
@@ -219,7 +219,8 @@ class SubprocessKernel:
         if skills is not None:
             self._skill_sources = dict(skills)
         if self._proc is not None and self._proc.returncode is None:
-            await self._send_vfs()
+            # A frame exchange with a live child: cut short, it desyncs the pipe.
+            await self._or_drop_child(self._send_vfs())
 
     async def stop(self) -> None:
         if self._proc is None:
@@ -310,8 +311,7 @@ class SubprocessKernel:
         frame protocol stays aligned.
         """
         try:
-            await self._send({"kind": "checkpoint"})
-            frame = await asyncio.wait_for(self._read_frame(), 30)
+            frame = await self._or_drop_child(self._checkpoint_frame())
         except Exception:
             await self._restart_and_restore()
             return
@@ -334,6 +334,10 @@ class SubprocessKernel:
             ]
         # else: oversized — keep the previous checkpoint
 
+    async def _checkpoint_frame(self) -> dict | None:
+        await self._send({"kind": "checkpoint"})
+        return await asyncio.wait_for(self._read_frame(), 30)
+
     async def _restart_and_restore(self) -> str:
         """Restart the kernel and restore the last checkpoint.
 
@@ -341,10 +345,28 @@ class SubprocessKernel:
         knows exactly what state survived, and arms :attr:`_restart_note` for
         the NEXT cell (see :func:`_restart_notice`).
         """
-        await self._restart()
-        detail = await self._restore()
+        async def restart_and_restore() -> str:
+            await self._restart()
+            return await self._restore()
+
+        detail = await self._or_drop_child(restart_and_restore())
         self._restart_note = _restart_notice(detail)
         return detail
+
+    async def _or_drop_child(self, step: Awaitable[Any]) -> Any:
+        """Every start, restart and frame exchange outside a cell runs here.
+
+        A failure at any await inside ``step``, a cancel included, kills and
+        forgets the child, whether the old one or a replacement that is only
+        partly booted or not yet restored. The next exec then finds no live
+        kernel and restarts it from the checkpoint, with the notice, instead
+        of running on an empty namespace or a desynced pipe.
+        """
+        try:
+            return await step
+        except BaseException:
+            self._drop_child()
+            raise
 
     async def _restore(self) -> str:
         have = self._ckpt_vars or self._ckpt_tools or self._ckpt_skills
@@ -446,11 +468,10 @@ class SubprocessKernel:
             # restart). Restore the checkpoint and arm the notice rather than
             # hand the next cell an empty namespace with no explanation.
             if self._ever_started:
-                await self._restart()
-                self._restart_note = _restart_notice(await self._restore())
+                await self._restart_and_restore()
             else:
-                await self._spawn()
-        await self._send({"kind": "exec", "code": code})
+                await self.start()
+        await self._or_drop_child(self._send({"kind": "exec", "code": code}))
 
         loop = asyncio.get_running_loop()
         host_calls = 0
@@ -464,7 +485,7 @@ class SubprocessKernel:
                 try:
                     printed = await self._interrupted_output()
                 except asyncio.CancelledError:
-                    await self._reset_after_cancel()
+                    await self._restart_and_restore()
                     raise
                 note = await self._restart_and_restore()
                 self._restart_note = ""  # said here; not repeated next cell
@@ -503,7 +524,7 @@ class SubprocessKernel:
                 # still executing it and would answer the NEXT exec with this
                 # cell's result, so the pipe is only kept in step by
                 # restarting the kernel; the checkpoint restores its state.
-                await self._reset_after_cancel()
+                await self._restart_and_restore()
                 raise
             remaining -= loop.time() - started
             if remaining <= 0:
@@ -522,7 +543,7 @@ class SubprocessKernel:
                     # Cancelled while serving the call: the child is blocked
                     # on its reply and would take the NEXT exec frame as that
                     # reply, then run the rest of this cancelled cell.
-                    await self._reset_after_cancel()
+                    await self._restart_and_restore()
                     raise
                 except TimeoutError:
                     reply = HostReply(error=(
@@ -538,7 +559,7 @@ class SubprocessKernel:
                 try:
                     await self._send(_reply_frame(reply))
                 except asyncio.CancelledError:
-                    await self._reset_after_cancel()
+                    await self._restart_and_restore()
                     raise
             elif kind == "done":
                 # Read the pending notice BEFORE checkpointing: a checkpoint
@@ -562,20 +583,6 @@ class SubprocessKernel:
                 return KernelResult(
                     error=f"kernel produced no result{note}", host_calls=host_calls
                 )
-
-    async def _reset_after_cancel(self) -> None:
-        """Restart and restore a kernel whose cell was cancelled mid-flight.
-
-        A second cancel can land during the restart. The child (old or the
-        half-booted new one) is then killed without awaiting and dropped, so
-        the next exec finds no live kernel and restarts it from the
-        checkpoint itself instead of talking to a desynced pipe.
-        """
-        try:
-            await self._restart_and_restore()
-        except BaseException:
-            self._drop_child()
-            raise
 
     def _drop_child(self) -> None:
         """Kill and forget the child without awaiting anything."""

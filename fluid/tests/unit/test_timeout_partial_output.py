@@ -138,12 +138,56 @@ async def test_bash_in_a_cell_times_out_under_the_ceiling_with_its_output(tmp_pa
 
 
 def test_bash_under_ceiling_only_lowers_a_timeout_that_would_be_cancelled() -> None:
-    assert _bash_under_ceiling({"command": "x"}, 0) == {"command": "x"}  # unbounded
-    assert _bash_under_ceiling({"command": "x"}, 900) == {"command": "x"}  # default 120 fits
-    assert _bash_under_ceiling({"command": "x", "timeout": 600}, 900)["timeout"] == 600
-    assert _bash_under_ceiling({"command": "x"}, 100) == {"command": "x", "timeout": 88}
-    assert _bash_under_ceiling({"command": "x", "timeout": 10}, 8) == {"command": "x", "timeout": 4}
-    assert _bash_under_ceiling({"command": "x", "timeout": 5}, 1) == {"command": "x", "timeout": 5}
+    def timeout(kwargs: dict, bound: float):
+        out, refused = _bash_under_ceiling(kwargs, bound)
+        assert refused is None
+        return out.get("timeout")
+
+    assert timeout({"command": "x"}, 0) is None  # unbounded: untouched
+    assert timeout({"command": "x"}, 900) is None  # default 120 fits
+    assert timeout({"command": "x", "timeout": 600}, 900) == 600
+    assert timeout({"command": "x"}, 100) == 88  # 100 - grace 2 - margin 10
+    assert timeout({"command": "x", "timeout": 10}, 8) == 4  # 8 - 2 - 8/4
+
+
+@pytest.mark.parametrize("bound, expected", [
+    (4.0, 1.0),  # the formula reaches Bash's 1 s floor exactly: 4 - 2 - 1
+    (4.4, 4.4 - 2 - 1.1),  # just above it
+    (3.9, None),  # just below it: refused, never the 60 s asked for
+    (1.0, None),
+    (0.001, None),  # the smallest positive ceiling (0 means unbounded)
+])
+def test_bash_under_ceiling_at_the_floor(bound, expected) -> None:
+    """Every ceiling either fits Bash's run plus cleanup under it or refuses
+    the call; it never falls back to a timeout larger than the ceiling."""
+    out, refused = _bash_under_ceiling({"command": "x", "timeout": 60}, bound)
+    if expected is None:
+        assert refused and "Bash was not run" in refused and out == {"command": "x", "timeout": 60}
+    else:
+        assert refused is None and out["timeout"] == pytest.approx(expected)
+        assert out["timeout"] + bash.KILL_GRACE_S < bound
+
+
+async def test_bash_in_a_cell_under_a_too_short_ceiling_is_refused_up_front(tmp_path) -> None:
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=3))
+    loop = _Loop(str(tmp_path))
+    marker = tmp_path / "ran"
+    code = (
+        "from tools.Bash import Bash\n"
+        f"Bash(command='echo BEFORE; touch {marker}; sleep 30', timeout=60)\n"
+    )
+    started = time.monotonic()
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 1})
+    finally:
+        await session.aclose()
+    assert time.monotonic() - started < 10
+    assert out.is_error and "Bash was not run" in out.text and "per-call ceiling is 3s" in out.text
+    assert "cancelled before it returned" not in out.text
+    assert not marker.exists()
+    assert not [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
 
 
 # ─── review round 1 ──────────────────────────────────────────────────────────
@@ -297,3 +341,66 @@ async def test_a_cancel_during_the_interrupt_grace_resets_the_kernel(tmp_path) -
         await session.aclose()
     assert "NEW CELL 7" in nxt.text
     assert "OK" in bash_cell.text
+
+
+# ─── review round 2: every restart path is cancel-safe ───────────────────────
+
+@posix_only
+@pytest.mark.parametrize("barrier", ["_restore", "_checkpoint_frame"])
+async def test_a_cancel_inside_restart_or_checkpoint_restores_on_the_next_cell(barrier) -> None:
+    """S4: cancel at the restore of a timeout's restart (the replacement is
+    booted, the namespace not yet restored), or inside the checkpoint after a
+    cell. The child is killed and forgotten; the next cell restores the
+    checkpoint and says so, instead of a live kernel missing ``keep``."""
+    kernel = SubprocessKernel(KernelConfig())
+    await kernel.start()
+    try:
+        await kernel.exec("keep = 7", timeout=10, on_host_call=_null_host)
+        entered = asyncio.Event()
+        real = getattr(kernel, barrier)
+
+        async def blocked(*args, **kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+        setattr(kernel, barrier, blocked)
+        code = _hang_after("x") if barrier == "_restore" else "other = 8"
+        task = asyncio.ensure_future(kernel.exec(code, timeout=0.5, on_host_call=_null_host))
+        await asyncio.wait_for(entered.wait(), timeout=20)
+        child = kernel._proc
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        setattr(kernel, barrier, real)
+        assert kernel._proc is None
+        await asyncio.wait_for(child.wait(), timeout=10)  # killed, not left live
+        after = await kernel.exec("keep", timeout=10, on_host_call=_null_host)
+        assert after.value_repr == "7"
+        assert "namespace restored from last checkpoint" in after.notes
+    finally:
+        await kernel.stop()
+
+
+async def test_a_cancel_during_the_first_start_leaves_a_kernel_that_starts_again() -> None:
+    kernel = SubprocessKernel(KernelConfig())
+    entered = asyncio.Event()
+    real = kernel._read_frame
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    kernel._read_frame = blocked
+    task = asyncio.ensure_future(kernel.start())
+    await asyncio.wait_for(entered.wait(), timeout=20)
+    child = kernel._proc
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    kernel._read_frame = real
+    try:
+        assert kernel._proc is None
+        await asyncio.wait_for(child.wait(), timeout=10)
+        assert (await kernel.exec("1 + 1", timeout=10, on_host_call=_null_host)).value_repr == "2"
+    finally:
+        await kernel.stop()

@@ -224,23 +224,33 @@ class _HumanWait:
 
 
 # Seconds an in-kernel Bash call keeps clear of the kernel's per-call
-# ceiling beyond its kill grace (a quarter of the ceiling when that is short):
-# Bash's whole run, timeout plus kill and drain, then ends before the ceiling,
-# so the output printed before the timeout comes back instead of being
-# cancelled away with the call (#1549).
+# ceiling beyond its kill grace (a quarter of the ceiling when that is short).
+# The rule: Bash's timeout is at most ceiling - kill grace - margin, so its
+# whole run (timeout, then kill and drain) ends before the ceiling and the
+# output printed before the timeout comes back instead of being cancelled away
+# with the call (#1549); a ceiling too short for even Bash's minimum timeout
+# refuses the call before it runs.
 _BASH_CEILING_MARGIN_S = 10.0
 
 
-def _bash_under_ceiling(kwargs: dict, bound: float) -> dict:
-    """``kwargs`` with Bash's timeout held under the per-call ceiling ``bound``."""
+def _bash_under_ceiling(kwargs: dict, bound: float) -> tuple[dict, str | None]:
+    """``(kwargs, None)`` with Bash's timeout held under the per-call ceiling
+    ``bound`` (0 = unbounded), or ``(kwargs, error)`` when no Bash timeout fits."""
     if bound <= 0 or not isinstance(kwargs, dict):
-        return kwargs
+        return kwargs, None
     from fluid.tools.builtins.bash import DEFAULT_TIMEOUT_S, KILL_GRACE_S, MIN_TIMEOUT_S, clamp_timeout
 
     limit = bound - KILL_GRACE_S - min(_BASH_CEILING_MARGIN_S, bound / 4)
-    if limit < MIN_TIMEOUT_S or clamp_timeout(kwargs.get("timeout", DEFAULT_TIMEOUT_S)) <= limit:
-        return kwargs
-    return {**kwargs, "timeout": limit}
+    if limit < MIN_TIMEOUT_S:
+        return kwargs, (
+            f"Bash was not run: this cell's per-call ceiling is {bound:g}s, too "
+            f"short for Bash's minimum {MIN_TIMEOUT_S:g}s timeout plus its "
+            f"{KILL_GRACE_S:g}s cleanup. Give the cell a longer timeout, or "
+            "call Bash outside the cell."
+        )
+    if clamp_timeout(kwargs.get("timeout", DEFAULT_TIMEOUT_S)) <= limit:
+        return kwargs, None
+    return {**kwargs, "timeout": limit}, None
 
 
 def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
@@ -608,7 +618,9 @@ class CodeModeSession:
 
         async def _host_call(name: str, kwargs: dict) -> HostReply:
             if name == "Bash":
-                kwargs = _bash_under_ceiling(kwargs, bound)
+                kwargs, refused = _bash_under_ceiling(kwargs, bound)
+                if refused is not None:
+                    return HostReply(error=refused)
             spec = self._registry.get(name)
             record = {
                 "name": name,

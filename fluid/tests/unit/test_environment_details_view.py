@@ -642,7 +642,14 @@ async def test_a_digested_unpinned_copy_does_not_count_as_held(git_repo: Path) -
     assert last.messages[:len(upgraded.messages)] == upgraded.messages
 
 
-async def test_a_resume_over_an_unpinned_copy_sends_the_facts(git_repo: Path) -> None:
+def _facts(request: ProviderRequest) -> int:
+    return sum(m.text().count(_FACTS) for m in request.messages)
+
+
+async def test_a_resume_over_an_unpinned_copy_stores_the_facts(git_repo: Path) -> None:
+    """The resumed request itself shows the facts: admission digests the
+    resumed turn, which drops request-only notes (#1358), so the replacement
+    is stored as a pinned harness note under the resumed prompt."""
     store, sid = await _session()
     failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
     provider = ScriptedProvider([failed, _text("ok")])
@@ -651,11 +658,74 @@ async def test_a_resume_over_an_unpinned_copy_sends_the_facts(git_repo: Path) ->
     await _turn(_loop(git_repo, provider, store, sid, include_env=False, **window), UserTurn(content=big))
     _unpin(store, sid)
     loop = _loop(git_repo, provider, store, sid, include_env=False, **window)
-    # Admission digests the resumed turn too, which retires the request-only
-    # Resume note (#1358): that one request cannot show the facts.
     await _turn(loop, Resume())
-    await _turn(loop, UserTurn(content="next"))  # so the next turn stores them
-    assert _FACTS in provider.requests[-1].messages[-1].text()
+    resumed = provider.requests[-1]
+    assert resumed.messages[0].text().startswith("[compacted turn")
+    assert _facts(resumed) == 1
+    await _turn(loop, UserTurn(content="next"))
+    assert _facts(provider.requests[-1]) == 1  # held now, not sent again
+    assert provider.requests[-1].messages[:len(resumed.messages)] == resumed.messages
+
+
+async def test_a_resume_over_held_facts_stores_nothing(git_repo: Path) -> None:
+    """The ordinary retry: the path holds the facts, so the resumed request is
+    the failed one, byte for byte, and no node is written."""
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
+    provider = ScriptedProvider([failed, _text("ok")])
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False), UserTurn(content="first"))
+    stored = len(store._nodes[sid])
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False), Resume())
+    first, resumed = provider.requests
+    assert _facts(resumed) == 1 and resumed.messages == first.messages
+    assert len(store._nodes[sid]) == stored + 1  # only the reply
+
+
+async def test_every_request_entry_carries_exactly_one_facts_block(git_repo: Path) -> None:
+    """Over a legacy transcript (unpinned facts, digested): a wake or hand-off
+    to a fresh engine, a fork, a rewind, a retry after failure, a Handoff into
+    a new session and a subagent's first turn each send one facts block."""
+    from fluid.events import Fork, Handoff, Rewind
+
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "boom", "retriable": False})]
+    provider = ScriptedProvider([_text("ok")])
+    window = {"context_window": 32_000, "max_tokens": 8192}
+    big = [Text(c * 24_000) for c in "abcd"]
+
+    def fresh(session: str = sid) -> NativeLoop:
+        return _loop(git_repo, provider, store, session, include_env=False, **window)
+
+    await _turn(fresh(), UserTurn(content=big))  # a subagent's (any session's) first turn
+    assert _facts(provider.requests[-1]) == 1
+    _unpin(store, sid)
+    legacy_reply = (await store.load_path(sid))[-1].node_id
+    seen = {}
+    loop = fresh()
+    await _turn(loop, UserTurn(content="wake"))
+    seen["wake / hand-off to a fresh engine"] = provider.requests[-1]
+    await _turn(loop, UserTurn(content="again"))
+    seen["next turn, held"] = provider.requests[-1]
+    await loop.submit(Fork(from_node_id=legacy_reply))
+    await _turn(loop, UserTurn(content="fork"))
+    seen["fork"] = provider.requests[-1]
+    await loop.submit(Rewind(to_node_id=legacy_reply))
+    await _turn(loop, UserTurn(content="rewind"))
+    seen["rewind"] = provider.requests[-1]
+    await loop.submit(Rewind(to_node_id=legacy_reply))
+    provider.scripts = [failed]
+    await _turn(loop, UserTurn(content="fails"))
+    provider.scripts = [_text("ok")]
+    await _turn(fresh(), Resume())
+    seen["retry after failure"] = provider.requests[-1]
+    sessions = set(store._sessions)
+    provider.scripts = [_text("handoff document")]
+    await fresh().submit(Handoff())
+    (new_sid,) = set(store._sessions) - sessions
+    provider.scripts = [_text("ok")]
+    await _turn(fresh(new_sid), UserTurn(content="continue"))
+    seen["Handoff into a new session"] = provider.requests[-1]
+    assert {name: _facts(request) for name, request in seen.items()} == dict.fromkeys(seen, 1)
 
 
 async def test_a_fork_before_the_runtime_facts_sends_them(git_repo: Path) -> None:

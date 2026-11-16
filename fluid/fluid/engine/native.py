@@ -2748,10 +2748,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
+            prompt = head
+            facts_note = await self._store_runtime_facts(sid, head)
+            if facts_note is not None:
+                head = facts_note
             # Fix the request-only clock to one real message for this turn.
             # A tool-result head uses its preceding input, never the result;
             # matching node ids (not text) survives reloads and duplicate inputs.
-            anchor = next((n for n in reversed([*path, head])
+            anchor = next((n for n in reversed([*path, prompt])
                            if n.message.role == "user" and not is_harness_note(n.message)
                            and not any(
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
@@ -2766,7 +2770,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
             await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
-                sid, turn_id, head.message.text(), with_context=False
+                sid, turn_id, prompt.message.text(), with_context=False
             )
             if blocked:
                 return
@@ -2810,8 +2814,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
-        sections = self.system_sections.sections if self.system_sections else ()
-        if not any(s.kind == "environment" for s in sections):
+        if self._runtime_facts_only():
             # The runtime facts ride once, so check the path this turn
             # extends, not engine memory: a fork or rewind, or a legacy
             # unpinned copy a digest drops, does not hold them (#1656).
@@ -3351,6 +3354,35 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._runtime_facts_rehydrated = True
         if head_node_id is not None:
             self._runtime_facts_sent = await self._held_runtime_facts(sid, head_node_id)
+
+    def _runtime_facts_only(self) -> bool:
+        """A compiled prompt with no environment section: the runtime facts
+        are its only reminder, sent once and again only when they change."""
+        sections = self.system_sections.sections if self.system_sections else None
+        return sections is not None and not any(s.kind == "environment" for s in sections)
+
+    async def _store_runtime_facts(self, sid: str, parent: SessionNode) -> SessionNode | None:
+        """Resume: store the runtime facts as a pinned harness note under
+        ``parent`` when the resumed path holds no pinned copy of the current
+        facts (a legacy unpinned copy, or facts that changed). A request-only
+        note would not survive the admission digest of the resumed turn
+        (#1656). Old messages are never rewritten. None when nothing is due."""
+        if not self._runtime_facts_only():
+            return None
+        self._runtime_facts_sent = await self._held_runtime_facts(sid, parent.node_id)
+        parts = await self._environment_reminder_parts()
+        if not parts:
+            return None
+        block = parts[0]
+        node = SessionNode(
+            node_id=new_id("node"), parent_id=parent.node_id,
+            message=Message(
+                role="user", content=[Text(block)],
+                provider_meta={HARNESS_NOTE_META_KEY: True},
+            ).pin_context(block),
+        )
+        await self._append_node(sid, node)
+        return node
 
     async def _held_runtime_facts(self, sid: str, leaf_node_id: str | None) -> str | None:
         """The body of the pinned runtime-facts block on the path to the leaf."""
