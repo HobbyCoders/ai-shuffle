@@ -329,6 +329,38 @@ test('the helper import walk only errs toward more journeys', () => {
 	const { [`${dir}/runner.mjs`]: _, ...noRunner } = { ...base, [`${dir}/a.journey.mjs`]: '' };
 	assert.equal(pick(noRunner, `${dir}/lib/helper.mjs`).journeys.length, 1);
 	assert.match(pick(noRunner, `${dir}/lib/helper.mjs`).reasons.a[0], /runner\.mjs cannot be read/);
-	// The checked-in journeys have no unknown import.
+	// Every way a file can load another one is either followed or unknown.
+	const forms = (source) => {
+		const files = { ...base, [`${dir}/lib/shared.cjs`]: '', [`${dir}/data.svelte`]: '', [`${dir}/a.journey.mjs`]: source, [`${dir}/b.journey.mjs`]: '' };
+		return pick(files, `${dir}/lib/helper.mjs`);
+	};
+	const unknown = (source) => assert.match(forms(source).reasons.b?.[0] ?? '(b not selected)', /imports are not fully known/, source);
+	// A string prefix is not the whole argument (#review S4).
+	unknown("await import('./lib/prefix.mjs'.replace('prefix', 'helper'));");
+	unknown("await import('./lib/' + 'helper.mjs');");
+	unknown("const req = createRequire(import.meta.url);");
+	unknown("const require = createRequire(import.meta.url);\nrequire(name);");
+	unknown("require(join(here, 'lib/helper.mjs'));");
+	unknown("const here = dirname(fileURLToPath(import.meta.url));");
+	unknown("spawn(process.execPath, [join(__dirname, 'lib', 'helper.mjs')]);");
+	unknown("const url = import.meta.resolve('./lib/helper.mjs');");
+	unknown("new Worker(new URL(name, import.meta.url));");
+	unknown("readFileSync(join(checkout, 'frontend/tests/journeys/lib/helper.mjs'));");
+	// A trailing note opts a line out of the location rules, never out of a computed import().
+	assert.deepEqual(forms("const root = dirname(fileURLToPath(import.meta.url)); // select.mjs: not a journey helper (the checkout)").journeys, []);
+	unknown("await import(name); // select.mjs: not a journey helper (no)");
+	// Followed: a relative require through createRequire (#review S5) and new URL next to the module.
+	const required = { ...base, [`${dir}/lib/shared.cjs`]: "require('./helper.mjs');",
+		[`${dir}/a.journey.mjs`]: "import { createRequire } from 'node:module';\nconst require = createRequire(import.meta.url);\nconst { x } = require('./lib/shared.cjs');\nrequire('playwright-core');",
+		[`${dir}/b.journey.mjs`]: "const src = readFileSync(new URL('./lib/helper.mjs', import.meta.url), 'utf8');",
+		[`${dir}/c.journey.mjs`]: '' };
+	assert.deepEqual(pick(required, `${dir}/lib/shared.cjs`).journeys, ['a']);
+	assert.deepEqual(pick(required, `${dir}/lib/helper.mjs`).journeys, ['a', 'b']);
+	// The checked-in journeys and roots load nothing the walk cannot follow; a
+	// journey using one of the forms above fails here, naming the line.
+	for (const name of journeys) {
+		const one = selectJourneys([`${dir}/lib/__nothing_imports_this__.mjs`], { ...loadMap(), all: [], rules: [] }, [name]);
+		assert.deepEqual(one.reasons, {}, name);
+	}
 	assert.equal(selectForCi([`${dir}/lib/voice.mjs`]).all, false);
 });

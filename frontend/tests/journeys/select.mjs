@@ -35,7 +35,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, posix, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = dirname(fileURLToPath(import.meta.url)); // select.mjs: not a journey helper (finds the checkout and map.json)
 export const REPO = join(here, '..', '..', '..');
 
 /** Every journey file's name (without .journey.mjs). */
@@ -88,6 +88,22 @@ const LITERAL_IMPORT = new RegExp(String.raw`(?:\bfrom|\bimport(?:${GAP}\()?)${G
 // Every dynamic import call; one whose argument is not a plain string cannot be followed.
 const DYNAMIC_IMPORT = new RegExp(String.raw`\bimport${GAP}\(${GAP}`, 'g');
 const PLAIN_STRING = /^(['"])[^'"\n]+\1/;
+// A call's whole first argument is one plain string: the string, then `)` or `,`.
+const ONLY_STRING = new RegExp(String.raw`^(['"])([^'"\n]+)\1${GAP}[),]`);
+const REQUIRE = new RegExp(String.raw`(?<![.\w$])require${GAP}\(${GAP}`, 'g');
+const CREATE_REQUIRE = /\bcreateRequire\b/g; // select.mjs: not a journey helper (the pattern itself)
+const NAMED_REQUIRE = /\bconst\s+require\s*=\s*$/;
+const IMPORTS_CREATE_REQUIRE = /^\s*import\s*\{[^}]*\}\s*from\s*['"](?:node:)?module['"]/;
+// new URL('<plain string>', import.meta.url): a file located next to the module.
+const MODULE_URL = new RegExp(String.raw`\bnew${GAP}URL${GAP}\(${GAP}(['"])([^'"\n]+)\1${GAP},${GAP}import\.meta\.url${GAP}\)`, 'g');
+// Anything else that builds a path from the module's own location.
+const MODULE_LOCATION = /\bimport\.meta\.(?:url|dirname|filename|resolve)\b|(?<![.\w$])__(?:dirname|filename)\b/g;
+// A string naming a journey helper by its repository path (spawned, read).
+const HELPER_PATH = /(['"`])[^'"`\n]*tests\/journeys\/lib\/[^'"`\n]*\1/g;
+// A line that uses one of the forms above for something other than loading a
+// journey helper says so, with the reason, in a trailing comment.
+const NOT_A_HELPER = /\/\/\s*select\.mjs: not a journey helper\b/;
+const JS_MODULE = /\.[cm]?js$/;
 const readRepoFile = (file) => readFileSync(join(REPO, file), 'utf8');
 
 /**
@@ -120,21 +136,32 @@ function withoutComments(source) {
 }
 
 /**
- * Every repo-relative module `entry` reaches through relative imports (static,
- * re-exports and plain-string dynamic imports), itself included: { files, uncertain }.
- * `uncertain` names the first thing that kept the walk from being complete: an
- * import in code whose target cannot be read (deleted, renamed, unreadable) or a
- * dynamic import of a computed path. The caller then treats `entry` as reaching
- * every module. An import quoted in a comment is followed when its target
- * exists, which can only widen the answer, and ignored when it does not.
+ * Every repo-relative module `entry` reaches, itself included: { files, uncertain }.
+ * The ways a walked file can load another local file (README "Which journeys
+ * run", the table):
+ * - followed: static import, export … from, import '…'; import() and require()
+ *   whose whole first argument is one relative plain string; new URL('…',
+ *   import.meta.url) (a non-JavaScript target is reached but not read further).
+ * - uncertain, so every journey: any other import(); any other require() of a
+ *   non-package path; createRequire not bound to `const require`; any other use
+ *   of import.meta.url, .dirname, .filename, .resolve, __dirname or __filename;
+ *   a string naming tests/journeys/lib/ by its repository path; an import in
+ *   code whose target cannot be read (deleted, renamed, unreadable). A line can
+ *   opt out of the location and require rules (not of import()) with a trailing
+ *   `// select.mjs: not a journey helper (<reason>)`.
+ * - ignored: require('<package>') (resolves into node_modules, never a helper);
+ *   an import quoted in a comment is followed when its target exists, which can
+ *   only widen the answer, and ignored when it does not.
+ * `uncertain` names the first such case; the caller then treats `entry` as
+ * reaching every module.
  */
 function reachable(entry, cache, read = readRepoFile) {
 	if (cache.has(entry)) return cache.get(entry);
 	const files = new Set();
 	let uncertain = null;
-	const queue = [[entry, true]];
+	const queue = [[entry, true, true]];
 	while (queue.length) {
-		const [file, inCode] = queue.pop();
+		const [file, inCode, walk] = queue.pop();
 		if (files.has(file)) continue;
 		let source;
 		try {
@@ -144,19 +171,50 @@ function reachable(entry, cache, read = readRepoFile) {
 			continue;
 		}
 		files.add(file);
+		if (!walk) continue;
 		const code = withoutComments(source);
+		// Also without the text of '…' and "…" strings, where the forms below are only words.
+		const bare = code.replace(/(['"])((?:\\.|(?!\1)[^\\\n])*)\1/g, (all, quote, text) => quote + ' '.repeat(text.length) + quote);
+		const lineOf = (at) => source.slice(source.lastIndexOf('\n', at - 1) + 1, (source.indexOf('\n', at) + 1 || source.length + 1) - 1);
+		const where = (at) => `${file}:${source.slice(0, at).split('\n').length}`;
+		const unsure = (at, what, exempt = true) => {
+			if (!(exempt && NOT_A_HELPER.test(lineOf(at)))) uncertain ??= `${where(at)} ${what}`;
+		};
+		const follow = (spec, inCodeHere = true, walkHere = true) => {
+			queue.push([posix.join(posix.dirname(file), spec), inCodeHere, walkHere]);
+		};
+		const relative = (spec) => spec.startsWith('./') || spec.startsWith('../');
 		for (const match of source.matchAll(LITERAL_IMPORT)) {
 			const spec = match[2];
-			if (!spec.startsWith('./') && !spec.startsWith('../')) continue;
+			if (!relative(spec)) continue;
 			// In code when the specifier survives comment removal.
 			const at = match.index + match[0].length - spec.length - 1;
-			queue.push([posix.join(posix.dirname(file), spec), code.slice(at, at + spec.length) === spec]);
+			follow(spec, code.slice(at, at + spec.length) === spec);
 		}
-		for (const call of code.matchAll(DYNAMIC_IMPORT)) {
-			if (!PLAIN_STRING.test(code.slice(call.index + call[0].length))) {
-				uncertain ??= `${file} imports a computed path`;
-			}
+		for (const call of bare.matchAll(DYNAMIC_IMPORT)) {
+			if (!ONLY_STRING.test(code.slice(call.index + call[0].length))) unsure(call.index, 'imports a computed path', false);
 		}
+		for (const call of bare.matchAll(REQUIRE)) {
+			const arg = code.slice(call.index + call[0].length).match(ONLY_STRING);
+			if (arg && relative(arg[2])) follow(arg[2]);
+			else if (!arg || arg[2].startsWith('/')) unsure(call.index, 'requires a computed or absolute path');
+		}
+		for (const use of bare.matchAll(CREATE_REQUIRE)) {
+			const before = code.slice(code.lastIndexOf('\n', use.index - 1) + 1, use.index);
+			if (!NAMED_REQUIRE.test(before) && !IMPORTS_CREATE_REQUIRE.test(lineOf(use.index))) unsure(use.index, 'binds createRequire to another name');
+		}
+		const located = new Set();
+		for (const url of code.matchAll(MODULE_URL)) {
+			follow(url[2], true, JS_MODULE.test(url[2]));
+			located.add(url.index + url[0].lastIndexOf('import.meta.url'));
+		}
+		for (const use of bare.matchAll(MODULE_LOCATION)) {
+			if (located.has(use.index)) continue;
+			const before = code.slice(Math.max(0, use.index - 40), use.index);
+			if (use[0] === 'import.meta.url' && /\bcreateRequire\s*\(\s*$/.test(before)) continue; // select.mjs: not a journey helper (the pattern itself)
+			unsure(use.index, `builds a path from ${use[0]}`);
+		}
+		for (const name of code.matchAll(HELPER_PATH)) unsure(name.index, 'names a journey helper by path');
 	}
 	const result = { files, uncertain };
 	cache.set(entry, result);
@@ -331,7 +389,7 @@ export function checkMap(map = loadMap(), journeys = allJourneys()) {
 	return problems;
 }
 
-if (process.argv[1] && relative(process.argv[1], fileURLToPath(import.meta.url)) === '') {
+if (process.argv[1] && relative(process.argv[1], fileURLToPath(import.meta.url)) === '') { // select.mjs: not a journey helper (run as a script?)
 	const args = process.argv.slice(2);
 	const flag = (name) => args.includes(name);
 	try {

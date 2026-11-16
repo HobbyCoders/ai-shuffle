@@ -1292,8 +1292,10 @@ record).
   specifier), so a new import moves the selection with it. The walk only errs
   toward more: when any journey's or root's imports cannot be fully followed
   (an import in code whose target is missing, as after a helper is deleted or
-  renamed while something still imports it, an unreadable file, or a dynamic
-  import of a computed path), the helper selects every journey. An import
+  renamed while something still imports it, an unreadable file, an `import()`
+  or `require()` whose argument is not one plain string, or a path built from
+  the module's own location), the helper selects every journey. The README in
+  `frontend/tests/journeys` lists every load form and how it is treated. An import
   quoted in a comment is followed when its target exists and ignored when it
   does not. A deleted helper nothing imports any more selects nothing; the
   journeys that dropped it changed and select themselves.

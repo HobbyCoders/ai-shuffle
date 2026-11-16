@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { allJourneys, changedFiles, selectJourneys } from './select.mjs';
 
-const here = dirname(fileURLToPath(import.meta.url));
+const here = dirname(fileURLToPath(import.meta.url)); // select.mjs: not a journey helper (spawns the *.journey.mjs files, which are walked themselves)
 const args = process.argv.slice(2);
 const out = process.env.JOURNEY_OUT || join(tmpdir(), 'journeys');
 mkdirSync(out, { recursive: true });

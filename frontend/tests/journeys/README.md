@@ -65,6 +65,33 @@ on every PR, independently of the shards that run every journey. It also runs
 and invalid temporary maps. `--check --map <path>` validates an alternative
 map against the same checkout without changing `map.json`.
 
+How the helper walk treats each way a journey, a `.cases.mjs` file, a helper or
+a root can load another local file. The walk only errs toward more: anything it
+cannot follow runs every journey (before a merge queue, the journeys it did
+follow; the queue runs all).
+
+| Form | Treatment |
+|---|---|
+| `import … from './x'`, `export … from './x'`, `import './x'` | followed |
+| `import('./x')`, the whole first argument one plain string | followed |
+| any other `import(…)` (a variable, a template, `'./x'.replace(…)`, concatenation) | uncertain |
+| `require('./x')`, the whole first argument one relative plain string | followed |
+| `require('package')` | ignored: resolves into `node_modules`, never a helper |
+| any other `require(…)` | uncertain |
+| `createRequire`, other than `const require = createRequire(…)` and its `import` | uncertain |
+| `new URL('./x', import.meta.url)` (read, spawned or given to a `Worker`) | followed; a non-JavaScript target is reached but not walked further |
+| any other `import.meta.url`, `import.meta.dirname`/`filename`/`resolve`, `__dirname`, `__filename` | uncertain: the start of a path to read, spawn or load |
+| a string naming `tests/journeys/lib/` by its repository path | uncertain |
+| `importScripts`, `new Worker`, child-process spawns | covered by the two rows above: a helper path comes from the module's location or names `tests/journeys/lib/` |
+| an import in code whose target is missing, renamed or unreadable | uncertain |
+| an import quoted in a comment | followed if the file exists, otherwise ignored |
+
+A line that uses the location or `require` forms for something other than a
+helper says so with a trailing `// select.mjs: not a journey helper (<reason>)`
+(the runner's `playwright-core`, the checkout root). That note never covers a
+computed `import()`. `select.test.mjs` fails, naming the line, when a checked-in
+journey or root uses an uncertain form without one.
+
 ## Responsive phone and native phone shell
 
 Hosted CI deliberately builds only the desktop bundle. Phone variants exercise
