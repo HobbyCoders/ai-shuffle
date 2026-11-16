@@ -32,6 +32,7 @@ import {
 	updateModelProvider,
 	deleteModelProvider,
 	fetchProviderModels as apiFetchProviderModels,
+	rowCatalogIdentity,
 	type ModelProvider,
 	type ModelProviderCreate,
 	type FetchModelsResult
@@ -144,14 +145,15 @@ let _refreshInFlight: Promise<void> | null = null;
 let _refreshInvalidated = false;
 /**
  * One model-list fetch per provider at a time, outliving the Models tab that
- * started it (#1649). Tagged with the credential binding it ran under: a fetch
- * for credentials since replaced is never joined.
+ * started it (#1649). Tagged with the credentials it ran under (binding and,
+ * for a Google sign-in row, the sign-in): a fetch for credentials since
+ * replaced is never joined.
  */
-const _modelFetches = new Map<string, { binding: string | null; promise: Promise<FetchModelsResult> }>();
+const _modelFetches = new Map<string, { identity: string | null; promise: Promise<FetchModelsResult> }>();
 
-/** The row's current credential binding, read without subscribing a caller's effect. */
-function catalogBinding(id: string): string | null {
-	return untrack(() => _state.providers?.find((p) => p.id === id)?.catalog_binding ?? null);
+/** The row's current credential identity, read without subscribing a caller's effect. */
+function catalogIdentityOf(id: string): string | null {
+	return untrack(() => rowCatalogIdentity(_state.providers?.find((p) => p.id === id)));
 }
 
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
@@ -592,11 +594,11 @@ export const providers = {
 	fetchProviderModels(id: string, options: { fresh?: boolean } = {}): Promise<FetchModelsResult> {
 		// A second caller (the tab reopened mid-fetch) joins the running fetch,
 		// unless the credentials changed since it started or it asks for a fresh one.
-		const binding = catalogBinding(id);
+		const identity = catalogIdentityOf(id);
 		const running = _modelFetches.get(id);
-		if (running && !options.fresh && running.binding === binding) return running.promise;
+		if (running && !options.fresh && running.identity === identity) return running.promise;
 		const entry = {
-			binding,
+			identity,
 			promise: apiFetchProviderModels(id).finally(() => {
 				if (_modelFetches.get(id) === entry) _modelFetches.delete(id);
 			})
@@ -608,7 +610,7 @@ export const providers = {
 	/** Whether a model-list fetch for this provider's current credentials is still running. */
 	modelFetchRunning(id: string): boolean {
 		const running = _modelFetches.get(id);
-		return !!running && running.binding === catalogBinding(id);
+		return !!running && running.identity === catalogIdentityOf(id);
 	},
 
 	// ------------------------------------------------------------------------

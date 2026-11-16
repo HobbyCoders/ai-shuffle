@@ -25,6 +25,8 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from fluid.engine.acp.redact import traceback_text
+
 logger = logging.getLogger(__name__)
 
 PROTOCOL_VERSION = 1
@@ -146,6 +148,7 @@ class AcpConnection:
         on_notification: NotificationHandler | None = None,
         on_request: RequestHandler | None = None,
         stderr_sink: Callable[[str], None] | None = None,
+        redact: Callable[[str], str] | None = None,
     ) -> None:
         self.argv = list(argv)
         self.cwd = cwd
@@ -153,6 +156,10 @@ class AcpConnection:
         self.on_notification = on_notification
         self.on_request = on_request
         self.stderr_sink = stderr_sink
+        # Every string the agent sends us outside the conversation (stderr,
+        # RPC error messages and data, stray stdout) passes this first, so
+        # nothing built from it (logs, errors, chat events) holds a secret.
+        self.redact: Callable[[str], str] = redact or (lambda text: text)
         self._proc: asyncio.subprocess.Process | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_id = 0
@@ -299,7 +306,7 @@ class AcpConnection:
                 try:
                     message = json.loads(text)
                 except json.JSONDecodeError:
-                    logger.debug("ACP agent wrote a non-JSON line: %.200s", text)
+                    logger.debug("ACP agent wrote a non-JSON line: %.200s", self.redact(text))
                     continue
                 if isinstance(message, dict):
                     await self._dispatch(message)
@@ -323,6 +330,7 @@ class AcpConnection:
             text = line.decode("utf-8", errors="replace").rstrip()
             if not text:
                 continue
+            text = self.redact(text)
             self.stderr_tail = [*self.stderr_tail[-19:], text[:500]]
             if self.stderr_sink is not None:
                 with contextlib.suppress(Exception):
@@ -337,8 +345,8 @@ class AcpConnection:
             error = message.get("error")
             if isinstance(error, dict):
                 fut.set_exception(AcpError(
-                    int(error.get("code") or INTERNAL_ERROR), str(error.get("message") or "error"),
-                    error.get("data"),
+                    int(error.get("code") or INTERNAL_ERROR), self.redact(str(error.get("message") or "error")),
+                    self._redact_data(error.get("data")),
                 ))
             else:
                 fut.set_result(message.get("result"))
@@ -349,14 +357,24 @@ class AcpConnection:
             if self.on_notification is not None:
                 try:
                     await self.on_notification(method, params)
-                except Exception:  # noqa: BLE001 — one bad update never ends the stream
-                    logger.warning("ACP notification %s handler failed", method, exc_info=True)
+                except Exception as exc:  # noqa: BLE001 — one bad update never ends the stream
+                    logger.warning("ACP notification %s handler failed: %s", method,
+                                   self.redact(traceback_text(exc)))
             return
         # A request: answered off the reader, since an answer may wait on a
         # person (a permission prompt) while updates keep streaming.
         task = asyncio.create_task(self._answer(message.get("id"), method, params))
         self._handlers.add(task)
         task.add_done_callback(self._handlers.discard)
+
+    def _redact_data(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self.redact(value)
+        if isinstance(value, dict):
+            return {k: self._redact_data(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact_data(v) for v in value]
+        return value
 
     async def _answer(self, rid: Any, method: str, params: dict[str, Any]) -> None:
         reply: dict[str, Any] = {"jsonrpc": "2.0", "id": rid}
@@ -372,7 +390,7 @@ class AcpConnection:
                 await self._write(reply)
             raise
         except Exception as exc:  # noqa: BLE001 — the agent must always get an answer
-            logger.warning("ACP request %s handler failed", method, exc_info=True)
+            logger.warning("ACP request %s handler failed: %s", method, self.redact(traceback_text(exc)))
             reply["error"] = {"code": INTERNAL_ERROR, "message": f"client error: {exc}"}
         with contextlib.suppress(AcpError):
             await self._write(reply)

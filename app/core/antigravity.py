@@ -802,7 +802,8 @@ async def _probe(row: Mapping[str, Any]) -> Dict[str, Any]:
     except FileNotFoundError:
         # Read on the provider's own screen, which offers the install below.
         return {"state": "not_installed", "message": NOT_INSTALLED_HERE}
-    conn = AcpConnection(spec.argv, cwd=home_for(str(row.get("id") or "default")), env=spec.env)
+    conn = AcpConnection(spec.argv, cwd=home_for(str(row.get("id") or "default")), env=spec.env,
+                         redact=spec.redact)  # its error message is shown on the provider's screen
     try:
         await conn.start()
         info = await asyncio.wait_for(conn.initialize(spec.client_capabilities(), spec.client_info),

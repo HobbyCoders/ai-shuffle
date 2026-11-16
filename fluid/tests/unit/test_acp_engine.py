@@ -602,29 +602,116 @@ def test_turn_failure_reads_no_log_without_the_process(tmp_path: Path) -> None:
 
 
 _KEY = "AIzaSyFAKE0123456789abcdefghijklmnopqrstu"
+_JSON_ESCAPED_KEY = "".join(f"\\u{ord(c):04x}" for c in _KEY[:4]) + _KEY[4:]
+_SECRETS = (_KEY, _KEY[:16], _KEY[-16:], "AIza", "ya29.", "1//0FAKE", "FAKEtoken", "abcDEF123456",
+            "xyz987654321", "4/0AfJohXyz", "Goog-Signature=", "deadbeef0123", "sess-9f8e7d6c5b4a")
+_FAILED = "⚠ Agent execution terminated due to error."
+
+
+def _log_reason(tmp_path: Path, logged: str, pid: int = 333) -> Path:
+    folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"acp-server-20261115-120000-{pid}.log"
+    path.write_text(f"E1115 errorreport.go:57] agent executor error: {logged}\n")
+    return path
 
 
 @pytest.mark.parametrize("logged", [
     f"GET https://generativelanguage.googleapis.com/v1beta/models?key={_KEY}&alt=sse: 400 Bad Request",
     f'INVALID_ARGUMENT (code 400): {{"apiKey": "{_KEY}", "model": "x"}}',
+    f'INVALID_ARGUMENT (code 400): {{"apiKey": "{_JSON_ESCAPED_KEY}"}}',  # the key JSON-escaped
+    f"GET /v1beta/models?key={_KEY.replace('S', '%53')}: 400",  # URL-encoded
     "request failed: Authorization: Bearer ya29.a0FAKEaccess-token_value.more headers sent",
     'token refresh failed: {"access_token": "ya29.FAKEtoken", "refresh_token": "1//0FAKErefreshTOKENvalue"}',
+    # double-encoded JSON: a JSON string holding a token response
+    'oauth: "{\\"access_token\\": \\"FAKEtoken0123456789\\", \\"expires_in\\": 3599}"',
+    "request headers: Cookie: session=abcDEF123456; SID=xyz987654321abc",
+    "sign-in callback http://localhost:8085/?code=4/0AfJohXyz123456789&scope=email failed",
+    "code: 4/0AfJohXyz123456789 was rejected",
+    "GET https://storage.googleapis.com/b/o?X-Goog-Signature=deadbeef0123456789&X-Goog-Expires=900: 403",
     "x-goog-api-key: " + _KEY + " rejected",
-    "PERMISSION_DENIED (code 403): " + "x" * 360 + " key " + _KEY,  # the cut falls inside the key
+    "PERMISSION_DENIED (code 403): " + "x" * 360 + " key " + _KEY,  # the 400-character cut falls in the key
+    "quota for key " + _KEY[:24] + "… exceeded",  # a key the agent cut short
+    "internal: session token sess-9f8e7d6c5b4a3210fedcba expired\nretry later " + _KEY,  # multi-line
+    "INTERNAL: " + "y" * 20000 + " " + _KEY,  # a very long line
 ])
 def test_a_logged_reason_never_shows_a_secret(tmp_path: Path, logged: str) -> None:
     spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
-    folder = tmp_path / "home" / ".gemini" / "antigravity-cli" / "log"
-    folder.mkdir(parents=True, exist_ok=True)
-    (folder / "acp-server-20261115-120000-333.log").write_text(
-        f"E1115 errorreport.go:57] agent executor error: {logged}\n")
-    message = spec.turn_failure("⚠ Agent execution terminated due to error.", pid=333) or ""
+    _log_reason(tmp_path, logged)
+    message = spec.turn_failure(_FAILED, pid=333) or ""
     assert message.startswith("Antigravity ended the turn")
-    for secret in (_KEY, "AIza", "ya29.", "1//0FAKE", "FAKEtoken"):
-        assert secret not in message
-    assert "[re" in message  # the cut may fall inside the marker, never inside the key
-    # stderr and RPC errors go through the same filter.
-    assert _KEY not in spec.redact(f"stderr: url?key={_KEY}\nnext line {_KEY}")
+    for secret in _SECRETS:
+        assert secret not in message, (secret, message)
+
+
+@pytest.mark.parametrize(("logged", "expected"), [
+    # An ordinary error reads as it was logged.
+    ("RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).",
+     "Antigravity ended the turn: RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota). "
+     "Check the provider's quota."),
+    ("googleapi: Error 400: API key not valid. Please pass a valid API key., badRequest",
+     "Antigravity ended the turn: googleapi: Error 400: API key not valid. Please pass a valid API key., "
+     "badRequest. Check the provider's sign-in or API key."),
+    ("rpc error: code = Unavailable desc = the model gemini-4-hydrogen is overloaded",
+     "Antigravity ended the turn with an error: rpc error: code = Unavailable desc = the model "
+     "gemini-4-hydrogen is overloaded"),
+    # Google's JSON error: its message and status, nothing else in it.
+    ('{"error": {"code": 429, "message": "Quota exceeded for model gemini-4-argon.", '
+     '"status": "RESOURCE_EXHAUSTED", "details": [{"reason": "x"}]}}',
+     "Antigravity ended the turn: Quota exceeded for model gemini-4-argon. (RESOURCE_EXHAUSTED, code 429). "
+     "Check the provider's quota."),
+    # A URL loses its query, so the request still shows.
+    (f"GET https://generativelanguage.googleapis.com/v1beta/models?key={_KEY}: 400 Bad Request",
+     "Antigravity ended the turn with an error: GET https://generativelanguage.googleapis.com/v1beta/models?… "
+     "400 Bad Request"),
+])
+def test_a_logged_reason_still_reads_usefully(tmp_path: Path, logged: str, expected: str) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    _log_reason(tmp_path, logged)
+    assert spec.turn_failure(_FAILED, pid=333) == expected
+
+
+def test_a_payload_it_cannot_read_is_named_not_shown(tmp_path: Path) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    path = _log_reason(tmp_path, 'UNAUTHENTICATED (code 401): {"apiKey": "' + _JSON_ESCAPED_KEY + '", "x": 1}')
+    assert spec.turn_failure(_FAILED, pid=333) == (
+        "Antigravity ended the turn with an error (UNAUTHENTICATED, code 401). Its reason holds data that is "
+        f"not shown here; it is in the agent's log on the worker: {path}. Check the provider's sign-in or API key.")
+
+
+def test_redact_removes_every_secret_from_stderr_and_rpc_text(tmp_path: Path) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    text = spec.redact(f"stderr: url?key={_KEY}\nnext line {_JSON_ESCAPED_KEY}\nCookie: SID=abcDEF123456")
+    for secret in _SECRETS:
+        assert secret not in text
+    assert "next line" in text  # what is not a credential stays
+
+
+async def test_a_refused_mode_at_start_never_shows_the_key(tmp_path: Path,
+                                                           caplog: pytest.LogCaptureFixture) -> None:
+    """An RPC error echoing the key (here ``session/set_mode``'s refusal,
+    which stops the start) reaches neither the chat nor the app log; nor do
+    the agent's stderr or a refused config option's error (S5)."""
+    import logging
+
+    caplog.set_level(logging.DEBUG, logger="fluid.engine.acp")
+    d = await _driver(tmp_path, auth_mode="gemini-api-key", api_key=_KEY, permission_mode="plan",
+                      model="gemini-3.8-flash")
+    d.loop.spec.env.update({"FAKE_ACP_REJECT_MODES": "plan", "FAKE_ACP_REJECT_CONFIG": "1",
+                            "FAKE_ACP_ERROR_DETAIL": f"GET /v1/x?key={_KEY} Authorization: Bearer ya29.FAKEtoken",
+                            "FAKE_ACP_STDERR": f"starting with key {_KEY}"})
+    try:
+        end = await d.turn("hello")
+        assert isinstance(end, ErrorEvent)
+        assert end.message.startswith("Could not start the agent: The agent refused to switch to Plan")
+        shown = " ".join(str(e) for e in d.events)
+        logged = caplog.text
+        assert "starting with key" in logged  # the stderr line was logged, cleaned
+        assert "refused model=gemini-3.8-flash: bad value" in logged  # and the refused option
+        for secret in _SECRETS:
+            assert secret not in shown and secret not in logged, secret
+    finally:
+        await d.close()
 
 
 async def test_set_model_mid_session_and_images(tmp_path: Path) -> None:

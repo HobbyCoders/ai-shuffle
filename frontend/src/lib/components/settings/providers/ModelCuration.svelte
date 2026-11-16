@@ -30,7 +30,7 @@
 	import { onMount, untrack } from 'svelte';
 	import { RefreshCw } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { hasModelRefresh, getModelCatalog, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
+	import { hasModelRefresh, getModelCatalog, listCatalogIdentity, rowCatalogIdentity, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
@@ -91,8 +91,10 @@
 	const canRefresh = $derived(!current || hasModelRefresh(current));
 	/** A catalog may beat its provider row over sync; keep it hidden until matched. */
 	let candidate = $state<ModelCatalogSnapshot | null>(null);
+	/** The row's credentials: binding and, for a Google sign-in row, the sign-in. */
+	const identity = $derived(rowCatalogIdentity(current));
 	const catalog = $derived(candidate?.binding &&
-		(candidate.binding === current?.catalog_binding || (mode === 'setup' && !current))
+		(listCatalogIdentity(candidate) === identity || (mode === 'setup' && !current))
 		? candidate : null);
 	/** Revision that produced the displayed selection, not a later store read. */
 	let selectionRevision = $state<string | null | undefined>();
@@ -134,10 +136,9 @@
 			: listed.map((r) => ({ ...r, checked: stored.some((m) => m.id === r.id) }));
 		// Without a catalog the saved list is all there is: keep a row unticked
 		// on screen meanwhile, so it can be ticked again at once (#1650).
-		const binding = current?.catalog_binding;
-		const keep = !catalog && mode !== 'setup' && binding === rowsBinding;
+		const keep = !catalog && mode !== 'setup' && identity === rowsBinding;
 		rows = keep ? keepShownRows(untrack(() => rows), next) : next;
-		rowsBinding = binding;
+		rowsBinding = identity;
 		selectionRevision = current?.revision;
 		hiddenMedia = catalog?.hidden ?? [];
 		if (candidate) typeable = canRefresh && !!catalog && catalog.models.length === 0;
@@ -164,8 +165,9 @@
 			const live = refresh || mode === 'setup' || wizard || providers.modelFetchRunning(id);
 			let res = live ? null : await getModelCatalog(id);
 			if (!live) {
-				const sameBinding = !!liveCatalog?.binding && liveCatalog.binding === current?.catalog_binding;
-				const sameSnapshot = !!res?.fetched_at && res.binding === liveCatalog?.binding && res.fetched_at === sharedFetchedAt;
+				const sameBinding = !!liveCatalog?.binding && listCatalogIdentity(liveCatalog) === identity;
+				const sameSnapshot = !!res?.fetched_at && listCatalogIdentity(res) === listCatalogIdentity(liveCatalog)
+					&& res.fetched_at === sharedFetchedAt;
 				// No snapshot is not a generation: keep an unshared live result only
 				// when the provider still proves the non-null binding that produced it.
 				if (sameBinding && (sameSnapshot || (!res && !sharedFetchedAt))) {
@@ -183,14 +185,16 @@
 				await providers.refreshProviders();
 				// The credentials changed while that fetch ran (a joined fetch from
 				// before a reconnect): ask once more, for the new ones.
-				if (mode !== 'setup' && res.binding && current?.catalog_binding && res.binding !== current.catalog_binding) {
+				// A Google sign-in row's binding is the same for every account: the
+				// sign-in tells them apart.
+				if (mode !== 'setup' && res.binding && identity && listCatalogIdentity(res) !== identity) {
 					res = await providers.fetchProviderModels(id);
 					liveCatalog = res;
 					sharedFetchedAt = res.fetched_at ?? sharedFetchedAt;
 					await providers.refreshProviders();
 				}
 				// Keep the full live result; the shared copy may omit optional metadata.
-				if (mode === 'setup' && current && (!res.binding || res.binding !== current.catalog_binding)) res = null;
+				if (mode === 'setup' && current && (!res.binding || listCatalogIdentity(res) !== identity)) res = null;
 			}
 			candidate = res;
 			if (!res) {

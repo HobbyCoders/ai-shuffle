@@ -25,6 +25,8 @@ import {
 	codexDeviceStart,
 	createModelProvider,
 	deleteModelProvider,
+	listCatalogIdentity,
+	rowCatalogIdentity,
 	updateModelProvider,
 	xaiDevicePoll,
 	xaiDeviceStart,
@@ -264,9 +266,9 @@ export class DeviceEnrollment {
 			// Fresh, never a fetch still running for the account this replaced.
 			const fetched = await providers.fetchProviderModels(id, { fresh: true });
 			await providers.refreshProviders();
-			const binding = providers.current?.providers?.find((p) => p.id === id)?.catalog_binding;
+			const identity = rowCatalogIdentity(providers.current?.providers?.find((p) => p.id === id));
 			// Models another account listed are not this one's.
-			if (fetched.binding && binding && fetched.binding !== binding) return;
+			if (fetched.binding && identity && listCatalogIdentity(fetched) !== identity) return;
 			await updateModelProvider(id, { models: fetched.models ?? [] });
 		} catch {
 			// Best-effort; the row is enrolled regardless.

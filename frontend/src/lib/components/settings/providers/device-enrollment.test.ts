@@ -21,7 +21,10 @@ const mocks = vi.hoisted(() => ({
 	storeProviders: [] as { id: string; models: { id: string; label: string }[]; catalog_binding?: string }[]
 }));
 
-vi.mock('$lib/api/model-providers', () => ({
+vi.mock('$lib/api/model-providers', async (importOriginal) => ({
+	// The real identity helpers: which account a list belongs to is under test.
+	listCatalogIdentity: (await importOriginal<typeof import('$lib/api/model-providers')>()).listCatalogIdentity,
+	rowCatalogIdentity: (await importOriginal<typeof import('$lib/api/model-providers')>()).rowCatalogIdentity,
 	createModelProvider: mocks.createModelProvider,
 	deleteModelProvider: mocks.deleteModelProvider,
 	updateModelProvider: mocks.updateModelProvider,

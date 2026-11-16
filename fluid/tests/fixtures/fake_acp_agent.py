@@ -27,7 +27,11 @@ FAKE_ACP_MODES (comma-separated mode ids it offers; default
 low/high; a session keeps the model and level it was set to),
 FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
 ``config_option_update`` before answering it), FAKE_ACP_TURN_ERROR (the
-reason the ``error`` turn logs under HOME as agy does; empty logs none).
+reason the ``error`` turn logs under HOME as agy does; empty logs none),
+FAKE_ACP_ERROR_DETAIL (added to every RPC error's message and data, as an
+agent echoing a request would), FAKE_ACP_REJECT_CONFIG=1 (every
+``session/set_config_option`` is refused), FAKE_ACP_STDERR (a line written to stderr at
+start).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
@@ -158,7 +162,12 @@ class Agent:
             result = await self.dispatch(method, params)
         except RpcError as exc:
             if rid is not None:
-                await self.write({"jsonrpc": "2.0", "id": rid, "error": {"code": exc.code, "message": exc.message}})
+                error: dict = {"code": exc.code, "message": exc.message}
+                detail = os.environ.get("FAKE_ACP_ERROR_DETAIL")
+                if detail:  # what a real agent may echo: a request, a header
+                    error["message"] += f" ({detail})"
+                    error["data"] = {"detail": detail}
+                await self.write({"jsonrpc": "2.0", "id": rid, "error": error})
             return
         except Exception as exc:  # a broken command must fail its request, not hang it
             if rid is not None:
@@ -208,7 +217,8 @@ class Agent:
             session = self.sessions.get(params.get("sessionId")) or {}
             config = session.setdefault("config", default_config())
             option = next((o for o in config_options(config) if o["id"] == params.get("configId")), None)
-            if option is None or params.get("value") not in [v["value"] for v in option["options"]]:
+            if (option is None or params.get("value") not in [v["value"] for v in option["options"]]
+                    or os.environ.get("FAKE_ACP_REJECT_CONFIG") == "1"):
                 raise RpcError(-32602, "bad value")
             config[option["id"]] = params["value"]
             if option["id"] == "model" and config["thought_level"] not in catalog()[config["model"]]:
@@ -396,6 +406,9 @@ class RpcError(Exception):
 
 
 async def main() -> None:
+    if os.environ.get("FAKE_ACP_STDERR"):
+        sys.stderr.write(os.environ["FAKE_ACP_STDERR"] + "\n")
+        sys.stderr.flush()
     agent = Agent()
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=16 * 1024 * 1024)

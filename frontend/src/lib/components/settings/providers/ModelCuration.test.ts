@@ -224,6 +224,22 @@ describe('while the list is loading', () => {
 		expect((screen.getByRole('checkbox', { name: 'gemini-5-new' }) as HTMLInputElement).checked).toBe(true);
 	});
 
+	it('asks again when another Google account signed in on the same binding (S2)', async () => {
+		const signedIn = (tag: string, models = seeded) => ({ ...agent(models), catalog_signin: tag });
+		const view = render(ModelCuration, { row: signedIn('tag-a') });
+		await screen.findByTestId('curation-fetching');
+		// Account B signed in while A's fetch runs; the binding stays the same.
+		await view.rerender({ row: signedIn('tag-b', [entry('gemini-5-new')]) });
+		const fetches = () => mocks.post.mock.calls.filter(([p]) => String(p).endsWith('/fetch-models')).length;
+		const before = fetches();
+		finish({ source: 'agent', binding: 'ag-binding', signin: 'tag-a', models: seeded });
+		// Account A's list is not shown for B; B is asked.
+		await waitFor(() => expect(fetches()).toBeGreaterThan(before));
+		expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull();
+		finish({ source: 'agent', binding: 'ag-binding', signin: 'tag-b', models: [entry('gemini-5-new'), entry('gemini-5-other')] });
+		expect(await screen.findByRole('checkbox', { name: 'gemini-5-other' })).toBeTruthy();
+	});
+
 	it('shows a running fetch, still after leaving and coming back, and what it ended with (#1649)', async () => {
 		const first = render(ModelCuration, { row: agent() });
 		expect((await screen.findByTestId('curation-fetching')).textContent).toBe('Fetching list');

@@ -47,6 +47,7 @@ from fluid.engine.acp.client import (
     INVALID_PARAMS,
 )
 from fluid.engine.acp.mapping import TurnMapper, safe_server_name
+from fluid.engine.acp.redact import Redactor, env_secrets, traceback_text
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
@@ -192,10 +193,16 @@ class AcpAgentSpec:
         started, for a spec that reads that process's own log."""
         return None
 
+    def secrets(self) -> list[str]:
+        """Values that must never leave in agent text: the credentials in the
+        agent's environment (any variable named for a key, token, secret...)."""
+        return env_secrets(self.env)
+
     def redact(self, text: str) -> str:
-        """``text`` (agent output shown to the user) with this spec's secrets
-        removed."""
-        return text
+        """``text`` the agent produced (an error, stderr, a log line) with
+        this spec's secrets and every credential shape removed. The one
+        filter for agent text bound for a chat event or the app log."""
+        return Redactor(self.secrets()).clean(text) if text else text
 
     def auth_message(self, exc: AcpError) -> str:
         return f"The agent is not signed in ({exc.message})."
@@ -659,10 +666,12 @@ class AcpLoop:
             # only within one lifetime.
             self._reported_models = None
             self._acp_models = None  # a resume reply may omit it: not the old agent's
+            redact = self.spec.redact
+            extra: dict[str, Any] = {"redact": redact} if _accepts(self._connection_factory, "redact") else {}
             conn = self._connection_factory(
                 self.spec.argv, cwd=self.cwd, env=self.spec.env,
                 on_notification=self._on_notification, on_request=self._on_request,
-                stderr_sink=lambda line: logger.debug("acp agent: %s", line),
+                stderr_sink=lambda line: logger.debug("acp agent: %s", redact(line)), **extra,
             )
             await conn.start()
             self._conn = conn
@@ -686,7 +695,7 @@ class AcpLoop:
                         if exc.auth_required:
                             raise
                         logger.warning("ACP agent did not resume session %s (%s); starting a new one",
-                                       self.cli_session_id, exc.message)
+                                       self.cli_session_id, self.spec.redact(exc.message))
                 if not self._session_resumed:
                     params: dict[str, Any] = {"cwd": self.cwd, "mcpServers": servers}
                     if self.add_dirs and info.session_capability("additionalDirectories"):
@@ -714,7 +723,7 @@ class AcpLoop:
                         raise
                     # It stays in a mode that asks at least as often: run, and
                     # the host's own answers still apply the shown mode.
-                    logger.warning("ACP agent kept mode %s: %s", self._agent_mode, exc)
+                    logger.warning("ACP agent kept mode %s: %s", self._agent_mode, self.spec.redact(str(exc)))
             except BaseException:
                 self._acp_session = None
                 self._starting = False
@@ -737,8 +746,8 @@ class AcpLoop:
                 await outcome
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 — a host's bookkeeping never fails a turn
-            logger.warning("could not report the ACP agent's models", exc_info=True)
+        except Exception as exc:  # noqa: BLE001 — a host's bookkeeping never fails a turn
+            logger.warning("could not report the ACP agent's models: %s", self.spec.redact(traceback_text(exc)))
 
     def _model_not_offered(self) -> str | None:
         """What runs instead when the agent is not running the chosen model.
@@ -807,7 +816,7 @@ class AcpLoop:
             result = await conn.request("session/set_config_option",
                                         {"sessionId": sid, "configId": config_id, "value": value})
         except AcpError as exc:
-            logger.warning("ACP agent refused %s=%s: %s", config_id, value, exc.message)
+            logger.warning("ACP agent refused %s=%s: %s", config_id, value, self.spec.redact(exc.message))
             return
         if isinstance(result, Mapping) and isinstance(result.get("configOptions"), list):
             self._config_options = [o for o in result["configOptions"] if isinstance(o, dict)]
@@ -834,7 +843,7 @@ class AcpLoop:
             await conn.request("session/set_mode", {"sessionId": sid, "modeId": mode})
         except AcpError as exc:
             raise AcpModeRejected(
-                f"The agent refused to switch to {label} ({exc.message}), so it was not changed"
+                f"The agent refused to switch to {label} ({self.spec.redact(exc.message)}), so it was not changed"
                 f"{self._kept_mode_note()}.") from exc
         self._agent_mode = mode
 
@@ -887,7 +896,7 @@ class AcpLoop:
                 return
             except Exception as exc:  # noqa: BLE001 — missing binary, spawn failure
                 await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
-                                            message=f"Could not start the agent: {exc}"))
+                                            message=f"Could not start the agent: {self.spec.redact(str(exc))}"))
                 return
             if isinstance(op, Resume):
                 # Retry: send the unanswered prompt at the head again.
@@ -930,8 +939,8 @@ class AcpLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — every turn ends on a terminal event
-            logger.warning("ACP turn failed", exc_info=True)
-            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=repr(exc)))
+            logger.warning("ACP turn failed: %s", self.spec.redact(traceback_text(exc)))
+            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=self.spec.redact(repr(exc))))
         finally:
             self._steering_open = False
             self._mapper = None

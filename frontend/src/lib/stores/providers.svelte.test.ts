@@ -380,6 +380,23 @@ describe('fetchProviderModels', () => {
 		await underB;
 	});
 
+	it('never joins a fetch from another Google account on the same binding (S2)', async () => {
+		const finishes: ((v: unknown) => void)[] = [];
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => finishes.push(r)));
+		const signedIn = (tag: string | null) => provider({ id: 'ag', catalog_binding: 'ag-binding', catalog_signin: tag });
+		mocks.listModelProviders.mockResolvedValue({ providers: [signedIn('tag-a')] });
+		await providers.refreshProviders();
+		void providers.fetchProviderModels('ag');
+		// Signed in as another account: the binding is unchanged, the sign-in is not.
+		mocks.listModelProviders.mockResolvedValue({ providers: [signedIn(null)] });
+		await providers.refreshProviders();
+		expect(providers.modelFetchRunning('ag')).toBe(false);
+		void providers.fetchProviderModels('ag');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+		finishes.forEach((finish) => finish({ binding: 'ag-binding', models: [] }));
+	});
+
 	it('forgets a removed row\'s running fetch', async () => {
 		mocks.fetchProviderModels.mockReset();
 		mocks.fetchProviderModels.mockImplementation(() => new Promise(() => {}));
