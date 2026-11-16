@@ -687,6 +687,13 @@ def _project_legacy_agent(coll: policy.Collection, record_id: str,
     return {**record, "is_builtin": False}
 
 
+def _provider_selection(coll: policy.Collection, record_id: str) -> bool:
+    """Whether writing this record takes the model provider slot lock first."""
+    from app.db.model_provider_slots import SLOT_SETTING_PREFIX
+    return coll.name == "model_providers" or (
+        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX))
+
+
 def _billing_refresh_needed(cursor, coll, record_id, record):
     """Private post-commit signal; never a synced collection or trust marker."""
     if coll.name != "model_providers" or not record:
@@ -701,19 +708,22 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
 def materialize(
     cursor: Any, coll: policy.Collection, record_id: str,
     record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
+    if_absent: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
 
     ``origin_device_id`` is the device that signed the record, when known.
+    ``if_absent``: the caller saw no row under lock (``_capture_local``). A
+    row inserted since is a local change no conflict holds yet, so the write
+    then raises ``TransientApplyError`` (the op waits and is read again)
+    instead of replacing it.
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
     from app.db.model_provider_slots import (
-        SLOT_SETTING_PREFIX, lock_model_provider_slots, reconcile_model_provider_slots,
+        lock_model_provider_slots, reconcile_model_provider_slots,
     )
-    provider_selection = coll.name == "model_providers" or (
-        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX)
-    )
+    provider_selection = _provider_selection(coll, record_id)
     if provider_selection:
         lock_model_provider_slots(cursor)
     if record is not None:
@@ -909,8 +919,10 @@ def materialize(
             insert_values.append(default)
     conflict = ", ".join(coll.keys)
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
-           f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
+           f"ON CONFLICT ({conflict}) " + ("DO NOTHING" if if_absent else f"DO UPDATE SET {updates}"))
     cursor.execute(sql, tuple(insert_values))
+    if if_absent and cursor.rowcount == 0:
+        raise TransientApplyError("A local " + coll.name + " row appeared while a peer version was applied")
     if provider_selection:
         # The shared slot register, not row arrival order, selects the account.
         reconcile_model_provider_slots(cursor)
@@ -974,10 +986,10 @@ def _owns_session(cursor, ctx: NetworkContext, session_ids: Sequence[Optional[st
     return cursor.fetchone() is not None
 
 
-def _read_row(cursor, coll: policy.Collection, record_id: str) -> Optional[dict]:
+def _read_row(cursor, coll: policy.Collection, record_id: str, *, lock: bool = False) -> Optional[dict]:
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
-    cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
+    cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}" + (" FOR UPDATE" if lock else ""), keys)
     row = cursor.fetchone()
     return dict(row) if row else None
 
@@ -2025,24 +2037,28 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
-    # Keep the local loser (a concurrent local edit) for the conflicts list,
+    # Keep the local losers (a concurrent local edit) for the conflicts list,
     # first a change this worker's scanner has not published yet (#1605).
-    # Read now, stored once the replacement below has been written.
-    loser = _local_loser(cursor, ctx, coll, env.record_id, existing,
-                         plaintext if env.op == OP_UPSERT else None, env.clock, env.origin_device_id)
+    # Read and locked now, stored once the replacement below has been written.
+    losers, present = _capture_local(cursor, ctx, coll, env.record_id, existing,
+                                     plaintext if env.op == OP_UPSERT else None, env.clock, env.origin_device_id)
 
     refresh_billing = False
     if env.op == OP_DELETE:
         if coll.name == "presence":
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
-        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
+        if present is not False:
+            # Absent when read under lock: a row inserted since is a newer
+            # local change, which the scanner publishes over this tombstone.
+            materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
-            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
+            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id,
+                              if_absent=present is False)
         except _KeepObservation as kept:
             if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                 store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
@@ -2070,7 +2086,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             local_hash = ""
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash=local_hash, deleted=False, order_seq=env.order_seq)
-    if loser is not None:
+    for loser in losers:
         # Only a replacement that was written: a refused one (rolled back to
         # its savepoint, or kept) leaves the local version in place.
         store.add_conflict(cursor, **loser)
@@ -2289,70 +2305,205 @@ def _observe_clock(cursor, clock: int) -> None:
     store.observe_clock(cursor, clock)
 
 
-def _local_loser(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
-                 existing: Optional[Mapping[str, Any]], incoming: Optional[Mapping[str, Any]],
-                 winning_clock: int, winning_device_id: str) -> Optional[dict]:
-    """The conflict entry for the local version a winning peer version is about to replace, or None.
+# Shared children a parent's deletion removes through ON DELETE CASCADE:
+# parent collection -> (child collection, foreign-key column). Each child is
+# scanned, so it can hold a change the scanner has not published yet (#1605).
+# A test checks this list against the schema's foreign keys.
+_CASCADE_CHILDREN: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "agents": (("permission_rules", "profile_id"),),
+    "api_users": (("api_user_credentials", "api_user_id"), ("api_user_profiles", "api_user_id"),
+                  ("user_credential_policies", "api_user_id")),
+    "notes": (("note_attachments", "note_id"),),
+}
 
-    ``incoming`` is the winner's record (None: a deletion). Nothing when the
-    local version says the same as the winner.
+
+def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) -> bool:
+    """Whether this worker's scanner publishes this record."""
+    return (ctx.bootstrap_state == BOOTSTRAP_READY and coll.name != "session_active"
+            and coll.name in policy.SCANNED_COLLECTIONS
+            and not (coll.name == "presence" and record_id != ctx.device_id))
+
+
+class _Locked(Exception):
+    """The row holds a value credential storage must decrypt, and it is locked."""
+
+
+def _readable(coll: policy.Collection, row: Mapping[str, Any], cursor) -> Optional[dict]:
+    """The row's record, or None when no scan could publish it.
+
+    Raises ``_Locked`` while credential storage is locked: the row may hold a
+    change the scanner will publish once it can read it.
+    """
+    try:
+        return serialize_row(coll, row, cursor=cursor)
+    except TransientApplyError:
+        if not encryption.is_encryption_ready():
+            raise _Locked from None
+        return None  # unreadable for good: no scan could publish it either
+    except ApplyError:
+        return None
+
+
+def _contains_ciphertext(value: Any) -> bool:
+    if isinstance(value, str):
+        return encryption.is_encrypted(value)
+    if isinstance(value, Mapping):
+        return any(_contains_ciphertext(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_ciphertext(v) for v in value)
+    return False
+
+
+def _readable_projection(coll: policy.Collection, row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The row's shared fields that need no credential storage; the rest are
+    the secret placeholder (a conflict never holds a secret anyway)."""
+    projection: Dict[str, Any] = {}
+    for name in coll.fields:
+        if name in coll.local_fields:
+            continue
+        value = row.get(name)
+        if name in coll.json_fields:
+            value = _parse_json(value)
+        if name in coll.encrypted or _contains_ciphertext(value):
+            projection[name] = SECRET_PLACEHOLDER
+        else:
+            projection[name] = _normalize_value(value)
+    return projection
+
+
+def _capture_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+                   existing: Optional[Mapping[str, Any]], incoming: Optional[Mapping[str, Any]],
+                   winning_clock: int, winning_device_id: str) -> Tuple[List[dict], Optional[bool]]:
+    """Conflict entries for local versions a winning peer version is about to replace.
+
+    Returns ``(conflicts, present)``. ``incoming`` is the winner's record
+    (None: a deletion). Nothing for a local version that says the same as
+    the winner. ``present`` says whether the record's row existed when it was
+    read and locked here (None: not read under lock); the caller's write must
+    not replace a row that appeared since (see ``materialize``).
 
     A change this worker's scanner has not published yet (#1605) is never
     signed here: the batch may still carry proof that this worker was
     restored from a backup and that its next sequence numbers are taken
-    (#1570), so an apply allocates none. The scanner publishes a shared row
+    (#1570), so this capture allocates no sequence number (only
+    ``session_active``'s ``local_pending`` rule signs during an apply, after
+    observing the incoming clock). The scanner publishes a shared row
     whose hash differs from its sync record and retracts a live record whose
     row is gone; such a change loses to the peer version and is kept as this
-    worker's conflict instead. A deletion of a row that cannot be read while
-    credential storage is locked waits (``TransientApplyError``) until it can.
-    Owner-published collections (the session catalog) and file-backed
-    publishers are not scanned and keep their own rules; ``session_active``
-    keeps its ``local_pending`` rule.
+    worker's conflict instead. That includes the shared children a deletion
+    removes through ON DELETE CASCADE (``_CASCADE_CHILDREN``). While
+    credential storage is locked, a deletion of a row (or child) that cannot
+    be read waits (``TransientApplyError``); an upsert applies and keeps the
+    row's readable fields it replaces. Owner-published collections (the session
+    catalog) and file-backed publishers are not scanned and keep their own
+    rules; ``session_active`` keeps its ``local_pending`` rule.
+
+    Domain writers do not take the network_state lock, so the scanned row
+    (and, for a deletion, its cascaded children) is read FOR UPDATE: none can
+    change between this read and the replacement in the same transaction.
+    Lock order: network_state (the caller), the provider slot lock or a
+    deleted connector's journal lock where materialize takes them, the
+    record's row, then its children. That is the order materialize and the
+    cascading DELETE already take them.
 
     Otherwise, the local version of a record another device wrote last: its
     row, or its tombstone (which an upsert brings back).
     """
     incoming_hash = content_hash(coll, incoming) if incoming is not None else ""
     live = existing is not None and not bool(existing["deleted"])
-    scanned = (ctx.bootstrap_state == BOOTSTRAP_READY and coll.name != "session_active"
-               and coll.name in policy.SCANNED_COLLECTIONS
-               and not (coll.name == "presence" and record_id != ctx.device_id))
+    scanned = _scanned_here(ctx, coll, record_id)
     foreign = existing is not None and existing["origin_device_id"] != winning_device_id
     if not scanned and not foreign:
-        return None
-    local_row = _read_row(cursor, coll, record_id)
+        return [], None
+    if scanned and _provider_selection(coll, record_id):
+        from app.db.model_provider_slots import lock_model_provider_slots
+        lock_model_provider_slots(cursor)
+    if scanned and coll.name == "connectors" and incoming is None:
+        # A connector's deletion takes its journal lock before the row (#1399);
+        # batch callers already hold it (_lock_deleted_connectors).
+        from app.db.watches import lock_connector
+        lock_connector(cursor, record_id)
+    local_row = _read_row(cursor, coll, record_id, lock=scanned)
+    present = (local_row is not None) if scanned else None
+    conflicts: List[dict] = []
+
+    def keep(name: str, rid: str, record: Any, known: Optional[Mapping[str, Any]], mine: bool) -> None:
+        conflicts.append(dict(collection=name, record_id=rid,
+                              losing_clock=int(known["clock"]) if known is not None else 0,
+                              losing_device_id=ctx.device_id if mine else known["origin_device_id"],
+                              losing_record=record, winning_clock=int(winning_clock),
+                              winning_device_id=winning_device_id))
+
     if local_row is None:
         # Gone here: an unpublished deletion of a live record, or a tombstone.
-        if incoming is None or not scanned or not (live or foreign):
-            return None
-        losing_record: Any = {"_deleted": True}
-        unpublished = scanned and live
+        if incoming is not None and scanned and (live or foreign):
+            keep(coll.name, record_id, {"_deleted": True}, existing, scanned and live)
+        return conflicts, present
+    if scanned:
+        try:
+            local_plain = _readable(coll, local_row, cursor)
+        except _Locked:
+            if incoming is None:
+                # A deletion destroys the whole row: it waits until the row
+                # can be read and any unpublished change kept.
+                raise TransientApplyError("Credential storage is locked; a local change of "
+                                          + coll.name + " waits for it") from None
+            # An upsert applies (a partial writer's explicit clear must not
+            # wait on secrets it does not touch). Whether a readable field
+            # was changed here cannot be told without the secrets, so every
+            # readable field the winner replaces with another value is kept.
+            projection = _readable_projection(coll, local_row)
+            replaced = [name for name, value in projection.items()
+                        if value != SECRET_PLACEHOLDER and name in incoming
+                        and _normalize_value(_parse_json(incoming[name]) if name in coll.json_fields
+                                             else incoming[name]) != value]
+            if replaced:
+                keep(coll.name, record_id, projection, existing, True)
+            return conflicts, present
     else:
         try:
             local_plain = serialize_row(coll, local_row, cursor=cursor)
-        except TransientApplyError:
-            # Only a deletion destroys the whole row. An upsert must still
-            # apply (an explicit clear from a partial writer keeps the local
-            # secrets it does not carry), and no conflict could hold a
-            # secret anyway: conflicts are stored redacted.
-            if scanned and incoming is None and not encryption.is_encryption_ready():
-                raise TransientApplyError("Credential storage is locked; a local change of "
-                                          + coll.name + " waits for it") from None
-            return None  # unreadable for good (no scan could publish it either), or an upsert
         except ApplyError:
-            return None
-        if local_plain is None:
-            return None
+            local_plain = None
+    if local_plain is not None:
         local_hash = content_hash(coll, local_plain)
         unpublished = scanned and not (live and existing["content_hash"] == local_hash)
-        if local_hash == incoming_hash or not (unpublished or (foreign and live)):
-            return None
-        losing_record = redact_secrets(local_plain)
-    return dict(collection=coll.name, record_id=record_id,
-                losing_clock=int(existing["clock"]) if existing is not None else 0,
-                losing_device_id=ctx.device_id if unpublished else existing["origin_device_id"],
-                losing_record=losing_record, winning_clock=int(winning_clock),
-                winning_device_id=winning_device_id)
+        if local_hash != incoming_hash and (unpublished or (foreign and live)):
+            keep(coll.name, record_id, redact_secrets(local_plain), existing, unpublished)
+    if incoming is None and scanned:
+        conflicts.extend(_cascaded_losers(cursor, ctx, coll, record_id, winning_clock, winning_device_id))
+    return conflicts, present
+
+
+def _cascaded_losers(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+                     winning_clock: int, winning_device_id: str) -> List[dict]:
+    """This worker's unpublished shared children a deletion of the record cascades into."""
+    losers: List[dict] = []
+    for child_name, column in _CASCADE_CHILDREN.get(coll.name, ()):
+        child = policy.collection(child_name)
+        cursor.execute(f"SELECT * FROM {child.table} WHERE {column} = %s ORDER BY "
+                       + ", ".join(child.keys) + " FOR UPDATE", (record_id,))
+        rows = [dict(row) for row in cursor.fetchall()]
+        for row in rows:
+            try:
+                plain = _readable(child, row, cursor)
+            except _Locked:
+                raise TransientApplyError("Credential storage is locked; a local change of "
+                                          + child_name + " waits for it") from None
+            if plain is None:
+                continue
+            child_id = child.record_id(plain)
+            if not _scanned_here(ctx, child, child_id):
+                continue
+            known = store.get_record(cursor, child_name, child_id)
+            if (known is not None and not bool(known["deleted"])
+                    and known["content_hash"] == content_hash(child, plain)):
+                continue  # published: the scanner retracts it after the cascade
+            losers.append(dict(collection=child_name, record_id=child_id,
+                               losing_clock=int(known["clock"]) if known is not None else 0,
+                               losing_device_id=ctx.device_id, losing_record=redact_secrets(plain),
+                               winning_clock=int(winning_clock), winning_device_id=winning_device_id))
+    return losers
 
 
 def _count_outcome(result: ApplyResult, outcome: str) -> None:
@@ -3300,11 +3451,17 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
             continue
-        unpublished = coll.name in policy.SCANNED_COLLECTIONS and _local_loser(
-            cursor, ctx, coll, item["record_id"], existing, None if item["deleted"] else item["record"],
-            int(item["clock"]), item["origin_device_id"])
-        if unpublished and unpublished["losing_device_id"] == ctx.device_id:
-            conflict = unpublished  # a change this worker had not published (#1605)
+        losers: List[dict] = []
+        present: Optional[bool] = None
+        if coll.name in policy.SCANNED_COLLECTIONS:
+            captured, present = _capture_local(
+                cursor, ctx, coll, item["record_id"], existing, None if item["deleted"] else item["record"],
+                int(item["clock"]), item["origin_device_id"])
+            # Changes this worker had not published (#1605); a published
+            # loser is the conflict above.
+            losers = [loser for loser in captured if loser["losing_device_id"] == ctx.device_id]
+            if losers and losers[0]["collection"] == coll.name and losers[0]["record_id"] == item["record_id"]:
+                conflict = losers.pop(0)
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
             if isinstance(record_data, dict):
@@ -3321,7 +3478,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
             continue
         if item["deleted"]:
-            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+            if present is not False:  # see _apply_in_order
+                materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
@@ -3329,7 +3487,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             try:
                 row = materialize(cursor, coll, item["record_id"], prepared,
-                                  origin_device_id=item["origin_device_id"])
+                                  origin_device_id=item["origin_device_id"], if_absent=present is False)
             except _KeepObservation as kept:
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
@@ -3353,6 +3511,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         # must not create another misleading conflict on every snapshot round.
         if conflict:
             store.add_conflict(cursor, **conflict)
+        for loser in losers:
+            store.add_conflict(cursor, **loser)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
                          deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
