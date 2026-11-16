@@ -661,6 +661,9 @@ def rename_member(device_id: str, name: str) -> Optional[dict]:
 
     with get_db() as conn:
         cursor = conn.cursor()
+        # network_state before the name row, the order an incoming apply
+        # takes them; engine.record below would otherwise wait for it holding it.
+        lock_state(cursor)
         cursor.execute("UPDATE network_members SET name = %s, updated_at = %s WHERE device_id = %s",
                        (name, _now(), device_id))
         if not cursor.rowcount:
@@ -1737,19 +1740,11 @@ def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> Lis
 def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, losing_device_id: str,
                  losing_record: Any, winning_clock: int, winning_device_id: str) -> None:
     now = datetime.now(timezone.utc)
-    losing = _json(losing_record)
-    # A replayed apply (a retried op, a re-sent state copy) keeps one entry.
-    cursor.execute(
-        """SELECT 1 FROM sync_conflicts WHERE collection = %s AND record_id = %s AND losing_clock = %s
-           AND losing_device_id = %s AND winning_clock = %s AND winning_device_id = %s AND losing_record = %s""",
-        (collection, record_id, losing_clock, losing_device_id, winning_clock, winning_device_id, losing))
-    if cursor.fetchone() is not None:
-        return
     cursor.execute(
         """INSERT INTO sync_conflicts (collection, record_id, losing_clock, losing_device_id, losing_record,
                                        winning_clock, winning_device_id, created_at, expires_at)
            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (collection, record_id, losing_clock, losing_device_id, losing, winning_clock,
+        (collection, record_id, losing_clock, losing_device_id, _json(losing_record), winning_clock,
          winning_device_id, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat()))
 
 
