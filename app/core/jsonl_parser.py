@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from app.core.config import settings
 from app.core.harness_reminders import strip_harness_reminders
 from app.core.query_streaming import extract_mcp_image
-from app.core.session_title import derive_session_title, recover_attachment_paths
+from app.core.session_title import derive_session_title
 from app.core.transcript_tags import first_tagged_text
 from app.core.system_message_filter import is_hidden_system_subtype
 
@@ -2661,16 +2661,6 @@ def get_session_cost_from_jsonl(
     }
 
 
-def _first_message_title(text: str) -> str:
-    """A transcript's title from its first user message (#1654).
-
-    The JSONL keeps the prompt text but not the app's attachment list, so the
-    paths are recovered from the text; with none recovered the title helper
-    is in its "unknown" state and only guesses at leading tokens.
-    """
-    return derive_session_title(text, recover_attachment_paths(text) or None)
-
-
 def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Optional[str], int]:
     """
     Extract session title (first user message) and preview from JSONL file.
@@ -2703,7 +2693,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                     message_count += 1
                     if title is None:
                         # First user message is the title
-                        title = _first_message_title(content)
+                        title = derive_session_title(content)
                 elif isinstance(content, list):
                     # Check for text blocks
                     for block in content:
@@ -2712,7 +2702,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                             if text and not _is_system_content(text) and not _is_task_notification(text):
                                 message_count += 1
                                 if title is None:
-                                    title = _first_message_title(text)
+                                    title = derive_session_title(text)
                                 break
 
             elif entry_type == "assistant" and role == "assistant":

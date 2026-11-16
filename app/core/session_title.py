@@ -49,8 +49,8 @@ The one rule, by what the caller knows about the message's attachments:
   guessed;
 * unknown (``None``): only leading tokens are guessed and stripped (above),
   since an ``@`` later in prose may be a mention. Callers that never see the
-  attachment list (the API query lanes, the JSONL import when no path can be
-  recovered) are in this state.
+  attachment list (the API query lanes, the JSONL listing and import) are in
+  this state.
 
 Then the result is truncated by code points. The client's optimistic title
 (``deriveSessionTitle`` in ``frontend/src/lib/utils/message-presentation.ts``)
@@ -58,9 +58,8 @@ is a port of this function for the two known states; both suites assert the
 same final strings from ``attachment-title-cases.json``.
 """
 
-import os
 import re
-from typing import Callable, Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Tuple, Union
 
 # The first whitespace-delimited segment after '@', plus the remainder.
 _AT_TOKEN = re.compile(r"^@(?P<first>\S+)(?P<rest>(?:\s+\S+)*)")
@@ -184,48 +183,6 @@ def _attachment_names(text: str, known_paths: Iterable[str]) -> str:
             if name not in names:
                 names.append(name)
     return ", ".join(names)
-
-
-# Folders the app stages attachments in: a project's ``uploads``
-# (upload_transfer.UPLOADS_SUBDIR) and the workspace's ``chat-uploads``
-# (session_modes.CHAT_UPLOADS_DIRNAME). Named here to keep this module free of
-# their heavy imports.
-_UPLOAD_FOLDERS = frozenset({"uploads", "chat-uploads"})
-
-# How many whitespace-separated segments a recovered path may span.
-_RECOVER_SEGMENT_CAP = 12
-
-# An ``@`` that opens an absolute path (POSIX or a Windows drive).
-_AT_ABSOLUTE = re.compile(r"@(?=/|[A-Za-z]:[\\/])")
-
-
-def recover_attachment_paths(text: str, is_file: Callable[[str], bool] = os.path.isfile) -> List[str]:
-    """The attachment paths a message names, for a caller with no recorded list.
-
-    A Claude JSONL transcript keeps the prompt text but not the app's
-    attachment list. Each ``@`` that opens an absolute path is read to the
-    longest stretch of its line that names a file on disk (upload names carry
-    spaces); when the file is gone, a path inside an upload folder is read up
-    to its first segment with a file extension. Anything else is not counted:
-    an ``@alice`` or a path never uploaded stays the user's text.
-    """
-    found: List[str] = []
-    for at in _AT_ABSOLUTE.finditer(text):
-        line = text[at.end():].split("\n", 1)[0]
-        # A bounded probe: an upload name rarely holds more than a few spaces,
-        # and a listing reads every transcript's first message.
-        segments = list(re.finditer(r"\S+", line))[:_RECOVER_SEGMENT_CAP]
-        path = next((line[:seg.end()] for seg in reversed(segments) if is_file(line[:seg.end()])), None)
-        if path is None and segments:
-            folders = re.split(r"[/\\]", segments[0].group())[:-1]
-            if _UPLOAD_FOLDERS.intersection(folders):
-                path = next(
-                    (line[:seg.end()] for seg in segments[:1 + _PATH_SEGMENT_CAP] if _FILE_TAIL.match(seg.group())),
-                    None,
-                )
-        if path and path not in found:
-            found.append(path)
-    return found
 
 
 _SPACE_RUN = re.compile(r"[ \t]{2,}")

@@ -1467,39 +1467,3 @@ class TestAgentChildScreenshots:
         child = next(c for c in children if c.get("toolId") == "orphan-1")
         assert child["type"] == "tool_result"
         assert child["toolScreenshot"] == "data:image/jpeg;base64,aGVsbG8="
-
-
-class TestFirstMessageTitleAttachments:
-    """The listing/import title leaves attachment paths out (#1654).
-
-    A JSONL keeps the prompt text but not the attachment list, so the paths are
-    recovered from the text: a file on disk, or a path in an upload folder.
-    """
-
-    @staticmethod
-    def _title(tmp_path, first_user):
-        path = tmp_path / "s.jsonl"
-        path.write_text(
-            json.dumps({"type": "user", "message": {"role": "user", "content": first_user}}) + "\n"
-            + json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]}}) + "\n",
-            encoding="utf-8",
-        )
-        return jsonl_parser._get_session_title_and_preview(path)[0]
-
-    def test_a_trailing_upload_reference_is_left_out(self, tmp_path):
-        assert self._title(tmp_path, "inspect @/ws/chat-uploads/my photo.png") == "inspect"
-
-    def test_an_attachment_only_message_is_named_by_the_file(self, tmp_path):
-        assert self._title(tmp_path, "@/ws/chat-uploads/my photo.png") == "my photo.png"
-
-    def test_a_file_on_disk_is_recovered_whole_spaces_and_all(self, tmp_path):
-        shot = tmp_path / "shot (1) final.png"
-        shot.write_bytes(b"x")
-        assert self._title(tmp_path, f"compare @{shot} with the last one") == "compare with the last one"
-
-    def test_text_blocks_are_read_the_same_way(self, tmp_path):
-        content = [{"type": "text", "text": "fix this @/p/uploads/err log.txt"}]
-        assert self._title(tmp_path, content) == "fix this"
-
-    def test_a_mention_and_a_path_never_uploaded_stay(self, tmp_path):
-        assert self._title(tmp_path, "ask @alice about @/nowhere/x.png") == "ask @alice about @/nowhere/x.png"
