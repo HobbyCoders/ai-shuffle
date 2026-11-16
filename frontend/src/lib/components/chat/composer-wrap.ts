@@ -251,25 +251,54 @@ const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
  * a button which moved in since (Send became Stop) is never meant for it. Send
  * is never guarded: a stray press on it sends the draft that was typed to be
  * sent.
+ *
+ * Stop coming back to its seat did not arrive, when the button that held the
+ * seat in between had itself arrived less than ARRIVAL_GUARD_MS before: that
+ * one was never there long enough for a press to be aimed at it, so a press
+ * in the seat is still aimed at Stop. This is a queue handoff (Stop, another
+ * button for a moment, Stop again): a press must stop the queued turn. The
+ * seat takes back the arrival time Stop had, so a Stop that had only just
+ * arrived keeps the rest of its own wait, and the button in between stays
+ * guarded while it shows. Only Stop: an ignored press on it leaves a turn
+ * running, while mic and Talk start something and lose nothing by waiting. A
+ * double click still counts the swap: its later press began on the other
+ * button.
  */
 export function createArrivalGuard(now: () => number = () => performance.now()) {
 	let row: RowButton[] | null = null;
 	let arrivedAt: number[] = [];
 	let movedAt: number[] = [];
-	// A seat that was empty arms nothing: no press was aimed at a button there.
-	const seatTimes = (next: RowButton[], before: RowButton[] | null, times: number[], at: number) =>
-		next.map((button, i) => {
-			const seat = next.length - 1 - i;
-			const was = before?.[before.length - 1 - seat];
-			if (was === undefined) return -Infinity;
-			return was === button ? (times[seat] ?? -Infinity) : at;
-		}).reverse();
+	// The button each seat held before its current one, and when that one had arrived.
+	let before: ({ button: RowButton; arrivedAt: number } | undefined)[] = [];
 	return {
 		/** The row as shown now. */
 		update(next: RowButton[], settled: boolean) {
 			const at = now();
-			movedAt = seatTimes(next, row, movedAt, at);
-			arrivedAt = settled ? next.map(() => -Infinity) : seatTimes(next, row, arrivedAt, at);
+			const arrived: number[] = [];
+			const moved: number[] = [];
+			const earlier: typeof before = [];
+			for (let seat = 0; seat < next.length; seat++) {
+				const button = next[next.length - 1 - seat];
+				const was = row?.[row.length - 1 - seat];
+				if (was === undefined) {
+					// A seat that was empty arms nothing: no press was aimed at a button there.
+					arrived[seat] = moved[seat] = -Infinity;
+				} else if (was === button) {
+					arrived[seat] = arrivedAt[seat] ?? -Infinity;
+					moved[seat] = movedAt[seat] ?? -Infinity;
+					earlier[seat] = before[seat];
+				} else {
+					const leaving = arrivedAt[seat] ?? -Infinity;
+					const back = before[seat];
+					const returns = button === 'stop' && back?.button === button && at - leaving < ARRIVAL_GUARD_MS;
+					arrived[seat] = returns ? back.arrivedAt : at;
+					moved[seat] = at;
+					earlier[seat] = { button: was, arrivedAt: leaving };
+				}
+			}
+			movedAt = moved;
+			arrivedAt = settled ? next.map(() => -Infinity) : arrived;
+			before = settled ? [] : earlier;
 			row = [...next];
 		},
 		/**

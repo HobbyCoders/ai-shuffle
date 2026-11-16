@@ -10,7 +10,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect } from './app.mjs';
+import { expect, waitSeated } from './app.mjs';
 
 /** The spoken form (app.core.voice_progress.speech_text) of the fake AI's [script:voice-reply]. */
 export const VOICE_REPLY_SPOKEN =
@@ -122,6 +122,10 @@ export const endCallButton = (page) => page.getByRole('button', { name: 'Stop vo
 
 /** Press the composer's call button and wait until the call is live. */
 export async function startCall(page, { timeout = 30_000 } = {}) {
+	// Talk takes Stop's seat as a turn ends and Send's as a call ends, and
+	// ignores pointer presses just after it moved in (#1632): press once it
+	// has kept its seat.
+	await waitSeated(page, 'Start a call in this conversation');
 	await callButton(page).first().click();
 	await waitCallLive(page, { timeout });
 }

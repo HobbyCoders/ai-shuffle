@@ -403,3 +403,101 @@ describe('createPressTracker (#1632)', () => {
 		expect(t.take(undefined, 300, stop)).toBeNull();
 	});
 });
+
+describe('createArrivalGuard: Stop back in its own seat', () => {
+	let clock = 0;
+	afterEach(() => { clock = 0; });
+	/** The rows shown at each time, on one guard. */
+	const shown = (...steps: [number, Parameters<ReturnType<typeof createArrivalGuard>['update']>[0]][]) => {
+		const g = createArrivalGuard(() => clock);
+		for (const [at, row] of steps) {
+			clock = at;
+			g.update(row, false);
+		}
+		return g;
+	};
+	// A queue handoff: the turn ends at 1000, the queued one starts 150 ms later.
+	const handoff = () => shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [1150, ['mic', 'talk', 'stop']]);
+
+	it('lets a press reach Stop 20 ms and 300 ms after it came back at a queue handoff', () => {
+		const g = handoff();
+		expect(g.ignores('stop', 1170)).toBe(false);
+		expect(g.ignores('stop', 1450)).toBe(false);
+		// Only Stop: Talk, back in the seat the mic had for those 150 ms, waits.
+		expect(g.ignores('talk', 1170)).toBe(true);
+		expect(g.ignores('talk', 1150 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('does the same when the button in between is Send (no call available)', () => {
+		const g = shown([0, ['mic', 'stop']], [1000, ['mic', 'send']], [1150, ['mic', 'stop']]);
+		expect(g.ignores('stop', 1170)).toBe(false);
+		expect(g.ignores('stop', 1450)).toBe(false);
+	});
+
+	it('still ignores a press on the button that had the seat in between', () => {
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']]);
+		expect(g.ignores('talk', 1050)).toBe(true);
+		expect(g.ignores('mic', 1050)).toBe(true);
+		expect(g.ignores('talk', 1149)).toBe(true);
+	});
+
+	it('holds back the rest of a double click that began on the button in between', () => {
+		const g = handoff();
+		expect(g.ignores('stop', 1170, 2)).toBe(true);
+		expect(g.ignores('stop', 1150 + DOUBLE_PRESS_MS, 2)).toBe(false);
+	});
+
+	it('guards Stop as an arrival once the other button had the seat for the whole wait', () => {
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [1000 + ARRIVAL_GUARD_MS, ['mic', 'talk', 'stop']]);
+		expect(g.ignores('stop', 1000 + ARRIVAL_GUARD_MS + 20)).toBe(true);
+		expect(g.ignores('stop', 1000 + 2 * ARRIVAL_GUARD_MS)).toBe(false);
+		// One millisecond less and Talk was never a target: Stop is only back.
+		const h = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [999 + ARRIVAL_GUARD_MS, ['mic', 'talk', 'stop']]);
+		expect(h.ignores('stop', 1000 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('guards Stop when it takes a seat another button held: Send leaves, Stop arrives', () => {
+		// Send held the seat; Talk shows for a moment; Stop is new to the seat.
+		const g = shown([0, ['mic', 'send']], [5000, ['mic', 'talk']], [5100, ['mic', 'stop']]);
+		expect(g.ignores('stop', 5120)).toBe(true);
+		expect(g.ignores('stop', 5100 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('keeps the rest of its own wait for a button that had only just arrived', () => {
+		// Send → Stop at 1000 (guarded to 1400) → Talk for 100 ms → Stop again.
+		const g = shown([0, ['mic', 'send']], [1000, ['mic', 'stop']], [1100, ['mic', 'talk']], [1200, ['mic', 'stop']]);
+		expect(g.ignores('stop', 1300)).toBe(true);
+		expect(g.ignores('stop', 1000 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+
+	it('guards Talk each time the turn ends, however fast turns end and start', () => {
+		// Stop · Talk 150 ms · Stop 150 ms · Talk: Stop was a target all along,
+		// so the second Talk is an arrival with a full wait of its own.
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [1150, ['mic', 'talk', 'stop']], [1300, ['mic', 'talk']]);
+		expect(g.ignores('talk', 1320)).toBe(true);
+		expect(g.ignores('mic', 1320)).toBe(true);
+		expect(g.ignores('talk', 1000 + ARRIVAL_GUARD_MS + 50)).toBe(true);
+		expect(g.ignores('talk', 1300 + ARRIVAL_GUARD_MS)).toBe(false);
+		// And Stop, back once more 100 ms later, is still the button aimed at.
+		clock = 1400;
+		g.update(['mic', 'talk', 'stop'], false);
+		expect(g.ignores('stop', 1420)).toBe(false);
+	});
+
+	it('guards a third button that takes the seat during the handoff', () => {
+		// Stop · Talk 100 ms · Send (a letter typed): Send is never guarded, and
+		// Stop coming after it is new to that seat.
+		const g = shown([0, ['mic', 'talk', 'stop']], [1000, ['mic', 'talk']], [1100, ['mic', 'send']], [1200, ['mic', 'send', 'stop']]);
+		expect(g.ignores('stop', 1220)).toBe(true);
+	});
+
+	it('forgets who held a seat once the row is placed again', () => {
+		const g = createArrivalGuard(() => clock);
+		g.update(['mic', 'talk', 'stop'], false);
+		clock = 1000;
+		g.update(['mic', 'talk'], true);
+		clock = 1100;
+		g.update(['mic', 'talk', 'stop'], false);
+		expect(g.ignores('stop', 1120)).toBe(true);
+	});
+});

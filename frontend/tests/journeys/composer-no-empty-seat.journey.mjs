@@ -20,7 +20,7 @@
 // must not flip the phone's wrapped layout: the composer keeps its height
 // and the message list its place.
 import { runJourney } from './runner.mjs';
-import { chatIdByToken, composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat, waitChatOpen } from './lib/app.mjs';
+import { chatIdByToken, composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const VIEWPORTS = ['desktop', 'phone', 'fold-cover'];
@@ -301,6 +301,57 @@ await runJourney({
 				if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
 			}
 			expect(proved, 'no attempt tapped Talk just after it took Stop\'s place (see the log)');
+		}
+	}, {
+		// Stop back in its seat at a queue handoff: one turn ends, Talk shows for
+		// a moment, the queued turn starts and Stop returns. A press made just
+		// after is aimed at Stop and must stop the queued turn (the dropped Stop
+		// behind a merge-queue failure of chat-position-stability-2). Fast
+		// only: slowed down, Talk keeps the seat past the guard's window and
+		// Stop rightly counts as arriving.
+		name: 'stop-back-at-handoff',
+		viewports: ['desktop', 'phone'],
+		throttles: ['fast'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a queued turn starts under a press on Stop, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 20 })}`);
+				await waitChat(page, { streaming: 'true' });
+				await typeAndSend(page, `queued tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.locator('.pending-messages [data-queue-confirmed="true"]').first().waitFor({ timeout: 30_000 });
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; window.__handoff = {}; });
+				// Stop leaves (the turn ended), then is back (the queued turn started).
+				await page.waitForFunction(() => {
+					const stop = !!document.querySelector('.send-cluster .stop-btn');
+					const seen = window.__handoff;
+					if (!stop && seen.left === undefined) seen.left = performance.now();
+					if (stop && seen.left !== undefined && seen.back === undefined) seen.back = performance.now();
+					return seen.back !== undefined;
+				}, null, { polling: 'raf', timeout: 60_000 });
+				await (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));
+				const stopped = await waitChat(page, { streaming: 'false' }, { timeout: 5000 }).then(() => true, () => false);
+				const { click, away, back } = await page.evaluate(() => ({
+					click: window.__row.clicks[0], away: Math.round(window.__handoff.back - window.__handoff.left), back: window.__handoff.back
+				}));
+				const after = click ? Math.round(click.made - back) : null;
+				log(`attempt ${attempt}: Stop was away ${away}ms; the press was made ${after}ms after it came back, on ${click?.on}; stopped=${stopped}`);
+				// Only a press on Stop soon after a short absence tests the rule; a
+				// slow handoff or a late press by this test is retried, not judged.
+				proved = !!click && click.on === 'Stop generating' && away < 350 && after < 300;
+				if (proved) expect(stopped, `a press ${after}ms after Stop came back (away ${away}ms) stopped the queued turn`);
+				if (!stopped) {
+					await waitSeated(page, 'Stop generating');
+					await stopButton(page).click();
+					await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				}
+				await page.waitForTimeout(1000);
+			}
+			expect(proved, 'no attempt pressed Stop just after it came back at a handoff (see the log)');
 		}
 	}, {
 		// #1632 review: a tap is judged by when the press began. A touch that
