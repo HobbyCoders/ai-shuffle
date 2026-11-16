@@ -107,6 +107,11 @@
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
 		},
 		{
+			"why": "a refused send clears Stop and hands the words back, in the orderings only a reordered socket and feed show: the auto-worktree fallback and a socket start ahead of the feed",
+			"journeys": ["refused-send"],
+			"globs": ["frontend/tests/journeys/refused-send.journey.mjs", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/stores/session/v2/feed-controller.ts", "frontend/src/lib/stores/session/v2/sse-feed.ts", "app/api/sessions_worktree.py", "app/api/chat_ws_handler.py"]
+		},
+		{
 			"why": "an image click inside an inline HTML preview goes to the page that handles it, or else to the lightbox",
 			"journeys": ["html-preview-image-click"],
 			"globs": [
