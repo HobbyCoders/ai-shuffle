@@ -113,36 +113,23 @@
 		if (lastScrolled !== undefined && lastScrolled !== current) resetPane();
 		lastScrolled = current;
 	});
-	// The pane scrolls on its own only while the list is beside it (no
-	// data-replace). A reset asked for while it cannot scroll (a phone turned
-	// sideways shows one pane at a time) does nothing, and the browser brings
-	// the old offset back once the pane scrolls again. So the reset waits until
-	// the pane next scrolls on its own, unless the pane has scrolled since.
-	let paneResetPending = false;
+	// The pane scrolls on its own only beside the list (split; settings.css).
+	// Elsewhere the reset does nothing and the browser brings the old offset
+	// back once the pane scrolls again, so it is applied by place() below.
 	function resetPane() {
-		paneResetPending = true;
+		detailPlace = null;
+		panePending = true;
 		pane?.scrollTo?.({ top: 0 });
+		place();
 	}
-	let lastReplace: boolean | undefined;
-	$effect(() => {
-		const now = replace;
-		const before = lastReplace;
-		lastReplace = now;
-		if (before === undefined || before === now || now) return;
-		void tick().then(() => {
-			if (paneResetPending) pane?.scrollTo?.({ top: 0 });
-		});
-	});
 
 	// Where the detail replaces the list (stacked on a phone, or one pane at a
 	// time), both scroll in the page's own scroller. An opened detail starts at
 	// its top, not at the list's offset, and Back returns to where the list was.
 	// Pre-effect: the list's offset is read before the detail replaces it.
 	// Stacked Back keeps the item selected and only steps back to the list, so
-	// the item on screen, not the selection, is what changes. Stacked, the
-	// detail pane can also scroll on its own (settings.css pins it), and
-	// reopening the same item does not change the selection, so the pane
-	// starts at its top here too. Beside the list (split panes) none of this
+	// the item on screen, not the selection, is what changes, so the detail's
+	// place is reset here too. Beside the list (split panes) none of this
 	// runs: the pane reset above handles a newly picked item.
 	const shownItem = $derived(
 		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
@@ -176,6 +163,80 @@
 			const gap = Math.max(0, Math.min(rowGap!, scroller.clientHeight - now.height));
 			scroller.scrollTo?.({ top: scroller.scrollTop + now.top - gap });
 		});
+	});
+	// An open detail scrolls in its own pane when split and in the page's
+	// scroller otherwise (settings.css), so a window that crosses between the two
+	// moves its place across: the detail keeps its own place, never the list's,
+	// measured from its title (what sits above the title differs by layout).
+	// The rule: a saved place is where its scroller is, read on every scroll
+	// while Settings is shown in a settled layout, except a scroller at the end
+	// of its range short of the saved place: the page got shorter and the
+	// browser clamped it; the reader did not move. place() applies saved places and never writes them
+	// (landing on one reads back the same place); one it cannot apply waits
+	// while Settings is hidden (0 wide) and runs once it has a width again.
+	const split = $derived(!replace && !settingsNav.stacked);
+	/** How far the reader is past the detail's title; null: at the detail's top. */
+	let detailPlace: number | null = null;
+	let listPlace = 0;
+	let panePending = false;
+	let pagePending = false;
+	/** Shown, and laid out at the width its mode was worked out for, not mid-resize. */
+	let measuredWidth = 0;
+	const settled = () => containerWidth > 0 && el?.getBoundingClientRect().width === measuredWidth;
+	function paneTop(scroller: HTMLElement): number {
+		return pane!.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+	}
+	function titleInPane(): number {
+		const title = pane!.querySelector('[data-settings-heading="detail"]');
+		return title ? title.getBoundingClientRect().top - pane!.getBoundingClientRect().top + pane!.scrollTop : 0;
+	}
+	/** The detail's place within the pane's content, never above its top. */
+	const detailOffset = () => (detailPlace === null ? 0 : Math.max(0, titleInPane() + detailPlace));
+	/** Records `offset` into the pane's content: at (or above) its top is its top. */
+	const readDetail = (offset: number) => (detailPlace = offset <= 0 ? null : offset - titleInPane());
+	function clamped(node: HTMLElement, saved: number): boolean {
+		return node.scrollTop >= node.scrollHeight - node.clientHeight - 1 && saved > node.scrollTop + 1;
+	}
+	function place() {
+		const scroller = el && scrollParent(el);
+		if (!scroller || !pane || !settled()) return;
+		if (split) {
+			if (panePending) pane.scrollTo?.({ top: detailOffset() });
+			if (pagePending) scroller.scrollTo?.({ top: listPlace });
+			panePending = pagePending = false;
+		} else if (pagePending) {
+			if (shownItem !== null) scroller.scrollTo?.({ top: paneTop(scroller) + detailOffset() });
+			pagePending = false;
+		}
+	}
+	function onPaneScroll() {
+		if (split && settled() && !clamped(pane!, detailOffset())) readDetail(pane!.scrollTop);
+	}
+	$effect(() => {
+		const scroller = el && scrollParent(el);
+		if (!scroller) return;
+		const onscroll = () => {
+			if (!settled()) return;
+			const list = split || shownItem === null;
+			if (clamped(scroller, list ? listPlace : paneTop(scroller) + detailOffset())) return;
+			if (list) listPlace = scroller.scrollTop;
+			else readDetail(scroller.scrollTop - paneTop(scroller));
+		};
+		scroller.addEventListener('scroll', onscroll, { passive: true });
+		return () => scroller.removeEventListener('scroll', onscroll);
+	});
+	// Stacked and one-pane are told apart by two observers, so a turn can pass
+	// through the other one first: every change of layout places again.
+	const mode = $derived(settingsNav.stacked ? 'stacked' : replace ? 'one' : 'split');
+	let lastMode: string | undefined;
+	$effect(() => {
+		const now = mode;
+		if (lastMode !== undefined && lastMode !== now && untrack(() => shownItem) !== null) {
+			panePending = pagePending = true;
+		}
+		lastMode = now;
+		// Also re-runs when Settings gets a width again after being hidden.
+		if (containerWidth > 0) void tick().then(place);
 	});
 	/** The item's list row, relative to the scroller's top, if shown. */
 	function rowBox(scroller: HTMLElement, item: string | null): { top: number; height: number } | null {
@@ -253,6 +314,7 @@
 		if (!el || typeof ResizeObserver === 'undefined') return;
 		const ro = new ResizeObserver((entries) => {
 			containerWidth = entries[0]?.contentRect.width ?? 0;
+			measuredWidth = el?.getBoundingClientRect().width ?? 0;
 		});
 		ro.observe(el);
 		return () => ro.disconnect();
@@ -312,7 +374,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={() => (paneResetPending = false)}>
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={onPaneScroll}>
 		<!-- A detail that is only a state ("Not found", "Loading…", no access)
 		     has no Back of its own. Where it replaces the list, this one shows
 		     (settings.css); everywhere else it is not displayed. -->
