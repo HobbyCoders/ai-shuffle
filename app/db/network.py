@@ -1724,6 +1724,14 @@ def get_op(cursor, origin: str, incarnation: int, seq: int, *, at_or_after: bool
     return _load(row["envelope"], {}) if row else None
 
 
+def record_ops(cursor, collection: str, record_id: str, *, origin_device_id: str, clock: int) -> List[dict]:
+    """The retained envelopes that carry this version (origin and clock) of a record."""
+    cursor.execute("SELECT envelope FROM sync_ops WHERE collection = %s AND record_id = %s "
+                   "AND origin_device_id = %s AND clock = %s ORDER BY ingest_id DESC LIMIT 4",
+                   (collection, record_id, origin_device_id, clock))
+    return [_load(row["envelope"], {}) for row in cursor.fetchall()]
+
+
 def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> List[dict]:
     """Membership records this worker applied from ``origin`` past ``(incarnation, seq)``."""
     cursor.execute("""SELECT record_id, incarnation, seq FROM sync_ops

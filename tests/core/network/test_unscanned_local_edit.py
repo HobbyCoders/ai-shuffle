@@ -732,3 +732,182 @@ def test_postgres_rename_during_a_presence_publish(pg_workers, private_cluster, 
     _finish(state)
     with b.active():
         assert store.get_member(b.device_id)["name"] == "renamed"
+
+
+# -- Rows whose hash carries the nested-secret quorum (connectors, automations
+# -- with triggers, the OAuth app settings): a peer's presence op changes that
+# -- hash without any local edit. The apply must not sign this worker's stale
+# -- copy for it; only the regular scanner republishes for re-keying.
+
+@pytest.fixture
+def own_data_keys(monkeypatch):
+    """Each worker encrypts stored credentials under its own key."""
+    from contextlib import contextmanager
+    from unittest.mock import patch
+    from tests.core.network.harness import Worker
+    original, keys = Worker.active, {}
+
+    @contextmanager
+    def active(worker):
+        key = keys.setdefault(worker.name, encryption.Fernet.generate_key())
+        with patch.object(encryption, "_encryption_key", key), original(worker):
+            yield worker
+
+    monkeypatch.setattr(Worker, "active", active)
+
+
+_NESTED_SECRET = "nested-test-credential"
+
+
+def _nested_case(kind):
+    """(collection, create() -> record id, edit(record id, value), read(record id))."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+    from app.api import connector_oauth
+    from app.core import automation_service, connector_service
+    request = SimpleNamespace(base_url="https://preview.test/")
+
+    def oauth(client_id):
+        asyncio.run(connector_oauth.configure(connector_oauth.GoogleApp(
+            client_id=client_id, client_secret=_NESTED_SECRET,
+            redirect_uri="https://preview.test" + connector_oauth.CALLBACK), request))
+        return connector_oauth.SETTING
+
+    if kind == "connector":
+        def create():
+            database.create_connector("connector", "gmail", "original", connector_service.encrypt_config(
+                {"client_secret": _NESTED_SECRET, "refresh_token": _NESTED_SECRET}, "gmail"), [])
+            return "connector"
+        return ("connectors", create, lambda rid, value: database.update_connector(rid, name=value),
+                lambda rid: database.get_connector(rid)["name"])
+    if kind == "automation":
+        def create():
+            return asyncio.run(automation_service.create_automation(
+                "original", "webhook", {"secret": _NESTED_SECRET}, "default",
+                triggers=[{"type": "webhook", "config": {"secret": _NESTED_SECRET}}]))["id"]
+        return ("automations", create, lambda rid, value: database.update_automation(rid, name=value),
+                lambda rid: database.get_automation(rid)["name"])
+    return ("system_settings", lambda: oauth("original"), lambda rid, value: oauth(value),
+            lambda rid: json.loads(database.get_system_setting(rid))["client_id"])
+
+
+def _nested_pair(factory, kind, signer):
+    """Two workers with nested-secret sync on and one converged record whose
+    last version ``signer`` ("a" or "b") signed."""
+    from app.network import nested_secret_sync
+    from tests.core.network.test_nested_secret_sync import contact
+    collection, create, edit, read = _nested_case(kind)
+    a, b = factory("a"), factory("b")
+    with a.active():
+        engine.create_network("Home")
+        engine.publish_presence()
+    join(a, b)
+    for worker in (a, b):
+        with worker.active():
+            engine.publish_presence()
+    for _ in range(2):
+        contact(a, b)
+        contact(b, a)
+        converge([a, b])
+    with a.active():
+        record_id = create()
+        engine.scan_all()
+    _settle(a, b)
+    with (a if signer == "a" else b).active():
+        edit(record_id, "converged")
+        engine.scan_all()
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert nested_secret_sync.enabled()
+            assert read(record_id) == "converged"
+        assert worker.sql("SELECT origin_device_id AS o FROM sync_records WHERE collection = ? AND record_id = ?",
+                          (collection, record_id))[0]["o"] == (a if signer == "a" else b).device_id
+    return a, b, collection, record_id, edit, read
+
+
+def _busy(worker):
+    """Unrelated local ops: this worker's clock is now ahead of its peer's."""
+    with worker.active():
+        database.create_tag("busy-1", "busy")
+        database.create_tag("busy-2", "busy")
+        assert engine.scan_collection("tags") == 2  # only these: no re-keying scan
+
+
+@pytest.mark.parametrize("delivery", ["same chunk", "presence first"])
+@pytest.mark.parametrize("signer", ["a", "b"])
+@pytest.mark.parametrize("kind", ["connector", "automation", "oauth setting"])
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_a_peer_presence_change_is_not_a_local_edit(request, own_data_keys, backend, kind, signer, delivery):
+    """A republishes its presence and edits the record; B has edited nothing
+    and its clock is ahead. B must take A's edit: signing its own unchanged
+    row first (the hash differs only by the quorum) would beat A's edit and
+    revert it on both workers."""
+    factory = request.getfixturevalue("pg_workers" if backend == "postgres" else "workers")
+    a, b, collection, record_id, edit, read = _nested_pair(factory, kind, signer)
+    signed = len(_own_ops(b, collection))
+    kept = {worker: len(_conflicts(worker, record_id, collection)) for worker in (a, b)}
+    with a.active():
+        engine.publish_presence(version="9.9.9")
+    if delivery == "presence first":
+        assert exchange(a, b).retry == 0
+    with a.active():
+        edit(record_id, "edited on a")
+        engine.scan_all()
+    _busy(b)
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    with b.active():
+        assert read(record_id) == "edited on a"
+    assert len(_own_ops(b, collection)) == signed
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert read(record_id) == "edited on a"
+    # As on base: A's edit is no loser anywhere; the version it replaced on B
+    # is kept as one only when another worker than A (B itself) had signed it.
+    assert len(_conflicts(a, record_id, collection)) == kept[a]
+    on_b = _conflicts(b, record_id, collection)  # newest first
+    assert [c["losing_device_id"] for c in on_b[:len(on_b) - kept[b]]] == ([] if signer == "a" else [b.device_id])
+
+
+@pytest.mark.parametrize("kind", ["connector", "automation", "oauth setting"])
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_an_unscanned_edit_made_with_a_presence_change_is_still_signed(request, own_data_keys, backend, kind):
+    """The quorum changed AND B edited the record without scanning: that edit
+    is signed before A's version applies, as for any other row."""
+    factory = request.getfixturevalue("pg_workers" if backend == "postgres" else "workers")
+    a, b, collection, record_id, edit, read = _nested_pair(factory, kind, "a")
+    with a.active():
+        engine.publish_presence(version="9.9.9")
+    assert exchange(a, b).retry == 0
+    with a.active():
+        edit(record_id, "edited on a")
+        engine.scan_all()
+    _busy(b)
+    with b.active():
+        edit(record_id, "edited on b")  # the scanner has not run yet
+    signed = len(_own_ops(b, collection))
+    exchange(a, b)
+    assert [op["record_id"] for op in _own_ops(b, collection)[signed:]] == [record_id]
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert read(record_id) == "edited on b"  # B's clock was ahead
+        # A's version is the kept loser (re-keying scans may add their own).
+        assert a.device_id in [c["losing_device_id"] for c in _conflicts(worker, record_id, collection)]
+
+
+def test_the_scanner_still_republishes_for_a_quorum_change(workers, own_data_keys):
+    """Re-keying for a changed quorum stays the regular scanner's job: the
+    apply signs nothing for it, the next scan republishes the row."""
+    a, b, collection, record_id, _edit, _read = _nested_pair(workers, "connector", "a")
+    signed = len(_own_ops(b, collection))
+    with a.active():
+        engine.publish_presence(version="9.9.9")  # A's scanner has not re-keyed the row yet
+    assert exchange(a, b).applied == 1
+    assert len(_own_ops(b, collection)) == signed
+    with b.active():
+        assert engine.scan_collection(collection) == 1
+    assert [op["record_id"] for op in _own_ops(b, collection)[signed:]] == [record_id]

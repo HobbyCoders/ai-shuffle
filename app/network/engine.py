@@ -2375,14 +2375,47 @@ def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) 
             and not (coll.name == "presence" and record_id != ctx.device_id))
 
 
-def _unsigned(cursor, coll: policy.Collection, record_id: str, row: Optional[Mapping[str, Any]],
-              existing: Optional[Mapping[str, Any]], incoming_hash: Optional[str] = None) -> bool:
-    """Whether ``record()`` would sign something for this row: the scanner's rule.
+def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+                          plaintext: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
+    """Whether a nested-secret row still says what the signed op its sync
+    record names says, the quorum fingerprint aside.
+
+    ``_nested_rekey`` is in these rows' hash so that the scanner republishes
+    them when the quorum changes. A peer's presence op therefore changes the
+    hash of a row nobody edited here, and signing that row during an apply
+    would put this worker's old copy above the peer edit about to replace
+    it. The stored hash cannot be compared without the fingerprint, so the
+    row is compared with the retained op. No such op, or one that reads
+    differently, proves nothing: the row then counts as changed.
+    """
+    def content(record: Mapping[str, Any]) -> str:
+        return content_hash(coll, {name: value for name, value in record.items() if name != "_nested_rekey"})
+
+    from app.network.keyring import open_envelope
+    current = content(plaintext)
+    for data in store.record_ops(cursor, coll.name, record_id, origin_device_id=existing["origin_device_id"],
+                                 clock=int(existing["clock"])):
+        try:
+            env = Envelope.from_dict(data)
+            if env.op == OP_UPSERT and content(open_envelope(ctx, env)[0]) == current:
+                return True
+        except (crypto.CryptoError, envelope_mod.EnvelopeError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+              row: Optional[Mapping[str, Any]], existing: Optional[Mapping[str, Any]],
+              incoming_hash: Optional[str] = None) -> bool:
+    """Whether the apply must have this row signed first: ``record()`` would
+    sign something for it (the scanner's rule) that is a local change.
 
     A row that differs from its sync record, or a live record whose row is
     gone. A row no scan can read for good (or not shared) is not a change,
     nor is one that already holds the incoming version (``incoming_hash``):
-    replacing it loses nothing.
+    replacing it loses nothing. Nor is a nested-secret row that differs from
+    its record only by the quorum (``_holds_signed_version``): republishing
+    for that stays the regular scanner's job.
     Raises ``TransientApplyError`` while credential storage is locked.
     """
     live = existing is not None and not bool(existing["deleted"])
@@ -2400,7 +2433,10 @@ def _unsigned(cursor, coll: policy.Collection, record_id: str, row: Optional[Map
     if plaintext is None:
         return False
     current = content_hash(coll, plaintext)
-    return current != incoming_hash and not (live and existing["content_hash"] == current)
+    if current == incoming_hash or (live and existing["content_hash"] == current):
+        return False
+    return not (live and "_nested_rekey" in plaintext
+                and _holds_signed_version(cursor, ctx, coll, record_id, plaintext, existing))
 
 
 def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str, *,
@@ -2471,8 +2507,8 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
             if not _scanned_here(ctx, target, target_id):
                 continue
             try:
-                if _unsigned(cursor, target, target_id, row, store.get_record(cursor, target.name, target_id),
-                             target_hash):
+                if _unsigned(cursor, ctx, target, target_id, row,
+                             store.get_record(cursor, target.name, target_id), target_hash):
                     record(cursor, target.name, target_id, row, ctx=ctx)
             except ApplyError:
                 continue  # step 2 makes the op wait
@@ -2506,7 +2542,7 @@ def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id
         targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None)
                     for child, child_id, child_row in _children(cursor, ctx, coll, record_id, lock=True)]
     for target, target_id, target_row, known, target_hash in targets:
-        if _unsigned(cursor, target, target_id, target_row, known, target_hash):
+        if _unsigned(cursor, ctx, target, target_id, target_row, known, target_hash):
             raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + target.name)
     return row is not None
 
