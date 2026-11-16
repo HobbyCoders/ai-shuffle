@@ -248,3 +248,87 @@ test('a journey helper module selects the journeys that import it, and every jou
 	broken.by_import.roots = ['frontend/tests/journeys/__missing_root__.mjs'];
 	assert.deepEqual(checkMap(broken), ['by_import root is not a tracked file: frontend/tests/journeys/__missing_root__.mjs']);
 });
+
+test('the Agents page and the licence client select the journeys that drive them; settings and Antigravity stay unmapped', () => {
+	const agents = ['agent-model-pin', 'data-pages', 'shell-geometry', 'view-shell-back'];
+	for (const file of [
+		'frontend/src/lib/components/deck/cards/ProfileCard.svelte',
+		'frontend/src/lib/components/deck/cards/profiles/AgentDetail.svelte',
+		'frontend/src/lib/components/deck/cards/profiles/AgentList.svelte'
+	]) {
+		const picked = selectForCi([file]);
+		assert.equal(picked.all, false, file);
+		for (const name of agents) assert.ok(picked.journeys.includes(name), `${file} → ${name}`);
+	}
+	const cloud = ['insecure-context-ids', 'settings-reload', 'shell-geometry', 'side-panels'];
+	for (const file of [
+		'frontend/src/lib/api/license.ts',
+		'frontend/src/lib/components/settings/pages/CloudPage.svelte',
+		'frontend/src/lib/components/setup/LicenseStep.svelte',
+		'frontend/src/routes/setup/+page.svelte'
+	]) {
+		const picked = selectForCi([file]);
+		assert.equal(picked.all, false, file);
+		for (const name of cloud) assert.ok(picked.journeys.includes(name), `${file} → ${name}`);
+	}
+	// Too widely used to narrow safely: every journey, as on main.
+	for (const file of ['frontend/src/lib/settings/types.ts', 'frontend/src/lib/api/antigravity.ts']) {
+		assert.equal(selectForCi([file]).all, true, file);
+	}
+});
+
+test('the helper import walk only errs toward more journeys', () => {
+	const dir = 'frontend/tests/journeys';
+	const map = { all: [], rules: [], by_import: { why: 'helper', globs: [`${dir}/lib/**`], roots: [`${dir}/runner.mjs`] } };
+	const pick = (files, changed, before = false) => {
+		const read = (file) => {
+			if (!(file in files)) throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+			return files[file];
+		};
+		const names = Object.keys(files).map((f) => f.match(/([^/]+)\.journey\.mjs$/)?.[1]).filter(Boolean);
+		return before ? selectBeforeQueue([changed], map, names, null, { read }) : selectJourneys([changed], map, names, { read });
+	};
+	const base = {
+		[`${dir}/runner.mjs`]: "import { open } from './lib/app.mjs';",
+		[`${dir}/lib/app.mjs`]: '',
+		[`${dir}/lib/helper.mjs`]: '',
+		[`${dir}/lib/other.mjs`]: ''
+	};
+	// A literal dynamic import with comments around the specifier is followed.
+	const commented = { ...base,
+		[`${dir}/a.journey.mjs`]: 'const h = await import(/* load helper */ "./lib/helper.mjs" /* done */);',
+		[`${dir}/b.journey.mjs`]: "import {\n  x // the helper\n} from // here\n './lib/other.mjs';" };
+	assert.deepEqual(pick(commented, `${dir}/lib/helper.mjs`).journeys, ['a']);
+	assert.deepEqual(pick(commented, `${dir}/lib/other.mjs`).journeys, ['b']);
+	// An import quoted in a comment is followed when its target exists, and a
+	// missing one is not a gap in the walk.
+	const quoted = { ...base,
+		[`${dir}/a.journey.mjs`]: "// usage: import { h } from './lib/helper.mjs';\n// was: import './lib/gone.mjs';\nconst u = 'http://x/'; import './lib/other.mjs';",
+		[`${dir}/b.journey.mjs`]: '' };
+	assert.deepEqual(pick(quoted, `${dir}/lib/helper.mjs`).journeys, ['a']);
+	assert.deepEqual(pick(quoted, `${dir}/lib/other.mjs`).journeys, ['a']);
+	// A computed dynamic import, a template literal and an import in code whose
+	// target is missing (a deleted or renamed helper) leave the graph unknown:
+	// every journey in the queue, and the journeys it did see before it.
+	for (const source of [
+		'const h = await import(name);',
+		'const h = await import(`./lib/${name}.mjs`);',
+		"import { gone } from './lib/renamed.mjs';"
+	]) {
+		const files = { ...base, [`${dir}/a.journey.mjs`]: source, [`${dir}/b.journey.mjs`]: "import './lib/helper.mjs';", [`${dir}/c.journey.mjs`]: '' };
+		const queue = pick(files, `${dir}/lib/helper.mjs`);
+		assert.deepEqual(queue.journeys, ['a', 'b', 'c'], source);
+		assert.match(queue.reasons.c[0], /imports are not fully known/, source);
+		assert.deepEqual(pick(files, `${dir}/lib/helper.mjs`, true).journeys, ['b'], source);
+	}
+	// A helper deleted with every import of it: its old path is in no graph and
+	// selects nothing (the journeys that changed select themselves).
+	const deleted = { ...base, [`${dir}/a.journey.mjs`]: "import './lib/other.mjs';" };
+	assert.deepEqual(pick(deleted, `${dir}/lib/removed.mjs`).journeys, []);
+	// An unreadable root is unknown too.
+	const { [`${dir}/runner.mjs`]: _, ...noRunner } = { ...base, [`${dir}/a.journey.mjs`]: '' };
+	assert.equal(pick(noRunner, `${dir}/lib/helper.mjs`).journeys.length, 1);
+	assert.match(pick(noRunner, `${dir}/lib/helper.mjs`).reasons.a[0], /runner\.mjs cannot be read/);
+	// The checked-in journeys have no unknown import.
+	assert.equal(selectForCi([`${dir}/lib/voice.mjs`]).all, false);
+});

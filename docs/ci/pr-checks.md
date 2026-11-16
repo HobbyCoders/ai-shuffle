@@ -1288,11 +1288,19 @@ record).
   `by_import`) selects the journey files that import it, directly or through
   other modules or a `.cases.mjs` file; when `runner.mjs` or `run-all.mjs`
   reaches it, every journey. The imports are read from the files (relative
-  static, re-export and literal dynamic imports), so a new import moves the
-  selection with it.
+  static, re-export and literal dynamic imports, comments allowed around the
+  specifier), so a new import moves the selection with it. The walk only errs
+  toward more: when any journey's or root's imports cannot be fully followed
+  (an import in code whose target is missing, as after a helper is deleted or
+  renamed while something still imports it, an unreadable file, or a dynamic
+  import of a computed path), the helper selects every journey. An import
+  quoted in a comment is followed when its target exists and ignored when it
+  does not. A deleted helper nothing imports any more selects nothing; the
+  journeys that dropped it changed and select themselves.
 - When a merge queue guards main, a pull request runs `select.mjs --ci
   --before-queue` instead: the same rules without the `all` rules, without a
-  helper module the runner reaches and without the unmapped fallback below,
+  helper module the runner reaches (or, when the import walk is incomplete,
+  with only the journeys it did follow) and without the unmapped fallback below,
   so always a subset of the full selection. The queue's run makes the full
   one before main moves.
 - A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,

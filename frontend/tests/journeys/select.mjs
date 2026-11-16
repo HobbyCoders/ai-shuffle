@@ -23,7 +23,8 @@
 //
 // map.json's `all` rules select every journey (minus their `except` globs);
 // `by_import` files (the helpers in lib/) select the journeys that import them,
-// or every journey when one of its `roots` (the runner) does.
+// or every journey when one of its `roots` (the runner) does or when an
+// import cannot be followed (the walk only errs toward more).
 //
 // Exit code 0; 2 on a bad map or a git error. Files no rule covers select
 // nothing (a docs or backend-only change needs no journey). With --ci an
@@ -80,31 +81,86 @@ const allRuleCovers = (rule, file) => matches(rule.globs, file) && !matches(rule
 
 const JOURNEY_DIR = 'frontend/tests/journeys';
 const BEFORE_QUEUE = Symbol('before the merge queue');
-const RELATIVE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)['"](\.{1,2}\/[^'"]+)['"]/g;
+// Whitespace and comments may sit between `import`, `(`, `from` and the specifier.
+const GAP = String.raw`(?:\s|\/\*[\s\S]*?\*\/|\/\/[^\n]*(?:\n|$))*`;
+// import x from '…', export … from '…', import '…' and import('…') with a plain string.
+const LITERAL_IMPORT = new RegExp(String.raw`(?:\bfrom|\bimport(?:${GAP}\()?)${GAP}(['"])([^'"\n]+)\1`, 'g');
+// Every dynamic import call; one whose argument is not a plain string cannot be followed.
+const DYNAMIC_IMPORT = new RegExp(String.raw`\bimport${GAP}\(${GAP}`, 'g');
+const PLAIN_STRING = /^(['"])[^'"\n]+\1/;
+const readRepoFile = (file) => readFileSync(join(REPO, file), 'utf8');
+
+/**
+ * `source` with every comment replaced by spaces (same length, so offsets line
+ * up). Strings and template literals are copied as they are, so a `//` in a URL
+ * is not a comment. Only tells imports in code from imports quoted in comments;
+ * edges are still taken from the whole source.
+ */
+function withoutComments(source) {
+	let out = '';
+	for (let i = 0; i < source.length;) {
+		const c = source[i];
+		if (c === '/' && (source[i + 1] === '/' || source[i + 1] === '*')) {
+			const close = source[i + 1] === '/' ? '\n' : '*/';
+			const end = source.indexOf(close, i + 2);
+			const stop = end === -1 ? source.length : end + (close === '*/' ? 2 : 0);
+			out += source.slice(i, stop).replace(/[^\n]/g, ' ');
+			i = stop;
+		} else if (c === '"' || c === "'" || c === '`') {
+			let j = i + 1;
+			while (j < source.length && source[j] !== c && !(c !== '`' && source[j] === '\n')) j += source[j] === '\\' ? 2 : 1;
+			out += source.slice(i, j + 1);
+			i = j + 1;
+		} else {
+			out += c;
+			i++;
+		}
+	}
+	return out;
+}
 
 /**
  * Every repo-relative module `entry` reaches through relative imports (static,
- * re-exports and literal dynamic imports), itself included. Comments that look
- * like imports only widen the answer. An unreadable module ends its branch.
+ * re-exports and plain-string dynamic imports), itself included: { files, uncertain }.
+ * `uncertain` names the first thing that kept the walk from being complete: an
+ * import in code whose target cannot be read (deleted, renamed, unreadable) or a
+ * dynamic import of a computed path. The caller then treats `entry` as reaching
+ * every module. An import quoted in a comment is followed when its target
+ * exists, which can only widen the answer, and ignored when it does not.
  */
-function reachable(entry, cache) {
+function reachable(entry, cache, read = readRepoFile) {
 	if (cache.has(entry)) return cache.get(entry);
-	const seen = new Set();
-	const queue = [entry];
+	const files = new Set();
+	let uncertain = null;
+	const queue = [[entry, true]];
 	while (queue.length) {
-		const file = queue.pop();
-		if (seen.has(file)) continue;
-		seen.add(file);
+		const [file, inCode] = queue.pop();
+		if (files.has(file)) continue;
 		let source;
 		try {
-			source = readFileSync(join(REPO, file), 'utf8');
-		} catch {
+			source = read(file);
+		} catch (error) {
+			if (inCode) uncertain ??= `${file} cannot be read (${error.code ?? error.message})`;
 			continue;
 		}
-		for (const [, spec] of source.matchAll(RELATIVE_IMPORT)) queue.push(posix.join(posix.dirname(file), spec));
+		files.add(file);
+		const code = withoutComments(source);
+		for (const match of source.matchAll(LITERAL_IMPORT)) {
+			const spec = match[2];
+			if (!spec.startsWith('./') && !spec.startsWith('../')) continue;
+			// In code when the specifier survives comment removal.
+			const at = match.index + match[0].length - spec.length - 1;
+			queue.push([posix.join(posix.dirname(file), spec), code.slice(at, at + spec.length) === spec]);
+		}
+		for (const call of code.matchAll(DYNAMIC_IMPORT)) {
+			if (!PLAIN_STRING.test(code.slice(call.index + call[0].length))) {
+				uncertain ??= `${file} imports a computed path`;
+			}
+		}
 	}
-	cache.set(entry, seen);
-	return seen;
+	const result = { files, uncertain };
+	cache.set(entry, result);
+	return result;
 }
 
 /**
@@ -114,7 +170,7 @@ function reachable(entry, cache) {
  * it, directly or through other modules, and every journey when one of its
  * `roots` (what every journey runs under: the runner) does.
  */
-export function selectJourneys(files, map = loadMap(), journeys = allJourneys()) {
+export function selectJourneys(files, map = loadMap(), journeys = allJourneys(), { read } = {}) {
 	const picked = new Map();
 	const add = (name, why) => {
 		if (!journeys.includes(name)) return;
@@ -131,12 +187,21 @@ export function selectJourneys(files, map = loadMap(), journeys = allJourneys())
 		}
 		if (map.by_import && matches(map.by_import.globs, file)) {
 			const why = `${file}: ${map.by_import.why}`;
-			const everyRun = (map.by_import.roots ?? []).find((root) => reachable(root, imports).has(file));
-			// Before a merge queue, a module every journey runs under is left to the queue, like an `all` rule.
-			if (everyRun && map.by_import[BEFORE_QUEUE]) continue;
+			// Every journey when a root reaches the file, or when any import walk is
+			// incomplete: an unknown import graph never narrows the selection.
+			const graphs = [...(map.by_import.roots ?? []), ...journeys.map((name) => `${JOURNEY_DIR}/${name}.journey.mjs`)]
+				.map((entry) => [entry, reachable(entry, imports, read)]);
+			const unsure = graphs.find(([, graph]) => graph.uncertain);
+			const root = (map.by_import.roots ?? []).find((entry) => reachable(entry, imports, read).files.has(file));
+			const everyRun = unsure ? `the journeys' imports are not fully known: ${unsure[1].uncertain}`
+				: root && `${root.split('/').pop()} imports it`;
+			// Before a merge queue, every journey is left to the queue's run, like an
+			// `all` rule; with an incomplete walk the journeys it did see still run.
+			if (root && !unsure && map.by_import[BEFORE_QUEUE]) continue;
+			const every = everyRun && !map.by_import[BEFORE_QUEUE];
 			for (const name of journeys) {
-				if (everyRun) add(name, `${why} (${everyRun.split('/').pop()} imports it)`);
-				else if (reachable(`${JOURNEY_DIR}/${name}.journey.mjs`, imports).has(file)) add(name, why);
+				if (every) add(name, `${why} (${everyRun})`);
+				else if (reachable(`${JOURNEY_DIR}/${name}.journey.mjs`, imports, read).files.has(file)) add(name, why);
 			}
 		}
 		for (const rule of map.rules) {
@@ -173,12 +238,12 @@ export const MAP_FILE = 'frontend/tests/journeys/map.json';
  * names, so an edit can add journeys to this run but never drop one the base
  * map requires. Without the base's map an edited map runs every journey.
  */
-export function selectForCi(files, map = loadMap(), journeys = allJourneys(), previousMap = null) {
+export function selectForCi(files, map = loadMap(), journeys = allJourneys(), previousMap = null, options = {}) {
 	if (previousMap && files.includes(MAP_FILE)) {
 		const others = files.filter((file) => file !== MAP_FILE);
 		const picked = new Map();
 		for (const each of [map, previousMap]) {
-			const part = selectForCi(others, each, journeys);
+			const part = selectForCi(others, each, journeys, null, options);
 			for (const name of part.journeys) picked.set(name, [...(picked.get(name) ?? []), ...part.reasons[name]]);
 		}
 		const names = journeys.filter((name) => picked.has(name));
@@ -188,7 +253,7 @@ export function selectForCi(files, map = loadMap(), journeys = allJourneys(), pr
 			all: names.length === journeys.length
 		};
 	}
-	const result = selectJourneys(files, map, journeys);
+	const result = selectJourneys(files, map, journeys, options);
 	const fallback = map.unmapped_runs_all;
 	const picked = new Map(result.journeys.map((name) => [name, [...result.reasons[name]]]));
 	for (const file of files) {
@@ -208,17 +273,18 @@ export function selectForCi(files, map = loadMap(), journeys = allJourneys(), pr
  * What a pull request runs when a merge queue checks the merged result again
  * before main moves: the journeys a rule names for the changed files, and no
  * more. The `all` rules, the unmapped fallback and a `by_import` module one of
- * its roots reaches are left to the queue's run, which selects with selectForCi. Every journey the change needs still passes
+ * its roots reaches are left to the queue's run, which selects with selectForCi
+(an incomplete import walk still runs the journeys it followed). Every journey the change needs still passes
  * before main moves, once per pull request instead of once per push.
  */
-export function selectBeforeQueue(files, map = loadMap(), journeys = allJourneys(), previousMap = null) {
+export function selectBeforeQueue(files, map = loadMap(), journeys = allJourneys(), previousMap = null, options = {}) {
 	const named = (each) => each && {
 		...each,
 		all: [],
 		unmapped_runs_all: undefined,
 		by_import: each.by_import && { ...each.by_import, [BEFORE_QUEUE]: true }
 	};
-	return selectForCi(files, named(map), journeys, named(previousMap));
+	return selectForCi(files, named(map), journeys, named(previousMap), options);
 }
 
 function git(args) {

@@ -1,5 +1,5 @@
 {
-	"$comment": "Changed file → UI journeys it needs (select.mjs). Paths are repo-relative globs (** any depth, * within a name). A file matching an 'all' rule runs every journey; otherwise the union of every matching rule. An 'all' rule's 'except' globs leave a file to the other rules. A file matching 'by_import' (the journeys' helper modules) runs the journeys whose files import it, directly or through other modules, and every journey when one of its 'roots' (the runner) does. Tests (*.test.ts) never select anything. On a pull request (select.mjs --ci) a changed non-test file under 'unmapped_runs_all' that no rule covers also runs every journey; a local selection does not. There, an edit to this file is judged against the base's copy: the other changed files run what either copy names, so an edit can add journeys to the run but never drop one. Keep this in step when adding a journey: every journey must be reachable from some rule (select.mjs --check).",
+	"$comment": "Changed file → UI journeys it needs (select.mjs). Paths are repo-relative globs (** any depth, * within a name). A file matching an 'all' rule runs every journey; otherwise the union of every matching rule. An 'all' rule's 'except' globs leave a file to the other rules. A file matching 'by_import' (the journeys' helper modules) runs the journeys whose files import it, directly or through other modules, and every journey when one of its 'roots' (the runner) does or an import cannot be followed. Tests (*.test.ts) never select anything. On a pull request (select.mjs --ci) a changed non-test file under 'unmapped_runs_all' that no rule covers also runs every journey; a local selection does not. There, an edit to this file is judged against the base's copy: the other changed files run what either copy names, so an edit can add journeys to the run but never drop one. Keep this in step when adding a journey: every journey must be reachable from some rule (select.mjs --check).",
 	"unmapped_runs_all": {
 		"why": "a UI source file no rule covers: the map cannot say which journeys it needs",
 		"globs": ["frontend/src/**", "frontend/static/**"]
@@ -797,24 +797,14 @@
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
 		},
 		{
-			"why": "the Settings registry, categories, entries, access and search the Settings pages, their deep links, the shared view panels and Docs/Spotlight search are built from",
-			"journeys": ["side-panels", "settings-narrow-collection", "settings-memory", "settings-reload", "settings-memory-health", "settings-detail-link", "shell-geometry", "data-pages", "touch-targets", "update-runtime", "provider-account-switch", "worker-machine-settings", "claude-cli-models", "model-picker", "automations", "view-shell-back", "notes-writing", "agent-model-pin", "docs-viewer", "keyboard-nav"],
-			"globs": ["frontend/src/lib/settings/**"]
+			"why": "the Agents page (Workspace > Agents): the agent card, list and detail tabs with their form model; the journeys that open it, check its header and collapsed list, or pin an agent's model",
+			"journeys": ["agent-model-pin", "view-shell-back", "data-pages", "shell-geometry"],
+			"globs": ["frontend/src/lib/components/deck/cards/ProfileCard.svelte", "frontend/src/lib/components/deck/cards/profiles/**"]
 		},
 		{
-			"why": "an agent's detail tabs and their form model, opened from the agent profile card",
-			"journeys": ["agent-model-pin", "view-shell-back"],
-			"globs": ["frontend/src/lib/components/deck/cards/profiles/**"]
-		},
-		{
-			"why": "the Antigravity provider client, used only by its Settings > Providers detail and setup",
-			"journeys": ["provider-account-switch", "side-panels"],
-			"globs": ["frontend/src/lib/api/antigravity.ts"]
-		},
-		{
-			"why": "the setup route and its licence step (a separately loaded page), and the licence client Settings > Cloud shares",
-			"journeys": ["insecure-context-ids", "side-panels"],
-			"globs": ["frontend/src/routes/setup/**", "frontend/src/lib/components/setup/LicenseStep.svelte", "frontend/src/lib/api/license.ts"]
+			"why": "the setup route and its licence step, and the licence client Settings > Cloud loads: the journey that opens /setup, and those that open Cloud (its slow-licence loading state, every Settings page reloaded)",
+			"journeys": ["insecure-context-ids", "side-panels", "shell-geometry", "settings-reload"],
+			"globs": ["frontend/src/routes/setup/**", "frontend/src/lib/components/setup/LicenseStep.svelte", "frontend/src/lib/api/license.ts", "frontend/src/lib/components/settings/pages/CloudPage.svelte"]
 		}
 	]
 }
