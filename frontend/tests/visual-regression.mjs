@@ -30,6 +30,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { changedAreas, MIN_AREA, TOLERANCE as DEFAULT_TOLERANCE, verdict } from './visual-diff.mjs';
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -46,8 +47,10 @@ const args = process.argv.slice(2);
 const update = args.includes('--update');
 const strict = args.includes('--strict');
 const filters = args.filter((a) => !a.startsWith('--'));
-// Share of pixels allowed to differ (antialiasing, caret blink) before failing.
-const TOLERANCE = Number(process.env.VISUAL_TOLERANCE || 0.002);
+// Share of pixels allowed to differ (antialiasing, caret blink) before failing,
+// and the connected area of changed pixels that fails on its own (visual-diff.mjs).
+const TOLERANCE = Number(process.env.VISUAL_TOLERANCE || DEFAULT_TOLERANCE);
+const AREA = Number(process.env.VISUAL_MIN_AREA || MIN_AREA);
 
 export const VIEWPORTS = [
 	{ name: 'desktop', width: 1440, height: 900, mobile: false },
@@ -87,9 +90,10 @@ async function startServer(name, port) {
 }
 
 /**
- * Share of differing pixels, computed in the page with a canvas (no image deps),
- * plus a diff image: changed pixels red over the dimmed baseline (over the
- * larger of the two sizes when the sizes differ, which counts as all changed).
+ * Share of differing pixels and the largest connected area of them, from a
+ * canvas comparison in the page (no image deps), plus a diff image: changed
+ * pixels red over the dimmed baseline (over the larger of the two sizes when
+ * the sizes differ, which counts as all changed).
  */
 async function diffRatio(page, a, b) {
 	const result = await page.evaluate(async ([left, right]) => {
@@ -115,10 +119,14 @@ async function diffRatio(page, a, b) {
 		canvas.height = height;
 		const ctx = canvas.getContext('2d');
 		const image = ctx.createImageData(width, height);
+		const mask = new Uint8Array(width * height);
 		let differing = 0;
 		for (let i = 0; i < p.length; i += 4) {
 			const changed = Math.abs(p[i] - q[i]) > 8 || Math.abs(p[i + 1] - q[i + 1]) > 8 || Math.abs(p[i + 2] - q[i + 2]) > 8;
-			if (changed) differing++;
+			if (changed) {
+				differing++;
+				mask[i / 4] = 1;
+			}
 			// Unchanged: the baseline as a light grey wash, enough to see where things are.
 			const wash = 155 + ((p[i] + p[i + 1] + p[i + 2]) / 3) * 0.38;
 			image.data[i] = changed ? 255 : wash;
@@ -128,9 +136,13 @@ async function diffRatio(page, a, b) {
 		}
 		ctx.putImageData(image, 0, 0);
 		const sameSize = x.width === y.width && x.height === y.height;
-		return { ratio: sameSize ? differing / (p.length / 4) : 1, diff: canvas.toDataURL('image/png').split(',')[1] };
+		let bytes = '';
+		for (let i = 0; i < mask.length; i += 0x8000) bytes += String.fromCharCode(...mask.subarray(i, i + 0x8000));
+		return { ratio: sameSize ? differing / (p.length / 4) : 1, width, height, mask: btoa(bytes),
+			diff: canvas.toDataURL('image/png').split(',')[1] };
 	}, [a.toString('base64'), b.toString('base64')]);
-	return { ratio: result.ratio, diff: Buffer.from(result.diff, 'base64') };
+	const { changed, largest } = changedAreas(Buffer.from(result.mask, 'base64'), result.width, result.height);
+	return { ratio: result.ratio, changed, largest, diff: Buffer.from(result.diff, 'base64') };
 }
 
 async function main() {
@@ -174,12 +186,17 @@ async function main() {
 						const exists = await access(baseline).then(() => true, () => false);
 						if (!exists) status = 'no baseline (run --update)';
 						else {
-							const { ratio, diff } = await diffRatio(page, await readFile(baseline), shot);
-							if (ratio <= TOLERANCE) status = 'ok';
-							else {
+							const { ratio, changed, largest, diff } = await diffRatio(page, await readFile(baseline), shot);
+							const judged = verdict({ ratio, largest }, { tolerance: TOLERANCE, minArea: AREA });
+							if (judged !== 'ok') {
 								await writeFile(path.join(diffs, key), diff);
-								status = `CHANGED ${(ratio * 100).toFixed(2)}% (render ${path.join(renders, key)}, diff ${path.join(diffs, key)})`;
-							}
+								status = `${judged} (render ${path.join(renders, key)}, diff ${path.join(diffs, key)})`;
+							} else if (changed) {
+								// Under both limits but not identical: shown in the job summary, so a
+								// baseline drifting a few pixels at a time is visible before it fails.
+								await writeFile(path.join(diffs, key), diff);
+								status = `ok, ${changed} px differ (largest area ${largest} px)`;
+							} else status = 'ok';
 						}
 					}
 					results.push({ fixture: fixture.name, viewport: vp.name, status });

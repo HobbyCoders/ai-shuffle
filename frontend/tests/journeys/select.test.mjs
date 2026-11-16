@@ -195,3 +195,12 @@ test('a split journey: its shared cases or either half selects both halves', () 
 		}
 	}
 });
+
+test('the Agents page and Settings > Cloud select the journeys that check them', () => {
+	const agents = selectForCi(['frontend/src/lib/components/deck/cards/ProfileCard.svelte']).journeys;
+	for (const name of ['agent-model-pin', 'view-shell-back', 'data-pages', 'shell-geometry']) assert.ok(agents.includes(name), name);
+	// Neither journey opens an agent's Models tab.
+	assert.deepEqual(selectForCi(['frontend/src/lib/components/deck/cards/profiles/AgentModelsTab.svelte']).journeys, ['agent-model-pin']);
+	const cloud = selectForCi(['frontend/src/lib/components/settings/pages/CloudPage.svelte']).journeys;
+	assert.deepEqual(cloud, ['shell-geometry', 'side-panels']);
+});

@@ -785,6 +785,16 @@
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
+		},
+		{
+			"why": "the Agents page card: data-pages opens Agents and checks an agent's header, shell-geometry opens an agent's detail and the collapsed list",
+			"journeys": ["data-pages", "shell-geometry"],
+			"globs": ["frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+		},
+		{
+			"why": "Settings > Cloud: shell-geometry checks its title and content gap and its slow-licence loading state",
+			"journeys": ["shell-geometry"],
+			"globs": ["frontend/src/lib/components/settings/pages/CloudPage.svelte"]
 		}
 	]
 }
