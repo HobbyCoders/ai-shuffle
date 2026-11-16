@@ -16,16 +16,11 @@ docs/internal/antigravity-acp-spike.md.
   it does not advertise the standard ``sessionCapabilities.systemPrompt``).
 * A failed model call is reported as message text
   ("Agent execution terminated due to error.") with ``stopReason: end_turn``.
-  The reason is not on stderr: 1.5.8 writes it to its own log under ``HOME``
-  (``.gemini/antigravity-cli/log/acp-server-<time>-<pid>.log``, an
-  ``agent executor error: ...`` line), which ``turn_failure`` reads (#1587).
 """
 
 from __future__ import annotations
 
-import glob
 import os
-import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -33,7 +28,6 @@ from typing import Any
 
 from fluid.engine.acp.client import AcpError, AgentInfo
 from fluid.engine.acp.loop import AcpAgentSpec
-from fluid.engine.acp.redact import Redactor
 
 PROVIDER = "antigravity"
 OAUTH_PERSONAL = "oauth-personal"
@@ -58,22 +52,6 @@ EFFORT_TO_THOUGHT = {"minimal": "low", "low": "low", "medium": "medium", "high":
 THOUGHT_TO_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh",
                      "extra": "xhigh", "max": "max"}
 _ERROR_TEXT = "Agent execution terminated due to error"
-# Where the agent logs a failed turn's reason, inside its HOME (agy 1.5.8).
-_LOG_DIR = (".gemini", "antigravity-cli", "log")
-_EXECUTOR_ERROR = re.compile(r"agent executor error:\s*(.+?)\s*$")
-_LOG_TAIL_BYTES = 64 * 1024
-_REASON_CHARS = 400
-# A reason that names the credential or the quota keeps that hint; anything
-# else (a rejected request, a server error) is shown as it is.
-_AUTH_REASON = re.compile(r"UNAUTHENTICATED|PERMISSION_DENIED|API[_ ]?key|\bcode 40[13]\b|"
-                          r"invalid_grant|not (?:signed|logged) in|credential", re.I)
-_QUOTA_REASON = re.compile(r"RESOURCE_EXHAUSTED|\bcode 429\b|quota|rate limit", re.I)
-# gRPC status names and HTTP codes: safe to show from any line, also one
-# that cannot be quoted (redact.Redactor.quote).
-_STATUS = re.compile(r"\b(CANCELLED|UNKNOWN|INVALID_ARGUMENT|DEADLINE_EXCEEDED|NOT_FOUND|ALREADY_EXISTS|"
-                     r"PERMISSION_DENIED|RESOURCE_EXHAUSTED|FAILED_PRECONDITION|ABORTED|OUT_OF_RANGE|"
-                     r"UNIMPLEMENTED|INTERNAL|UNAVAILABLE|DATA_LOSS|UNAUTHENTICATED)\b")
-_HTTP_CODE = re.compile(r"(?i)\b(?:code|http|status|error)[\s=:]*([1-5]\d\d)\b")
 # Environment the agent may inherit from the host; everything else (API keys,
 # database URLs, tokens) is left out.
 _PASS_ENV = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "SYSTEMROOT",
@@ -277,71 +255,10 @@ class AntigravitySpec(AcpAgentSpec):
                        models: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
         return offered_models(options, models) or None
 
-    def turn_failure(self, text: str, pid: int | None = None, since: float | None = None) -> str | None:
-        if _ERROR_TEXT not in (text or ""):
-            return None
-        found = self.logged_reason(pid, since)
-        if found is None:
-            return "Antigravity ended the turn with an error and logged no reason."
-        reason, status, path = found
-        if reason is None:
-            # A line it cannot show safely: its status, and where it is.
-            tag = f" ({status})" if status else ""
-            hint = (" Check the provider's sign-in or API key." if _AUTH_REASON.search(status or "")
-                    else " Check the provider's quota." if _QUOTA_REASON.search(status or "") else "")
-            return (f"Antigravity ended the turn with an error{tag}. Its reason holds data that is not "
-                    f"shown here; it is in the agent's log on the worker: {path}.{hint}")
-        if _AUTH_REASON.search(reason):
-            return f"Antigravity ended the turn: {reason}. Check the provider's sign-in or API key."
-        if _QUOTA_REASON.search(reason):
-            return f"Antigravity ended the turn: {reason}. Check the provider's quota."
-        return f"Antigravity ended the turn with an error: {reason}"
-
-    def logged_reason(self, pid: int | None = None,
-                      since: float | None = None) -> tuple[str | None, str | None, str] | None:
-        """The last ``agent executor error`` that process ``pid`` logged, in
-        its own log (named with the pid): ``(reason, status, path)``.
-
-        ``reason`` is the line as it may be quoted in a chat
-        (``Redactor.quote``: credentials removed, plain prose only), None
-        when the line holds a payload that cannot be shown with confidence;
-        ``status`` its gRPC status and HTTP code, if it names them; ``path``
-        the log file. Only a log written since ``since`` (when the process
-        started) counts, so a recycled pid's old log is not read. With no pid
-        nothing is read: another chat sharing this row's HOME may have logged
-        the newest error. None when there is no such line."""
-        home = (self.env or {}).get("HOME")
-        if not home or not pid:
-            return None
-        folder = os.path.join(home, *_LOG_DIR)
-        candidates = glob.glob(os.path.join(glob.escape(folder), f"acp-server-*-{int(pid)}.log"))
-        try:
-            if since is not None:
-                # Whole-second slack: some filesystems store coarse mtimes.
-                candidates = [path for path in candidates if os.path.getmtime(path) >= since - 2]
-            path = max(candidates, key=os.path.getmtime) if candidates else None
-            if path is None:
-                return None
-            with open(path, "rb") as handle:
-                start = max(0, os.path.getsize(path) - _LOG_TAIL_BYTES)
-                handle.seek(start)
-                lines = handle.read().decode("utf-8", "replace").splitlines()
-        except OSError:
-            return None
-        if start and lines:
-            lines = lines[1:]  # cut mid-line by the tail: not a whole line
-        for line in reversed(lines):
-            match = _EXECUTOR_ERROR.search(line)
-            if match and match.group(1):
-                raw = match.group(1)
-                redactor = Redactor(self.secrets())
-                # Cleaned (and judged quotable) before it is cut, so no part
-                # of a secret survives the cut.
-                reason = redactor.quote(raw, _REASON_CHARS)
-                plain = redactor.clean(raw[:16 * 1024])
-                codes = [m.group(1) for m in _STATUS.finditer(plain)][:1]
-                codes += [f"code {m.group(1)}" for m in _HTTP_CODE.finditer(plain)][:1]
-                return reason, ", ".join(codes) or None, path
+    def turn_failure(self, text: str) -> str | None:
+        if _ERROR_TEXT in (text or ""):
+            return ("Antigravity ended the turn with an error. Check the provider's sign-in or "
+                    "API key, and its quota.")
         return None
 
     def auth_message(self, exc: AcpError) -> str:

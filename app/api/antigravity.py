@@ -239,11 +239,13 @@ async def login_state(provider_id: str, login_id: str, token: str = Depends(requ
     """One sign-in's state, read from memory without running the agent, so an
     open sign-in panel can poll it: ``awaiting_code`` | ``completing`` while
     this worker holds it, ``ended`` once it was finished, cancelled or expired
-    anywhere (another tab or device) (#1533)."""
+    anywhere (another tab or device) (#1533). It carries no message: the
+    agent's own output is never part of this answer."""
     login = antigravity.get_login(login_id)
-    if login is not None and login.row_id == provider_id:
-        return login.public()
-    return {"login_id": login_id, "provider_id": provider_id, "state": "ended", "url": None, "message": None}
+    state = login.state if login is not None and login.row_id == provider_id else "ended"
+    if state not in ("awaiting_code", "completing"):
+        state = "ended"
+    return {"login_id": login_id, "provider_id": provider_id, "state": state, "url": None, "message": None}
 
 
 @router.post("/providers/{provider_id}/login/{login_id}/complete")

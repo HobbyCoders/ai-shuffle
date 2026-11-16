@@ -135,7 +135,7 @@
 			login = null;
 			owned = false;
 			code = '';
-			error = answer.message || 'This sign-in ended in another tab or expired. Start the sign-in again if you still need it.';
+			error = 'This sign-in ended in another tab or expired. Start the sign-in again if you still need it.';
 			onEnded?.();
 		}, WATCH_MS);
 		return () => clearInterval(timer);

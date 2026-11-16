@@ -20,12 +20,9 @@ import logging
 import os
 import signal
 import sys
-import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
-
-from fluid.engine.acp.redact import traceback_text
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +145,6 @@ class AcpConnection:
         on_notification: NotificationHandler | None = None,
         on_request: RequestHandler | None = None,
         stderr_sink: Callable[[str], None] | None = None,
-        redact: Callable[[str], str] | None = None,
     ) -> None:
         self.argv = list(argv)
         self.cwd = cwd
@@ -156,10 +152,6 @@ class AcpConnection:
         self.on_notification = on_notification
         self.on_request = on_request
         self.stderr_sink = stderr_sink
-        # Every string the agent sends us outside the conversation (stderr,
-        # RPC error messages and data, stray stdout) passes this first, so
-        # nothing built from it (logs, errors, chat events) holds a secret.
-        self.redact: Callable[[str], str] = redact or (lambda text: text)
         self._proc: asyncio.subprocess.Process | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_id = 0
@@ -170,10 +162,6 @@ class AcpConnection:
         self._closed = asyncio.Event()
         self.stderr_tail: list[str] = []
         self.info: AgentInfo | None = None
-        # The process this connection started, kept after it exits (``pid``
-        # is None then): a spec reading the agent's own log names it by this.
-        self.process_id: int | None = None
-        self.started_at: float | None = None
 
     # ─── lifecycle ──────────────────────────────────────────────────────
 
@@ -201,8 +189,6 @@ class AcpConnection:
             limit=STREAM_LINE_LIMIT,
             **kwargs,
         )
-        self.process_id = self._proc.pid
-        self.started_at = time.time()
         self._reader = asyncio.create_task(self._read_loop())
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
@@ -306,7 +292,7 @@ class AcpConnection:
                 try:
                     message = json.loads(text)
                 except json.JSONDecodeError:
-                    self._log(logging.DEBUG, "ACP agent wrote a non-JSON line: %s", self.redact(text)[:200])
+                    logger.debug("ACP agent wrote a non-JSON line: %.200s", text)
                     continue
                 if isinstance(message, dict):
                     await self._dispatch(message)
@@ -330,7 +316,6 @@ class AcpConnection:
             text = line.decode("utf-8", errors="replace").rstrip()
             if not text:
                 continue
-            text = self.redact(text)
             self.stderr_tail = [*self.stderr_tail[-19:], text[:500]]
             if self.stderr_sink is not None:
                 with contextlib.suppress(Exception):
@@ -345,8 +330,8 @@ class AcpConnection:
             error = message.get("error")
             if isinstance(error, dict):
                 fut.set_exception(AcpError(
-                    int(error.get("code") or INTERNAL_ERROR), self.redact(str(error.get("message") or "error")),
-                    self._redact_data(error.get("data")),
+                    int(error.get("code") or INTERNAL_ERROR), str(error.get("message") or "error"),
+                    error.get("data"),
                 ))
             else:
                 fut.set_result(message.get("result"))
@@ -357,30 +342,14 @@ class AcpConnection:
             if self.on_notification is not None:
                 try:
                     await self.on_notification(method, params)
-                except Exception as exc:  # noqa: BLE001 — one bad update never ends the stream
-                    self._log(logging.WARNING, "ACP notification %s handler failed: %s", method,
-                              traceback_text(exc))
+                except Exception:  # noqa: BLE001 — one bad update never ends the stream
+                    logger.warning("ACP notification %s handler failed", method, exc_info=True)
             return
         # A request: answered off the reader, since an answer may wait on a
         # person (a permission prompt) while updates keep streaming.
         task = asyncio.create_task(self._answer(message.get("id"), method, params))
         self._handlers.add(task)
         task.add_done_callback(self._handlers.discard)
-
-    def _log(self, level: int, msg: str, *args: Any) -> None:
-        """Log ``msg % args``, the whole formatted line redacted: any
-        argument may carry agent text."""
-        if logger.isEnabledFor(level):
-            logger.log(level, "%s", self.redact(msg % args if args else msg))
-
-    def _redact_data(self, value: Any) -> Any:
-        if isinstance(value, str):
-            return self.redact(value)
-        if isinstance(value, dict):
-            return {k: self._redact_data(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [self._redact_data(v) for v in value]
-        return value
 
     async def _answer(self, rid: Any, method: str, params: dict[str, Any]) -> None:
         reply: dict[str, Any] = {"jsonrpc": "2.0", "id": rid}
@@ -396,7 +365,7 @@ class AcpConnection:
                 await self._write(reply)
             raise
         except Exception as exc:  # noqa: BLE001 — the agent must always get an answer
-            self._log(logging.WARNING, "ACP request %s handler failed: %s", method, traceback_text(exc))
+            logger.warning("ACP request %s handler failed", method, exc_info=True)
             reply["error"] = {"code": INTERNAL_ERROR, "message": f"client error: {exc}"}
         with contextlib.suppress(AcpError):
             await self._write(reply)

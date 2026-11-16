@@ -13,7 +13,7 @@ The prompt text picks the behaviour:
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
 * ``plan`` — a plan update.
-* ``error`` — Antigravity's in-band error text (``error-exit``: then exits).
+* ``error`` — Antigravity's in-band error text.
 * ``die`` — exits mid-turn.
 * anything else — echoes the text.
 
@@ -26,12 +26,7 @@ FAKE_ACP_MODES (comma-separated mode ids it offers; default
 ``{model: [thought levels]}`` it offers, in place of 1.5.6's three models with
 low/high; a session keeps the model and level it was set to),
 FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
-``config_option_update`` before answering it), FAKE_ACP_TURN_ERROR (the
-reason the ``error`` turn logs under HOME as agy does; empty logs none),
-FAKE_ACP_ERROR_DETAIL (added to every RPC error's message and data, as an
-agent echoing a request would), FAKE_ACP_REJECT_CONFIG=1 (every
-``session/set_config_option`` is refused), FAKE_ACP_STDERR (a line written to stderr at
-start).
+``config_option_update`` before answering it).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
@@ -49,7 +44,6 @@ import asyncio
 import json
 import os
 import sys
-import time
 import uuid
 
 LOG = os.environ.get("FAKE_ACP_LOG")
@@ -162,12 +156,7 @@ class Agent:
             result = await self.dispatch(method, params)
         except RpcError as exc:
             if rid is not None:
-                error: dict = {"code": exc.code, "message": exc.message}
-                detail = os.environ.get("FAKE_ACP_ERROR_DETAIL")
-                if detail:  # what a real agent may echo: a request, a header
-                    error["message"] += f" ({detail})"
-                    error["data"] = {"detail": detail}
-                await self.write({"jsonrpc": "2.0", "id": rid, "error": error})
+                await self.write({"jsonrpc": "2.0", "id": rid, "error": {"code": exc.code, "message": exc.message}})
             return
         except Exception as exc:  # a broken command must fail its request, not hang it
             if rid is not None:
@@ -217,8 +206,7 @@ class Agent:
             session = self.sessions.get(params.get("sessionId")) or {}
             config = session.setdefault("config", default_config())
             option = next((o for o in config_options(config) if o["id"] == params.get("configId")), None)
-            if (option is None or params.get("value") not in [v["value"] for v in option["options"]]
-                    or os.environ.get("FAKE_ACP_REJECT_CONFIG") == "1"):
+            if option is None or params.get("value") not in [v["value"] for v in option["options"]]:
                 raise RpcError(-32602, "bad value")
             config[option["id"]] = params["value"]
             if option["id"] == "model" and config["thought_level"] not in catalog()[config["model"]]:
@@ -341,12 +329,8 @@ class Agent:
                 {"content": "Write", "priority": "medium", "status": "in_progress"}]})
             await self.say(sid, "planned")
             return {"stopReason": "end_turn"}
-        if word in ("error", "error-exit"):
-            log_turn_error()
+        if word == "error":
             await self.say(sid, "\n⚠ Agent execution terminated due to error.\n")
-            if word == "error-exit":
-                # Gone right after the turn ends, before the client reads it.
-                asyncio.get_running_loop().call_later(0.05, os._exit, 0)
             return {"stopReason": "end_turn"}
         if word == "die":
             await self.say(sid, "bye")
@@ -406,9 +390,6 @@ class RpcError(Exception):
 
 
 async def main() -> None:
-    if os.environ.get("FAKE_ACP_STDERR"):
-        sys.stderr.write(os.environ["FAKE_ACP_STDERR"] + "\n")
-        sys.stderr.flush()
     agent = Agent()
     loop = asyncio.get_running_loop()
     reader = asyncio.StreamReader(limit=16 * 1024 * 1024)
@@ -458,20 +439,6 @@ def usage() -> int:
         {"model": "gemini-3.8-flash", "remainingFraction": 1.0, "resetTime": "2026-11-12T10:00:00Z"},
     ]}), flush=True)
     return 0
-
-
-def log_turn_error() -> None:
-    """Write the reason where agy 1.5.8 does: its own log under HOME, not
-    stderr. FAKE_ACP_TURN_ERROR names it; empty logs nothing."""
-    reason = os.environ.get("FAKE_ACP_TURN_ERROR",
-                            "INVALID_ARGUMENT (code 400): request contains an invalid argument.")
-    if not reason:
-        return
-    folder = os.path.join(os.environ.get("HOME") or ".", ".gemini", "antigravity-cli", "log")
-    os.makedirs(folder, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    with open(os.path.join(folder, f"acp-server-{stamp}-{os.getpid()}.log"), "a", encoding="utf-8") as log:
-        log.write(f"E1115 12:00:00.000000 {os.getpid()} errorreport.go:57] agent executor error: {reason}\n")
 
 
 def models() -> int:
