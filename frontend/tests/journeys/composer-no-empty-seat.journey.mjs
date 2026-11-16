@@ -15,12 +15,17 @@
 // A double tap on Send must not land on that Stop and cancel the turn it just
 // started, also when the page is busy and handles the second press late.
 //
+// stop-back-at-handoff, double-tap-at-handoff: at a queue handoff Stop leaves
+// its seat for a moment and comes back. A press on the Stop that is back
+// stops the queued turn; the second touch of a double tap whose first was
+// ignored on the button in between does not.
+//
 // draft-in-stop-band: a one-line draft that fits the field without Stop but
 // not beside it. Stop arriving (a turn sent from another tab) and leaving
 // must not flip the phone's wrapped layout: the composer keeps its height
 // and the message list its place.
 import { runJourney } from './runner.mjs';
-import { chatIdByToken, composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat, waitChatOpen } from './lib/app.mjs';
+import { chatIdByToken, composer, expect, isPhone, openNewChat, scriptTag, sendButton, stopButton, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const VIEWPORTS = ['desktop', 'phone', 'fold-cover'];
@@ -108,6 +113,20 @@ const composerPlace = (page) =>
 	});
 
 /** Open a first exchange, so this is a chat, where Stop can come and go under a draft. */
+/** Watch the action row: when its circles last changed, and each click with when it was made. */
+const watchRow = (page) =>
+	page.evaluate(() => {
+		const row = () => [...document.querySelectorAll('.send-cluster button')].filter((b) => b.getClientRects().length).map((b) => b.className).join('|');
+		window.__row = { changes: [], last: row(), clicks: [] };
+		// When the row last changed before a press was made.
+		window.__row.changedBefore = (made) => Math.max(-Infinity, ...window.__row.changes.filter((t) => t <= made));
+		new MutationObserver(() => {
+			const now = row();
+			if (now !== window.__row.last) { window.__row.last = now; window.__row.changes.push(performance.now()); }
+		}).observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'disabled'] });
+		document.addEventListener('click', (e) => window.__row.clicks.push({ made: e.timeStamp, on: e.target.closest?.('button')?.getAttribute('aria-label') ?? null }), true);
+	});
+
 async function firstExchange(ctx) {
 	await openNewChat(ctx);
 	await ctx.page.waitForTimeout(800);
@@ -168,6 +187,36 @@ await runJourney({
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: DEV_INSTANCE_NOISE,
 	cases: [seatCase(true), seatCase(false), {
+		name: 'first-send-slot',
+		viewports: ['phone', 'fold-cover'],
+		setup: async (ctx) => { await openNewChat(ctx); await ctx.page.waitForTimeout(800); },
+		async act({ page, mark, variant, log }) {
+			// #1645: the slot keeps its height through the first send from the
+			// start screen. (A draft too long for one line takes its own row
+			// while it is typed; that is the wrapped layout, not this.)
+			await composer(page).click();
+			await page.keyboard.type('hi');
+			await page.waitForTimeout(400);
+			await page.evaluate(() => {
+				const height = () => Math.round(document.querySelector('.input-slot')?.getBoundingClientRect().height ?? -1);
+				window.__slot = { before: height(), seen: [] };
+				const tick = () => {
+					const h = height();
+					const seen = window.__slot.seen;
+					if (seen[seen.length - 1] !== h) seen.push(h);
+					if (!window.__slot.stop) requestAnimationFrame(tick);
+				};
+				requestAnimationFrame(tick);
+			});
+			await mark('first send');
+			await sendButton(page).click();
+			await waitChat(page, { streaming: 'false', messagesAtLeast: 2 }, { timeout: 60_000 });
+			await page.waitForTimeout(300);
+			const slot = await page.evaluate(() => { window.__slot.stop = true; return window.__slot; });
+			log(`slot ${slot.before}px before Send, then ${slot.seen.join(' → ')}`);
+			expect(slot.seen.every((h) => h === slot.before), `the slot keeps one height through the first send (${slot.before} → ${slot.seen.join(' → ')})`);
+		}
+	}, {
 		name: 'double-tap-send',
 		viewports: VIEWPORTS,
 		async setup(ctx) {
@@ -229,6 +278,369 @@ await runJourney({
 				}
 				expect(proved, `${what}: no attempt pressed Stop inside the window as intended (see the log)`);
 			}
+		}
+	}, {
+		// #1632 case 1: Stop leaves as the turn ends and Talk takes its place. A
+		// tap meant for Stop that lands just after must not start a call.
+		name: 'late-tap-on-stop',
+		viewports: ['phone'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a turn ends under a tap meant for Stop, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 40 })}`);
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; });
+				await page.waitForFunction(() => !document.querySelector('.send-cluster .stop-btn'), null, { polling: 'raf', timeout: 60_000 });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(1500);
+				const { click, changedAt } = await page.evaluate(() => ({ click: window.__row.clicks[0], changedAt: window.__row.changedBefore(window.__row.clicks[0]?.made ?? 0) }));
+				const after = click ? Math.round(click.made - changedAt) : null;
+				log(`attempt ${attempt}: the tap was made ${after}ms after the row changed, on ${click?.on}`);
+				proved = !!click && /call|Talk/i.test(click.on ?? '') && after < 300;
+				const call = await page.getByRole('button', { name: 'Stop voice agent' }).isVisible();
+				if (proved) expect(!call, `a tap ${after}ms after Talk took Stop's place did not start a call`);
+				if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
+			}
+			expect(proved, 'no attempt tapped Talk just after it took Stop\'s place (see the log)');
+		}
+	}, {
+		// Stop back in its seat at a queue handoff: one turn ends, Talk shows for
+		// a moment, the queued turn starts and Stop returns. A press made just
+		// after is aimed at Stop and must stop the queued turn (the dropped Stop
+		// behind a merge-queue failure of chat-position-stability-2). Fast
+		// only: slowed down, Talk keeps the seat past the guard's window and
+		// Stop rightly counts as arriving.
+		name: 'stop-back-at-handoff',
+		viewports: ['desktop', 'phone'],
+		throttles: ['fast'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a queued turn starts under a press on Stop, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 20 })}`);
+				await waitChat(page, { streaming: 'true' });
+				await typeAndSend(page, `queued tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+				await page.locator('.pending-messages [data-queue-confirmed="true"]').first().waitFor({ timeout: 30_000 });
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; window.__handoff = {}; });
+				// Stop leaves (the turn ended), then is back (the queued turn started).
+				await page.waitForFunction(() => {
+					const stop = !!document.querySelector('.send-cluster .stop-btn');
+					const seen = window.__handoff;
+					if (!stop && seen.left === undefined) seen.left = performance.now();
+					if (stop && seen.left !== undefined && seen.back === undefined) seen.back = performance.now();
+					return seen.back !== undefined;
+				}, null, { polling: 'raf', timeout: 60_000 });
+				await (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));
+				const stopped = await waitChat(page, { streaming: 'false' }, { timeout: 5000 }).then(() => true, () => false);
+				const { click, away, back } = await page.evaluate(() => ({
+					click: window.__row.clicks[0], away: Math.round(window.__handoff.back - window.__handoff.left), back: window.__handoff.back
+				}));
+				const after = click ? Math.round(click.made - back) : null;
+				log(`attempt ${attempt}: Stop was away ${away}ms; the press was made ${after}ms after it came back, on ${click?.on}; stopped=${stopped}`);
+				// Only a press on Stop soon after a short absence tests the rule; a
+				// slow handoff or a late press by this test is retried, not judged.
+				proved = !!click && click.on === 'Stop generating' && away < 350 && after < 300;
+				if (proved) expect(stopped, `a press ${after}ms after Stop came back (away ${away}ms) stopped the queued turn`);
+				if (!stopped) {
+					await waitSeated(page, 'Stop generating');
+					await stopButton(page).click();
+					await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+				}
+				await page.waitForTimeout(1000);
+			}
+			expect(proved, 'no attempt pressed Stop just after it came back at a handoff (see the log)');
+		}
+	}, {
+		// The other side of stop-back-at-handoff: a double tap that straddles the
+		// handoff. Its first touch lands on Talk, there for a moment between the
+		// two turns, and is ignored; its second lands on the Stop that came back
+		// and must not stop the queued turn nobody asked to stop. Two orders: both
+		// taps after Stop left, and a first touch that went down on the old Stop
+		// just before it left and came up on Talk.
+		//
+		// The touches are made from inside the page, in the very callback that
+		// sees the row change, so no clock decides whether they land: the first
+		// is on Talk because Talk is what the row shows, the second on Stop the
+		// moment it is back. Whether the app must hold the second back is then
+		// read from the two presses themselves: it must when the second began
+		// inside the double tap's window (DOUBLE_PRESS_MS in composer-wrap.ts) of
+		// the first. A handoff slower than that window (a busy runner) is outside
+		// the rule: the case says so and asserts nothing, it never fails for it.
+		name: 'double-tap-at-handoff',
+		viewports: ['desktop', 'phone'],
+		throttles: ['fast'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			// The app's window is 500ms from the first press. The margin keeps a
+			// press at the very edge, where a millisecond decides, out of the verdict.
+			const WINDOW_MS = 500, EDGE_MS = 25;
+			for (const heldOnStop of [false, true]) {
+				const what = heldOnStop ? 'a touch that went down on the old Stop, then a second tap' : 'a double tap whose first touch lands on Talk';
+				let exercised = false;
+				for (let attempt = 1; attempt <= 3 && !exercised; attempt++) {
+					await mark(`${what}, attempt ${attempt}`);
+					await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 20 })}`);
+					await waitChat(page, { streaming: 'true' });
+					await typeAndSend(page, `queued tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 2 })}`);
+					await page.locator('.pending-messages [data-queue-confirmed="true"]').first().waitFor({ timeout: 30_000 });
+					await page.evaluate((heldOnStop) => {
+						const cluster = [...document.querySelectorAll('.send-cluster')].find((el) => el.getClientRects().length);
+						const shown = (selector) => [...cluster.querySelectorAll(selector)].find((b) => b.getClientRects().length) ?? null;
+						const seen = window.__doubleTap = {};
+						// A touch's events as the browser sends them; `ignored` is the
+						// composer calling preventDefault on the click.
+						const fire = (type, el, pointerId) => {
+							const event = new PointerEvent(type, { bubbles: true, cancelable: true, composed: true, view: window,
+								pointerId, pointerType: 'touch', isPrimary: true, detail: type === 'click' ? 1 : 0 });
+							return { at: event.timeStamp, ignored: !el.dispatchEvent(event), on: el.getAttribute('aria-label') };
+						};
+						// The held touch: down on Stop, taken back and put down again every
+						// 80ms, so the press that stands began just before Stop left.
+						const hold = heldOnStop ? setInterval(() => {
+							const stop = shown('.stop-btn');
+							if (!stop || seen.left !== undefined) return;
+							if (seen.down) fire('pointercancel', stop, 11);
+							seen.down = fire('pointerdown', stop, 11);
+						}, 80) : 0;
+						const watch = new MutationObserver(() => {
+							const stop = shown('.stop-btn');
+							if (!stop && seen.left === undefined) {
+								seen.left = performance.now();
+								clearInterval(hold);
+							}
+							if (seen.left === undefined) return;
+							if (!stop && !seen.first) {
+								// Stop is away: the first touch, on Talk as soon as the row shows it.
+								const talk = shown('.call-circle');
+								if (!talk) return;
+								if (!heldOnStop) seen.down = fire('pointerdown', talk, 11);
+								fire('pointerup', talk, 11);
+								seen.first = fire('click', talk, 11);
+							} else if (stop) {
+								// Stop is back: the second touch, now.
+								watch.disconnect();
+								seen.back = performance.now();
+								fire('pointerdown', stop, 12);
+								fire('pointerup', stop, 12);
+								seen.second = fire('click', stop, 12);
+							}
+						});
+						watch.observe(cluster, { subtree: true, childList: true, attributes: true });
+					}, heldOnStop);
+					await page.waitForFunction(() => window.__doubleTap.second, null, { polling: 'raf', timeout: 60_000 });
+					const stopped = await waitChat(page, { streaming: 'false' }, { timeout: 3000 }).then(() => true, () => false);
+					const seen = await page.evaluate(() => window.__doubleTap);
+					const call = await page.getByRole('button', { name: 'Stop voice agent' }).isVisible();
+					const away = Math.round(seen.back - seen.left);
+					const apart = seen.down ? Math.round(seen.second.at - seen.down.at) : null;
+					log(`${what}, attempt ${attempt}: Stop away ${away}ms; first press began ${seen.down ? Math.round(seen.down.at - seen.left) : null}ms from Stop leaving on ${seen.down?.on}; `
+						+ `its click on ${seen.first?.on} ${seen.first ? Math.round(seen.first.at - seen.left) : null}ms after Stop left, ignored=${seen.first?.ignored}; `
+						+ `second tap on ${seen.second.on} ${Math.round(seen.second.at - seen.back)}ms after Stop came back, ${apart}ms after the first press began, ignored=${seen.second.ignored}; `
+						+ `stopped=${stopped} call=${call}`);
+					// What the presses were, not how long anything took: the first on
+					// Talk while Stop was away (the held one begun on the Stop that
+					// left), the second on Stop inside the double tap's window.
+					const landed = seen.first?.on === 'Start a call in this conversation' && seen.second.on === 'Stop generating'
+						&& (!heldOnStop || (seen.down?.on === 'Stop generating' && seen.down.at < seen.left));
+					exercised = landed && apart < WINDOW_MS - EDGE_MS;
+					if (exercised) {
+						expect(seen.first.ignored && !call, `${what}: the touch on Talk was ignored and started no call`);
+						expect(seen.second.ignored, `${what}: the second tap, ${apart}ms after the first press began, was ignored`);
+						expect(!stopped, `${what}: the queued turn kept running`);
+					} else {
+						log(`${what}, attempt ${attempt}: not exercised: ${!landed ? 'the first touch did not land on Talk while Stop was away'
+							: `the handoff took ${away}ms and the second tap came ${apart}ms after the first press began, outside the ${WINDOW_MS}ms double tap`}`);
+					}
+					if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
+					if (!stopped) {
+						await waitSeated(page, 'Stop generating');
+						await stopButton(page).click();
+						await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+					}
+					await page.waitForTimeout(1000);
+				}
+				// The runner has no skipped verdict: say it in the log and judge nothing.
+				if (!exercised) log(`${what}: NOT EXERCISED in 3 attempts: every handoff was slower than the double tap's window; nothing asserted`);
+			}
+		}
+	}, {
+		// #1632 review: a tap is judged by when the press began. A touch that
+		// lands on Talk just after it took Stop's place and lifts after the
+		// guard's window ends was still aimed at Stop: no call may start.
+		name: 'held-tap-on-stop',
+		viewports: ['phone'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			await page.evaluate(() => {
+				window.__row.downs = [];
+				document.addEventListener('pointerdown', (e) => window.__row.downs.push(e.timeStamp), true);
+			});
+			const cdp = await page.context().newCDPSession(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a press meant for Stop, lifted after the window, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 40 })}`);
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; window.__row.downs = []; });
+				// The row change that took Stop away, read in the frame it shows.
+				await page.waitForFunction(() => {
+					if (document.querySelector('.send-cluster .stop-btn')) return false;
+					window.__row.stopGoneAt = window.__row.changedBefore(performance.now() + 1);
+					return true;
+				}, null, { polling: 'raf', timeout: 60_000 });
+				// The touch carries its own times, so however late it reaches the
+				// page it was made 50ms after the row changed and lifted at 450ms
+				// (the window is 400ms): no Node-to-browser hop sits inside it.
+				const { changed, origin } = await page.evaluate(() => ({
+					changed: window.__row.stopGoneAt, origin: performance.timeOrigin
+				}));
+				const epoch = (ms) => (origin + changed + ms) / 1000;
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at], timestamp: epoch(50) });
+				// Lift no earlier than the time the touch claims.
+				await page.waitForFunction((end) => performance.now() >= end, changed + 460, { polling: 'raf', timeout: 5000 });
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [], timestamp: epoch(450) });
+				await page.waitForTimeout(1500);
+				const { click, down, changedAt } = await page.evaluate(() => {
+					return { click: window.__row.clicks[0], down: window.__row.downs[0], changedAt: window.__row.stopGoneAt };
+				});
+				const pressed = down === undefined ? null : Math.round(down - changedAt);
+				const lifted = click ? Math.round(click.made - changedAt) : null;
+				log(`attempt ${attempt}: pressed ${pressed}ms and released ${lifted}ms after the row changed, on ${click?.on}`);
+				proved = !!click && /call|Talk/i.test(click.on ?? '') && pressed !== null && pressed < 300 && lifted >= 400;
+				const call = await page.getByRole('button', { name: 'Stop voice agent' }).isVisible();
+				if (proved) expect(!call, `a press made ${pressed}ms after Talk took Stop's place and lifted at ${lifted}ms did not start a call`);
+				if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
+			}
+			expect(proved, 'no attempt pressed Talk inside the window and lifted after it (see the log)');
+		}
+	}, {
+		// #1632 case 2: no call, a turn running, a draft sent. Send stays held for
+		// the double-tap window, then the mic slides into its place. A second tap
+		// on Send that lands on the mic must not start dictation.
+		name: 'late-tap-on-held-send',
+		viewports: ['fold-cover'],
+		async setup(ctx) {
+			await withoutCalls(ctx.page);
+			await firstExchange(ctx);
+		},
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			await typeAndSend(page, `long turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+			await stopButton(page).waitFor({ timeout: 20_000 });
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a second tap on a queued Send, attempt ${attempt}`);
+				await composer(page).click();
+				await page.keyboard.type(`queued tok-${uniq()}`);
+				const box = await sendButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForFunction(() => !document.querySelector('.send-cluster .send-btn'), null, { polling: 'raf', timeout: 5000 });
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(1200);
+				const { clicks, changedAt } = await page.evaluate(() => ({ clicks: window.__row.clicks, changedAt: window.__row.changedBefore(window.__row.clicks[1]?.made ?? 0) }));
+				const second = clicks[1];
+				const after = second ? Math.round(second.made - changedAt) : null;
+				log(`attempt ${attempt}: the second tap was made ${after}ms after the row changed, on ${second?.on}`);
+				proved = !!second && second.on === 'Start voice input' && after < 300;
+				const dictating = await page.evaluate(() => !!document.querySelector('.voice-btn-wrapper.expanded, .voice-btn.recording, .voice-btn.preparing')
+					|| [...document.querySelectorAll('[role="alert"]')].some((el) => /record|microphone/i.test(el.textContent ?? '')));
+				if (proved) expect(!dictating, `a tap ${after}ms after the mic took Send's place did not start dictation`);
+				if (dictating) {
+					await page.keyboard.press('Escape');
+					const dismiss = page.getByRole('button', { name: 'Dismiss' });
+					if (await dismiss.isVisible()) await dismiss.click();
+				}
+			}
+			expect(proved, 'no attempt tapped the mic just after it took Send\'s place (see the log)');
+			await stopButton(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
+		// #1631: a dictation error during a turn rendered inside the action row and
+		// pushed Stop off-screen on a phone. It shows above the box instead.
+		name: 'dictation-error-outside-row',
+		viewports: VIEWPORTS,
+		allow: [{ kind: 'errors', message: /\[GlobalSTT\] Failed to start recording/, reason: 'this case refuses the microphone on purpose to show the dictation error' }],
+		async setup(ctx) {
+			// The microphone is refused, as on a page without a secure context.
+			await ctx.page.addInitScript(() => {
+				if (navigator.mediaDevices) {
+					navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
+				}
+			});
+			await firstExchange(ctx);
+		},
+		async act({ page, mark, variant, log }) {
+			await typeAndSend(page, `long turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+			await stopButton(page).waitFor({ timeout: 20_000 });
+			await page.waitForTimeout(700);
+			const before = await stopButton(page).boundingBox();
+			await mark('dictate while the turn runs: the microphone is refused');
+			await page.locator('.send-cluster .voice-btn').click();
+			const alert = page.locator('[role="alert"]').filter({ hasText: /record|microphone/i }).first();
+			await alert.waitFor({ timeout: 10_000 });
+			const state = await page.evaluate(() => {
+				const el = [...document.querySelectorAll('[role="alert"]')].find((a) => /record|microphone/i.test(a.textContent ?? ''));
+				const stop = document.querySelector('.send-cluster .stop-btn')?.getBoundingClientRect();
+				return {
+					inRow: !!el?.closest('.send-cluster'),
+					stopRight: stop ? Math.round(stop.right) : null,
+					overflow: document.documentElement.scrollWidth - window.innerWidth
+				};
+			});
+			const after = await stopButton(page).boundingBox();
+			log(`error shown: ${JSON.stringify(state)}; Stop ${Math.round(before.x)} → ${Math.round(after?.x ?? -1)}`);
+			expect(!state.inRow, 'the dictation error is not inside the action row');
+			expect(after && Math.abs(after.x - before.x) <= 1, `Stop stays in its place (${Math.round(before.x)} → ${Math.round(after?.x ?? -1)})`);
+			expect(state.stopRight !== null && state.stopRight <= page.viewportSize().width, `Stop stays on screen (right edge ${state.stopRight})`);
+			expect(state.overflow <= 0, `the page does not scroll sideways (${state.overflow}px)`);
+			await mark('dismiss the error, then stop');
+			await alert.getByRole('button', { name: /dismiss/i }).click();
+			await alert.waitFor({ state: 'detached', timeout: 5000 });
+			await stopButton(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
+		// #1632 comment: a double click on Send in a new chat (desktop, a project
+		// picked) left the first message "Not sent (stopped)".
+		name: 'new-chat-double-click-send',
+		viewports: ['desktop', 'phone'],
+		setup: async (ctx) => { await openNewChat(ctx, { project: 'Dev other' }); await ctx.page.waitForTimeout(800); },
+		async act({ page, mark, variant, log, token }) {
+			const text = `Let's work on the work project tests today tok-${uniq()} ${scriptTag(variant, 'default')}`;
+			await composer(page).click();
+			await page.keyboard.type(text);
+			await page.evaluate(() => {
+				window.__clicks = [];
+				document.addEventListener('click', (e) => window.__clicks.push({ made: Math.round(e.timeStamp), on: e.target.closest?.('button')?.getAttribute('aria-label') ?? e.target.tagName }), true);
+			});
+			await mark('double click Send');
+			const box = await sendButton(page).boundingBox();
+			const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+			if (isPhone(variant)) {
+				await page.touchscreen.tap(at.x, at.y);
+				await page.waitForTimeout(120);
+				await page.touchscreen.tap(at.x, at.y);
+			} else {
+				await page.mouse.dblclick(at.x, at.y);
+			}
+			await waitChat(page, { messagesAtLeast: 2, streaming: 'false' }, { timeout: 60_000 });
+			await page.waitForTimeout(500);
+			log(`clicks: ${JSON.stringify(await page.evaluate(() => window.__clicks))}`);
+			const notSent = await page.locator('[data-not-sent="true"]').count();
+			expect(notSent === 0, `the first message was sent, not marked "Not sent" (${notSent} not-sent rows)`);
 		}
 	}, {
 		name: 'draft-in-stop-band',

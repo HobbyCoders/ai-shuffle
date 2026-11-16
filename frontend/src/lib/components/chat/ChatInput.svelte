@@ -35,6 +35,7 @@
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
+	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
 	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
 	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
@@ -87,7 +88,7 @@
 	import ContextPillBar from './ContextPillBar.svelte';
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
-	import { composerCircles, createWrapWatcher } from './composer-wrap';
+	import { composerCircles, createArrivalGuard, createPressTracker, createWrapWatcher, type RowButton } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
@@ -742,6 +743,85 @@
 	}));
 	const showTalk = $derived(circles.includes('talk'));
 
+	// A button that takes over a seat another button held ignores pointer
+	// presses for a moment (#1632): when Stop, Talk or a held Send leaves, a tap
+	// aimed at it must not start a call or dictation, or stop the turn on a
+	// Stop that just took a spinner's place. Only seats count, never what moved
+	// the row (composer-wrap.ts). Seats carry over only within one chat's
+	// docked composer: on the start screen nothing is guarded but a double
+	// click (the composer moves away as the chat opens), and another chat's
+	// row is a new row.
+	const arrivals = createArrivalGuard();
+	let placed: { inChat: boolean; chat: string | null } | null = null;
+	$effect(() => {
+		const row: RowButton[] = ['mic', ...circles];
+		const now = { inChat: compact, chat: $activeSession.sessionId };
+		const newRow = !placed || placed.inChat !== now.inChat || placed.chat !== now.chat;
+		placed = now;
+		arrivals.update(row, !compact || newRow);
+	});
+	const presses = createPressTracker<HTMLButtonElement>();
+	const rowButtonAt = (target: EventTarget | null) =>
+		((target as Element | null)?.closest?.('button') as HTMLButtonElement | null) ?? null;
+	function rowButtonKind(button: HTMLButtonElement | null): RowButton | null {
+		return button?.classList.contains('voice-btn') ? 'mic'
+			: button?.classList.contains('call-circle') ? 'talk'
+			: button?.classList.contains('stop-btn') ? 'stop' : null;
+	}
+	// Event times, clamped to now: a busy main thread that handles a press
+	// late must not let it through.
+	const eventTime = (event: Event) => {
+		const now = performance.now();
+		return event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
+	};
+	function notePress(event: PointerEvent) {
+		presses.down(event.pointerId, eventTime(event), rowButtonAt(event.target));
+	}
+	function forgetPress(event: PointerEvent) {
+		presses.cancel(event.pointerId);
+	}
+	// A press ends wherever its pointer comes up or is cancelled, on the row or
+	// off it; leaving the page abandons every press, as does the row going.
+	$effect(() => {
+		const up = (event: PointerEvent) => presses.up(event.pointerId, eventTime(event));
+		const clear = () => presses.clear();
+		const hidden = () => { if (document.visibilityState === 'hidden') presses.clear(); };
+		window.addEventListener('pointerup', up, true);
+		window.addEventListener('pointercancel', forgetPress, true);
+		window.addEventListener('blur', clear);
+		document.addEventListener('visibilitychange', hidden);
+		return () => {
+			window.removeEventListener('pointerup', up, true);
+			window.removeEventListener('pointercancel', forgetPress, true);
+			window.removeEventListener('blur', clear);
+			document.removeEventListener('visibilitychange', hidden);
+			presses.clear();
+		};
+	});
+	function ignoreArrivingPress(event: MouseEvent) {
+		// detail is 0 for a click from the keyboard (Enter, Space): never ignored.
+		if (event.detail === 0) return;
+		const button = rowButtonAt(event.target);
+		const kind = rowButtonKind(button);
+		if (!kind) return;
+		const clickAt = eventTime(event);
+		const pointerId = 'pointerId' in event && typeof event.pointerId === 'number' ? event.pointerId : undefined;
+		const press = presses.take(pointerId, clickAt, button);
+		// A press that began on another button (Stop, before Talk took its
+		// place) is never a press on this one. Without a press of its own
+		// (assistive technology, a script) the click's time stands in. Every
+		// guard in the row judges this one time: the arrival guard, and Stop
+		// under a double tap on Send (isStrayStopPress).
+		const began = press ? (press.target === button ? press.at : null) : clickAt;
+		if (began !== null && !arrivals.ignores(kind, began, event.detail)
+			&& !(kind === 'stop' && isStrayStopPress(began))) return;
+		// The seat remembers it: a double tap's second press must not reach a
+		// button that has the seat by then (Stop back at a queue handoff).
+		arrivals.noteIgnored(kind, press?.at ?? clickAt);
+		event.preventDefault();
+		event.stopPropagation();
+	}
+
 	// Wrap: while the text fits on one line, attach and the circles sit inline
 	// with it; once it needs a second line they move to the controls row's two
 	// ends and the text takes the full width (composer-wrap.ts).
@@ -800,6 +880,9 @@
 
 	// Error display — shared between file upload errors and voice recording errors
 	let errorMessage = $state('');
+	// This composer's dictation error (VoiceRecorder): shown with the notices
+	// above the box, never in the action row (#1631).
+	let dictationError = $state<string | null>(null);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -1133,8 +1216,9 @@
 	// the next submit, and it holds only for the chat the send went to (a chat
 	// switch inside the window shows another chat's Stop); Stop's keyboard
 	// activation and its confirmation are never ignored. A Stop press is judged
-	// by when it was made, so a stall right after the send cannot use up the
-	// window.
+	// by when it began (ignoreArrivingPress, the row's one press time), so a
+	// stall right after the send cannot use up the window and a touch held
+	// past it still counts as made inside it.
 	let strayStop: { until: number; destination: SendDestination } | null = null;
 	const isStrayStopPress = (pressedAt: number) => !!strayStop && pressedAt < strayStop.until
 		&& stillAtDestination(strayStop.destination, composerPlace());
@@ -1934,6 +2018,9 @@
 		{#if errorMessage}
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
 		{/if}
+		{#if dictationError}
+			<Banner severity="error" message={dictationError} dismissible onDismiss={clearSttError} />
+		{/if}
 
 		<!-- Agents cannot start here yet (no license, or no provider ready):
 		     say what is missing instead of failing later. -->
@@ -2063,7 +2150,7 @@
 					     independently. StopButton confirms first when background
 					     agents are live. A circle that is not shown takes no room:
 					     the others move over (owner decision, 2026-11-14). -->
-					<div class="send-cluster" bind:this={sendClusterRef}>
+					<div class="send-cluster" bind:this={sendClusterRef} onpointerdowncapture={notePress} onclickcapture={ignoreArrivingPress}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
@@ -2103,7 +2190,6 @@
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								ignoresPress={isStrayStopPress}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{/if}
@@ -2172,6 +2258,7 @@
 		disabled={!$anyCredential || isUploading}
 		bind:isRecording
 		bind:isTranscribing
+		bind:error={dictationError}
 	/>
 {/snippet}
 

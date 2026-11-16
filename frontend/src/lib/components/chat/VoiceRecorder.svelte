@@ -14,12 +14,10 @@
 	 */
 	import { onDestroy } from 'svelte';
 	import { composerDictation } from '$lib/services/composerDictation';
-	import Banner from '$lib/components/Banner.svelte';
 	import {
 		globalSttState,
 		globalSttAudio,
 		globalSttUpload,
-		clearError,
 		toggleVoiceInput,
 		cancelVoiceInput
 	} from '$lib/services/globalStt';
@@ -40,6 +38,10 @@
 		disabled?: boolean;
 		isRecording?: boolean;
 		isTranscribing?: boolean;
+		/** This composer's dictation error, for the composer to show with its
+		 *  other notices above the box. Never rendered here: inside the action
+		 *  row it pushed Stop off-screen (#1631). Dismiss with `clearError`. */
+		error?: string | null;
 	}
 
 	let {
@@ -52,7 +54,8 @@
 		onStart,
 		disabled = false,
 		isRecording = $bindable(false),
-		isTranscribing = $bindable(false)
+		isTranscribing = $bindable(false),
+		error = $bindable(null)
 	}: Props = $props();
 
 	const ownsInput = $derived($globalSttState.source === 'composer' &&
@@ -64,6 +67,9 @@
 	});
 	$effect(() => {
 		isTranscribing = ownsInput && $globalSttState.isTranscribing;
+	});
+	$effect(() => {
+		error = ownsInput ? $globalSttState.error : null;
 	});
 
 	const isPreparing = $derived(ownsInput && $globalSttState.isPreparing);
@@ -132,15 +138,6 @@
 		}
 	});
 </script>
-
-{#if ownsInput && $globalSttState.error}
-	<Banner
-		severity="error"
-		message={$globalSttState.error}
-		dismissible
-		onDismiss={clearError}
-	/>
-{/if}
 
 <!-- Voice control is rendered inline within the send-button-wrapper -->
 <div class="voice-btn-wrapper" class:expanded>

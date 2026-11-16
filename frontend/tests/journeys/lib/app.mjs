@@ -356,6 +356,29 @@ export const sendButton = (page) => page.getByRole('button', { name: 'Send', exa
 export const stopButton = (page) => page.getByRole('button', { name: /^Stop/ });
 
 /**
+ * Wait until the composer's action row has shown the button labelled `label`
+ * with no change to the row for as long as an arriving button ignores pointer
+ * presses (ARRIVAL_GUARD_MS in composer-wrap.ts, #1632). The row keeps no
+ * empty seats, so Stop, Talk and the mic slide into each other's places and a
+ * press made just after one moved in is ignored as aimed at the button that
+ * left. A person presses a button they have seen; a journey that presses the
+ * moment a button exists must wait the same way, or its press is dropped.
+ */
+export async function waitSeated(page, label, { timeout = 30_000 } = {}) {
+	// Each call watches afresh: the row is not watched between calls, so what an
+	// earlier call saw says nothing about a button that left and came back since.
+	await page.evaluate(() => { window.__seatedRow = {}; });
+	await page.waitForFunction(({ label, ms }) => {
+		const row = [...document.querySelectorAll('.send-cluster button')]
+			.filter((b) => b.getClientRects().length).map((b) => b.getAttribute('aria-label') ?? '');
+		const seen = (window.__seatedRow ??= {});
+		const now = performance.now();
+		if (seen.row !== row.join('|')) Object.assign(seen, { row: row.join('|'), since: now });
+		return row.includes(label) && now - seen.since >= ms;
+	}, { label, ms: 450 }, { polling: 'raf', timeout });
+}
+
+/**
  * What the composer area shows right now, for the case's trace: the text's
  * length and first characters (the journey's own prompt), Send's state, the
  * chat signature and any banner or alert on screen.

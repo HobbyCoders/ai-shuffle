@@ -554,9 +554,9 @@
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
 		},
 		{
-			"why": "the composer's action row holds no empty seat for Send or Stop, and a double tap on Send never lands on the Stop that takes its place",
+			"why": "the composer's action row holds no empty seat for Send or Stop, a double tap on Send never lands on the Stop that takes its place, a late tap never lands on a button that slid into a freed seat, and the phone slot keeps its height on the first send",
 			"journeys": ["composer-no-empty-seat"],
-			"globs": ["frontend/tests/journeys/composer-no-empty-seat.journey.mjs", "frontend/src/lib/components/chat/composer-wrap*", "frontend/src/lib/components/chat/phone/phone-composer.css"]
+			"globs": ["frontend/tests/journeys/composer-no-empty-seat.journey.mjs", "frontend/src/lib/components/chat/composer-wrap*", "frontend/src/lib/components/chat/phone/phone-composer.css", "frontend/src/lib/components/chat/ChatInput.svelte", "frontend/src/lib/components/chat/VoiceRecorder.svelte"]
 		},
 		{
 			"why": "queued (pending) messages",
