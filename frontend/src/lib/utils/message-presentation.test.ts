@@ -5,7 +5,7 @@ import {
 	shouldCollapseUserMessage,
 	canRewindUserMessage,
 	typedWords,
-	firstMessageWords
+	deriveSessionTitle
 } from './message-presentation';
 import sharedTitleCases from './attachment-title-cases.json';
 
@@ -54,14 +54,26 @@ describe('typedWords (#1654)', () => {
 		expect(typedWords('email @user today', ['/ws/a.png'])).toBe('email @user today');
 		expect(typedWords('@/ws/a.png', ['/ws/a.png'])).toBe('');
 		expect(typedWords('  plain words  ', undefined)).toBe('plain words');
+		expect(typedWords('@alice fix it', [])).toBe('@alice fix it');
 	});
 });
 
-// The same cases the server's derive_session_title is tested against
-// (tests/core/test_session_title.py), so the two title rules cannot drift.
-describe('first-message words match the server title rule', () => {
-	it.each(sharedTitleCases)('$name', ({ prompt, paths, title, branchWords }) => {
-		expect(firstMessageWords(prompt, paths)).toBe(title);
+// The same cases the server's derive_session_title (the definition) is tested
+// against (tests/core/test_session_title.py), final formatted title included,
+// so the two title rules cannot drift. "unknown" cases (paths null) are the
+// server's alone: the composer always knows its attachments.
+type TitleCase = { name: string; state: string; prompt: string; paths: string[] | null; title: string; branchWords?: string };
+const titleCases = sharedTitleCases as TitleCase[];
+const knownCases = titleCases.filter((c): c is TitleCase & { paths: string[]; branchWords: string } => c.paths !== null);
+describe('the first-message title is the server title, truncation included', () => {
+	it('covers both known states, and leaves the unknown cases to the server', () => {
+		expect(knownCases.some(c => c.state === 'known')).toBe(true);
+		expect(knownCases.some(c => c.state === 'known-empty')).toBe(true);
+		expect(titleCases.filter(c => c.paths === null).every(c => c.state === 'unknown')).toBe(true);
+	});
+	it.each(knownCases)('$name', ({ state, prompt, paths, title, branchWords }) => {
+		expect(state).toBe(paths.length ? 'known' : 'known-empty');
+		expect(deriveSessionTitle(prompt, paths)).toBe(title);
 		expect(typedWords(prompt, paths)).toBe(branchWords);
 	});
 });

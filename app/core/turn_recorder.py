@@ -1826,7 +1826,9 @@ _TITLE_MAX_CHARS = 100
 
 def _derive_title(text: str, upload_paths: Optional[List[str]] = None) -> str:
     # Attachments ride in the text as ``@path``; the title is the typed words.
-    return derive_session_title(text, upload_paths, max_chars=_TITLE_MAX_CHARS)
+    # The exchange knows its attachments, so none is a known empty list: an
+    # ``@alice`` the user said is kept, never guessed away.
+    return derive_session_title(text, list(upload_paths or []), max_chars=_TITLE_MAX_CHARS)
 
 
 #: Metadata stamped on the ``session_messages`` row for a backend-authored note.

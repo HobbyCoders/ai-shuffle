@@ -251,7 +251,7 @@ async def _persist_and_broadcast_first_message(
     ``upload_paths`` are the attachments the prompt names, left out of the
     title (#1654).
     """
-    title = derive_session_title(prompt, upload_paths)
+    title = derive_session_title(prompt, list(upload_paths or []))
     msg_role, msg_meta = _detect_command_meta(prompt)
 
     def _persist_first_message():
@@ -458,7 +458,7 @@ async def _create_remote_branch_session(
                 "project_v2_id": pv2["id"],
                 # The owner receives this row before first-message persistence below.
                 # Give it the title now so its catalog cannot overwrite ours with "".
-                "title": derive_session_title(prompt or "", body.pending_upload_paths),
+                "title": derive_session_title(prompt or "", list(body.pending_upload_paths or [])),
                 "api_user_id": api_user_id,
                 "is_active": True,
                 "target_instance_id": target_instance_id,

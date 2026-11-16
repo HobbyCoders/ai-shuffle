@@ -161,8 +161,10 @@ class TestKnownAttachmentReferencesAnywhere:
         assert derive_session_title("@/ws/a.png", ["/ws/a.png"]) == "a.png"
 
 
-# The same cases the client's ``firstMessageWords`` is tested against
-# (message-presentation.test.ts), so the two title rules cannot drift.
+# The same cases the client's ``deriveSessionTitle`` is tested against
+# (message-presentation.test.ts), final formatted title and all, so the two
+# title rules cannot drift. ``paths`` is null for a caller in the "unknown"
+# state (server only: the composer always knows its attachments).
 _SHARED_CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "frontend/src/lib/utils/attachment-title-cases.json").read_text("utf-8")
 )
@@ -170,4 +172,6 @@ _SHARED_CASES = json.loads(
 
 @pytest.mark.parametrize("case", _SHARED_CASES, ids=[c["name"] for c in _SHARED_CASES])
 def test_title_matches_the_client_rule(case):
+    expected_state = "unknown" if case["paths"] is None else "known" if case["paths"] else "known-empty"
+    assert case["state"] == expected_state
     assert derive_session_title(case["prompt"], case["paths"]) == case["title"]
