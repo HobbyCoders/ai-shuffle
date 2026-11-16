@@ -51,7 +51,6 @@
 	import { backToChats } from '$lib/services/session-navigation';
 	import { chatHeaderTitle, NEW_CHAT_LABEL } from '$lib/components/layout/chat-empty-state';
 	import { canStartDrawerSwipe, completes, dragOffset, lockAxis, type DrawerSwipe } from './drawer-gesture';
-	import { FlickTracker } from '$lib/utils/swipe-arm';
 
 	interface Props {
 		isAdmin?: boolean;
@@ -263,8 +262,9 @@
 		x0: number;
 		y0: number;
 		locked: boolean;
-		/** The finger's sideways speed, read on release (#1637). */
-		flick: FlickTracker;
+		lastX: number;
+		lastT: number;
+		velocity: number;
 	}
 	let swipe: Swipe | null = null;
 	/** The drawer's offset while a finger drags it; null otherwise. */
@@ -272,7 +272,7 @@
 	let viewportW = $state(typeof window === 'undefined' ? 400 : window.innerWidth);
 
 	function touchStart(e: TouchEvent) {
-		if (e.touches.length !== 1) { endSwipe(null); return; }
+		if (e.touches.length !== 1) { endSwipe(false); return; }
 		if (swipe) return;
 		const touch = e.touches[0];
 		const target = e.target;
@@ -285,17 +285,23 @@
 		}
 		if (!canStartDrawerSwipe(target, kind)) return;
 		viewportW = window.innerWidth || viewportW;
-		const flick = new FlickTracker();
-		flick.start(touch.clientX, e);
-		swipe = { kind, id: touch.identifier, x0: touch.clientX, y0: touch.clientY, locked: false, flick };
+		swipe = {
+			kind,
+			id: touch.identifier,
+			x0: touch.clientX,
+			y0: touch.clientY,
+			locked: false,
+			lastX: touch.clientX,
+			lastT: e.timeStamp || performance.now(),
+			velocity: 0
+		};
 	}
 
 	function touchMove(e: TouchEvent) {
 		const current = swipe;
 		if (!current) return;
 		const touch = Array.from(e.touches).find((t) => t.identifier === current.id);
-		if (!touch || e.touches.length !== 1) { endSwipe(null); return; }
-		current.flick.add(touch.clientX, e);
+		if (!touch || e.touches.length !== 1) { endSwipe(false); return; }
 		const dx = touch.clientX - current.x0;
 		if (!current.locked) {
 			const lock = lockAxis(dx, touch.clientY - current.y0, current.kind);
@@ -305,28 +311,24 @@
 			mounted = true;
 		}
 		e.preventDefault();
+		const now = e.timeStamp || performance.now();
+		const dt = now - current.lastT;
+		if (dt > 0) current.velocity = 0.7 * ((touch.clientX - current.lastX) / dt) + 0.3 * current.velocity;
+		current.lastX = touch.clientX;
+		current.lastT = now;
 		dragX = dragOffset(dx, viewportW, current.kind);
-	}
-
-	// Touch events carry no coalesced moves; the pointer events for the same
-	// finger do, so a busy page's bunched moves still give the flick its speed.
-	function pointerMove(e: PointerEvent) {
-		if (swipe && e.pointerType === 'touch' && e.isPrimary) swipe.flick.addPointer(e);
 	}
 
 	function touchEnd(e: TouchEvent) {
 		if (!swipe) return;
-		if (e.touches.length === 0) endSwipe(e);
-		else endSwipe(null);
+		endSwipe(e.touches.length === 0);
 	}
 
-	/** Finish the drag: `release` is the lift that ended it, null when cancelled. */
-	function endSwipe(release: TouchEvent | null) {
+	function endSwipe(release: boolean) {
 		const current = swipe;
 		swipe = null;
 		if (!current?.locked) return;
-		// Speed at the lift: a fast drag, a hold, then a lift is not a flick.
-		const done = !!release && dragX !== null && completes(dragX, current.flick.velocity(release), viewportW, current.kind);
+		const done = release && dragX !== null && completes(dragX, current.velocity, viewportW, current.kind);
 		dragX = null;
 		if (!done) return;
 		if (current.kind === 'open') void openDrawer();
@@ -334,16 +336,14 @@
 	}
 
 	$effect(() => {
-		const cancel = () => endSwipe(null);
+		const cancel = () => endSwipe(false);
 		window.addEventListener('touchstart', touchStart, { capture: true, passive: true });
 		window.addEventListener('touchmove', touchMove, { passive: false });
-		window.addEventListener('pointermove', pointerMove, { passive: true });
 		window.addEventListener('touchend', touchEnd);
 		window.addEventListener('touchcancel', cancel);
 		return () => {
 			window.removeEventListener('touchstart', touchStart, true);
 			window.removeEventListener('touchmove', touchMove);
-			window.removeEventListener('pointermove', pointerMove);
 			window.removeEventListener('touchend', touchEnd);
 			window.removeEventListener('touchcancel', cancel);
 		};

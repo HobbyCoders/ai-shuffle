@@ -14,7 +14,7 @@
 	 */
 	import { tick, type Snippet } from 'svelte';
 	import { X } from 'lucide-svelte';
-	import { moveSheetDrag, pointerDragPoints, sheetDragDismisses, startSheetDrag, type SheetDrag } from '$lib/components/ui/sheet-drag';
+	import { moveSheetDrag, sheetDragDismisses, startSheetDrag, type SheetDrag } from '$lib/components/ui/sheet-drag';
 
 	interface Props {
 		open: boolean;
@@ -63,11 +63,8 @@
 		if (!start || e.pointerId !== start.id) return;
 		// Only a downward pull drags the sheet; anything else is a tap or a
 		// scroll of its content.
-		let mode = start.drag.mode;
-		for (const point of pointerDragPoints(e)) {
-			mode = moveSheetDrag(start.drag, point);
-			if (mode === 'scroll') { start = null; return; }
-		}
+		const mode = moveSheetDrag(start.drag, { x: e.clientX, y: e.clientY, time: e.timeStamp });
+		if (mode === 'scroll') { start = null; return; }
 		if (mode !== 'drag') return;
 		if (!dragging) {
 			dragging = true;

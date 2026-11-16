@@ -68,10 +68,9 @@
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
-	import { FlickTracker } from '$lib/utils/swipe-arm';
 	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 		import {
-		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, RELEASE_WINDOW_MS, dragAxis, settlesClosed,
+		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
 		settlesOpen, stepValue, taskSummary
 	} from './quick-controls';
 
@@ -546,8 +545,7 @@
 		cell: string | null;
 		height: number;
 		offset: number;
-		/** The finger's vertical speed, read at release (#1637). */
-		tracker: FlickTracker;
+		tracker: VelocityTracker;
 		/** The element that started the drag; it captures the pointer once the drag is real. */
 		el: Element | null;
 	}
@@ -556,13 +554,6 @@
 	let dragOffset = $state<number | null>(null);
 	let dragHeight = $state(0);
 	let suppressClick = false;
-
-	/** A vertical release-speed reading that starts at this press. */
-	function tracker(event: PointerEvent): FlickTracker {
-		const t = new FlickTracker({ windowMs: RELEASE_WINDOW_MS });
-		t.start(event.clientY, event);
-		return t;
-	}
 
 	function panelHeight(): number {
 		return panelRef?.offsetHeight || Math.round(window.innerHeight * 0.86);
@@ -574,14 +565,14 @@
 		// not open Chat controls underneath it.
 		if ((event.target as Element | null)?.closest?.('.usage-popover')) return;
 		const cell = (event.target as Element | null)?.closest<HTMLElement>('[data-cell]')?.dataset.cell ?? null;
-		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell, height: 0, offset: 0, tracker: tracker(event), el: event.currentTarget as Element };
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell, height: 0, offset: 0, tracker: new VelocityTracker(), el: event.currentTarget as Element };
 		suppressClick = false;
 	}
 
 	function startHeadDrag(event: PointerEvent) {
 		if (event.button !== 0 || !open || drag) return;
 		if ((event.target as Element | null)?.closest('button')) return;
-		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'head', height: panelHeight(), offset: 0, tracker: tracker(event), el: event.currentTarget as Element };
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'head', height: panelHeight(), offset: 0, tracker: new VelocityTracker(), el: event.currentTarget as Element };
 	}
 
 	// The usage sheet (the shared ContextUsageBar details, restyled below as a
@@ -604,7 +595,7 @@
 		// Setting `drag` first also keeps the bar's own pull-up from starting.
 		if (event.button !== 0 || drag || usageClosing) return;
 		const el = event.currentTarget as Element;
-		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'usage-grip', height: usageSheetHeight(el), offset: 0, tracker: tracker(event), el };
+		drag = { id: event.pointerId, x: event.clientX, y: event.clientY, kind: 'pending', cell: 'usage-grip', height: usageSheetHeight(el), offset: 0, tracker: new VelocityTracker(), el };
 	}
 
 	function dismissUsage(height: number) {
@@ -682,18 +673,18 @@
 			dragHeight = d.height;
 			d.offset = Math.min(d.height, Math.max(0, d.height + dy));
 			dragOffset = d.offset;
-			d.tracker.addPointer(event, 'y');
+			d.tracker.add(event.clientY, event.timeStamp || performance.now());
 		} else if (d.kind === 'close') {
 			d.offset = dy < 0 ? dy * 0.15 : dy;
 			dragOffset = d.offset;
 			dragHeight = d.height;
-			d.tracker.addPointer(event, 'y');
+			d.tracker.add(event.clientY, event.timeStamp || performance.now());
 		} else if (d.kind === 'usage') {
 			d.offset = dy < 0 ? dy * 0.15 : dy;
 			usageHeld = true;
 			usageDragHeight = d.height;
 			usageDragOffset = d.offset;
-			d.tracker.addPointer(event, 'y');
+			d.tracker.add(event.clientY, event.timeStamp || performance.now());
 		} else if (d.kind === 'step') {
 			const next = permissionPending ? null : stepValue(accessValues, accessValue, dx, BYPASS);
 			preview = next && next !== accessValue ? { cell: 'access', value: next } : null;
@@ -707,17 +698,17 @@
 		const cancelled = event.type === 'pointercancel';
 		if (d.kind === 'open') {
 			const progress = d.height ? 1 - d.offset / d.height : 0;
-			const keep = !cancelled && settlesOpen(progress, d.tracker.velocity(event));
+			const keep = !cancelled && settlesOpen(progress, d.tracker.velocity());
 			dragOffset = null;
 			if (keep) openPanel('main');
 			else if (!open) scheduleUnrender();
 		} else if (d.kind === 'close') {
-			const shut = !cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity(event));
+			const shut = !cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity());
 			dragOffset = null;
 			if (shut) closePanel();
 		} else if (d.kind === 'usage') {
 			usageHeld = false;
-			if (!cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity(event))) dismissUsage(d.height);
+			if (!cancelled && settlesClosed(d.offset, d.height, d.tracker.velocity())) dismissUsage(d.height);
 			else usageDragOffset = null; // springs back through the sheet's transition
 		} else if (d.kind === 'step') {
 			const chosen = preview;

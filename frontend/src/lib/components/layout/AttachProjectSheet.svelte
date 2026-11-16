@@ -21,7 +21,6 @@
 	import {
 		canStartSheetDrag,
 		moveSheetDrag,
-		sampleSheetDrag,
 		sheetDragDismisses,
 		startSheetDrag,
 		type DragPoint,
@@ -177,9 +176,6 @@
 	}
 
 	function onPointerMove(e: PointerEvent) {
-		// A finger's drag runs on touch events; its pointer events add the
-		// moves a busy page coalesced, for the release speed.
-		if (e.pointerType === 'touch' && e.isPrimary && gesture) { sampleSheetDrag(gesture, e); return; }
 		if (mouseId === null || e.pointerId !== mouseId) return;
 		const wasDragging = dragging;
 		if (moveDrag(at(e, e.timeStamp))) {

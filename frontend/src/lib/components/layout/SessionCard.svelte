@@ -69,7 +69,7 @@
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { FlickTracker, swipeArmDistance } from '$lib/utils/swipe-arm';
+	import { FLICK_STALE_MS, isQuickSwipe, swipeArmDistance } from '$lib/utils/swipe-arm';
 	import {
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
@@ -443,8 +443,14 @@
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
 	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
-	/** The finger's sideways speed, read on release (#1637). */
-	const flick = new FlickTracker();
+	/** Times are the events' own timeStamps, never the handler's clock (#1637). */
+	let startT = 0;
+	let lastX = 0;
+	let lastT = 0;
+	let velocity = 0;
+	/** Where the finger is and the farthest it got, from the press. */
+	let lastDx = 0;
+	let peakDx = 0;
 	let longTimer: ReturnType<typeof setTimeout> | null = null;
 	let laneTimer: ReturnType<typeof setTimeout> | null = null;
 	let suppressNextClick = false;
@@ -467,9 +473,10 @@
 		if (slideX !== null) return;
 		pointerId = event.pointerId;
 		pointerType = event.pointerType;
-		startX = event.clientX;
+		startX = lastX = event.clientX;
 		startY = event.clientY;
-		flick.start(event.clientX, event);
+		startT = lastT = event.timeStamp;
+		velocity = lastDx = peakDx = 0;
 		axis = null;
 		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
 		armDistance = swipeArmDistance(rowWidth, ARM_RATIO);
@@ -489,9 +496,6 @@
 
 	function handlePointerMove(event: PointerEvent) {
 		if (pointerId !== event.pointerId) return;
-		// Every move counts toward the release speed, the ones before the axis
-		// locks and the ones the browser coalesced into this event included.
-		flick.addPointer(event);
 		let dx = event.clientX - startX;
 		const dy = event.clientY - startY;
 		if (!axis) {
@@ -510,8 +514,15 @@
 			frameRef?.setPointerCapture?.(event.pointerId);
 		}
 		event.preventDefault();
+		const t = event.timeStamp;
+		const elapsed = t - lastT;
+		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
+		lastX = event.clientX;
+		lastT = t;
 		// A row with no right-swipe action does not move that way.
 		if (swipe.right === null) dx = Math.min(0, dx);
+		lastDx = dx;
+		if (Math.abs(dx) > Math.abs(peakDx)) peakDx = dx;
 		const lim = armDistance * EASE_PAST_ARM;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
@@ -540,9 +551,15 @@
 		// The click this gesture leaves behind must not open the session.
 		suppressNextClick = true;
 		const dx = dragX ?? 0;
-		// Read at the lift: a fast move then a hold is not a flick.
-		const flicked = Math.abs(flick.velocity(event)) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
-		if (dx !== 0 && (armed || flicked)) {
+		// Still moving fast, the drag's way, at the lift.
+		const flick =
+			event.timeStamp - lastT <= FLICK_STALE_MS &&
+			Math.sign(velocity) === Math.sign(dx) &&
+			Math.abs(velocity) > FLICK_VELOCITY &&
+			Math.abs(dx) > FLICK_MIN_DX;
+		// Short from press to lift: needs no moves in between (#1637).
+		const quick = isQuickSwipe({ durationMs: event.timeStamp - startT, dx: lastDx, peakDx, minDx: FLICK_MIN_DX });
+		if (dx !== 0 && (armed || flick || quick)) {
 			if (dx < 0) slideOut(-1, leftAction);
 			else {
 				// Snooze waits for a time: the row stays put, and the picker opens.

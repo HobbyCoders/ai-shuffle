@@ -26,10 +26,11 @@
 // `--mobile-shell`, as the drawer is the phone app's.
 //
 // A quick flick commits short of the arm point however busy the page is
-// (#1637): 80px as eight moves 8ms apart, sent without waiting, so the page
-// handles them late and in bunches. Guards: the release speed comes from the
-// last move's handling time again, which read 0.6 to 4px/ms for a 1.25px/ms
-// finger, so most flicks sprang back.
+// (#1637): 80px lifted 166ms after the press, sent as eight moves without
+// waiting (so the page handles them late and in bunches), or as one move
+// after a 100ms rest (all a busy page over plain HTTP may see). Guards: a
+// short swipe is judged by the moves' handling times again, which read 0.5
+// to 4px/ms for a 1.25px/ms finger, so most flicks sprang back.
 //
 // Snoozed and Settled rest at the bottom of the panel: Needs you and Active
 // read from the top, and the spare height sits between the two. Guards: the
@@ -94,7 +95,7 @@ async function rowAction(page, id, name) {
 /**
  * A finger along `path` (points { x, y, t }, `t` in ms after the press),
  * lifting at `liftAt` ms. Every touch event carries its own time, and the
- * page reads a gesture's speed by those times (#1637), so the speed is the
+ * page times a gesture by those stamps (#1637), so its timing is the
  * path's however late a busy runner sends the events: nothing here sleeps to
  * make a speed. `beforeLift` looks at the page mid-drag.
  */
@@ -155,11 +156,13 @@ async function dragScreen(page, x, y, travel) {
 }
 
 /**
- * A quick 80px flick across the row: eight moves 8ms apart (1.25px/ms),
- * lifted 2ms after the last, sent back to back so the page handles them in
- * bunches as a busy page does.
+ * A quick 80px flick across the row, lifted 166ms after the press. `burst`:
+ * eight moves 8ms apart (1.25px/ms), sent back to back so the page handles
+ * them in bunches as a busy page does. `single`: the finger rests 100ms, then
+ * the whole 80px arrives as one move 64ms later, as a busy page over plain
+ * HTTP (no coalesced events) may see it: no speed can be read from the moves.
  */
-async function flickRow(page, id, direction) {
+async function flickRow(page, id, direction, shape = 'burst') {
 	await showChats(page);
 	if (page.__mobileShell) await expectDrawer(page, true, 'the drawer never settled open before the flick');
 	const row = page.locator(CARD(id));
@@ -167,7 +170,10 @@ async function flickRow(page, id, direction) {
 	const box = await row.boundingBox();
 	const y = box.y + box.height / 2;
 	const from = direction > 0 ? box.x + 40 : box.x + box.width - 40;
-	await touchPath(page, sideways(from, y, 80 * direction, 8, 8), 66);
+	const path = shape === 'single'
+		? [{ x: from, y, t: 0 }, { x: from + 80 * direction, y, t: 164 }]
+		: sideways(from, y, 80 * direction, 8, 8).map((p) => ({ ...p, t: p.t + 100 }));
+	await touchPath(page, path, 166);
 }
 
 /**
@@ -498,8 +504,8 @@ await runJourney({
 			}
 		},
 		{
-			// A quick flick the page handles late and in bunches still commits
-			// (#1637), at full speed and under the CPU throttle.
+			// A quick flick still commits (#1637), at full speed and under the
+			// CPU throttle: handled late and in bunches, or seen as one move.
 			name: `${mobileShell ? 'native' : 'responsive'}-flick-commits`,
 			viewports: mobileShell ? ['phone', 'fold-inner'] : ['phone'],
 			setup: (ctx) => swipeSetup(ctx),
@@ -507,11 +513,13 @@ await runJourney({
 				const id = page.__snoozeChat;
 				await waitLane(page, id, 'active');
 				const picker = snoozePicker(page);
-				for (let round = 1; round <= 3; round++) {
-					await mark(`quick 80px flick right (${round} of 3): the picker opens`);
-					await flickRow(page, id, 1);
+				const shapes = ['burst', 'single', 'burst'];
+				for (const [i, shape] of shapes.entries()) {
+					const round = `${i + 1} of ${shapes.length}, ${shape}`;
+					await mark(`quick 80px flick right (${round}): the picker opens`);
+					await flickRow(page, id, 1, shape);
 					await picker.waitFor({ timeout: 5_000 }).catch(() => {
-						throw new Error(`a quick 80px flick right did not open the picker (round ${round})`);
+						throw new Error(`a quick 80px flick right did not open the picker (${round})`);
 					});
 					// Escape, or a scrim tap once the sheet has finished sliding in.
 					await page.keyboard.press('Escape');
@@ -525,8 +533,8 @@ await runJourney({
 					await expectRowInPlace(page, id);
 					expect(await laneOf(page, id) === 'active', 'a dismissed picker leaves the row in Active');
 				}
-				await mark('quick 80px flick left: the row settles');
-				await flickRow(page, id, -1);
+				await mark('quick 80px flick left, seen as one move: the row settles');
+				await flickRow(page, id, -1, 'single');
 				await waitLane(page, id, 'settled', 10_000).catch(() => {
 					throw new Error('a quick 80px flick left did not settle the row');
 				});

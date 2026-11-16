@@ -113,24 +113,6 @@ describe('composer opening touch arbitration', () => {
  it('opens upward and suppresses the trailing physical click, not keyboard activation', () => { const h = setup(); expect(swipe(h.button).defaultPrevented).toBe(true); expect(h.open).toHaveBeenCalledOnce(); h.button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 })); expect(h.click).not.toHaveBeenCalled(); h.button.click(); expect(h.click).toHaveBeenCalledOnce(); });
  it.each([[150, 100], [95, 180], [100, 100], [93, 100]])('does not open for downward/horizontal/tap/slop %s %s', (y,x) => { const h = setup(); swipe(h.button,y,x); expect(h.open).not.toHaveBeenCalled(); });
  it('uses 24px distance or existing flick threshold', () => { const h = setup(); const now = vi.spyOn(performance, 'now').mockReturnValue(0); touch(h.button,'touchstart',100); now.mockReturnValue(1000); touch(h.button,'touchmove',77); touch(h.button,'touchend',77); expect(h.open).not.toHaveBeenCalled(); swipe(h.button,76); expect(h.open).toHaveBeenCalledOnce(); now.mockRestore(); });
- it('reads a short flick a busy page hands over as one bunched move by its coalesced pointer moves (#1637)', () => {
-  // 20px up (short of 24px) in 15ms after a 100ms rest; one touchmove carries
-  // only the end point, its pointermove carries every position.
-  const stamped = (event: Event, t: number) => { Object.defineProperty(event, 'timeStamp', { value: t }); return event; };
-  const run = (coalesced: boolean) => {
-   const h = setup();
-   const at = (type: string, y: number, t: number) => { const item = { identifier: 1, clientX: 100, clientY: y }; const e = stamped(new Event(type, { bubbles: true, cancelable: true }), t); Object.assign(e, { touches: type === 'touchend' ? [] : [item], changedTouches: [item] }); h.button.dispatchEvent(e); };
-   at('touchstart', 100, 1000);
-   const move = stamped(new Event('pointermove', { bubbles: true }), 1120);
-   const point = (y: number, t: number) => stamped(Object.assign(new Event('pointermove'), { clientX: 100, clientY: y }), t);
-   Object.assign(move, { pointerType: 'touch', isPrimary: true, clientX: 100, clientY: 80, getCoalescedEvents: () => coalesced ? [point(95, 1105), point(90, 1110), point(85, 1115), point(80, 1120)] : [] });
-   h.button.dispatchEvent(move);
-   at('touchmove', 80, 1120); at('touchend', 80, 1122);
-   return h.open;
-  };
-  expect(run(false)).not.toHaveBeenCalled();
-  expect(run(true)).toHaveBeenCalledOnce();
- });
  it('does not suppress a new intentional touch after the sheet opens', () => {
   const h = setup(); swipe(h.button); h.state.enabled = false;
   const down = new Event('pointerdown', { bubbles: true }); Object.assign(down, { pointerType: 'touch', isPrimary: true }); h.button.dispatchEvent(down);

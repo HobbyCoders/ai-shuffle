@@ -372,32 +372,6 @@ describe('AttachProjectSheet on the phone: drag down to dismiss', () => {
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 
-	it('reads a flick a busy page hands over as one bunched move by its coalesced pointer moves (#1637)', async () => {
-		vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), media: query }));
-		const run = (coalesced: boolean) => {
-			const onClose = vi.fn();
-			const view = render(AttachProjectSheet, { props: props({ onClose }) });
-			const title = view.getByRole('heading', { name: 'Attach a project' });
-			// A 100ms rest, then 45px in 24ms: the touchmove carries only the end
-			// point, its pointermove carries every position.
-			touch(title, 'touchstart', 200, 0);
-			const point = (y: number, t: number) => { const e = new Event('pointermove', { bubbles: true }); Object.defineProperties(e, { clientX: { value: 20 }, clientY: { value: y }, timeStamp: { value: t } }); return e; };
-			const move = point(245, 124);
-			Object.defineProperties(move, {
-				pointerType: { value: 'touch' }, isPrimary: { value: true }, pointerId: { value: 1 },
-				getCoalescedEvents: { value: () => (coalesced ? [point(215, 108), point(230, 116), point(245, 124)] : []) }
-			});
-			// The browser sends a finger's pointermove just before its touchmove.
-			title.dispatchEvent(move);
-			touch(title, 'touchmove', 245, 124);
-			touch(title, 'touchend', 245, 126);
-			view.unmount();
-			return onClose;
-		};
-		expect(run(false)).not.toHaveBeenCalled();
-		expect(run(true)).toHaveBeenCalledTimes(1);
-	});
-
 	it('lets a scrolled list scroll, and drags it only once it is at its top', async () => {
 		const onClose = vi.fn();
 		render(AttachProjectSheet, { props: props({ onClose }) });

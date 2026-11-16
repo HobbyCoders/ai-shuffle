@@ -13,8 +13,6 @@
  * back otherwise.
  */
 
-import { FLICK_STALE_MS, FlickTracker, coalescedMoves } from '$lib/utils/swipe-arm';
-
 /** Movement before the gesture picks a direction. Below it, a touch is a tap. */
 export const DRAG_SLOP = 8;
 /** Past this pull, letting go closes the sheet. */
@@ -24,7 +22,7 @@ export const FLICK_VELOCITY = 0.5;
 /** The shortest pull a flick may close from, so a tap's jitter never does. */
 export const FLICK_MIN_DISTANCE = 16;
 /** A release this long after the last move was a hold, not a flick. */
-export { FLICK_STALE_MS };
+export const FLICK_STALE_MS = 90;
 
 export interface DragPoint {
 	x: number;
@@ -37,10 +35,9 @@ export type SheetDragMode = 'pending' | 'drag' | 'scroll';
 
 export interface SheetDrag {
 	start: DragPoint;
-	/** Downward speed at the last move, px/ms, over the last few moves. */
+	last: DragPoint;
+	/** Downward speed at the last move, px/ms. */
 	velocity: number;
-	/** The finger's downward positions, read by the shared flick reading (#1637). */
-	flick: FlickTracker;
 	/** False when the touch began where a downward move must scroll content. */
 	eligible: boolean;
 	mode: SheetDragMode;
@@ -49,9 +46,7 @@ export interface SheetDrag {
 }
 
 export function startSheetDrag(point: DragPoint, eligible = true): SheetDrag {
-	const flick = new FlickTracker();
-	flick.addAt(point.y, point.time);
-	return { start: point, velocity: 0, flick, eligible, mode: eligible ? 'pending' : 'scroll', offset: 0 };
+	return { start: point, last: point, velocity: 0, eligible, mode: eligible ? 'pending' : 'scroll', offset: 0 };
 }
 
 /**
@@ -61,7 +56,6 @@ export function startSheetDrag(point: DragPoint, eligible = true): SheetDrag {
  */
 export function moveSheetDrag(state: SheetDrag, point: DragPoint): SheetDragMode {
 	if (state.mode === 'scroll') return state.mode;
-	state.flick.addAt(point.y, point.time);
 	const dx = point.x - state.start.x;
 	const dy = point.y - state.start.y;
 	if (state.mode === 'pending') {
@@ -69,28 +63,15 @@ export function moveSheetDrag(state: SheetDrag, point: DragPoint): SheetDragMode
 		state.mode = dy > 0 && dy > Math.abs(dx) ? 'drag' : 'scroll';
 		if (state.mode === 'scroll') return state.mode;
 	}
-	// Over the last few moves, so one jittery event cannot fake or hide a flick.
-	state.velocity = state.flick.velocityAt();
+	const dt = point.time - state.last.time;
+	if (dt > 0) {
+		const instant = (point.y - state.last.y) / dt;
+		// Smooth over moves so one jittery event cannot fake or hide a flick.
+		state.velocity = state.velocity ? state.velocity * 0.4 + instant * 0.6 : instant;
+	}
+	state.last = point;
 	state.offset = Math.max(0, dy);
 	return state.mode;
-}
-
-/**
- * A pointermove's positions: every one the browser coalesced into it (a busy
- * page hands over a quick pull in one event), else the event's own.
- */
-export function pointerDragPoints(e: PointerEvent): DragPoint[] {
-	return coalescedMoves(e).map((m) => ({ x: m.clientX, y: m.clientY, time: m.timeStamp }));
-}
-
-/**
- * Add a touch's pointermove to a drag that touch events drive: touch events
- * carry no coalesced moves, the pointer events for the same finger do. Only
- * the speed reading takes them; the touch events still move the sheet.
- */
-export function sampleSheetDrag(state: SheetDrag, e: PointerEvent): void {
-	if (state.mode === 'scroll') return;
-	for (const point of pointerDragPoints(e)) state.flick.addAt(point.y, point.time);
 }
 
 /**
@@ -101,7 +82,7 @@ export function sampleSheetDrag(state: SheetDrag, e: PointerEvent): void {
 export function sheetDragDismisses(state: SheetDrag, releaseTime: number, distance = DISMISS_DISTANCE): boolean {
 	if (state.mode !== 'drag') return false;
 	if (state.offset > distance) return true;
-	const velocity = state.flick.velocityAt(releaseTime);
+	const velocity = releaseTime - state.last.time > FLICK_STALE_MS ? 0 : state.velocity;
 	return state.offset > FLICK_MIN_DISTANCE && velocity > FLICK_VELOCITY;
 }
 

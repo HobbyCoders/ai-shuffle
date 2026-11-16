@@ -43,23 +43,6 @@ describe('panel dismiss gesture ownership', () => {
 		expect(finishPanelGesture(flick, point(100, 126, 30), 240)).toBe(true);
 	});
 
-	it('reads speed at the lift: a hold before letting go is not a flick, a rest before the pull does not slow it (#1637)', () => {
-		const held = createPanelGesture({ ...start, eligible: true });
-		updatePanelGesture(held, point(100, 110, 10));
-		updatePanelGesture(held, point(100, 120, 20));
-		expect(finishPanelGesture(held, point(100, 120, 520), 0)).toBe(false);
-		const flick = createPanelGesture({ ...start, eligible: true });
-		updatePanelGesture(flick, point(100, 110, 10));
-		updatePanelGesture(flick, point(100, 120, 20));
-		expect(finishPanelGesture(flick, point(100, 120, 28), 0)).toBe(true);
-		// A rest before a quick pull does not slow the pull down.
-		const late = createPanelGesture({ ...start, eligible: true });
-		updatePanelGesture(late, point(100, 101, 400));
-		updatePanelGesture(late, point(100, 110, 410));
-		updatePanelGesture(late, point(100, 120, 420));
-		expect(finishPanelGesture(late, point(100, 120, 428), 0)).toBe(true);
-	});
-
 	it('does not collapse an extremely short panel from a tiny slow pull', () => {
 		const gesture = createPanelGesture({ ...start, eligible: true });
 		updatePanelGesture(gesture, point(100, 120));
