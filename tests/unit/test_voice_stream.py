@@ -938,7 +938,7 @@ def _upload_row(monkeypatch, row=None):
     monkeypatch.setattr(voice_stream.database, "get_session", lambda session_id: row or {"id": session_id, "mode": "chat"})
     # The disk checks; a test about them restores or replaces these.
     monkeypatch.setattr(upload_transfer, "resolve_upload_references", lambda payload, session: payload)
-    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session: None)
+    monkeypatch.setattr(upload_transfer, "validate_turn_uploads", lambda payload, session, **_: None)
 
 
 @pytest.mark.asyncio

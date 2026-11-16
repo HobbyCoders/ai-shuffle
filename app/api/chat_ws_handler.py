@@ -1430,6 +1430,13 @@ class ChatWebSocketHandler:
             [p for p in raw_upload_paths if isinstance(p, str) and p]
             if isinstance(raw_upload_paths, list) else []
         )
+        # What a title leaves out: every attachment the message names, fresh
+        # or restored (#1654). Text only; admission checks the references.
+        raw_references = data.get("upload_references")
+        title_paths = upload_paths + [
+            ref["path"] for ref in (raw_references if isinstance(raw_references, list) else [])
+            if isinstance(ref, dict) and isinstance(ref.get("path"), str) and ref["path"]
+        ]
         # Sidepanel mode for a NEW session (code / chat / voice). Creation-time
         # only: an existing session's mode is settled on its row, so re-sending
         # it here could never move a session between surfaces. The frontend
@@ -1579,7 +1586,7 @@ class ChatWebSocketHandler:
             session_id = str(uuid.uuid4())
             is_new_session = True
             # Generate title from the user's first message
-            title = derive_session_title(prompt, upload_paths)
+            title = derive_session_title(prompt, title_paths)
 
             # Create session + first user message atomically so neither is orphaned.
             # Wrapped in run_sync to avoid blocking the event loop during DB I/O.
@@ -1733,7 +1740,7 @@ class ChatWebSocketHandler:
             # run via the queue. (The user-message persist itself happens further
             # down, only after this query WINS the check-and-register.)
             if existing_session and not (existing_session.get("title") or "").strip():
-                derived_title = derive_session_title(prompt, upload_paths)
+                derived_title = derive_session_title(prompt, title_paths)
                 if derived_title:
                     await run_sync(
                         database.update_session,

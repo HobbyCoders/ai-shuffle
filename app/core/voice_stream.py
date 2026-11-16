@@ -1221,8 +1221,7 @@ class VoiceStream:
         if not self.remote_owner:
             # As the turn itself will: the send is refused here, with the draft
             # kept, instead of being accepted and failing or losing the file.
-            resolved = await run_sync(upload_transfer.resolve_upload_references, uploads, row)
-            await run_sync(upload_transfer.validate_turn_uploads, resolved, row)
+            await run_sync(upload_transfer.admit_turn_uploads, uploads, row)
             unmentioned = [path for path in recorded if "@" + path not in text]
             return recorded, attachment_note(unmentioned) if unmentioned else "", uploads
         if local:

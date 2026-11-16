@@ -1824,8 +1824,11 @@ VOICE_PLACEHOLDER_TITLE = "Voice session"
 _TITLE_MAX_CHARS = 100
 
 
-def _derive_title(text: str) -> str:
-    return derive_session_title(text, max_chars=_TITLE_MAX_CHARS)
+def _derive_title(text: str, upload_paths: Optional[List[str]] = None) -> str:
+    # Attachments ride in the text as ``@path``; the title is the typed words.
+    # The exchange knows its attachments, so none is a known empty list: an
+    # ``@alice`` the user said is kept, never guessed away.
+    return derive_session_title(text, list(upload_paths or []), max_chars=_TITLE_MAX_CHARS)
 
 
 #: Metadata stamped on the ``session_messages`` row for a backend-authored note.
@@ -1837,6 +1840,7 @@ def _voice_exchange_side_effects(
     user_text: Optional[str],
     assistant_text: Optional[str],
     system_text: Optional[str] = None,
+    upload_paths: Optional[List[str]] = None,
 ) -> Optional[str]:
     """Search rows + board bookkeeping for one voice exchange (sync).
 
@@ -1869,7 +1873,7 @@ def _voice_exchange_side_effects(
         row = database.get_session(session_id)
         current = (row or {}).get("title") or ""
         if not current.strip() or current.strip() == VOICE_PLACEHOLDER_TITLE:
-            new_title = _derive_title(user_text) or None
+            new_title = _derive_title(user_text, upload_paths) or None
 
     database.update_session(
         session_id=session_id, turn_increment=1, title=new_title,
@@ -1971,6 +1975,7 @@ async def record_voice_exchange(
             new_title = await asyncio.to_thread(
                 _voice_exchange_side_effects,
                 session_id, user_text, assistant_text, system_text,
+                list(upload_paths or []),
             )
             if new_title:
                 logger.info(

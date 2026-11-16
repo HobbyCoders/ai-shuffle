@@ -239,10 +239,16 @@
 		}
 	}
 
+	// The pill remounts the sheet per chat (#1663). An answer that returns
+	// after that must not close the sheet another chat has open since.
+	let mounted = true;
+	$effect(() => () => { mounted = false; });
+	const closeIfMounted = () => { if (mounted) onClose(); };
+
 	async function confirm() {
 		if (!canAttach || !pickedItem) return;
-		// Fix everything this attach needs now. The sheet is not remounted per
-		// chat, so by the time an answer returns its props may name another one.
+		// Fix everything this attach needs now: by the time an answer returns
+		// the page may show another chat.
 		const id = sessionId;
 		const relayTo = owner;
 		const name = pickedItem.name;
@@ -260,7 +266,7 @@
 		try {
 			const result = await attachProject(id, target);
 			if (left()) {
-				onClose();
+				closeIfMounted();
 				return;
 			}
 			if (!relayTo) {
@@ -268,7 +274,7 @@
 			} else {
 				const outcome = await activeSession.waitForAttachedRow(id, ATTACH_ROW_WAIT_MS);
 				if (outcome === 'left' || left()) {
-					onClose();
+					closeIfMounted();
 					return;
 				}
 				if (outcome === 'pending') {
@@ -285,7 +291,7 @@
 			const message = getErrorMessage(e, 'Could not attach the project.');
 			if (left()) {
 				// The sheet belongs to another chat now; say it outside it.
-				onClose();
+				closeIfMounted();
 				notify(message, { severity: 'error' });
 			} else {
 				error = message;

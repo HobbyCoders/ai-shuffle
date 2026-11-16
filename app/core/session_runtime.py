@@ -1614,8 +1614,7 @@ class SessionRuntime:
                 from app.core import upload_transfer
                 from app.db import database
                 session = await asyncio.to_thread(database.get_session, self.session_id)
-                turn_payload = await asyncio.to_thread(upload_transfer.resolve_upload_references, turn_payload, session)
-                await asyncio.to_thread(upload_transfer.validate_turn_uploads, turn_payload, session)
+                turn_payload = await asyncio.to_thread(upload_transfer.admit_turn_uploads, turn_payload, session)
                 self.turn["payload"] = turn_payload
             record_user = not resume and not already_recorded and not awaiting_uploads
             agent_content = await self._note_expanded(prompt) if record_user else None

@@ -299,6 +299,21 @@ describe('autoCreateWorktree', () => {
 		expect(sendMessage).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		['one attachment', 'QA E4 worktree B @/ws/proj/uploads/a.png', ['/ws/proj/uploads/a.png']],
+		['several attachments, one run into a word', 'QA E4 worktree B@/ws/proj/uploads/a b.png @/ws/proj/uploads/c.txt', ['/ws/proj/uploads/a b.png', '/ws/proj/uploads/c.txt']],
+	])('names the branch and the chat from the typed words only, with %s (#1654)', async (_label, prompt, paths) => {
+		post.mockResolvedValueOnce({ session_id: 'wt-words', branch_name: 'feat/auto-name', base_branch: 'develop', worktree_path: '/w', status: 'ok', query_started: true });
+		const { sender, state } = setup();
+
+		await sender.autoCreateWorktree(prompt, paths);
+
+		expect(generateBranchName).toHaveBeenCalledWith('proj-1', 'QA E4 worktree B');
+		expect(state().title).toBe('QA E4 worktree B');
+		// The prompt itself still names its attachments.
+		expect((post.mock.calls[0][1] as { prompt: string }).prompt).toBe(prompt);
+	});
+
 	it('sends the local row\'s own command id with the create, so the delivered row reconciles by id (#1351)', async () => {
 		// The server stores the prompt with each upload's checkout path, so the
 		// delivered message.user text differs from this row: only the id matches.

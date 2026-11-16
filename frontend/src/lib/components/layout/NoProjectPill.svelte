@@ -24,9 +24,16 @@
 
 	let { variant = 'chip' }: Props = $props();
 
-	let open = $state(false);
+	// The chat the sheet was opened for. The pill stays mounted across chats,
+	// so the sheet belongs to one: moving to another chat closes it (#1663).
+	let openFor = $state<string | null>(null);
 
 	const sessionId = $derived($activeSession.sessionId);
+	const open = $derived(!!openFor && openFor === sessionId);
+	$effect(() => {
+		// Coming back to that chat later does not reopen it.
+		if (openFor && openFor !== sessionId) openFor = null;
+	});
 	const row = $derived($sessions.find((s) => s.id === sessionId) ?? null);
 	const isRemote = $derived(!!(row?.is_remote ?? $activeSession.isRemote));
 	// The worker that runs the chat: the attach is relayed to it, and the sheet
@@ -64,7 +71,7 @@
 			aria-expanded={open}
 			aria-label="No project. Attach a project to this session"
 			title="No project — attach one to get a checkout and git"
-			onclick={() => (open = true)}
+			onclick={() => (openFor = sessionId)}
 		>
 			<FolderPlus size={18} strokeWidth={1.8} aria-hidden="true" />
 		</button>
@@ -79,14 +86,17 @@
 			aria-expanded={open}
 			aria-label="No project. Attach a project to this session"
 			title="No project — attach one to get a checkout and git"
-			onclick={() => (open = true)}
+			onclick={() => (openFor = sessionId)}
 		>
 			<FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" />
 			<span class="ctx-chip-label">No project</span>
 			<ChevronDown size={12} strokeWidth={1.5} aria-hidden="true" />
 		</button>
 	{/if}
-	<AttachProjectSheet {open} {sessionId} {agentName} {blockedReason} {owner} onClose={() => (open = false)} />
+	<!-- Keyed on the chat, so its pick and error text never carry to another. -->
+	{#key sessionId}
+		<AttachProjectSheet {open} {sessionId} {agentName} {blockedReason} {owner} onClose={() => (openFor = null)} />
+	{/key}
 {/if}
 
 <style>

@@ -1,14 +1,14 @@
 {
   "version": 1,
-  "fingerprint": "0f971f2d47c580a7681050dde118f84858e4001fa61d7c36b719db28141fe7a0",
-  "bundle_sha256": "865dc4b59b871091dfae85c6a8049ebe3d5c5a34ed06f29a35d363d6d1b7f6ca",
+  "fingerprint": "f502b40de0fd63cd4d4c99107c3053fa62e9482aadd480229764aa594b18463b",
+  "bundle_sha256": "e76cb29164e7da470bd84f8245f68ec8033994cd319027172dbbe5cc18ce4797",
   "minimum_node_major": 22,
   "canonical_sources": {
     "app/api/events.py": "9e17b660b9587237efcb2f036f6fc13ad75c5a2348f1328e13c2f247953a9871",
     "app/core/harness_reminders.py": "5502ad06a5ac46c7fcf262c30adef1a055be9c708e95a12b6337e63729209cf4",
     "app/core/transcript_replay.py": "23af5359c20a185b2968f2ed6c8b44ece9142a3787eb3e92579ba13548884e2f",
     "app/core/transcript_views/preprocess.py": "488153378d7d27aa2fc71823268b4a5eaf7963c5208219694ebe4f3a7a76fefe",
-    "app/core/turn_recorder.py": "257b6598d8b8e767c59f7c0a76e1dc35d682d1ae712310102e4a18c1f86c5687",
+    "app/core/turn_recorder.py": "14d22631111d7a9334274a073fbca55fc37c15d2418ea0fa7d9413d098cbbe2d",
     "app/db/session_events.py": "8c5eea978456249c5b9ed842a49bb26d965c6ceccad359ea9b674f2ba89c8e67"
   }
 }

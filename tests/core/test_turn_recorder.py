@@ -1654,6 +1654,19 @@ async def test_record_voice_exchange_backfills_the_placeholder_title(mock_db):
     assert sessions_db.get_session(SID)["turn_count"] == 2
 
 
+async def test_record_voice_exchange_titles_from_the_typed_words_not_the_attachment(mock_db):
+    # #1654: text typed into a call with an attachment carries it as ``@path``;
+    # the backfilled title is the typed words only.
+    sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
+    path = "/ws/chat-uploads/my photo.png"
+    await tr.record_voice_exchange(
+        SID, f"inspect @{path}", "looking", user_source="typed", upload_paths=[path],
+    )
+    assert sessions_db.get_session(SID)["title"] == "inspect"
+    rows = {e["event_type"]: e["payload"] for e in se.get_events(SID)}
+    assert rows["message.user"]["content"] == f"inspect @{path}"
+
+
 async def test_record_voice_exchange_title_truncates_on_a_word_boundary(mock_db):
     sessions_db.create_session(SID, "default", title=tr.VOICE_PLACEHOLDER_TITLE)
     spoken = "word " * 40
