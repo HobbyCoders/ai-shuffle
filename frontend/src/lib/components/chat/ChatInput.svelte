@@ -743,22 +743,22 @@
 	}));
 	const showTalk = $derived(circles.includes('talk'));
 
-	// A button that slides into a seat ignores pointer presses for a moment
-	// (#1632): when Stop or a held Send leaves, a tap aimed at it must not
-	// start a call or dictation, or stop the turn on a Stop that just took a
-	// spinner's place. Typing, a chat switch and voice availability settle
-	// the row instead (the user caused it, or nothing moved under a tap).
+	// A button that takes over a seat another button held ignores pointer
+	// presses for a moment (#1632): when Stop, Talk or a held Send leaves, a tap
+	// aimed at it must not start a call or dictation, or stop the turn on a
+	// Stop that just took a spinner's place. Only seats count, never what moved
+	// the row (composer-wrap.ts). Seats carry over only within one chat's
+	// docked composer: on the start screen nothing is guarded but a double
+	// click (the composer moves away as the chat opens), and another chat's
+	// row is a new row.
 	const arrivals = createArrivalGuard();
-	// On the start screen nothing is guarded: the composer moves away as the
-	// chat opens, so no button slides under a tap meant for another one.
-	let rowCause: { chat: string | null; content: boolean; call: boolean; compact: boolean } | null = null;
+	let placed: { inChat: boolean; chat: string | null } | null = null;
 	$effect(() => {
 		const row: RowButton[] = ['mic', ...circles];
-		const cause = { chat: $activeSession.sessionId, content: hasMessageContent, call: callAvailable, compact };
-		const settled = !compact || !rowCause || rowCause.chat !== cause.chat || rowCause.content !== cause.content
-			|| rowCause.call !== cause.call || rowCause.compact !== cause.compact;
-		rowCause = cause;
-		arrivals.update(row, settled);
+		const now = { inChat: compact, chat: $activeSession.sessionId };
+		const newRow = !placed || placed.inChat !== now.inChat || placed.chat !== now.chat;
+		placed = now;
+		arrivals.update(row, !compact || newRow);
 	});
 	const presses = createPressTracker<HTMLButtonElement>();
 	const rowButtonAt = (target: EventTarget | null) =>

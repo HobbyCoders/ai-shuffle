@@ -399,6 +399,51 @@ await runJourney({
 			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
 		}
 	}, {
+		// #1631: a dictation error during a turn rendered inside the action row and
+		// pushed Stop off-screen on a phone. It shows above the box instead.
+		name: 'dictation-error-outside-row',
+		viewports: VIEWPORTS,
+		allow: [{ kind: 'errors', message: /\[GlobalSTT\] Failed to start recording/, reason: 'this case refuses the microphone on purpose to show the dictation error' }],
+		async setup(ctx) {
+			// The microphone is refused, as on a page without a secure context.
+			await ctx.page.addInitScript(() => {
+				if (navigator.mediaDevices) {
+					navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
+				}
+			});
+			await firstExchange(ctx);
+		},
+		async act({ page, mark, variant, log }) {
+			await typeAndSend(page, `long turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 3 })}`);
+			await stopButton(page).waitFor({ timeout: 20_000 });
+			await page.waitForTimeout(700);
+			const before = await stopButton(page).boundingBox();
+			await mark('dictate while the turn runs: the microphone is refused');
+			await page.locator('.send-cluster .voice-btn').click();
+			const alert = page.locator('[role="alert"]').filter({ hasText: /record|microphone/i }).first();
+			await alert.waitFor({ timeout: 10_000 });
+			const state = await page.evaluate(() => {
+				const el = [...document.querySelectorAll('[role="alert"]')].find((a) => /record|microphone/i.test(a.textContent ?? ''));
+				const stop = document.querySelector('.send-cluster .stop-btn')?.getBoundingClientRect();
+				return {
+					inRow: !!el?.closest('.send-cluster'),
+					stopRight: stop ? Math.round(stop.right) : null,
+					overflow: document.documentElement.scrollWidth - window.innerWidth
+				};
+			});
+			const after = await stopButton(page).boundingBox();
+			log(`error shown: ${JSON.stringify(state)}; Stop ${Math.round(before.x)} → ${Math.round(after?.x ?? -1)}`);
+			expect(!state.inRow, 'the dictation error is not inside the action row');
+			expect(after && Math.abs(after.x - before.x) <= 1, `Stop stays in its place (${Math.round(before.x)} → ${Math.round(after?.x ?? -1)})`);
+			expect(state.stopRight !== null && state.stopRight <= page.viewportSize().width, `Stop stays on screen (right edge ${state.stopRight})`);
+			expect(state.overflow <= 0, `the page does not scroll sideways (${state.overflow}px)`);
+			await mark('dismiss the error, then stop');
+			await alert.getByRole('button', { name: /dismiss/i }).click();
+			await alert.waitFor({ state: 'detached', timeout: 5000 });
+			await stopButton(page).click();
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
 		// #1632 comment: a double click on Send in a new chat (desktop, a project
 		// picked) left the first message "Not sent (stopped)".
 		name: 'new-chat-double-click-send',

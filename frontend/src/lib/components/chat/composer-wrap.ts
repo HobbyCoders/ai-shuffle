@@ -245,11 +245,10 @@ const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
  * When each seat of the action row last got another button in place of the one
  * it held (a seat that was empty arms nothing). Seats count from
  * the row's right end, where the circles sit, so a button that slides over
- * takes a new seat. A change the user made themselves (typing turns Talk
- * into Send, a chat switch) is `settled`: they are looking at the row, and
- * nothing arrives unseen, except under the rest of a double click or double
- * tap: its later presses land where the first one was, so one that reaches a
- * button which moved in since (Send became Stop) is never meant for it. Send
+ * takes a new seat. A row that has just been placed (`settled`: the start
+ * screen, the composer arriving in the chat, another chat's row) arms only the rest of a double
+ * click: its later presses land where the first one was, so one that reaches
+ * a button which moved in since (Send became Stop) is never meant for it. Send
  * is never guarded: a stray press on it sends the draft that was typed to be
  * sent.
  */

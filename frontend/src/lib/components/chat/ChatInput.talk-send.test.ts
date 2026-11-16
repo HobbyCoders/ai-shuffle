@@ -14,6 +14,8 @@ import { auth } from '$lib/stores/auth.svelte';
 import { initialState, reduce } from '$lib/stores/session/v2/reducer';
 import { bumpInitGeneration } from '$lib/stores/session/session-init';
 import '$lib/test-stubs/composer-dom';
+import { get } from 'svelte/store';
+import { voiceCallState } from '$lib/services/voiceCall';
 
 const voice = vi.hoisted(() => ({ enabled: true }));
 vi.hoisted(() => {
@@ -300,11 +302,19 @@ describe('Talk turns into Send', () => {
 			const { container } = render(ChatInput, { props: { compact: true } });
 			await type(container, 'Ship it');
 			await waitFor(() => expect(circles(container)).toContain('Send'));
+			const pressed = performance.now();
+			const clock = vi.spyOn(performance, 'now').mockReturnValue(pressed);
 			await tap(screen.getByRole('button', { name: 'Send' }));
 			await tick();
 			expect(sends).not.toHaveBeenCalled();
 			startTurn();
-			await tap(await screen.findByRole('button', { name: 'Stop generating' }));
+			const stop = await screen.findByRole('button', { name: 'Stop generating' });
+			// Work starting elsewhere slid Stop into Send's seat: a tap is judged
+			// after the row's own 400ms, still inside a Send window had one armed.
+			clock.mockReturnValue(pressed + 450);
+			const event = new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 });
+			Object.defineProperty(event, 'timeStamp', { value: pressed + 450 });
+			await fireEvent(stop, event);
 			expect(stops).toHaveBeenCalledOnce();
 		});
 	});
@@ -468,5 +478,52 @@ describe('a button sliding into a freed seat (#1632)', () => {
 		const hits = reached(mic);
 		await tap(mic, ARRIVED + 100, ARRIVED + 160);
 		expect(hits).toEqual([ARRIVED + 160]);
+	});
+
+	describe('a call starting or ending in a working chat', () => {
+		afterEach(() => voiceCallState.set(callIdle));
+		const callIdle = { ...get(voiceCallState) };
+
+		async function workingWithTalk() {
+			startTurn('local-working');
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await waitFor(() => expect(circles(container)).toEqual([
+				'Start voice input', 'Start a call in this conversation', 'Stop generating'
+			]));
+			return container;
+		}
+
+		it('never lets the second touch of a double tap on Talk start dictation on the mic that took its seat', async () => {
+			const container = await workingWithTalk();
+			// The tap on Talk starts the call: Talk leaves, mic · Stop, the mic in Talk's seat.
+			voiceCallState.set({ ...callIdle, sessionId: 'local-working', status: 'connecting' });
+			await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Stop generating']));
+			clock.mockReturnValue(ARRIVED + 5000);
+			const mic = container.querySelector('.voice-btn')!;
+			const hits = reached(mic);
+			await tap(mic, ARRIVED + 100, ARRIVED + 160);
+			expect(hits).toEqual([]);
+			await tap(mic, ARRIVED + 450, ARRIVED + 520);
+			expect(hits).toEqual([ARRIVED + 520]);
+		});
+
+		it('holds back a tap aimed at the mic that lands on Talk returning as the call ends', async () => {
+			voiceCallState.set({ ...callIdle, sessionId: 'local-working', status: 'live' });
+			startTurn('local-working');
+			const { container } = render(ChatInput, { props: { compact: true } });
+			await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Stop generating']));
+			// The call ends: Talk comes back into the mic's seat.
+			voiceCallState.set(callIdle);
+			await waitFor(() => expect(circles(container)).toEqual([
+				'Start voice input', 'Start a call in this conversation', 'Stop generating'
+			]));
+			clock.mockReturnValue(ARRIVED + 5000);
+			const talk = container.querySelector('.call-circle')!;
+			const hits = reached(talk);
+			await tap(talk, ARRIVED + 100, ARRIVED + 160);
+			expect(hits).toEqual([]);
+			await tap(talk, ARRIVED + 450, ARRIVED + 520);
+			expect(hits).toEqual([ARRIVED + 520]);
+		});
 	});
 });
