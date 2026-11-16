@@ -1,4 +1,5 @@
 import type { ComposerGestureHandle, ComposerOpenOptions } from '$lib/components/chat/composer-shell';
+import { FlickTracker, coalescedMoves, gestureClock, type GestureClock } from '$lib/utils/swipe-arm';
 
 export interface GesturePoint { x: number; y: number; time: number; }
 export interface PanelGesture {
@@ -6,14 +7,19 @@ export interface PanelGesture {
 	mode: 'pending' | 'scroll' | 'dismiss';
 	offset: number;
 	ended: boolean;
+	/** The finger's speed along the pull, read at release (#1637). */
+	flick: FlickTracker;
 }
 
 export function createPanelGesture(point: GesturePoint & { eligible: boolean }): PanelGesture {
-	return { start: { x: point.x, y: point.y, time: point.time }, mode: point.eligible ? 'pending' : 'scroll', offset: 0, ended: false };
+	const flick = new FlickTracker();
+	flick.addAt(point.y, point.time);
+	return { start: { x: point.x, y: point.y, time: point.time }, mode: point.eligible ? 'pending' : 'scroll', offset: 0, ended: false, flick };
 }
 
 export function updatePanelGesture(state: PanelGesture, point: GesturePoint) {
 	if (state.ended || state.mode === 'scroll') return { mode: state.mode, offset: state.offset };
+	state.flick.addAt(point.y, point.time);
 	const dx = point.x - state.start.x;
 	const dy = point.y - state.start.y;
 	if (state.mode === 'pending' && Math.max(Math.abs(dx), Math.abs(dy)) > 8) {
@@ -26,9 +32,11 @@ export function updatePanelGesture(state: PanelGesture, point: GesturePoint) {
 export function finishPanelGesture(state: PanelGesture, point: GesturePoint, panelHeight: number): boolean {
 	if (state.ended) return false;
 	const wasDismiss = state.mode === 'dismiss';
+	// The speed of the last moves, zero if the finger rested before lifting;
+	// read before the lift itself counts as a move.
+	const velocity = state.flick.velocityAt(point.time);
 	updatePanelGesture(state, point);
 	state.ended = true;
-	const velocity = state.offset / Math.max(1, point.time - state.start.time);
 	return wasDismiss && (state.offset >= Math.max(24, Math.min(72, panelHeight * 0.3)) || (state.offset > 16 && velocity > 0.6));
 }
 
@@ -68,7 +76,9 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 	let dragged = false;
 	let exceededTapSlop = false;
 	let suppressClickUntil = 0;
-	const point = (x: number, y: number) => ({ x, y: y * intent!.direction, time: performance.now() });
+	// Every time in one touch is on the clock its touchstart picked.
+	let clock: GestureClock = gestureClock();
+	const point = (x: number, y: number, event: Event) => ({ x, y: y * intent!.direction, time: clock(event) });
 	function clear() {
 		gesture = null; snapshot = null; intent = null; identifier = -1; origin = null;
 		consumed = false; dragged = false; exceededTapSlop = false;
@@ -104,14 +114,15 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 		intent = sampled;
 		const touch = event.touches[0];
 		identifier = touch.identifier; origin = event.target; suppressClickUntil = 0;
-		gesture = createPanelGesture({ ...point(touch.clientX, touch.clientY), eligible: true });
+		clock = gestureClock(event);
+		gesture = createPanelGesture({ ...point(touch.clientX, touch.clientY, event), eligible: true });
 	}
 	function move(event: TouchEvent) {
 		if (!gesture) return;
 		if (event.touches.length !== 1 || !options.enabled() || !event.cancelable || !canStartComposerOpen(origin, composer, true)) { cancel(); return; }
 		const touch = Array.from(event.touches).find(t => t.identifier === identifier);
 		if (!touch) { cancel(); return; }
-		const next = point(touch.clientX, touch.clientY);
+		const next = point(touch.clientX, touch.clientY, event);
 		const dx = next.x - gesture.start.x, dy = next.y - gesture.start.y;
 		if (Math.max(Math.abs(dx), Math.abs(dy)) > 8) exceededTapSlop = true;
 		// Decide ownership on the first move, before the browser starts a native
@@ -122,12 +133,18 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 		event.preventDefault(); consumed = true;
 		if (gesture.offset > 8) dragged = true;
 	}
+	// Touch events carry no coalesced moves; the pointer events for the same
+	// finger do, so a busy page's bunched pull still reads its own speed.
+	function pointerMove(event: PointerEvent) {
+		if (!gesture || !intent || gesture.ended || gesture.mode === 'scroll' || event.pointerType !== 'touch' || event.isPrimary === false) return;
+		for (const m of coalescedMoves(event)) gesture.flick.addAt(m.clientY * intent.direction, clock(m));
+	}
 	function end(event: TouchEvent) {
 		if (!gesture) { snapshot = null; return; }
 		if (event.touches.length) { cancel(); return; }
 		const touch = Array.from(event.changedTouches).find(t => t.identifier === identifier);
 		if (!touch) { cancel(); return; }
-		const next = point(touch.clientX, touch.clientY);
+		const next = point(touch.clientX, touch.clientY, event);
 		const withinSlop = Math.max(Math.abs(next.x - gesture.start.x), Math.abs(next.y - gesture.start.y)) <= 8;
 		const element = origin instanceof Element ? origin : null;
 		const tap = consumed && !dragged && !exceededTapSlop && withinSlop && next.time - gesture.start.time < 500 && options.enabled()
@@ -147,6 +164,7 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 	window.addEventListener('pointerdown', pointerDown, true);
 	window.addEventListener('touchstart', start, { capture: true, passive: true });
 	window.addEventListener('touchmove', move, { passive: false });
+	window.addEventListener('pointermove', pointerMove, { passive: true });
 	window.addEventListener('touchend', end);
 	window.addEventListener('touchcancel', cancel);
 	window.addEventListener('pointercancel', cancel);
@@ -157,6 +175,7 @@ export function attachComposerOpen(composer: HTMLElement, options: ComposerOpenO
 		window.removeEventListener('pointerdown', pointerDown, true);
 		window.removeEventListener('touchstart', start, true);
 		window.removeEventListener('touchmove', move);
+		window.removeEventListener('pointermove', pointerMove);
 		window.removeEventListener('touchend', end);
 		window.removeEventListener('touchcancel', cancel);
 		window.removeEventListener('pointercancel', cancel);

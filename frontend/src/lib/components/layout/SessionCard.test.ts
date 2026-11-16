@@ -780,24 +780,98 @@ describe('SessionCard swipe gestures', () => {
 		expect(mocks.setSessionActive).toHaveBeenCalledWith('session-a', false);
 	});
 
-	it('commits a flick whose moves are handled late and in bunches (#1637)', async () => {
-		// 80px in 64ms as eight moves 8ms apart by their own times, handled in
-		// pairs on a busy page: the last move alone would read 10px in 15ms.
-		const handled = [1000, 1017, 1019, 1033, 1035, 1050, 1052, 1066, 1081, 1081];
-		vi.spyOn(performance, 'now').mockImplementation(() => handled.shift() ?? 1081);
-		const at = (el: Element, kind: 'pointerDown' | 'pointerMove' | 'pointerUp', x: number, t: number) => {
-			const event = createEvent[kind](el, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: x, clientY: 20 });
-			Object.defineProperty(event, 'timeStamp', { value: t });
+	describe('release speed (#1637)', () => {
+		type Kind = 'pointerDown' | 'pointerMove' | 'pointerUp' | 'pointerCancel';
+		type Move = { x: number; t: number; y?: number };
+		/** A pointer event stamped with when it happened, optionally carrying coalesced moves. */
+		const at = (el: Element, kind: Kind, p: Move, coalesced?: Move[]) => {
+			const event = createEvent[kind](el, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: p.x, clientY: p.y ?? 20 });
+			Object.defineProperty(event, 'timeStamp', { value: p.t });
+			if (coalesced) {
+				const list = coalesced.map((c) => ({ clientX: c.x, clientY: c.y ?? 20, timeStamp: c.t }));
+				Object.defineProperty(event, 'getCoalescedEvents', { value: () => list });
+			}
 			return fireEvent(el, event);
 		};
-		const onSnooze = vi.fn();
-		const { container } = renderCard({ is_active: true }, { onSnooze });
-		const { frame, card } = parts(container);
-		await at(card, 'pointerDown', 50, 1000);
-		for (let i = 1; i <= 8; i++) await at(frame, 'pointerMove', 50 + i * 10, 1000 + i * 8);
-		expect(frame.classList.contains('armed')).toBe(false);
-		await at(frame, 'pointerUp', 130, 1066);
-		expect(onSnooze).toHaveBeenCalledWith('session-a');
+		/** 80px in 64ms (1.25px/ms) from x=50: eight moves 8ms apart from `t0`. */
+		const flickMoves = (t0: number, dir = 1, from = 50) =>
+			Array.from({ length: 8 }, (_, i) => ({ x: from + dir * (i + 1) * 10, t: t0 + (i + 1) * 8 }));
+
+		function setup({ clock = true } = {}) {
+			// Handler time far past every stamp, so only the stamps can decide.
+			if (clock) vi.spyOn(performance, 'now').mockReturnValue(100_000);
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			return { onSnooze, ...parts(container) };
+		}
+
+		it('reads moves by their own time, not when a busy page handled them', async () => {
+			// Handled in pairs: by handler time the last move alone would read 10px in 15ms.
+			const handled = [1000, 1017, 1019, 1033, 1035, 1050, 1052, 1066, 1081, 1081];
+			vi.spyOn(performance, 'now').mockImplementation(() => handled.shift() ?? 1081);
+			const { onSnooze, frame, card } = setup({ clock: false });
+			await at(card, 'pointerDown', { x: 50, t: 1000 });
+			for (const m of flickMoves(1000)) await at(frame, 'pointerMove', m);
+			expect(frame.classList.contains('armed')).toBe(false);
+			await at(frame, 'pointerUp', { x: 130, t: 1066 });
+			expect(onSnooze).toHaveBeenCalledWith('session-a');
+		});
+
+		it('reads the moves a browser coalesced into one pointermove', async () => {
+			// A 100ms hold, then the whole flick handed over as one event: its
+			// own position alone reads 80px in 164ms (0.49px/ms).
+			const { onSnooze, frame, card } = setup();
+			await at(card, 'pointerDown', { x: 50, t: 1000 });
+			const moves = flickMoves(1100);
+			await at(frame, 'pointerMove', moves.at(-1)!, moves);
+			await at(frame, 'pointerUp', { x: 130, t: 1170 });
+			expect(onSnooze).toHaveBeenCalledWith('session-a');
+		});
+
+		it('reads coalesced moves that share one time as no speed, not Infinity', async () => {
+			const { onSnooze, frame, card } = setup();
+			await at(card, 'pointerDown', { x: 50, t: 1000 });
+			const moves = flickMoves(1100).map((m) => ({ ...m, t: 1000 }));
+			await at(frame, 'pointerMove', moves.at(-1)!, moves);
+			await at(frame, 'pointerUp', { x: 130, t: 1000 });
+			expect(onSnooze).not.toHaveBeenCalled();
+			expect(frame.classList.contains('dragging')).toBe(false);
+		});
+
+		it('does not count a fast move then a hold as a flick, either way', async () => {
+			const { onSnooze, frame, card } = setup();
+			await at(card, 'pointerDown', { x: 50, t: 1000 });
+			for (const m of flickMoves(1000)) await at(frame, 'pointerMove', m);
+			await at(frame, 'pointerUp', { x: 130, t: 1564 });
+			expect(onSnooze).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(500);
+			await at(card, 'pointerDown', { x: 300, t: 3000 });
+			for (const m of flickMoves(3000, -1, 300)) await at(frame, 'pointerMove', m);
+			await at(frame, 'pointerUp', { x: 220, t: 3564 });
+			await vi.advanceTimersByTimeAsync(450);
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it('never reads a vertical scroll as a sideways flick', async () => {
+			const { onSnooze, frame, card } = setup();
+			await at(card, 'pointerDown', { x: 50, t: 1000, y: 20 });
+			for (let i = 1; i <= 8; i++) await at(frame, 'pointerMove', { x: 50 + i * 6, t: 1000 + i * 8, y: 20 + i * 15 });
+			await at(frame, 'pointerUp', { x: 98, t: 1066, y: 140 });
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).not.toHaveBeenCalled();
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
+
+		it('commits nothing when the system cancels a flick mid-way', async () => {
+			const { onSnooze, frame, card } = setup();
+			await at(card, 'pointerDown', { x: 300, t: 1000 });
+			for (const m of flickMoves(1000, -1, 300)) await at(frame, 'pointerMove', m);
+			await at(frame, 'pointerCancel', { x: 220, t: 1066 });
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).not.toHaveBeenCalled();
+			expect(mocks.setSessionActive).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('on a wide row', () => {

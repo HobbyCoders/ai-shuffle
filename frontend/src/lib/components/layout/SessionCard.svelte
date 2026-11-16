@@ -69,7 +69,7 @@
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { FLICK_WINDOW_MS, flickVelocity, sampleTime, swipeArmDistance, type SwipeSample } from '$lib/utils/swipe-arm';
+	import { FlickTracker, swipeArmDistance } from '$lib/utils/swipe-arm';
 	import {
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
@@ -443,9 +443,8 @@
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
 	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
-	/** Recent finger positions, for the release speed (see flickVelocity). */
-	let samples: SwipeSample[] = [];
-	let velocity = 0;
+	/** The finger's sideways speed, read on release (#1637). */
+	const flick = new FlickTracker();
 	let longTimer: ReturnType<typeof setTimeout> | null = null;
 	let laneTimer: ReturnType<typeof setTimeout> | null = null;
 	let suppressNextClick = false;
@@ -470,8 +469,7 @@
 		pointerType = event.pointerType;
 		startX = event.clientX;
 		startY = event.clientY;
-		samples = [{ t: sampleTime(event), x: event.clientX }];
-		velocity = 0;
+		flick.start(event.clientX, event);
 		axis = null;
 		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
 		armDistance = swipeArmDistance(rowWidth, ARM_RATIO);
@@ -491,6 +489,9 @@
 
 	function handlePointerMove(event: PointerEvent) {
 		if (pointerId !== event.pointerId) return;
+		// Every move counts toward the release speed, the ones before the axis
+		// locks and the ones the browser coalesced into this event included.
+		flick.addPointer(event);
 		let dx = event.clientX - startX;
 		const dy = event.clientY - startY;
 		if (!axis) {
@@ -509,12 +510,6 @@
 			frameRef?.setPointerCapture?.(event.pointerId);
 		}
 		event.preventDefault();
-		// Speed over the last few moves by their own times: a busy page hands
-		// moves over late and in bunches, and one sample alone swings (#1637).
-		const t = sampleTime(event);
-		samples.push({ t, x: event.clientX });
-		while (samples.length > 2 && t - samples[1].t > FLICK_WINDOW_MS) samples.shift();
-		velocity = flickVelocity(samples);
 		// A row with no right-swipe action does not move that way.
 		if (swipe.right === null) dx = Math.min(0, dx);
 		const lim = armDistance * EASE_PAST_ARM;
@@ -545,8 +540,9 @@
 		// The click this gesture leaves behind must not open the session.
 		suppressNextClick = true;
 		const dx = dragX ?? 0;
-		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
-		if (dx !== 0 && (armed || flick)) {
+		// Read at the lift: a fast move then a hold is not a flick.
+		const flicked = Math.abs(flick.velocity(event)) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
+		if (dx !== 0 && (armed || flicked)) {
 			if (dx < 0) slideOut(-1, leftAction);
 			else {
 				// Snooze waits for a time: the row stays put, and the picker opens.

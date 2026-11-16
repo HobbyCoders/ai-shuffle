@@ -92,11 +92,40 @@ async function rowAction(page, id, name) {
 }
 
 /**
+ * A finger along `path` (points { x, y, t }, `t` in ms after the press),
+ * lifting at `liftAt` ms. Every touch event carries its own time, and the
+ * page reads a gesture's speed by those times (#1637), so the speed is the
+ * path's however late a busy runner sends the events: nothing here sleeps to
+ * make a speed. `beforeLift` looks at the page mid-drag.
+ */
+async function touchPath(page, path, liftAt, beforeLift) {
+	const cdp = await page.context().newCDPSession(page);
+	// Stamps in the recent past: Chrome clamps one from before the page
+	// loaded, and the page has been open far longer than any gesture here.
+	const base = Date.now() / 1000 - (liftAt + 50) / 1000;
+	const send = (type, touchPoints, t) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints, timestamp: base + t / 1000 });
+	try {
+		const [press, ...moves] = path;
+		await send('touchStart', [{ x: press.x, y: press.y }], press.t);
+		for (const { x, y, t } of moves) await send('touchMove', [{ x, y }], t);
+		if (beforeLift) await beforeLift();
+		await send('touchEnd', [], liftAt);
+	} finally {
+		await cdp.detach();
+	}
+}
+
+/** `steps` even moves `travel` px sideways from (x, y), `stepMs` apart. */
+function sideways(x, y, travel, steps, stepMs) {
+	return Array.from({ length: steps + 1 }, (_, i) => ({ x: x + (travel * i) / steps, y, t: i * stepMs }));
+}
+
+/**
  * A finger dragging across the row, 60% of its width (past the 40% commit
- * point), paced like a real swipe and held before lifting so it commits on
- * distance, not as a flick. `beforeLift` looks at the row mid-drag.
- * `travel` instead drags a fixed number of pixels, in 8px steps at most
- * 0.3px/ms, far below the flick speed, so only distance can commit it.
+ * point), then resting 150ms before lifting so it commits on distance, not
+ * as a flick. `beforeLift` looks at the row mid-drag. `travel` instead drags
+ * a fixed number of pixels in 8px steps at 0.27px/ms, far below the flick
+ * speed, so only distance can commit it.
  */
 async function swipeRow(page, id, direction, beforeLift, { travel: fixed } = {}) {
 	await showChats(page);
@@ -107,47 +136,28 @@ async function swipeRow(page, id, direction, beforeLift, { travel: fixed } = {})
 	// Start clear of the screen edges, where the system takes back swipes.
 	const from = direction > 0 ? box.x + 40 : box.x + box.width - 40;
 	const travel = (fixed ?? box.width * 0.6) * direction;
-	const steps = fixed ? Math.ceil(fixed / 8) : 10;
-	const cdp = await page.context().newCDPSession(page);
-	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
-	try {
-		await touch('touchStart', [{ x: from, y }]);
-		for (let step = 1; step <= steps; step++) {
-			await touch('touchMove', [{ x: from + (travel * step) / steps, y }]);
-			await page.waitForTimeout(fixed ? 30 : 16);
-		}
+	const path = fixed ? sideways(from, y, travel, Math.ceil(fixed / 8), 30) : sideways(from, y, travel, 10, 16);
+	const lastMove = path.at(-1).t;
+	await touchPath(page, path, lastMove + 150, beforeLift && (async () => {
+		// The row follows the finger on the next frames.
 		await page.waitForTimeout(150);
-		if (beforeLift) await beforeLift(row);
-		await touch('touchEnd', []);
-	} finally {
-		await cdp.detach();
-	}
+		await beforeLift(row);
+	}));
 }
 
 /**
- * A slow finger drag `travel` px sideways from (x, y): 8px steps at most
- * 0.3px/ms, held before lifting, so only distance can complete it.
+ * A slow finger drag `travel` px sideways from (x, y): 8px steps at
+ * 0.27px/ms, resting 150ms before lifting, so only distance can complete it.
  */
 async function dragScreen(page, x, y, travel) {
-	const steps = Math.ceil(Math.abs(travel) / 8);
-	const cdp = await page.context().newCDPSession(page);
-	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
-	try {
-		await touch('touchStart', [{ x, y }]);
-		for (let step = 1; step <= steps; step++) {
-			await touch('touchMove', [{ x: x + (travel * step) / steps, y }]);
-			await page.waitForTimeout(30);
-		}
-		await page.waitForTimeout(150);
-		await touch('touchEnd', []);
-	} finally {
-		await cdp.detach();
-	}
+	const path = sideways(x, y, travel, Math.ceil(Math.abs(travel) / 8), 30);
+	await touchPath(page, path, path.at(-1).t + 150);
 }
 
 /**
- * A quick 80px flick across the row: eight moves 8ms apart (1.25px/ms), each
- * sent without waiting for the last, so the page handles them in bunches.
+ * A quick 80px flick across the row: eight moves 8ms apart (1.25px/ms),
+ * lifted 2ms after the last, sent back to back so the page handles them in
+ * bunches as a busy page does.
  */
 async function flickRow(page, id, direction) {
 	await showChats(page);
@@ -157,20 +167,7 @@ async function flickRow(page, id, direction) {
 	const box = await row.boundingBox();
 	const y = box.y + box.height / 2;
 	const from = direction > 0 ? box.x + 40 : box.x + box.width - 40;
-	const cdp = await page.context().newCDPSession(page);
-	const touch = (type, touchPoints) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
-	try {
-		await touch('touchStart', [{ x: from, y }]);
-		const sent = [];
-		for (let step = 1; step <= 8; step++) {
-			sent.push(touch('touchMove', [{ x: from + direction * 10 * step, y }]));
-			await page.waitForTimeout(8);
-		}
-		await Promise.all(sent);
-		await touch('touchEnd', []);
-	} finally {
-		await cdp.detach();
-	}
+	await touchPath(page, sideways(from, y, 80 * direction, 8, 8), 66);
 }
 
 /**

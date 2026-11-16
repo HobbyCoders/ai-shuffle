@@ -256,18 +256,20 @@ describe('Chat controls panel', () => {
 		}
 
 		/** A drag on the grip with controlled timing, so the release speed is known. */
-		async function gripDrag(dy: number, msPerStep: number, onHold?: () => void) {
+		async function gripDrag(dy: number, msPerStep: number, onHold?: () => void, holdMs = 1) {
 			const from = { x: 180, y: 300 };
+			// Every event carries its own time, as a browser's do; the release
+			// reads speed by them.
 			let at = 1000;
-			await fireEvent.pointerDown(grip(), { pointerId: 9, button: 0, clientX: from.x, clientY: from.y });
+			const stamped = (event: Event) => { Object.defineProperty(event, 'timeStamp', { value: at }); return event; };
+			await fireEvent(grip(), stamped(createEvent.pointerDown(grip(), { pointerId: 9, button: 0, clientX: from.x, clientY: from.y })));
 			for (let i = 1; i <= 4; i++) {
 				at += msPerStep;
-				const move = createEvent.pointerMove(window, { pointerId: 9, clientX: from.x, clientY: from.y + (dy * i) / 4 });
-				Object.defineProperty(move, 'timeStamp', { value: at });
-				await fireEvent(window, move);
+				await fireEvent(window, stamped(createEvent.pointerMove(window, { pointerId: 9, clientX: from.x, clientY: from.y + (dy * i) / 4 })));
 			}
 			onHold?.();
-			await fireEvent.pointerUp(window, { pointerId: 9, clientX: from.x, clientY: from.y + dy });
+			at += holdMs;
+			await fireEvent(window, stamped(createEvent.pointerUp(window, { pointerId: 9, clientX: from.x, clientY: from.y + dy })));
 		}
 
 		it('shows an aria-hidden grip at the top of the sheet', async () => {
@@ -293,6 +295,17 @@ describe('Chat controls panel', () => {
 			await gripDrag(60, 4);
 			await waitFor(() => expect(sheet()).toBeNull());
 			expect(onUsageOpenChange).toHaveBeenLastCalledWith(false);
+		});
+
+		it('stays open when the finger rested after a quick short pull before letting go (#1637)', async () => {
+			const onUsageOpenChange = await openUsageSheet();
+			onUsageOpenChange.mockClear();
+			await gripDrag(60, 4, undefined, 500);
+			// Springs back rather than sliding out to close.
+			expect(usageCell().style.getPropertyValue('--usage-drag')).toBe('');
+			await new Promise((r) => setTimeout(r, 300));
+			expect(sheet()).not.toBeNull();
+			expect(onUsageOpenChange).not.toHaveBeenCalled();
 		});
 
 		it('springs back on a short slow drag, and barely moves when pulled up', async () => {
