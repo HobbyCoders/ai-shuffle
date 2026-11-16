@@ -37,12 +37,13 @@ truncated.
 
 A known path is also cut out wherever it sits: the composer puts a chip where
 the cursor was, usually after the typed words (``fix it @/ws/a.png``), and the
-title is the typed words only (#1654). Without known paths only leading
-tokens go: an ``@`` later in prose may be a mention.
+title is the typed words only (#1654). With known paths only those go, and any
+other ``@`` text stays; without them only leading tokens are guessed and
+stripped, since an ``@`` later in prose may be a mention.
 """
 
 import re
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Tuple, Union
 
 # The first whitespace-delimited segment after '@', plus the remainder.
 _AT_TOKEN = re.compile(r"^@(?P<first>\S+)(?P<rest>(?:\s+\S+)*)")
@@ -114,36 +115,57 @@ def strip_leading_attachment_tokens(
 def strip_known_attachment_references(text: str, known_paths: Optional[Iterable[str]] = None) -> str:
     """Remove every ``@<path>`` of a known attachment, wherever it sits.
 
-    Longest path first, so one that is a prefix of another is never cut short.
-    The spaces a removal leaves are folded into one. Like the leading strip, a
+    Read like :func:`_split_known_references`: left to right, the longest
+    path where two start together, each reference consumed whole. The spaces a removal leaves are folded into one. Like the leading strip, a
     message that is nothing but attachments comes back unchanged.
     """
     return _cut_known_references(text, known_paths) or text
 
 
+def _split_known_references(text: str, known_paths: Optional[Iterable[str]]) -> List[Union[str, Tuple[str]]]:
+    """``text`` cut into typed stretches and ``(path,)`` attachment references.
+
+    Read left to right; at each point the earliest ``@<path>`` wins, the
+    longest path when two start there, and a reference is consumed whole, so a
+    shorter path inside a longer one's reference is never matched again. The
+    client's ``splitUploadMentions`` (message-presentation.ts) reads the same.
+    """
+    known = sorted({p for p in known_paths or [] if p}, key=len, reverse=True)
+    parts: List[Union[str, Tuple[str]]] = []
+    offset = 0
+    while offset < len(text):
+        at, path = -1, ""
+        for candidate in known:
+            index = text.find("@" + candidate, offset)
+            if index != -1 and (at == -1 or index < at):
+                at, path = index, candidate
+        if at == -1:
+            parts.append(text[offset:])
+            break
+        if at > offset:
+            parts.append(text[offset:at])
+        parts.append((path,))
+        offset = at + len(path) + 1
+    return parts
+
+
 def _cut_known_references(text: str, known_paths: Optional[Iterable[str]]) -> str:
     """``text`` with every known ``@<path>`` cut out; may be empty."""
-    known = sorted({p for p in known_paths or [] if p}, key=len, reverse=True)
-    body = text
-    for path in known:
-        body = body.replace("@" + path, " ")
-    if body == text:
+    parts = _split_known_references(text, known_paths)
+    if not any(isinstance(part, tuple) for part in parts):
         return text
+    body = "".join(part if isinstance(part, str) else " " for part in parts)
     return _LINE_EDGE_SPACES.sub("\n", _SPACE_RUN.sub(" ", body)).strip()
 
 
 def _attachment_names(text: str, known_paths: Iterable[str]) -> str:
-    """The file names of the known attachments ``text`` mentions, in order."""
-    found = []
-    for path in {p for p in known_paths if p}:
-        at = text.find("@" + path)
-        if at != -1:
-            found.append((at, -len(path), path))
+    """The file names of the known attachments ``text`` references, in order, once each."""
     names: List[str] = []
-    for _, _, path in sorted(found):
-        name = re.split(r"[/\\]", path)[-1] or path
-        if name not in names:
-            names.append(name)
+    for part in _split_known_references(text, known_paths):
+        if isinstance(part, tuple):
+            name = re.split(r"[/\\]", part[0])[-1] or "attachment"
+            if name not in names:
+                names.append(name)
     return ", ".join(names)
 
 
@@ -159,8 +181,9 @@ def derive_session_title(
 ) -> str:
     """Turn a first user message into a session title.
 
-    Known attachment references are removed wherever they sit and leading
-    attachment tokens are stripped, then what remains is truncated to
+    Known attachment references are removed wherever they sit; without known
+    paths, leading attachment tokens are guessed and stripped. What remains is
+    truncated to
     ``max_chars``. ``word_boundary`` keeps the two historical shapes: the
     100-char sites cut at the last space before the ellipsis, the older
     50-char sites append the ellipsis to whatever the cut left.
@@ -170,6 +193,11 @@ def derive_session_title(
     if not typed:
         # Only attachments: name it by their files, never the raw paths.
         body = _attachment_names(text, known)
+    elif known:
+        # The message's own attachments are known: only they go. A leading
+        # ``@alice`` or a path never uploaded is the user's text (the client's
+        # ``typedWords`` keeps it too).
+        body = typed
     else:
         body = strip_leading_attachment_tokens(typed, known)
     title = body[:max_chars].strip()

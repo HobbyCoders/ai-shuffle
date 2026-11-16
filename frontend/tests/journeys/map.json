@@ -383,7 +383,20 @@
 					"frontend/src/lib/components/layout/NoProjectPill.svelte",
 					"frontend/src/lib/components/layout/AttachProjectSheet.svelte",
 					"app/core/upload_transfer.py",
-					"app/api/sessions_attach.py"
+					"app/api/sessions_attach.py",
+					"app/api/chat_ws_handler.py",
+					"app/core/session_runtime.py"
+				]
+			},
+			{
+				"why": "a worktree chat's first message with an attachment: the prompt keeps the words and the chip apart, and the branch and chat title come from the typed words only (#1654)",
+				"journeys": ["new-worktree-session"],
+				"globs": [
+					"app/core/session_title.py",
+					"frontend/src/lib/components/chat/tiptap/serialization.ts",
+					"frontend/src/lib/utils/message-presentation.ts",
+					"frontend/src/lib/utils/attachment-title-cases.json",
+					"frontend/src/lib/stores/session/message-sender.ts"
 				]
 			},
 			{

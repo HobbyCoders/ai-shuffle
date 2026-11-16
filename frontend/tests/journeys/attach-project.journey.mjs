@@ -68,6 +68,48 @@ async function answerAsOwner(route, status) {
 	await route.fulfill({ status: response.status, contentType: 'application/json', body: await response.text() });
 }
 
+/**
+ * Route the sheet's attach request. `hold` keeps it until `release()`;
+ * `fail` answers with a refusal instead of the owner's real answer.
+ * `done` settles once the handler has answered (or rejects with its error,
+ * so a broken handler fails the journey), and `delivered` once the page has
+ * the whole response.
+ */
+async function routeAttach(page, status, { hold = false, fail = false } = {}) {
+	let reached, release, finish, abort;
+	const requested = new Promise((resolve) => { reached = resolve; });
+	const released = hold ? new Promise((resolve) => { release = resolve; }) : Promise.resolve();
+	const done = new Promise((resolve, reject) => { finish = resolve; abort = reject; });
+	done.catch(() => {}); // observed by whoever awaits it
+	const delivered = page.waitForEvent('requestfinished', { predicate: (r) => r.url().endsWith('/attach-project'), timeout: 120_000 });
+	delivered.catch(() => {});
+	await page.route('**/attach-project', async (route) => {
+		reached();
+		try {
+			await released;
+			if (fail) {
+				await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'journey: attach refused late' }) });
+			} else {
+				await answerAsOwner(route, status);
+			}
+			finish();
+		} catch (error) {
+			abort(error);
+		}
+	});
+	return { requested, release: () => release?.(), done, delivered };
+}
+
+/** Within `ms`, or a named failure (never a silent pass). */
+function within(promise, ms, what) {
+	let timer;
+	return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for ${what}`)), ms); })])
+		.finally(() => clearTimeout(timer));
+}
+
+/** Two animation frames: the page has run what the delivered answer queued. */
+const twoFrames = (page) => page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+
 async function openSheetAndPick(page) {
 	await pill(page).click();
 	await sheet(page).waitFor({ timeout: 10_000 });
@@ -105,31 +147,24 @@ function lateAnswerAfterSwitch(fail) {
 	return async ({ page, mark, state, status }) => {
 		await mark('open the sheet and pick a project');
 		await openSheetAndPick(page);
-		let reached, release;
-		const requested = new Promise((resolve) => { reached = resolve; });
-		const released = new Promise((resolve) => { release = resolve; });
-		await page.route('**/attach-project', async (route) => {
-			reached();
-			await released;
-			if (fail) {
-				await route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ detail: 'journey: attach refused late' }) }).catch(() => {});
-			} else {
-				await answerAsOwner(route, status).catch(() => {});
-			}
-		});
+		const attach = await routeAttach(page, status, { hold: true, fail });
 		await mark('press Attach, then go back to the other chat');
 		await sheet(page).getByRole('button', { name: `Attach ${PROJECT}`, exact: true }).click();
-		await requested;
+		await within(attach.requested, 30_000, 'the attach request');
 		await page.goBack();
 		await waitChat(page, { session: state.b.tag, loading: 'false' }, { timeout: 30_000 });
 		await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
 		expect(!(await sheet(page).isVisible()), 'the sheet closed when the page moved to the other chat');
 		expect((await pill(page).getAttribute('aria-expanded')) === 'false', 'the other chat\'s pill is not expanded');
 		await mark('the attach answer arrives late');
-		release();
-		await page.waitForTimeout(1500);
+		attach.release();
+		await within(attach.done, 60_000, 'the late attach answer');
+		await within(attach.delivered, 60_000, 'the page to receive the late answer');
 		await page.unrouteAll({ behavior: 'ignoreErrors' });
+		await twoFrames(page);
+		await waitChat(page, { session: state.b.tag }, { timeout: 5_000 });
 		expect(!(await sheet(page).isVisible()), 'the late answer did not reopen the sheet');
+		expect((await sheet(page).count()) === 0, 'no sheet is mounted after the late answer');
 		await mark('open the sheet in this chat');
 		await pill(page).click();
 		await sheet(page).waitFor({ timeout: 10_000 });
@@ -173,8 +208,10 @@ await runJourney({
 
 				await mark('attach a project');
 				await openSheetAndPick(page);
-				await page.route('**/attach-project', (route) => answerAsOwner(route, status));
+				const attach = await routeAttach(page, status);
 				await sheet(page).getByRole('button', { name: `Attach ${PROJECT}`, exact: true }).click();
+				await within(attach.done, 60_000, 'the attach answer');
+				await within(attach.delivered, 60_000, 'the page to receive the attach answer');
 				await sheet(page).waitFor({ state: 'hidden', timeout: 30_000 });
 				await pill(page).waitFor({ state: 'hidden', timeout: 30_000 });
 				await page.unrouteAll({ behavior: 'ignoreErrors' });
@@ -192,7 +229,7 @@ await runJourney({
 				await waitTurnSettled(page, { messagesAtLeast: 4, text: 'You said:' });
 				const refused = page.getByText(/Attachments need|outside (the|this) (chat|session)|not allowed|refused/i).first();
 				expect(!(await refused.isVisible().catch(() => false)), 'the resend was not refused');
-				for (let i = 0; i < 20 && (await providerRequestsWith(status, state.file)) <= sentOnce; i++) await page.waitForTimeout(250);
+				for (let i = 0; i < 240 && (await providerRequestsWith(status, state.file)) <= sentOnce; i++) await page.waitForTimeout(250); // polls the log, up to 60 s
 				const sentTwice = await providerRequestsWith(status, state.file);
 				expect(sentTwice > sentOnce, `the resend reached the AI with the file (${sentOnce} → ${sentTwice})`);
 			}
