@@ -397,10 +397,16 @@ describe('AppTopBar drawer lifecycle', () => {
 			// A slow pop: elapsed time alone never opens it.
 			vi.advanceTimersByTime(2000);
 			expect(props.onOpenFeature).not.toHaveBeenCalled();
-			page.state = {};
+			// SvelteKit 3 updates page.state some time after popstate: the
+			// event alone, with the drawer's entry still in the state, opens nothing.
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
+			expect(props.onOpenFeature).not.toHaveBeenCalled();
+			page.state = {};
+			await tick();
 			expect(props.onOpenFeature).toHaveBeenCalledExactlyOnceWith('settings', 'system');
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
 			// A newer navigation calls a waiting target off: tap the target,
@@ -413,6 +419,7 @@ describe('AppTopBar drawer lifecycle', () => {
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub open session' }));
 			page.state = {};
 			window.dispatchEvent(new PopStateEvent('popstate'));
+			await tick();
 			expect(props.onOpenSession).toHaveBeenCalledWith('s-2');
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 

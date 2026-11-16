@@ -142,7 +142,7 @@
 	// Opening moves focus into the drawer (it covers the whole screen), and a
 	// dismissal hands it back to the ☰ instead of dropping it on <body>.
 	async function openDrawer() {
-		pendingTarget?.();
+		pendingTarget = null;
 		mounted = true;
 		if (!drawerOpen) {
 			drawerOpen = true;
@@ -160,7 +160,7 @@
 
 	function dismissDrawer() {
 		// Any newer navigation calls off a Settings target still waiting.
-		pendingTarget?.();
+		pendingTarget = null;
 		if (!drawerOpen) return;
 		closeDrawer();
 		popDrawerEntry();
@@ -171,7 +171,7 @@
 	// drawer instead of leaving the app. Closing it any other way pops that
 	// entry again, so Back never needs a second press to do something.
 	let entryLive = false;
-	/** Calls off a drawer Settings target still waiting for the pop. */
+	/** Opens a drawer Settings target still waiting for the pop; cleared to call it off. */
 	let pendingTarget: (() => void) | null = null;
 
 	function pushDrawerEntry() {
@@ -193,11 +193,17 @@
 		untrack(() => {
 			if (inHistory) {
 				entryLive = true;
-			} else if (entryLive) {
+				return;
+			}
+			if (entryLive) {
 				// Back popped our entry: close without popping a second one.
 				entryLive = false;
 				if (drawerOpen) closeDrawer();
 			}
+			// Our entry is gone: a Settings target that waited for that opens now.
+			const open = pendingTarget;
+			pendingTarget = null;
+			open?.();
 		});
 	});
 
@@ -236,22 +242,13 @@
 		dismissDrawer();
 		if (!itemId) return onOpenFeature(type);
 		if (!popping) return onOpenFeature(type, itemId);
-		// The drawer's pop is shallow, so the router has set page.state by the
-		// time this later listener runs: a popstate still on the drawer's
-		// entry is not that pop.
-		const open = () => {
-			if (page.state?.mobileDrawer) return;
-			stop();
-			onOpenFeature(type, itemId);
-		};
-		const stop = () => {
-			window.removeEventListener('popstate', open);
-			if (pendingTarget === stop) pendingTarget = null;
-		};
-		pendingTarget = stop;
-		window.addEventListener('popstate', open);
+		// SvelteKit updates page.state some time after `popstate`, so the wait
+		// ends in the effect above, when the state no longer has our entry.
+		pendingTarget = () => onOpenFeature(type, itemId);
 	}
-	$effect(() => () => pendingTarget?.());
+	$effect(() => () => {
+		pendingTarget = null;
+	});
 
 	// --- Swipe ----------------------------------------------------------------
 	// A right swipe on the main screen pulls the drawer open; a left swipe

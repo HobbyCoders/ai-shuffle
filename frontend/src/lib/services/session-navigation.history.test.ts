@@ -90,15 +90,69 @@ describe('sidebar chat switches and browser history (#953)', () => {
 		expect(openChat()).toBe('chat-b');
 		expect(h.stack).toHaveLength(2); // nothing pushed on top of the drawer entry
 
-		// The pending Back lands on the chat entry under the drawer.
-		h.index = 0;
-		page.state = h.stack[0];
+		// The pending Back lands on the entry under the drawer.
+		step(-1);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }]);
+		expect(openChat()).toBe('chat-b');
+		step(-1);
+		expect(openChat()).toBe('chat-a');
+	});
+
+	it('waits for the router state, not popstate: the drawer marker is never copied onto chat entries', async () => {
+		vi.useFakeTimers();
+		// A chat entry already exists, then the drawer opened on top of it.
+		openSession('chat-a');
+		openSessionFromList('chat-b');
+		h.stack = [...h.stack, { chatSession: 'chat-b', mobileDrawer: true }];
+		h.index = 2;
+		page.state = h.stack[2];
+		openSessionFromList('chat-c');
+
+		// SvelteKit 3: popstate arrives while page.state is still the drawer's entry.
+		h.index = 1;
 		window.dispatchEvent(new PopStateEvent('popstate'));
-		return Promise.resolve().then(() => {
-			expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }]);
-			step(-1);
-			expect(openChat()).toBe('chat-a');
-		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(h.stack).toHaveLength(3); // nothing written yet
+
+		// The router then moves page.state to the entry under the drawer.
+		page.state = h.stack[1];
+		followChatHistory(page.state);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }, { chatSession: 'chat-c' }]);
+		expect(openChat()).toBe('chat-c');
+
+		// Nothing is left waiting: the give-up timer writes nothing more.
+		vi.advanceTimersByTime(5000);
+		expect(h.stack).toHaveLength(3);
+		step(-1);
+		expect(openChat()).toBe('chat-b');
+	});
+
+	it('a Back the router never reports still gives the pick an entry, without the drawer marker', () => {
+		vi.useFakeTimers();
+		openSession('chat-a');
+		h.stack = [{}, { mobileDrawer: true }];
+		h.index = 1;
+		page.state = h.stack[1];
+		openSessionFromList('chat-b');
+		vi.advanceTimersByTime(5000);
+		expect(h.stack).toEqual([{}, { chatSession: 'chat-a' }, { chatSession: 'chat-b' }]);
+		// A state change after that is ordinary history again.
+		step(-1);
+		expect(openChat()).toBe('chat-a');
+	});
+
+	it('two picks before the drawer entry is popped each get an entry, in order', () => {
+		vi.useFakeTimers();
+		openSession('chat-a');
+		h.stack = [{}, { mobileDrawer: true }];
+		h.index = 1;
+		page.state = h.stack[1];
+		openSessionFromList('chat-b');
+		openSessionFromList('chat-c');
+		step(-1);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }, { chatSession: 'chat-c' }]);
+		expect(openChat()).toBe('chat-c');
 	});
 });
 
