@@ -4,7 +4,7 @@
  * line.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ARRIVAL_GUARD_MS, composerCircles, DOUBLE_PRESS_MS, createArrivalGuard, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
+import { ARRIVAL_GUARD_MS, composerCircles, DOUBLE_PRESS_MS, createArrivalGuard, createPressTracker, createWrapWatcher, MEASURED_CHARS, needsWrap, singleLineTextWidth } from './composer-wrap';
 
 const idle = { callAvailable: true, hasContent: false, working: false, busy: false };
 
@@ -275,6 +275,20 @@ describe('createArrivalGuard (#1632)', () => {
 		expect(g.ignores('stop', 5050, 2)).toBe(false);
 	});
 
+	it('arms nothing where a seat was empty: the row growing leaves the mic alone', () => {
+		// Work starting in another tab: mic · Talk becomes mic · Talk · Stop.
+		const g = guard();
+		g.update(['mic', 'talk'], false);
+		clock = 1000;
+		g.update(['mic', 'talk', 'stop'], false);
+		// The mic moved into a seat no button held: a tap there meant nothing else.
+		expect(g.ignores('mic', 1100)).toBe(false);
+		expect(g.ignores('mic', 1100, 2)).toBe(false);
+		// Talk took the mic's seat and Stop took Talk's: replacements stay guarded.
+		expect(g.ignores('talk', 1100)).toBe(true);
+		expect(g.ignores('stop', 1100)).toBe(true);
+	});
+
 	it('ignores a press on Stop just after it replaced the spinner', () => {
 		const g = guard();
 		g.update(['mic', 'busy'], false);
@@ -308,5 +322,45 @@ describe('createArrivalGuard (#1632)', () => {
 		g.update(['mic', 'stop'], false);
 		expect(g.ignores('stop', 350)).toBe(true);
 		expect(g.ignores('stop', 100 + ARRIVAL_GUARD_MS)).toBe(false);
+	});
+});
+
+describe('createPressTracker (#1632)', () => {
+	const stop = { name: 'stop' };
+	const talk = { name: 'talk' };
+
+	it('gives a click the press of its own pointer, once', () => {
+		const t = createPressTracker<object>();
+		t.down(1, 1350, talk);
+		t.down(7, 1360, stop);
+		expect(t.take(1, 1450, talk)).toEqual({ at: 1350, target: talk });
+		expect(t.take(1, 1460, talk)).toBeNull();
+		expect(t.take(7, 1470, stop)).toEqual({ at: 1360, target: stop });
+	});
+
+	it('keeps only the latest press of a pointer and forgets a cancelled one', () => {
+		const t = createPressTracker<object>();
+		t.down(1, 100, stop);
+		t.down(1, 900, talk);
+		expect(t.take(1, 950, talk)).toEqual({ at: 900, target: talk });
+		t.down(2, 1000, talk);
+		t.cancel(2);
+		expect(t.take(2, 1100, talk)).toBeNull();
+	});
+
+	it('gives no press to a click from no pointer, a stale press or one after the click', () => {
+		const t = createPressTracker<object>();
+		t.down(1, 100, talk);
+		expect(t.take(-1, 200, talk)).toBeNull();
+		expect(t.take(1, 50, talk)).toBeNull();
+		expect(t.take(1, 100 + 10_001, talk)).toBeNull();
+	});
+
+	it('matches a click without a pointer id only to the latest press on the same button', () => {
+		const t = createPressTracker<object>();
+		t.down(3, 100, stop);
+		expect(t.take(undefined, 200, talk)).toBeNull();
+		expect(t.take(undefined, 200, stop)).toEqual({ at: 100, target: stop });
+		expect(t.take(undefined, 300, stop)).toBeNull();
 	});
 });

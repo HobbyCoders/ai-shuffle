@@ -242,7 +242,8 @@ export const DOUBLE_PRESS_MS = 500;
 const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
 
 /**
- * When each seat of the action row last got another button. Seats count from
+ * When each seat of the action row last got another button in place of the one
+ * it held (a seat that was empty arms nothing). Seats count from
  * the row's right end, where the circles sit, so a button that slides over
  * takes a new seat. A change the user made themselves (typing turns Talk
  * into Send, a chat switch) is `settled`: they are looking at the row, and
@@ -256,11 +257,13 @@ export function createArrivalGuard(now: () => number = () => performance.now()) 
 	let row: RowButton[] | null = null;
 	let arrivedAt: number[] = [];
 	let movedAt: number[] = [];
+	// A seat that was empty arms nothing: no press was aimed at a button there.
 	const seatTimes = (next: RowButton[], before: RowButton[] | null, times: number[], at: number) =>
 		next.map((button, i) => {
 			const seat = next.length - 1 - i;
-			if (!before) return -Infinity;
-			return before[before.length - 1 - seat] === button ? (times[seat] ?? -Infinity) : at;
+			const was = before?.[before.length - 1 - seat];
+			if (was === undefined) return -Infinity;
+			return was === button ? (times[seat] ?? -Infinity) : at;
 		}).reverse();
 	return {
 		/** The row as shown now. */
@@ -281,6 +284,54 @@ export function createArrivalGuard(now: () => number = () => performance.now()) 
 			const seat = row.length - 1 - index;
 			if (clicks > 1 && pressedAt < (movedAt[seat] ?? -Infinity) + DOUBLE_PRESS_MS) return true;
 			return pressedAt < (arrivedAt[seat] ?? -Infinity) + ARRIVAL_GUARD_MS;
+		}
+	};
+}
+
+/** Where and when a pointer press on the action row began. */
+export interface RowPress<T> { at: number; target: T | null }
+
+/** Presses older than this are dropped: a click never follows its press that late. */
+const PRESS_KEPT_MS = 10_000;
+
+/**
+ * The pointer presses on the action row, so a click is judged by when its
+ * press began rather than when it was released (#1632). Each pointer keeps
+ * only its latest press; a cancelled press (a scroll, the system taking the
+ * touch) is forgotten, and a press is used once. A click with no press of
+ * its own (keyboard, assistive technology, a script) gets none.
+ */
+export function createPressTracker<T>() {
+	const presses = new Map<number, RowPress<T>>();
+	let last: { id: number; press: RowPress<T> } | null = null;
+	return {
+		down(pointerId: number, at: number, target: T | null) {
+			for (const [id, press] of presses) if (at - press.at > PRESS_KEPT_MS) presses.delete(id);
+			const press = { at, target };
+			presses.set(pointerId, press);
+			last = { id: pointerId, press };
+		},
+		cancel(pointerId: number) {
+			presses.delete(pointerId);
+			if (last?.id === pointerId) last = null;
+		},
+		/**
+		 * The press behind a click on `target`. `pointerId` is the click's own
+		 * (undefined where a click carries none: then only the latest press on
+		 * this same target counts). Clicks from no pointer (id -1) get none.
+		 */
+		take(pointerId: number | undefined, clickAt: number, target: T | null): RowPress<T> | null {
+			let id = pointerId;
+			if (id === undefined) {
+				if (!last || last.press.target !== target) return null;
+				id = last.id;
+			}
+			if (id < 0) return null;
+			const press = presses.get(id);
+			if (!press || press.at > clickAt || clickAt - press.at > PRESS_KEPT_MS) return null;
+			presses.delete(id);
+			if (last?.id === id) last = null;
+			return press;
 		}
 	};
 }

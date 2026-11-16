@@ -303,6 +303,47 @@ await runJourney({
 			expect(proved, 'no attempt tapped Talk just after it took Stop\'s place (see the log)');
 		}
 	}, {
+		// #1632 review: a tap is judged by when the press began. A touch that
+		// lands on Talk just after it took Stop's place and lifts after the
+		// guard's window ends was still aimed at Stop: no call may start.
+		name: 'held-tap-on-stop',
+		viewports: ['phone'],
+		setup: firstExchange,
+		async act({ page, mark, variant, log }) {
+			await watchRow(page);
+			await page.evaluate(() => {
+				window.__row.downs = [];
+				document.addEventListener('pointerdown', (e) => window.__row.downs.push(e.timeStamp), true);
+			});
+			const cdp = await page.context().newCDPSession(page);
+			let proved = false;
+			for (let attempt = 1; attempt <= 3 && !proved; attempt++) {
+				await mark(`a press meant for Stop, lifted after the window, attempt ${attempt}`);
+				await typeAndSend(page, `short turn tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 40 })}`);
+				const box = await stopButton(page).boundingBox();
+				const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+				await page.evaluate(() => { window.__row.clicks = []; window.__row.downs = []; });
+				await page.waitForFunction(() => !document.querySelector('.send-cluster .stop-btn'), null, { polling: 'raf', timeout: 60_000 });
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [at] });
+				// Lift 420ms after the row changed: past the 400ms window.
+				await page.waitForFunction(() => performance.now() >= window.__row.changedBefore(window.__row.downs[0] ?? 0) + 420, null, { polling: 'raf', timeout: 5000 });
+				await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+				await page.waitForTimeout(1500);
+				const { click, down, changedAt } = await page.evaluate(() => {
+					const down = window.__row.downs[0];
+					return { click: window.__row.clicks[0], down, changedAt: window.__row.changedBefore(down ?? 0) };
+				});
+				const pressed = down === undefined ? null : Math.round(down - changedAt);
+				const lifted = click ? Math.round(click.made - changedAt) : null;
+				log(`attempt ${attempt}: pressed ${pressed}ms and released ${lifted}ms after the row changed, on ${click?.on}`);
+				proved = !!click && /call|Talk/i.test(click.on ?? '') && pressed !== null && pressed < 300 && lifted >= 400;
+				const call = await page.getByRole('button', { name: 'Stop voice agent' }).isVisible();
+				if (proved) expect(!call, `a press made ${pressed}ms after Talk took Stop's place and lifted at ${lifted}ms did not start a call`);
+				if (call) await page.getByRole('button', { name: 'Stop voice agent' }).click();
+			}
+			expect(proved, 'no attempt pressed Talk inside the window and lifted after it (see the log)');
+		}
+	}, {
 		// #1632 case 2: no call, a turn running, a draft sent. Send stays held for
 		// the double-tap window, then the mic slides into its place. A second tap
 		// on Send that lands on the mic must not start dictation.

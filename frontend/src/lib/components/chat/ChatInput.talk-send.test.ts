@@ -327,3 +327,110 @@ describe('the composer circles', () => {
 		expect(dock.querySelector('.composer-attach, .attach-btn, .voice-btn, .voice-call-btn, .call-circle')).toBeNull();
 	});
 });
+
+describe('a button sliding into a freed seat (#1632)', () => {
+	// The row's clock is frozen at ARRIVED while it changes, then moved on so
+	// the events' own times (the press, the release) are what count.
+	const ARRIVED = 1000;
+	let clock: ReturnType<typeof vi.spyOn>;
+	beforeEach(() => { clock = vi.spyOn(performance, 'now').mockReturnValue(ARRIVED); });
+
+	function fire(type: string, el: Element, timeStamp: number, init: { pointerId?: number; detail?: number } = {}) {
+		const Ctor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+		const event = new Ctor(type, { bubbles: true, cancelable: true, detail: init.detail ?? 1, ...init });
+		Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+		if (init.pointerId !== undefined && (event as PointerEvent).pointerId !== init.pointerId) {
+			Object.defineProperty(event, 'pointerId', { value: init.pointerId });
+		}
+		return fireEvent(el, event);
+	}
+	/** Clicks that got through to `el`, kept from its own handler. */
+	function reached(el: Element) {
+		const hits: number[] = [];
+		el.addEventListener('click', (event) => { hits.push(event.timeStamp); event.stopPropagation(); });
+		return hits;
+	}
+	/** A tap: pressed at `down`, released (the click) at `up`. */
+	async function tap(el: Element, down: number, up: number, pointerId = 1) {
+		await fire('pointerdown', el, down, { pointerId });
+		await fire('click', el, up, { pointerId });
+	}
+
+	/** Talk takes Stop's seat as the turn ends on its own, at ARRIVED. */
+	async function talkReplacesStop() {
+		startTurn();
+		const { container } = render(ChatInput, { props: { compact: true } });
+		await waitFor(() => expect(circles(container)).toEqual([
+			'Start voice input', 'Start a call in this conversation', 'Stop generating'
+		]));
+		const stop = container.querySelector('.stop-btn')!;
+		Object.assign(activeSession.current, { isStreaming: false, liveTurnId: null });
+		activeSession.setDraft('');
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']));
+		clock.mockReturnValue(ARRIVED + 5000);
+		return { container, stop, talk: container.querySelector('.call-circle')! };
+	}
+
+	it('judges a tap by when the press began, not when it was released', async () => {
+		const { talk } = await talkReplacesStop();
+		const hits = reached(talk);
+		// Pressed 350ms after Talk arrived, released 100ms later: aimed at Stop.
+		await tap(talk, ARRIVED + 350, ARRIVED + 450);
+		expect(hits).toEqual([]);
+		// Pressed after the window: a real press on Talk.
+		await tap(talk, ARRIVED + 450, ARRIVED + 520);
+		expect(hits).toEqual([ARRIVED + 520]);
+	});
+
+	it('never lets a press that began on Stop act on the Talk that replaced it', async () => {
+		startTurn();
+		const mounted = render(ChatInput, { props: { compact: true } });
+		await waitFor(() => expect(circles(mounted.container)).toContain('Stop generating'));
+		await fire('pointerdown', mounted.container.querySelector('.stop-btn')!, ARRIVED - 50, { pointerId: 4 });
+		Object.assign(activeSession.current, { isStreaming: false, liveTurnId: null });
+		activeSession.setDraft('');
+		await waitFor(() => expect(circles(mounted.container)).not.toContain('Stop generating'));
+		clock.mockReturnValue(ARRIVED + 5000);
+		const talk = mounted.container.querySelector('.call-circle')!;
+		const hits = reached(talk);
+		// Released on Talk well after the window: still Stop's press.
+		await fire('click', talk, ARRIVED + 900, { pointerId: 4 });
+		expect(hits).toEqual([]);
+	});
+
+	it('leaves no stale press behind a cancelled touch, and no press to a click without one', async () => {
+		const { talk } = await talkReplacesStop();
+		const hits = reached(talk);
+		// A touch that turned into a scroll inside the window...
+		await fire('pointerdown', talk, ARRIVED + 100, { pointerId: 9 });
+		await fire('pointercancel', talk, ARRIVED + 150, { pointerId: 9 });
+		// ...does not decide a later click: that one is judged by its own time.
+		await fire('click', talk, ARRIVED + 600, { pointerId: 9 });
+		// A scripted or assistive click (no pointer) after the window works,
+		await fire('click', talk, ARRIVED + 650, { pointerId: -1 });
+		// and a keyboard click always does.
+		await fire('click', talk, ARRIVED + 10, { detail: 0 });
+		expect(hits).toEqual([ARRIVED + 600, ARRIVED + 650, ARRIVED + 10]);
+		// Inside the window, a click with no press of its own is still held back.
+		const early = await talkReplacesStop();
+		const earlyHits = reached(early.talk);
+		await fire('click', early.talk, ARRIVED + 100, { pointerId: -1 });
+		expect(earlyHits).toEqual([]);
+	});
+
+	it('never holds back the mic when work starting elsewhere grows the row', async () => {
+		// Same chat, nothing typed: another tab starts a turn, mic · Talk → mic · Talk · Stop.
+		Object.assign(activeSession.current, { sessionId: 'local-working', mode: 'code', profile: 'coding',
+			isStreaming: false, liveTurnId: null, error: null, worktreeError: null, activeTasks: [] });
+		activeSession.setDraft('');
+		const { container } = render(ChatInput, { props: { compact: true } });
+		await waitFor(() => expect(circles(container)).toEqual(['Start voice input', 'Start a call in this conversation']));
+		startTurn('local-working');
+		await waitFor(() => expect(circles(container)).toContain('Stop generating'));
+		clock.mockReturnValue(ARRIVED + 5000);
+		const mic = container.querySelector('.voice-btn')!;
+		const hits = reached(mic);
+		await tap(mic, ARRIVED + 100, ARRIVED + 160);
+		expect(hits).toEqual([ARRIVED + 160]);
+	});
+});

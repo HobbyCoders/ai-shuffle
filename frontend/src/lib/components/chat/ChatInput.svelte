@@ -88,7 +88,7 @@
 	import ContextPillBar from './ContextPillBar.svelte';
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
-	import { composerCircles, createArrivalGuard, createWrapWatcher, type RowButton } from './composer-wrap';
+	import { composerCircles, createArrivalGuard, createPressTracker, createWrapWatcher, type RowButton } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
@@ -760,19 +760,40 @@
 		rowCause = cause;
 		arrivals.update(row, settled);
 	});
+	const presses = createPressTracker<HTMLButtonElement>();
+	const rowButtonAt = (target: EventTarget | null) =>
+		((target as Element | null)?.closest?.('button') as HTMLButtonElement | null) ?? null;
+	function rowButtonKind(button: HTMLButtonElement | null): RowButton | null {
+		return button?.classList.contains('voice-btn') ? 'mic'
+			: button?.classList.contains('call-circle') ? 'talk'
+			: button?.classList.contains('stop-btn') ? 'stop' : null;
+	}
+	// Event times, clamped to now: a busy main thread that handles a press
+	// late must not let it through.
+	const eventTime = (event: Event) => {
+		const now = performance.now();
+		return event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
+	};
+	function notePress(event: PointerEvent) {
+		presses.down(event.pointerId, eventTime(event), rowButtonAt(event.target));
+	}
+	function forgetPress(event: PointerEvent) {
+		presses.cancel(event.pointerId);
+	}
 	function ignoreArrivingPress(event: MouseEvent) {
 		// detail is 0 for a click from the keyboard (Enter, Space): never ignored.
 		if (event.detail === 0) return;
-		const button = (event.target as Element | null)?.closest?.('button');
-		const kind: RowButton | null = button?.classList.contains('voice-btn') ? 'mic'
-			: button?.classList.contains('call-circle') ? 'talk'
-			: button?.classList.contains('stop-btn') ? 'stop' : null;
+		const button = rowButtonAt(event.target);
+		const kind = rowButtonKind(button);
 		if (!kind) return;
-		// Judged by when the press was made, so a busy main thread that handles
-		// it late does not let it through.
-		const now = performance.now();
-		const pressedAt = event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
-		if (!arrivals.ignores(kind, pressedAt, event.detail)) return;
+		const clickAt = eventTime(event);
+		const pointerId = 'pointerId' in event && typeof event.pointerId === 'number' ? event.pointerId : undefined;
+		const press = presses.take(pointerId, clickAt, button);
+		// A press that began on another button (Stop, before Talk took its
+		// place) is never a press on this one. Without a press of its own
+		// (assistive technology, a script) the click's time stands in.
+		const began = press ? (press.target === button ? press.at : null) : clickAt;
+		if (began !== null && !arrivals.ignores(kind, began, event.detail)) return;
 		event.preventDefault();
 		event.stopPropagation();
 	}
@@ -2104,7 +2125,7 @@
 					     independently. StopButton confirms first when background
 					     agents are live. A circle that is not shown takes no room:
 					     the others move over (owner decision, 2026-11-14). -->
-					<div class="send-cluster" bind:this={sendClusterRef} onclickcapture={ignoreArrivingPress}>
+					<div class="send-cluster" bind:this={sendClusterRef} onpointerdowncapture={notePress} onpointercancelcapture={forgetPress} onclickcapture={ignoreArrivingPress}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
