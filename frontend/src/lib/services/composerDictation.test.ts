@@ -5,7 +5,7 @@ import { get } from 'svelte/store';
 import type { SttStreamHandlers } from './sttStream';
 
 const mocks = vi.hoisted(() => ({ start: vi.fn(), capability: vi.fn(), settings: vi.fn(), save: vi.fn(), mirror: vi.fn() }));
-vi.mock('$app/environment', () => ({ browser: true }));
+vi.mock('$app/env', () => ({ browser: true }));
 vi.mock('$lib/api/voice', () => ({ loadVoiceSettings: mocks.settings }));
 vi.mock('./keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));

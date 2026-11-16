@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
 import { appVersion } from './app-version.js';
+import { svelteOptions } from './svelte-options.js';
 
 const lib = fileURLToPath(new URL('./src/lib', import.meta.url));
 const stubs = fileURLToPath(new URL('./src/lib/test-stubs', import.meta.url));
@@ -13,7 +14,7 @@ const FULL_RUN_TRIGGERS = [
 	'**/package.json/**',
 	'**/{vitest,vite}.config.*/**',
 	'**/package-lock.json',
-	'**/svelte.config.js',
+	'**/svelte-options.js',
 	'**/tsconfig.json',
 	'**/app-version.js',
 	'**/src/lib/test-stubs/**',
@@ -24,7 +25,8 @@ const FULL_RUN_TRIGGERS = [
 export default defineConfig({
 	// Keep generated caches local when dependencies are shared by worktrees.
 	cacheDir: '.svelte-kit/vitest-cache',
-	plugins: [svelte({ hot: !process.env.VITEST })],
+	// SvelteKit 3 has no svelte.config.js for the plugin to find: pass the options.
+	plugins: [svelte({ ...svelteOptions, hot: !process.env.VITEST })],
 	define: {
 		__APP_VERSION__: JSON.stringify(appVersion)
 	},
@@ -66,8 +68,7 @@ export default defineConfig({
 			{ find: /^\$lib$/, replacement: lib },
 			// SvelteKit virtual modules aren't available outside the kit plugin;
 			// stub them so store code that imports them can be unit-tested.
-			{ find: /^\$app\/environment$/, replacement: `${stubs}/app-environment.ts` },
-			{ find: /^\$app\/stores$/, replacement: `${stubs}/app-stores.ts` },
+			{ find: /^\$app\/env$/, replacement: `${stubs}/app-env.ts` },
 			{ find: /^\$app\/navigation$/, replacement: `${stubs}/app-navigation.ts` },
 			{ find: /^\$app\/state$/, replacement: `${stubs}/app-state.svelte.ts` }
 		]

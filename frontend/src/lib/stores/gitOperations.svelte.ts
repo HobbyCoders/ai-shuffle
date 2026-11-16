@@ -22,7 +22,7 @@
  * createSubscribers subscribe shim for `$gitOperations` auto-subscription.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import * as gitApi from '$lib/api/git';
 import { isApiError } from '$lib/api/client';
 import { git } from './git.svelte';

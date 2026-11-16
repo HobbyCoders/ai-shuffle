@@ -46,14 +46,15 @@ function isDangling(path) {
 /**
  * The shared `$lib` sources sit under frontend/, so Vite's esbuild transform
  * reads frontend/tsconfig.json for them — and that file extends the generated
- * frontend/.svelte-kit/tsconfig.json. A fresh checkout (CI, a clean clone)
+ * `$app/tsconfig` (node_modules/$app/tsconfig.json, in the one node_modules
+ * tree both apps share). A fresh checkout (CI, a clean clone)
  * has not run `svelte-kit sync` there yet, and the mobile build would fail
  * with "failed to resolve extends". Generate it here so `npm run deps` is all
  * a mobile build needs after `npm ci` in frontend/.
  */
 function syncFrontend() {
-	if (existsSync(resolve(frontendRoot, '.svelte-kit', 'tsconfig.json'))) return;
-	console.log('[mobile] generating frontend/.svelte-kit (svelte-kit sync)');
+	if (existsSync(resolve(target, '$app', 'tsconfig.json'))) return;
+	console.log('[mobile] generating the shared $app/tsconfig (svelte-kit sync in frontend/)');
 	execFileSync(process.execPath, [resolve(target, '@sveltejs', 'kit', 'svelte-kit.js'), 'sync'], {
 		cwd: frontendRoot,
 		stdio: 'inherit'

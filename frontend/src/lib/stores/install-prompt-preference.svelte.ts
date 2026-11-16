@@ -1,5 +1,5 @@
 /** Account presentation choices; browser installation capability stays in pwa. */
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { preferenceSync } from '$lib/services/preferences';
 
 interface InstallPromptChoice { never: boolean; dismissedAt: number | null }

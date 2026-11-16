@@ -11,7 +11,7 @@ import { compatible } from '$lib/services/preference-values';
  * compatibility with $storeName auto-subscription in .svelte files.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 

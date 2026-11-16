@@ -9,16 +9,14 @@ vi.mock('$lib/components/layout/RootLayout.svelte', async () => ({
 }));
 
 import Layout from './+layout.svelte';
-import * as appStores from '$app/stores';
-import type { Writable } from 'svelte/store';
+import { page } from '$app/state';
 import { platform } from '$lib/stores/platform.svelte';
 
-// Tests alias $app/stores to a writable stub (vitest.config.ts).
-const page = appStores.page as unknown as Writable<unknown>;
+// Tests alias $app/state to a mutable stub (vitest.config.ts).
 const children = createRawSnippet(() => ({ render: () => '<p>page content</p>' }));
 
 function at(path: string) {
-	page.set({ url: new URL(`https://worker.example${path}`), params: {}, data: {}, status: 200, error: null });
+	page.url = new URL(`https://worker.example${path}`);
 	return render(Layout, { props: { children } });
 }
 

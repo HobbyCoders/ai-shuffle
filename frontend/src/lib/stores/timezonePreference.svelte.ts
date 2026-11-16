@@ -9,7 +9,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * Migrated to Svelte 5 runes.
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { createSubscribers } from './store-utils';
 
 const STORAGE_KEY = 'ai-shuffle-timezone';

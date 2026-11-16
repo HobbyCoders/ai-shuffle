@@ -5,7 +5,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * Migrated to Svelte 5 runes. Provides subscribe() shim for backward
  * compatibility with $storeName auto-subscription in .svelte files.
  */
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 

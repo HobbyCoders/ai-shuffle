@@ -2,7 +2,7 @@
  * Do not sync this preference: `null` means this browser's local worker.
  * Availability is checked by the routing API, never by silently falling back.
  */
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import type { DeviceIntent } from './types';
 
 const STORAGE_KEY = 'aihub_workerSelection';

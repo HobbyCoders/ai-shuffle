@@ -13,7 +13,7 @@
  * The value is fixed for the life of the page. `set()` exists for unit tests
  * and for the mobile app's startup only.
  */
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import {
 	buildShell,
 	resolveUiPlatform,

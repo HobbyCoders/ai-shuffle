@@ -1,10 +1,10 @@
 <script lang="ts">
-	import { page } from '$app/stores';
+	import { page } from '$app/state';
 	import Layout from '../../routes/+layout.svelte';
 	import Home from '../../routes/+page.svelte';
 	import Pair from '../../routes/pair/+page.svelte';
 
-	const path = $derived<string>($page.url.pathname);
+	const path = $derived<string>(page.url.pathname);
 </script>
 
 <Layout>
