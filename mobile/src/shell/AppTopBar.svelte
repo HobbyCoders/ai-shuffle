@@ -200,10 +200,17 @@
 				entryLive = false;
 				if (drawerOpen) closeDrawer();
 			}
-			// Our entry is gone: a Settings target that waited for that opens now.
+			// Our entry is gone: a Settings target that waited for that opens
+			// once this update has been applied. Opening it from inside the
+			// update (the router is still finishing the pop) breaks the page.
 			const open = pendingTarget;
-			pendingTarget = null;
-			open?.();
+			if (!open) return;
+			void tick().then(() => {
+				// Still the same wait: nothing newer called it off meanwhile.
+				if (pendingTarget !== open) return;
+				pendingTarget = null;
+				open();
+			});
 		});
 	});
 
