@@ -158,6 +158,22 @@ describe('universal search', () => {
   await view.rerender({ ...p, visible: false }); await view.rerender(p); await search('orchid');
   expect(mocks.get.mock.calls.filter(([path]) => path === '/agents')).toHaveLength(2);
  });
+ // Results that answer later go below the rows already shown, and the status
+ // line they replace sits below too, so nothing on screen moves (#1600).
+ it('adds slower results below the local rows without moving them', async () => {
+  let resolve!: (result: unknown) => void;
+  mocks.sessions.mockReturnValueOnce(new Promise(r => { resolve = r; }));
+  render(SpotlightSearch, { props: props() }); await search('new');
+  const action = screen.getByText('New conversation').closest('button')!;
+  const status = screen.getByRole('status');
+  expect(status.textContent).toBe('Searching…');
+  expect(action.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  resolve({ items: [{ id: 'chat', title: 'A new chat' }] }); await vi.advanceTimersByTimeAsync(1); await tick();
+  const chat = screen.getByText('A new chat');
+  expect(screen.getByText('New conversation').closest('button')).toBe(action);
+  expect(action.compareDocumentPosition(chat) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(action.getAttribute('data-index')).toBe('0');
+ });
  it('lists the Terminal page only when this viewer may open shells', async () => {
   terminalTargets.mockResolvedValue({ worker: { id: 'w', name: 'ServerWorker', platform: 'linux' }, supported: true,
    unsupported_reason: null, targets: [], shells: [{ name: 'bash', default: true }], default_shell: 'bash',

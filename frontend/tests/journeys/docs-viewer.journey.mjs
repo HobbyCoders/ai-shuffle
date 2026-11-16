@@ -195,10 +195,9 @@ await runJourney({
 		}
 	}, {
 		// #1581, #1554: Spotlight ranks from the backend index the same way, and its
-		// rows read as text, not Markdown. Desktop only: on a phone the Spotlight
-		// sheet jumps whenever its results change, whatever the query (#1600).
+		// rows read as text, not Markdown. On a phone the sheet keeps its top edge
+		// while each query's results arrive (#1600): the recorder fails a jump.
 		name: 'spotlight-phrase-ranking',
-		viewports: ['desktop'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
 		},
@@ -214,6 +213,7 @@ await runJourney({
 			await mark('Spotlight: "remote, access!" ranks Remote Access first');
 			// The sidebar's Search button, not Ctrl+K: right after load the hotkey
 			// may not be bound yet.
+			if (!await page.getByRole('complementary', { name: 'Chats', exact: true }).isVisible()) await page.getByRole('button', { name: /^Chats(?: \(|$)|Show sidebar/ }).first().click();
 			await page.getByRole('complementary', { name: 'Chats', exact: true }).getByRole('button', { name: /^Search\b/ }).click();
 			await spotlight.waitFor();
 			const spotRemote = await firstSpotlightRow('remote, access!', 'Remote Access');
