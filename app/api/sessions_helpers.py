@@ -436,9 +436,33 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
         )
 
 
+def _guard_reads_database(api_user: Optional[dict], session: dict) -> bool:
+    """Whether the project check needs the database: a project-limited key
+    and a chat known only by its shared project id (#1659)."""
+    return bool(api_user and api_user.get("project_id")
+                and not session.get("project_id") and session.get("project_v2_id"))
+
+
+async def check_session_access_for_api_user_async(api_user: Optional[dict], session: dict) -> None:
+    """:func:`check_session_access_for_api_user` for async callers.
+
+    The shared-project lookup reads the database, so that case runs off the
+    event loop; every other case is decided in memory, as before.
+    """
+    if _guard_reads_database(api_user, session):
+        await run_sync(check_session_access_for_api_user, api_user, session)
+    else:
+        check_session_access_for_api_user(api_user, session)
+
+
 def check_session_access(request: Request, session: dict) -> None:
     """Check that the request's API user owns ``session`` and has it in scope."""
     check_session_access_for_api_user(get_api_user_from_request(request), session)
+
+
+async def check_session_access_async(request: Request, session: dict) -> None:
+    """:func:`check_session_access` for async callers (see the ``_async`` guard)."""
+    await check_session_access_for_api_user_async(get_api_user_from_request(request), session)
 
 
 async def require_session(request: Request, session_id: str) -> dict:
@@ -458,7 +482,7 @@ async def require_session(request: Request, session_id: str) -> dict:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}"
         )
-    check_session_access(request, session)
+    await check_session_access_async(request, session)
     return session
 
 
@@ -474,7 +498,7 @@ async def check_transcript_access(request: Request, session: dict) -> None:
     member's phone or a direct controller is refused a chat it may not see
     the images of. The owner login and API keys are unchanged.
     """
-    check_session_access(request, session)
+    await check_session_access_async(request, session)
     client = getattr(request.state, "paired_client", None)
     if not client:
         return

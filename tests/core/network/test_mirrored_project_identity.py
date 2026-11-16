@@ -51,6 +51,20 @@ def test_a_chat_this_worker_runs_keeps_its_own_binding(workers):
         assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "mine"
 
 
+def test_a_chat_this_worker_runs_keeps_its_checkout_over_another_of_the_same_project(workers):
+    """A late copy names ``sandbox``, another checkout of the same shared
+    project: the binding this worker holds still stands."""
+    viewer = workers("viewer")
+    with viewer.active():
+        database.create_project("sandbox", "Sandbox", None, "/v", link_group_id="git:acme/owners-repo")
+        database.create_project("mine", "Mine", None, "/m", link_group_id="git:acme/owners-repo")
+        database.create_session(session_id="remote-chat", profile_id="default", title="t")
+        viewer.sql("UPDATE sessions SET project_id = 'mine', project_v2_id = ?, owner_device_id = ? WHERE id = ?",
+                   (OWNERS_PROJECT, VIEWER, "remote-chat"))
+        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "mine"
+        assert _mirror(_record(owner_device_id=None))["project_id"] == "mine"
+
+
 def _viewer_with_both_sandboxes(viewer):
     """The viewer's ``sandbox`` is unrelated; ``owners-checkout`` is its checkout of the chat's project."""
     database.create_project("sandbox", "Viewer sandbox", None, "/v", link_group_id="git:acme/viewers-repo")
@@ -135,14 +149,30 @@ def test_is_checkout_of_compares_shared_identity():
 
 
 def test_one_local_checkout_is_picked_per_origin():
-    """This worker's row before any other, otherwise the first in name order."""
+    """This worker's row before any other, then name, then id, whatever the input order."""
     origin = "git:acme/owners-repo"
-    peer = {"id": "a-peer", "instance_id": "peer", "link_group_id": origin}
-    unowned = {"id": "b-unowned", "instance_id": None, "link_group_id": origin}
-    mine = {"id": "c-mine", "instance_id": "me", "link_group_id": origin}
+    peer = {"id": "a-peer", "name": "Same", "instance_id": "peer", "link_group_id": origin}
+    unowned = {"id": "b-unowned", "name": "Same", "instance_id": None, "link_group_id": origin}
+    mine = {"id": "c-mine", "name": "Zed", "instance_id": "me", "link_group_id": origin}
     assert local_rows_by_origin([peer, unowned, mine], ("me",))[origin]["id"] == "c-mine"
     assert local_rows_by_origin([peer, unowned], ("me",))[origin]["id"] == "a-peer"
-    assert local_rows_by_origin([unowned, peer], ("me", None))[origin]["id"] == "b-unowned"
+    assert local_rows_by_origin([unowned, peer], ("me",))[origin]["id"] == "a-peer"
+    named = {"id": "z-named", "name": "Alpha", "instance_id": None, "link_group_id": origin}
+    assert local_rows_by_origin([unowned, peer, named], ("me",))[origin]["id"] == "z-named"
+
+
+def test_a_shared_project_with_two_local_checkouts_picks_one_stably(workers):
+    from app.core.config import settings
+    from app.core.project_resolver import local_project_for_shared
+
+    viewer = workers("viewer")
+    with viewer.active():
+        for project_id in ("b-checkout", "a-checkout"):
+            database.create_project(project_id, "Same name", None, f"/{project_id}",
+                                    link_group_id="git:acme/owners-repo")
+        viewer.sql("UPDATE projects SET instance_id = ?", (settings.effective_instance_id,))
+        with get_db() as conn:
+            assert local_project_for_shared(conn.cursor(), OWNERS_PROJECT) == "a-checkout"
 
 
 def test_cluster_catalog_names_this_workers_checkout():

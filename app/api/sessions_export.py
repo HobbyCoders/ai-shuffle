@@ -166,23 +166,27 @@ def _safe_filename_title(title: str) -> str:
     return safe_title.strip().replace(" ", "-")[:50]
 
 
-def _import_project_id(project_id: Optional[str], project_v2_id: Optional[str]) -> Optional[str]:
-    """The local project an imported chat files under.
+def _import_project(project_id: Optional[str], project_v2_id: Optional[str]) -> tuple:
+    """``(project_id, project_v2_id)`` an unrestricted import files the chat under.
 
-    The export's legacy id when that project exists here and, if the export
-    names a shared project, is a checkout of it; otherwise this install's
-    checkout of the shared project (#1659). Older exports carry no shared id.
+    A legacy id is one worker's slug and may name another project here, so a
+    file that names a shared project (``project_v2_id``) is filed by that id
+    alone: under this install's checkout of it, or none, keeping the shared id
+    when this install knows the project (#1659). Only an older file with no
+    shared id falls back to its slug, when that project exists here.
     """
     from app.core import project_resolver
     from app.db.base import get_db
 
-    project = database.get_project(project_id) if project_id else None
-    if project and (not project_v2_id or project_resolver.is_checkout_of(project, project_v2_id)):
-        return project_id
-    if not project_v2_id:
-        return None
-    with get_db() as conn:
-        return project_resolver.local_project_for_shared(conn.cursor(), project_v2_id)
+    if project_v2_id:
+        with get_db() as conn:
+            local = project_resolver.local_project_for_shared(conn.cursor(), project_v2_id)
+        if local or project_resolver.resolve_catalog_project(project_v2_id):
+            return local, project_v2_id
+        return None, None
+    if project_id and database.get_project(project_id):
+        return project_id, None
+    return None, None
 
 
 def _session_export_metadata(session: dict) -> dict:
@@ -672,9 +676,13 @@ async def import_session(
     project_id = session_data.get('project_id') or None
     project_v2_id = session_data.get('project_v2_id') or None
     if api_user and api_user.get('project_id'):
-        if (project_id and project_id != api_user['project_id']) or (
-                not project_id and project_v2_id
-                and not await run_sync(key_project_is_shared_project, api_user['project_id'], project_v2_id)):
+        # The shared id decides when the file has one: a slug equal to the
+        # key's may name another project on the exporting worker (#1659).
+        if project_v2_id:
+            allowed = await run_sync(key_project_is_shared_project, api_user['project_id'], project_v2_id)
+        else:
+            allowed = not project_id or project_id == api_user['project_id']
+        if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this project",
@@ -685,7 +693,7 @@ async def import_session(
         # may name a project by a slug this install lacks or uses for another
         # project; sessions.project_id has a FK to projects, so it files
         # under this install's checkout of the shared project, or none.
-        project_id = await run_sync(_import_project_id, project_id, project_v2_id)
+        project_id, project_v2_id = await run_sync(_import_project, project_id, project_v2_id)
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
@@ -697,6 +705,7 @@ async def import_session(
         session_id=new_session_id,
         profile_id=profile_id,
         project_id=project_id,
+        project_v2_id=project_v2_id,
         title=title,
         api_user_id=api_user_id
     )

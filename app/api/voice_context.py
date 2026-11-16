@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_auth
-from app.api.sessions_helpers import check_session_access
+from app.api.sessions_helpers import check_session_access_async
 from app.core.generation_options import VALID_EFFORTS
 from app.core.query_options import decode_provider_model
 from app.db import database
@@ -149,7 +149,7 @@ async def update_voice_session_context(
     # permission mode, ...) of a voice session it owns and has in scope.
     from app.api.voice import _load_voice_session
     session = await _load_voice_session(session_id, check_eligible=True)
-    check_session_access(request, session)
+    await check_session_access_async(request, session)
 
     _validate_patch(body)
     if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):

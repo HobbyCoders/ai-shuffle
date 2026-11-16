@@ -353,6 +353,39 @@ class TestImport:
                     headers=AUTH)
         assert r.status_code == 200, r.text
 
+    def test_key_slug_matching_another_shared_project_is_refused(self, client, world):
+        """#1659: the file's slug equals the key's project, but on the
+        exporting worker it named another project. The shared id decides."""
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        _key(project_id="proj-a", profile_ids=["agent-a"])
+        r = _upload(client, _export(session={"profile_id": "agent-a", "project_id": "proj-a",
+                                             "project_v2_id": project_v2_id_for_origin("git:acme/b")}),
+                    headers=AUTH)
+        assert r.status_code == 403
+
+    def test_key_import_keeps_the_validated_shared_id(self, client, world):
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        _key(project_id="proj-a", profile_ids=["agent-a"])
+        shared = project_v2_id_for_origin("local:proj-a")
+        r = _upload(client, _export(session={"profile_id": "agent-a", "project_id": "other-slug",
+                                             "project_v2_id": shared}), headers=AUTH)
+        assert r.status_code == 200, r.text
+        row = database.get_session(r.json()["session_id"])
+        assert (row["project_id"], row["project_v2_id"]) == ("proj-a", shared)
+
+    def test_import_without_a_local_checkout_keeps_the_shared_id(self, client, world):
+        """The shared project is known here (another worker's), but this
+        install has no checkout of it: the chat keeps its only identity."""
+        from app.db import projects_v2
+
+        shared = projects_v2.upsert_project("git:acme/remote-only", "Remote only")["id"]
+        r = _upload(client, _export(session={"project_id": "proj-a", "project_v2_id": shared}))
+        assert r.status_code == 200, r.text
+        row = database.get_session(r.json()["session_id"])
+        assert (row["project_id"], row["project_v2_id"]) == (None, shared)
+
     @pytest.mark.parametrize("payload,detail", [
         ({"session": {}}, "Invalid export format. Missing 'session' or 'messages' field."),
         ({"session": [], "messages": []},

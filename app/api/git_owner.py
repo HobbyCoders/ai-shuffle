@@ -180,8 +180,8 @@ def session_git_action(endpoint):
         if not session:
             raise HTTPException(404, "Session not found")
         from app.api.common import check_project_access
-        from app.api.sessions_helpers import check_session_access
-        check_session_access(request, session)
+        from app.api.sessions_helpers import check_session_access_async
+        await check_session_access_async(request, session)
         refuse_subagent_git(session)
         check_project_access(request, values["project_id"])
         await run_sync(_check_project, session, values["project_id"])

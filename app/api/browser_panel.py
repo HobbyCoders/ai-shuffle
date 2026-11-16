@@ -39,7 +39,7 @@ from pydantic import BaseModel
 from app.api.auth import require_auth
 from app.api.common import api_error_handler
 from app.api.sessions_helpers import (
-    check_session_access_for_api_user,
+    check_session_access_for_api_user_async,
     require_session,
 )
 from app.api.ws_auth import authenticate_websocket
@@ -306,7 +306,7 @@ async def browser_panel_websocket(
         return
 
     try:
-        check_session_access_for_api_user(api_user, session)
+        await check_session_access_for_api_user_async(api_user, session)
     except HTTPException:
         await websocket.close(code=4003, reason="Access denied")
         return

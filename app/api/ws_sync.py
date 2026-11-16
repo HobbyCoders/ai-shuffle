@@ -10,7 +10,7 @@ from fastapi.websockets import WebSocketState
 from app.core.sync_engine import sync_engine
 from app.db import database
 from app.db.async_database import run_sync
-from app.api.sessions_helpers import check_session_access_for_api_user, socket_may_read_transcript
+from app.api.sessions_helpers import check_session_access_for_api_user_async, socket_may_read_transcript
 from app.api.ws_auth import authenticate_websocket
 from app.api.ws_key_watch import watch_api_key
 from app.api.ws_utils import ping_loop
@@ -66,7 +66,7 @@ async def session_sync_websocket(
         await websocket.close(code=4004, reason="Session not found")
         return
     try:
-        check_session_access_for_api_user(api_user, session)
+        await check_session_access_for_api_user_async(api_user, session)
         # The state frame carries every message: a paired controller gets the
         # transcript rule of the REST routes (#1877). An error refuses.
         readable = await run_sync(socket_may_read_transcript,

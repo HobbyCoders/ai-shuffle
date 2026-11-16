@@ -82,6 +82,30 @@ class TestSharedRule:
         with pytest.raises(HTTPException):
             check_session_access_for_api_user({"id": "key-a", "project_id": "gone", "profile_ids": []}, mirrored)
 
+    def test_async_guard_reads_the_database_only_off_the_loop(self):
+        """Async callers must not block the event loop on the pool (#1659).
+
+        A slug decides in memory; only a shared-id-only chat with a
+        project-limited key needs the database, and that runs via run_sync.
+        """
+        from app.api import sessions_helpers
+
+        key = {"id": "key-a", "project_id": "q", "profile_ids": []}
+        by_slug = {"id": "s", "api_user_id": "key-a", "project_id": "q", "project_v2_id": "pv2"}
+        shared_only = {"id": "s", "api_user_id": "key-a", "project_id": None, "project_v2_id": "pv2"}
+        offloaded = []
+
+        async def fake_run_sync(fn, *args):
+            offloaded.append(fn)
+            return fn(*args)
+
+        with patch.object(sessions_helpers, "run_sync", fake_run_sync), \
+                patch.object(sessions_helpers, "key_project_is_shared_project", return_value=True) as lookup:
+            asyncio.run(sessions_helpers.check_session_access_for_api_user_async(key, by_slug))
+            assert offloaded == [] and not lookup.called
+            asyncio.run(sessions_helpers.check_session_access_for_api_user_async(key, shared_only))
+            assert offloaded == [sessions_helpers.check_session_access_for_api_user] and lookup.called
+
     def test_worker_session_belongs_to_the_owner_of_its_parent(self):
         rows = {
             "root": {"id": "root", "api_user_id": "key-a"},

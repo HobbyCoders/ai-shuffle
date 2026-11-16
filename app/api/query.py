@@ -24,7 +24,7 @@ from app.db import database
 from app.db.async_database import run_sync
 from app.api.auth import get_api_user_from_request, require_api_key, require_auth
 from app.api.sessions_helpers import (
-    check_session_access_for_api_user, require_session, resolve_api_user_profile,
+    check_session_access_for_api_user, check_session_access_for_api_user_async, require_session, resolve_api_user_profile,
 )
 from app.api.sse_utils import is_client_disconnect
 
@@ -377,7 +377,7 @@ async def _check_continued_session(api_user: dict, session_id: str | None) -> No
         return
     session = await run_sync(database.get_session, session_id)
     if session:
-        check_session_access_for_api_user(api_user, session)
+        await check_session_access_for_api_user_async(api_user, session)
         from app.core import archive_guard
 
         if archive_guard.is_archived_row(session):
@@ -441,7 +441,7 @@ async def conversation(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Unknown session_id",
                 )
-            check_session_access_for_api_user(api_user, existing)
+            await check_session_access_for_api_user_async(api_user, existing)
             from app.core import archive_guard
 
             if archive_guard.is_archived_row(existing):

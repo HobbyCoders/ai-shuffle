@@ -508,17 +508,21 @@ def _mirror_project_id(cursor, record: Dict[str, Any], device_id: Optional[str])
         cursor.execute("SELECT id, link_group_id FROM projects WHERE id = %s", (project_id,))
         found = cursor.fetchone()
         local_project = dict(found) if found is not None else None
-    if local_project is not None and (not project_v2_id or is_checkout_of(local_project, project_v2_id)):
-        return project_id
+    sender_checkout = local_project is not None and (
+        not project_v2_id or is_checkout_of(local_project, project_v2_id))
     if not project_v2_id:
-        return None
+        return project_id if sender_checkout else None
+    # The row this worker holds decides first: even a slug naming another
+    # checkout of the same shared project must not replace its binding.
     cursor.execute("SELECT project_id, owner_device_id, instance_id FROM sessions WHERE id = %s",
                    (record.get("id"),))
     local = cursor.fetchone()
     if _held_here(local, record, device_id):
-        if local is not None:
+        if local is not None and local["project_id"]:
             return local["project_id"]
-        return project_id if local_project is not None else None
+        return project_id if sender_checkout else None
+    if sender_checkout:
+        return project_id
     if device_id and record.get("owner_device_id") == device_id:
         return local_project_for_shared(cursor, project_v2_id)
     return None

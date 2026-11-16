@@ -89,15 +89,19 @@ def local_rows_by_origin(rows, self_ids) -> Dict[str, Dict[str, Any]]:
     The single rule for which of this worker's checkouts names a shared
     project (cluster catalog, a relayed attach, setup and peer views): a row
     registered by this worker (``instance_id`` in ``self_ids``) before any
-    other row, otherwise the first in ``rows`` order (callers pass
-    ``get_all_projects``, ordered by name).
+    other row, then by name, then by id, so the choice does not depend on
+    the order ``rows`` arrive in.
     """
     own = {str(i) for i in self_ids if i}
+
+    def rank(row):
+        return (row.get("instance_id") not in own, str(row.get("name") or ""), str(row.get("id") or ""))
+
     out: Dict[str, Dict[str, Any]] = {}
     for row in rows:
         origin = origin_for_legacy_project(row)
         existing = out.get(origin)
-        if existing is None or (row.get("instance_id") in own and existing.get("instance_id") not in own):
+        if existing is None or rank(row) < rank(existing):
             out[origin] = row
     return out
 
@@ -113,8 +117,8 @@ def local_project_for_shared(cursor, project_v2_id: Optional[str]) -> Optional[s
     if not project_v2_id:
         return None
     instance_id = settings.effective_instance_id
-    cursor.execute("SELECT id, link_group_id, instance_id FROM projects "
-                   "WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC", (instance_id,))
+    cursor.execute("SELECT id, name, link_group_id, instance_id FROM projects "
+                   "WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC, id ASC", (instance_id,))
     by_origin = local_rows_by_origin([dict(row) for row in cursor.fetchall()], (instance_id,))
     for row in by_origin.values():
         if is_checkout_of(row, project_v2_id):
