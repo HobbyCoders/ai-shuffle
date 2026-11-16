@@ -126,8 +126,12 @@ def test_the_same_record_in_two_consecutive_batches(workers):
             engine.scan_all()
         exchange(a, b)
     _settle(a, b)
-    assert _tag_name(a) == _tag_name(b) is not None
-    assert set(_losers(a)) == set(_losers(b))
+    final = _tag_name(a)
+    assert final == _tag_name(b) in ("a-1", "b-1")
+    # The last round's loser is a conflict on both workers. Earlier versions
+    # are recorded where they lost on arrival, as for scanned edits (base).
+    last = ("b-1", b.device_id) if final == "a-1" else ("a-1", a.device_id)
+    assert last in _losers(a) and last in _losers(b)
 
 
 def test_unscanned_local_delete_that_loses_is_a_conflict_on_both_workers(workers):
@@ -351,6 +355,63 @@ def test_a_peer_op_waits_while_a_local_change_cannot_be_read(workers, monkeypatc
         assert "b-token" not in str(losers)
 
 
+def _bundle(worker, provider, generation, stamp):
+    from app.db import model_providers
+    with worker.active():
+        model_providers.set_codex_token_bundle(
+            provider, access_token=encryption.encrypt_value("access-" + generation),
+            refresh_token=encryption.encrypt_value("refresh-" + generation), account_id="account-" + generation,
+            last_refresh=stamp)
+
+
+def _refresh_token(worker, provider):
+    from app.db import model_providers
+    with worker.active():
+        return encryption.decrypt_value(model_providers.get_codex_tokens(provider)["codex_refresh_token"])
+
+
+@pytest.mark.parametrize("delivery", ["op", "snapshot"])
+def test_a_losing_credential_merge_waits_for_an_unsigned_rotation(workers, monkeypatch, delivery):
+    """A's op loses B's row by clock but carries a newer credential generation
+    (T3). B rotated to T2 without a scan and its outbox is held. The merge
+    would overwrite T2 unsigned; it waits. After release B's T2 is signed and
+    generation ordering converges both workers on T3."""
+    from app.db import database as db
+    provider = "sync-unscanned-credentials"
+    a, b = _provider_pair(workers, monkeypatch, provider)
+    _bundle(a, provider, "t3", "2026-11-01T12:00:00+00:00")
+    with a.active():
+        engine.scan_all()
+        chunk = engine.snapshot_chunk("model_providers", 0)
+    _advance_clock(b)
+    with b.active():
+        db.update_model_provider(provider, name="from-b")
+        engine.scan_all()  # B's row clock is ahead of A's op
+    _bundle(b, provider, "t2", "2026-11-01T10:00:00+00:00")
+    with b.active():
+        # Only the provider row stays unscanned (not the slot selection the
+        # rotation also writes).
+        engine.scan_collection("system_settings", ctx=engine.context())
+        engine.hold_outbox(True)
+    try:
+        if delivery == "op":
+            exchange(a, b)
+        else:
+            with b.active(), pytest.raises(engine.TransientApplyError):
+                engine.apply_snapshot_chunk(chunk)
+        assert _refresh_token(b, provider) == "refresh-t2"
+    finally:
+        with b.active():
+            engine.hold_outbox(False)
+    exchange(a, b)
+    with b.active():
+        engine.resume_pending()
+    _settle(a, b)
+    assert _refresh_token(a, provider) == _refresh_token(b, provider) == "refresh-t3"
+    with a.active():
+        assert db.get_model_provider(provider)["name"] == "from-b"
+
+
 # -- A restored worker (#1570): nothing is signed into the old stream while the
 # -- batch proves its next sequence numbers are taken.
 
@@ -556,7 +617,7 @@ def _interleave(monkeypatch, private_cluster, worker, hook, collection, record_i
 
     def wrapped(cursor, *args, **kwargs):
         coll, rid = (args[1], args[2]) if hook == "_check_local" else (args[0], args[1])
-        if coll.name == collection and rid == record_id and state["thread"] is None and _ACTIVE.get() is worker:
+        if getattr(coll, "name", coll) == collection and rid == record_id and state["thread"] is None and _ACTIVE.get() is worker:
             state["thread"] = threading.Thread(target=run)
             state["thread"].start()
             state["thread"].join(1.0)
@@ -650,3 +711,24 @@ def test_postgres_permission_revocation_during_a_peer_apply(pg_workers, private_
     _settle(a, b)
     for worker in (a, b):
         assert not worker.sql("SELECT id FROM permission_rules WHERE id = ?", (rule,))
+
+
+def test_postgres_rename_during_a_presence_publish(pg_workers, private_cluster, monkeypatch):
+    """B renames itself while publishing its presence, after the publish wrote
+    its presence and member rows and before it signs them. Both take
+    network_state first, so the rename waits instead of deadlocking (member
+    row held by the publish, network_state by the rename)."""
+    from types import SimpleNamespace
+    from tests.core.network.harness import _ACTIVE
+    _a, b = _pair(pg_workers)
+
+    def rename(conn):
+        _ACTIVE.set(SimpleNamespace(shim=conn))  # this thread's get_db: the second connection
+        store.rename_member(b.device_id, "renamed")
+
+    state = _interleave(monkeypatch, private_cluster, b, "record", "presence", b.device_id, rename)
+    with b.active():
+        engine.publish_presence(capabilities={}, version="interleaved")
+    _finish(state)
+    with b.active():
+        assert store.get_member(b.device_id)["name"] == "renamed"

@@ -1904,13 +1904,15 @@ def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, A
     return stored != received
 
 
-def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_id: str,
+def _merge_losing_provider_credentials(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
                                        incoming: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
     """A row-LWW loser can still carry the newest subscription generation.
 
     Keep the ordinary fields and their winning clock/origin. Leave the winning
     hash unchanged so scan publishes the combined row, including to old peers.
     Never revive a tombstone, and never advance with an unversioned bundle.
+    Like a winning replacement, a merge that would change the row waits while
+    it holds an unsigned local change (``_check_local``, #1605).
     """
     if (coll.name != "model_providers" or existing["deleted"]
             or not incoming.get("codex_last_refresh")):
@@ -1921,6 +1923,12 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
         return False
     from app.db.model_provider_slots import lock_model_provider_slots, reconcile_model_provider_slots
     lock_model_provider_slots(cursor)
+    cursor.execute("SELECT 1 FROM model_providers WHERE id = %s "
+                   "AND (codex_last_refresh IS NULL OR codex_last_refresh < %s) FOR UPDATE",
+                   (record_id, incoming["codex_last_refresh"]))
+    if cursor.fetchone() is None:
+        return False  # not newer: nothing changes
+    _check_local(cursor, ctx, coll, record_id, existing, deleting=False, incoming=incoming)
     encrypted = list(incoming.get("_enc") or [])
     values = [_column_value(coll, name, incoming[name], encrypted)
               for name in _PROVIDER_CREDENTIAL_FIELDS]
@@ -2005,7 +2013,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
-            cursor, coll, env.record_id, plaintext, existing)
+            cursor, ctx, coll, env.record_id, plaintext, existing)
         if merged:
             result.touched.append((env.collection, env.record_id, env.op))
         # The network already moved past this write; keep it as a conflict
@@ -2038,7 +2046,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         _apply_membership(cursor, ctx, plaintext)
 
     # A local change no op carries yet waits to be signed first (#1605).
-    present = _check_local(cursor, ctx, coll, env.record_id, existing, deleting=env.op == OP_DELETE)
+    present = _check_local(cursor, ctx, coll, env.record_id, existing, deleting=env.op == OP_DELETE,
+                           incoming=plaintext if env.op == OP_UPSERT else None)
 
     # Keep the local loser (a concurrent local edit) for the conflicts list.
     if existing is not None and existing["origin_device_id"] != env.origin_device_id:
@@ -2343,7 +2352,8 @@ def _observe_clock(cursor, clock: int) -> None:
 # journal lock where materialize takes them, the record's row, then its
 # cascaded children. Domain writers that lock a shared row and then sign it in
 # the same transaction take network_state first (``_delete_permission_rules``,
-# ``rename_member``).
+# ``rename_member``, ``publish_presence``). A losing provider credential merge
+# goes through step 2 too: it changes the row as a winning op would.
 
 # Shared children a parent's deletion removes through ON DELETE CASCADE:
 # parent collection -> (child collection, foreign-key column). A test checks
@@ -2366,11 +2376,13 @@ def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) 
 
 
 def _unsigned(cursor, coll: policy.Collection, record_id: str, row: Optional[Mapping[str, Any]],
-              existing: Optional[Mapping[str, Any]]) -> bool:
+              existing: Optional[Mapping[str, Any]], incoming_hash: Optional[str] = None) -> bool:
     """Whether ``record()`` would sign something for this row: the scanner's rule.
 
     A row that differs from its sync record, or a live record whose row is
-    gone. A row no scan can read for good (or not shared) is not a change.
+    gone. A row no scan can read for good (or not shared) is not a change,
+    nor is one that already holds the incoming version (``incoming_hash``):
+    replacing it loses nothing.
     Raises ``TransientApplyError`` while credential storage is locked.
     """
     live = existing is not None and not bool(existing["deleted"])
@@ -2385,7 +2397,10 @@ def _unsigned(cursor, coll: policy.Collection, record_id: str, row: Optional[Map
         return False
     except ApplyError:
         return False
-    return plaintext is not None and not (live and existing["content_hash"] == content_hash(coll, plaintext))
+    if plaintext is None:
+        return False
+    current = content_hash(coll, plaintext)
+    return current != incoming_hash and not (live and existing["content_hash"] == current)
 
 
 def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str, *,
@@ -2415,7 +2430,7 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
     restored from a backup (``_own_ahead_proof``): the sequence numbers it
     would allocate are taken by its own retained ops.
     """
-    wanted = {}
+    wanted: Dict[Tuple[str, str], List[Any]] = {}
     for data in items:
         if not isinstance(data, Mapping):
             continue
@@ -2423,26 +2438,41 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
         if not (isinstance(name, str) and isinstance(record_id, str) and name in policy.SCANNED_COLLECTIONS):
             continue
         deleting = data.get("op") == OP_DELETE or data.get("deleted") is True
-        wanted[(name, record_id)] = wanted.get((name, record_id), False) or deleting
+        # A state copy's item is plaintext: a row already equal to it (the
+        # record's only item here) is no change. An envelope's hash is of its
+        # sealed bytes, not comparable.
+        record_data = None if deleting else data.get("record")
+        incoming = None
+        if isinstance(record_data, Mapping):
+            try:  # as the apply sees it (see apply_snapshot_items)
+                projected = _project_legacy_agent(policy.collection(name), record_id, record_data)
+                incoming = None if projected is None else content_hash(policy.collection(name), projected)
+            except (ValueError, KeyError, TypeError, ApplyError):
+                incoming = None
+        if (name, record_id) in wanted:
+            wanted[(name, record_id)] = [wanted[(name, record_id)][0] or deleting, None]
+        else:
+            wanted[(name, record_id)] = [deleting, incoming]
     if not wanted or ctx.bootstrap_state != BOOTSTRAP_READY:
         return locked
     if not locked:
         store.lock_state(cursor)
     if getattr(_own_ahead_batch, "found", False):
         return True
-    for (name, record_id), deleting in sorted(wanted.items()):
+    for (name, record_id), (deleting, incoming) in sorted(wanted.items()):
         coll = policy.collection(name)
         try:
-            targets = [(coll, record_id, _read_row(cursor, coll, record_id))]
+            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming)]
             if deleting:
-                targets += _children(cursor, ctx, coll, record_id, lock=False)
+                targets += [(*child, None) for child in _children(cursor, ctx, coll, record_id, lock=False)]
         except (ValueError, KeyError, TypeError, ApplyError):
             continue  # malformed: the apply refuses it
-        for target, target_id, row in targets:
+        for target, target_id, row, target_hash in targets:
             if not _scanned_here(ctx, target, target_id):
                 continue
             try:
-                if _unsigned(cursor, target, target_id, row, store.get_record(cursor, target.name, target_id)):
+                if _unsigned(cursor, target, target_id, row, store.get_record(cursor, target.name, target_id),
+                             target_hash):
                     record(cursor, target.name, target_id, row, ctx=ctx)
             except ApplyError:
                 continue  # step 2 makes the op wait
@@ -2450,7 +2480,8 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
 
 
 def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
-                 existing: Optional[Mapping[str, Any]], *, deleting: bool) -> Optional[bool]:
+                 existing: Optional[Mapping[str, Any]], *, deleting: bool,
+                 incoming: Optional[Mapping[str, Any]] = None) -> Optional[bool]:
     """Step 2 (see above): lock the row a winning peer version replaces; wait
     while it holds an unsigned change.
 
@@ -2469,12 +2500,13 @@ def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id
         from app.db.watches import lock_connector
         lock_connector(cursor, record_id)
     row = _read_row(cursor, coll, record_id, lock=True)
-    targets = [(coll, record_id, row, existing)]
+    targets = [(coll, record_id, row, existing,
+                content_hash(coll, incoming) if incoming is not None and not deleting else None)]
     if deleting and row is not None:
-        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id))
+        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None)
                     for child, child_id, child_row in _children(cursor, ctx, coll, record_id, lock=True)]
-    for target, target_id, target_row, known in targets:
-        if _unsigned(cursor, target, target_id, target_row, known):
+    for target, target_id, target_row, known, target_hash in targets:
+        if _unsigned(cursor, target, target_id, target_row, known, target_hash):
             raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + target.name)
     return row is not None
 
@@ -3457,11 +3489,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             if conflict:
                 store.add_conflict(cursor, **conflict)
             if not item["deleted"] and _merge_losing_provider_credentials(
-                    cursor, coll, item["record_id"], item["record"], existing):
+                    cursor, ctx, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
             continue
-        present = _check_local(cursor, ctx, coll, item["record_id"], existing, deleting=bool(item["deleted"]))
+        present = _check_local(cursor, ctx, coll, item["record_id"], existing, deleting=bool(item["deleted"]),
+                               incoming=None if item["deleted"] else item["record"])
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
             if isinstance(record_data, dict):
@@ -3958,6 +3991,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     changed = False
     with get_db() as conn:
         cursor = conn.cursor()
+        # network_state before the presence and member rows (see _check_local).
+        store.lock_state(cursor)
         cursor.execute(
             """INSERT INTO network_presence (device_id, endpoints, capabilities, version, source_revision, platform, incarnation,
                                              instance_id, updated_at)
