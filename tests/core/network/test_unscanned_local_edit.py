@@ -180,6 +180,42 @@ def test_unscanned_local_delete_racing_a_peer_delete_records_nothing(workers):
     assert not _conflicts(a) and not _conflicts(b)
 
 
+def test_unscanned_local_delete_meeting_a_peer_delete_signs_nothing(workers):
+    """Both deleted the row: the peer's tombstone says what B would say, so B
+    signs none of its own and the stream does not wait."""
+    a, b = _pair(workers)
+    with b.active():
+        database.delete_tag("t1")
+    with a.active():
+        database.delete_tag("t1")
+        engine.scan_all()
+    signed = len(_own_ops(b))
+    result = exchange(a, b)
+    assert (result.applied, result.retry, result.lost) == (1, 0, 0), result.reasons
+    assert len(_own_ops(b)) == signed
+    _scan_is_quiet(b)
+    assert not _conflicts(b)
+
+
+def test_unscanned_local_delete_with_a_peer_upsert_and_delete_in_one_batch(workers):
+    """A's stream holds an edit and then a deletion of the row B deleted
+    without scanning. The edit would bring the row back, so B's deletion is
+    still signed first; the batch must not wait for good."""
+    a, b = _pair(workers)
+    with b.active():
+        database.delete_tag("t1")
+    with a.active():
+        database.update_tag("t1", name="from-a")
+        engine.scan_all()
+        database.delete_tag("t1")
+        engine.scan_all()
+    signed = len(_own_ops(b))
+    exchange(a, b)
+    assert [(op["record_id"], op["op"]) for op in _own_ops(b)[signed:]] == [("t1", "delete")]
+    _settle(a, b)
+    assert _tag_name(a) is _tag_name(b) is None
+
+
 def test_same_unscanned_edit_on_both_sides_records_no_conflict(workers):
     a, b = _pair(workers)
     for worker in (a, b):
@@ -544,6 +580,63 @@ def test_a_parent_deletion_signs_an_unscanned_child_first(workers, kind):
     exchange(a, b)
     assert len(_own_ops(b, collection)) == signed + 1
     _settle(a, b)
+
+
+def _watermark(worker, origin):
+    with worker.active():
+        with database.get_db() as conn:
+            return store.get_watermark(conn.cursor(), origin.device_id, origin.identity.incarnation)
+
+
+@pytest.mark.parametrize("kind", ["notes", "agents", "api_users"])
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_a_peer_parent_and_child_tombstone_apply_in_one_pass(request, backend, kind):
+    """A deleted a parent with a published child: its stream is the parent's
+    tombstone, then the child's. The parent's removes the child row here, so
+    the child's finds the row gone under a live record. That is no local
+    delete: the op applies, and B signs no tombstone of its own."""
+    parent, child, drop = _cascade_case(kind)
+    a, b = _pair(request.getfixturevalue("pg_workers" if backend == "postgres" else "workers"))
+    parent(a)
+    collection = child(a)
+    with a.active():
+        if kind == "agents":  # _cascade_case leaves the rule unsigned
+            engine.scan_all()
+        engine.scan_all()
+    converge([a, b])
+    _scan_is_quiet(b)
+    drop(a)
+    with a.active():
+        engine.scan_all()
+        database.create_tag("after", "after")  # a later op on the same stream
+        engine.scan_all()
+    signed = len(_own_ops(b, collection))
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    assert _watermark(b, a) == _own_ops(a)[-1]["origin_seq"]
+    assert _tag_name(b, "after") == "after"
+    assert len(_own_ops(b, collection)) == signed
+    _scan_is_quiet(b)
+
+
+def test_a_state_copy_parent_and_child_tombstone_sign_nothing(workers):
+    from app.db import notes
+    a, b = _pair(workers)
+    with a.active():
+        notes.create_note("n1", "Shared note", "body")
+        notes.create_note_attachment("att", "n1", "b.txt", "notes/b.txt", "text/plain", 3, b"abc")
+        engine.scan_all()
+    converge([a, b])
+    with a.active():
+        notes.delete_note("n1")
+        engine.scan_all()
+        chunks = [engine.snapshot_chunk(name, 0) for name in ("notes", "note_attachments")]
+    with b.active():
+        for chunk in chunks:
+            engine.apply_snapshot_chunk(chunk)
+        assert notes.get_note("n1") is None
+    assert _own_ops(b, "note_attachments") == []
+    _scan_is_quiet(b)
 
 
 def test_a_state_copy_deletion_signs_an_unscanned_child_first(workers):

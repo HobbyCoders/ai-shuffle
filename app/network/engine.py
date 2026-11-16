@@ -2406,12 +2406,15 @@ def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, 
 
 def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
               row: Optional[Mapping[str, Any]], existing: Optional[Mapping[str, Any]],
-              incoming_hash: Optional[str] = None) -> bool:
+              incoming_hash: Optional[str] = None, *, deleting: bool = False) -> bool:
     """Whether the apply must have this row signed first: ``record()`` would
     sign something for it (the scanner's rule) that is a local change.
 
     A row that differs from its sync record, or a live record whose row is
-    gone. A row no scan can read for good (or not shared) is not a change,
+    gone, unless the incoming version deletes the record (``deleting``): the
+    row is gone either way, here usually through the cascade of its parent's
+    tombstone earlier in the same stream.
+    A row no scan can read for good (or not shared) is not a change,
     nor is one that already holds the incoming version (``incoming_hash``):
     replacing it loses nothing. Nor is a nested-secret row that differs from
     its record only by the quorum (``_holds_signed_version``): republishing
@@ -2420,7 +2423,7 @@ def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: s
     """
     live = existing is not None and not bool(existing["deleted"])
     if row is None:
-        return live and _incoming_row_is_shared(coll, record_id, None)
+        return live and not deleting and _incoming_row_is_shared(coll, record_id, None)
     try:
         plaintext = serialize_row(coll, row, cursor=cursor)
     except TransientApplyError:
@@ -2485,30 +2488,33 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
                 incoming = None if projected is None else content_hash(policy.collection(name), projected)
             except (ValueError, KeyError, TypeError, ApplyError):
                 incoming = None
+        # [some item deletes it, the one item's hash, every item deletes it]
         if (name, record_id) in wanted:
-            wanted[(name, record_id)] = [wanted[(name, record_id)][0] or deleting, None]
+            previous = wanted[(name, record_id)]
+            wanted[(name, record_id)] = [previous[0] or deleting, None, previous[2] and deleting]
         else:
-            wanted[(name, record_id)] = [deleting, incoming]
+            wanted[(name, record_id)] = [deleting, incoming, deleting]
     if not wanted or ctx.bootstrap_state != BOOTSTRAP_READY:
         return locked
     if not locked:
         store.lock_state(cursor)
     if getattr(_own_ahead_batch, "found", False):
         return True
-    for (name, record_id), (deleting, incoming) in sorted(wanted.items()):
+    for (name, record_id), (deleting, incoming, only_deleted) in sorted(wanted.items()):
         coll = policy.collection(name)
         try:
-            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming)]
+            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming, only_deleted)]
             if deleting:
-                targets += [(*child, None) for child in _children(cursor, ctx, coll, record_id, lock=False)]
+                targets += [(*child, None, False) for child in _children(cursor, ctx, coll, record_id, lock=False)]
         except (ValueError, KeyError, TypeError, ApplyError):
             continue  # malformed: the apply refuses it
-        for target, target_id, row, target_hash in targets:
+        for target, target_id, row, target_hash, target_deleted in targets:
             if not _scanned_here(ctx, target, target_id):
                 continue
             try:
                 if _unsigned(cursor, ctx, target, target_id, row,
-                             store.get_record(cursor, target.name, target_id), target_hash):
+                             store.get_record(cursor, target.name, target_id), target_hash,
+                             deleting=target_deleted):
                     record(cursor, target.name, target_id, row, ctx=ctx)
             except ApplyError:
                 continue  # step 2 makes the op wait
@@ -2537,12 +2543,12 @@ def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id
         lock_connector(cursor, record_id)
     row = _read_row(cursor, coll, record_id, lock=True)
     targets = [(coll, record_id, row, existing,
-                content_hash(coll, incoming) if incoming is not None and not deleting else None)]
+                content_hash(coll, incoming) if incoming is not None and not deleting else None, deleting)]
     if deleting and row is not None:
-        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None)
+        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None, False)
                     for child, child_id, child_row in _children(cursor, ctx, coll, record_id, lock=True)]
-    for target, target_id, target_row, known, target_hash in targets:
-        if _unsigned(cursor, ctx, target, target_id, target_row, known, target_hash):
+    for target, target_id, target_row, known, target_hash, target_deleted in targets:
+        if _unsigned(cursor, ctx, target, target_id, target_row, known, target_hash, deleting=target_deleted):
             raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + target.name)
     return row is not None
 
