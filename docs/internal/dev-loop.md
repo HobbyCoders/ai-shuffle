@@ -415,6 +415,10 @@ before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
 | `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` while the work runs (Grok only), then the short result is said. |
 | `long-work-quiet` | As `long-work`, but the caller says "just tell me when it's done" after the handoff: no progress line, only the result. |
 | `check-idle` | Grok only. With nothing running, the voice answers a new request with `check_work` instead of a handoff; the app takes that call as the handoff, the fake says "Checking on that now." and the reply (`[script:voice-reply]`) is said once. |
+| `status-after-small-talk` | Small talk the voice answers itself, then "Is it done yet?" handed off with nothing running: the app answers from its state ("Nothing is running. ..."), and no chat turn starts. |
+| `status-twice` | Two status questions in a row, each handed off at idle: each gets its own answer from the app's state, and no chat turn starts. |
+| `mute-mixed` | On `long-work`: "just tell me when it's done", then "Keep me posted, skip the updates and reboot the server" (a work request, not a mute): the progress line is said once, then the result. |
+| `mute-work-request` | On `long-work`: "Skip the updates and reboot the server" is a work request, not a mute: the progress line is said once, then the result. |
 
 Steps (one key each): `wait_audio_ms` (wait for that much speech-level
 microphone audio, so a script never runs ahead of a real microphone),

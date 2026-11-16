@@ -25,9 +25,18 @@
 //   check-idle  Grok only: with nothing running, the voice answers a new request ("Check whether the
 //               deploy finished.") with check_work instead of a handoff; the app takes it as the
 //               handoff: one request reaches the agent, a short "on it", the reply said once
+//   status-after-small-talk  (#1547) nothing running: answered small talk, then "Is it done yet?" handed
+//               off; it is answered from the task state and starts no chat turn (no fake-AI request)
+//   status-twice (#1547) two status questions in a row at idle, each handed off: both answered, no chat turn
+//   mute-mixed  (#1547) on long work, "just tell me when it's done" then "Keep me posted, skip the
+//               updates and reboot the server": progress is back on, the progress line is said
+//   mute-work-request (#1547) "Skip the updates and reboot the server" is a work request, not a mute:
+//               the progress line is still said
 //   attachment-during-call (#1265) a file sent while a call is live goes as fields beside the words
 //               and shows as a chip on the message
 import { runJourney } from './runner.mjs';
+import { readFile } from 'node:fs/promises';
+import { anyFrame } from './lib/timeline.mjs';
 import { PROJECT, composer, countUserRows, expect, openNewChat, pickAccess, typeAndSend, uniq, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import {
@@ -311,6 +320,93 @@ const checkIdle = {
 	}
 };
 
+/** Every request the fake AI has answered so far (the dev instance's request log). */
+async function fakeAiRequests(status) {
+	const text = await readFile(status.fake_ai.request_log, 'utf8').catch(() => '');
+	return text.split('\n').filter(Boolean).map((line) => { try { return JSON.parse(line); } catch { return {}; } });
+}
+
+/** The status the app reads out when nothing runs (voice_status.status_sentence). */
+const IDLE_STATUS = 'Nothing is running.';
+
+/**
+ * Status questions at idle (#1541, #1547): the caller's newest words are the
+ * question, so each handoff is answered from the app's task state and no
+ * chat turn starts, after answered small talk or after another status question.
+ */
+function idleStatus(name, { questions }) {
+	return {
+		name,
+		throttles: ['fast'],
+		async setup(ctx) {
+			ctx.token = await chatWithScenario(ctx, name);
+		},
+		async act({ page, mark, status, log }) {
+			const voice = fakeVoiceLog(status);
+			const seq = voice.mark();
+			const requestsBefore = await fakeAiRequests(status);
+			await mark('start the call; the caller asks how the work is going');
+			await startCall(page, { timeout: 45_000 });
+			const session = await callSession(voice, seq, name);
+			await voice.waitFor(seq, (es) => spokenNotes(es, session).filter((e) => e.text.includes(IDLE_STATUS)).length >= questions.length,
+				`${questions.length} status answer(s) said aloud`, { timeout: 60_000 });
+			await page.waitForTimeout(3000); // a chat turn started by the question would show now
+			const entries = voice.since(seq);
+			expect(entries.filter((e) => e.kind === 'handoff').length === questions.length, `the voice handed off ${questions.length} time(s)`);
+			expect(spokenNotes(entries, session).filter((e) => e.text.includes(IDLE_STATUS)).length === questions.length,
+				`each status question is answered once from the task state:\n  ${speechReport(entries)}`);
+			// The call's own words show in the chat as its transcript; a chat turn
+			// is a request to the chat agent, which the fake AI logs.
+			const turns = (await fakeAiRequests(status)).slice(requestsBefore.length)
+				.filter((r) => questions.some((q) => String(r.prompt || '').includes(q)));
+			expect(turns.length === 0, `no status question reached the chat agent: ${turns.map((r) => JSON.stringify(String(r.prompt).slice(-120))).join('; ')}`);
+			expect(!entries.some((e) => e.kind === 'error.sent' || e.kind === 'overlap'), 'no provider error or overlapping response');
+			log(`${spokenNotes(entries, session).length} spoken note(s), no chat turn`);
+			await mark('end the call');
+			await endCall(page);
+		},
+		verify({ recording }) {
+			expect(!anyFrame(recording, (s) => s.streaming === 'true'), 'no frame shows a chat turn streaming');
+		}
+	};
+}
+
+/**
+ * A sentence that mixes "skip the updates" with a work request is not a mute
+ * (#1541, #1547): on long work ([script:voice-long]) the progress line is
+ * still said once, before the result.
+ */
+function mixedMute(name, { sentence }) {
+	return {
+		name,
+		throttles: ['fast'],
+		async setup(ctx) {
+			ctx.token = await chatWithScenario(ctx, name);
+		},
+		async act({ page, mark, status, log }) {
+			const voice = fakeVoiceLog(status);
+			const seq = voice.mark();
+			await mark(`start the call; after the handoff the caller says "${sentence}"`);
+			await startCall(page, { timeout: 45_000 });
+			const session = await callSession(voice, seq, name);
+			await voice.waitFor(seq, (es) => es.find((e) => e.kind === 'caller' && e.text === sentence), 'the mixed sentence said by the caller');
+			await voice.waitFor(seq, (es) => spokenNotes(es, session).find((e) => e.text.includes(LONG_WORK.result)), 'the result said aloud', { timeout: 90_000 });
+			await page.waitForTimeout(3000);
+			const entries = voice.since(seq);
+			const notes = spokenNotes(entries, session);
+			const progress = notes.filter((e) => e.text === LONG_WORK.progress);
+			const result = notes.findIndex((e) => e.text.includes(LONG_WORK.result));
+			expect(progress.length === 1, `the progress line is still said once after "${sentence}":\n  ${speechReport(entries)}`);
+			expect(notes.indexOf(progress[0]) < result, 'the progress line comes before the result');
+			expect(notes.filter((e) => e.text.includes(LONG_WORK.result)).length === 1, `the result is said once:\n  ${speechReport(entries)}`);
+			expect(!entries.some((e) => e.kind === 'error.sent' || e.kind === 'overlap'), 'no provider error or overlapping response');
+			log(`${notes.length} spoken note(s)`);
+			await mark('end the call');
+			await endCall(page);
+		}
+	};
+}
+
 const attachmentDuringCall = {
 	name: 'attachment-during-call',
 	// Slow copies only: the fast ones add no signal and cost hosted shard time.
@@ -356,6 +452,11 @@ const attachmentDuringCall = {
 await runJourney({
 	name: 'voice-call',
 	browser: voiceBrowser,
-	cases: [startEnd, relay, waitUpdate, busy, longWork('long-work', { quiet: false }), longWork('long-work-quiet', { quiet: true }), checkIdle, contextAdmissionTimeout, attachmentDuringCall],
+	cases: [startEnd, relay, waitUpdate, busy, longWork('long-work', { quiet: false }), longWork('long-work-quiet', { quiet: true }), checkIdle,
+		idleStatus('status-after-small-talk', { questions: ['Is it done yet?'] }),
+		idleStatus('status-twice', { questions: ['Is it done yet?', 'Is anything running right now?'] }),
+		mixedMute('mute-mixed', { sentence: 'Keep me posted, skip the updates and reboot the server.' }),
+		mixedMute('mute-work-request', { sentence: 'Skip the updates and reboot the server.' }),
+		contextAdmissionTimeout, attachmentDuringCall],
 	allow: [...DEV_INSTANCE_NOISE]
 });

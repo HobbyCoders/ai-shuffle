@@ -1,0 +1,11 @@
+{
+  "description": "Nothing is running. The caller makes small talk, the voice answers it, then the caller asks \"Is it done yet?\" and the voice hands off. Only the newest words are the question: the app answers it from the task state and starts no chat turn (#1541).",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Hi there, how's your day going?"},
+    {"say": "Pretty good, thanks for asking."},
+    {"caller": "Is it done yet?"},
+    {"handoff": true, "ack": "Let me look."},
+    {"wait_speech": 1}
+  ]
+}
