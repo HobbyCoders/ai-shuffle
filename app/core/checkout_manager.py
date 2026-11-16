@@ -972,6 +972,50 @@ def _is_sveltekit_package(package: Path) -> bool:
         for section in ("dependencies", "devDependencies")
     )
 
+
+def _keeps_generated_types_in_node_modules(modules: Path) -> bool:
+    """Whether the SvelteKit installed in ``modules`` generates into it.
+
+    SvelteKit 3's sync writes ``node_modules/$app/tsconfig.json`` and the app
+    types under ``node_modules/$app/types``, where SvelteKit 2 wrote them to
+    the package's own ``.svelte-kit``. The generated tsconfig points at the
+    sources with paths relative to itself, so a tree shared with another
+    checkout resolves ``$lib`` in THAT checkout, and each checkout's sync
+    overwrites the other's types.
+    """
+    manifest = _read_json_file(modules / "@sveltejs" / "kit" / "package.json")
+    version = (manifest or {}).get("version")
+    try:
+        return int(str(version).split(".", 1)[0]) >= 3
+    except ValueError:
+        return False
+
+
+def _sibling_modules_owner(source: Path, source_modules: Path) -> Optional[Path]:
+    """The sibling package whose node_modules ``source_modules`` links to.
+
+    A package may share another package's tree inside one checkout (a second
+    app compiled from the same sources). Returns that package's path relative
+    to the checkout, or ``None`` when ``source_modules`` is the package's own.
+    """
+    try:
+        # Resolved rather than is_symlink(): a Windows junction is not one.
+        target = source_modules.resolve()
+        if target.name != "node_modules" or target.parent == source_modules.parent.resolve():
+            return None
+        return target.parent.relative_to(source.resolve())
+    except (OSError, ValueError):
+        return None
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 # The project's lockfile, and npm's own record of what a node_modules actually
 # holds (npm writes the latter on every install).
 _LOCKFILE_NAME = "package-lock.json"
@@ -1189,6 +1233,9 @@ def provision_node_modules(
     source's ``node_modules`` into the worktree (when the source's installed
     tree satisfies the WORKTREE's lockfile). Stale or empty dependencies are
     reported as setup-required; checkout creation never silently installs them.
+    A SvelteKit 3 app is never linked: its generated types live in node_modules
+    and belong to one checkout, so it always needs its own install. A package
+    that shares a sibling's tree gets the same link inside the worktree.
     A caller that obtained explicit setup approval may pass allow_install=True.
     Then runs the installed local ``svelte-kit sync`` where configured; no npx
     fallback may download missing tools.
@@ -1227,8 +1274,26 @@ def provision_node_modules(
             elif not source_modules.is_dir():
                 summary["skipped"].append(f"{label}: source has no node_modules")
                 continue
+            elif (owner := _sibling_modules_owner(source, source_modules)) is not None:
+                # The source package uses a sibling's tree. Mirror that inside
+                # the worktree; never reach through to the source checkout's.
+                own = dest / owner / "node_modules"
+                if not own.is_dir() or not _is_inside(own, dest):
+                    summary["skipped"].append(
+                        f"{label}: setup required (shares {owner.as_posix()}/node_modules, "
+                        "which this worktree does not have yet)"
+                    )
+                    continue
+                _link_directory(own, dest_modules)
+                summary["linked"].append(label)
             else:
                 verdict, reason = _installed_tree_verdict(source_modules, package)
+                if verdict != "stale" and _keeps_generated_types_in_node_modules(source_modules):
+                    verdict = "stale"
+                    reason = (
+                        "SvelteKit 3 keeps this checkout's generated types in "
+                        "node_modules, so the tree cannot be shared"
+                    )
                 if verdict == "stale":
                     if not allow_install:
                         summary["skipped"].append(
@@ -1283,6 +1348,14 @@ def provision_node_modules(
             continue
 
         if not _is_sveltekit_package(package):
+            continue
+        if _keeps_generated_types_in_node_modules(dest_modules) and not _is_inside(dest_modules, dest):
+            # A tree linked from another checkout (an older worktree): sync
+            # would write this checkout's types over that checkout's.
+            summary["errors"].append(
+                f"{label}: svelte-kit sync skipped: node_modules belongs to another "
+                "checkout; install this worktree's own dependencies"
+            )
             continue
         if _run_svelte_kit_sync(package):
             summary["synced"].append(label)
