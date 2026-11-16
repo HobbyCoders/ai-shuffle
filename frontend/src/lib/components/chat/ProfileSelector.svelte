@@ -183,6 +183,15 @@
 		flex-shrink: 0;
 	}
 
+	/* The new-chat row's agent word: it may shrink in its row, and the whole
+	   chip stops at the branch word's cap (ExecutionModeBar's --branch-slot-max)
+	   so a long unbroken name ends in an ellipsis instead of widening the row. */
+	.selector-wrapper.card-variant {
+		flex-shrink: 1;
+		min-width: 0;
+		max-width: min(100%, 232px);
+	}
+
 	.selector-wrapper.sheet-mode {
 		position: relative;
 		width: 100%;

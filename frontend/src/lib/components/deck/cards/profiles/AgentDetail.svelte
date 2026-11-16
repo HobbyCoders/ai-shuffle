@@ -36,6 +36,8 @@
 		type GroupState,
 		type RosterAgent
 	} from './agentForm';
+	import { AGENT_NAME_MAX } from './agentList';
+	import { codePoints } from '$lib/utils/code-points';
 
 	interface Props {
 		form: AgentForm;
@@ -125,6 +127,8 @@
 	const builtin = $derived(!!editingProfile?.is_builtin);
 	const modified = $derived(!!editingProfile?.is_modified);
 	const title = $derived(form.name.trim() || 'New agent');
+	/** Saving waits until the name fits; the Name field says by how much. */
+	const nameTooLong = $derived(codePoints(form.name) > AGENT_NAME_MAX);
 
 	let root: HTMLDivElement | undefined = $state();
 	let restoreArmed = $state(false);
@@ -171,8 +175,10 @@
 </script>
 
 {#snippet topStatus()}
-	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveState === 'error' || draft} role="status" aria-live="polite">
-		{#if draft}
+	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveState === 'error' || draft || nameTooLong} role="status" aria-live="polite">
+		{#if nameTooLong}
+			Name too long
+		{:else if draft}
 			Name it to save
 		{:else if saveState === 'saving'}
 			<LoaderCircle class="spin" />Saving

@@ -1,8 +1,13 @@
 /** The Agents list: search, the All / Yours / Built-in filter, the folder filter and the sections. */
 import { describe, expect, it } from 'vitest';
 import type { Profile } from '$lib/api/client';
+import { codePoints } from '$lib/utils/code-points';
 import {
+	AGENT_ID_MAX,
+	AGENT_NAME_MAX,
 	FOLDER_NONE,
+	duplicateAgentName,
+	agentNameProblem,
 	defaultModelBinding,
 	isPinned,
 	pinnedModel,
@@ -109,6 +114,93 @@ describe('uniqueAgentId', () => {
 		expect(uniqueAgentId('Release Notes!', [])).toBe('release-notes');
 		expect(uniqueAgentId('Scribe copy', ['scribe-copy', 'scribe-copy-2'])).toBe('scribe-copy-3');
 		expect(uniqueAgentId('  ', [])).toBe('agent');
+	});
+
+	// #1616: the server rejects ids over 50 characters (422), so a long name never saved.
+	it('cuts a long name to the 50-character id limit, suffix included', () => {
+		const long = 'a'.repeat(80);
+		const id = uniqueAgentId(long, []);
+		expect(id).toBe('a'.repeat(AGENT_ID_MAX));
+		const second = uniqueAgentId(long, [id]);
+		expect(second).toBe(`${'a'.repeat(AGENT_ID_MAX - 2)}-2`);
+		expect(second).toHaveLength(AGENT_ID_MAX);
+		// Suffixes 2..10 taken: each base is cut so base + suffix is exactly 50.
+		const suffixed = (n: number) => `${'a'.repeat(AGENT_ID_MAX - String(n).length - 1)}-${n}`;
+		const taken = [id, ...[2, 3, 4, 5, 6, 7, 8, 9, 10].map(suffixed)];
+		expect(taken[1]).toBe(second);
+		const eleventh = uniqueAgentId(long, taken);
+		expect(eleventh).toBe(`${'a'.repeat(AGENT_ID_MAX - 3)}-11`);
+		expect(eleventh).toHaveLength(AGENT_ID_MAX);
+	});
+
+	it('never leaves a dash where the cut falls', () => {
+		// 49 letters then a space: the slug's dash at index 49 is cut off, not kept.
+		const id = uniqueAgentId(`${'b'.repeat(49)} tail words here`, []);
+		expect(id).toBe('b'.repeat(49));
+		expect(uniqueAgentId(`${'b'.repeat(47)} x`, [`${'b'.repeat(47)}-x`])).toBe(`${'b'.repeat(47)}-2`);
+	});
+});
+
+describe('duplicateAgentName', () => {
+	it('adds " copy" within the 100-character name limit', () => {
+		expect(duplicateAgentName('Scribe')).toBe('Scribe copy');
+		const name = duplicateAgentName('c'.repeat(AGENT_NAME_MAX));
+		expect(name).toHaveLength(AGENT_NAME_MAX);
+		expect(name.endsWith(' copy')).toBe(true);
+	});
+	it('never splits an emoji: no lone surrogate, at most 100 code points', () => {
+		const loneSurrogate = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+		const name = duplicateAgentName('a'.repeat(94) + '😀');
+		// The review case: 95 code points (96 UTF-16 units) fit, so the emoji stays whole.
+		expect(name).toBe('a'.repeat(94) + '😀 copy');
+		expect(codePoints(name)).toBe(AGENT_NAME_MAX);
+		expect(loneSurrogate.test(name)).toBe(false);
+		// One code point too many: the emoji goes whole.
+		expect(duplicateAgentName('a'.repeat(95) + '😀')).toBe('a'.repeat(95) + ' copy');
+		// A ZWJ family is one character: kept whole or dropped whole.
+		const family = '👩\u200d👩\u200d👧';
+		expect(duplicateAgentName('a'.repeat(93) + family)).toBe('a'.repeat(93) + ' copy');
+		expect(duplicateAgentName('a'.repeat(90) + family)).toBe('a'.repeat(90) + family + ' copy');
+		// An all-emoji name of 100 code points.
+		const emoji = duplicateAgentName('😀'.repeat(AGENT_NAME_MAX));
+		expect(codePoints(emoji)).toBe(AGENT_NAME_MAX);
+		expect(loneSurrogate.test(emoji)).toBe(false);
+	});
+});
+
+describe('duplicateAgentName against existing names', () => {
+	it('numbers a copy whose name is taken', () => {
+		expect(duplicateAgentName('Scribe', ['Scribe', 'Scribe copy'])).toBe('Scribe copy 2');
+		expect(duplicateAgentName('Scribe', ['Scribe copy', 'Scribe copy 2'])).toBe('Scribe copy 3');
+	});
+	it('keeps copies of a copy at the 100 limit distinct', () => {
+		const base = 'w'.repeat(AGENT_NAME_MAX);
+		const names = [base];
+		const first = duplicateAgentName(base, names);
+		names.push(first);
+		// Duplicating the copy would cut it back to the same "… copy".
+		const second = duplicateAgentName(first, names);
+		names.push(second);
+		const third = duplicateAgentName(first, names);
+		expect(first).toBe('w'.repeat(95) + ' copy');
+		expect(second).toBe('w'.repeat(93) + ' copy 2');
+		expect(third).toBe('w'.repeat(93) + ' copy 3');
+		expect(names.concat(third).every((n) => codePoints(n) <= AGENT_NAME_MAX)).toBe(true);
+	});
+	it('cuts on a character boundary to make room for the number', () => {
+		const family = '👩\u200d👩\u200d👧';
+		const name = 'a'.repeat(90) + family;
+		const taken = [name, name + ' copy'];
+		expect(duplicateAgentName(name, taken)).toBe('a'.repeat(90) + ' copy 2');
+	});
+});
+
+describe('agentNameProblem', () => {
+	it('asks for a name, then for one within 100 code points', () => {
+		expect(agentNameProblem('  ')).toBe('Required to save.');
+		expect(agentNameProblem('Scribe')).toBeNull();
+		expect(agentNameProblem('😀'.repeat(AGENT_NAME_MAX))).toBeNull();
+		expect(agentNameProblem('😀'.repeat(AGENT_NAME_MAX + 1))).toBe('Too long: 101 of 100 characters. Shorten it to save.');
 	});
 });
 

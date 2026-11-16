@@ -11,6 +11,7 @@
 	import TextField from '$lib/components/settings/rows/TextField.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
 	import type { AgentForm, GroupState } from './agentForm';
+	import { agentNameProblem } from './agentList';
 
 	interface Props {
 		form: AgentForm;
@@ -35,7 +36,7 @@
 		onDeleteGroup
 	}: Props = $props();
 
-	const nameMissing = $derived(!form.name.trim());
+	const nameProblem = $derived(agentNameProblem(form.name));
 
 	// ── Folder ───────────────────────────────────────────────────────────
 	let creatingFolder = $state(false);
@@ -83,11 +84,12 @@
 {/snippet}
 
 <RowGroup title="Identity">
-	<SettingRow label="Name" hint={nameMissing ? 'Required to save.' : 'Shown in pickers and chats.'}>
+	<SettingRow label="Name" hint={nameProblem ?? 'Shown in pickers and chats.'}>
 		<TextField
 			value={form.name}
 			width={260}
 			placeholder="My agent"
+			invalid={!!nameProblem && !!form.name.trim()}
 			oninput={(v) => onFormChange('name', v)}
 		/>
 	</SettingRow>

@@ -64,6 +64,8 @@
 		profileModels,
 		sectionAgents,
 		uniqueAgentId,
+		duplicateAgentName,
+		agentNameProblem,
 		type AgentFilter
 	} from './profiles/agentList';
 	import {
@@ -708,7 +710,8 @@
 			try {
 				while (persistDirty) {
 					persistDirty = false;
-					if (!profileForm.name.trim()) continue;
+					// A blank or over-long name waits: the field says why (agentNameProblem).
+					if (agentNameProblem(profileForm.name)) continue;
 					saveState = 'saving';
 					try {
 						await writeProfile();
@@ -810,7 +813,10 @@
 		if (!source) return;
 		await flushPendingPersist();
 		const latest = profiles.find((p) => p.id === source.id) ?? source;
-		const name = `${latest.name} copy`;
+		const name = duplicateAgentName(
+			latest.name,
+			profiles.map((p) => p.name)
+		);
 		const id = uniqueAgentId(name, profiles.map((p) => p.id));
 		const config = JSON.parse(JSON.stringify(latest.config ?? {}));
 		const data: { id: string; name: string; description?: string; config: Record<string, unknown> } = {

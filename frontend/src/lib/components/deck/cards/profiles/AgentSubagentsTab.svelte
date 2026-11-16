@@ -77,7 +77,7 @@
 			{@const on = all || enabled.includes(agent.id)}
 			<div class="ra" class:dim={all}>
 				<div class="tx">
-					<div class="nm">{agent.name}</div>
+					<div class="nm" title={agent.name}>{agent.name}</div>
 					<div class="ds">{reach(agent)}{agent.description ? ` · ${agent.description}` : ''}</div>
 				</div>
 				<Switch checked={on} label={`Allow ${agent.name}`} disabled={all} onchange={() => onToggle(agent.id)} />
@@ -105,12 +105,15 @@
 		font-size: 14px;
 		font-weight: 450;
 	}
+	.nm,
 	.ds {
-		font-size: 12.5px;
-		color: var(--st-mfg);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.ds {
+		font-size: 12.5px;
+		color: var(--st-mfg);
 	}
 	.ra.dim .nm,
 	.ra.dim .ds {
