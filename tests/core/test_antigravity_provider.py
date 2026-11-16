@@ -1325,6 +1325,13 @@ def test_fetch_models_lists_what_the_agent_lists_with_no_chat(client, monkeypatc
     stored = model_catalogs.read(row["id"])
     assert stored["source"] == "agent" and stored["signin"] == ag.signin_tag(row["id"])
     assert [m["id"] for m in stored["models"]] == _LISTED
+    # The UI keys the list by binding and sign-in: both reach it, on the
+    # result and on the row (two Google accounts share one binding).
+    with _catalog_client() as catalog:
+        listed = catalog.get("/api/v1/model-providers").json()
+    shown = next(p for p in listed["providers"] if p["id"] == row["id"])
+    assert body["signin"] == shown["catalog_signin"] == ag.signin_tag(row["id"])
+    assert body["binding"] == shown["catalog_binding"]
     # Curation is the owner's: nothing the agent newly lists is ticked.
     assert db.get_model_provider(row["id"])["models_json"] == curated
 
