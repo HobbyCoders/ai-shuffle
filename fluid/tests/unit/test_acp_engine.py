@@ -687,6 +687,67 @@ def test_redact_removes_every_secret_from_stderr_and_rpc_text(tmp_path: Path) ->
     assert "next line" in text  # what is not a credential stays
 
 
+@pytest.mark.parametrize("text", [
+    "a-" * 10000, "." * 20000, "x" * (1 << 20), "a=" * 10000, '"k":' * 5000, "aB3-" * 5000,
+    "Ab1" * 6000, '{"' * 8000, "key: " * 4000, "https://" * 3000 + "a?b=c" * 1000,
+])
+def test_redaction_takes_bounded_time(text: str) -> None:
+    """Runs on the event loop for each agent line: no input may stall it (S6)."""
+    from fluid.engine.acp.redact import Redactor
+
+    redactor = Redactor([_KEY])
+    started = time.perf_counter()
+    redactor.clean(text)
+    redactor.quote(text)
+    assert time.perf_counter() - started < 0.5
+
+
+@pytest.mark.parametrize(("logged", "expected"), [
+    # Valid JSON is read before anything is unescaped (S7).
+    ('{"error": {"code": 404, "message": "Model \\"gemini-4-argon\\" was not found", "status": "NOT_FOUND"}}',
+     'Antigravity ended the turn with an error: Model "gemini-4-argon" was not found (NOT_FOUND, code 404)'),
+    ('{"error": {"code": 429, "message": "Quota exceeded.\\nRetry in 30s", "status": "RESOURCE_EXHAUSTED"}}',
+     "Antigravity ended the turn: Quota exceeded. Retry in 30s (RESOURCE_EXHAUSTED, code 429). "
+     "Check the provider's quota."),
+    # A JSON error whose message is itself a JSON error.
+    ('{"error": {"message": "{\\"error\\": {\\"code\\": 503, \\"message\\": \\"The model is overloaded\\", '
+     '\\"status\\": \\"UNAVAILABLE\\"}}"}}',
+     "Antigravity ended the turn with an error: The model is overloaded (UNAVAILABLE, code 503)"),
+])
+def test_a_json_error_reads_as_its_message(tmp_path: Path, logged: str, expected: str) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    _log_reason(tmp_path, logged)
+    assert spec.turn_failure(_FAILED, pid=333) == expected
+
+
+def test_redaction_edges() -> None:
+    from fluid.engine.acp.redact import MAX_INPUT, Redactor
+
+    # A credential-named field is removed whatever its value (S1).
+    assert "123456" not in Redactor().clean("authorization_code: 123456 rejected")
+    assert "4321" not in Redactor().clean('{"otp": 4321, "pin": "9876"}')
+    assert Redactor().clean("rpc error: code = Unavailable, code: 503") == "rpc error: code = Unavailable, code: 503"
+    # Empty and short configured values never blank ordinary text.
+    assert Redactor(["", "a", "the", "key1234"]).clean("the key was not valid") == "the key was not valid"
+    # Nothing after the cap is ever emitted, also half a secret on its edge.
+    text = "y " * (MAX_INPUT // 2 - 10) + _KEY + " tail"
+    cleaned = Redactor([_KEY]).clean(text)
+    assert "tail" not in cleaned and _KEY[:12] not in cleaned
+    # Bytes that are not UTF-8.
+    assert _KEY not in Redactor([_KEY]).clean(b"\xff\xfe bad " + _KEY.encode())
+    # Standard shapes go with no configured secret at all.
+    shapes = Redactor().clean("AIzaSyOTHER0123456789abcdefghijk ya29.a0OTHER Bearer abcdef0123456789")
+    assert "AIza" not in shapes and "ya29" not in shapes and "abcdef0123456789" not in shapes
+
+
+def test_a_log_line_that_is_not_utf8_still_reads(tmp_path: Path) -> None:
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key=_KEY)
+    path = _log_reason(tmp_path, "placeholder")
+    path.write_bytes(b"E1115 errorreport.go:57] agent executor error: INTERNAL (code 500): bad \xff\xfe byte\n")
+    message = spec.turn_failure(_FAILED, pid=333) or ""
+    assert message.startswith("Antigravity ended the turn with an error: INTERNAL (code 500): bad")
+
+
 async def test_a_refused_mode_at_start_never_shows_the_key(tmp_path: Path,
                                                            caplog: pytest.LogCaptureFixture) -> None:
     """An RPC error echoing the key (here ``session/set_mode``'s refusal,
@@ -698,6 +759,7 @@ async def test_a_refused_mode_at_start_never_shows_the_key(tmp_path: Path,
     d = await _driver(tmp_path, auth_mode="gemini-api-key", api_key=_KEY, permission_mode="plan",
                       model="gemini-3.8-flash")
     d.loop.spec.env.update({"FAKE_ACP_REJECT_MODES": "plan", "FAKE_ACP_REJECT_CONFIG": "1",
+                            "FAKE_ACP_MODES": f"{_KEY},plan",  # the key as the agent's current mode id
                             "FAKE_ACP_ERROR_DETAIL": f"GET /v1/x?key={_KEY} Authorization: Bearer ya29.FAKEtoken",
                             "FAKE_ACP_STDERR": f"starting with key {_KEY}"})
     try:

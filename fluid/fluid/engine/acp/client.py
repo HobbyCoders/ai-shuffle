@@ -306,7 +306,7 @@ class AcpConnection:
                 try:
                     message = json.loads(text)
                 except json.JSONDecodeError:
-                    logger.debug("ACP agent wrote a non-JSON line: %.200s", self.redact(text))
+                    self._log(logging.DEBUG, "ACP agent wrote a non-JSON line: %s", self.redact(text)[:200])
                     continue
                 if isinstance(message, dict):
                     await self._dispatch(message)
@@ -358,14 +358,20 @@ class AcpConnection:
                 try:
                     await self.on_notification(method, params)
                 except Exception as exc:  # noqa: BLE001 — one bad update never ends the stream
-                    logger.warning("ACP notification %s handler failed: %s", method,
-                                   self.redact(traceback_text(exc)))
+                    self._log(logging.WARNING, "ACP notification %s handler failed: %s", method,
+                              traceback_text(exc))
             return
         # A request: answered off the reader, since an answer may wait on a
         # person (a permission prompt) while updates keep streaming.
         task = asyncio.create_task(self._answer(message.get("id"), method, params))
         self._handlers.add(task)
         task.add_done_callback(self._handlers.discard)
+
+    def _log(self, level: int, msg: str, *args: Any) -> None:
+        """Log ``msg % args``, the whole formatted line redacted: any
+        argument may carry agent text."""
+        if logger.isEnabledFor(level):
+            logger.log(level, "%s", self.redact(msg % args if args else msg))
 
     def _redact_data(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -390,7 +396,7 @@ class AcpConnection:
                 await self._write(reply)
             raise
         except Exception as exc:  # noqa: BLE001 — the agent must always get an answer
-            logger.warning("ACP request %s handler failed: %s", method, self.redact(traceback_text(exc)))
+            self._log(logging.WARNING, "ACP request %s handler failed: %s", method, traceback_text(exc))
             reply["error"] = {"code": INTERNAL_ERROR, "message": f"client error: {exc}"}
         with contextlib.suppress(AcpError):
             await self._write(reply)

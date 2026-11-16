@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from fluid.engine.acp import antigravity as agy_spec
 from fluid.engine.acp.client import AcpConnection, AcpError
+from fluid.engine.acp.redact import Redactor
 
 logger = logging.getLogger(__name__)
 
@@ -946,7 +947,7 @@ async def start_login(row: Mapping[str, Any]) -> Dict[str, Any]:
         if not login.url:
             _drop(login)
             login.state = "failed"
-            login.message = "Antigravity did not print a sign-in link." + _tail(login)
+            login.message = _login_safe("Antigravity did not print a sign-in link." + _tail(login))
         else:
             login.state = "awaiting_code"
         return login.public()
@@ -971,7 +972,14 @@ def _tail(login: LoginSession) -> str:
     # with the verdict because the code prompt ends without a newline.
     lines = [_LOGIN_PROMPT_RE.sub("", line).strip() for line in login.output if line and not _URL_RE.search(line)]
     lines = [line for line in lines if line][-3:]
-    return (" " + " ".join(lines))[:400] if lines else ""
+    # Cleaned before it is cut, so no part of a token survives the cut.
+    return (" " + _login_safe(" ".join(lines)))[:400] if lines else ""
+
+
+def _login_safe(text: str) -> str:
+    """``text`` (holding the sign-in command's own output, shown through the
+    API) with tokens, codes, cookies and URL queries removed."""
+    return Redactor().clean(text)
 
 
 def get_login(login_id: str) -> Optional[LoginSession]:
@@ -1040,8 +1048,8 @@ async def complete_login(login: LoginSession, code: str, row: Mapping[str, Any])
         login.state, login.message = "signed_in", None
     else:
         login.state = "failed"
-        login.message = ("Antigravity did not accept the sign-in. Start the sign-in again; "
-                         "if it fails again, check the worker's connection to Google." + _tail(login))
+        login.message = _login_safe("Antigravity did not accept the sign-in. Start the sign-in again; "
+                                    "if it fails again, check the worker's connection to Google." + _tail(login))
     _drop(login)
     return login.public()
 

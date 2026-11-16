@@ -1644,6 +1644,20 @@ def test_a_sign_in_ended_elsewhere_reads_as_ended(client):
     assert client.get(f"{BASE}/providers/{row['id']}/login/{again['login_id']}").json()["state"] == "ended"
 
 
+def test_a_failed_sign_in_never_shows_a_token():
+    """The sign-in command's own output reaches the API in the failure
+    message: tokens, codes and cookies in it are removed before the cut."""
+    login = ag.LoginSession(id="l1", row_id="r1")
+    login.output = ["Exchanging the code...",
+                    "POST /token failed: Authorization: Bearer ya29.a0FAKEaccessTOKEN12345",
+                    '{"refresh_token": "1//0FAKErefreshTOKEN", "code": "4/0AfJohXyz123456789"} ' + "x" * 380]
+    tail = ag._tail(login)
+    assert len(tail) <= 400
+    for secret in ("ya29", "1//0FAKE", "4/0AfJohXyz", "FAKEaccess"):
+        assert secret not in tail and secret not in ag._login_safe("failed." + tail)
+    assert "Exchanging the code" in tail
+
+
 async def test_a_wrong_code_on_a_signed_in_worker_is_not_a_sign_in(mock_db, fake_agy, monkeypatch):
     """The agent's own refusal of the code wins over the check after it,
     which still finds the earlier sign-in."""

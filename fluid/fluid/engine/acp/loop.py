@@ -423,7 +423,7 @@ class AcpLoop:
             if fut is not None and not fut.done():
                 fut.set_result(op)
             else:
-                logger.warning("permission decision for %s matched no open request; ignored", op.request_id)
+                self._log(logging.WARNING, "permission decision for %s matched no open request; ignored", op.request_id)
         elif isinstance(op, RespondQuestion):
             fut = self._pending_questions.get(op.request_id)
             if fut is None or fut.done():
@@ -650,7 +650,7 @@ class AcpLoop:
                 continue
             kind = entry.get("type", "stdio")
             if kind not in transports:
-                logger.info("ACP agent takes no %s MCP servers; %s is not passed", kind, name)
+                self._log(logging.INFO, "ACP agent takes no %s MCP servers; %s is not passed", kind, name)
                 continue
             servers.append(entry)
         return servers
@@ -671,7 +671,7 @@ class AcpLoop:
             conn = self._connection_factory(
                 self.spec.argv, cwd=self.cwd, env=self.spec.env,
                 on_notification=self._on_notification, on_request=self._on_request,
-                stderr_sink=lambda line: logger.debug("acp agent: %s", redact(line)), **extra,
+                stderr_sink=lambda line: self._log(logging.DEBUG, "acp agent: %s", line), **extra,
             )
             await conn.start()
             self._conn = conn
@@ -694,8 +694,8 @@ class AcpLoop:
                     except AcpError as exc:
                         if exc.auth_required:
                             raise
-                        logger.warning("ACP agent did not resume session %s (%s); starting a new one",
-                                       self.cli_session_id, self.spec.redact(exc.message))
+                        self._log(logging.WARNING, "ACP agent did not resume session %s (%s); starting a new one",
+                                  self.cli_session_id, exc.message)
                 if not self._session_resumed:
                     params: dict[str, Any] = {"cwd": self.cwd, "mcpServers": servers}
                     if self.add_dirs and info.session_capability("additionalDirectories"):
@@ -723,7 +723,7 @@ class AcpLoop:
                         raise
                     # It stays in a mode that asks at least as often: run, and
                     # the host's own answers still apply the shown mode.
-                    logger.warning("ACP agent kept mode %s: %s", self._agent_mode, self.spec.redact(str(exc)))
+                    self._log(logging.WARNING, "ACP agent kept mode %s: %s", self._agent_mode, exc)
             except BaseException:
                 self._acp_session = None
                 self._starting = False
@@ -747,7 +747,7 @@ class AcpLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — a host's bookkeeping never fails a turn
-            logger.warning("could not report the ACP agent's models: %s", self.spec.redact(traceback_text(exc)))
+            self._log(logging.WARNING, "could not report the ACP agent's models: %s", traceback_text(exc))
 
     def _model_not_offered(self) -> str | None:
         """What runs instead when the agent is not running the chosen model.
@@ -807,7 +807,7 @@ class AcpLoop:
         choice = self.spec.config_value(self._config_options, kind, wanted)
         if choice is None:
             if self._config_options:
-                logger.info("ACP agent offers no %s %r; keeping its own choice", kind, wanted)
+                self._log(logging.INFO, "ACP agent offers no %s %r; keeping its own choice", kind, wanted)
             return
         config_id, value = choice
         if self._current_config(config_id) == value:
@@ -816,7 +816,7 @@ class AcpLoop:
             result = await conn.request("session/set_config_option",
                                         {"sessionId": sid, "configId": config_id, "value": value})
         except AcpError as exc:
-            logger.warning("ACP agent refused %s=%s: %s", config_id, value, self.spec.redact(exc.message))
+            self._log(logging.WARNING, "ACP agent refused %s=%s: %s", config_id, value, exc.message)
             return
         if isinstance(result, Mapping) and isinstance(result.get("configOptions"), list):
             self._config_options = [o for o in result["configOptions"] if isinstance(o, dict)]
@@ -836,16 +836,22 @@ class AcpLoop:
         mode = self.spec.mode_id(self.permission_mode, self._modes)
         label = _MODE_LABELS.get(self.permission_mode, self.permission_mode)
         if mode is None:
-            raise AcpModeRejected(
+            raise AcpModeRejected(self.spec.redact(
                 f"The agent has no mode that matches {label}, so it was not changed"
-                f"{self._kept_mode_note()}.")
+                f"{self._kept_mode_note()}."))
         try:
             await conn.request("session/set_mode", {"sessionId": sid, "modeId": mode})
         except AcpError as exc:
-            raise AcpModeRejected(
-                f"The agent refused to switch to {label} ({self.spec.redact(exc.message)}), so it was not changed"
-                f"{self._kept_mode_note()}.") from exc
+            raise AcpModeRejected(self.spec.redact(
+                f"The agent refused to switch to {label} ({exc.message}), so it was not changed"
+                f"{self._kept_mode_note()}.")) from exc
         self._agent_mode = mode
+
+    def _log(self, level: int, msg: str, *args: Any) -> None:
+        """Log ``msg % args`` with the whole formatted line passed through
+        the spec's redaction: any argument may carry agent text."""
+        if logger.isEnabledFor(level):
+            logger.log(level, "%s", self.spec.redact(msg % args if args else msg))
 
     def _kept_mode_note(self) -> str:
         return f"; it stays in its {self._agent_mode} mode" if self._agent_mode else ""
@@ -875,12 +881,12 @@ class AcpLoop:
 
     def _failure_event(self, sid: str, turn_id: str, exc: AcpError, *, prefix: str = "", **extra: Any) -> ErrorEvent:
         if not exc.auth_required:
-            return ErrorEvent(session_id=sid, turn_id=turn_id, message=f"{prefix}{self.spec.redact(exc.message)}",
+            return ErrorEvent(session_id=sid, turn_id=turn_id, message=self.spec.redact(f"{prefix}{exc.message}"),
                               **extra)
         # The sign-in guidance replaces the agent's bare "Authentication
         # required". No HTTP status: nothing here was an HTTP call, and a
         # host would prefix one ("provider returned HTTP 401: ...").
-        message = self.spec.auth_message(exc)
+        message = self.spec.redact(self.spec.auth_message(exc))
         return ErrorEvent(session_id=sid, turn_id=turn_id, message=message,
                           provider_message=message, **extra)
 
@@ -896,7 +902,7 @@ class AcpLoop:
                 return
             except Exception as exc:  # noqa: BLE001 — missing binary, spawn failure
                 await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
-                                            message=f"Could not start the agent: {self.spec.redact(str(exc))}"))
+                                            message=self.spec.redact(f"Could not start the agent: {exc}")))
                 return
             if isinstance(op, Resume):
                 # Retry: send the unanswered prompt at the head again.
@@ -939,7 +945,7 @@ class AcpLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — every turn ends on a terminal event
-            logger.warning("ACP turn failed: %s", self.spec.redact(traceback_text(exc)))
+            self._log(logging.WARNING, "ACP turn failed: %s", traceback_text(exc))
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=self.spec.redact(repr(exc))))
         finally:
             self._steering_open = False
@@ -1136,7 +1142,7 @@ class AcpLoop:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — fails closed
-            logger.error("tool policy failed for %s; denying the call", name, exc_info=True)
+            self._log(logging.ERROR, "tool policy failed for %s; denying the call: %s", name, traceback_text(exc))
             return f"tool policy error ({type(exc).__name__}); call refused"
         return verdict or None
 
@@ -1183,7 +1189,7 @@ class AcpLoop:
             return chose("allow_once", "allow_always")
         denial = await self._policy_denial(name, data)
         if denial:
-            logger.info("ACP permission for %s refused by policy: %s", name, denial)
+            self._log(logging.INFO, "ACP permission for %s refused by policy: %s", name, denial)
             if mapper is not None and call.get("toolCallId"):
                 # The card says why (as the delegated leg's PreToolUse denial
                 # does), not just "failed": the agent only hears "rejected".
