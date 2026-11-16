@@ -210,6 +210,33 @@ describe('Talk turns into Send', () => {
 			expect(stops).toHaveBeenCalledOnce();
 		});
 
+		it('judges a held second touch by when it began, not when it lifted', async () => {
+			idle();
+			const SENT = 1000;
+			const clock = vi.spyOn(performance, 'now').mockReturnValue(SENT);
+			const { container } = render(ChatInput, { props: { compact: true } });
+			const stop = await sendDraft(container);
+			// The row's own guard has long expired; only Stop's Send window holds.
+			clock.mockReturnValue(SENT + 5000);
+			const touch = async (type: string, timeStamp: number) => {
+				const Ctor = typeof PointerEvent === 'function' ? PointerEvent : MouseEvent;
+				const event = new Ctor(type, { bubbles: true, cancelable: true, detail: 1, pointerId: 7 } as PointerEventInit);
+				Object.defineProperty(event, 'timeStamp', { value: timeStamp });
+				if ((event as PointerEvent).pointerId !== 7) Object.defineProperty(event, 'pointerId', { value: 7 });
+				await fireEvent(stop, event);
+			};
+			// Pressed 460ms after Send (inside its 500ms window), lifted at 800ms.
+			await touch('pointerdown', SENT + 460);
+			await touch('pointerup', SENT + 800);
+			await touch('click', SENT + 800);
+			expect(stops).not.toHaveBeenCalled();
+			// A press that begins after the window stops the turn.
+			await touch('pointerdown', SENT + 900);
+			await touch('pointerup', SENT + 960);
+			await touch('click', SENT + 960);
+			expect(stops).toHaveBeenCalledOnce();
+		});
+
 		it('never ignores Stop after a send from the start screen (the composer moves away)', async () => {
 			idle();
 			const { container } = render(ChatInput);

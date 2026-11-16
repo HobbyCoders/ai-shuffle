@@ -809,9 +809,12 @@
 		const press = presses.take(pointerId, clickAt, button);
 		// A press that began on another button (Stop, before Talk took its
 		// place) is never a press on this one. Without a press of its own
-		// (assistive technology, a script) the click's time stands in.
+		// (assistive technology, a script) the click's time stands in. Every
+		// guard in the row judges this one time: the arrival guard, and Stop
+		// under a double tap on Send (isStrayStopPress).
 		const began = press ? (press.target === button ? press.at : null) : clickAt;
-		if (began !== null && !arrivals.ignores(kind, began, event.detail)) return;
+		if (began !== null && !arrivals.ignores(kind, began, event.detail)
+			&& !(kind === 'stop' && isStrayStopPress(began))) return;
 		event.preventDefault();
 		event.stopPropagation();
 	}
@@ -1210,8 +1213,9 @@
 	// the next submit, and it holds only for the chat the send went to (a chat
 	// switch inside the window shows another chat's Stop); Stop's keyboard
 	// activation and its confirmation are never ignored. A Stop press is judged
-	// by when it was made, so a stall right after the send cannot use up the
-	// window.
+	// by when it began (ignoreArrivingPress, the row's one press time), so a
+	// stall right after the send cannot use up the window and a touch held
+	// past it still counts as made inside it.
 	let strayStop: { until: number; destination: SendDestination } | null = null;
 	const isStrayStopPress = (pressedAt: number) => !!strayStop && pressedAt < strayStop.until
 		&& stillAtDestination(strayStop.destination, composerPlace());
@@ -2183,7 +2187,6 @@
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
-								ignoresPress={isStrayStopPress}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
 						{/if}
