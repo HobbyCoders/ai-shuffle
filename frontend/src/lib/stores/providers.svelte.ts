@@ -19,6 +19,7 @@
  * the store directly — no prop drill.
  */
 
+import { untrack } from 'svelte';
 import { apiBase, withAuth } from '$lib/api/runtime';
 import { auth } from './auth.svelte';
 import { createSubscribers } from './store-utils';
@@ -31,6 +32,7 @@ import {
 	updateModelProvider,
 	deleteModelProvider,
 	fetchProviderModels as apiFetchProviderModels,
+	rowCatalogIdentity,
 	type ModelProvider,
 	type ModelProviderCreate,
 	type FetchModelsResult
@@ -141,6 +143,18 @@ let _initialLoadStarted = false;
 // Retry/open callers join the flight; data changes require a newer snapshot.
 let _refreshInFlight: Promise<void> | null = null;
 let _refreshInvalidated = false;
+/**
+ * One model-list fetch per provider at a time, outliving the Models tab that
+ * started it (#1649). Tagged with the credentials it ran under (binding and,
+ * for a Google sign-in row, the sign-in): a fetch for credentials since
+ * replaced is never joined.
+ */
+const _modelFetches = new Map<string, { identity: string | null; promise: Promise<FetchModelsResult> }>();
+
+/** The row's current credential identity, read without subscribing a caller's effect. */
+function catalogIdentityOf(id: string): string | null {
+	return untrack(() => rowCatalogIdentity(_state.providers?.find((p) => p.id === id)));
+}
 
 const { subscribe, update: _update, notifySubscribers: _notifySubscribers } =
 	createSubscribers<ProvidersState>(
@@ -569,6 +583,7 @@ export const providers = {
 	/** Delete one provider row. Throws on failure, so the caller stays put and says why. */
 	async deleteProvider(id: string) {
 		await deleteModelProvider(id);
+		_modelFetches.delete(id);
 		await providers.refreshProviders();
 	},
 
@@ -576,8 +591,26 @@ export const providers = {
 	 * Fetch the provider's live catalog and share a bounded discovery snapshot.
 	 * Curation is unchanged; throws only when discovery itself fails.
 	 */
-	async fetchProviderModels(id: string): Promise<FetchModelsResult> {
-		return apiFetchProviderModels(id);
+	fetchProviderModels(id: string, options: { fresh?: boolean } = {}): Promise<FetchModelsResult> {
+		// A second caller (the tab reopened mid-fetch) joins the running fetch,
+		// unless the credentials changed since it started or it asks for a fresh one.
+		const identity = catalogIdentityOf(id);
+		const running = _modelFetches.get(id);
+		if (running && !options.fresh && running.identity === identity) return running.promise;
+		const entry = {
+			identity,
+			promise: apiFetchProviderModels(id).finally(() => {
+				if (_modelFetches.get(id) === entry) _modelFetches.delete(id);
+			})
+		};
+		_modelFetches.set(id, entry);
+		return entry.promise;
+	},
+
+	/** Whether a model-list fetch for this provider's current credentials is still running. */
+	modelFetchRunning(id: string): boolean {
+		const running = _modelFetches.get(id);
+		return !!running && running.identity === catalogIdentityOf(id);
 	},
 
 	// ------------------------------------------------------------------------
@@ -597,6 +630,7 @@ export const providers = {
 	/** Reset the whole store (test/teardown helper). */
 	clear() {
 		_refreshInFlight = null;
+		_modelFetches.clear();
 		_refreshInvalidated = false;
 		_state = { ...initialState };
 		_initialLoadStarted = false;

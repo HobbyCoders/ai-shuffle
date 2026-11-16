@@ -6,7 +6,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { LocalModelSettings, ProviderModelEntry } from '$lib/api/model-providers';
-import { curatedEntries, passthroughModels, rowsFromFetch, rowsFromStored } from './curation';
+import { curatedEntries, keepShownRows, passthroughModels, rowsFromFetch, rowsFromStored } from './curation';
 
 const tuning: LocalModelSettings = {
 	server: 'llama_cpp',
@@ -51,5 +51,29 @@ describe('local_settings survives every model-entry rebuild', () => {
 	it('an explicit null clear is not resurrected or invented', () => {
 		const out = passthroughModels([{ ...plain, local_settings: null }]);
 		expect(out[0].local_settings ?? null).toBeNull();
+	});
+});
+
+describe('keepShownRows (#1650)', () => {
+	const r = (id: string, checked: boolean) => ({ id, label: id, checked });
+	it('keeps a row the saved list lost, unticked and in place', () => {
+		const shown = [r('a', true), r('b', true), r('c', true)];
+		expect(keepShownRows(shown, [r('a', true), r('c', true)])).toEqual([r('a', true), r('b', false), r('c', true)]);
+	});
+	it('adds rows the saved list gained at the end', () => {
+		expect(keepShownRows([r('a', true)], [r('a', true), r('z', true)])).toEqual([r('a', true), r('z', true)]);
+	});
+});
+
+describe('a saved model the agent did not list (#1634)', () => {
+	it('is kept ticked and marked only for an agent list', () => {
+		const stored = [plain, { id: 'gone', label: 'Gone' }];
+		const agent = rowsFromFetch(stored, { source: 'agent', models: [plain] } as Parameters<typeof rowsFromFetch>[1]);
+		expect(agent.find((x) => x.id === 'gone')).toMatchObject({ checked: true, unlisted: true });
+		expect(agent.find((x) => x.id === 'plain')?.unlisted).toBeUndefined();
+		const preset = rowsFromFetch(stored, { source: 'preset', models: [plain] } as Parameters<typeof rowsFromFetch>[1]);
+		expect(preset.find((x) => x.id === 'gone')?.unlisted).toBeUndefined();
+		// The mark is display only: never part of a saved entry.
+		expect(curatedEntries(agent).some((e) => 'unlisted' in e)).toBe(false);
 	});
 });

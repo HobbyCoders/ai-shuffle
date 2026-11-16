@@ -119,6 +119,10 @@ class ModelProviderResponse(BaseModel):
     auth_token_set: bool
     auth_token_masked: str
     catalog_binding: Optional[str] = None
+    # A Google sign-in row's binding is the same for every account: this
+    # worker's tag for the current sign-in tells two sign-ins apart (None
+    # until an agent ran on it). The UI keys model lists by both.
+    catalog_signin: Optional[str] = None
     models: List[Dict[str, Any]]
     default_model: Optional[str] = None
     small_fast_model: Optional[str] = None
@@ -180,6 +184,9 @@ class FetchModelsResponse(BaseModel):
     hidden: List[Dict[str, Any]] = []
     recommended: List[str] = []
     binding: Optional[str] = None
+    # A Google sign-in row: the sign-in the list belongs to (the row's
+    # ``catalog_signin`` then), so a list from a replaced sign-in is told apart.
+    signin: Optional[str] = None
     fetched_at: Optional[str] = None
     fetched_by_device: Optional[str] = None
     fetched_by_name: Optional[str] = None
@@ -445,6 +452,12 @@ def _antigravity_signed_in(row: Dict[str, Any]) -> Optional[bool]:
     return antigravity.signed_in_here(str(row.get("id") or ""))
 
 
+def _catalog_signin(row: Dict[str, Any]) -> Optional[str]:
+    from app.core import antigravity
+
+    return antigravity.signin_tag(str(row.get("id") or "")) if antigravity.worker_scoped(row) else None
+
+
 def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
     """Shape a DB row (public columns only, no token) into the response model."""
     models = []
@@ -464,6 +477,7 @@ def _public_provider(row: Dict[str, Any]) -> ModelProviderResponse:
         auth_token_set=bool(row.get("_auth_token_set")),
         auth_token_masked=row.get("_auth_token_masked", ""),
         catalog_binding=row.get("_catalog_binding"),
+        catalog_signin=_catalog_signin(row),
         models=models,
         default_model=row.get("default_model"),
         small_fast_model=row.get("small_fast_model"),
@@ -1510,12 +1524,13 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
         if captured and captured.get("models"):
             return FetchModelsResponse(
                 source="agent", models=captured["models"], binding=captured.get("binding"),
+                signin=captured.get("signin"),
                 recommended=[m["id"] for m in captured["models"] if m["id"] in seeded],
                 **{field: captured.get(field) for field in (
                     "fetched_at", "fetched_by_device", "fetched_by_name", "agent_version")})
         return FetchModelsResponse(source="preset", models=[dict(m) for m in antigravity.DEFAULT_MODELS],
                                    recommended=[m["id"] for m in antigravity.DEFAULT_MODELS],
-                                   binding=checked_binding)
+                                   binding=checked_binding, signin=_catalog_signin(row))
 
     kind = model_catalog_presets.preset_kind_for(row)
     from app.core.http_client import get_http_client

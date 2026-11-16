@@ -78,9 +78,19 @@ afterEach(() => {
 it.each([
 	['mp:p1', 'provider:openai'],
 	['mp:gw-1', null],
+	['mp:ag-1', 'provider:antigravity'],
 	['claude:api-key', 'provider:claude']
 ])('removes %s and returns safely after the detail unmounts', async (item, back) => {
-	worker = fakeWorker({ rows: [row(), gatewayRow()] }, {
+	// Reading the removed row threw on every read and left its page up (#1651).
+	const errors: unknown[] = [];
+	const onError = (e: ErrorEvent) => errors.push(e.error ?? e.message);
+	window.addEventListener('error', onError);
+	const consoleError = vi.spyOn(console, 'error').mockImplementation((...args) => errors.push(args));
+	const agRow = row({ id: 'ag-1', name: 'Antigravity key', provider_type: 'antigravity', base_url: '',
+		auth_mode: 'gemini-api-key' } as Parameters<typeof row>[0]);
+	worker = fakeWorker({ rows: [row(), gatewayRow(), agRow] }, {
+		'GET /antigravity/status': () => ({ installed: true, version: '1.5.6' }),
+		'GET /antigravity/providers/:id/status': () => ({ state: 'signed_in', login: null }),
 		'DELETE /model-providers/:id': (_body, path) => {
 			worker.state.rows = worker.state.rows.filter((r) => r.id !== path.split('/')[2]);
 			return { success: true };
@@ -103,6 +113,10 @@ it.each([
 	await waitFor(() => expect(settingsNav.selectedItem('providers')).toBe(back));
 	if (!back) expect(settingsNav.view).toBe('page');
 	else expect(screen.queryByText('Select a provider or credential.')).toBeNull();
+	await flush();
+	window.removeEventListener('error', onError);
+	consoleError.mockRestore();
+	expect(errors.filter((e) => /reading '(credential|provider)'/.test(String(e)))).toEqual([]);
 });
 
 describe('the list', () => {

@@ -20,6 +20,8 @@ const mocks = vi.hoisted(() => ({
 	listModelProviders: vi.fn(),
 	updateModelProvider: vi.fn(),
 	activateModelProvider: vi.fn(),
+	fetchProviderModels: vi.fn(),
+	deleteModelProvider: vi.fn(),
 	hydrateModelRegistry: vi.fn(),
 	getAuthStatus: vi.fn()
 }));
@@ -30,7 +32,9 @@ vi.mock('$lib/api/model-providers', async (importOriginal) => {
 		...actual,
 		listModelProviders: mocks.listModelProviders,
 		updateModelProvider: mocks.updateModelProvider,
-		activateModelProvider: mocks.activateModelProvider
+		activateModelProvider: mocks.activateModelProvider,
+		fetchProviderModels: mocks.fetchProviderModels,
+		deleteModelProvider: mocks.deleteModelProvider
 	};
 });
 
@@ -326,5 +330,81 @@ describe('providers store — fal.ai and Claude mode', () => {
 		expect(providers.current.claudeForbidden).toBe(true);
 		expect(providers.current.claudeError).toBe(null);
 		get.mockRestore();
+	});
+});
+
+describe('fetchProviderModels', () => {
+	it('shares one running fetch per provider and says when it is running (#1649)', async () => {
+		let finish: (v: unknown) => void = () => {};
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => { finish = r; }));
+		const first = providers.fetchProviderModels('p1');
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		expect(providers.modelFetchRunning('p2')).toBe(false);
+		// The Models tab reopened mid-fetch joins it instead of starting another.
+		const second = providers.fetchProviderModels('p1');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(1);
+		finish({ source: 'agent', models: [] });
+		expect(await second).toEqual(await first);
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		// A failed fetch ends too, so the next Refresh starts a new one.
+		mocks.fetchProviderModels.mockRejectedValueOnce(new Error('offline'));
+		await expect(providers.fetchProviderModels('p1')).rejects.toThrow('offline');
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+	});
+
+	it('never joins a fetch started for credentials since replaced (S2)', async () => {
+		const finishes: ((v: unknown) => void)[] = [];
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => finishes.push(r)));
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', catalog_binding: 'key-a' })] });
+		await providers.refreshProviders();
+		const underA = providers.fetchProviderModels('p1');
+		// The key changes while that fetch runs.
+		mocks.listModelProviders.mockResolvedValue({ providers: [provider({ id: 'p1', catalog_binding: 'key-b' })] });
+		await providers.refreshProviders();
+		expect(providers.modelFetchRunning('p1')).toBe(false);
+		const underB = providers.fetchProviderModels('p1');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		// A's late answer does not end B's fetch.
+		finishes[0]({ binding: 'key-a', models: [] });
+		await underA;
+		expect(providers.modelFetchRunning('p1')).toBe(true);
+		// A fresh request (a reconnect) never joins either.
+		void providers.fetchProviderModels('p1', { fresh: true });
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(3);
+		finishes[1]({ binding: 'key-b', models: [] });
+		finishes[2]({ binding: 'key-b', models: [] });
+		await underB;
+	});
+
+	it('never joins a fetch from another Google account on the same binding (S2)', async () => {
+		const finishes: ((v: unknown) => void)[] = [];
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise((r) => finishes.push(r)));
+		const signedIn = (tag: string | null) => provider({ id: 'ag', catalog_binding: 'ag-binding', catalog_signin: tag });
+		mocks.listModelProviders.mockResolvedValue({ providers: [signedIn('tag-a')] });
+		await providers.refreshProviders();
+		void providers.fetchProviderModels('ag');
+		// Signed in as another account: the binding is unchanged, the sign-in is not.
+		mocks.listModelProviders.mockResolvedValue({ providers: [signedIn(null)] });
+		await providers.refreshProviders();
+		expect(providers.modelFetchRunning('ag')).toBe(false);
+		void providers.fetchProviderModels('ag');
+		expect(mocks.fetchProviderModels).toHaveBeenCalledTimes(2);
+		finishes.forEach((finish) => finish({ binding: 'ag-binding', models: [] }));
+	});
+
+	it('forgets a removed row\'s running fetch', async () => {
+		mocks.fetchProviderModels.mockReset();
+		mocks.fetchProviderModels.mockImplementation(() => new Promise(() => {}));
+		mocks.deleteModelProvider.mockResolvedValue(undefined);
+		mocks.listModelProviders.mockResolvedValue({ providers: [] });
+		void providers.fetchProviderModels('gone');
+		expect(providers.modelFetchRunning('gone')).toBe(true);
+		await providers.deleteProvider('gone');
+		expect(providers.modelFetchRunning('gone')).toBe(false);
 	});
 });

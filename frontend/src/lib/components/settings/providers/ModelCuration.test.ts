@@ -23,10 +23,18 @@ vi.mock('$lib/api/client', () => ({
 }));
 vi.mock('$lib/stores/providers.svelte', async () => {
 	const api = await import('$lib/api/model-providers');
+	// As the store: one running fetch per provider, joined by a remount.
+	const running = new Map<string, Promise<unknown>>();
 	return {
 		providers: {
 			current: { providers: [], claude: null },
-			fetchProviderModels: api.fetchProviderModels,
+			fetchProviderModels: (id: string) => {
+				if (!running.has(id)) {
+					running.set(id, api.fetchProviderModels(id).finally(() => running.delete(id)));
+				}
+				return running.get(id);
+			},
+			modelFetchRunning: (id: string) => running.has(id),
 			saveProvider: (data: Parameters<typeof api.updateModelProvider>[1], id: string) =>
 				api.updateModelProvider(id, data),
 			refreshProviders: mocks.refresh,
@@ -159,6 +167,123 @@ it("asks the agent on opening when nothing it listed is stored (the old stored s
 	expect((screen.getByRole('checkbox', { name: 'claude-opus-5-5' }) as HTMLInputElement).checked).toBe(false);
 	expect((screen.getByRole('checkbox', { name: 'gemini-4-argon' }) as HTMLInputElement).checked).toBe(true);
 	expect(mocks.patch).not.toHaveBeenCalled();
+});
+
+describe('while the list is loading', () => {
+	const seeded = [entry('gemini-4-argon'), entry('gemini-3.8-flash')];
+	const agent = (models = seeded) => row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models });
+	let finish: (v: unknown) => void = () => {};
+	beforeEach(() => {
+		mocks.post.mockImplementation((path: string) =>
+			path.endsWith('/fetch-models') ? new Promise((r) => { finish = r; }) : Promise.resolve({}));
+	});
+	afterEach(() => finish({ source: 'preset', binding: 'ag-binding', models: [] }));
+
+	it('keeps a model unticked mid-fetch on screen, and lets it be ticked again (#1650)', async () => {
+		render(ModelCuration, { row: agent() });
+		await screen.findByTestId('curation-fetching');
+		await toggle('gemini-3.8-flash');
+		expect(saved()).toEqual([entry('gemini-4-argon')]);
+		const flash = screen.getByRole('checkbox', { name: 'gemini-3.8-flash' }) as HTMLInputElement;
+		expect(flash.checked).toBe(false);
+		mocks.patch.mockClear();
+		await fireEvent.click(flash);
+		await waitFor(() => expect(mocks.patch).toHaveBeenCalled());
+		expect(saved().map((m: ProviderModelEntry) => m.id).sort()).toEqual(['gemini-3.8-flash', 'gemini-4-argon']);
+		expect(screen.getByTestId('curation-fetching')).toBeTruthy();
+	});
+
+	it('keeps the unticked row when the saved row comes back mid-fetch (#1650)', async () => {
+		const view = render(ModelCuration, { row: { ...agent(), revision: 'r1' } });
+		await screen.findByTestId('curation-fetching');
+		await toggle('gemini-3.8-flash');
+		// The store echoes the saved row (new revision, the model gone) before the list arrives.
+		await view.rerender({ row: { ...agent([entry('gemini-4-argon')]), revision: 'r2' } });
+		const flash = await screen.findByRole('checkbox', { name: 'gemini-3.8-flash' }) as HTMLInputElement;
+		expect(flash.checked).toBe(false);
+		expect((screen.getByRole('checkbox', { name: 'gemini-4-argon' }) as HTMLInputElement).checked).toBe(true);
+		finish({ source: 'agent', binding: 'ag-binding', models: seeded });
+		await waitFor(() => expect(screen.queryByTestId('curation-fetching')).toBeNull());
+		expect((screen.getByRole('checkbox', { name: 'gemini-3.8-flash' }) as HTMLInputElement).checked).toBe(false);
+	});
+
+	it('asks again when the key changed while the list was loading (S2)', async () => {
+		const view = render(ModelCuration, { row: agent() });
+		await screen.findByTestId('curation-fetching');
+		// Reconnected to another account while the old fetch runs: its models go.
+		await view.rerender({ row: { ...agent([entry('gemini-5-new')]), catalog_binding: 'ag-binding-b' } });
+		await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull());
+		const fetches = () => mocks.post.mock.calls.filter(([p]) => String(p).endsWith('/fetch-models')).length;
+		const before = fetches();
+		finish({ source: 'agent', binding: 'ag-binding', models: seeded });
+		// The old account's answer is not shown; the new account is asked.
+		await waitFor(() => expect(fetches()).toBeGreaterThan(before));
+		expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull();
+		finish({ source: 'agent', binding: 'ag-binding-b', models: [entry('gemini-5-new'), entry('gemini-5-other')] });
+		expect(await screen.findByRole('checkbox', { name: 'gemini-5-other' })).toBeTruthy();
+		expect((screen.getByRole('checkbox', { name: 'gemini-5-new' }) as HTMLInputElement).checked).toBe(true);
+	});
+
+	it('asks again when another Google account signed in on the same binding (S2)', async () => {
+		const signedIn = (tag: string, models = seeded) => ({ ...agent(models), catalog_signin: tag });
+		const view = render(ModelCuration, { row: signedIn('tag-a') });
+		await screen.findByTestId('curation-fetching');
+		// Account B signed in while A's fetch runs; the binding stays the same.
+		await view.rerender({ row: signedIn('tag-b', [entry('gemini-5-new')]) });
+		const fetches = () => mocks.post.mock.calls.filter(([p]) => String(p).endsWith('/fetch-models')).length;
+		const before = fetches();
+		finish({ source: 'agent', binding: 'ag-binding', signin: 'tag-a', models: seeded });
+		// Account A's list is not shown for B; B is asked.
+		await waitFor(() => expect(fetches()).toBeGreaterThan(before));
+		expect(screen.queryByRole('checkbox', { name: 'gemini-3.8-flash' })).toBeNull();
+		finish({ source: 'agent', binding: 'ag-binding', signin: 'tag-b', models: [entry('gemini-5-new'), entry('gemini-5-other')] });
+		expect(await screen.findByRole('checkbox', { name: 'gemini-5-other' })).toBeTruthy();
+	});
+
+	it('shows a running fetch, still after leaving and coming back, and what it ended with (#1649)', async () => {
+		const first = render(ModelCuration, { row: agent() });
+		expect((await screen.findByTestId('curation-fetching')).textContent).toBe('Fetching list');
+		expect(screen.getByTestId('curation-list-pending')).toBeTruthy();
+		expect(screen.getByRole('button', { name: 'Refresh model list' }).getAttribute('aria-busy')).toBe('true');
+		first.unmount(); // another tab
+		render(ModelCuration, { row: agent() });
+		expect(await screen.findByTestId('curation-fetching')).toBeTruthy();
+		const refresh = screen.getByRole('button', { name: 'Refresh model list' }) as HTMLButtonElement;
+		expect(refresh.disabled).toBe(true);
+		// Joined, not a second fetch.
+		expect(mocks.post.mock.calls.filter(([p]) => String(p).endsWith('/fetch-models'))).toHaveLength(1);
+		// The agent gave no list: the built-in models stay, and the tab says so.
+		finish({ source: 'preset', binding: 'ag-binding', models: seeded });
+		expect((await screen.findByTestId('curation-agent-silent')).textContent).toMatch(/has not listed its models yet/);
+		expect(screen.queryByTestId('curation-fetching')).toBeNull();
+		expect(refresh.disabled).toBe(false);
+	});
+});
+
+describe('a ticked model the agent no longer lists (#1634)', () => {
+	const listed = (source: string) => ({
+		source, binding: 'ag-binding', models: [entry('gemini-4-hydrogen')], agent_version: '1.5.9',
+		fetched_at: '2026-11-14T23:32:00Z', fetched_by_device: 'dev-self', fetched_by_name: 'Local'
+	});
+	const ticked = [entry('gemini-4-argon'), entry('gemini-4-hydrogen')];
+
+	it('is marked on an agent-listed row, and the mark is never saved', async () => {
+		mocks.get.mockResolvedValue(listed('agent'));
+		render(ModelCuration, { row: row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models: ticked }) });
+		const marks = await screen.findAllByTestId('curation-unlisted');
+		expect(marks).toHaveLength(1);
+		expect(marks[0].closest('label')?.textContent).toContain('gemini-4-argon');
+		expect((screen.getByRole('checkbox', { name: /gemini-4-argon/ }) as HTMLInputElement).checked).toBe(true);
+		await toggle('gemini-4-hydrogen');
+		expect(saved()).toEqual([entry('gemini-4-argon')]);
+	});
+
+	it('is not marked on a row still on the preset list', async () => {
+		mocks.get.mockResolvedValue(listed('preset'));
+		render(ModelCuration, { row: row({ id: 'ag', provider_type: 'antigravity', catalog_binding: 'ag-binding', models: ticked }) });
+		await screen.findByRole('checkbox', { name: 'gemini-4-argon' });
+		expect(screen.queryByTestId('curation-unlisted')).toBeNull();
+	});
 });
 
 describe('shared catalog and concurrent curation', () => {
@@ -495,6 +620,30 @@ describe('adding an API key', () => {
 		await screen.findByTestId('draft-gone');
 		expect(mocks.patch).toHaveBeenCalledWith('/model-providers/new-provider', { models: [catalog[0]] });
 		expect(settingsNav.selectedItem('providers')).toBe('mp:new-provider');
+	});
+
+	it('inserts nothing above the list when it arrives, so the buttons stay put (#1648)', async () => {
+		let finish: (v: unknown) => void = () => {};
+		mocks.post.mockImplementation((url: string) =>
+			url.endsWith('/fetch-models') ? new Promise((r) => { finish = r; }) : Promise.resolve({ id: 'new-provider' }));
+		start('openai');
+		await fireEvent.input(screen.getByLabelText('API key'), { target: { value: 'test-key' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Continue' }));
+		await screen.findByText('Fetching models');
+		const card = () => document.querySelector('.setup-card') as HTMLElement;
+		// What sits above the list box, and the buttons' place after it.
+		const above = () => [...card().parentElement!.children]
+			.slice(0, [...card().parentElement!.children].indexOf(card()))
+			.map((el) => `${el.tagName}.${el.className}`);
+		const before = above();
+		expect((screen.getByLabelText('Filter models') as HTMLInputElement).disabled).toBe(true);
+		finish({ source: 'agent', binding: 'fixture-binding-a', models: catalog, fetched_at: '2026-11-15T12:00:00Z' });
+		await screen.findByRole('checkbox', { name: 'model-a Model A' });
+		expect(above()).toEqual(before);
+		// The source is said on the line that was already there.
+		expect(screen.getByText('The agent listed 2 models, pick what to offer')).toBeTruthy();
+		expect(screen.queryByTestId('curation-agent-list')).toBeNull();
+		expect((screen.getByLabelText('Filter models') as HTMLInputElement).disabled).toBe(false);
 	});
 
 	it('retries a failed catalog fetch without creating another row', async () => {
