@@ -102,6 +102,28 @@ def local_rows_by_origin(rows, self_ids) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def local_project_for_shared(cursor, project_v2_id: Optional[str]) -> Optional[str]:
+    """This worker's legacy project id for shared project ``project_v2_id``, or None.
+
+    The checkout :func:`local_rows_by_origin` picks among this worker's rows
+    (own ``instance_id`` or none, as ``get_all_projects`` lists them),
+    following a late-linked placeholder by origin. Runs on the caller's
+    ``cursor`` so a hand-off binds inside its own transaction.
+    """
+    if not project_v2_id:
+        return None
+    instance_id = settings.effective_instance_id
+    cursor.execute("SELECT id, link_group_id, instance_id FROM projects "
+                   "WHERE instance_id = %s OR instance_id IS NULL ORDER BY name ASC", (instance_id,))
+    by_origin = local_rows_by_origin([dict(row) for row in cursor.fetchall()], (instance_id,))
+    for row in by_origin.values():
+        if is_checkout_of(row, project_v2_id):
+            return row["id"]
+    shared = resolve_catalog_project(project_v2_id)
+    row = by_origin.get(shared.get("origin")) if shared else None
+    return row["id"] if row else None
+
+
 def resolve_catalog_project(project_v2_id: str) -> Optional[Dict[str, Any]]:
     """Follow a late-linked placeholder for project-level reads, never sessions.
 

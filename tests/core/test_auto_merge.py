@@ -97,3 +97,26 @@ async def test_enable_requires_an_open_pr():
         with pytest.raises(ValueError, match="no open pull request"):
             await am.enable("s1")
     assert am.status("s1") == {"enabled": False, "pr_number": None}
+
+
+def test_a_mirrored_chat_merges_in_this_workers_checkout_of_its_project(mock_db, tmp_path):
+    """#1659: a chat another worker runs names only its shared project here.
+
+    It must resolve this worker's checkout of that project, never an
+    unrelated project that happens to share the owner's legacy id."""
+    from app.db import database
+    from app.db.base import get_db
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    database.create_project("sandbox", "Unrelated", None, str(tmp_path / "unrelated"),
+                            link_group_id="git:acme/unrelated")
+    database.create_project("checkout", "Shared", None, str(tmp_path / "shared"), link_group_id="git:acme/shared")
+    database.create_session("s1", "default", title="t")
+    with get_db() as conn:
+        conn.cursor().execute(
+            "UPDATE sessions SET project_id = NULL, project_v2_id = %s, pr_number = 7, pr_state = 'open' WHERE id = 's1'",
+            (project_v2_id_for_origin("git:acme/shared"),))
+    with patch("app.core.github_service.github_service.get_repo_from_remote",
+               side_effect=lambda path: "acme/shared" if path.endswith("shared") else "acme/unrelated"):
+        target = am._session_target("s1")
+    assert (target["project_id"], target["repo"]) == ("checkout", "acme/shared")

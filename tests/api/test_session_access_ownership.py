@@ -61,6 +61,27 @@ class TestSharedRule:
         with pytest.raises(HTTPException):
             check_session_access_for_api_user(key, {"id": "s", "api_user_id": None, "project_id": None})
 
+    def test_project_key_is_held_to_a_mirrored_chats_shared_project(self, mock_db):
+        """A chat another worker runs may name only its shared project here (#1659).
+
+        Key A made the chat in P and was later restricted to Q: its legacy id
+        being cleared on this worker must not make it a projectless chat.
+        """
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        database.create_project("q", "Q", None, "/q", link_group_id="git:acme/q")
+        database.create_project("p-here", "P", None, "/p", link_group_id="git:acme/p")
+        mirrored = {"id": "s", "api_user_id": "key-a", "project_id": None,
+                    "project_v2_id": project_v2_id_for_origin("git:acme/p")}
+        with pytest.raises(HTTPException) as exc:
+            check_session_access_for_api_user({"id": "key-a", "project_id": "q", "profile_ids": []}, mirrored)
+        assert exc.value.status_code == 403
+        # A key limited to this worker's checkout of P keeps its access.
+        check_session_access_for_api_user({"id": "key-a", "project_id": "p-here", "profile_ids": []}, mirrored)
+        # A key limited to a project that does not exist here reaches nothing.
+        with pytest.raises(HTTPException):
+            check_session_access_for_api_user({"id": "key-a", "project_id": "gone", "profile_ids": []}, mirrored)
+
     def test_worker_session_belongs_to_the_owner_of_its_parent(self):
         rows = {
             "root": {"id": "root", "api_user_id": "key-a"},

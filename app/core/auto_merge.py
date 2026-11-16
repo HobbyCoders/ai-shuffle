@@ -191,15 +191,24 @@ def _session_target(session_id: str) -> Dict[str, Any]:
     if not session.get("pr_number") or str(session.get("pr_state") or "").lower() != "open":
         raise ValueError("This session has no open pull request to merge.")
     working_dir = None
+    project_id = session.get("project_id")
+    if not project_id and session.get("project_v2_id"):
+        # A chat another worker runs names only its shared project here
+        # (#1659): this worker's checkout of it has the same GitHub repository.
+        from app.core.project_resolver import local_project_for_shared
+        from app.db.base import get_db
+
+        with get_db() as conn:
+            project_id = local_project_for_shared(conn.cursor(), session["project_v2_id"])
     if session.get("worktree_path"):
         working_dir = get_project_working_dir(session["worktree_path"])
-    elif session.get("project_id"):
-        project = database.get_project(session["project_id"])
+    elif project_id:
+        project = database.get_project(project_id)
         working_dir = get_project_working_dir(project) if project else None
     repo = github_service.get_repo_from_remote(working_dir) if working_dir else None
     if not repo:
         raise ValueError("Could not determine this session's GitHub repository.")
-    return {"project_id": session.get("project_id"), "repo": repo,
+    return {"project_id": project_id, "repo": repo,
             "pr_number": int(session["pr_number"]), "working_dir": working_dir}
 
 

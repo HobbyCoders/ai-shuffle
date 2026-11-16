@@ -277,7 +277,8 @@
 	const stage = $derived(
 		deriveGitStage({
 			mode: sessionModeOf(session),
-			hasProject: Boolean(session.project_id),
+			// A chat another worker runs may name only its shared project (#1659).
+			hasProject: Boolean(session.project_id || session.project_v2_id),
 			prState,
 			branch,
 			git: gitFacts

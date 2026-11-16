@@ -39,10 +39,62 @@ def test_this_workers_checkout_of_the_same_project_is_named(workers):
         assert _mirror(_record())["project_id"] == "sandbox"
 
 
-def test_a_chat_this_worker_runs_keeps_its_project(workers):
-    with workers("viewer").active():
+def test_a_chat_this_worker_runs_keeps_its_own_binding(workers):
+    viewer = workers("viewer")
+    with viewer.active():
         database.create_project("sandbox", "Viewer sandbox", None, "/v", link_group_id="git:acme/viewers-repo")
-        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "sandbox"
+        database.create_project("mine", "Mine", None, "/m", link_group_id="git:acme/owners-repo")
+        database.create_session(session_id="remote-chat", profile_id="default", title="t")
+        viewer.sql("UPDATE sessions SET project_id = 'mine', project_v2_id = ?, owner_device_id = ? WHERE id = ?",
+                   (OWNERS_PROJECT, VIEWER, "remote-chat"))
+        # A late copy from the previous owner names its own slug: ignored.
+        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "mine"
+
+
+def _viewer_with_both_sandboxes(viewer):
+    """The viewer's ``sandbox`` is unrelated; ``owners-checkout`` is its checkout of the chat's project."""
+    database.create_project("sandbox", "Viewer sandbox", None, "/v", link_group_id="git:acme/viewers-repo")
+    database.create_project("owners-checkout", "Owners", None, "/o", link_group_id="git:acme/owners-repo")
+    database.create_session(session_id="remote-chat", profile_id="default", title="t")
+    viewer.sql("UPDATE sessions SET project_id = NULL, project_v2_id = ?, owner_device_id = ? WHERE id = ?",
+               (OWNERS_PROJECT, OWNER, "remote-chat"))
+
+
+def test_handoff_sync_record_first_binds_this_workers_checkout(workers):
+    """The owner publishes its ownership flip with its own slug before this worker accepts."""
+    viewer = workers("viewer")
+    with viewer.active():
+        _viewer_with_both_sandboxes(viewer)
+        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "owners-checkout"
+        viewer.sql("DELETE FROM projects WHERE id = 'owners-checkout'")
+        # No checkout of the shared project here: none rather than the unrelated slug.
+        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] is None
+
+
+def test_handoff_accept_first_binds_this_workers_checkout(workers):
+    from app.network.handoff import _accept_owner_row
+
+    viewer = workers("viewer")
+    with viewer.active():
+        _viewer_with_both_sandboxes(viewer)
+        with get_db() as conn:
+            _accept_owner_row(conn, conn.cursor(), "remote-chat", VIEWER, None)
+        assert database.get_session("remote-chat")["project_id"] == "owners-checkout"
+        # The owner's sync record arrives after: it does not restore its slug.
+        assert _mirror(_record(owner_device_id=VIEWER))["project_id"] == "owners-checkout"
+
+
+def test_accepting_a_chat_already_bound_to_a_checkout_keeps_it(workers):
+    from app.network.handoff import _accept_owner_row
+
+    viewer = workers("viewer")
+    with viewer.active():
+        _viewer_with_both_sandboxes(viewer)
+        database.create_project("another-checkout", "Owners 2", None, "/o2", link_group_id="git:acme/owners-repo")
+        viewer.sql("UPDATE sessions SET project_id = 'owners-checkout' WHERE id = 'remote-chat'")
+        with get_db() as conn:
+            _accept_owner_row(conn, conn.cursor(), "remote-chat", VIEWER, None)
+        assert database.get_session("remote-chat")["project_id"] == "owners-checkout"
 
 
 def test_a_copy_without_a_shared_id_keeps_the_owners_id(workers):

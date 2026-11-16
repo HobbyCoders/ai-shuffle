@@ -1838,6 +1838,10 @@ def _accept_owner_row(conn, cur, sid, device_id, branch, token=None, locked=()):
                 (device_id, settings.effective_instance_id, json.dumps(placement), branch, sid))
     if branch is None:
         cur.execute("UPDATE sessions SET worktree_id=NULL, worktree_branch=NULL, worktree_path=NULL WHERE id=%s", (sid,))
+    # The row was a mirror: its legacy project id is none, or the previous
+    # owner's slug, which may name an unrelated project here (#1659).
+    from app.network.catalog import bind_received_chat_project
+    bind_received_chat_project(cur, sid)
     if token:
         _release_holds(cur, HOLD + token)
         _discard_superseded_history(cur, sid, token, locked)

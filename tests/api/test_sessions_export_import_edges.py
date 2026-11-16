@@ -310,6 +310,49 @@ class TestImport:
         assert r.status_code == 200
         assert database.get_session(r.json()["session_id"])["project_id"] == "proj-a"
 
+    def test_a_chat_known_only_by_its_shared_project_keeps_it(self, client, world):
+        """#1659: a chat another worker runs names no legacy id on the viewer;
+        the export carries the shared id and the import files it under this
+        install's checkout of that project."""
+        from app.db.base import get_db
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        shared = project_v2_id_for_origin("git:acme/b")
+        _session_with_messages("mirrored")
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE sessions SET project_id = NULL, project_v2_id = %s WHERE id = 'mirrored'",
+                                  (shared,))
+        exported = client.get("/api/v1/sessions/mirrored/export", params={"format": "json"}).json()
+        assert exported["session"]["project_v2_id"] == shared
+        database.create_project("b-checkout", "B", None, str(world["tmp"] / "b"), link_group_id="git:acme/b")
+        r = _upload(client, exported)
+        assert r.status_code == 200, r.text
+        assert database.get_session(r.json()["session_id"])["project_id"] == "b-checkout"
+
+    def test_an_unrelated_project_with_the_exports_slug_is_not_named(self, client, world):
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        database.create_project("b-checkout", "B", None, str(world["tmp"] / "b"), link_group_id="git:acme/b")
+        shared = project_v2_id_for_origin("git:acme/b")
+        r = _upload(client, _export(session={"project_id": "proj-a", "project_v2_id": shared}))
+        assert database.get_session(r.json()["session_id"])["project_id"] == "b-checkout"
+        r = _upload(client, _export(session={"project_id": "proj-a",
+                                             "project_v2_id": project_v2_id_for_origin("git:acme/none")}))
+        assert database.get_session(r.json()["session_id"])["project_id"] is None
+
+    def test_key_cannot_import_a_chat_of_another_shared_project(self, client, world):
+        from app.db.projects_v2 import project_v2_id_for_origin
+
+        _key(project_id="proj-a", profile_ids=["agent-a"])
+        r = _upload(client, _export(session={"profile_id": "agent-a",
+                                             "project_v2_id": project_v2_id_for_origin("git:acme/b")}),
+                    headers=AUTH)
+        assert r.status_code == 403
+        r = _upload(client, _export(session={"profile_id": "agent-a",
+                                             "project_v2_id": project_v2_id_for_origin("local:proj-a")}),
+                    headers=AUTH)
+        assert r.status_code == 200, r.text
+
     @pytest.mark.parametrize("payload,detail", [
         ({"session": {}}, "Invalid export format. Missing 'session' or 'messages' field."),
         ({"session": [], "messages": []},

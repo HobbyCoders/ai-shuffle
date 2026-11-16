@@ -372,6 +372,23 @@ def api_user_owns_session(api_user: dict, session: dict) -> bool:
     return False
 
 
+def key_project_is_shared_project(project_id: str, project_v2_id: str) -> bool:
+    """Whether local project ``project_id`` is a checkout of shared project ``project_v2_id``.
+
+    Same origin comparison as ``require_origin_access``, following a
+    late-linked placeholder; a missing project is never a match.
+    """
+    from app.core import project_resolver
+
+    project = database.get_project(project_id)
+    if not project:
+        return False
+    if project_resolver.is_checkout_of(project, project_v2_id):
+        return True
+    shared = project_resolver.resolve_catalog_project(project_v2_id)
+    return bool(shared) and shared.get("origin") == project_resolver.origin_for_legacy_project(project)
+
+
 def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
     """Enforce an API user's access to a session.
 
@@ -393,10 +410,19 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
             detail="Access denied to this session"
         )
 
-    # Check project restriction
-    # (a projectless session passes only because it is the caller's own).
-    if api_user.get("project_id") and session.get("project_id"):
-        if api_user["project_id"] != session["project_id"]:
+    # Check project restriction. A chat another worker runs may carry only
+    # its shared project id here (#1659): the key's project must be that
+    # project. Only a chat with no project identity at all passes, and only
+    # because it is the caller's own.
+    key_project = api_user.get("project_id")
+    if key_project:
+        if session.get("project_id"):
+            allowed = key_project == session["project_id"]
+        elif session.get("project_v2_id"):
+            allowed = key_project_is_shared_project(key_project, session["project_v2_id"])
+        else:
+            allowed = True
+        if not allowed:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this session"

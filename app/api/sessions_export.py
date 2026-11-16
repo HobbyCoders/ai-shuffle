@@ -16,6 +16,7 @@ from app.api.auth import require_admin, require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
     api_user_may_use_profile,
+    key_project_is_shared_project,
     require_transcript_session,
     resolve_api_user_profile,
     SessionImportResponse,
@@ -165,6 +166,25 @@ def _safe_filename_title(title: str) -> str:
     return safe_title.strip().replace(" ", "-")[:50]
 
 
+def _import_project_id(project_id: Optional[str], project_v2_id: Optional[str]) -> Optional[str]:
+    """The local project an imported chat files under.
+
+    The export's legacy id when that project exists here and, if the export
+    names a shared project, is a checkout of it; otherwise this install's
+    checkout of the shared project (#1659). Older exports carry no shared id.
+    """
+    from app.core import project_resolver
+    from app.db.base import get_db
+
+    project = database.get_project(project_id) if project_id else None
+    if project and (not project_v2_id or project_resolver.is_checkout_of(project, project_v2_id)):
+        return project_id
+    if not project_v2_id:
+        return None
+    with get_db() as conn:
+        return project_resolver.local_project_for_shared(conn.cursor(), project_v2_id)
+
+
 def _session_export_metadata(session: dict) -> dict:
     """The session block of the JSON export."""
     return {
@@ -173,6 +193,9 @@ def _session_export_metadata(session: dict) -> dict:
         "status": session.get("status"),
         "profile_id": session.get("profile_id"),
         "project_id": session.get("project_id"),
+        # The shared project id is the same on every install; the legacy id
+        # is one worker's slug, and none on a chat another worker runs (#1659).
+        "project_v2_id": session.get("project_v2_id"),
         "created_at": session.get("created_at"),
         "updated_at": session.get("updated_at"),
         "total_cost_usd": session.get("total_cost_usd"),
@@ -608,7 +631,7 @@ async def import_session(
             )
     # These name the session and its agent and project. A non-string would fail
     # the lookups, or the response after the session row was already created.
-    for field in ('title', 'profile_id', 'project_id'):
+    for field in ('title', 'profile_id', 'project_id', 'project_v2_id'):
         value = session_data.get(field)
         if value is not None and not isinstance(value, str):
             raise HTTPException(
@@ -647,17 +670,22 @@ async def import_session(
             detail=f"This API key is not allowed to use agent '{profile_id}'.",
         )
     project_id = session_data.get('project_id') or None
+    project_v2_id = session_data.get('project_v2_id') or None
     if api_user and api_user.get('project_id'):
-        if project_id and project_id != api_user['project_id']:
+        if (project_id and project_id != api_user['project_id']) or (
+                not project_id and project_v2_id
+                and not await run_sync(key_project_is_shared_project, api_user['project_id'], project_v2_id)):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied to this project",
             )
         project_id = api_user['project_id']
-    elif project_id and not await run_sync(database.get_project, project_id):
-        # An export from another install names a project this one lacks;
-        # sessions.project_id has a FK to projects, so file it projectless.
-        project_id = None
+    else:
+        # An export from another install, or of a chat another worker ran,
+        # may name a project by a slug this install lacks or uses for another
+        # project; sessions.project_id has a FK to projects, so it files
+        # under this install's checkout of the shared project, or none.
+        project_id = await run_sync(_import_project_id, project_id, project_v2_id)
 
     # Create session in database
     title = session_data.get('title') or 'Imported Session'
