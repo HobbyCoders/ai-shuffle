@@ -486,6 +486,76 @@ describe('AppTopBar drawer swipe', () => {
 		main.remove();
 	});
 
+	/** 80px in 64ms (1.25 px/ms), short of the 120px a 400px screen asks for, then a lift `holdMs` later. */
+	function flick(target: Element, from: number, dir: 1 | -1, holdMs: number) {
+		stepMs = 8;
+		touch(target, 'touchstart', from);
+		for (let i = 1; i <= 8; i++) touch(target, 'touchmove', from + dir * 10 * i);
+		stepMs = holdMs;
+		touch(target, 'touchend', from + dir * 80);
+	}
+
+	it('opens on a short flick, but not when the finger rested before lifting (#1637)', async () => {
+		renderBar();
+		const main = document.createElement('div');
+		document.body.append(main);
+		flick(main, 20, 1, 500);
+		await tick();
+		expect(drawerClosed()).toBe(true);
+
+		flick(main, 20, 1, 8);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+		main.remove();
+	});
+
+	it('closes on a short left flick, but not after a hold or a cancel (#1637)', async () => {
+		renderBar();
+		await fireEvent.click(menuButton());
+		await tick();
+		const sidebar = screen.getByTestId('sidebar');
+		flick(sidebar, 300, -1, 500);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+
+		stepMs = 8;
+		touch(sidebar, 'touchstart', 300);
+		for (let i = 1; i <= 8; i++) touch(sidebar, 'touchmove', 300 - 10 * i);
+		touch(sidebar, 'touchcancel', 220);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+
+		flick(sidebar, 300, -1, 8);
+		await tick();
+		expect(drawerClosed()).toBe(true);
+	});
+
+	it('opens on a flick a busy page hands over as one bunched move (#1637)', async () => {
+		renderBar();
+		const main = document.createElement('div');
+		document.body.append(main);
+		// Press, rest 100ms, then 80px in 64ms: one touchmove carries the end
+		// point, its pointermove carries all eight positions.
+		stepMs = 0;
+		clock += 16;
+		const t0 = clock;
+		touch(main, 'touchstart', 20);
+		clock = t0 + 164;
+		const move = new Event('pointermove', { bubbles: true }) as PointerEvent;
+		const at = (x: number, t: number) => ({ clientX: x, clientY: 100, timeStamp: t }) as PointerEvent;
+		Object.defineProperties(move, {
+			pointerType: { value: 'touch' }, isPrimary: { value: true }, clientX: { value: 100 }, clientY: { value: 100 }, timeStamp: { value: clock },
+			getCoalescedEvents: { value: () => Array.from({ length: 8 }, (_, i) => at(30 + 10 * i, t0 + 108 + 8 * i)) }
+		});
+		main.dispatchEvent(move);
+		touch(main, 'touchmove', 100);
+		clock += 2;
+		touch(main, 'touchend', 100);
+		await tick();
+		expect(drawerClosed()).toBe(false);
+		main.remove();
+	});
+
 	it('does not open from a text field', async () => {
 		renderBar();
 		const field = document.createElement('textarea');

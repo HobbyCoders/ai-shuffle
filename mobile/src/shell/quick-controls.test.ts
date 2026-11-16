@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-	BYPASS, STEP_DISTANCE, VelocityTracker, dragAxis, knobFraction, settlesClosed, settlesOpen, slideAnswer, stepValue, taskSummary
+	BYPASS, RELEASE_WINDOW_MS, STEP_DISTANCE, dragAxis, knobFraction, settlesClosed, settlesOpen, slideAnswer, stepValue, taskSummary
 } from '$lib/components/chat/phone/quick-controls';
+import { FlickTracker } from '$lib/utils/swipe-arm';
 
 const ACCESS = ['default', 'auto', 'acceptEdits', BYPASS];
 const EFFORT = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -50,12 +51,15 @@ describe('panel drag', () => {
 		expect(settlesClosed(500, 800, -0.8)).toBe(false);
 	});
 
-	it('reads a release velocity from recent samples', () => {
-		const t = new VelocityTracker();
-		t.add(500, 0);
-		t.add(400, 50);
-		t.add(300, 100);
-		expect(t.velocity()).toBeCloseTo(-2);
+	it('reads a release velocity from the last 100ms of a pull', () => {
+		const t = new FlickTracker({ windowMs: RELEASE_WINDOW_MS });
+		t.addAt(600, 0);
+		t.addAt(500, 100);
+		t.addAt(400, 150);
+		t.addAt(300, 200);
+		expect(t.velocityAt()).toBeCloseTo(-2);
+		// Held still before letting go: not a flick.
+		expect(t.velocityAt(400)).toBe(0);
 	});
 });
 

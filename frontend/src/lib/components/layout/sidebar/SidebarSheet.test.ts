@@ -53,6 +53,22 @@ describe('SidebarSheet drag to dismiss', () => {
 		expect(onClose).toHaveBeenCalledTimes(1);
 	});
 
+	it('reads a flick a busy page hands over as one coalesced move (#1637)', () => {
+		const { onClose, node } = sheet();
+		const at = (type: string, y: number, time: number) => {
+			const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX: 40, clientY: y, button: 0 });
+			Object.defineProperties(event, { pointerType: { value: 'touch' }, pointerId: { value: 3 }, isPrimary: { value: true }, timeStamp: { value: time } });
+			return event;
+		};
+		node.dispatchEvent(at('pointerdown', 100, 0));
+		// A 100ms rest, then 45px in 24ms delivered as one pointermove.
+		const move = at('pointermove', 145, 124);
+		Object.defineProperty(move, 'getCoalescedEvents', { value: () => [at('pointermove', 115, 108), at('pointermove', 130, 116), at('pointermove', 145, 124)] });
+		node.dispatchEvent(move);
+		node.dispatchEvent(at('pointerup', 145, 126));
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
 	it('springs back from the same pull held still before letting go', async () => {
 		const { node, onClose, pointer } = sheet();
 		pointer('pointerdown', 100, 0);

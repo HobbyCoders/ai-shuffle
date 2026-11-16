@@ -70,24 +70,12 @@ export function slideAnswer(fraction: number): SlideAnswer | null {
 	return null;
 }
 
-/** Recent pointer samples, enough to read a release velocity. */
-export class VelocityTracker {
-	private samples: { at: number; pos: number }[] = [];
-
-	add(pos: number, at = performance.now()): void {
-		this.samples.push({ at, pos });
-		while (this.samples.length > 2 && at - this.samples[0].at > 100) this.samples.shift();
-	}
-
-	/** px/ms over the last ~100ms; positive means down (or right). */
-	velocity(): number {
-		const s = this.samples;
-		if (s.length < 2) return 0;
-		const a = s[0];
-		const b = s[s.length - 1];
-		return (b.pos - a.pos) / Math.max(1, b.at - a.at);
-	}
-}
+/**
+ * How far back a panel or sheet drag reads its release speed (the shared
+ * FlickTracker from $lib/utils/swipe-arm): a pull is slower and longer than a
+ * row flick, so it looks back further than a row does.
+ */
+export const RELEASE_WINDOW_MS = 100;
 
 /** Short labels for the quick bar, where five cells share 390px. */
 export const ACCESS_SHORT: Record<string, string> = {
