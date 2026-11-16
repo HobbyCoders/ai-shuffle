@@ -38,6 +38,20 @@ const mobileShell = process.argv.includes('--mobile-shell');
 const CARD = (id) => `[data-session-card="${id}"]`;
 const laneOf = (page, id) => page.evaluate((selector) => document.querySelector(selector)?.closest('[data-group]')?.getAttribute('data-group') ?? null, CARD(id));
 
+/**
+ * Resize the window and wait until the app shell has the new height. The
+ * shell's height is `--app-viewport-height`, which the page writes from its
+ * resize listener, a frame after `setViewportSize` returns; measuring before
+ * that reads the old height (a 420px window still laid out 1600px tall).
+ */
+async function resizeWindow(page, size) {
+	await page.setViewportSize(size);
+	await page.waitForFunction(() => {
+		const shell = getComputedStyle(document.documentElement).getPropertyValue('--app-viewport-height').trim();
+		return !shell || shell === `${window.visualViewport?.height || window.innerHeight}px`;
+	}, null, { timeout: 10_000 });
+}
+
 /** The chat list: the sidebar, or the drawer the native phone shell opens from its menu button. */
 async function showChats(page) {
 	if (!page.__mobileShell) return showSidebar(page);
@@ -277,7 +291,7 @@ await runJourney({
 				await api(page, 'PATCH', `/sessions/${settled}/active`, { is_active: false });
 				// Tall enough that every seeded row fits with room to spare.
 				page.__viewport = page.viewportSize();
-				await page.setViewportSize({ width: page.__viewport.width, height: 1600 });
+				await resizeWindow(page, { width: page.__viewport.width, height: 1600 });
 				await waitLane(page, snoozed, 'snoozed');
 				const sessions = await showChats(page);
 				await sessions.getByRole('button', { name: /^Settled/ }).first().waitFor({ timeout: 30_000 });
@@ -321,7 +335,7 @@ await runJourney({
 				await page.waitForFunction((el) => el.getAttribute('aria-expanded') === 'false', await header.elementHandle());
 
 				await mark('a list taller than the window: it scrolls, nothing is squeezed');
-				await page.setViewportSize({ width: page.__viewport.width, height: 420 });
+				await resizeWindow(page, { width: page.__viewport.width, height: 420 });
 				const short = await listLayout(page);
 				expect(!short.fits, 'the seeded list overflows a 420px tall window');
 				expect(JSON.stringify(short.rowHeights) === JSON.stringify(tall.rowHeights), `rows keep their height, got ${short.rowHeights} for ${tall.rowHeights}`);
