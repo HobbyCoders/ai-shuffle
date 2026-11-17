@@ -27,6 +27,17 @@ PAIR_TIMEOUT = 180
 WORKER_NAMES = ("Dev worker A", "Dev worker B")
 
 
+def consume_restart(directory: Path) -> bool:
+    try:
+        (directory / "restart").unlink()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        devloop.log.warning("Ignoring unreadable worker restart marker: %s", exc)
+        return False
+    return True
+
+
 class WorkerStatus:
     """Serialize both reporters into one status; keep A's legacy aliases."""
 
@@ -215,7 +226,7 @@ def up_workers(args: argparse.Namespace) -> int:
                                      ttl=max(0.001, deadline - time.monotonic()), owner_pid=owner_pid,
                                      stopped=stopped, restart=None if args.ci else instance.gate.restart,
                                      on_start=instance.on_app_start, on_exit=instance.on_app_exit,
-                                     stop_timeout=15)  # allow bounded stream drain and normal lifespan shutdown
+                                     stop_timeout=4 if args.ci else 15)
                     if code:
                         errors.append(f"worker app exited with code {code}")
                         devloop.log.error("%s", errors[-1])
@@ -288,12 +299,8 @@ def up_workers(args: argparse.Namespace) -> int:
                 while not stopped.wait(0.5):
                     if not args.ci:
                         for instance in instances:
-                            marker = Path(instance.data["peer_fixture_dir"]) / "restart"
-                            try:
-                                marker.unlink()
-                            except FileNotFoundError:
-                                continue
-                            instance.gate.request()
+                            if consume_restart(Path(instance.data["peer_fixture_dir"])):
+                                instance.gate.request()
                     if not all(i.data["state"] == "ready" for i in instances) or status.network:
                         pair_deadline = None
                         continue

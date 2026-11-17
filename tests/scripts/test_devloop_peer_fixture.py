@@ -2,6 +2,18 @@ import json
 
 import pytest
 
+from scripts.devloop.workers import consume_restart
+
+
+def test_invalid_restart_marker_is_not_a_request(tmp_path):
+    (tmp_path / "restart").mkdir()
+    assert not consume_restart(tmp_path)
+    (tmp_path / "restart").rmdir()
+    (tmp_path / "restart").touch()
+    assert consume_restart(tmp_path)
+    assert not consume_restart(tmp_path)
+
+
 from scripts.devloop.peer_fixture import PeerFixture
 
 
