@@ -1505,8 +1505,19 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// the exact attempt; do not give its words back to ordinary Send.
 				if (awaitingCreate && ![400, 401, 403, 404, 409, 422, 429].includes(status ?? 0)) {
 					if (creationGen === internal.worktreeCreationGeneration && pendingOpening()?.id === opening.id) {
-						recoveringOpening.set({ note: { ...opening, dispatched: true }, ready: true });
-						update(s => ({ ...s, isCreatingWorktree: false, messages: s.messages.filter(m => m.id !== userMsgId) }));
+						// Keep the same transcript and editor until the receipt resolves.
+						// The feed reconciles this pending row by clientMessageId.
+						recoveringOpening.set({ note: { ...opening, dispatched: true }, ready: true, adopt: id => {
+							if (creationGen !== internal.worktreeCreationGeneration) return;
+							creation?.made(id);
+							update(s => ({ ...s, sessionId: id, selectedWorktreeBranch: s.worktreeBranch,
+								title: deriveSessionTitle(prompt, pendingUploadPaths), deviceIntent: null,
+								activeTasks: [], isCreatingWorktree: false, ...OPTIMISTIC_STREAMING_ON, error: null }));
+							persistSession();
+							feedController.start(id);
+							appData.loadSessions();
+							appData.loadApiUserSessions();
+						} });
 					}
 					return true;
 				}

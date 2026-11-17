@@ -13,7 +13,7 @@ export function pendingOpening(): Opening | null {
 // Hold the surface from the first frame, before boot has established which
 // account and project may see the words. Only a validated scope enables lookup.
 const initial = pendingOpening();
-export const recoveringOpening = writable<{ note: Opening; ready: boolean } | null>(
+export const recoveringOpening = writable<{ note: Opening; ready: boolean; adopt?: (id: string) => void } | null>(
 	initial?.dispatched ? { note: initial, ready: false } : null);
 export function keepOpening(note: Opening) {
 	try { sessionStorage.setItem(key, JSON.stringify(note)); } catch { /* storage unavailable */ }

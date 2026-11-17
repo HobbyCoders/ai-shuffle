@@ -5,6 +5,7 @@ import {
   pickAccess,
   expect,
   composer,
+  waitTurnSettled,
 } from "./lib/app.mjs";
 
 import { DEV_INSTANCE_NOISE } from "./lib/noise.mjs";
@@ -122,6 +123,16 @@ function reloadCase(outcome) {
       }, outcome);
       ctx.words = "Keep this worktree message " + Date.now();
       await composer(page).fill(ctx.words);
+      if (outcome === "live-loss") {
+        await page.route("**/sessions/with-worktree", async route => {
+          const response = await route.fetch();
+          const body = await response.json();
+          expect(response.ok() && body.query_started, "origin admitted opening turn");
+          evidence.id = body.session_id;
+          await route.abort("connectionreset");
+        });
+        return; // Send belongs inside the recorded window for this case.
+      }
       await page.getByRole("button", { name: "Send", exact: true }).click();
       await page.waitForFunction(() => window.__reloadReady);
       ctx.expected = await page.evaluate(() => window.__reloadReady);
@@ -136,6 +147,16 @@ function reloadCase(outcome) {
       }
     },
     async act({ page, words, expected, mark, evidence }) {
+      if (outcome === "live-loss") {
+        await page.getByRole("button", { name: "Send", exact: true }).click();
+        await waitTurnSettled(page);
+        const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem("ai-shuffle-active-session") || "{}").sessionId);
+        expect(id && id === evidence.id && evidence.receipts > 0, "exact receipt chat without reload");
+        const rows = await (await page.request.get(`/api/v1/sessions/${id}`)).json();
+        expect(rows.messages.filter(m => m.role === "user" && m.content === words).length === 1 && evidence.creates === 1 && !evidence.queries, "one create, one durable user turn, no fallback query");
+        expect(!(await composer(page).innerText()).trim(), "admitted words stay out of Send");
+        return;
+      }
       // Record the old document before the deliberate replacement.
       await page.evaluate(
         () =>
@@ -230,6 +251,7 @@ await runJourney({
   name: "auto-worktree-reload",
   browser: async () => ({ context: { serviceWorkers: "block" } }),
   cases: [
+    "live-loss",
     "before-dispatch",
     "admitted",
     "ambiguous",

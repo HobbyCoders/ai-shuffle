@@ -4,7 +4,7 @@
 	import { admittedOpening, finishOpening, pendingOpening, recoveringOpening, type Opening } from '$lib/stores/session/worktree-opening';
 	import { openSession } from '$lib/services/session-navigation';
 
-	let { note, ready }: { note: Opening; ready: boolean } = $props();
+	let { note, ready, adopt }: { note: Opening; ready: boolean; adopt?: (id: string) => void } = $props();
 	let unknown = $state(false);
 	let check = $state(0);
 	function current() {
@@ -23,7 +23,8 @@
 			const id = await admittedOpening(note);
 			if (cancelled || !current()) return;
 			if (id) {
-				openSession(id);
+				if (adopt) adopt(id);
+				else openSession(id);
 				finishOpening(note.id);
 				recoveringOpening.set(null);
 			} else {

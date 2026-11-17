@@ -504,6 +504,9 @@
 	const statusOffset = $derived(
 		connectionNotice === 'pill' && reconnectPillHeight ? `${reconnectPillHeight + 6}px` : undefined
 	);
+	const recovery = $derived(($recoveringOpening && !$activeSession.sessionId && pendingOpening()?.id === $recoveringOpening.note.id
+		&& (!$recoveringOpening.ready || (openingGeneration() === $recoveringOpening.note.generation &&
+		$activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))) ? $recoveringOpening : null);
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined}
@@ -517,10 +520,8 @@
 	data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
-	{#if $recoveringOpening && !$activeSession.sessionId && pendingOpening()?.id === $recoveringOpening.note.id
-		&& (!$recoveringOpening.ready || (openingGeneration() === $recoveringOpening.note.generation &&
-		$activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))}
-		<OpeningRecovery {...$recoveringOpening} />
+	{#if recovery && !recovery.adopt}
+		<OpeningRecovery {...recovery} />
 	{:else}
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
@@ -620,7 +621,7 @@
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. All three lanes keep this same editor. -->
 	{#if showComposer}
-		<div class="input-slot" bind:this={inputSlot} bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+		<div class="input-slot" inert={!!recovery?.adopt} class:checking-opening={!!recovery?.adopt} bind:this={inputSlot} bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
@@ -645,6 +646,9 @@
 		</div>
 	{/if}
 
+	{#if recovery?.adopt}
+		<div class="live-opening"><OpeningRecovery {...recovery} /></div>
+	{/if}
 	{#if showEmptyHero && showComposer}
 		<!-- Desktop only: balances the flex:1 hero so the hero + persistent input pair sits
 		     vertically centered — reproduces the old .empty-state
@@ -671,6 +675,8 @@
 </div>
 
 <style>
+	.checking-opening { visibility: hidden; }
+	.live-opening { position: absolute; inset: auto 0 0; max-height: 50%; overflow: auto; background: var(--background); }
 	.chat-view {
 		position: relative;
 		display: flex;
