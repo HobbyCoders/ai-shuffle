@@ -30,9 +30,12 @@ function between(start: string, end: string) {
 	return source.slice(from, to);
 }
 const transaction = between("let layoutBoundary = '';", '// Rendered geometry has one lifecycle').replace(': QueueHandoffMark | null', '');
-const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
+const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()')
+	.replace('(container: HTMLElement, spacer: HTMLElement): number', '(container, spacer)');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
+// The container observer's width handler, run first on every resize notification.
+const widthChange = between('function restoreReadingAnchorOnWidthChange()', '// Retained space is outside').replaceAll('<HTMLElement>', '');
 
 type Session = Pick<ActiveSessionState, 'sessionId' | 'messages' | 'isStreaming' | 'liveTurnId' | 'error' | 'queuedMessages' | 'localSendIntent'>;
 const session = (id: string, count = 2): Session => ({ sessionId: id, messages: Array(count).fill({}), isStreaming: false, liveTurnId: null, error: null, queuedMessages: [] });
@@ -44,7 +47,7 @@ function probe() {
 	slot.innerHTML = '<div class="tail-controls"></div>';
 	const tail = slot.firstElementChild as HTMLElement;
 	const env = {
-		session: session('long'), scrollTop: 5000, proseEnd: 200,
+		session: session('long'), scrollTop: 5000, proseEnd: 200, columnWidth: 412,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
 		landedFromQueue, visibleTurnError
 	};
@@ -56,9 +59,12 @@ function probe() {
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
 		const clearJumpRevealTimer = () => {};
-		const containerRef = { clientHeight: 600, scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }) };
+		const containerRef = { clientHeight: 600, scrollTop: 0, get clientWidth() { return env.columnWidth; }, getBoundingClientRect: () => ({ top: 0 }) };
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
-		const tailControlsRef = { getBoundingClientRect: () => ({ height: env.pendingHeight }) }, chatColumnRef = {};
+		const tailControlsRef = { getBoundingClientRect: () => ({ height: env.pendingHeight }) };
+		const chatColumnRef = { get clientWidth() { return env.columnWidth; } };
+		let observedWidth = 0, readingAnchor = null;
+		const scheduleReadingAnchorCapture = () => {};
 		const getComputedStyle = () => ({ rowGap: String(env.gap) });
 		const activeSession = {}, get = () => env.session;
 		const liveActiveSession = { clearError: () => { env.session = { ...env.session, error: null }; } };
@@ -74,7 +80,9 @@ function probe() {
 		${reserve}
 		${transaction}
 		${beginTurn}
+		${widthChange}
 		return {
+			resize: () => restoreReadingAnchorOnWidthChange(),
 			start: fromQueue => startCurrentTurnAnchor('next', fromQueue),
 			dismiss: () => dismissTailError(),
 			run() {
@@ -95,7 +103,7 @@ function probe() {
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const state = create(env) as { resize(): void; dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
 	return { env, ...state, render() { state.run(); tail.style.minHeight = renderSlotStyle(state.queueSlot()); return tail; }, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
 }
 
@@ -289,6 +297,60 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		p.run();
 		expect(p.floor()).toBe(0);
 		expect(p.reserve()).toBe(0);
+	});
+
+	// A queue-only commit captures the floor; the delivered row is a later commit.
+	function queueHandoffFloor(p: ReturnType<typeof probe>) {
+		p.env.proseEnd = 5450;
+		p.run();
+		p.env.session = { ...session('long', 2), queuedMessages: [{ id: 'q1' }] } as Session;
+		p.run();
+		p.env.session = session('long', 2);
+		p.run();
+		expect(p.floor()).toBe(5600);
+		expect(p.reserve()).toBe(150);
+	}
+
+	it('keeps the handoff floor through a column resize that reflows nothing', () => {
+		const p = probe();
+		p.resize();
+		queueHandoffFloor(p);
+		// A 1px column change between the bubble leaving and its row landing.
+		p.env.columnWidth = 413;
+		p.resize();
+		expect(p.reserve()).toBe(150);
+		// The delivered row consumes the floor as before.
+		p.env.session = session('long', 3);
+		p.env.proseEnd = 5530;
+		p.run();
+		expect(p.reserve()).toBe(70);
+	});
+
+	it('moves the floor with prose that reflows on unfolding, measured from capture', () => {
+		// Hydration: no container resize between the column mounting and the
+		// capture, so only the capture knows the width the floor belongs to.
+		const p = probe();
+		queueHandoffFloor(p);
+		p.env.columnWidth = 700;
+		p.env.proseEnd = 4900;
+		p.resize();
+		expect(p.reserve()).toBe(150);
+		expect(p.floor()).toBe(5050);
+		// At the new width, content consumes the moved floor.
+		p.env.proseEnd = 4980;
+		expect(p.reserve()).toBe(70);
+	});
+
+	it('does not bring back a floor eviction released when the column narrows', () => {
+		const p = probe();
+		queueHandoffFloor(p);
+		p.shift(); p.endShift();
+		// Narrower prose ends lower; a released floor must not be rebased into one.
+		p.env.columnWidth = 300;
+		p.env.proseEnd = 6000;
+		p.resize();
+		expect(p.reserve()).toBe(0);
+		expect(p.floor()).toBe(0);
 	});
 
 	it('drops the floor and pending layout work when bounded eviction changes coordinates', async () => {

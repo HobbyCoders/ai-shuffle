@@ -1379,10 +1379,33 @@
 
 	function readingFloorReserve(): number {
 		if (!containerRef || !tailSpacerRef || !shouldAutoScroll || windowShifting) return 0;
-		const proseEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		const proseEnd = rebaseFloorOnReflow(containerRef, tailSpacerRef);
 		// Dequeue and delivered user row are separate commits. Keep the read
 		// viewport available between them; subsequent content consumes it.
 		return Math.max(0, followedViewportEnd - proseEnd);
+	}
+
+	// Where the prose ended, and at which column width, when the floor was last
+	// captured or read. Width 0: not measured yet.
+	let floorProseEnd = 0;
+	let floorColumnWidth = 0;
+
+	/**
+	 * The prose end now. A floor kept across a column width change moves with the
+	 * reflowed prose: wider prose ends higher, and a floor left in the narrow
+	 * layout's coordinates would hold blank viewport above the tail controls.
+	 * Moving it by the prose end's change keeps the read gap; at the same width
+	 * only content changed, which consumes the floor instead.
+	 */
+	function rebaseFloorOnReflow(container: HTMLElement, spacer: HTMLElement): number {
+		const proseEnd = container.scrollTop + spacer.getBoundingClientRect().top - container.getBoundingClientRect().top;
+		const width = chatColumnRef?.clientWidth ?? 0;
+		if (followedViewportEnd > 0 && floorColumnWidth > 0 && width !== floorColumnWidth) {
+			followedViewportEnd = Math.max(0, followedViewportEnd + proseEnd - floorProseEnd);
+		}
+		floorProseEnd = proseEnd;
+		floorColumnWidth = width;
+		return proseEnd;
 	}
 
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
@@ -1648,7 +1671,6 @@
 	// and put back where it was when the container observer sees a new width.
 	let readingAnchor: (ReadingAnchor & { width: number }) | null = null;
 	let observedWidth = 0;
-	let observedColumnWidth = 0;
 	let readingAnchorRaf: number | null = null;
 
 	function captureReadingAnchor() {
@@ -1687,13 +1709,6 @@
 		const width = containerRef.clientWidth;
 		const changed = observedWidth > 0 && width !== observedWidth;
 		observedWidth = width;
-		// A reading floor measured before the prose reflowed is not a scroll target
-		// after it: wider prose ends higher, and the stale floor would hold a blank
-		// viewport above the tail controls. The column's width, not the container's,
-		// so a scrollbar appearing beside a fixed-measure column keeps the floor.
-		const columnWidth = chatColumnRef?.clientWidth ?? 0;
-		if (observedColumnWidth > 0 && columnWidth !== observedColumnWidth) followedViewportEnd = 0;
-		observedColumnWidth = columnWidth;
 		const anchor = readingAnchor;
 		if (changed && anchor && anchor.width !== width && !shouldAutoScroll && !currentTurnAnchorId && chatColumnRef) {
 			const row = chatColumnRef.querySelector<HTMLElement>(`:scope > [data-transcript-key="${CSS.escape(anchor.key)}"]`);
@@ -2271,6 +2286,8 @@
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
 		if (resetFloor || !untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
 		const beforeTop = untrack(() => lastKnownScrollTop);
+		// Record the width this floor belongs to, rebasing one kept from another.
+		untrack(() => { if (containerRef && tailSpacerRef) rebaseFloorOnReflow(containerRef, tailSpacerRef); });
 		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
 		const sessionId = s.sessionId;
 		const version = untrack(() => windowShiftVersion);
