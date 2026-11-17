@@ -339,7 +339,9 @@ def _owned_install(store, cli, root):
         maker.script_template = "import time; time.sleep(30)\n"
         maker.make("claude = unused:main")
     else:
-        binary.write_bytes(Path("/bin/sleep").read_bytes())
+        # Use a real executable with its own inode, not a coreutils applet:
+        # uutils sleep dispatches on argv[0] and refuses the name "claude".
+        binary.write_bytes(Path(sys.executable).read_bytes())
         binary.chmod(0o755)
         ci._launcher().symlink_to(binary)
     cli.installed, cli.binary_path = True, str(ci._launcher())
@@ -351,7 +353,7 @@ def _owned_install(store, cli, root):
 def test_remove_refused_while_cli_runs(worker):
     store, cli, root = worker
     _owned_install(store, cli, root)
-    running = subprocess.Popen([str(ci._launcher()), "30"])
+    running = subprocess.Popen([str(ci._launcher()), "-I", "-S", "-c", "import time; time.sleep(30)"])
     try:
         assert ci._in_use() == [running.pid]
         with pytest.raises(ValueError, match="Claude Code is running"):
