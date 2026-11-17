@@ -43,9 +43,9 @@ async function spill(page) {
  });
 }
 
-async function stub(page, { users = [] } = {}) {
+async function stub(page, { users = [], lines = LOGS } = {}) {
  await page.route(/\/api\/v1\/api-users(\?.*)?$/, route => route.fulfill({ json: users }));
- await page.route(/\/api\/v1\/logs\?/, route => route.fulfill({ json: { lines: LOGS, total: LOGS.length, returned: LOGS.length, levels: ['INFO', 'WARNING', 'ERROR'] } }));
+ await page.route(/\/api\/v1\/logs\?/, route => route.fulfill({ json: { lines, total: lines.length, returned: lines.length, levels: ['INFO', 'WARNING', 'ERROR'] } }));
 }
 
 async function openSettings(page, status, width) {
@@ -668,6 +668,41 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  ...[390, 800].map(width => ({
+  name: `resize-focused-logs-${width}`, viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   // The search field appears above six lines.
+   await stub(page, { lines: [...LOGS, ...['41', '40', '39'].map(min => line(min, 'INFO', 'app.journey.other', `Line ${min}`))] });
+   await openSettings(page, status, 1280);
+  },
+  async act({ page, mark }) {
+   await category(page, 'Logs');
+   const row = page.locator('.st-lcol [data-settings-item]').filter({ hasText: 'Alpha started' }).first();
+   await row.click();
+   const selected = await row.getAttribute('data-settings-item');
+   await category(page, 'Integrations');
+   await settingsNav(page).getByRole('button', { name: /^Logs\b/ }).click();
+   const action = button(page, 'Same logger');
+   await action.waitFor();
+   const list = await entryKey(page);
+   const search = page.getByRole('searchbox', { name: 'Search logs' });
+   const resize = async w => {
+    await page.setViewportSize({ width: w, height: 800 });
+    await action.waitFor({ state: w === 1280 ? 'visible' : 'hidden' });
+    expect(await entryKey(page) === list, 'resizing did not navigate');
+   };
+   await mark('keep typing at the caret when the focused search stays visible');
+   await search.fill('pha'); await search.press('Home');
+   await resize(width);
+   await page.keyboard.type('l');
+   expect(await search.inputValue() === 'lpha', 'narrowing preserves focus and the insertion point');
+   await search.press('Home'); await resize(1280); await page.keyboard.type('A');
+   expect(await search.inputValue() === 'Alpha', 'widening preserves focus and the insertion point');
+   await mark('recover focus when the focused detail control disappears');
+   await action.focus(); await resize(width);
+   expect(await focusedItem(page) === selected, 'hidden detail yields focus to its visible row');
+  }
+ })),
+ ...[390, 800].map(width => ({
   name: `same-logger-retained-list-${width}`, viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) { await stub(page); await openSettings(page, status, 1280); },
   async act({ page, mark }) {
@@ -690,6 +725,7 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
    await button(page, 'Same logger').click(); await row('Alpha ready').waitFor();
    expect(await entryKey(page) === list, 'returned to the existing list entry despite its retained selection');
    expect(await visibleLogRows(page) === 2 && await focusInList(page), 'two filtered rows and focus in the list');
+   expect(await focusedItem(page) === await row('Alpha ready').getAttribute('data-settings-item'), 'Same logger returns focus to its row');
    expect(!await detail('Alpha started').count(), 'retained detail does not displace the narrow list');
    await mark('Back leaves Logs; Forward retraces the list and detail');
    await page.goBack();

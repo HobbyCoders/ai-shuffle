@@ -258,8 +258,13 @@
 	// The list and the detail swap in place, so focus has to move with them:
 	// into the detail's title, or back to the row it was opened from.
 	let lastOpen: string | null | undefined;
+	let wasSplit = false;
 	$effect(() => {
 		const current = shownItem;
+		// Hiding a retained detail on resize isn't Back: a visible list
+		// control keeps its focus (and a search field keeps its caret).
+		const narrowedToList = wasSplit && !split && !current;
+		wasSplit = split;
 		const previous = lastOpen;
 		lastOpen = current;
 		if (previous === undefined || previous === current) return;
@@ -277,7 +282,7 @@
 			// away). A control the reader moved to meanwhile keeps it.
 			const active = document.activeElement;
 			const lost = !active || active === document.body || !active.isConnected || !!pane?.contains(active);
-			if (stacked && !lost) return;
+			if ((stacked || narrowedToList) && !lost) return;
 			const target = current
 				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
 				: (row?.matches('[data-settings-nav-item]')
