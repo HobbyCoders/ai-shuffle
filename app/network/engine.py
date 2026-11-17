@@ -2498,8 +2498,10 @@ def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: s
 
 
 def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str, *,
-              lock: bool) -> List[Tuple[policy.Collection, str, dict]]:
-    """The scanned shared children a deletion of the record cascades into."""
+              lock: bool) -> List[Tuple[policy.Collection, str, dict, Optional[str]]]:
+    """The scanned shared children a deletion of the record removes (ON DELETE
+    CASCADE) or rewrites (ON DELETE SET NULL), as (collection, record id, row,
+    the column the deletion clears, None for a removed child)."""
     found = []
     for child_name, column in _CASCADE_CHILDREN.get(coll.name, ()):
         child = policy.collection(child_name)
@@ -2509,8 +2511,37 @@ def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: s
             row = dict(row)
             child_id = child.record_id(row)
             if _scanned_here(ctx, child, child_id):
-                found.append((child, child_id, row))
+                found.append((child, child_id, row, None))
+    for child_name, column in _SET_NULL_CHILDREN.get(coll.name, ()):
+        child = policy.collection(child_name)
+        cursor.execute(f"SELECT * FROM {child.table} WHERE {column} = %s ORDER BY " + ", ".join(child.keys)
+                       + (" FOR UPDATE" if lock else ""), (record_id,))
+        for row in cursor.fetchall():
+            row = dict(row)
+            child_id = child.record_id(row)
+            if _scanned_here(ctx, child, child_id):
+                found.append((child, child_id, row, column))
     return found
+
+
+def _cleared_child_unsigned(cursor, ctx: NetworkContext, child: policy.Collection, child_id: str,
+                            row: Mapping[str, Any], column: str) -> Tuple[bool, bool]:
+    """For a row whose reference the deletion of its parent clears (ON DELETE
+    SET NULL): (whether the row holds an unsigned local change, whether the
+    row as the deletion leaves it still differs from its sync record).
+
+    Review S1: the deletion clears an unsigned assignment to the parent. The
+    row is signed as the deletion leaves it (reference cleared), the content
+    every peer derives once it applies the tombstone: a signed op naming the
+    deleted parent could never be applied by a peer that already holds the
+    tombstone (#1720). What the deletion destroys is kept as a conflict here
+    (``_check_local``). A row that held its signed version is no local edit:
+    its record follows the cleared reference (``_follow_rewrites``).
+    """
+    known = store.get_record(cursor, child.name, child_id)
+    if not _unsigned(cursor, ctx, child, child_id, row, known):
+        return False, False
+    return True, _unsigned(cursor, ctx, child, child_id, {**row, column: None}, known)
 
 
 def _rewrite_candidates(cursor, coll: policy.Collection, record_id: str, *,
@@ -2541,7 +2572,8 @@ def _rewrite_candidates(cursor, coll: policy.Collection, record_id: str, *,
     return found
 
 
-def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, dict, str]]) -> None:
+def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, dict, str]]
+                     ) -> List[Tuple[str, str]]:
     """After ``materialize``: move the sync record of each row the write
     itself rewrote to the row's new hash, at the version it already names.
 
@@ -2561,7 +2593,11 @@ def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, 
     written under ``network_state``, which every apply holds. A nested-secret
     row whose hash is behind the quorum keeps its record too, for the
     scanner's republish; ``_holds_signed_version`` knows the cleared reference.
+
+    Returns the (collection, record id) of each record it moved: a caller
+    holding sync records read before this write must read those again.
     """
+    moved_records: List[Tuple[str, str]] = []
     for target, target_id, before, column in candidates:
         after = _read_row(cursor, target, target_id)
         if after is None or after.get(column) == before.get(column):
@@ -2584,15 +2620,22 @@ def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, 
         store.put_record(cursor, target.name, target_id, clock=int(known["clock"]),
                          origin_device_id=known["origin_device_id"], content_hash=moved,
                          deleted=False, order_seq=known.get("order_seq"))
+        moved_records.append((target.name, target_id))
+    return moved_records
 
 
 def _materialize_op(cursor, coll: policy.Collection, record_id: str,
-                    record: Optional[Mapping[str, Any]], **kwargs) -> Optional[dict[str, Any]]:
+                    record: Optional[Mapping[str, Any]], *,
+                    cached: Optional[Dict[str, dict]] = None, **kwargs) -> Optional[dict[str, Any]]:
     """``materialize`` for a peer's version; the sync records of the other
-    rows the write rewrites follow them (``_follow_rewrites``)."""
+    rows the write rewrites follow them (``_follow_rewrites``). ``cached``:
+    the caller's sync records of ``coll`` by record id, read before this
+    write; a moved one is read again (review S2)."""
     candidates = _rewrite_candidates(cursor, coll, record_id, deleting=record is None)
     row = materialize(cursor, coll, record_id, record, **kwargs)
-    _follow_rewrites(cursor, candidates)
+    for name, moved_id in _follow_rewrites(cursor, candidates):
+        if cached is not None and name == coll.name and moved_id in cached:
+            cached[moved_id] = store.get_record(cursor, name, moved_id)
     return row
 
 
@@ -2641,18 +2684,22 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
     for (name, record_id), (deleting, incoming, only_deleted) in sorted(wanted.items()):
         coll = policy.collection(name)
         try:
-            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming, only_deleted)]
+            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming, only_deleted, None)]
             if deleting:
-                targets += [(*child, None, False) for child in _children(cursor, ctx, coll, record_id, lock=False)]
+                targets += [(child, child_id, row, None, False, cleared)
+                            for child, child_id, row, cleared in _children(cursor, ctx, coll, record_id, lock=False)]
         except (ValueError, KeyError, TypeError, ApplyError):
             continue  # malformed: the apply refuses it
-        for target, target_id, row, target_hash, target_deleted in targets:
+        for target, target_id, row, target_hash, target_deleted, cleared in targets:
             if not _scanned_here(ctx, target, target_id):
                 continue
             try:
-                if _unsigned(cursor, ctx, target, target_id, row,
-                             store.get_record(cursor, target.name, target_id), target_hash,
-                             deleting=target_deleted):
+                if cleared is not None:
+                    if _cleared_child_unsigned(cursor, ctx, target, target_id, row, cleared)[1]:
+                        record(cursor, target.name, target_id, {**row, cleared: None}, ctx=ctx)
+                elif _unsigned(cursor, ctx, target, target_id, row,
+                               store.get_record(cursor, target.name, target_id), target_hash,
+                               deleting=target_deleted):
                     record(cursor, target.name, target_id, row, ctx=ctx)
             except ApplyError:
                 continue  # step 2 makes the op wait
@@ -2682,12 +2729,37 @@ def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id
     row = _read_row(cursor, coll, record_id, lock=True)
     targets = [(coll, record_id, row, existing,
                 content_hash(coll, incoming) if incoming is not None and not deleting else None, deleting)]
+    cleared_children = []
     if deleting and row is not None:
-        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None, False)
-                    for child, child_id, child_row in _children(cursor, ctx, coll, record_id, lock=True)]
+        for child, child_id, child_row, cleared in _children(cursor, ctx, coll, record_id, lock=True):
+            if cleared is None:
+                targets.append((child, child_id, child_row, store.get_record(cursor, child.name, child_id),
+                                None, False))
+            else:
+                cleared_children.append((child, child_id, child_row, cleared))
     for target, target_id, target_row, known, target_hash, target_deleted in targets:
         if _unsigned(cursor, ctx, target, target_id, target_row, known, target_hash, deleting=target_deleted):
             raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + target.name)
+    kept = []
+    for child, child_id, child_row, cleared in cleared_children:
+        changed, unsigned_after = _cleared_child_unsigned(cursor, ctx, child, child_id, child_row, cleared)
+        if unsigned_after:
+            raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + child.name)
+        if changed:
+            kept.append((child, child_id, child_row))
+    for child, child_id, child_row in kept:
+        # The deletion clears this worker's unsigned reference to the record:
+        # keep the row as it was (step 1 signed the rest of the change).
+        try:
+            losing = serialize_row(child, child_row, cursor=cursor)
+        except ApplyError:
+            losing = None
+        known = store.get_record(cursor, child.name, child_id)
+        if losing is not None and known is not None:
+            store.add_conflict(cursor, collection=child.name, record_id=child_id,
+                               losing_clock=int(known["clock"]), losing_device_id=ctx.device_id,
+                               losing_record=redact_secrets(losing), winning_clock=int(known["clock"]),
+                               winning_device_id=known["origin_device_id"])
     return row is not None
 
 
@@ -3622,7 +3694,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             ids = [item["record_id"] for item in items]
             if not items:
                 return 0, touched
-    # A page names each record once; anything else is read one by one.
+    # A page names each record once; anything else is read one by one. An
+    # apply that moves another record of the page refreshes it (_materialize_op).
     known = _records_by_id(cursor, coll.name, ids) if len(set(ids)) == len(ids) else None
     applied = 0
     bulk: set = set()
@@ -3692,7 +3765,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             continue
         if item["deleted"]:
             if present is not False:  # see _apply_in_order
-                _materialize_op(cursor, coll, item["record_id"], None,
+                _materialize_op(cursor, coll, item["record_id"], None, cached=known,
                                 origin_device_id=item["origin_device_id"])
             local_hash = ""
         else:
@@ -3700,7 +3773,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                        ctx=ctx)
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             try:
-                row = _materialize_op(cursor, coll, item["record_id"], prepared,
+                row = _materialize_op(cursor, coll, item["record_id"], prepared, cached=known,
                                       origin_device_id=item["origin_device_id"], if_absent=present is False)
             except _KeepObservation as kept:
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)

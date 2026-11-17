@@ -101,7 +101,11 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    first and orders the two normally, and a change that lands during the apply
    makes the op wait one pass. A row the apply itself rewrote (a deleted
    parent clearing a reference, the provider slot projection) is not a local
-   change: its record moves to the new hash at the same version.
+   change: its record moves to the new hash at the same version. When a
+   deleted parent clears the reference of a row with an unpublished local
+   change, the apply signs the row as the deletion leaves it (reference
+   cleared, which every peer can apply) and keeps the row as it was in
+   `sync_conflicts`, so an assignment to the deleted parent stays recoverable.
 5. **Bootstrap.** A joiner installs the join response (keys wrapped to it, the
    membership chain), copies signed snapshot chunks from the inviter, adopts the
    inviter's watermarks, then flips from `syncing` to `ready`. Its outbox is

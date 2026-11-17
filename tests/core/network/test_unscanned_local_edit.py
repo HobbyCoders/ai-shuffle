@@ -1263,8 +1263,9 @@ def test_a_cleared_reference_alone_is_signed_by_no_one_else(workers, kind):
 @pytest.mark.parametrize("kind", _REFERENCES)
 def test_an_unscanned_edit_of_a_row_whose_reference_a_peer_clears_is_still_published(workers, kind):
     """B renamed the row and its scanner has not run. The parent's tombstone
-    from A clears the reference on B, but the record does not follow a row
-    that was already changed: B's scanner publishes the rename."""
+    from A would clear the reference on B, so B signs the rename first (the
+    row as B holds it, review S1); the record then follows the cleared
+    reference at B's version and B's scanner has nothing left to publish."""
     a, b, parent, child, column, _, drop, rename, _, read = _reference_pair(workers, kind)
     _advance_clock(b)  # A's scanner publishes its cleared reference too: B's rename is the later edit
     with b.active():
@@ -1272,9 +1273,11 @@ def test_an_unscanned_edit_of_a_row_whose_reference_a_peer_clears_is_still_publi
     with a.active():
         drop()
         assert engine.scan_collection(parent) == 1
+    signed = len(_own_ops(b, child))
     exchange(a, b)
+    assert len(_own_ops(b, child)) == signed + 1
     with b.active():
-        assert engine.scan_collection(child) == 1
+        assert engine.scan_collection(child) == 0
     _settle(a, b)
     for worker in (a, b):
         with worker.active():
@@ -1400,3 +1403,298 @@ def test_two_workers_do_not_keep_signing_over_each_other(workers):
             names.append(read()["name"])
     assert names[0] == names[1] and names[0].startswith("unscanned-")
     _stream_rounds(a, b, rounds=6)
+
+
+# -- An unsigned edit of a row a peer parent's deletion rewrites through
+# -- ON DELETE SET NULL is signed first, like a cascaded child (review S1).
+
+def _assignment_case(kind):
+    """(child collection, column, create the unassigned child, assign it,
+    read the child) for each SET NULL reference."""
+    from app.db import api_users, templates
+    if kind == "template agent":
+        return ("templates", "profile_id",
+                lambda: templates.create_template("child", "original", "prompt"),
+                lambda: templates.update_template("child", profile_id="parent"),
+                lambda: templates.get_template("child"))
+    if kind == "key agent":
+        def assign():
+            with database.get_db() as conn:
+                conn.cursor().execute("UPDATE api_users SET profile_id = %s WHERE id = %s", ("parent", "child"))
+        return ("api_users", "profile_id", lambda: api_users.create_api_user("child", "original", "hash"),
+                assign, lambda: api_users.get_api_user("child"))
+
+    def assign():
+        with database.get_db() as conn:
+            conn.cursor().execute("UPDATE connectors SET api_user_id = %s WHERE id = %s", ("parent", "child"))
+    return ("connectors", "api_user_id",
+            lambda: database.create_connector("child", "telegram", "original", {}, [], is_active=False),
+            assign, lambda: database.get_connector("child"))
+
+
+def _unscanned_assignment(factory, kind, also=None):
+    """Both workers hold the child unassigned and the parent. B assigns the
+    child to the parent (only the reference column changes) and its scanner
+    has not run; A deletes the parent and B applies the tombstone."""
+    from app.db import api_users, profiles
+    child, column, create, assign, read = _assignment_case(kind)
+    a, b = _pair(factory)
+    with a.active():
+        if kind == "connector key":
+            api_users.create_api_user("parent", "connector:child", "hash")
+        else:
+            database.create_profile(profile_id="parent", name="Agent", description=None, config={})
+        create()
+        engine.scan_all()
+    _settle(a, b)
+    with b.active():
+        assign()
+        if also is not None:
+            also()
+        assert read()[column] == "parent"
+    with a.active():
+        if kind == "connector key":
+            api_users.delete_api_user("parent")
+        else:
+            profiles.delete_profile("parent")
+        engine.scan_all()
+    signed = len(_own_ops(b, child))
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    return a, b, child, column, read, signed
+
+
+def _kept_assignment(worker, child, column):
+    return [c for c in _conflicts(worker, "child", child)
+            if c["losing_record"].get(column) == "parent" and c["losing_device_id"] == worker.device_id]
+
+
+@pytest.mark.parametrize("kind", _REFERENCES)
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_an_unscanned_assignment_a_peer_parent_deletion_clears_is_kept(request, backend, kind):
+    """Applying the tombstone on B clears the reference again, which left the
+    row equal to its signed hash: the assignment vanished with no op and no
+    conflict (review S1). The row as the deletion leaves it is what B already
+    signed, so nothing is signed; the assignment is kept as a conflict on B.
+    (Signing the row naming the deleted parent would give A an op it can
+    never apply, #1720.) Both workers agree and go quiet."""
+    a, b, child, column, read, signed = _unscanned_assignment(
+        request.getfixturevalue("pg_workers" if backend == "postgres" else "workers"), kind)
+    assert len(_own_ops(b, child)) == signed
+    assert len(_kept_assignment(b, child, column)) == 1, "the assignment vanished without a trace"
+    with b.active():
+        assert read()[column] is None and read()["name"] == "original"
+        assert engine.scan_collection(child) == 0
+    back = exchange(b, a)
+    assert back.retry == back.rejected == 0, back.reasons
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert read()[column] is None and read()["name"] == "original"
+    assert len(_kept_assignment(b, child, column)) == 1
+    _stream_rounds(a, b)
+
+
+@pytest.mark.parametrize("kind", _REFERENCES)
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_an_unscanned_rename_and_assignment_a_peer_parent_deletion_clears(request, backend, kind):
+    """B renamed the row as well. The rename is signed first, as the row the
+    deletion leaves (reference cleared), so A applies it; the assignment is
+    kept as a conflict on B."""
+    from app.network.keyring import open_envelope
+    case = _reference_case(kind)
+    child, column = case[1], case[2]
+    a, b, *_ = _unscanned_assignment(
+        request.getfixturevalue("pg_workers" if backend == "postgres" else "workers"), kind,
+        also=lambda: case[5]("from-b"))
+    mine = _own_ops(b, child)
+    assert len(mine) == 1
+    with b.active():
+        signed = open_envelope(engine.cached_context(), envelope.Envelope.from_dict(mine[-1]))[0]
+        assert signed[column] is None and signed["name"] == "from-b"
+        assert engine.scan_collection(child) == 0
+    assert len(_kept_assignment(b, child, column)) == 1
+    back = exchange(b, a)
+    assert back.retry == back.rejected == 0, back.reasons
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert case[-1]()[column] is None and case[-1]()["name"] == "from-b"
+    _stream_rounds(a, b)
+
+
+def test_a_state_copy_deletion_keeps_an_unscanned_assignment(workers):
+    """The same through a state copy page of the parent's collection."""
+    from app.db import profiles, templates
+    a, b = _pair(workers)
+    with a.active():
+        database.create_profile(profile_id="parent", name="Agent", description=None, config={})
+        templates.create_template("child", "original", "prompt")
+        engine.scan_all()
+    _settle(a, b)
+    with b.active():
+        templates.update_template("child", profile_id="parent")
+    with a.active():
+        profiles.delete_profile("parent")
+        engine.scan_all()
+        chunk = engine.snapshot_chunk("agents", 0)
+    with b.active():
+        engine.apply_snapshot_chunk(chunk)
+        assert templates.get_template("child")["profile_id"] is None
+        assert engine.scan_collection("templates") == 0
+    assert _own_ops(b, "templates") == []
+    assert len(_kept_assignment(b, "templates", "profile_id")) == 1
+
+
+def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(workers):
+    """A deletes the parent and then renames the row, later than B's
+    assignment: one batch on B. The assignment is signed once (as the
+    tombstone's child and as the rename's target), loses to the rename, and
+    is kept as a conflict on A, where B's signed op arrives."""
+    from app.db import profiles, templates
+    a, b = _pair(workers)
+    with a.active():
+        database.create_profile(profile_id="parent", name="Agent", description=None, config={})
+        templates.create_template("child", "original", "prompt")
+        engine.scan_all()
+    _settle(a, b)
+    with b.active():
+        templates.update_template("child", profile_id="parent")
+    _advance_clock(a, 20000)
+    with a.active():
+        profiles.delete_profile("parent")
+        templates.update_template("child", name="from-a")
+        engine.scan_all()
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    assert len(_own_ops(b, "templates")) == 1
+    back = exchange(b, a)
+    assert back.retry == 0, back.reasons
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            row = templates.get_template("child")
+            assert row["name"] == "from-a" and row["profile_id"] is None
+    assert any(c["losing_record"].get("profile_id") == "parent" and c["losing_device_id"] == b.device_id
+               for c in _conflicts(a, "child", "templates"))
+    _stream_rounds(a, b)
+
+
+def test_an_unscanned_edit_of_an_account_a_peer_selection_turns_off_is_published(workers):
+    """The slot projection rewrites only ``enabled`` of another account. B's
+    unscanned rename of that account is not replaced: the record does not
+    follow a row that was already changed, so B's scanner publishes the
+    rename with the projected flag."""
+    a, b = _pair(workers)
+    with a.active():
+        for provider in ("one", "two"):
+            database.create_model_provider(provider, provider, "openai", "https://api.openai.com/v1",
+                                           enabled=(provider == "one"))
+        engine.scan_all()
+    _settle(a, b)
+    _advance_clock(b)
+    with b.active():
+        database.update_model_provider("one", name="from-b")
+    with a.active():
+        database.set_model_provider_enabled("two", True)
+        engine.scan_collection("system_settings")  # only the selection travels
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    with b.active():
+        one = database.get_model_provider("one")
+        assert one["name"] == "from-b" and not one["enabled"]
+        assert engine.scan_collection("model_providers") == 1
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert database.get_model_provider("one")["name"] == "from-b"
+            assert [row["id"] for row in database.get_enabled_model_providers()] == ["two"]
+
+
+def test_no_shared_row_is_rewritten_two_levels_down(workers):
+    """``_children`` looks one level down: a parent's deletion must not reach
+    a shared row through a cascaded child (shared or local-only). Walks every
+    CASCADE edge from each shared table and checks that only the listed
+    direct children are deleted or cleared."""
+    from app.network import policy
+    worker = workers("schema")
+    tables = {coll.table: name for name, coll in policy.COLLECTIONS.items()}
+    edges = {}
+    for table in sorted(r["name"] for r in worker.sql("SELECT name FROM sqlite_master WHERE type='table'")):
+        for fk in worker.sql(f"PRAGMA foreign_key_list('{table}')"):
+            if fk["on_delete"] in ("CASCADE", "SET NULL"):
+                edges.setdefault(fk["table"], []).append((table, fk["on_delete"]))
+    for start in sorted(t for t in tables if tables[t] in policy.SCANNED_COLLECTIONS):
+        frontier = [child for child, rule in edges.get(start, ()) if rule == "CASCADE"]
+        seen = set()
+        while frontier:
+            table = frontier.pop()
+            if table in seen:
+                continue
+            seen.add(table)
+            for child, rule in edges.get(table, ()):
+                assert tables.get(child) not in policy.SCANNED_COLLECTIONS, (start, table, child, rule)
+                if rule == "CASCADE":
+                    frontier.append(child)
+
+
+@pytest.mark.xfail(strict=True, reason="known bug #1720: A retries a reference to its deleted parent forever")
+@pytest.mark.parametrize("kind", _REFERENCES)
+def test_a_published_assignment_to_a_parent_a_peer_deleted(workers, kind):
+    """Not #1605: B's assignment was published before A's deletion reached
+    it. A cannot store B's op (the parent is gone) and waits for a parent
+    that never arrives, holding up B's stream."""
+    child, column, create, assign, read = _assignment_case(kind)
+    a, b, *_ = _unscanned_assignment(workers, kind, also=lambda: engine.scan_collection(child))
+    back = exchange(b, a)
+    assert back.retry == 0, back.reasons
+
+
+# -- A snapshot page reads its records once; one an earlier item's apply
+# -- rewrote is read again (review S2).
+
+def _drop_slot_registers(worker):
+    """Legacy data: no provider slot selection register on this worker."""
+    with worker.active():
+        with database.get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM system_settings WHERE key LIKE 'model_provider_slot:%%'")
+            cursor.execute("DELETE FROM sync_records WHERE collection = 'system_settings' "
+                           "AND record_id LIKE 'model_provider_slot:%%'")
+
+
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_a_snapshot_page_reads_a_record_an_earlier_item_rewrote(request, backend):
+    """B holds custom account aa and OpenAI account zz, both enabled, and no
+    slot register. A turns aa (created first) into an OpenAI account and
+    renames zz. In A's provider page, applying aa projects zz.enabled off on
+    B and moves zz's record; zz's item then compared the row with the hash
+    read before the page, took the projection for an unsigned local edit and
+    aborted the page on every retry."""
+    a, b = _pair(request.getfixturevalue("pg_workers" if backend == "postgres" else "workers"))
+    with a.active():
+        database.create_model_provider("aa", "aa", "custom", "https://gateway.example/v1", enabled=True)
+        database.create_model_provider("zz", "zz", "openai", "https://api.openai.com/v1", enabled=True)
+        engine.scan_all()
+    _settle(a, b)
+    for worker in (a, b):
+        _drop_slot_registers(worker)
+    with a.active():
+        database.update_model_provider("aa", provider_type="openai", base_url="https://api.openai.com/v1")
+        database.update_model_provider("zz", name="renamed")
+        engine.scan_all()
+    _drop_slot_registers(a)
+    with a.active():
+        chunk = engine.snapshot_chunk("model_providers", 0)
+        body = engine.open_snapshot_chunk(chunk, ctx=engine.require_context())
+    assert [item["record_id"] for item in body["items"]] == ["aa", "zz"]  # one page, aa first
+    signed = len(_own_ops(b))
+    with b.active():
+        engine.apply_snapshot_chunk(chunk)
+        zz = database.get_model_provider("zz")
+        assert zz["name"] == "renamed" and not zz["enabled"]
+        assert database.get_model_provider("aa")["provider_type"] == "openai"
+        assert [row["id"] for row in database.get_enabled_model_providers()] == ["aa"]
+        assert engine.scan_collection("model_providers") == 0
+    assert len(_own_ops(b)) == signed
+    assert not _conflicts(b, "zz", "model_providers")
