@@ -1106,6 +1106,15 @@
           "past_bug": "#465: repeated stop cancelled usage booking, forced execute cancellation skipped terminal persistence and settlement callbacks, shutdown waited unboundedly before its timeout, and task force-stops accumulated per-task delays."
         },
         {
+          "id": "harness-basics.antigravity-turn-error",
+          "check": "Antigravity turn errors show only a supported reason",
+          "kind": "owner",
+          "needs": ["install"],
+          "how": "On an isolated candidate worker with a disposable provider row backed by the repository's fake ACP agent, send error and invalid-request in a throwaway chat. Inspect the rendered errors, session API and worker log. Do not sign in, call a provider or read CLI diagnostic files.",
+          "pass_when": "The marker without a reason gives a neutral error. Invalid parameters gives the request-parameters message. Neither suggests sign-in or quota or quotes the fake agent's diagnostic text.",
+          "past_bug": "#1587: a generic turn failure always blamed sign-in or quota."
+        },
+        {
           "id": "harness-basics.approval-pending-message-delivery",
           "check": "A message sent while an approval waits reaches the agent and the card stays open",
           "kind": "owner",

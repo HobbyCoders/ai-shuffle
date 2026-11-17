@@ -528,7 +528,11 @@ async def test_plan_in_band_error_and_agent_exit(tmp_path: Path) -> None:
         plan = [e for e in d.events if isinstance(e, ToolUse) and e.name == "TodoWrite"]
         assert plan and plan[0].input["todos"][1]["status"] == "in_progress"
         end = await d.turn("error")
-        assert isinstance(end, ErrorEvent) and "ended the turn with an error" in end.message
+        assert isinstance(end, ErrorEvent)
+        assert end.message == "Antigravity ended the turn with an error but did not report a reason over ACP."
+        assert end.provider_message is None
+        end = await d.turn("invalid-request")
+        assert isinstance(end, ErrorEvent) and end.message == "The agent rejected the request parameters."
         end = await d.turn("die")
         assert isinstance(end, ErrorEvent)
         # A dead agent is restarted (and resumed) on the next turn.

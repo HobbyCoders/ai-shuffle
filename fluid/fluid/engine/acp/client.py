@@ -144,14 +144,12 @@ class AcpConnection:
         env: Mapping[str, str] | None = None,
         on_notification: NotificationHandler | None = None,
         on_request: RequestHandler | None = None,
-        stderr_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.argv = list(argv)
         self.cwd = cwd
         self.env = dict(env) if env is not None else None
         self.on_notification = on_notification
         self.on_request = on_request
-        self.stderr_sink = stderr_sink
         self._proc: asyncio.subprocess.Process | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._next_id = 0
@@ -160,7 +158,6 @@ class AcpConnection:
         self._handlers: set[asyncio.Task[None]] = set()
         self._write_lock = asyncio.Lock()
         self._closed = asyncio.Event()
-        self.stderr_tail: list[str] = []
         self.info: AgentInfo | None = None
 
     # ─── lifecycle ──────────────────────────────────────────────────────
@@ -292,34 +289,20 @@ class AcpConnection:
                 try:
                     message = json.loads(text)
                 except json.JSONDecodeError:
-                    logger.debug("ACP agent wrote a non-JSON line: %.200s", text)
+                    logger.debug("ACP agent wrote a non-JSON line; dropped")
                     continue
                 if isinstance(message, dict):
                     await self._dispatch(message)
         finally:
-            tail = " | ".join(self.stderr_tail[-3:])
-            self._fail_pending(AcpConnectionClosed(
-                "the agent process exited" + (f": {tail}" if tail else "")
-            ))
+            self._fail_pending(AcpConnectionClosed())
             self._closed.set()
 
     async def _read_stderr(self) -> None:
         proc = self._proc
         assert proc is not None and proc.stderr is not None
-        while True:
-            try:
-                line = await proc.stderr.readline()
-            except (ValueError, asyncio.LimitOverrunError):
-                continue
-            if not line:
-                return
-            text = line.decode("utf-8", errors="replace").rstrip()
-            if not text:
-                continue
-            self.stderr_tail = [*self.stderr_tail[-19:], text[:500]]
-            if self.stderr_sink is not None:
-                with contextlib.suppress(Exception):
-                    self.stderr_sink(text)
+        # Drain for liveness. CLI diagnostics have no safe free-text contract.
+        while await proc.stderr.read(8192):
+            pass
 
     async def _dispatch(self, message: dict[str, Any]) -> None:
         if "method" not in message:
@@ -329,10 +312,18 @@ class AcpConnection:
                 return
             error = message.get("error")
             if isinstance(error, dict):
-                fut.set_exception(AcpError(
-                    int(error.get("code") or INTERNAL_ERROR), str(error.get("message") or "error"),
-                    error.get("data"),
-                ))
+                # Exceptions reach chat, status APIs and logs. Report a protocol
+                # category, never the agent's diagnostic message or data.
+                code = error.get("code")
+                if type(code) is not int:
+                    code = INTERNAL_ERROR
+                reason = {
+                    AUTH_REQUIRED: "Authentication required.",
+                    INVALID_PARAMS: "The agent rejected the request parameters.",
+                    METHOD_NOT_FOUND: "The agent does not support this request.",
+                    INTERNAL_ERROR: "The agent reported an internal error.",
+                }.get(code, "The agent could not complete the request.")
+                fut.set_exception(AcpError(code, reason))
             else:
                 fut.set_result(message.get("result"))
             return

@@ -655,7 +655,6 @@ class AcpLoop:
             conn = self._connection_factory(
                 self.spec.argv, cwd=self.cwd, env=self.spec.env,
                 on_notification=self._on_notification, on_request=self._on_request,
-                stderr_sink=lambda line: logger.debug("acp agent: %s", line),
             )
             await conn.start()
             self._conn = conn
@@ -1002,7 +1001,6 @@ class AcpLoop:
         reported = self.spec.turn_failure(mapper.text)
         if reported:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=reported,
-                                        provider_message=" | ".join(conn.stderr_tail[-3:]) or None,
                                         usage=usage, cost_usd=cost))
             return
         if stop == "refusal":

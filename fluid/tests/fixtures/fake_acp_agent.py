@@ -329,6 +329,8 @@ class Agent:
                 {"content": "Write", "priority": "medium", "status": "in_progress"}]})
             await self.say(sid, "planned")
             return {"stopReason": "end_turn"}
+        if word == "invalid-request":
+            raise RpcError(-32602, "request option was not accepted")
         if word == "error":
             await self.say(sid, "\n⚠ Agent execution terminated due to error.\n")
             return {"stopReason": "end_turn"}

@@ -257,8 +257,7 @@ class AntigravitySpec(AcpAgentSpec):
 
     def turn_failure(self, text: str) -> str | None:
         if _ERROR_TEXT in (text or ""):
-            return ("Antigravity ended the turn with an error. Check the provider's sign-in or "
-                    "API key, and its quota.")
+            return "Antigravity ended the turn with an error but did not report a reason over ACP."
         return None
 
     def auth_message(self, exc: AcpError) -> str:
