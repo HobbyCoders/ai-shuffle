@@ -14,7 +14,7 @@
 //               sent without the prompt), so the turn goes out over the socket
 //               (the fallback), and the server refuses it. Stop clears, nothing
 //               streams after, the row goes and the composer gets the words
-//               back (the last two fail today: known bug #1677).
+//               back.
 //   start-ahead-of-feed-refused  an idle send in a chat with history: the socket
 //               announces another turn (`start`) before the feed shows it, then
 //               the original send is refused. The refused row goes, Stop stays
@@ -135,11 +135,6 @@ const composerText = async (page) => (await composer(page).innerText()).trim();
 const worktreeFallbackRefused = {
 	name: 'worktree-fallback-refused',
 	recorder: { selectors: [STOP_SELECTOR] },
-	knownBug: {
-		issue: 1677,
-		error: /the refused row is gone/,
-		reason: 'the fallback send mints its own client_message_id, so the refusal finds no row to retract or restore'
-	},
 	async setup(ctx) {
 		const { page } = ctx;
 		ctx.hook = await hookChatSocket(page);

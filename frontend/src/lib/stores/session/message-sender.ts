@@ -250,6 +250,8 @@ interface SendMessageOptions {
 	/** The create this first send belongs to (see Creation). */
 	creation?: Creation;
 	skipMessageAppend?: boolean;
+	/** Command id of the row already appended by autoCreateWorktree. */
+	appendedCommandId?: string;
 	pendingUploadPaths?: string[];
 	pendingUploadReferences?: import('$lib/api/rewind').UploadReference[];
 	compactFirst?: boolean;
@@ -731,7 +733,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const clientMessageId = options?.compactFirst
 					? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
 						project: _state.project, uploadPaths: options.pendingUploadPaths, uploadReferences: options.pendingUploadReferences, overrides: retryOverrides }), newLocalPendingId)
-					: newLocalPendingId();
+					: options?.appendedCommandId ?? newLocalPendingId();
 				const queuedEcho = (sendWhileStreaming || options?.compactFirst) && !options?.skipMessageAppend;
 				// An unrelated snapshot cannot admit this newly minted command.
 				const optimisticQueuedId = queuedEcho ? clientMessageId : null;
@@ -1487,7 +1489,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// (#1499), and the reply renders even if the turn's WS `start`
 				// never reaches this device.
 				if (!feedController.isFeeding(response.session_id)) feedController.start(response.session_id);
-				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true, creation });
+				const sent = await getActiveSession().sendMessage(prompt, { skipWorktreeSetup: true, skipMessageAppend: true, appendedCommandId: clientMessageId, creation });
 				// Refused: the composer takes the text back, so drop its echo.
 				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));
 				return sent;
