@@ -40,6 +40,15 @@ current_tool_use_id: ContextVar[str | None] = ContextVar(
     "fluid_current_tool_use_id", default=None,
 )
 
+# Whether the call being dispatched came from a code-mode cell (the bridge's
+# ``raw_shell_output``). Set by every ``dispatch``, so a worker started inside
+# a bridged call never inherits it for its own direct calls. Bash reads it to
+# hand a cell its captured output at a higher cut limit: the cell's stdout
+# cap, not the value's size, bounds what reaches the model there.
+current_call_in_cell: ContextVar[bool] = ContextVar(
+    "fluid_current_call_in_cell", default=False,
+)
+
 # A local (builtin/inproc) handler: takes the parsed input and the tool context,
 # returns anything ``_normalize`` understands (ToolOutcome | str | SDK dict).
 Handler = Callable[[dict[str, Any], "ToolCtx"], Awaitable[Any]]
@@ -620,12 +629,14 @@ class ToolRegistry:
         if not isinstance(tool_use_id, str) or not tool_use_id:
             tool_use_id = None
         token = current_tool_use_id.set(tool_use_id)
+        cell_token = current_call_in_cell.set(raw_shell_output)
         try:
             return await self._dispatch(
                 name, input, ctx, input_responses=input_responses,
                 request_state=request_state, raw_shell_output=raw_shell_output,
             )
         finally:
+            current_call_in_cell.reset(cell_token)
             current_tool_use_id.reset(token)
 
     async def _dispatch(

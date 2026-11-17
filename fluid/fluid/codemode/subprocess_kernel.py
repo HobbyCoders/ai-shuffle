@@ -522,6 +522,8 @@ class SubprocessKernel:
                     notes=notes,
                     stdout_full=frame.get("stdout_full") or "",
                     stdout_total=int(frame.get("stdout_total") or 0),
+                    error_full=frame.get("error_full") or "",
+                    error_summary=frame.get("error_summary") or "",
                 )
             else:  # unexpected EOF or malformed frame
                 note = await self._restart_and_restore()

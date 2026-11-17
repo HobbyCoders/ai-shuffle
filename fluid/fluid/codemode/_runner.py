@@ -57,6 +57,11 @@ _STDOUT_CAP = truncate.DEFAULT_STDOUT_CAP
 # ("" otherwise), held to truncate.FULL_STDOUT_MAX, and its true length; sent
 # once on the done frame, then cleared.
 _FULL_STDOUT = ["", 0]
+# The last failed cell's error for the host, sent once on the done frame:
+# the whole text when the model-facing ``error`` was clipped or cut ("" when
+# not; held to truncate.FULL_STDOUT_MAX), and a one-line "Type: message"
+# summary built from the exception object (journal, skill verdicts).
+_FULL_ERROR = ["", ""]
 _CKPT_MAX_BYTES = 0  # 0: no budget (the host keeps its own cap)
 _SOURCES: dict = {}
 _SKILLS: dict = {}
@@ -645,8 +650,8 @@ def _type_name(exc: BaseException) -> str:
         return "Exception"
 
 
-def _format_cell_traceback(exc: BaseException) -> str:
-    """Traceback text starting at the model's own code.
+def _format_cell_traceback(exc: BaseException) -> tuple[str, str, str]:
+    """Traceback text starting at the model's own code: ``(clipped, full, summary)``.
 
     The cell runs under ``exec``/``eval`` inside :func:`_run_cell`, so a raw
     ``format_exc`` leads with runner internals (``eval(compile(ast.Expression
@@ -654,6 +659,13 @@ def _format_cell_traceback(exc: BaseException) -> str:
     whose file is ``<cell>``; a failure with no cell frame at all (a
     SyntaxError from parsing, an error in a stub import before the cell ran)
     renders as just the exception line.
+
+    ``clipped`` is the same rendering with every exception message, note and
+    SyntaxError source line held to ``truncate.ERROR_PART_CAP``, across the
+    whole ``__cause__``/``__context__`` chain and every ExceptionGroup child;
+    it is byte-identical to ``full`` when nothing was over. ``summary`` is
+    "Type: message" (whitespace collapsed, clipped) for the exception that
+    ended the cell, read from the object, not from the rendered lines.
 
     Formatting calls the exception's own ``__str__``, its ``__notes__`` and
     every link of its ``__cause__``/``__context__`` chain — cell code. It runs
@@ -665,13 +677,58 @@ def _format_cell_traceback(exc: BaseException) -> str:
         tb = exc.__traceback__
         while tb is not None and tb.tb_frame.f_code.co_filename != "<cell>":
             tb = tb.tb_next
-        if tb is None:
-            text = "".join(traceback.format_exception_only(type(exc), exc))
-        else:
-            text = "".join(traceback.format_exception(type(exc), exc, tb))
-        return _scrub_host_paths(_plain_str(text))
+        # What traceback.format_exception(_only) builds, kept so its parts
+        # can be clipped in place and rendered a second time.
+        te = traceback.TracebackException(type(exc), exc, tb, compact=True)
+
+        def render() -> str:
+            lines = te.format_exception_only() if tb is None else te.format()
+            return _scrub_host_paths(_plain_str("".join(lines)))
+
+        full = render()
+        message = getattr(te, "_str", "")
+        message = " ".join(message.split()) if type(message) is str else ""
+        summary = _type_name(exc) + (f": {message}" if message else "")
+        summary = truncate.clip_part(_scrub_host_paths(summary), truncate.ERROR_SUMMARY_CAP)
     except BaseException:
-        return f"{_type_name(exc)}: {_UNREPRESENTABLE}\n"
+        line = f"{_type_name(exc)}: {_UNREPRESENTABLE}"
+        return line + "\n", line + "\n", line
+    if len(full) <= truncate.ERROR_PART_CAP:
+        return full, full, summary
+    try:
+        _clip_parts(te)
+        return render(), full, summary
+    except BaseException:
+        # Clipping is only an improvement: the whole rendering and summary
+        # are already in hand, and the caller's backstop bounds them.
+        return full, full, summary
+
+
+def _clip_parts(root) -> None:
+    """Clip every message, note and SyntaxError line in ``root``'s tree in place.
+
+    Iterative: a cell can chain thousands of exceptions, past the recursion
+    limit. ``seen`` stops a cycle.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        te = stack.pop()
+        if te is None or id(te) in seen:
+            continue
+        seen.add(id(te))
+        for attr in ("_str", "msg", "text"):
+            value = getattr(te, attr, None)
+            if type(value) is str and len(value) > truncate.ERROR_PART_CAP:
+                setattr(te, attr, truncate.clip_part(value))
+        notes = getattr(te, "__notes__", None)
+        if type(notes) is list:
+            te.__notes__ = [
+                truncate.clip_part(n) if type(n) is str else n for n in notes
+            ]
+        stack.append(getattr(te, "__cause__", None))
+        stack.append(getattr(te, "__context__", None))
+        stack.extend(getattr(te, "exceptions", None) or ())
 
 
 _KERNEL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -967,27 +1024,35 @@ def _exec_cell(code: str):
         else:
             exec(compile(tree, "<cell>", "exec"), _NS)
     except Exception as exc:
-        err = _format_cell_traceback(exc)
+        err, full, summary = _format_cell_traceback(exc)
         # ``_error_hint`` calls ``str(exc)``: the R9-2 hook.
         hint = _render(_error_hint, exc, fallback="")
         if hint:
-            err = err.rstrip("\n") + "\n" + hint + "\n"
+            err, full = _append_line(err, hint), _append_line(full, hint)
         queued = _unattempted_note(code, exc)
         if queued:
-            err = err.rstrip("\n") + "\n" + queued + "\n"
+            err, full = _append_line(err, queued), _append_line(full, queued)
     except (SystemExit, KeyboardInterrupt) as exc:
         # A cell that calls sys.exit() or raises KeyboardInterrupt ends the
         # cell, not the kernel: letting it out would kill the child and the
         # host would report a death it cannot explain.
-        err = _format_cell_traceback(exc).rstrip("\n") + (
-            "\nThe kernel keeps running; a cell cannot exit the process.\n"
-        )
+        err, full, summary = _format_cell_traceback(exc)
+        exit_note = "The kernel keeps running; a cell cannot exit the process."
+        err, full = _append_line(err, exit_note), _append_line(full, exit_note)
     except BaseException as exc:
         # Any other BaseException subclass (a cell's own ``class E(BaseException)``,
         # GeneratorExit) is still the cell's failure, not the kernel's: left
         # uncaught it ended the child and cost every function defined so far.
-        err = _format_cell_traceback(exc)
+        err, full, summary = _format_cell_traceback(exc)
+    if err is not None:
+        err = truncate.bound_error(err, summary)
+        _FULL_ERROR[:] = [
+            truncate.bounded_full_stdout(full, what="the error") if err != full else "", summary]
     return value_repr, err
+
+
+def _append_line(text: str, line: str) -> str:
+    return text.rstrip("\n") + "\n" + line + "\n"
 
 
 def _finish_stdout(buf: "_SegmentedStdout") -> str:
@@ -1385,12 +1450,18 @@ def _dispatch(kind, frame: dict) -> dict:
     try:
         if kind == "exec":
             _FULL_STDOUT[:] = ["", 0]
+            _FULL_ERROR[:] = ["", ""]
             out, value_repr, err = _run_cell(frame.get("code", ""))
             done = {"kind": "done", "stdout": out, "value_repr": value_repr, "error": err}
             (full, total), _FULL_STDOUT[:] = _FULL_STDOUT, ["", 0]
             if full:
                 done["stdout_full"] = full
                 done["stdout_total"] = total
+            (error_full, summary), _FULL_ERROR[:] = _FULL_ERROR, ["", ""]
+            if error_full:
+                done["error_full"] = error_full
+            if summary:
+                done["error_summary"] = summary
             return done
         if kind == "set_vfs":
             _set_vfs(frame.get("sources") or {}, frame.get("skills") or {})

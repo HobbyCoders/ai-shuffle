@@ -24,7 +24,7 @@ from fluid.tools.priority import (
     priority_creationflags,
     raise_oom_score_adj,
 )
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, current_call_in_cell
 from fluid.tools.shell import resolve_shell
 
 DEFAULT_TIMEOUT_S = 120.0
@@ -35,6 +35,11 @@ MAX_TIMEOUT_S = 600.0
 # model sees inline, so the spill file holds the whole output of all but a
 # runaway command (and its marker says when it does not).
 MAX_CAPTURE_BYTES = 1024 * 1024
+# The cut limit for Bash called from a code-mode cell. The value goes to the
+# cell, not to the model: the cell's stdout cap bounds what the model sees and
+# a big result rides behind a ResultRef, so a `git diff` or `gh ... --json`
+# the cell slices or parses arrives whole. Above this it still spills.
+CELL_TRUNCATE_LIMIT = 50_000
 # Share of the inline budget given to the head; the tail gets the rest, since
 # errors, tracebacks and exit summaries come last.
 _HEAD_SHARE = 1 / 3
@@ -121,7 +126,8 @@ def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None
         "- There is no stdin: commands that prompt for input will hang until "
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
-        f"- Output over {_TRUNCATE_LIMIT:,} characters keeps its head and a "
+        f"- Output over {_TRUNCATE_LIMIT:,} characters ({CELL_TRUNCATE_LIMIT:,} "
+        "in code mode) keeps its head and a "
         "longer tail; the cut marker names a file with the saved output"
         f"{read_back} instead of re-running. NEVER pipe a build or test command through tail/head/cat to shorten "
         "output (e.g. `cargo build | tail -20`): the cap already handles "
@@ -306,7 +312,8 @@ async def _read_capped(stream: asyncio.StreamReader, capture: _Capture | None = 
 
 
 def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
-    """The captured output, ANSI-stripped and cut to the inline cap.
+    """The captured output, ANSI-stripped and cut to the inline cap (the
+    higher :data:`CELL_TRUNCATE_LIMIT` when a code-mode cell called it).
 
     Over the cap, the same cleaned text is spilled once and the marker names
     it. It says "full output" only when nothing was dropped while capturing.
@@ -317,8 +324,12 @@ def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
     if capture.dropped:
         saved_as = "captured " + saved_as.removeprefix("full ")
         note = f"the middle ~{capture.dropped:,} bytes were not captured"
+    # A timeout's partial output is an error message, not a value: it keeps
+    # the direct cap even in a cell.
+    in_cell = current_call_in_cell.get() and not timed_out
+    limit = CELL_TRUNCATE_LIMIT if in_cell else _TRUNCATE_LIMIT
     return truncate(
-        text, ctx=ctx, tool="Bash", head_share=_HEAD_SHARE, saved_as=saved_as, note=note)
+        text, limit, ctx=ctx, tool="Bash", head_share=_HEAD_SHARE, saved_as=saved_as, note=note)
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:

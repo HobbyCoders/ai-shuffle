@@ -160,13 +160,55 @@ _SPLIT_MIN = 400
 FULL_STDOUT_MAX = 2 * 1024 * 1024
 
 
-def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX) -> str:
-    """``text`` held to ``limit`` chars for the spill file, head and tail kept."""
+# A failed cell's error text. An exception carries whatever the cell put in
+# it (``raise ValueError(diff)``), so the kernel bounds it where the exception
+# object is still in hand: each message, note and SyntaxError source line is
+# clipped to ERROR_PART_CAP, so one huge part cannot push out the frames or
+# the other chain links and group children; the whole rendered error is then
+# held to ERROR_CAP as the backstop. The unclipped text rides to the host
+# separately (``error_full``) for the spill file and never reaches the model.
+ERROR_PART_CAP = 2_000
+ERROR_CAP = 8_000
+ERROR_SUMMARY_CAP = 300
+
+
+def clip_part(text: str, limit: int = ERROR_PART_CAP) -> str:
+    """``text`` whole when it fits; else its head and tail around a count,
+    ``limit`` chars in all."""
+    if len(text) <= limit:
+        return text
+    room = max(0, limit - len(f" …[-{len(text):,} chars]… "))
+    head = room * 3 // 4
+    tail = room - head
+    marker = f" …[-{len(text) - head - tail:,} chars]… "
+    return f"{text[:head]}{marker}{text[len(text) - tail:]}"
+
+
+def bound_error(text: str, summary: str, limit: int = ERROR_CAP) -> str:
+    """The backstop: ``text`` whole when it fits; else a first line naming the
+    exception that ended the cell (``summary``, built from the exception
+    object, never parsed from ``text``), then head and a longer tail."""
+    if len(text) <= limit:
+        return text
+    head = limit // 4
+    tail = limit - head
+    lead = f"[the cell ended with: {summary}]\n" if summary else ""
+    return (
+        f"{lead}{text[:head]}\n…[-{len(text) - head - tail:,} chars of the error]…\n"
+        f"{text[len(text) - tail:]}"
+    )
+
+
+def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX, *, what: str = "cell stdout") -> str:
+    """``text`` held to ``limit`` chars for the spill file, head and tail kept.
+
+    Only a cut result is longer than ``limit`` (the marker pushes it over).
+    """
     if len(text) <= limit:
         return text
     half = limit // 2
     dropped = len(text) - 2 * half
-    return f"{text[:half]}\n…[{dropped:,} chars of cell stdout not kept]…\n{text[-half:]}"
+    return f"{text[:half]}\n…[{dropped:,} chars of {what} not kept]…\n{text[-half:]}"
 
 
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names

@@ -249,6 +249,28 @@ def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
     )
 
 
+def _spill_cell_error(full: str, ctx: Any) -> str:
+    """Spill a clipped cell error's whole text; the one-line pointer, or "".
+
+    The kernel already bounded the error the model sees (see
+    ``truncate.ERROR_CAP``); this only says where the rest went.
+    """
+    if not full or ctx is None:
+        return ""
+    path = spill.write_spill(full, ctx=ctx, tool="run_python")
+    if path is None:
+        return ""
+    if len(full) > FULL_STDOUT_MAX:
+        # The kernel held the error to FULL_STDOUT_MAX: only its head and tail.
+        saved = f"its first and last {FULL_STDOUT_MAX // 2:,} chars"
+    else:
+        saved = f"all {len(full):,} chars"
+    return (
+        f"[cell error clipped; {saved} saved to {path} "
+        f"(session scratch) — {spill.READ_HINT}]"
+    )
+
+
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
 _JOURNAL_STDOUT_CAP = 1500
 _JOURNAL_VALUE_CAP = 300
@@ -702,6 +724,9 @@ class CodeModeSession:
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
+            error_note = _spill_cell_error(result.error_full, getattr(loop, "ctx", None))
+            if error_note:
+                text = f"{text.rstrip(chr(10))}\n{error_note}"
         # Every cell can print sliced or persisted shell data, even without a
         # host call this time. Frame at the model boundary, not in Python strings.
         text = fence_shell_output(text, "code-mode output (may include shell stdout/stderr)")
@@ -741,12 +766,16 @@ class CodeModeSession:
             return
         try:
             error_lines = (result.error or "").strip().splitlines()
+            # The kernel's one-line summary of the exception; a host-authored
+            # error (timeout, kernel death) has none and is short.
+            error = getattr(result, "error_summary", "") or (
+                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
             self._skills.journal_append({
                 "kind": "cell",
                 "code": _cap_code(code),
                 "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
-                "error": error_lines[-1] if error_lines else None,
+                "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),
                 # Compatible extension: the same calls in the order they ran,

@@ -90,6 +90,12 @@ class KernelResult:
     # Chars of the cell's whole stdout; above truncate.FULL_STDOUT_MAX,
     # ``stdout_full`` holds only its head and tail.
     stdout_total: int = 0
+    # A failed cell's whole error text when ``error`` was clipped or cut (""
+    # otherwise); the host spills it and never shows it to the model.
+    error_full: str = ""
+    # "Type: message" for the exception that ended the cell, one bounded line
+    # built from the exception object ("" for host-authored errors).
+    error_summary: str = ""
 
 
 # The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the

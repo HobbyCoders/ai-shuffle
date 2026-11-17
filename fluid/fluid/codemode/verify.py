@@ -95,7 +95,10 @@ async def verify_sources(
                 "    _st()\n"
             )
             result = await kernel.exec(code, timeout=slice_timeout, on_host_call=_no_tools)
-            results[name] = _summarize(result.error)
+            # The kernel's bounded "Type: message" line for the exception,
+            # not the traceback's last line (a long note or message).
+            results[name] = (result.error_summary if result.error else "") or _summarize(
+                result.error)
     finally:
         await kernel.stop()
     return results
