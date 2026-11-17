@@ -55,8 +55,6 @@
   detailOpen = true;
   find = query ? { query, key: ++searches } : null;
   remember(`${category}/${slug}`);
-  const scroll = articleEl?.closest('.view-main-slot');
-  if (scroll) scroll.scrollTop = 0;
  }
  function backToList() {
   detailOpen = false;
@@ -75,7 +73,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} onBack={backToList}>
+<ViewShell label="Docs" {detailOpen} detailKey={detailOpen ? currentDoc : null} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}
