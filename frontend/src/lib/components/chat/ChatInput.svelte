@@ -388,7 +388,11 @@
 		composerSelections.set(sessionId, { from, to });
 	}
 
-	let isUploading = $state(false);
+	// Every accepted upload (picker, drop, large paste) counts until it settles:
+	// Send stays blocked until the last one has, so no result can arrive after
+	// the message it belonged with went (#1659).
+	let uploadsPending = $state(0);
+	const isUploading = $derived(uploadsPending > 0);
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
 
@@ -703,7 +707,7 @@
 		// The paste belongs to this chat even if another one is open by the time
 		// the upload settles (#1659).
 		const origin = captureOrigin();
-		isUploading = true;
+		uploadsPending += 1;
 		errorMessage = '';
 		uploadComposerFile(file, origin)
 			.then(result => placeUploadedChip(origin, result))
@@ -714,7 +718,7 @@
 				const err = error as { detail?: string };
 				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
 			})
-			.finally(() => { isUploading = false; });
+			.finally(() => { uploadsPending -= 1; });
 		return true;
 	}
 
@@ -1915,7 +1919,7 @@
 		if (attachBlockNow()) return;
 
 		const origin = captureOrigin();
-		isUploading = true;
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(files)) {
@@ -1931,7 +1935,7 @@
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 			input.value = '';
 		}
 	}
@@ -2013,7 +2017,7 @@
 		}
 
 		const origin = captureOrigin();
-		isUploading = true;
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
@@ -2025,7 +2029,7 @@
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 		}
 	}
 </script>

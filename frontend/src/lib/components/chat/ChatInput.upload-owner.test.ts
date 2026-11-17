@@ -329,6 +329,40 @@ describe('a paste or attachment started on a New chat that takes its id (#1659)'
 		}
 	}
 
+	// #1659 S10: two drops on the landing New chat while the bootstrap's
+	// newChat({ initialLanding }) moves the navigation count. Send waits for
+	// both, so neither result can arrive after the message went.
+	it('two drops on the landing New chat: Send waits for both, then both go in the editor once', async () => {
+		Object.assign(activeSession.current, { sessionId: null, isRemote: undefined });
+		const finishes: Array<(value: unknown) => void> = [];
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finishes.push(done); }) as never);
+		const sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(() => new Promise<boolean>(() => {}));
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		const zone = container.querySelector('[aria-label="File drop zone"]') as HTMLElement;
+		await fireEvent.drop(zone, { dataTransfer: { files: [new File(['x'], 'a.txt')] } });
+		await fireEvent.drop(zone, { dataTransfer: { files: [new File(['y'], 'b.txt')] } });
+		await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+		activeSession.newChat({ initialLanding: true });
+		await settle();
+		// The landing compose starts without a project: the user picks one.
+		Object.assign(activeSession.current, { project: 'app', profile: 'coding', mode: 'code' });
+		finishes[0](uploaded);
+		await waitFor(() => expect(chips(editor, 'uploads/a.txt')).toBe(1));
+		await settle();
+		const send = () => container.querySelector('button.send-btn') as HTMLButtonElement | null;
+		expect(send()?.disabled ?? true).toBe(true);
+		await fireEvent.submit(container.querySelector('form')!);
+		await settle();
+		expect(sends).not.toHaveBeenCalled();
+		finishes[1]({ ...uploaded, path: 'uploads/b.txt', filename: 'b.txt' });
+		await waitFor(() => expect(chips(editor, 'uploads/b.txt')).toBe(1));
+		expect(chips(editor, 'uploads/a.txt')).toBe(1);
+		await waitFor(() => expect(send()?.disabled).toBe(false));
+		await fireEvent.submit(container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+	});
+
 	it('an open chat chosen again before its attachment finishes still gets it in the editor', async () => {
 		let finish!: (value: unknown) => void;
 		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finish = done; }) as never);

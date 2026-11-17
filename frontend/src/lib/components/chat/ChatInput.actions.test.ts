@@ -29,7 +29,7 @@ describe('streaming composer actions', () => {
 		expect(sender).not.toContain('!remoteOnly && pendingUploadPaths');
 	});
 	it('drops an earlier upload error when a new upload starts, for picker, drop and large paste', () => {
-		expect(source.match(/isUploading = true;\r?\n\s*errorMessage = '';/g)).toHaveLength(3);
+		expect(source.match(/uploadsPending \+= 1;\r?\n\s*errorMessage = '';/g)).toHaveLength(3);
 	});
 	it('lets the owner message a subagent that has no project', () => {
 		// A worker started from the owner's no-project chat is stored with no
