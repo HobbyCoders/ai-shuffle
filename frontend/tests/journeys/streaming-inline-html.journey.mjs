@@ -46,6 +46,9 @@ async function expectAbsent(page, selector, log) {
 
 await runJourney({
 	name: 'streaming-inline-html',
+	// Like composer-no-empty-seat: a controlling SW bypasses page.route and
+	// returns the real server's JSON instead of our video fixture on localhost.
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: DEV_INSTANCE_NOISE,
 	recorder: { selectors: ['videos=video', 'thinking=.thinking-block.streaming'] },
 	cases: [
@@ -82,8 +85,8 @@ await runJourney({
 				await mark('stream image alt HTML before a real media URL');
 				await typeAndSend(page, scriptTag(variant, 'stream-image-alt-html', { tps: 4 }));
 				await page.locator('[role="article"]:has(video)').filter({ hasText: 'later03' }).waitFor();
+				expect(mediaRequests.length > 0, 'the fixture route served the actual media request (not a service-worker fetch)');
 				await waitForVideo(page);
-				expect(mediaRequests.length > 0, 'the fixture route served the actual media request');
 				expect(await page.evaluate(() => new URL(document.querySelector('video').currentSrc).origin === location.origin), 'media is same-origin under the built app CSP');
 				log(`fixture requests: ${JSON.stringify(mediaRequests)}`);
 				await page.evaluate(async () => {
