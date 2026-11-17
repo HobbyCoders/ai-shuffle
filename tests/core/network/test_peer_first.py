@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from app.db import network as store
+from app.db.base import get_db
 from app.network import engine, hub, peer_snapshot, transport
 from tests.core.network.harness import join, owner_pref, set_owner_pref
 from tests.core.network.test_transport import (  # noqa: F401
@@ -167,11 +168,19 @@ async def test_snapshot_merge_keeps_conflicting_offline_edit(workers):
         engine.create_network('Home')
     join(a, b)
     set_owner_pref(a, 'same_setting', 'a edit')
+    # Put B's edit unambiguously after A's; each copy then brings back the loser.
+    with a.active():
+        sent_clock = store.get_state()['clock']
+    with b.active(), get_db() as conn:
+        store.observe_clock(conn.cursor(), sent_clock)
     set_owner_pref(b, 'same_setting', 'b edit')
     served = ServedBy(a, 'https://a.example.com')
     with b.active():
         async with httpx.AsyncClient(transport=served.transport()) as client:
-            await transport.PeerLink(a.device_id, [served.base_url]).receive_state(client, engine.context())
-        conflicts = store.list_conflicts()
-        assert any('same_setting' in row['record_id'] for row in conflicts)
-        assert owner_pref(b, 'same_setting') in ('a edit', 'b edit')
+            link = transport.PeerLink(a.device_id, [served.base_url])
+            await link.receive_state(client, engine.context())
+            first = [r for r in store.list_conflicts() if 'same_setting' in r['record_id']]
+            assert len(first) == 1 and first[0]['losing_record']['value'] == 'a edit'
+            await link.receive_state(client, engine.context())
+        assert [r for r in store.list_conflicts() if 'same_setting' in r['record_id']] == first
+        assert owner_pref(b, 'same_setting') == 'b edit'
