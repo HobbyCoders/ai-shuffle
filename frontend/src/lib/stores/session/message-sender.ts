@@ -81,6 +81,7 @@ const VOICE_CONTEXT_SAVE_TIMEOUT_MS = 10_000;
 // Send order (#1444): the longest a send waits for an earlier send to its
 // chat to end. Past it the LATER send is refused, never the earlier one.
 export const SEND_ORDER_WAIT_MS = 15_000;
+const REATTACH_BEFORE_SEND = 'Message not sent. Reattach the files and send again.';
 /** How a send's turn outlives its return: until the chat it creates is
  *  created, or the create failed. `ended` answers now, without waiting. */
 type CreationEnd = { ended: () => boolean; done: Promise<void> };
@@ -241,11 +242,12 @@ export interface MessageSenderDeps {
  *  order. `made` names the chat the create made the moment its id is known,
  *  before any wait, so a send made in that chat after a leave and reopen
  *  goes after this create's first query. */
-export type Creation = { holdUntil: (after: CreationEnd) => void; made: (chat: string) => void };
+export type Creation = { holdUntil: (after: CreationEnd) => void; made: (chat: string) => void; reattach?: (chat: string) => void };
 /** The wrapper's end-of-turn callback for one send (see sendMessage). */
 type LetNextGo = ((after?: CreationEnd) => void) & { made?: (chat: string) => void };
 
 interface SendMessageOptions {
+	onReattach?: (chat: string) => void;
 	skipWorktreeSetup?: boolean;
 	/** The create this first send belongs to (see Creation). */
 	creation?: Creation;
@@ -599,7 +601,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				const creationGen = internal.worktreeCreationGeneration;
 				const bootClaim = claimBootSend();
 				let accepted = false;
-				const creation: Creation = { holdUntil: (after) => letNextGo?.(after), made: (chat) => letNextGo?.made?.(chat) };
+				let refusedUploads = false;
+				const creation: Creation = { reattach: chat => { refusedUploads = true; options?.onReattach?.(chat); }, holdUntil: (after) => letNextGo?.(after), made: (chat) => letNextGo?.made?.(chat) };
 				let createEnded!: () => void;
 				let createOver = false;
 				letNextGo?.({ ended: () => createOver, done: new Promise<void>(resolve => { createEnded = resolve; }) });
@@ -611,7 +614,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					} else {
 						accepted = await getActiveSession().autoCreateWorktree(prompt, options?.pendingUploadPaths, creation);
 					}
-					accepted ||= creationGen !== internal.worktreeCreationGeneration;
+					accepted ||= !refusedUploads && creationGen !== internal.worktreeCreationGeneration;
 					return accepted;
 				} finally {
 					createOver = true;
@@ -1108,8 +1111,14 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				appData.loadSessions();
 				appData.loadApiUserSessions();
 
-				if (response.upload_migration_errors?.length) {
-					console.warn('[Worktree] Upload migration had errors:', response.upload_migration_errors);
+				if (prompt && response.upload_migration_errors?.length) {
+					creation?.reattach?.(response.session_id);
+					if (creationGen === internal.worktreeCreationGeneration) {
+						update(s => ({ ...s, sessionId: response.session_id, isCreatingWorktree: false,
+							activeTasks: [], error: REATTACH_BEFORE_SEND }));
+						persistSession();
+					}
+					return null;
 				}
 
 				if (creationGen !== internal.worktreeCreationGeneration) {
@@ -1380,9 +1389,10 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				appData.loadSessions();
 				appData.loadApiUserSessions();
 
-				if (response.upload_migration_errors?.length) {
-					console.warn('[Worktree] Upload migration had errors:', response.upload_migration_errors);
-				}
+				// A socket fallback has neither migrated paths nor upload references.
+				// Never turn an attachment send into a words-only turn.
+				const reattach = !response.query_started && (!!pendingUploadPaths?.length || !!response.upload_migration_errors?.length);
+				if (reattach) creation?.reattach?.(response.session_id);
 
 				// User navigated away during POST: backend still created the
 				// worktree + session and (if query_started) kicked off the
@@ -1390,6 +1400,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// the current (switched) session's state.
 				if (creationGen !== internal.worktreeCreationGeneration) {
 					console.debug('[Worktree] User navigated away — backend query already running in background');
+					if (reattach) return false;
 					// Fallback only needed if backend didn't start the query
 					// (e.g. spawn failed). In that case fire WS query if we can.
 					if (!response.query_started && wsConn.isConnected()) {
@@ -1440,6 +1451,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 
 				persistSession();
 
+				if (reattach) {
+					update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId),
+						error: REATTACH_BEFORE_SEND }));
+					return false;
+				}
 				if (response.query_started) {
 					// Start the SSE feed FIRST — before any async WS work. The
 					// headless query runner (sessions_worktree.py →
@@ -1464,8 +1480,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				// Fallback path: backend failed to spawn the query (rare). The
-				// backend already migrated uploads server-side before the turn
-				// submit, so nothing to do here but send the query via WS.
+				// prompt has no attachments and can be sent as-is via WS.
 				if (!wsConn.isConnected()) {
 					wsConn.connect();
 					await waitForConnectionVoid();

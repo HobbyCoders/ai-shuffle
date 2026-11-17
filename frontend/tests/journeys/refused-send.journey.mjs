@@ -154,7 +154,8 @@ const worktreeFallbackRefused = {
 				const body = JSON.parse(init.body);
 				seen.prompted = typeof body.prompt === 'string' && body.prompt.length > 0;
 				seen.commandId = body.client_message_id || null;
-				body.pending_upload_paths = [missing];
+				if (body.pending_upload_paths?.length) body.pending_upload_paths.push(missing);
+				else delete body.prompt; // exercise the old promptless peer fallback separately
 				const response = await original(input, { ...init, body: JSON.stringify(body) });
 				try { seen.created.push(await response.clone().json()); } catch { seen.created.push(null); }
 				return response;
@@ -207,6 +208,40 @@ const worktreeFallbackRefused = {
 		const tail = spans(recording, (s) => Number(s.stop) > 0, { from: refusedAt });
 		const last = tail[tail.length - 1];
 		expect(!last || last.end < recording.durationMs - 2000, `Stop is still shown at the end of the case: ${JSON.stringify(tail)}`);
+	}
+};
+
+const partialMigration = {
+	name: 'worktree-upload-migration-refused',
+	setup: worktreeFallbackRefused.setup,
+	async act({ page, mark, hook, variant }) {
+		const box = composer(page);
+		const words = `migration ${uniq()} ${fakeAiTag(variant)}`.trim();
+		const file = { name: `present-${uniq()}.txt`, mimeType: 'text/plain', buffer: Buffer.from('present') };
+		const attach = async () => {
+			await page.locator('input[type="file"]').first().setInputFiles(file);
+			await box.locator('[data-file-chip]').waitFor();
+		};
+		const send = page.getByRole('button', { name: 'Send', exact: true });
+		await mark('stage a real attachment and send alongside an expired path');
+		await box.pressSequentially(words);
+		await attach();
+		await send.click();
+		await page.getByText('Message not sent. Reattach the files and send again.', { exact: true }).first().waitFor();
+		const [created] = await page.evaluate(() => window.__journeyWorktree.created);
+		expect(created?.upload_migration_errors?.length && !created.query_started, 'migration refused the opening turn');
+		expect(hook.queries.length === 0 && !(await stopShown(page)), 'no socket fallback ran');
+		expect(await composerText(page) === words && !(await box.locator('[data-file-chip]').count()), 'words restored without stale chips');
+		const history = () => page.evaluate(async id => (await (await fetch(`/api/v1/sessions/${id}`)).json()).messages, created.session_id);
+		expect(!(await history()).some(m => m.role === 'user'), 'no phantom transcript row');
+		await mark('reattach and send explicitly in the new chat');
+		await attach();
+		await send.click();
+		await waitTurnSettled(page);
+		const rows = (await history()).filter(m => m.role === 'user');
+		const paths = rows[0]?.metadata?.upload_paths ?? [];
+		expect(rows.length === 1 && rows[0].content.includes(words.split(' ')[1]) && paths.length === 1
+			&& paths[0].includes(file.name.slice(0, -4)) && rows[0].content.includes(paths[0]), 'single admitted retry carries the reattached file');
 	}
 };
 
@@ -309,6 +344,6 @@ await runJourney({
 	// The fetch wrappers see the page's own requests only while the product
 	// service worker is kept out (CI's loopback instance).
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
-	cases: [worktreeFallbackRefused, startAheadOfFeedRefused],
+	cases: [worktreeFallbackRefused, partialMigration, startAheadOfFeedRefused],
 	allow: [...DEV_INSTANCE_NOISE]
 });

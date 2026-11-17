@@ -1112,7 +1112,7 @@ export const activeSession = {
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
 
-	sendMessage: (prompt: string, options?: { skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void; turn?: SendReservation }) =>
+	sendMessage: (prompt: string, options?: { onReattach?: (chat: string) => void; skipWorktreeSetup?: boolean; skipMessageAppend?: boolean; pendingUploadPaths?: string[]; compactFirst?: boolean; stillAtDestination?: () => boolean; notesForm?: { pathPrompt: string; runsHere: () => Promise<boolean> }; onDispatched?: () => void; turn?: SendReservation }) =>
 		messageSender.sendMessage(prompt, options),
 	/** Take a send's place in line before awaiting, then pass it as
 	 *  `options.turn` (#1444; see send-order.ts). */

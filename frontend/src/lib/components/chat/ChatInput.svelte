@@ -1511,14 +1511,15 @@
 		// The chat a New chat send made: New chat taking a session with no
 		// navigation since. Its words belong there if refused (#1444).
 		let madeChat: string | null = null;
+		let needsReattachment = false;
 		const stopWatchingReason = activeSession.subscribe(s => {
 			if (s.error !== reasonAtSend.error) reasonSet.error = true;
 			if (s.worktreeError !== reasonAtSend.worktreeError) reasonSet.worktreeError = true;
 			if (destination.chat === null && !madeChat && s.sessionId && getInitGeneration() === destination.navigation) madeChat = s.sessionId;
 		});
-		const priorDraftJSON = getDraftJSON();
+		let priorDraftJSON = getDraftJSON();
 		const priorInputValue = inputValue;
-		const priorUploadedFiles = uploadedFiles;
+		let priorUploadedFiles = uploadedFiles;
 		// The draft is cleared below, before the cold-cache check lets the
 		// message go: a reload in that wait finds the words here (S3).
 		const pendingNote = mayGo || notesForm
@@ -1569,6 +1570,11 @@
 			// This composer has gone: no snapshot of it decides anything. The
 			// words, upload chips included, go in front of the draft their chat
 			// has now, the chat being the one sent to or the one this send made.
+			if (needsReattachment && madeChat && get(activeSession).sessionId !== madeChat) {
+				keepRefusedSend(destination, madeChat, priorDraftJSON);
+				refuseSend('Message not sent. Open the new chat and reattach the files.', 'warning');
+				return;
+			}
 			if (composerGone) {
 				nameRefusal(held);
 				const paths = priorUploadedFiles.map((f) => f.full_path).filter(Boolean);
@@ -1663,6 +1669,17 @@
 				: {};
 			const sent = await activeSession.sendMessage(finalPrompt, {
 				...late,
+				onReattach: (chat) => {
+					madeChat = chat;
+					needsReattachment = true;
+					priorUploadedFiles = [];
+					// Migrating a batch can move some files before another fails.
+					// Keep the document, but never offer stale upload paths to Send.
+					try {
+						priorDraftJSON = JSON.stringify(JSON.parse(priorDraftJSON), (_key, value) =>
+							Array.isArray(value) ? value.filter(n => n?.type !== 'fileChip' || !pendingPaths?.includes(n.attrs?.fullPath)) : value);
+					} catch { /* plain-text draft has no inline chips */ }
+				},
 				...(holdUntilDispatched && released ? { onDispatched: released } : {}),
 				...(pendingPaths?.length ? { pendingUploadPaths: pendingPaths } : {}),
                 ...(pendingReferences.length ? { pendingUploadReferences: pendingReferences } : {}),
