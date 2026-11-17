@@ -26,7 +26,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from fluid.codemode import SubprocessKernel
 from fluid.codemode.kernel import HostReply
 from fluid.codemode.session import CodeModeSession
@@ -229,6 +228,18 @@ async def test_in_cell_timeout_output_keeps_the_direct_cap_and_spills(tmp_path) 
     assert "line 1500 of noise" in full and full.rstrip().endswith("FATAL-BEFORE-HANG")
 
 
+@needs_bash
+async def test_bash_has_one_deadline_for_its_whole_run(tmp_path) -> None:
+    """A command that closes its output late and then hangs gets the time
+    left, not a second full timeout, so the cut timeout really bounds it."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    command = "echo EARLY; sleep 1.5; exec >/dev/null 2>&1; sleep 30"
+    out = await bash.handler({"command": command, "timeout": 2}, _ctx(tmp_path))
+    assert out.is_error and "timed out after 2s" in out.text and "EARLY" in out.text
+    assert loop.time() - started < 3.2
+
+
 async def test_bash_with_too_little_time_left_is_not_run(tmp_path) -> None:
     marker = tmp_path / "ran"
     token = current_call_time_left.set(lambda: 5.5)
@@ -308,3 +319,111 @@ async def test_a_worker_started_inside_a_bridged_call_is_not_bound(tmp_path) -> 
         current_call_time_left.reset(token)
     assert seen[0] is not None and seen[0]() == 10.0
     assert seen[1] is None
+
+
+# ── all three through the real native loop, scripted provider ───────────────
+
+
+def _tool_call(name: str, args: dict, tuid: str) -> list:
+    import json
+
+    from fluid.providers.base import StreamChunk
+
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "tool_use", "tool_name": name, "tool_use_id": tuid}),
+        StreamChunk("tool_args_delta", {"index": 0, "partial_json": json.dumps(args)}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+def _final_text(text: str) -> list:
+    from fluid.providers.base import StreamChunk
+
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "text"}),
+        StreamChunk("text_delta", {"index": 0, "text": text}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "end_turn"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+class _Scripted:
+    name = "anthropic"
+
+    def __init__(self, scripts: list) -> None:
+        from fluid.providers.base import ProviderCaps
+
+        self.caps = ProviderCaps(explicit_cache_breakpoints=True, max_cache_breakpoints=4)
+        self.scripts = scripts
+        self.requests: list = []
+
+    async def stream(self, request):
+        self.requests.append(request)
+        for chunk in self.scripts[min(len(self.requests) - 1, len(self.scripts) - 1)]:
+            yield chunk
+
+
+def _last_tool_result(request) -> str:
+    from fluid.messages import ToolResultBlock
+
+    for message in reversed(request.messages):
+        for block in message.content:
+            if isinstance(block, ToolResultBlock):
+                content = block.content
+                return content if isinstance(content, str) else repr(content)
+    raise AssertionError("no tool result in the request")
+
+
+@needs_bash
+@posix_only
+async def test_the_native_loop_hands_the_model_what_timed_out_calls_printed(tmp_path) -> None:
+    """Bash's own timeout (JSON path), Bash under a cell's per-call ceiling,
+    and a cell that prints then hangs: each next model request carries the
+    text printed before the timeout, said to be partial."""
+    from fluid.engine.native import NativeLoop
+    from fluid.events import UserTurn
+    from fluid.store.base import MemoryStore
+
+    hang = _py("print('BASH-SAID-THIS', flush=True); import time; time.sleep(60)")
+    direct = _Scripted([
+        _tool_call("Bash", {"command": hang, "timeout": 1}, "b1"), _final_text("done")])
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    loop = NativeLoop(
+        provider=direct, store=MemoryStore(), model="claude-sonnet-5", registry=registry,
+        permissions=PermissionEngine("never_ask"), ctx=_ctx(tmp_path),
+    )
+    try:
+        await loop.submit(UserTurn(content="run it"))
+        await loop.wait_turn()
+    finally:
+        await loop.aclose()
+    seen = _last_tool_result(direct.requests[1])
+    assert "timed out after 1s" in seen and "BASH-SAID-THIS" in seen and "may be incomplete" in seen
+
+    in_cell = f"from tools.Bash import Bash\nBash(command={hang!r}, timeout=60)\n"
+    cell_hang = _hang_after("CELL-SAID-THIS")
+    coded = _Scripted([
+        _tool_call("run_python", {"code": in_cell, "timeout": 2}, "c1"),
+        _tool_call("run_python", {"code": cell_hang, "timeout": 1}, "c2"),
+        _final_text("done"),
+    ])
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=7))
+    loop = NativeLoop(
+        provider=coded, store=MemoryStore(), model="claude-sonnet-5", registry=registry,
+        codemode=session, permissions=PermissionEngine("never_ask"), ctx=_ctx(tmp_path),
+    )
+    try:
+        await loop.submit(UserTurn(content="run them"))
+        await loop.wait_turn()
+    finally:
+        await loop.aclose()
+    seen = _last_tool_result(coded.requests[1])
+    assert "BASH-SAID-THIS" in seen and "cut from 60s" in seen and "cancelled before" not in seen
+    seen = _last_tool_result(coded.requests[2])
+    assert "CELL-SAID-THIS" in seen and "printed before the timeout and may be incomplete" in seen
