@@ -8,6 +8,7 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict, Optional, cast
 
+from app.core.models import profile_name_error
 from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
     apply_list_ops,
@@ -234,6 +235,8 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def create_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        if name_error := profile_name_error(args.get("name")):
+            return _error(name_error)
         mode_error = _tool_mode_error(args)
         if mode_error:
             return _error(mode_error)
@@ -386,6 +389,8 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def update_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        if args.get("name") is not None and (name_error := profile_name_error(args["name"])):
+            return _error(name_error)
         from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("profile_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")
