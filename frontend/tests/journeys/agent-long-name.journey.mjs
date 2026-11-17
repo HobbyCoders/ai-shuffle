@@ -11,7 +11,7 @@
 // agents on a throwaway instance but never delete one (owner-only by design,
 // tests/api/test_preview_project_management.py).
 import { runJourney } from './runner.mjs';
-import { api, expect, gotoApp, uniq, waitChat } from './lib/app.mjs';
+import { api, expect, gotoApp, showSidebar, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const NAME_MAX = 100;
@@ -146,6 +146,36 @@ await runJourney({
 		},
 		act: ({ page, mark }) => steps(page, mark),
 		verify: ({ page, log }) => check(page, log)
+	}, {
+		name: 'failed-save-stays-in-header-until-success',
+		viewports: ['desktop', 'phone'],
+		allow: [{ kind: 'failed_requests', status: 422, url: /\/api\/v1\/agents$/, reason: 'intentional one-shot rejection of the draft create in this case' }],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			await page.getByRole('button', { name: 'New agent', exact: true }).filter({ visible: true }).first().click();
+			await page.getByRole('dialog', { name: 'New agent' }).getByRole('button', { name: 'Create', exact: true }).click();
+		},
+		async act({ page, mark }) {
+			await mark('show the reason for a rejected create in the header');
+			await page.route('**/api/v1/agents', (route) => route.request().method() === 'POST'
+				? route.fulfill({ status: 422, json: { detail: 'Test: rejected agent save' } })
+				: route.fallback());
+			const field = page.getByRole('textbox', { name: 'Name', exact: true });
+			const candidate = `zzsave${uniq()}`;
+			await field.fill(candidate);
+			const status = page.locator('.agd').getByRole('status').filter({ hasText: /^Save failed: Test: rejected agent save$/ });
+			await status.waitFor();
+			await page.unroute('**/api/v1/agents');
+
+			await mark('save corrected draft through API and clear the error');
+			await field.fill(`${candidate}-corrected`);
+			await page.locator('.agd').getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
+			await status.waitFor({ state: 'hidden' });
+			await waitAgents(page, `${candidate}-corrected`, 1);
+		},
+		verify: () => {}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
 });

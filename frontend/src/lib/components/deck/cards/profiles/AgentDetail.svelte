@@ -48,7 +48,8 @@
 		isNew: boolean;
 		isAdmin: boolean;
 		folder: string;
-		saveState: 'idle' | 'saving' | 'saved' | 'error';
+		saveState: 'idle' | 'saving' | 'saved';
+		saveError: string;
 		duplicating: boolean;
 		remoteChange: string;
 		tab: AgentTab;
@@ -91,6 +92,7 @@
 		isAdmin,
 		folder,
 		saveState,
+		saveError,
 		duplicating,
 		remoteChange,
 		tab,
@@ -137,7 +139,7 @@
 
 	const kind = $derived(builtin ? 'Built-in' : 'Yours');
 	const updated = $derived.by(() => {
-		if (draft) return 'Not saved yet';
+		if (draft) return saveError ? '' : 'Not saved yet';
 		const at = editingProfile?.updated_at;
 		if (!at) return '';
 		const ms = Date.parse(at);
@@ -177,17 +179,17 @@
 </script>
 
 {#snippet topStatus()}
-	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveState === 'error' || draft || nameTooLong} role="status" aria-live="polite">
-		{#if nameTooLong}
+	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveError || draft || nameTooLong} role="status" aria-live="polite">
+		{#if saveError}
+			<span class="save-error">Save failed: {saveError}</span>
+		{:else if nameTooLong}
 			Name too long
-		{:else if draft}
-			Name it to save
 		{:else if saveState === 'saving'}
 			<LoaderCircle class="spin" />Saving
 		{:else if saveState === 'saved'}
 			<Check />Saved
-		{:else if saveState === 'error'}
-			Not saved
+		{:else if draft}
+			Name it to save
 		{/if}
 	</span>
 {/snippet}
@@ -349,6 +351,10 @@
 		font-size: 12px;
 		color: var(--st-mfg);
 		white-space: nowrap;
+	}
+	.save-error {
+		white-space: normal;
+		overflow-wrap: anywhere;
 	}
 	.savetick.ok {
 		color: var(--st-primary);

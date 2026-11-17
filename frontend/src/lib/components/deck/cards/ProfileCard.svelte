@@ -16,7 +16,7 @@
 	import { watchResources } from '$lib/services/watch-resources';
 	import AIGenerateDialog from './AIGenerateDialog.svelte';
 	import { notify } from '$lib/stores/notifications';
-	import { api, type Profile, exportAgent, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
+	import { api, type Profile, exportAgent, getErrorMessage, importAgent, parseAgentExportFile, type AgentExport } from '$lib/api/client';
 	import { getSubagentDefault, putSubagentDefault, type SubagentDefault } from '$lib/api/subagentDefault';
 	import {
 		STARTER_TEAM_ID,
@@ -252,7 +252,8 @@
 	/** The open agent's id; '' while drafting a new one; null when none is open. */
 	const selectedId = $derived(viewMode !== 'form' ? null : editingProfile ? editingProfile.id : '');
 	const isNew = $derived(!editingProfile || editingProfile.id === draftId);
-	let saveState = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+	let saveState = $state<'idle' | 'saving' | 'saved'>('idle');
+	let saveError = $state('');
 	let duplicating = $state(false);
 
 	const sections = $derived(
@@ -396,6 +397,7 @@
 		await flushPendingPersist();
 		remoteChange = '';
 		saveState = 'idle';
+		saveError = '';
 		draftId = null;
 		resetForm();
 		editingProfile = null;
@@ -429,6 +431,7 @@
 	}
 
 	function openEditForm(profile: Profile) {
+		saveError = '';
 		editingProfile = profile;
 		const config = profile.config || {};
 		const sp = (config.system_prompt || {}) as {
@@ -716,10 +719,12 @@
 					saveState = 'saving';
 					try {
 						await writeProfile();
+						saveError = '';
 						saveState = 'saved';
-					} catch (e: any) {
-						saveState = 'error';
-						notify('Failed to save agent: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
+					} catch (error) {
+						saveState = 'idle';
+						saveError = getErrorMessage(error) || 'Unknown error';
+						notify(`Failed to save agent: ${saveError}`, { severity: 'error' });
 					}
 				}
 			} finally {
@@ -930,6 +935,7 @@
 		await flushPendingPersist();
 		remoteChange = '';
 		saveState = 'idle';
+		saveError = '';
 		draftId = null;
 		openFormFromGenerated(data as AgentExport);
 		showDetail();
@@ -1087,6 +1093,7 @@
 						isAdmin={$isAdminStore}
 						folder={openFolder}
 						{saveState}
+						{saveError}
 						{duplicating}
 						{remoteChange}
 						{tab}
