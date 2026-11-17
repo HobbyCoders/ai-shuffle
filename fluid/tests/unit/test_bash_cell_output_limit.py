@@ -291,6 +291,30 @@ async def test_a_broken_skill_verdict_and_listing_are_bounded(tmp_path) -> None:
     assert "BROKEN" in listing.text and len(listing.text) < 3_000
 
 
+async def test_historical_errors_are_bounded_when_read(tmp_path) -> None:
+    from fluid.codemode.continual import Synthesizer
+    from fluid.codemode.session import CodeModeSession, register_code_mode_tools
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    error = "ValueError: " + "z" * 30_000 + "END_ERROR"
+    store.save("broken", '"""An old skill."""\n')
+    store.mark_verified("broken", error)
+    store.journal_append({"kind": "cell", "code": "f()", "error": error})
+
+    registry = _registry()
+    session = CodeModeSession(registry, skills=store)
+    register_code_mode_tools(registry, session)
+    try:
+        listing = await registry.dispatch("list_tools", {}, _ctx(tmp_path))
+    finally:
+        await session.aclose()
+    prompt = Synthesizer(None, "probe", store, context_window=200_000)._prompt(store.journal_entries())
+    for rendered in (listing.text, prompt):
+        assert "ValueError:" in rendered and "END_ERROR" in rendered
+        assert "z" * cm_truncate.ERROR_SUMMARY_CAP not in rendered
+
+
 async def test_a_short_traceback_is_unchanged(tmp_path) -> None:
     result = await _run_cell(_registry(), _ctx(tmp_path), "x = {}\nx['missing']\n")
     # Byte-identical to the rendering before errors were bounded.

@@ -96,6 +96,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from fluid._filelock import file_lock
+from fluid.codemode.truncate import ERROR_SUMMARY_CAP, clip_part
 
 _log = logging.getLogger(__name__)
 
@@ -1077,7 +1078,7 @@ class SkillStore:
             description=_description_of(source) or name,
             uses=int(info.get("uses", 0)),
             updated_at=float(info.get("updated_at", 0.0)),
-            broken=broken,
+            broken=clip_part(broken, ERROR_SUMMARY_CAP) if isinstance(broken, str) else broken,
         )
 
     def list(self) -> list[Skill]:
@@ -1650,7 +1651,12 @@ class SkillStore:
                         break
                     reached = i + 1
                     try:
-                        out.append((i + 1, json.loads(line)))
+                        entry = json.loads(line)
+                        # Older kernels journaled the whole exception. Apply the summary
+                        # budget on read, without rewriting history or moving cursors.
+                        if isinstance(entry, dict) and isinstance(entry.get("error"), str):
+                            entry["error"] = clip_part(entry["error"], ERROR_SUMMARY_CAP)
+                        out.append((i + 1, entry))
                     except ValueError:
                         continue
         except OSError:
