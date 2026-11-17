@@ -111,6 +111,24 @@ async function headingPlace(page, name, level) {
 // The service worker would answer the stubbed requests before page.route sees them.
 await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ context: { serviceWorkers: 'block' } }), allow: DEV_INSTANCE_NOISE, cases: [
  {
+  name: 'desktop-category-opens-at-top', viewports: ['desktop'],
+  async setup({ page, status }) {
+   await openSettings(page, status, 1440);
+   await category(page, 'General');
+   await page.getByRole('heading', { name: 'General', exact: true }).filter({ visible: true }).first().waitFor();
+  },
+  async act({ page, mark }) {
+   await mark('scroll General in the shared Settings viewport');
+   await page.locator('.settings-viewport').evaluate(el => el.scrollTo({ top: 300 }));
+   expect((await scrollState(page)).page > 100, 'General was scrolled');
+   await mark('select System from the category index');
+   await category(page, 'System');
+   await page.getByRole('heading', { name: 'System', exact: true, level: 1 }).filter({ visible: true }).first().waitFor();
+   const { page: top } = await scrollState(page);
+   expect(top === 0, `System opens at the top (scrollTop=${top})`);
+  }
+ },
+ {
   name: 'one-pane-run-and-back', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page);

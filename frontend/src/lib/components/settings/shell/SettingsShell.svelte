@@ -224,7 +224,7 @@
 		return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
 	}
 
-	// Stacked, every category shares the one scroller (.settings-viewport), so a
+	// Settings categories share the one scroller (.settings-viewport), so a
 	// category opens at its top, not where the previous one was left. Reopening
 	// the same category from the index counts as opening it; its own list and
 	// detail steps keep the offset CollectionPage gives them.
@@ -235,7 +235,7 @@
 		const current = shownCategory;
 		const previous = lastShown;
 		lastShown = current;
-		if (previous === undefined || previous === current || current === null || !untrack(() => stacked)) return;
+		if (previous === undefined || previous === current || current === null) return;
 		root?.querySelector<HTMLElement>('.settings-viewport')?.scrollTo?.({ top: 0 });
 	});
 
