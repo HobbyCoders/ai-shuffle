@@ -844,6 +844,21 @@ describe('SessionCard swipe gestures', () => {
 		}
 	});
 
+	it("keeps main's vertical axis lock ahead of the endpoint route", async () => {
+		slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await timedPointer(card, 'pointerDown', 200, 20, 0);
+		await timedPointer(frame, 'pointerMove', 204, 80, 80);
+		await timedPointer(frame, 'pointerMove', 280, 40, 164);
+		await timedPointer(frame, 'pointerUp', 280, 40, 166);
+		// Horizontal endpoints would qualify, but the first decisive move was
+		// vertical: this is still the list's scroll, not a row swipe.
+		expect(onSnooze).not.toHaveBeenCalled();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
 	it("keeps main's sampled-speed route after a pause longer than 350ms", async () => {
 		const ticks = [1000, 1020, 1040];
 		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
