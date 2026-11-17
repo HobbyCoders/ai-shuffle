@@ -37,6 +37,7 @@
 		NATIVE_PROVIDER_KEY
 	} from '$lib/constants/models';
 	import { computerUse } from '$lib/stores/computerUse.svelte';
+	import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
 	import EmptyDetail from '$lib/components/settings/shell/EmptyDetail.svelte';
 	import Segmented from '$lib/components/settings/rows/Segmented.svelte';
 	import SelectField from '$lib/components/settings/rows/SelectField.svelte';
@@ -255,6 +256,7 @@
 	let saveState = $state<'idle' | 'saving' | 'saved'>('idle');
 	let saveError = $state('');
 	let duplicating = $state(false);
+	let pendingSwitch = $state<{ profile: Profile; tab?: AgentTab; problem: string } | null>(null);
 
 	const sections = $derived(
 		sectionAgents(profiles, {
@@ -411,10 +413,22 @@
 	}
 
 	/** Open an agent, saving the open one's pending edits first. */
-	async function selectProfile(profile: Profile, nextTab?: AgentTab) {
+	async function selectProfile(profile: Profile, nextTab?: AgentTab, discard = false) {
+		if (pendingSwitch && !discard) return;
 		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
 		if (!alreadyOpen) {
-			await flushPendingPersist();
+			if (discard) {
+				await dropPending();
+				pendingSwitch = null;
+			} else {
+				await flushPendingPersist();
+				if (pendingSwitch) return;
+				const problem = agentNameProblem(profileForm.name);
+				if (viewMode === 'form' && formSnapshot() !== lastPersisted && problem) {
+					pendingSwitch = { profile, tab: nextTab, problem };
+					return;
+				}
+			}
 			remoteChange = '';
 			saveState = 'idle';
 			if (draftId !== profile.id) draftId = null;
@@ -428,6 +442,14 @@
 		showDetail();
 		await tick();
 		root?.querySelector('.st-dpane')?.scrollTo?.({ top: 0 });
+	}
+
+	async function stayAndFixName() {
+		pendingSwitch = null;
+		tab = 'profile';
+		showDetail();
+		await tick();
+		root?.querySelector<HTMLInputElement>('.st-dpane input.st-txt')?.focus();
 	}
 
 	function openEditForm(profile: Profile) {
@@ -1163,6 +1185,20 @@
 		onImport={handleImportFile}
 	/>
 </div>
+
+<ConfirmDialog
+	open={!!pendingSwitch}
+	title="Fix the agent name or discard edits?"
+	message={`${pendingSwitch?.problem ?? ''} Stay to keep editing, or discard your unsaved changes and switch agents.`}
+	cancelLabel="Stay and fix"
+	confirmLabel="Discard and switch"
+	focusCancel
+	danger
+	onCancel={stayAndFixName}
+	onConfirm={() => {
+		if (pendingSwitch) void selectProfile(pendingSwitch.profile, pendingSwitch.tab, true);
+	}}
+/>
 
 <!-- AI Generate Dialog ("Describe it") -->
 <AIGenerateDialog

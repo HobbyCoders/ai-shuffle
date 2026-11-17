@@ -178,6 +178,49 @@ await runJourney({
 			await waitAgents(page, corrected, 1);
 		},
 		verify: () => {}
+	}, {
+		name: 'invalid-name-switch-keeps-draft-until-discard',
+		viewports: ['desktop', 'phone'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark }) {
+			const key = uniq().slice(-6);
+			const first = await api(page, 'POST', '/agents', { id: `draft-${key}`, name: `Draft ${key}`, description: 'Original', config: {} });
+			const target = await api(page, 'POST', '/agents', { id: `next-${key}`, name: `Next ${key}`, config: {} });
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			const row = (name) => page.locator('[data-settings-item]').filter({ hasText: name });
+			await row(first.name).click();
+			const name = page.getByRole('textbox', { name: 'Name', exact: true });
+			const description = page.getByRole('textbox', { name: 'Description', exact: true });
+			const draftName = 'w'.repeat(101);
+			await name.fill(draftName);
+			await description.fill('Edited description');
+			await page.getByText(/^Too long: 101 of 100 characters/).waitFor();
+			const switchAgent = async () => {
+				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
+				if (await back.isVisible()) await back.click();
+				await row(target.name).click();
+			};
+			await mark('request a switch with a name error and another field edited');
+			await switchAgent();
+			const dialog = page.getByRole('dialog', { name: 'Fix the agent name or discard edits?' });
+			await dialog.getByText(/^Too long: 101 of 100 characters/).waitFor({ timeout: 5_000 });
+			await dialog.getByRole('button', { name: 'Stay and fix', exact: true }).filter({ visible: true }).last().click();
+			expect(await name.inputValue() === draftName, 'the invalid name stays in the editor');
+			expect(await description.inputValue() === 'Edited description', 'the other edited field stays in the editor');
+			await mark('only explicit discard switches and resets the draft');
+			await switchAgent();
+			await dialog.getByRole('button', { name: 'Discard and switch' }).click();
+			await page.getByRole('heading', { level: 2, name: target.name, exact: true }).waitFor();
+			const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
+			if (await back.isVisible()) await back.click();
+			await row(first.name).click();
+			expect(await name.inputValue() === first.name, 'reopened agent has the original name');
+			expect(await description.inputValue() === 'Original', 'reopened agent has the original description');
+			const stored = await api(page, 'GET', `/agents/${first.id}`);
+			expect(stored.description === 'Original', 'discard never wrote the edited description');
+		},
+		verify: () => {}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
 });

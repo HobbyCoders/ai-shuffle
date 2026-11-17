@@ -27,6 +27,8 @@
 		cancelLabel?: string;
 		/** Style the confirm action as destructive. */
 		danger?: boolean;
+		/** Default to the non-destructive action, including Enter outside either button. */
+		focusCancel?: boolean;
 		/** Optional opt-in checkbox rendered between the message and the actions.
 		 *  When set, a checkbox with this label appears; its state is exposed via
 		 *  the bindable `checkboxChecked` prop so the caller can branch on confirm.
@@ -45,6 +47,7 @@
 		confirmLabel = 'Confirm',
 		cancelLabel = 'Cancel',
 		danger = false,
+		focusCancel = false,
 		checkboxLabel = undefined,
 		checkboxChecked = $bindable(false),
 		onConfirm,
@@ -82,7 +85,8 @@
 			const target = e.target instanceof Element ? e.target : null;
 			if (target?.closest('button, a[href]')) return;
 			e.stopPropagation();
-			onConfirm();
+			if (focusCancel) onCancel();
+			else onConfirm();
 		}
 	}
 </script>
@@ -92,7 +96,7 @@
 {#if open}
 	<div
 		use:portal
-		use:focusTrap={{ initial: '[data-confirm-action]' }}
+		use:focusTrap={{ initial: focusCancel ? '[data-cancel-action]' : '[data-confirm-action]' }}
 		class="ui-overlay ui-surface"
 		role="dialog"
 		aria-modal="true"
@@ -120,6 +124,7 @@
 			<div class="ui-dialog-footer">
 				<button
 					onclick={onCancel}
+					data-cancel-action
 					class="ui-button"
 				>
 					{cancelLabel}
