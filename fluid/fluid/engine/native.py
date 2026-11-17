@@ -211,6 +211,7 @@ from fluid.permissions.engine import (
     PermissionEngine,
 )
 from fluid.providers.base import (
+    CACHE_VOLATILE_META_KEY,
     TURN_MARKER_KEY,
     ProviderClient,
     ProviderRequest,
@@ -5149,7 +5150,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         assert self._resume_environment is not None
         return Message(
             role="user", content=[Text(self._resume_environment)],
-            provider_meta={HARNESS_NOTE_META_KEY: True},
+            provider_meta={HARNESS_NOTE_META_KEY: True, CACHE_VOLATILE_META_KEY: True},
         ).pin_context(self._resume_environment)
 
     def _resume_clock_tokens(self) -> int:

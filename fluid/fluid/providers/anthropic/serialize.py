@@ -28,9 +28,9 @@ from fluid.providers._transport import (
     provider_error_summary,
     usage_limit_summary,
 )
-from fluid.providers.base import ProviderRequest, StreamChunk
 from fluid.providers.anthropic.limits import resolve_max_tokens
 from fluid.providers.anthropic.thinking import clamp_effort, resolve_thinking
+from fluid.providers.base import ProviderRequest, StreamChunk, cacheable_history_end
 from fluid.tools.images import condition_image
 
 
@@ -90,7 +90,9 @@ def build_request_body(request: ProviderRequest, *,
                        compatible_provider: str | None = None,
                        model_efforts: dict[str, list[str]] | None = None) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
-    for msg in request.messages:
+    cache_end = cacheable_history_end(request.messages)
+    stable_tail: tuple[list[dict[str, Any]], int] | None = None
+    for i, msg in enumerate(request.messages):
         content = [
             b for b in (_block_to_api(blk, request.model, compatible_provider=compatible_provider) for blk in msg.content) if b
         ]
@@ -101,8 +103,10 @@ def build_request_body(request: ProviderRequest, *,
             # with the same role; folding the second into the first keeps
             # the order of every block and invents nothing.
             messages[-1]["content"].extend(content)
-            continue
-        messages.append({"role": msg.role, "content": content})
+        else:
+            messages.append({"role": msg.role, "content": content})
+        if i < cache_end:
+            stable_tail = (messages[-1]["content"], len(messages[-1]["content"]) - 1)
 
     body: dict[str, Any] = {
         "model": request.model,
@@ -144,10 +148,11 @@ def build_request_body(request: ProviderRequest, *,
         body["thinking"] = thinking
     if effort:
         body["output_config"] = {"effort": effort}
-    if breakpoints > 0 and messages:
-        last = messages[-1]["content"]
-        if last:
-            last[-1] = {**last[-1], "cache_control": {"type": "ephemeral"}}
+    if breakpoints > 0 and stable_tail is not None:
+        # Consecutive user messages may have merged a volatile reminder into
+        # the same content list. Mark the saved history block, not that suffix.
+        blocks, index = stable_tail
+        blocks[index] = {**blocks[index], "cache_control": {"type": "ephemeral"}}
     body.update(request.extra)
     if compatible_provider:
         _compatible_body(body, request, compatible_provider, model_efforts)

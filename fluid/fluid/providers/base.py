@@ -9,11 +9,21 @@ once the tool block closes.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from fluid.messages import Message
+
+# Request-only reminders must not move a cache breakpoint with each tool call.
+# This metadata stays internal: serializers never send it to a provider.
+CACHE_VOLATILE_META_KEY = "cache_volatile"
+
+
+def cacheable_history_end(messages: Sequence[Message]) -> int:
+    """End of the stable prefix, before the first request-only suffix block."""
+    return next((i for i, msg in enumerate(messages)
+                 if msg.provider_meta.get(CACHE_VOLATILE_META_KEY)), len(messages))
 
 
 @dataclass(frozen=True)
