@@ -214,18 +214,18 @@ const chatMarked = new Marked({
 export function streamingSplit(text: string, media = false): number {
 	const tokens = chatMarked.lexer(text);
 	if (Object.keys(tokens.links).length > 0) return 0;
-	const open: string[] = [];
+	const state: SplitState = { open: [], inRawBlock: false };
 	let offset = 0;
 	let last = 0;
 	let before = 0;
 	for (const token of tokens) {
 		// The lexer normalises line endings; offsets hold only while each raw is the source.
 		if (!text.startsWith(token.raw, offset)) return 0;
-		if (token.type !== 'space' && open.length === 0) {
+		if (token.type !== 'space' && state.open.length === 0 && !state.inRawBlock) {
 			before = last;
 			last = offset;
 		}
-		if (!followTags(token, open, media)) return last === offset ? before : last;
+		if (!followTags(token, state, media)) return last === offset ? before : last;
 		offset += token.raw.length;
 	}
 	return last;
@@ -245,6 +245,14 @@ const VOID_TAGS = new Set(['br', 'wbr', 'hr', 'img']);
  */
 const TAG_RE = /^<(\/?)([a-z][a-z0-9-]*)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>$/i;
 
+// Marked shares only inLink/inRawBlock between inline blocks. `top` belongs
+// to block lexing; reference definitions are handled above. Inline masking and
+// emphasis context are local to each inlineTokens call, not carried here.
+interface SplitState {
+	open: string[];
+	inRawBlock: boolean;
+}
+
 /**
  * Walk a token's raw HTML in document order, keeping the stack of plain
  * elements still open. False at the first tag that is not plain, a closing
@@ -253,12 +261,17 @@ const TAG_RE = /^<(\/?)([a-z][a-z0-9-]*)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>$
  * hit: `marked.walkTokens` collects results by concatenation, which is
  * quadratic on a long list.
  */
-function followTags(token: Token, open: string[], media: boolean): boolean {
-	// Image children become escaped alt text, not raw HTML. Media link labels
-	// are escaped by mediaHtml too; ordinary links (including ThinkingBlock's
-	// non-media renderer) still render their inline tokens and must be walked.
-	if (token.type === 'image' || (media && token.type === 'link' && embedKind('link', token.href))) return true;
+function followTags(token: Token, state: SplitState, media: boolean, rendered = true): boolean {
+	// Labels are escaped by the image/player renderers, but marked still lexes
+	// their children. outputLink resets inLink afterwards, NOT inRawBlock.
+	// Follow that boolean even in escaped labels, without treating their tags
+	// as live HTML. The inline tag token records the lexer's state after it.
+	const childrenRendered = rendered && token.type !== 'image' &&
+		!(media && token.type === 'link' && embedKind('link', token.href));
 	if (token.type === 'html') {
+		if ('inRawBlock' in token) state.inRawBlock = token.inRawBlock;
+		if (!rendered) return true;
+		const open = state.open;
 		const tag = TAG_RE.exec(token.raw.trim());
 		if (!tag) return false;
 		const name = tag[2].toLowerCase();
@@ -277,10 +290,10 @@ function followTags(token: Token, open: string[], media: boolean): boolean {
 		tokens?: Token[]; items?: Tokens.ListItem[];
 		header?: Tokens.TableCell[]; rows?: Tokens.TableCell[][];
 	};
-	if (t.tokens) for (const child of t.tokens) if (!followTags(child, open, media)) return false;
-	if (t.items) for (const item of t.items) if (!followTags(item, open, media)) return false;
-	if (t.header) for (const cell of t.header) for (const child of cell.tokens) if (!followTags(child, open, media)) return false;
-	if (t.rows) for (const row of t.rows) for (const cell of row) for (const child of cell.tokens) if (!followTags(child, open, media)) return false;
+	if (t.tokens) for (const child of t.tokens) if (!followTags(child, state, media, childrenRendered)) return false;
+	if (t.items) for (const item of t.items) if (!followTags(item, state, media, childrenRendered)) return false;
+	if (t.header) for (const cell of t.header) for (const child of cell.tokens) if (!followTags(child, state, media, childrenRendered)) return false;
+	if (t.rows) for (const row of t.rows) for (const cell of row) for (const child of cell.tokens) if (!followTags(child, state, media, childrenRendered)) return false;
 	return true;
 }
 

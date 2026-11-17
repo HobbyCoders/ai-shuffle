@@ -135,6 +135,13 @@ describe('streamingSplit (#1619)', () => {
 		expect(streamingSplit(prefix + 'Two', true)).toBe(prefix.length);
 	});
 
+	it('resumes splitting once an escaped raw-block label closes', () => {
+		const prefix = '![<code>](/a.png)\n\n![</kbd>](/b.png)\n\nOne\n\n';
+		for (const media of [false, true]) {
+			expect(streamingSplit(prefix + 'Two', media)).toBe(prefix.length);
+		}
+	});
+
 	it('still follows raw HTML in non-media link labels', () => {
 		const text = '[<style>](/movie.mp4)\n\nOne\n\nTwo';
 		expect(streamingSplit(text)).toBe(0);
@@ -150,6 +157,15 @@ describe('streamingSplit (#1619)', () => {
 			expect(streamingSplit(prefix + 'Next\n\nLast', media)).toBe(prefix.length + 'Next\n\n'.length);
 		}
 	});
+
+	it.each(['<b>', '<a href="/docs">', '<style>', '<code></code>', '<pre></pre>', '<script></script>', '<kbd></kbd>'])(
+		'advances past escaped labels with no remaining raw-block state: %s', (label) => {
+			for (const media of [false, true]) {
+				const prefix = `Intro ![${label}](/a.png).\n\nOne\n\n`;
+				expect(streamingSplit(prefix + 'Two', media)).toBe(prefix.length);
+			}
+		}
+	);
 
 	it('does not split when the lexer rewrote line endings', () => {
 		expect(streamingSplit('One.\r\n\r\nTwo')).toBe(0);

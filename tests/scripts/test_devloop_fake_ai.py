@@ -93,6 +93,22 @@ def test_script_tag_picks_the_scenario_and_unknown_names_list_the_choices(fake: 
     assert "Unknown scenario 'nope'" in unknown and "tool-bash" in unknown
 
 
+def test_chat_reasoning_streams_separately_before_answer(fake: FakeAI) -> None:
+    prompt = [{"role": "user", "content": "[script:stream-thinking-inline-html tps=0]"}]
+    response = _chat(fake, prompt)
+    assert response.status_code == 200
+    deltas = [c["delta"] for e in _sse(response.text) for c in e.get("choices", [])]
+    reasoning = "".join(d.get("reasoning", "") for d in deltas)
+    assert reasoning.startswith('Intro <a href="/docs">label\n\nhttps://example.com/')
+    assert _chat_text(response) == "Reasoning complete."
+    assert len([d for d in deltas if d.get("reasoning")]) > 1
+    first_answer = next(i for i, d in enumerate(deltas) if d.get("content"))
+    assert all(not d.get("reasoning") for d in deltas[first_answer:])
+    whole = _chat(fake, prompt, stream=False).json()["choices"][0]["message"]
+    assert whole["reasoning"] == reasoning
+    assert whole["content"] == "Reasoning complete."
+
+
 def test_tag_parameters_and_last_tag_wins() -> None:
     assert parse_tag("a [script:long] b [script:slow tps=4 latency_ms=800]") == (
         "slow", {"tps": "4", "latency_ms": "800"})
