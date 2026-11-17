@@ -282,6 +282,40 @@ def refs_footer(refs) -> str:
     )
 
 
+def _bookend_stdout(segments: list[str], cap: int, total: int, refs: Sequence[tuple]) -> str:
+    """Shares too small for per-print markers: keep two readable windows instead."""
+    def marker(prints: int, chars: int) -> str:
+        return f"…[{prints} prints, {chars} chars cut]…\n"
+
+    room = max(0, cap - len(marker(len(segments), total)))
+
+    def window(indices: range, budget: int, *, tail: bool) -> tuple[str, int]:
+        parts = []
+        whole = 0
+        for i in indices:
+            part = segments[i]
+            if len(part) > budget:
+                # Prefer complete prints unless even the edge print won't fit.
+                if not whole and budget:
+                    parts.append(part[-budget:] if tail else part[:budget])
+                break
+            parts.append(part)
+            whole += 1
+            budget -= len(part)
+        return "".join(reversed(parts) if tail else parts), whole
+
+    n = len(segments)
+    head, first = window(range(n), room // 2, tail=False)
+    tail, last = window(range(n - 1, -1, -1), room - room // 2, tail=True)
+    kept = len(head) + len(tail)
+    cut = marker(n - first - last, total - kept)
+    payload = head + (cut if len(cut) <= cap else "…"[:cap]) + tail
+    return (
+        payload.rstrip("\n") + f"\n…[stdout truncated: kept {kept} of {total} chars across "
+        f"{n} prints — one cell's stdout budget is {cap:,} chars.{_recovery_clause(refs)}]"
+    )
+
+
 def fair_share_stdout(
     segments: list[str],
     cap: int = DEFAULT_STDOUT_CAP,
@@ -295,9 +329,9 @@ def fair_share_stdout(
     was working towards: the summary, the file list, the verdict. This instead
     max-min fair-shares the budget across ``segments`` (one segment ≈ one
     ``print``): every segment shorter than its share survives whole and frees
-    its surplus for the greedy ones, so *something* from every print gets
-    through. Each truncated segment keeps its head and carries an inline
-    ``…[-N chars]`` marker, and a closing notice names the totals, the budget
+    its surplus for the greedy ones. If shares are too thin even for markers,
+    keep the first and last prints with one counted gap. Otherwise each cut
+    segment carries an inline ``…[-N chars]`` marker. A closing notice names
     that did the cutting, the heaviest drops, and — when the cell's tool
     results are alive in the kernel — the ``_refs`` handles that hold them
     whole, so the recovery is a slice rather than a re-run.
@@ -337,16 +371,7 @@ def fair_share_stdout(
         # when every print is truncated.
         reserve = len(_drop_marker(len(segment) - budget)) + 1
         if budget <= reserve:
-            # Shares too thin to carry a counted marker (a cell with hundreds
-            # of prints): a bare ellipsis still shows the print happened,
-            # paid for out of the segment's own share. A share too thin even
-            # for that (thousands of prints) joins one ellipsis for the whole
-            # run, so the payload cannot grow past the cap two characters at
-            # a time.
-            drops.append((index + 1, len(segment)))
-            if budget >= 2 or not parts or parts[-1] != "…\n":
-                parts.append("…\n")
-            continue
+            return _bookend_stdout(segments, cap, total, refs)
         room = budget - reserve
         # A share big enough to split keeps the print's tail too: a printed
         # command result or log ends with its error or summary.

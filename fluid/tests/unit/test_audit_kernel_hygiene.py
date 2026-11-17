@@ -68,12 +68,16 @@ def test_fair_share_small_prints_survive_whole() -> None:
     assert "across 12 prints" in out
 
 
-def test_fair_share_degenerate_share_still_marks_every_print() -> None:
-    segments = [f"line {i} " + "q" * 200 + "\n" for i in range(300)]
-    out = fair_share_stdout(segments, 1_000)
-    assert "across 300 prints" in out
-    # Every print is represented by at least an ellipsis marker.
-    assert out.count("…") >= 300
+def test_fair_share_degenerate_share_keeps_bookends() -> None:
+    segments = [f"line {i} " + "q" * 32 + "\n" for i in range(1200)]
+    out = fair_share_stdout(segments, 8_000)
+    payload, notice = out.rsplit("\n", 1)
+    head, marker, tail = payload.partition("…[")
+    counts, _, tail = tail.partition("]…\n")
+    cut = segments[len(head.splitlines()):len(segments) - len(tail.splitlines())]
+    assert head.startswith(segments[0]) and tail.endswith(segments[-1].rstrip("\n"))
+    assert marker and counts == f"{len(cut)} prints, {sum(map(len, cut))} chars cut"
+    assert len(payload) <= 8_000 and "across 1200 prints" in notice
 
 
 # ── pure policy: ref threshold boundary ───────────────────────────────────
