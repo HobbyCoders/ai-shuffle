@@ -334,7 +334,7 @@ def test_the_summary_scrubs_home_paths_like_the_error(monkeypatch) -> None:
     try:
         raise ValueError("/home/someone/proj/app.py is broken")
     except ValueError as exc:
-        err, full, summary = _runner._format_cell_traceback(exc)
+        err, _full, summary = _runner._format_cell_traceback(exc)
     assert err.endswith("ValueError: ~/proj/app.py is broken\n")
     assert summary == "ValueError: ~/proj/app.py is broken"
 
