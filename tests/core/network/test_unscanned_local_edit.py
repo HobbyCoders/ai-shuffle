@@ -14,7 +14,7 @@ import pytest
 from app.core import encryption
 from app.db import database
 from app.db import network as store
-from app.network import engine
+from app.network import engine, envelope
 from tests.core.network.harness import converge, exchange, join
 
 
@@ -949,6 +949,7 @@ def test_a_peer_presence_change_is_not_a_local_edit(request, own_data_keys, back
         edit(record_id, "edited on a")
         engine.scan_all()
     _busy(b)
+    engine._QUORUM_FREE.clear()  # as after a restart: only the retained op tells
     result = exchange(a, b)
     assert result.retry == result.lost == 0, result.reasons
     with b.active():
@@ -990,6 +991,57 @@ def test_an_unscanned_edit_made_with_a_presence_change_is_still_signed(request, 
             assert read(record_id) == "edited on b"  # B's clock was ahead
         # A's version is the kept loser (re-keying scans may add their own).
         assert a.device_id in [c["losing_device_id"] for c in _conflicts(worker, record_id, collection)]
+
+
+@pytest.mark.parametrize("delivery", ["same chunk", "presence first", "presence first, then a restart"])
+@pytest.mark.parametrize("kind", ["connector", "automation", "oauth setting"])
+def test_a_presence_change_without_a_retained_op(workers, own_data_keys, kind, delivery):
+    """B holds the record without its signed op, as after a state copy. What
+    B's process hashed under the recorded hash still tells a changed quorum
+    from an edit. With neither (a restart between A's presence op and A's
+    edit, before any scan), B's unchanged copy is signed and ordered like the
+    scanner's quorum republish: the workers agree, the loser is a kept
+    conflict and nobody signs again."""
+    a, b, collection, record_id, edit, read = _nested_pair(workers, kind, "a")
+    with b.active(), database.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM sync_ops WHERE collection = %s AND record_id = %s", (collection, record_id))
+        assert cursor.rowcount
+    signed = len(_own_ops(b, collection))
+    with a.active():
+        engine.publish_presence(version="9.9.9")
+    if delivery != "same chunk":
+        assert exchange(a, b).retry == 0
+    with a.active():
+        edit(record_id, "edited on a")
+        engine.scan_all()
+    _busy(b)
+    if delivery != "presence first":
+        engine._QUORUM_FREE.clear()  # same chunk: step 1 hashes the row again
+    result = exchange(a, b)
+    assert result.retry == 0, result.reasons
+    if delivery.endswith("restart"):
+        assert [op["record_id"] for op in _own_ops(b, collection)[signed:]] == [record_id]
+        expected, loser = "converged", a.device_id  # B's clock was ahead
+    else:
+        assert result.lost == 0 and len(_own_ops(b, collection)) == signed
+        expected, loser = "edited on a", None
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert read(record_id) == expected
+        if loser:
+            assert loser in [c["losing_device_id"] for c in _conflicts(worker, record_id, collection)]
+    quiet = [len(_own_ops(worker, collection)) for worker in (a, b)]
+    for _ in range(3):
+        converge([a, b])
+        for worker in (a, b):
+            with worker.active():
+                engine.scan_all()
+    assert [len(_own_ops(worker, collection)) for worker in (a, b)] == quiet
+    for worker in (a, b):
+        with worker.active():
+            assert read(record_id) == expected
 
 
 def test_the_scanner_still_republishes_for_a_quorum_change(workers, own_data_keys):
@@ -1073,3 +1125,278 @@ async def test_launch_catch_up_keeps_the_hold_without_rollback_proof(workers, mo
     finally:
         engine.hold_outbox(False)
     assert _own_ops(b) == [] and _tag_name(b) == "from-b"
+
+
+# -- A row the apply itself rewrote is no local edit: its sync record follows
+# -- it (``engine._follow_rewrites``).
+
+def test_set_null_children_match_the_schema(workers):
+    """Every shared row a shared parent's deletion rewrites is listed."""
+    from app.network import policy
+    worker = workers("schema")
+    tables = {coll.table: name for name, coll in policy.COLLECTIONS.items()}
+    found = {}
+    for table in sorted(r["name"] for r in worker.sql("SELECT name FROM sqlite_master WHERE type='table'")):
+        for fk in worker.sql(f"PRAGMA foreign_key_list('{table}')"):
+            if (fk["on_delete"] == "SET NULL" and table in tables and fk["table"] in tables
+                    and tables[table] in policy.SCANNED_COLLECTIONS):
+                found.setdefault(tables[fk["table"]], set()).add((tables[table], fk["from"]))
+    assert found == {parent: set(children) for parent, children in engine._SET_NULL_CHILDREN.items()}
+
+
+def _reference_case(kind):
+    """(parent collection, child collection, child id, column, create, drop
+    the parent, rename the child, drop the child, read the child)."""
+    from app.db import api_users, profiles, templates
+
+    if kind == "connector key":
+        def create():
+            api_users.create_api_user("parent", "connector:child", "hash")
+            database.create_connector("child", "telegram", "original", {}, [], api_user_id="parent",
+                                      is_active=False)
+        return ("api_users", "connectors", "api_user_id", create, lambda: api_users.delete_api_user("parent"),
+                lambda name: database.update_connector("child", name=name),
+                lambda: database.delete_connector("child"), lambda: database.get_connector("child"))
+    if kind == "template agent":
+        def create():
+            database.create_profile(profile_id="parent", name="Agent", description=None, config={})
+            templates.create_template("child", "original", "prompt", profile_id="parent")
+        return ("agents", "templates", "profile_id", create, lambda: profiles.delete_profile("parent"),
+                lambda name: templates.update_template("child", name=name),
+                lambda: templates.delete_template("child"), lambda: templates.get_template("child"))
+
+    def create():
+        database.create_profile(profile_id="parent", name="Agent", description=None, config={})
+        api_users.create_api_user("child", "original", "hash")
+        with database.get_db() as conn:
+            conn.cursor().execute("UPDATE api_users SET profile_id = %s WHERE id = %s", ("parent", "child"))
+    return ("agents", "api_users", "profile_id", create, lambda: profiles.delete_profile("parent"),
+            lambda name: api_users.update_api_user("child", name=name),
+            lambda: api_users.delete_api_user("child"), lambda: api_users.get_api_user("child"))
+
+
+def _reference_pair(factory, kind):
+    case = _reference_case(kind)
+    a, b = _pair(factory)
+    with a.active():
+        case[3]()
+        engine.scan_all()
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert case[-1]()[case[2]] == "parent"
+    return (a, b) + case
+
+
+def _stream_rounds(a, b, rounds=4):
+    """Further sync and scan rounds sign nothing on either worker."""
+    before = [len(_own_ops(worker)) for worker in (a, b)]
+    for _ in range(rounds):
+        converge([a, b])
+        _scan_is_quiet(a, b)
+    assert [len(_own_ops(worker)) for worker in (a, b)] == before
+
+
+_REFERENCES = ["connector key", "template agent", "key agent"]
+
+
+@pytest.mark.parametrize("then", ["nothing", "rename", "delete"])
+@pytest.mark.parametrize("kind", _REFERENCES)
+@pytest.mark.parametrize("backend", ["shim", "postgres"])
+def test_a_peer_parent_deletion_clearing_a_reference_is_not_a_local_edit(request, backend, kind, then):
+    """A deletes a parent and then renames or deletes the row that referenced
+    it. On B the parent's tombstone clears the reference through the foreign
+    key. B signs nothing for that, so A's next version of the row applies in
+    the same pass: the rename wins and the delete stays a delete."""
+    a, b, _, child, column, _, drop, rename, remove, read = _reference_pair(
+        request.getfixturevalue("pg_workers" if backend == "postgres" else "workers"), kind)
+    with a.active():
+        drop()
+        if then == "rename":
+            rename("from-a")
+        elif then == "delete":
+            remove()
+        engine.scan_all()
+    signed = len(_own_ops(b))
+    result = exchange(a, b)
+    assert result.retry == result.lost == result.rejected == 0, result.reasons
+    assert _watermark(b, a) == _own_ops(a)[-1]["origin_seq"]
+    _scan_is_quiet(b)
+    assert len(_own_ops(b)) == signed
+    for worker in (a, b):
+        with worker.active():
+            row = read()
+            if then == "delete":
+                assert row is None
+            else:
+                assert row[column] is None and row["name"] == ("from-a" if then == "rename" else "original")
+    assert not _conflicts(a, "child", child) and not _conflicts(b, "child", child)
+    _stream_rounds(a, b)
+
+
+@pytest.mark.parametrize("kind", _REFERENCES)
+def test_a_cleared_reference_alone_is_signed_by_no_one_else(workers, kind):
+    """Only the parent's tombstone has arrived (A's scanner has not published
+    the row yet). B's scanner stays quiet, and a later rename from A applies."""
+    a, b, parent, child, column, _, drop, rename, _, read = _reference_pair(workers, kind)
+    with a.active():
+        drop()
+        assert engine.scan_collection(parent) == 1  # the row's own op is not signed yet
+    signed = len(_own_ops(b))
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    with b.active():
+        assert read()[column] is None
+    _scan_is_quiet(b)
+    assert len(_own_ops(b)) == signed
+    with a.active():
+        rename("from-a")
+        engine.scan_all()
+    result = exchange(a, b)
+    assert result.retry == result.lost == 0, result.reasons
+    assert len(_own_ops(b)) == signed
+    with b.active():
+        assert read()["name"] == "from-a"
+    _stream_rounds(a, b)
+
+
+@pytest.mark.parametrize("kind", _REFERENCES)
+def test_an_unscanned_edit_of_a_row_whose_reference_a_peer_clears_is_still_published(workers, kind):
+    """B renamed the row and its scanner has not run. The parent's tombstone
+    from A clears the reference on B, but the record does not follow a row
+    that was already changed: B's scanner publishes the rename."""
+    a, b, parent, child, column, _, drop, rename, _, read = _reference_pair(workers, kind)
+    _advance_clock(b)  # A's scanner publishes its cleared reference too: B's rename is the later edit
+    with b.active():
+        rename("from-b")
+    with a.active():
+        drop()
+        assert engine.scan_collection(parent) == 1
+    exchange(a, b)
+    with b.active():
+        assert engine.scan_collection(child) == 1
+    _settle(a, b)
+    for worker in (a, b):
+        with worker.active():
+            assert read()["name"] == "from-b" and read()[column] is None
+    _stream_rounds(a, b)
+
+
+def test_postgres_local_edit_while_a_peer_tombstone_clears_the_reference(pg_workers, private_cluster, monkeypatch):
+    """The app renames the connector between the apply's read of it and the
+    parent's deletion. The record does not follow: the rename is published."""
+    a, b, parent, child, column, _, drop, _, _, read = _reference_pair(pg_workers, "connector key")
+    _advance_clock(b)  # as above: B's rename is the later edit
+    with a.active():
+        drop()
+        assert engine.scan_collection(parent) == 1
+    state = _interleave(monkeypatch, private_cluster, b, "materialize", "api_users", "parent",
+                        _sql("UPDATE connectors SET name = %s WHERE id = 'child'", ("concurrent",)))
+    result = exchange(a, b)
+    _finish(state)
+    assert result.retry == result.lost == 0, result.reasons
+    with b.active():
+        assert read()["name"] == "concurrent" and read()[column] is None
+        assert engine.scan_collection(child) == 1
+    _settle(a, b)
+    with a.active():
+        assert read()["name"] == "concurrent"
+    _stream_rounds(a, b)
+
+
+def test_a_peer_slot_selection_flipping_another_account_is_not_a_local_edit(workers):
+    """A selects account two and renames account one. On B the selection turns
+    account one off; that is the apply's projection, so A's rename of account
+    one applies in the same pass and B signs nothing."""
+    a, b = _pair(workers)
+    with a.active():
+        for provider in ("one", "two"):
+            database.create_model_provider(provider, provider, "openai", "https://api.openai.com/v1",
+                                           enabled=(provider == "one"))
+        engine.scan_all()
+    _settle(a, b)
+    with a.active():
+        database.set_model_provider_enabled("two", True)
+        database.update_model_provider("one", name="renamed")
+        engine.scan_all()
+    signed = len(_own_ops(b))
+    result = exchange(a, b)
+    assert result.retry == result.lost == result.rejected == 0, result.reasons
+    _scan_is_quiet(b)
+    assert len(_own_ops(b)) == signed
+    for worker in (a, b):
+        with worker.active():
+            assert database.get_model_provider("one")["name"] == "renamed"
+            assert [row["id"] for row in database.get_enabled_model_providers()] == ["two"]
+    _stream_rounds(a, b)
+
+
+# -- A local write that lands while the peer's op is being applied: the op
+# -- waits one pass, the next pass signs the write first and both converge.
+
+@pytest.mark.parametrize("peer", ["rename", "delete", "rename then delete"])
+def test_postgres_local_write_landing_during_a_peer_apply_converges_next_pass(
+        pg_workers, private_cluster, monkeypatch, peer):
+    """B's app activates the connector (as a watch restore does) after the
+    apply's first check and before it locks the row. No exemption: that pass
+    replaces nothing, the next signs B's write, and normal ordering decides."""
+    a, b, _, child, _, _, _, rename, remove, read = _reference_pair(pg_workers, "connector key")
+    with a.active():
+        if peer != "delete":
+            rename("from-a")
+            engine.scan_all()
+        if peer != "rename":
+            remove()
+            engine.scan_all()
+    state = _interleave(monkeypatch, private_cluster, b, "_check_local", child, "child",
+                        _sql("UPDATE connectors SET is_active = TRUE WHERE id = 'child'"))
+    signed = len(_own_ops(b, child))
+    waited = exchange(a, b)
+    _finish(state)
+    assert waited.retry == 1 and waited.lost == 0 and "waiting to be signed" in waited.reasons[0]
+    assert len(_own_ops(b, child)) == signed
+    with b.active():
+        assert read()["name"] == "original" and read()["is_active"]
+    again = exchange(a, b)  # the next pass
+    with b.active():
+        engine.resume_pending()
+    assert again.retry == 0, again.reasons
+    mine, theirs = _own_ops(b, child), _own_ops(a, child)[-1]
+    assert len(mine) == signed + 1
+    local_wins = envelope.compare(mine[-1]["clock"], b.device_id, theirs["clock"], a.device_id) > 0
+    _settle(a, b)
+    rows = []
+    for worker in (a, b):
+        with worker.active():
+            row = read()
+            rows.append(None if row is None else (row["name"], bool(row["is_active"])))
+    expected = ("original", True) if local_wins else None if peer != "rename" else ("from-a", False)
+    assert rows == [expected, expected]
+    loser = (a if local_wins else b).device_id
+    for worker in (a, b):
+        assert loser in [c["losing_device_id"] for c in _conflicts(worker, "child", child)]
+    _stream_rounds(a, b)
+
+
+def test_two_workers_do_not_keep_signing_over_each_other(workers):
+    """Round after round, both workers hold an unscanned edit of the same row
+    when the other's signed version of it arrives. Each signs its edit once
+    and orders it; the rounds after the last edit sign nothing (no livelock)."""
+    a, b, _, child, _, _, _, rename, _, read = _reference_pair(workers, "connector key")
+    for round_number in range(3):
+        for worker in (a, b):
+            with worker.active():
+                rename(f"signed-{worker.device_id[-4:]}-{round_number}")
+                assert engine.scan_collection(child) == 1
+                rename(f"unscanned-{worker.device_id[-4:]}-{round_number}")
+        before = [len(_own_ops(worker, child)) for worker in (a, b)]
+        exchange(a, b)
+        exchange(b, a)
+        assert [len(_own_ops(worker, child)) for worker in (a, b)] == [count + 1 for count in before]
+    _settle(a, b)
+    names = []
+    for worker in (a, b):
+        with worker.active():
+            names.append(read()["name"])
+    assert names[0] == names[1] and names[0].startswith("unscanned-")
+    _stream_rounds(a, b, rounds=6)

@@ -440,8 +440,12 @@ def test_bad_envelope_inside_a_chunk_keeps_watermark_semantics(workers):
         # Without savepoints (the SQLite shim) the chunk is replayed one
         # envelope per transaction; the harness shares one connection, so a
         # nested read-only get_db() may already have committed an earlier op,
-        # which the replay then counts as a duplicate.
-        assert result.applied + result.duplicate == 2
+        # which the replay then counts as a duplicate. When that commit fell
+        # between an op's row and its sync record, the replay finds a row no
+        # record knows, signs it like any unpublished local row (#1605) and
+        # counts the op, which says the same, as lost. One PostgreSQL
+        # transaction cannot leave a chunk half committed.
+        assert result.applied + result.duplicate + result.lost == 2
         assert result.rejected == 1 and result.pending == 2
         assert "bad signature" in result.reasons
         with store.get_db() as conn:

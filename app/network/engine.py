@@ -624,6 +624,28 @@ def content_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     return crypto.sha256_hex(envelope_mod.record_bytes(subset))
 
 
+# The hash of a nested-secret row -> the same row's hash without the quorum
+# fingerprint, for rows this process has hashed. A sync record names only the
+# first; this is what lets ``_unsigned`` tell a changed quorum from a changed
+# row when no signed op is retained (a state copy stores none). A pure function
+# of the row's content, so an entry is never wrong, only absent.
+_QUORUM_FREE: Dict[Tuple[str, str], str] = {}
+
+
+def _without_quorum(coll: policy.Collection, record: Mapping[str, Any]) -> str:
+    return content_hash(coll, {name: value for name, value in record.items() if name != "_nested_rekey"})
+
+
+def _row_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
+    """``content_hash`` of a row this worker holds, remembered in ``_QUORUM_FREE``."""
+    digest = content_hash(coll, record)
+    if "_nested_rekey" in record:
+        if len(_QUORUM_FREE) >= 4096:
+            _QUORUM_FREE.clear()
+        _QUORUM_FREE[(coll.name, digest)] = _without_quorum(coll, record)
+    return digest
+
+
 def _column_value(coll: policy.Collection, name: str, value: Any, encrypted_columns: Sequence[str]) -> Any:
     if name in coll.json_fields:
         # Wire values are already decoded JSON, including scalar strings/null.
@@ -1031,7 +1053,7 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
             return None
         new_hash = ""
     else:
-        new_hash = content_hash(coll, plaintext)
+        new_hash = _row_hash(coll, plaintext)
         pending_active = coll.name == "session_active" and bool(row.get("local_pending"))
         if (not force and not pending_active and existing is not None and not bool(existing["deleted"])
                 and existing["content_hash"] == new_hash):
@@ -2078,15 +2100,15 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         if present is not False:
             # Absent when read under lock: a row inserted since is a newer
             # local change, which the scanner publishes over this tombstone.
-            materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
+            _materialize_op(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
-            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id,
-                              if_absent=present is False)
+            row = _materialize_op(cursor, coll, env.record_id, plaintext,
+                                  origin_device_id=env.origin_device_id, if_absent=present is False)
         except _KeepObservation as kept:
             if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                 store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
@@ -2104,7 +2126,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             try:
                 reserialized = serialize_row(coll, row, cursor=cursor)
                 if reserialized is not None:
-                    local_hash = content_hash(coll, reserialized)
+                    local_hash = _row_hash(coll, reserialized)
             except ApplyError:
                 pass
         if row is not None and _provider_credentials_kept(coll, plaintext, row):
@@ -2365,6 +2387,20 @@ _CASCADE_CHILDREN: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "notes": (("note_attachments", "note_id"),),
 }
 
+# Shared rows a parent's deletion rewrites through ON DELETE SET NULL, same
+# shape. The apply of the parent's tombstone clears the reference on every
+# worker, so the child's sync record follows its row (``_follow_rewrites``). A
+# test checks this list against the schema's foreign keys too.
+_SET_NULL_CHILDREN: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "agents": (("api_users", "profile_id"), ("templates", "profile_id")),
+    "api_users": (("connectors", "api_user_id"),),
+}
+# child collection -> (foreign-key column, parent collection)
+_CLEARED_REFERENCES: Dict[str, Tuple[Tuple[str, str], ...]] = {}
+for _parent, _set_null in _SET_NULL_CHILDREN.items():
+    for _child, _column in _set_null:
+        _CLEARED_REFERENCES[_child] = _CLEARED_REFERENCES.get(_child, ()) + ((_column, _parent),)
+
 LOCAL_CHANGE_WAITS = "A local change is waiting to be signed"
 
 
@@ -2377,27 +2413,46 @@ def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) 
 
 def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
                           plaintext: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
-    """Whether a nested-secret row still says what the signed op its sync
-    record names says, the quorum fingerprint aside.
+    """Whether a nested-secret row still says what its sync record names, the
+    quorum fingerprint aside.
 
     ``_nested_rekey`` is in these rows' hash so that the scanner republishes
     them when the quorum changes. A peer's presence op therefore changes the
     hash of a row nobody edited here, and signing that row during an apply
     would put this worker's old copy above the peer edit about to replace
     it. The stored hash cannot be compared without the fingerprint, so the
-    row is compared with the retained op. No such op, or one that reads
-    differently, proves nothing: the row then counts as changed.
-    """
-    def content(record: Mapping[str, Any]) -> str:
-        return content_hash(coll, {name: value for name, value in record.items() if name != "_nested_rekey"})
+    row is compared with what this process saw under that hash
+    (``_QUORUM_FREE``: step 1 hashes every record of a batch before a presence
+    op in it applies, and so do the scanner and the apply that wrote the
+    row), else with the retained signed op. A reference the row no longer has
+    because this worker applied its parent's tombstone (``_follow_rewrites``)
+    is not a difference.
 
+    Neither one (a record adopted from a state copy, the quorum changed in an
+    earlier transaction, and this process restarted before its scanner saw
+    the row) proves nothing: the row then counts as changed. That keeps the
+    rule that no local change is ever replaced unsigned. The cost, when the
+    row was not edited, is what the scanner's own quorum republish does on
+    its next run anyway: this worker's copy is signed and ordered against the
+    peer's, and the loser is kept as a conflict.
+    """
     from app.network.keyring import open_envelope
-    current = content(plaintext)
+    current = _without_quorum(coll, plaintext)
+    if _QUORUM_FREE.get((coll.name, existing["content_hash"])) == current:
+        return True
     for data in store.record_ops(cursor, coll.name, record_id, origin_device_id=existing["origin_device_id"],
                                  clock=int(existing["clock"])):
         try:
             env = Envelope.from_dict(data)
-            if env.op == OP_UPSERT and content(open_envelope(ctx, env)[0]) == current:
+            if env.op != OP_UPSERT:
+                continue
+            signed = dict(open_envelope(ctx, env)[0])
+            for column, parent in _CLEARED_REFERENCES.get(coll.name, ()):
+                if plaintext.get(column) is None and isinstance(signed.get(column), str):
+                    gone = store.get_record(cursor, parent, signed[column])
+                    if gone is not None and bool(gone["deleted"]):
+                        signed[column] = None
+            if _without_quorum(coll, signed) == current:
                 return True
         except (crypto.CryptoError, envelope_mod.EnvelopeError, ValueError, KeyError, TypeError, AttributeError):
             continue
@@ -2435,7 +2490,7 @@ def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: s
         return False
     if plaintext is None:
         return False
-    current = content_hash(coll, plaintext)
+    current = _row_hash(coll, plaintext)
     if current == incoming_hash or (live and existing["content_hash"] == current):
         return False
     return not (live and "_nested_rekey" in plaintext
@@ -2456,6 +2511,89 @@ def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: s
             if _scanned_here(ctx, child, child_id):
                 found.append((child, child_id, row))
     return found
+
+
+def _rewrite_candidates(cursor, coll: policy.Collection, record_id: str, *,
+                        deleting: bool) -> List[Tuple[policy.Collection, str, dict, str]]:
+    """Before ``materialize``: the rows of other shared records the write may
+    rewrite, as (collection, record id, row, the one column it rewrites).
+
+    A deletion clears the references to the record (``_SET_NULL_CHILDREN``);
+    a provider account or slot selection projects ``enabled`` onto the other
+    accounts (``reconcile_model_provider_slots``). Plain reads, no locks: see
+    ``_follow_rewrites``.
+    """
+    found: List[Tuple[policy.Collection, str, dict, str]] = []
+    if deleting:
+        for child_name, column in _SET_NULL_CHILDREN.get(coll.name, ()):
+            child = policy.collection(child_name)
+            cursor.execute(f"SELECT * FROM {child.table} WHERE {column} = %s", (record_id,))
+            found += [(child, child.record_id(row), dict(row), column) for row in cursor.fetchall()]
+    elif _provider_selection(coll, record_id):
+        from app.db.model_provider_slots import model_provider_slot
+        providers = policy.collection("model_providers")
+        cursor.execute(f"SELECT * FROM {providers.table}")
+        # Only a slotted account's flag is a projection; the caller holds the
+        # slot lock every local selection takes (_check_local).
+        found += [(providers, providers.record_id(row), dict(row), "enabled") for row in cursor.fetchall()
+                  if model_provider_slot(row)
+                  and (coll.name, record_id) != (providers.name, providers.record_id(row))]
+    return found
+
+
+def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, dict, str]]) -> None:
+    """After ``materialize``: move the sync record of each row the write
+    itself rewrote to the row's new hash, at the version it already names.
+
+    The same rule as for the applied record, whose stored hash is of the row
+    as this worker holds it. Every worker that applies the op derives the
+    same rewrite, so nothing is signed for it; left alone, the row would read
+    as an unsigned local change and be signed above the peer's next version
+    of it (#1605).
+
+    Only when the row held exactly the recorded hash before and now differs
+    from that in the rewritten column alone. A local write that committed in
+    between changes something else or makes the comparison fail: the record
+    stays, the row stays an unsigned local change and the scanner publishes
+    it. One that waits for the row commits after this transaction and then
+    differs from the moved record. So this needs, and takes, no lock beyond
+    those the write took: plain reads of the row, and one ``sync_records`` row
+    written under ``network_state``, which every apply holds. A nested-secret
+    row whose hash is behind the quorum keeps its record too, for the
+    scanner's republish; ``_holds_signed_version`` knows the cleared reference.
+    """
+    for target, target_id, before, column in candidates:
+        after = _read_row(cursor, target, target_id)
+        if after is None or after.get(column) == before.get(column):
+            continue
+        if target.name != "model_providers" and after.get(column) is not None:
+            continue  # a local write pointed it elsewhere: not the cleared reference
+        known = store.get_record(cursor, target.name, target_id)
+        if known is None or bool(known["deleted"]):
+            continue
+        try:
+            was = serialize_row(target, before, cursor=cursor)
+            now = serialize_row(target, after, cursor=cursor)
+        except ApplyError:
+            continue  # unreadable here: the scanner decides once it can read it
+        if was is None or now is None or content_hash(target, was) != known["content_hash"]:
+            continue
+        moved = _row_hash(target, now)
+        if content_hash(target, {**was, column: now.get(column)}) != moved:
+            continue
+        store.put_record(cursor, target.name, target_id, clock=int(known["clock"]),
+                         origin_device_id=known["origin_device_id"], content_hash=moved,
+                         deleted=False, order_seq=known.get("order_seq"))
+
+
+def _materialize_op(cursor, coll: policy.Collection, record_id: str,
+                    record: Optional[Mapping[str, Any]], **kwargs) -> Optional[dict[str, Any]]:
+    """``materialize`` for a peer's version; the sync records of the other
+    rows the write rewrites follow them (``_follow_rewrites``)."""
+    candidates = _rewrite_candidates(cursor, coll, record_id, deleting=record is None)
+    row = materialize(cursor, coll, record_id, record, **kwargs)
+    _follow_rewrites(cursor, candidates)
+    return row
 
 
 def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked: bool) -> bool:
@@ -3554,15 +3692,16 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             continue
         if item["deleted"]:
             if present is not False:  # see _apply_in_order
-                materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+                _materialize_op(cursor, coll, item["record_id"], None,
+                                origin_device_id=item["origin_device_id"])
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
                                        ctx=ctx)
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             try:
-                row = materialize(cursor, coll, item["record_id"], prepared,
-                                  origin_device_id=item["origin_device_id"], if_absent=present is False)
+                row = _materialize_op(cursor, coll, item["record_id"], prepared,
+                                      origin_device_id=item["origin_device_id"], if_absent=present is False)
             except _KeepObservation as kept:
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
@@ -3577,7 +3716,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 try:
                     reserialized = serialize_row(coll, row, cursor=cursor)
                     if reserialized is not None:
-                        local_hash = content_hash(coll, reserialized)
+                        local_hash = _row_hash(coll, reserialized)
                 except ApplyError:
                     pass
             if row is not None and _provider_credentials_kept(coll, prepared, row):
