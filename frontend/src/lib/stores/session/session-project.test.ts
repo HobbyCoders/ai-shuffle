@@ -42,6 +42,30 @@ describe('resolveSessionProject', () => {
 	it('does not inherit a leaving session when nothing is provided', () => {
 		expect(resolveSessionProject({})).toEqual({ project: '', projectV2Id: null });
 	});
+
+	// #1659: who runs the chat decides, never a comparison of the two ids.
+	it('holds the shared id alone for a chat another worker runs, whatever local id the row or cache names', () => {
+		expect(resolveSessionProject({
+			projectId: 'app', projectV2Id: 'pv2-theirs', isRemote: true
+		})).toEqual({ project: '', projectV2Id: 'pv2-theirs' });
+		expect(resolveSessionProject({
+			ephemeralProject: 'app', ephemeralProjectV2Id: 'pv2-theirs', isRemote: true
+		})).toEqual({ project: '', projectV2Id: 'pv2-theirs' });
+	});
+
+	it('keeps the local id of a chat this worker runs, and of one whose owner is not known yet', () => {
+		for (const isRemote of [false, undefined]) {
+			expect(resolveSessionProject({
+				projectId: 'app', projectV2Id: 'pv2-former-identity', isRemote
+			})).toEqual({ project: 'app', projectV2Id: 'pv2-former-identity' });
+		}
+	});
+
+	it('keeps the local id of a chat another worker runs when there is no shared id to hold', () => {
+		expect(resolveSessionProject({
+			projectId: 'app', projectV2Id: null, isRemote: true
+		})).toEqual({ project: 'app', projectV2Id: null });
+	});
 });
 
 describe('resolvePersistedProject', () => {

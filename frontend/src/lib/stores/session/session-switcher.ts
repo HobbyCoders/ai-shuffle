@@ -677,11 +677,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
+		// Who owns the chat. Without a loaded row (a deep link, a row outside the
+		// loaded page) a re-open of the chat on screen keeps what /live already
+		// said: unknown reads as mirrored, which hides the shown transcript behind
+		// a first-sync check until /live answers again (#890).
+		const keepOwner = !row && state.sessionId === sessionId;
+		const isRemote = keepOwner ? state.isRemote : row?.is_remote;
+		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
+		// The owner also decides whether the row's legacy id names a project here
+		// (#1659); an owner not known yet is settled by /live below.
 		const { project: targetProject, projectV2Id: targetV2 } = resolveSessionProject({
 			projectId: projectId !== undefined ? projectId : row?.project_id,
 			projectV2Id: projectV2Id !== undefined ? projectV2Id : (row?.project_v2_id ?? undefined),
 			ephemeralProject: ephemeral?.project,
 			ephemeralProjectV2Id: ephemeral?.projectV2Id,
+			isRemote,
 		});
 
 		// Single update: set sessionId, reset + restore ephemeral state.
@@ -718,14 +728,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const binding = restoreComposerBinding(ephemeral, row, {
 			rowPermissionWins: attachedSinceSaved(ephemeral, row),
 		});
-
-		// Who owns the chat. Without a loaded row (a deep link, a row outside the
-		// loaded page) a re-open of the chat on screen keeps what /live already
-		// said: unknown reads as mirrored, which hides the shown transcript behind
-		// a first-sync check until /live answers again (#890).
-		const keepOwner = !row && state.sessionId === sessionId;
-		const isRemote = keepOwner ? state.isRemote : row?.is_remote;
-		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
 
 		update(s => ({
 			...s,
@@ -1026,6 +1028,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 					projectV2Id: meta.project_v2_id,
 					ephemeralProject: initialProject,
 					ephemeralProjectV2Id: initialProjectV2Id,
+					// A reload restores the project from a saved snapshot and a
+					// deep link has no row: this answer is where the owner is known.
+					isRemote: meta.is_remote ?? getState().isRemote,
 				}));
 			}
 			// No sidebar row (hidden child/deep link), or a reload whose saved
