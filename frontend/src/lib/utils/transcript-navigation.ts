@@ -1,6 +1,12 @@
 import type { ChatMessage } from '$lib/stores/types';
 import { agentDelivery } from './agent-delivery';
 import { createPrefixFold } from './prefix-fold';
+import { splitUploadMentions, uploadFileName } from './message-presentation';
+
+function recordedPaths(message: ChatMessage): string[] {
+	const paths = message.metadata?.upload_paths;
+	return Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string' && p.length > 0) : [];
+}
 
 export interface UserTurnNavigationItem {
 	id: string;
@@ -72,7 +78,8 @@ function createTurnOpenerTracker(): (message: ChatMessage) => boolean {
  *  their turn ids (steered or opening) and prompt lengths, no regex. */
 export function turnNavigationSignatureStep(signature: string, message: ChatMessage): string {
 	if (!isNavigableUserTurn(message) || !message.id) return signature;
-	return signature + `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}\u0000`;
+	const paths = recordedPaths(message);
+	return signature + `${message.id}:${message.turnId ?? ''}:${(message.content ?? '').length}${paths.length ? JSON.stringify(paths) : ''}\u0000`;
 }
 
 /** The rail signature per streaming fold without re-reading every historical
@@ -90,10 +97,13 @@ export function deriveUserTurnNavigationItems(messages: ChatMessage[]): UserTurn
 	for (const message of messages) {
 		if (!opensTurn(message) || !message.id || seen.has(message.id)) continue;
 		seen.add(message.id);
+		const paths = recordedPaths(message);
+		const content = paths.length ? splitUploadMentions(message.content, paths)
+			.map(part => typeof part === 'string' ? part : uploadFileName(part.path)).join('') : message.content;
 		result.push({
 			id: message.id,
-			label: compactTurnLabel(message.content),
-			...splitTurnPreview(message.content)
+			label: compactTurnLabel(content),
+			...splitTurnPreview(content)
 		});
 	}
 	return result;

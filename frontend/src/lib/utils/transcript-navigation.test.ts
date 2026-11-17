@@ -4,6 +4,7 @@ import {
 	needsYouTurnIds,
 	turnsOwningTools,
 	compactTurnLabel,
+	createTurnNavigationSignature,
 	deriveUserTurnNavigationItems,
 	isNavigableUserTurn,
 	resolveCurrentTurnIndex,
@@ -49,6 +50,20 @@ describe('transcript navigation derivation', () => {
 	it('compacts labels and provides an empty-content fallback', () => {
 		expect(compactTurnLabel('   ')).toBe('User message');
 		expect(compactTurnLabel('abcdefgh', 6)).toBe('abcde…');
+	});
+
+	it('shows recorded attachments by name in both the tick label and hover preview', () => {
+		const path = '/project/chat-uploads/my photo.png';
+		const [item] = deriveUserTurnNavigationItems([message({
+			role: 'user', content: `@${path}\ncompare with @other and @${path}`,
+			metadata: { upload_paths: [path] }
+		})]);
+		const signature = createTurnNavigationSignature();
+		const turn = message({ role: 'user', content: `@${path}` });
+		expect(signature([turn])).not.toBe(signature([{ ...turn, metadata: { upload_paths: [path] } }]));
+		expect(item.title).toBe('my photo.png');
+		expect(item.preview).toBe('compare with @other and my photo.png');
+		expect(item.label).toBe('my photo.png compare with @other and my photo.png');
 	});
 
 	it('splits the first line as the hover title', () => {

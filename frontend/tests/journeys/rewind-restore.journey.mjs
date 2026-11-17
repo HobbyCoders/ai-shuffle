@@ -265,6 +265,12 @@ await runJourney({
 				await bubble.waitFor({ timeout: 15_000 });
 				const row = (await bubble.locator('xpath=ancestor::*[contains(@class,"user-message") or @data-role="user"][1]').innerText().catch(() => '')) || (await bubble.innerText());
 				expect(!/@?\/\S*uploads\//.test(row), `no raw upload path in the sent bubble: ${JSON.stringify(row)}`);
+				await mark('hover the attached turn');
+				const nav = page.getByRole('navigation', { name: 'Navigate user turns' });
+				await nav.getByRole('button', { name: /^Turn 2 of 2:/ }).hover();
+				const preview = await nav.locator('.preview.is-visible').innerText();
+				const basename = await bubble.innerText();
+				expect(preview.includes(basename) && !preview.includes('/' + basename) && !preview.includes('\\' + basename), `attachment name in turn preview: ${preview}`);
 				await mark('rewind the message with the attachment');
 				await confirmRewindOfLastUserMessage(page);
 				await waitChat(page, { messages: '2' }, { timeout: 30_000 });
