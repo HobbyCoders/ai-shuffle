@@ -2743,6 +2743,41 @@ def test_http_agent_import_rejects_invalid_name(authenticated_client, invalid_na
     assert database.get_profile("garden") is None
 
 
+def test_http_agent_import_can_rename_a_legacy_export(authenticated_client):
+    response = authenticated_client.post("/api/v1/agents/import", json={
+        "version": "1.0", "type": "ai-shuffle-agent", "agent": {"name": "a" * 101},
+        "new_name": "Rescued export",
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == "Rescued export"
+
+
+def test_http_nested_agent_writes_reject_invalid_name(authenticated_client):
+    from app.db import database
+
+    database.create_profile("garden", "Garden", None, {})
+    path = "/api/v1/agents/garden/agents"
+    valid = {"name": "Bee", "description": "Original", "prompt": "Pollinate"}
+    created = authenticated_client.post(path, json=valid)
+    assert created.status_code == 201, created.text
+    invalid = {**valid, "name": "🌿" * 101, "description": "Edited"}
+    assert authenticated_client.post(path, json=invalid).status_code == 422
+    assert authenticated_client.put(f"{path}/bee", json=invalid).status_code == 422
+    assert database.get_subagent("bee")["description"] == "Original"
+    listing = authenticated_client.get("/api/v1/agents")
+    assert listing.status_code == 200
+    assert next(row for row in listing.json() if row["id"] == "bee")["name"] == "Bee"
+
+
+def test_http_create_derives_addressable_bounded_ids(authenticated_client):
+    path = "/api/v1/agents"
+    for name, expected_id in [("🌿" * 100, "agent"), ("a" * 100, "a" * 50), ("a" * 100, "a" * 48 + "-1")]:
+        created = authenticated_client.post(path, json={"name": name, "config": {}})
+        assert created.status_code == 201, created.text
+        assert created.json()["id"] == expected_id
+        assert authenticated_client.get(f"{path}/{expected_id}").json()["name"] == name
+
+
 def test_http_agent_names_accept_100_code_points_and_import_ids_leave_room_for_suffix(authenticated_client):
     payload = {"version": "1.0", "type": "ai-shuffle-agent", "agent": {"name": "a" * 100}}
     for expected_id in ["a" * 50, "a" * 48 + "-1"]:

@@ -13,8 +13,8 @@ from psycopg2.errors import UniqueViolation
 from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileCreate, ProfileUpdate,
-    AgentExport, AgentExportData, AgentImportRequest, PROFILE_ID_MAX_LENGTH
+    Profile, ProfileCreate, ProfileName, ProfileUpdate,
+    AgentExport, AgentExportData, AgentImportRequest, PROFILE_ID_MAX_LENGTH, profile_name_error
 )
 from app.db import database
 from app.db.async_database import run_sync
@@ -91,6 +91,16 @@ def _refuse_assistant_agent(*agent_ids: str) -> None:
             status_code=status.HTTP_410_GONE,
             detail="This agent ID is retired",
         )
+
+
+def _derived_profile_id(name: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    return re.sub(r"-+", "-", slug).strip("-")[:PROFILE_ID_MAX_LENGTH].rstrip("-") or fallback
+
+
+def _suffixed_profile_id(base_id: str, counter: int) -> str:
+    suffix = f"-{counter}"
+    return base_id[:PROFILE_ID_MAX_LENGTH - len(suffix)] + suffix
 
 
 def _check_profile_modified(profile: dict) -> None:
@@ -543,7 +553,7 @@ async def get_all_available_subagents(
 # Request model for creating/updating a subagent via profile
 class ProfileSubagentRequest(BaseModel):
     """Request to create or update a subagent via profile endpoint"""
-    name: Optional[str] = None  # Required for create, optional for update
+    name: Optional[ProfileName] = None  # Required for create, optional for update
     description: str
     prompt: str
     tools: Optional[List[str]] = None
@@ -777,12 +787,7 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
         inserts under it. Awaiting between the last probe and the insert would
         widen that gap into a real race for the id.
         """
-        # Derive ID from name if not provided
-        if request.id:
-            profile_id = request.id
-        else:
-            profile_id = re.sub(r'[^a-z0-9-]', '-', request.name.lower())
-            profile_id = re.sub(r'-+', '-', profile_id).strip('-')
+        profile_id = request.id or _derived_profile_id(request.name, "agent")
 
         # Ensure uniqueness. Bounded so a store that keeps reporting a conflict (a
         # bug, a stale read, or absurd collision counts) can never spin forever and
@@ -796,7 +801,7 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Could not allocate a unique profile id for: {base_id}",
                 )
-            profile_id = f"{base_id}-{counter}"
+            profile_id = _suffixed_profile_id(base_id, counter)
             counter += 1
 
         try:
@@ -1228,16 +1233,11 @@ async def import_profile(
 
     # Determine profile name
     profile_name = import_request.new_name or agent_data.name
+    # A valid override can rescue a legacy file without persisting its old name.
+    if error := profile_name_error(profile_name):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=error)
 
-    # Determine profile ID
-    if import_request.new_id:
-        profile_id = import_request.new_id
-    else:
-        # Generate ID from name
-        profile_id = re.sub(r'[^a-z0-9-]', '-', profile_name.lower())
-        profile_id = re.sub(r'-+', '-', profile_id).strip('-')[:PROFILE_ID_MAX_LENGTH].rstrip('-')
-        if not profile_id:
-            profile_id = "imported-agent"
+    profile_id = import_request.new_id or _derived_profile_id(profile_name, "imported-agent")
 
     def _load() -> dict:
         """Id allocation, subagent filtering and the insert in ONE hop.
@@ -1253,8 +1253,7 @@ async def import_profile(
         base_id = profile_id
         counter = 1
         while database.get_profile(profile_id):
-            suffix = f"-{counter}"
-            profile_id = base_id[:PROFILE_ID_MAX_LENGTH - len(suffix)].rstrip("-") + suffix
+            profile_id = _suffixed_profile_id(base_id, counter)
             counter += 1
             if counter > 100:  # Safety limit
                 raise HTTPException(
