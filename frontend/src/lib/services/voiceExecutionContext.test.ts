@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 const update = vi.hoisted(() => vi.fn(async (_owner: string, _context: unknown) => ({})));
 vi.mock('$lib/api/voice', () => ({ updateVoiceContext: update }));
-import { persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
+import { idleVoiceContextFor, persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 
 describe('voice execution context', () => {
@@ -22,6 +22,8 @@ describe('voice execution context', () => {
 	it('carries the shown effort with the revision it was saved at', () => {
 		const state = { sessionId: 'chat', effortRev: 3, modelOverride: 'opus', effortLevelOverride: 'low' } as unknown as ActiveSessionState;
 		expect(voiceContextFor(state)).toMatchObject({ effort: 'low', effort_rev: 3 });
+		expect(idleVoiceContextFor(state)).not.toHaveProperty('effort');
+		expect(idleVoiceContextFor(state)).not.toHaveProperty('effort_rev');
 	});
 	it('never sends a level without its revision (stage-1 review S6)', () => {
 		// A snapshot with no revision would be saved as a pick over a level

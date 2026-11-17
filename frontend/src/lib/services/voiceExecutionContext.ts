@@ -30,6 +30,13 @@ export function voiceContextFor(state: ActiveSessionState, row?: { effort?: stri
 	};
 }
 
+/** A render or model switch is not an effort pick. Only a delegation send
+ * includes the fitted level; an explicit pick already has its own PUT. */
+export function idleVoiceContextFor(state: ActiveSessionState): VoiceExecutionContext {
+	const { effort, effort_rev, ...context } = voiceContextFor(state);
+	return context;
+}
+
 /** Serialize per owner so a slower earlier PATCH cannot overwrite the latest pick. */
 export function persistVoiceContext(owner: string, context: VoiceExecutionContext): Promise<void> {
 	const key = JSON.stringify(context);
