@@ -34,7 +34,7 @@ from typing import Any
 
 from dataclasses import dataclass, replace
 
-from fluid.codemode.kernel import HostReply
+from fluid.codemode.kernel import HostReply, current_host_call_salvage
 from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, hook_reminder
 from fluid.permissions.engine import (
     PROMPT_DENIAL,
@@ -46,6 +46,7 @@ from fluid.tools.registry import (
     FATAL_EXTERNAL_ERROR_CODES,
     InputRequired,
     ToolCtx,
+    ToolOutcome,
     ToolRegistry,
 )
 
@@ -94,6 +95,14 @@ OnInputRequired = Callable[
 # A hook answered ``continue: false`` on an in-kernel call: the engine is told
 # the reason and ends the turn once the running cell returns.
 OnStop = Callable[[str], None]
+
+# Appended to a result the cell gets because the per-call ceiling expired
+# while PostToolUse hooks were still running on it.
+_POST_HOOKS_UNFINISHED = (
+    "[host: the PostToolUse hooks did not finish before this cell's per-call "
+    "ceiling and were cancelled; this result carries no hook feedback or "
+    "context, and no hook stop was applied]"
+)
 
 
 _RESULT_FIELD_TYPES: dict[str, tuple[type, ...]] = {
@@ -338,7 +347,19 @@ class HostBridge:
                 ),
             )
 
+        salvage = current_host_call_salvage.get()
         if self._hooks is not None:
+            if salvage is not None:
+                # The tool is done and its output capped (and spilled); only the
+                # hooks are left. If the kernel's per-call ceiling expires while
+                # they run, the cell gets this instead of a bare cancellation
+                # (#1549). A hook that never answered has no opinion, as on the
+                # JSON path, and the note says its verdict is missing.
+                salvage.reply = self._reply(spec, tool_name, tool_input, replace(
+                    outcome,
+                    text=f"{outcome.text.rstrip()}\n\n{_POST_HOOKS_UNFINISHED}",
+                    content_id=None, window_of=None,
+                ))
             decision = await self._hooks.emit(
                 POST_TOOL_USE,
                 {
@@ -370,6 +391,16 @@ class HostBridge:
                     content_id=None, window_of=None,
                 )
 
+        reply = self._reply(spec, tool_name, tool_input, outcome)
+        if salvage is not None:
+            # What is left after this (the host's own result event) must not
+            # cost the cell its result either.
+            salvage.reply = reply
+        return reply
+
+    def _reply(
+        self, spec: Any, tool_name: str, tool_input: dict[str, Any], outcome: ToolOutcome,
+    ) -> HostReply:
         if outcome.is_error and not outcome.soft_error and not _soft_external_error(spec, outcome):
             return HostReply(
                 error=outcome.text,
