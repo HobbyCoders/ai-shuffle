@@ -23,9 +23,10 @@
 			const id = await admittedOpening(note);
 			if (cancelled || !current()) return;
 			if (id) {
+				const attemptId = note.id; // Adopting changes the view and invalidates these props.
 				if (adopt) adopt(id);
 				else openSession(id);
-				finishOpening(note.id);
+				finishOpening(attemptId);
 				recoveringOpening.set(null);
 			} else {
 				unknown = true;

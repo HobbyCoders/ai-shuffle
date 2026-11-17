@@ -15,6 +15,7 @@ import { DEV_INSTANCE_NOISE } from "./lib/noise.mjs";
 function reloadCase(outcome) {
   return {
     name: outcome,
+    allow: outcome === "live-loss" ? [{ kind: "failed_requests", url: /^\/api\/v1\/sessions\/with-worktree$/, reason: "the case resets this one POST after verifying origin admission" }] : [],
     async setup(ctx) {
       const { page } = ctx;
       const hero = await openNewChat(ctx, { project: "Dev sandbox" });
@@ -152,7 +153,7 @@ function reloadCase(outcome) {
         await waitTurnSettled(page);
         const id = await page.evaluate(() => JSON.parse(sessionStorage.getItem("ai-shuffle-active-session") || "{}").sessionId);
         expect(id && id === evidence.id && evidence.receipts > 0, "exact receipt chat without reload");
-        const rows = await (await page.request.get(`/api/v1/sessions/${id}`)).json();
+        const rows = await (await page.request.get(new URL(`/api/v1/sessions/${id}`, page.url()).href)).json();
         expect(rows.messages.filter(m => m.role === "user" && m.content === words).length === 1 && evidence.creates === 1 && !evidence.queries, "one create, one durable user turn, no fallback query");
         expect(!(await composer(page).innerText()).trim(), "admitted words stay out of Send");
         return;
