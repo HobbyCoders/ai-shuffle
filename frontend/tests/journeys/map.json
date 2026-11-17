@@ -511,6 +511,11 @@
 			]
 		},
 		{
+			"why": "HTML inline lexer state and stable streamed media (#1627)",
+			"journeys": ["streaming-inline-html"],
+			"globs": ["frontend/tests/journeys/streaming-inline-html.journey.mjs", "frontend/src/lib/utils/chat-markdown*", "frontend/src/lib/components/chat/AssistantMessage*", "frontend/src/lib/components/chat/ThinkingBlock*"]
+		},
+		{
 			"why": "sending, streaming and rendering a reply",
 			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "reload-midstream"],
 			"globs": [
