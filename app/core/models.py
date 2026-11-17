@@ -663,6 +663,9 @@ class QueryOverrides(BaseModel):
     # Fast mode for this turn. True asks the leg for its expedited
     # service, False explicitly turns it off, None defers to the session row.
     fast: Optional[bool] = None
+    # The session's effort revision as the caller last saw it (#1609): a level
+    # sent with an older one runs on the saved level and is not saved.
+    effort_rev: Optional[int] = Field(None, ge=0)
 
 
 class QueryRequest(BaseModel):

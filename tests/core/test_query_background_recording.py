@@ -496,12 +496,15 @@ async def test_start_background_query_stamps_run_binding(mock_db):
     sessions_db.create_session(sid, "default")
     run_sync_calls = []
 
+    from app.core import turn_manager
     from app.db import database
 
     async def _fake_run_sync(fn, *a, **k):
         run_sync_calls.append((fn, a, k))
         if fn is database.get_session:
             return {"id": sid, "sdk_session_id": None}
+        if fn is turn_manager.persist_send_binding:
+            return a[1]
         return {"id": "row-1"}
 
     with ExitStack() as stack:
@@ -520,15 +523,17 @@ async def test_start_background_query_stamps_run_binding(mock_db):
         )
         await asyncio.sleep(0)  # let the (mocked) background task settle
 
+    # The chat lane's binding write, revision rule included (#1609).
     binding = [
         (a, k) for fn, a, k in run_sync_calls
-        if fn is database.set_session_run_binding
+        if fn is turn_manager.persist_send_binding
     ]
     assert binding, "API lane never persisted the run binding (v79)"
     args, kwargs = binding[0]
     assert args[0] == sid
-    assert kwargs["model"] == "prov:p1:m1"
-    assert kwargs["effort"] == "high"
+    assert args[1]["model"] == "prov:p1:m1"
+    assert args[1]["effort"] == "high"
+    assert args[2] is None
 
 
 async def test_start_background_query_without_overrides_stamps_nothing(mock_db):
@@ -557,8 +562,10 @@ async def test_start_background_query_without_overrides_stamps_nothing(mock_db):
         await qb.start_background_query("hi", "default", session_id=sid)
         await asyncio.sleep(0)
 
+    from app.core import turn_manager
     assert not any(
-        fn is database.set_session_run_binding for fn, _, _ in run_sync_calls
+        fn in (database.set_session_run_binding, turn_manager.persist_send_binding)
+        for fn, _, _ in run_sync_calls
     )
 
 

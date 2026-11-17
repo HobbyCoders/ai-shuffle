@@ -197,14 +197,19 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             if selected["fast"] and route not in ("delegated", "openai_responses"):
                 raise ValueError("Fast mode is not supported by this provider")
             selected["effort"] = effort
-        stored = selected
+        # Only what was asked for is saved: the effort read above may already
+        # be older than the row's (a send saved another level since; this lock
+        # does not cover sends), so a Fast-only change must not write it back
+        # (#1609).
+        stored = {key: selected[key] for key in changes}
+        if "effort" in changes:
+            stored.update(clear_effort=selected["effort"] is None, effort_explicit=True)
         # The owner's own pick on a subagent pins it: a parent's later toggle
         # leaves it alone.
         pin = ({"fast_pinned": True}
                if not inherited and "fast" in changes and session.get("is_worker") else {})
         try:
-            saved = await run_sync(database.set_session_run_binding, session_id, **stored,
-                                   clear_effort=stored["effort"] is None, **pin)
+            saved = await run_sync(database.set_session_run_binding, session_id, **stored, **pin)
         except Exception:
             if connected:
                 await state.adapter.set_run_settings(**old)

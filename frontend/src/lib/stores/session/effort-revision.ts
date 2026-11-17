@@ -34,15 +34,24 @@ type RowEffort = { effort?: string | null; effort_rev?: number };
 /**
  * The level and revision a chat opens with: the copy cached when this client
  * left it, or the session row when the row's revision is newer (a pick made
- * while the chat was not open here). A cached Auto falls back to the row, as
- * it did before revisions.
+ * while the chat was not open here).
+ *
+ * A cached copy with a revision is ordered by it, Auto included: a cached
+ * Auto at a newer revision than the row is a choice, not missing state. A
+ * cached copy with no revision (cached before revisions, or by a page that
+ * never learned one) loses to a row that names one, since it cannot show it
+ * is newer. Only when neither has a revision does the old rule hold: a cached
+ * level wins, a cached Auto falls back to the row.
  */
 export function restoredEffort(cached: HeldEffort | null | undefined, row: RowEffort | undefined): HeldEffort {
 	const rowRev = effortRevOf(row?.effort_rev);
 	const fromRow = { effortLevelOverride: row?.effort ?? null, effortRev: rowRev };
-	if (!cached || cached.effortLevelOverride == null) return fromRow;
-	if (row && rowRev !== undefined && cached.effortRev !== undefined && rowRev > cached.effortRev) return fromRow;
-	return { effortLevelOverride: cached.effortLevelOverride, effortRev: cached.effortRev };
+	if (!cached) return fromRow;
+	const cachedRev = effortRevOf(cached.effortRev);
+	const held = { effortLevelOverride: cached.effortLevelOverride ?? null, effortRev: cachedRev };
+	if (cachedRev !== undefined) return rowRev !== undefined && rowRev > cachedRev ? fromRow : held;
+	if (rowRev !== undefined || held.effortLevelOverride == null) return fromRow;
+	return held;
 }
 
 /**
@@ -63,7 +72,7 @@ export function effortFromRow(state: HeldEffort, row: RowEffort | undefined): He
 
 /**
  * The revision a send carries, or undefined to send none (the worker then
- * saves the level, as it did before revisions).
+ * runs the level, but saves it only on a row whose effort never changed).
  *
  * A chat created in this tab was never told a revision. Its sidebar row names
  * one, and that is the composer's as long as the row names the same level.

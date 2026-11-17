@@ -1148,20 +1148,22 @@ async def test_control_turns_keep_a_newer_effort_and_answer_with_it(workers, mon
         answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
                                            overrides={"model": "opus", "effort": "max", "effort_rev": 2})
         assert "effort_rev" not in answer
-        # A revision that is not a count is dropped: the send is one without.
+        # A revision that is not a count is dropped: the send is one without,
+        # which runs its level but cannot save it over a changed one.
         for bad in (True, -1, "2"):
             answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
                                                overrides={"model": "opus", "effort": "low", "effort_rev": bad})
             assert "effort_rev" not in answer
     with a.active():
         row = database.get_session("s-effort")
-        assert (row["effort"], row["effort_rev"]) == ("low", 3)
+        assert (row["effort"], row["effort_rev"]) == ("max", 2)
+        assert turns_db.get_latest_turn("s-effort")["overrides"]["effort"] == "low"
         engine.scan_all()
     converge([a, b])
     with b.active():
         # The mirror holds the owner's level with the owner's revision.
         mirror = database.get_session("s-effort")
-        assert (mirror["effort"], mirror["effort_rev"]) == ("low", 3)
+        assert (mirror["effort"], mirror["effort_rev"]) == ("max", 2)
 
 
 def test_session_effort_revision_does_not_resign_rows_that_never_changed_effort():

@@ -37,15 +37,38 @@ describe('restoredEffort', () => {
 			.toEqual({ effortLevelOverride: null, effortRev: 3 });
 	});
 
-	it('never pairs a cached level with the row revision', () => {
-		// The cached copy knows no revision: the level is sent with none.
-		expect(restoredEffort({ effortLevelOverride: 'high' }, { effort: 'low', effort_rev: 3 }))
+	it('a cached level with no revision loses to a row that names one (S4)', () => {
+		// A cache from before revisions holds High; the loaded row says Low at
+		// revision 3. Sending before /live answers used to save High.
+		const restored = restoredEffort({ effortLevelOverride: 'high' }, { effort: 'low', effort_rev: 3 });
+		expect(restored).toEqual({ effortLevelOverride: 'low', effortRev: 3 });
+		expect(effortRevToSend(restored, { effort: 'low', effort_rev: 3 })).toBe(3);
+		// Revision 0 is a revision too: the row's never-changed level stands.
+		expect(restoredEffort({ effortLevelOverride: 'high' }, { effort: 'low', effort_rev: 0 }))
+			.toEqual({ effortLevelOverride: 'low', effortRev: 0 });
+		// Neither side counts (a server too old): the cached level, as before.
+		expect(restoredEffort({ effortLevelOverride: 'high' }, { effort: 'low' }))
+			.toEqual({ effortLevelOverride: 'high', effortRev: undefined });
+		expect(restoredEffort({ effortLevelOverride: 'high' }, undefined))
 			.toEqual({ effortLevelOverride: 'high', effortRev: undefined });
 	});
 
-	it('falls back to the row for a cached Auto, and for a chat with no cached copy', () => {
+	it('a cached Auto with a revision is a choice, ordered like any level (S5)', () => {
+		// Switching back to a chat whose mirror row is older than the Auto this
+		// page had acknowledged used to restore High.
+		expect(restoredEffort({ effortLevelOverride: null, effortRev: 4 }, { effort: 'high', effort_rev: 3 }))
+			.toEqual({ effortLevelOverride: null, effortRev: 4 });
+		expect(restoredEffort({ effortLevelOverride: null, effortRev: 4 }, { effort: 'high', effort_rev: 4 }))
+			.toEqual({ effortLevelOverride: null, effortRev: 4 });
+		expect(restoredEffort({ effortLevelOverride: null, effortRev: 4 }, undefined))
+			.toEqual({ effortLevelOverride: null, effortRev: 4 });
+	});
+
+	it('falls back to the row for an older or unversioned cached Auto, and for a chat with no cached copy', () => {
 		expect(restoredEffort({ effortLevelOverride: null, effortRev: 1 }, { effort: 'low', effort_rev: 3 }))
 			.toEqual({ effortLevelOverride: 'low', effortRev: 3 });
+		expect(restoredEffort({ effortLevelOverride: null }, { effort: 'low' }))
+			.toEqual({ effortLevelOverride: 'low', effortRev: undefined });
 		expect(restoredEffort(null, { effort: 'max', effort_rev: 0 })).toEqual({ effortLevelOverride: 'max', effortRev: 0 });
 		expect(restoredEffort(undefined, undefined)).toEqual({ effortLevelOverride: null, effortRev: undefined });
 		// A row from a server that does not count.

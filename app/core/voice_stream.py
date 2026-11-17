@@ -340,6 +340,10 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # Submit to the SAME session: reuse its history/client and normal queue,
     # approval, stop, placement and model-switch semantics. No worker creation.
     overrides = {key: row.get(key) for key in ("effort", "permission_mode", "context_window", "fast")}
+    # The level is copied from this read, not picked: with its revision the
+    # send cannot save it over a level picked since, and runs on that one
+    # instead (#1609, turn_manager.EFFORT_REV).
+    overrides[turn_manager.EFFORT_REV] = int(row.get("effort_rev") or 0)
     if provider_id is None and normal_conversation:
         provider_id = row.get("provider_id")
     # The voice guidance is NOT a system-prompt append: that changed the

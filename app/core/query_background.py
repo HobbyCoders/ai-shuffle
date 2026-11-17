@@ -830,17 +830,21 @@ async def _start_background_turn(
     # unpark wake, auto-continue, failover) would build its options with no
     # binding and empty overrides, fall back to the bare launched_model with no
     # provider, and fail on the wrong leg with the wrong credentials.
+    # The level goes through the chat lane's revision rule (#1609): an
+    # ``effort_rev`` older than the row's runs this turn on the saved level and
+    # saves nothing, and the saved pair is pushed to the chat's open clients.
+    from app.core import turn_manager
+
+    overrides, effort_rev = turn_manager._split_effort_rev(overrides)
     if overrides:
         try:
-            await run_sync(
-                database.set_session_run_binding,
-                session_id,
-                model=overrides.get("model"),
-                effort=overrides.get("effort"),
-                permission_mode=overrides.get("permission_mode"),
-                fast=overrides.get("fast"),
-                workspace_project_ids=overrides.get("workspace_project_ids"),
+            effort_seen: Dict[str, Any] = {}
+            overrides = await run_sync(
+                turn_manager.persist_send_binding, session_id, overrides, effort_rev,
+                permission_mode=overrides.get("permission_mode"), effort_seen=effort_seen,
             )
+            if effort_seen:
+                await turn_manager.announce_effort(session_id, effort_seen)
             if overrides.get("context_window"):
                 # The picker's check, against the model just saved: a window
                 # the model does not offer is ignored, neither saved as the pin

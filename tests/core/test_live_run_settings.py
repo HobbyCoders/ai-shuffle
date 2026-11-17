@@ -1,7 +1,7 @@
 """Live run settings through owner routing, adapter and native request producer."""
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import httpx
 import pytest
@@ -55,7 +55,10 @@ async def test_live_sparse_picks_update_engine_binding_and_active_turn(live):
         assert runtime.turn["overrides"] == expected
         assert state.is_streaming
     assert state.adapter._engine.request_extra == {"keep": 1}
-    save.assert_called_with("s", effort=None, fast=False, clear_effort=True)
+    # Only what was asked for is saved: a Fast change never writes the effort
+    # it read, which a send may have replaced since (#1609).
+    assert save.call_args_list[1] == call("s", fast=True)
+    save.assert_called_with("s", effort=None, clear_effort=True, effort_explicit=True)
 
 
 @pytest.mark.asyncio
@@ -156,7 +159,7 @@ async def test_idle_session_and_explicit_default_persist_without_spawning(mock_d
     next_options, _ = build_options_from_profile(profile={"id": "agent", "config": {"effort": "max"}}, session_id="idle-knobs")
     assert next_options.effort is None
     # The default turn-persistence contract still does not erase an effort.
-    db.set_session_run_binding("idle-knobs", effort="high")
+    db.set_session_run_binding("idle-knobs", effort="high", effort_explicit=True)
     db.set_session_run_binding("idle-knobs", fast=True)
     assert db.get_session("idle-knobs")["effort"] == "high"
     assert await api.apply_run_settings("idle-knobs", api.RunSettingsUpdate(fast=True)) == {"effort": "high", "fast": True}

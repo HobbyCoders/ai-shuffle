@@ -36,13 +36,14 @@ class TestRevisionCounter:
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         assert _pair("s") == ("high", 0)
-        assert db.set_session_run_binding("s", effort="low") == {"effort": "low", "effort_rev": 1}
+        pick = {"effort_explicit": True}
+        assert db.set_session_run_binding("s", effort="low", **pick) == {"effort": "low", "effort_rev": 1}
         # Writing the level the row holds is no change: one revision, one level.
-        assert db.set_session_run_binding("s", effort="low") == {"effort": "low", "effort_rev": 1}
+        assert db.set_session_run_binding("s", effort="low", **pick) == {"effort": "low", "effort_rev": 1}
         # Auto is a level too.
-        assert db.set_session_run_binding("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", effort="max") == {"effort": "max", "effort_rev": 3}
+        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 2}
+        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 2}
+        assert db.set_session_run_binding("s", effort="max", **pick) == {"effort": "max", "effort_rev": 3}
         # A write of another field reports the pair and leaves it alone.
         assert db.set_session_run_binding("s", fast=True) == {"effort": "max", "effort_rev": 3}
         assert _pair("s") == ("max", 3)
@@ -153,17 +154,29 @@ class TestSendGuard:
         _send("s", effort="max", effort_rev=2)
         assert _pair("s") == ("max", 2)
 
-    def test_a_send_without_a_revision_behaves_as_before(self, mock_db):
-        """An older client, or the API: its level is saved whatever was picked."""
+    def test_a_send_without_a_revision_runs_its_level_but_saves_none_over_a_change(self, mock_db):
+        """S4 (#1609): an older client, a cache from before revisions, or the API
+        names no revision, so it cannot show its level is newer than the row's.
+        Its turn runs on the level it sent; a row whose effort changed keeps its
+        own. Only the run-settings endpoint changes a saved level."""
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
-        db.set_session_run_binding("s", effort="low")
+        db.set_session_run_binding("s", effort="low")                     # (low, 1)
         ran = _send("s", effort="high")
-        assert _pair("s") == ("high", 2)
+        assert _pair("s") == ("low", 1)
         assert ran["effort"] == "high"
+        assert _send("s", effort="max")["effort"] == "max"
+        assert _pair("s") == ("low", 1)
+
+    def test_a_send_without_a_revision_on_a_never_changed_row_behaves_as_before(self, mock_db):
+        make_profile("agent", {})
+        db.create_session("s", profile_id="agent", model="opus", effort="high")
+        ran = _send("s", effort="low")
+        assert _pair("s") == ("low", 1)
+        assert ran["effort"] == "low"
         # A send that names no level keeps the saved one, as before.
         _send("s")
-        assert _pair("s") == ("high", 2)
+        assert _pair("s") == ("low", 1)
 
     @pytest.mark.parametrize("bad", [True, -1, "0", 1.0, None])
     def test_a_revision_that_is_not_a_count_is_no_revision(self, mock_db, bad):
@@ -171,7 +184,9 @@ class TestSendGuard:
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         db.set_session_run_binding("s", effort="low")
         ran = _send("s", effort="high", effort_rev=bad)
-        assert _pair("s") == ("high", 2)
+        # No revision: the turn runs its level, the changed row keeps its own.
+        assert _pair("s") == ("low", 1)
+        assert ran["effort"] == "high"
         assert "effort_rev" not in ran
 
     def test_two_tabs(self, mock_db):
@@ -246,3 +261,82 @@ class TestAnnouncement:
         with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
             await api._announce_run_settings("s", {"effort": "max", "fast": False}, effort_asked=True)
         assert "effort_rev" not in broadcast.await_args.kwargs["updates"]
+
+
+class TestPathsThatDidNotPickALevel:
+    """Review findings S1-S3 (#1609): every path that writes the row's level
+    either was asked to change it or goes through the send guard. Each test is
+    the interleaving the review reproduced: a snapshot read, a newer pick, then
+    the write."""
+
+    async def test_a_fast_only_change_leaves_a_level_saved_after_its_read(self, mock_db, monkeypatch):
+        """S1: the Fast change reads high/0; a guarded send saves low/1 before
+        its write; the Fast write used to restore high at revision 2."""
+        make_profile("agent", {})
+        db.create_session("s", profile_id="agent", model="opus", effort="high")
+
+        def read_then_pick(session_id):
+            row = db.get_session(session_id)
+            _send(session_id, effort="low", effort_rev=0)
+            return row
+
+        monkeypatch.setattr(api.control, "_require_owned", read_then_pick)
+        result = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
+        assert result["fast"] is True
+        assert _pair("s") == ("low", 1)
+        assert db.get_session("s")["fast"]
+
+    async def test_a_voice_delegation_runs_on_a_level_picked_after_its_read(self, mock_db, monkeypatch):
+        """S2: the delegation copies high/0 from its read, a picker saves low/1
+        while it awaits, then it submits as "user"."""
+        from app.core import api_user_scope, session_runtime, voice_stream
+
+        make_profile("agent", {})
+        db.create_session("s", profile_id="agent", model="opus", effort="high")
+        monkeypatch.setattr(turn_manager, "_kick", lambda *a, **k: None)
+        monkeypatch.setattr(session_runtime, "try_steer_pending", AsyncMock(return_value=0))
+
+        def pick_meanwhile(row):
+            db.set_session_run_binding("s", effort="low")              # (low, 1)
+            return None
+
+        monkeypatch.setattr(api_user_scope, "session_api_user_id", pick_meanwhile)
+        submitted = AsyncMock()
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()):
+            assert await voice_stream.delegate_to_selected_model(
+                "s", "Run the tests.", on_submitted=submitted) == ""
+        assert _pair("s") == ("low", 1)
+        assert turns.get_turn(submitted.await_args.args[0])["overrides"]["effort"] == "low"
+
+    async def test_a_background_send_from_an_older_view_keeps_the_newer_level(self, mock_db, monkeypatch):
+        """S3: the background API lane bypassed the guard."""
+        from unittest.mock import MagicMock
+
+        from app.core import query_background
+
+        make_profile("agent", {})
+        db.create_session("s", profile_id="agent", model="opus", effort="high")
+        db.set_session_run_binding("s", effort="low")                      # (low, 1)
+        ran = {}
+
+        async def run(**kwargs):
+            ran.update(kwargs["overrides"])
+
+        monkeypatch.setattr(query_background, "_run_background_query", run)
+        monkeypatch.setattr(query_background.session_admission, "close", lambda lease: None)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await query_background._start_background_turn(
+                MagicMock(), False, "hi", "agent", None,
+                {"model": "opus", "effort": "high", "effort_rev": 0}, "s", None, None)
+            await query_background._pending_background_tasks["s"]
+        assert _pair("s") == ("low", 1)
+        assert ran["effort"] == "low" and "effort_rev" not in ran
+        assert broadcast.await_args.kwargs["updates"] == {"effort": "low", "effort_rev": 1}
+
+    def test_the_public_request_keeps_the_revision(self):
+        """S3: ``QueryOverrides`` dropped ``effort_rev`` before any lane saw it."""
+        from app.core.models import ConversationRequest
+
+        body = ConversationRequest.model_validate(
+            {"prompt": "hi", "overrides": {"effort": "high", "effort_rev": 3}})
+        assert body.overrides.model_dump(exclude_none=True) == {"effort": "high", "effort_rev": 3}

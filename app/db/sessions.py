@@ -994,6 +994,7 @@ def set_session_run_binding(
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
     effort_rev_base: Optional[int] = None,
+    effort_explicit: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Persist the run binding a turn actually used onto its session.
 
@@ -1029,7 +1030,11 @@ def set_session_run_binding(
     (#1609). A base above the row's revision means the row lost its count (a
     database restored from a backup under an open tab): the row's level
     stands and its revision moves past the base, so that client adopts it
-    instead of holding a revision no answer can ever exceed. The other fields
+    instead of holding a revision no answer can ever exceed. A level with no
+    base (an older client, the API, a connector) is written only on a row
+    whose effort never changed (revision 0): it cannot tell whether it is
+    older than the row's. ``effort_explicit`` is a change the person asked
+    for (the run-settings endpoint): written whatever the revision. The other fields
     are written either way. Returns the row's ``{"effort", "effort_rev"}``
     after the write, or ``None`` when nothing was written or the session does
     not exist.
@@ -1051,13 +1056,22 @@ def set_session_run_binding(
     writes_effort = bool(clean_effort or clear_effort)
     level = clean_effort or None
     # Every right-hand side reads the row as it was before this statement.
-    if effort_rev_base is None:
+    if effort_explicit:
         if writes_effort:
             updates.append(f"effort = {_ph}")
             values.append(level)
             updates.append(
                 f"effort_rev = CASE WHEN effort IS DISTINCT FROM {_ph} "
                 "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
+            values.append(level)
+    elif effort_rev_base is None:
+        if writes_effort:
+            updates.append(
+                f"effort = CASE WHEN COALESCE(effort_rev, 0) = 0 THEN {_ph} ELSE effort END")
+            values.append(level)
+            updates.append(
+                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) = 0 AND effort IS DISTINCT FROM {_ph} "
+                "THEN 1 ELSE effort_rev END")
             values.append(level)
     else:
         base = int(effort_rev_base)

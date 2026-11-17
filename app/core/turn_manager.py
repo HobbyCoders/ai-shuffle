@@ -248,6 +248,59 @@ def _split_effort_rev(
     return rest, raw
 
 
+def persist_send_binding(
+    session_id: str,
+    overrides: Dict[str, Any],
+    effort_rev: Optional[int],
+    *,
+    permission_mode: Optional[str] = None,
+    effort_seen: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Save a send's run binding on its session; return the turn's overrides.
+
+    Every send path that saves its binding goes through here (the chat lane
+    and the background API lane), so one revision rule admits every send's
+    level (#1609, ``set_session_run_binding``): with ``effort_rev`` the level
+    is saved only while that is still the row's revision, and a level sent
+    from an older view is replaced on this turn by the saved one; without one
+    the level is saved only on a row whose effort never changed, and runs this
+    turn either way. ``effort_seen`` receives the row's ``{"effort",
+    "effort_rev"}`` when the send carried a revision the row no longer holds,
+    for the caller to push to open clients. Blocking.
+    """
+    from app.db import database
+
+    saved = database.set_session_run_binding(
+        session_id,
+        model=overrides.get("model"),
+        effort=overrides.get("effort"),
+        permission_mode=permission_mode,
+        fast=overrides.get("fast"),
+        workspace_project_ids=overrides.get("workspace_project_ids"),
+        effort_rev_base=effort_rev,
+    )
+    # ``saved`` is the row after the write (a revision always makes one), or
+    # None for a session that does not exist.
+    if effort_rev is None or saved is None or saved["effort_rev"] == effort_rev:
+        return overrides
+    if (overrides.get("effort") or None) != saved["effort"]:
+        # The client's view of the level is outdated (another tab, device or
+        # worker picked since): its level must not replace the newer one,
+        # which this turn runs on.
+        logger.info(
+            "Ignoring outdated effort %s for session %s "
+            "(client revision %s, saved %s at revision %s)",
+            overrides.get("effort"), session_id, effort_rev,
+            saved["effort"], saved["effort_rev"],
+        )
+        overrides = {k: v for k, v in overrides.items() if k != "effort"}
+        if saved["effort"]:
+            overrides["effort"] = saved["effort"]
+    if effort_seen is not None:
+        effort_seen.update(saved)
+    return overrides
+
+
 # Payload flag on a person's message that was given a live Task worker's own
 # binding (see ``_active_worker_turn``). A turn carrying it is still the worker's
 # work, so a later message in the same chat joins it the same way.
@@ -450,34 +503,11 @@ def _submit_blocking(
         try:
             from app.db import database
 
-            saved = database.set_session_run_binding(
-                session_id,
-                model=overrides.get("model"),
-                effort=overrides.get("effort"),
+            overrides = persist_send_binding(
+                session_id, overrides, effort_rev,
                 permission_mode=overrides.get("permission_mode") if explicit_permission else None,
-                fast=overrides.get("fast"),
-                workspace_project_ids=overrides.get("workspace_project_ids"),
-                effort_rev_base=effort_rev,
+                effort_seen=effort_seen,
             )
-            if effort_rev is not None:
-                # ``saved`` is the row after the write (a revision always
-                # makes one), or None for a session that does not exist.
-                if saved is not None and saved["effort_rev"] != effort_rev:
-                    if (overrides.get("effort") or None) != saved["effort"]:
-                        # The client's view of the level is outdated (another
-                        # tab, device or worker picked since): its level must
-                        # not replace the newer one, which this turn runs on.
-                        logger.info(
-                            "Ignoring outdated effort %s for session %s "
-                            "(client revision %s, saved %s at revision %s)",
-                            overrides.get("effort"), session_id, effort_rev,
-                            saved["effort"], saved["effort_rev"],
-                        )
-                        overrides = {k: v for k, v in overrides.items() if k != "effort"}
-                        if saved["effort"]:
-                            overrides["effort"] = saved["effort"]
-                    if effort_seen is not None:
-                        effort_seen.update(saved)
             if overrides.get("context_window"):
                 # Checked against the model just saved, as the picker checks
                 # it. A window the model does not offer is ignored: never
