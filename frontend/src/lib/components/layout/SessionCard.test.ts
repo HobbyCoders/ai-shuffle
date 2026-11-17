@@ -844,6 +844,40 @@ describe('SessionCard swipe gestures', () => {
 		}
 	});
 
+	it.each([1, -1])('keeps a horizontal lock at a diagonally displaced lift (direction %i)', async (direction) => {
+		slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await timedPointer(card, 'pointerDown', 200, 20, 0);
+		await timedPointer(frame, 'pointerMove', 200 + direction * 40, 20, 100);
+		await timedPointer(frame, 'pointerUp', 200 + direction * 80, 120, 200);
+		await vi.advanceTimersByTimeAsync(450);
+		expect(onSnooze).toHaveBeenCalledTimes(direction > 0 ? 1 : 0);
+		expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 ? 1 : 0);
+	});
+
+	it.each([
+		['horizontal endpoints', 80, 0, true],
+		['vertical-dominant endpoints', 80, 100, false],
+		['equal horizontal and vertical endpoints', 80, 80, false],
+	] as const)('decides an undelivered axis from %s at lift', async (_name, dx, dy, commits) => {
+		for (const direction of [1, -1]) {
+			slowClock();
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			const { frame, card } = parts(container);
+			await timedPointer(card, 'pointerDown', 200, 20, 0);
+			await timedPointer(frame, 'pointerUp', 200 + direction * dx, 20 + dy, 200);
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).toHaveBeenCalledTimes(direction > 0 && commits ? 1 : 0);
+			expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 && commits ? 1 : 0);
+			cleanup();
+			mocks.setSessionActive.mockClear();
+			vi.restoreAllMocks();
+		}
+	});
+
 	it("keeps main's vertical axis lock ahead of the endpoint route", async () => {
 		slowClock();
 		const onSnooze = vi.fn();

@@ -545,17 +545,24 @@
 		clearLongPress();
 		pressing = false;
 		pointerId = null;
-		if (axis !== 'x') return;
-		axis = null;
-		// The click this gesture leaves behind must not open the session.
-		suppressNextClick = true;
 		// The lift can differ from the last delivered move (including a reversal).
 		// Neither easing the painted row nor missing moves changes these endpoints.
 		const dx = event.clientX - startX;
 		const dy = event.clientY - startY;
+		if (axis === null) {
+			// With no decisive move delivered, apply the usual axis/eligibility
+			// checks at lift. Never reconsider an axis already locked by a move.
+			const horizontal = Math.abs(dx) >= AXIS_LOCK && Math.abs(dx) > Math.abs(dy);
+			const allowed = dx < 0 || swipe.right !== null;
+			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) return;
+			axis = 'x';
+		}
+		if (axis !== 'x') return;
+		axis = null;
+		// The click this gesture leaves behind must not open the session.
+		suppressNextClick = true;
 		const elapsed = event.timeStamp - startT;
-		const quick = Math.abs(dx) >= FLICK_MIN_DX && Math.abs(dx) > Math.abs(dy)
-			&& elapsed >= 0 && elapsed <= QUICK_SWIPE_MS;
+		const quick = Math.abs(dx) >= FLICK_MIN_DX && elapsed >= 0 && elapsed <= QUICK_SWIPE_MS;
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
 		if (dx !== 0 && (Math.abs(dx) > armDistance || quick || flick)) {
 			if (dx < 0) slideOut(-1, leftAction);
