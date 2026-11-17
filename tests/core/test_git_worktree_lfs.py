@@ -19,9 +19,17 @@ def git(repo, *args):
 
 
 def registered_worktrees(repo):
-    return {Path(line.removeprefix("worktree "))
-            for line in git(repo, "worktree", "list", "--porcelain").splitlines()
-            if line.startswith("worktree ")}
+    listing = subprocess.check_output(["git", "worktree", "list", "--porcelain", "-z"], cwd=repo, timeout=10)
+    return {Path(os.fsdecode(field.removeprefix(b"worktree "))) for field in listing.split(b"\0")
+            if field.startswith(b"worktree ")}
+
+
+def test_registered_worktrees_preserves_path_boundaries(tmp_path):
+    repo = tmp_path / "worktree before\u2028after"
+    repo.mkdir()
+    git(repo, "init", "-b", "main")
+    assert registered_worktrees(repo) == {repo.resolve()}
+
 
 
 @pytest.fixture
@@ -167,7 +175,7 @@ def test_lfs_hook_failure_keeps_registered_worktree(checkout_project, lfs_repo, 
     assert (dest / "asset.bin").read_text() == "agent edit after adoption\n"
     assert mutations == [["worktree", "add"]]  # No retry, remove, or prune.
     assert warning in runtime_facts(str(dest))
-    assert git(repo, "worktree", "list", "--porcelain").count("worktree ") == 2
+    assert registered_worktrees(repo) == {repo.resolve(), dest.resolve()}
     assert "git-lfs: not found" in hook.read_text()
 
 
