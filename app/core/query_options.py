@@ -29,7 +29,7 @@ from app.core.git_worktree_ops import WorktreeAddError, worktree_error_detail
 from app.core.platform import detect_deployment_mode, DeploymentMode
 
 from app.core.project_utils import get_project_working_dir
-from app.core.model_registry import is_offered_context_window
+from app.core.model_registry import effective_context_window
 from app.core.turn_sources import INTERACTIVE_TURN_SOURCES as _INTERACTIVE_TURN_SOURCES
 
 # --- Re-exports for backward compatibility ---
@@ -1543,20 +1543,9 @@ def build_options_from_profile(
     # Validate new/sessionless overrides against the picker, but a saved pin
     # is a ceiling, not permission to silently use a wider model default when
     # the model changes or its catalog entry is missing/stale.
-    if not is_offered_context_window(context_window, model_to_use, main_provider_row):
-        from app.core.model_registry import get_model, resolve_provider_context_window
-
-        native = get_model(model_to_use) if main_provider_row is None else None
-        maximum = (resolve_provider_context_window(main_provider_row, model_to_use)
-                   if main_provider_row is not None
-                   else native.context_window if native is not None else None)
-        if context_window is not None and (_binding_row or {}).get("context_window"):
-            if maximum is not None and maximum <= context_window:
-                # The default is already no larger than the pin (e.g. Haiku 4.5).
-                # No override is needed; leave that model's default unchanged.
-                context_window = None
-        else:
-            context_window = None
+    context_window = effective_context_window(
+        context_window, model_to_use, main_provider_row, saved=bool((_binding_row or {}).get("context_window")),
+    )
 
     from app.core.owner_services import assert_proactive_allowed
     assistant_proactive = overrides.get("_assistant_proactive")

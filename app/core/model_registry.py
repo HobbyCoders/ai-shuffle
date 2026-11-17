@@ -441,6 +441,14 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
         value = None
     if value is None or value <= 0:
         return None
+    model, provider = _session_model_provider(session)
+    if is_offered_context_window(value, model, provider):
+        return value
+    logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
+    return None
+
+
+def _session_model_provider(session):
     from app.db import database
     from app.db.model_providers import resolve_model_provider
 
@@ -452,11 +460,25 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
     provider_id = row.get("provider_id") if row.get("mode") != "voice" else None
     if model.startswith("prov:"):
         _, provider_id, model = model.split(":", 2)
-    provider = resolve_model_provider(provider_id) if provider_id else None
-    if is_offered_context_window(value, model, provider):
-        return value
-    logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
-    return None
+    provider = resolve_model_provider(provider_id, include_token=False) if provider_id else None
+    return model, provider
+
+
+def effective_context_window(window, model, provider, *, saved):
+    """A saved ceiling still applies if smaller than the model's default, even off-menu."""
+    if window is None or is_offered_context_window(window, model, provider):
+        return window
+    if not saved:
+        return None
+    native = get_model(model) if provider is None else None
+    maximum = (resolve_provider_context_window(provider, model) if provider is not None
+               else native.context_window if native is not None else None)
+    return None if maximum is not None and maximum <= window else window
+
+
+def session_effective_context_window(session):
+    model, provider = _session_model_provider(session)
+    return effective_context_window(session["context_window"], model, provider, saved=True)
 
 
 # Anthropic API model ids for the selectable presets. The registry's canonical

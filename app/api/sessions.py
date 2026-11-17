@@ -1117,6 +1117,10 @@ async def get_session(
     if session["id"] in start_admission.admission.queued_sessions():
         session["start_queued"] = True
 
+    if session.get("context_window"):
+        from app.core.model_registry import session_effective_context_window
+        session["context_window"] = await run_sync(session_effective_context_window, session)
+
     session["messages"] = messages
     session["tags"] = await run_sync(database.get_session_tags, session_id)
     session["has_forks"] = await run_sync(database.session_has_forks, session_id)
