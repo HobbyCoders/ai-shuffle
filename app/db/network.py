@@ -227,6 +227,8 @@ def create_schema(cursor) -> None:
             expires_at TIMESTAMP WITH TIME ZONE NOT NULL
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_conflicts_version "
+                   "ON sync_conflicts(collection, record_id, losing_clock)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_peers (
             device_id TEXT PRIMARY KEY,
@@ -1807,13 +1809,20 @@ def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> Lis
 
 def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, losing_device_id: str,
                  losing_record: Any, winning_clock: int, winning_device_id: str) -> None:
+    # Apply transactions serialize on the network_state clock row. A replay
+    # of the same loss should neither append a row nor renew its retention.
+    version = (collection, record_id, losing_clock, losing_device_id, _json(losing_record),
+               winning_clock, winning_device_id)
     now = datetime.now(timezone.utc)
     cursor.execute(
         """INSERT INTO sync_conflicts (collection, record_id, losing_clock, losing_device_id, losing_record,
                                        winning_clock, winning_device_id, created_at, expires_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (collection, record_id, losing_clock, losing_device_id, _json(losing_record), winning_clock,
-         winning_device_id, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat()))
+           SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s
+           WHERE NOT EXISTS (SELECT 1 FROM sync_conflicts
+                             WHERE collection = %s AND record_id = %s AND losing_clock = %s
+                               AND losing_device_id = %s AND losing_record = %s
+                               AND winning_clock = %s AND winning_device_id = %s)""",
+        (*version, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat(), *version))
 
 
 def list_conflicts(limit: int = 200) -> List[dict]:
