@@ -815,10 +815,7 @@ class HarnessAdapter(ProviderAdapter):
                 # delegated leg JSON-serializes this map into its --mcp-config
                 # file -> TypeError("Object of type Server is not JSON
                 # serializable") and a failed spawn.
-                mcp_servers=(
-                    {} if options.extra.get("assistant_proactive") is not None
-                    else _external_mcp_servers(options.mcp_servers)
-                ),
+                mcp_servers=await run_sync(_delegated_external_mcp_servers, options),
                 cwd=options.cwd,
                 env=cli_env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
@@ -6343,29 +6340,49 @@ def _external_mcp_servers(mcp_servers: Optional[Dict[str, Any]]) -> Dict[str, An
     return out
 
 
-def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
-    """Merge approved, enabled Fluid plugin servers into the native surface only.
-
-    Discovery reads the same enablement files as the app's plugin service and
-    checks authored-plugin content approvals. Respect the session's scope filter.
-    The delegated CLI discovers its own Claude plugins; copying their servers
-    into its --mcp-config would expose the same tools under two names.
-    """
+def _fluid_plugin_servers(options: SessionOptions, *, delegated: bool) -> dict[str, Any]:
     from fluid.context.plugins import discover_plugins, plugin_mcp_servers
 
     sources = _fluid_setting_sources(options)
-    plugins = []
-    # Plugin packages are user-scoped, even when project/local settings enable them.
-    if sources is None or "user" in sources:
-        plugins = discover_plugins(
-            options.cwd or ".",
-            sources=sources if sources is not None else ("user", "project", "local"),
-        )
-    merged = plugin_mcp_servers(plugins)
-    # Reserve all host names, including in-process servers filtered below.
+    if sources is not None and "user" not in sources:
+        return {}  # Packages are user-scoped even when enabled in project settings.
+    return plugin_mcp_servers(discover_plugins(
+        options.cwd or ".",
+        sources=sources if sources is not None else ("user", "project", "local"),
+        # The delegated map goes into a file. Expand plugin/project paths but
+        # never materialize values from the worker's environment in that file.
+        mcp_env={} if delegated else None,
+        owner_approved_only=True,
+    ))
+
+
+def _native_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
+    merged = _fluid_plugin_servers(options, delegated=False)
     merged.update(options.mcp_servers or {})
     external = _external_mcp_servers(merged)
     return {name: external[name] for name in sorted(external)}
+
+
+def _delegated_external_mcp_servers(options: SessionOptions) -> dict[str, Any]:
+    if options.extra.get("assistant_proactive") is not None:
+        return {}
+    host = options.mcp_servers or {}
+    external = _external_mcp_servers(host)
+    if (options.extra.get("one_shot") or _session_mode(options) != "code"
+            or _tool_allowlist(options) is not None):
+        return external
+    # Only connect new servers on the unrestricted code lane. Never load a
+    # plugin directory (which would also run its hooks), override a bundled or
+    # SDK server, or add a permission grant. The CLI owns these connections.
+    for name, config in _fluid_plugin_servers(options, delegated=True).items():
+        if (name in host or name == "fluid_bundled" or "__" in name
+                or not re.fullmatch(r"[A-Za-z0-9_-]+", name)):
+            continue
+        # Forward only the connection fields Fluid consumes, not CLI-specific
+        # tool policy or executable hooks from a plugin manifest.
+        fields = ("transport", "url", "headers") if "url" in config else ("command", "args", "env")
+        external[name] = {key: config[key] for key in fields if key in config}
+    return external
 
 
 def _with_session_cwd(config: Any, cwd: Optional[str]) -> Any:
