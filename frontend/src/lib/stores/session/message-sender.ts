@@ -28,6 +28,7 @@ import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
+import { keepOpening, finishOpening, pendingOpening } from './worktree-opening';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
 import { ANY_CHAT, createSendOrder, type SendLane, type SendReservation, type SendTurn } from './send-order';
@@ -1263,6 +1264,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// id: its text names the checkout's copy of each upload, not the staging
 			// path this row shows, so a text match cannot find it (#1351).
 			const clientMessageId = newLocalPendingId();
+			const opening = { id: clientMessageId, project: projectId, shared: projectV2Id, generation: getInitGeneration(), prompt, paths: pendingUploadPaths };
+			keepOpening(opening);
 
 			claimNewSessionWorker();
 			const creationGen = internal.worktreeCreationGeneration;
@@ -1327,6 +1330,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}));
 				}
 
+				if (pendingOpening()?.id === clientMessageId) keepOpening({ ...opening, dispatched: true });
 				const postCreate = (name: string) => api.post<{
 					session_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
@@ -1509,6 +1513,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
 				return false;
+			} finally {
+				finishOpening(clientMessageId);
 			}
 		},
 
