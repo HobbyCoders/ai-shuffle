@@ -468,7 +468,13 @@ class TestCreateProfileEndpoint:
             assert mock_db.create_profile.call_args.kwargs["profile_id"] == "test-profile-1"
 
     @pytest.mark.parametrize("constraint_name", ["agents_pkey", "profiles_pkey"])
-    def test_http_create_profile_id_race_returns_plain_conflict(self, authenticated_client, constraint_name):
+    @pytest.mark.parametrize(("path", "payload"), [
+        ("/api/v1/agents", {"id": "in-use", "name": "In Use", "config": {}}),
+        ("/api/v1/agents/import", {
+            "version": "1.0", "type": "ai-shuffle-agent", "new_id": "in-use", "agent": {"name": "In Use"},
+        }),
+    ])
+    def test_http_agent_id_race_returns_plain_conflict(self, authenticated_client, constraint_name, path, payload):
         from types import SimpleNamespace
         from psycopg2.errors import UniqueViolation
 
@@ -478,9 +484,7 @@ class TestCreateProfileEndpoint:
                 return SimpleNamespace(constraint_name=constraint_name)
 
         with patch("app.api.agents.database.create_profile", side_effect=AgentIdConflict("database details")):
-            response = authenticated_client.post("/api/v1/agents", json={
-                "id": "in-use", "name": "In Use", "config": {},
-            })
+            response = authenticated_client.post(path, json=payload)
         assert response.status_code == 409
         assert response.json() == {"detail": "Agent ID already exists"}
 

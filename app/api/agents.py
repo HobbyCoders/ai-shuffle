@@ -777,6 +777,19 @@ async def delete_profile_agent(
     return await run_sync(_load)
 
 
+def _insert_agent(profile_id: str, name: str, description: str | None, config: dict) -> dict:
+    try:
+        return database.create_profile(
+            profile_id=profile_id, name=name, description=description, config=config, is_builtin=False
+        )
+    except UniqueViolation as exc:
+        # Another request can claim the id after the last probe. Upgraded
+        # databases may retain the original primary key constraint name.
+        if exc.diag.constraint_name not in {"agents_pkey", "profiles_pkey"}:
+            raise
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent ID already exists") from exc
+
+
 @router.post("", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def create_profile(request: ProfileCreate, token: str = Depends(require_admin)):
     """Create a custom profile - Admin only"""
@@ -804,20 +817,7 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             profile_id = _suffixed_profile_id(base_id, counter)
             counter += 1
 
-        try:
-            return database.create_profile(
-                profile_id=profile_id,
-                name=request.name,
-                description=request.description,
-                config=request.config.model_dump(exclude_none=True),
-                is_builtin=False,
-            )
-        except UniqueViolation as exc:
-            # Another request can claim the id after the last probe.
-            # The table rename did not rename the primary key on upgraded databases.
-            if exc.diag.constraint_name not in {"agents_pkey", "profiles_pkey"}:
-                raise
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent ID already exists") from exc
+        return _insert_agent(profile_id, request.name, request.description, request.config.model_dump(exclude_none=True))
 
     return await run_sync(_load)
 
@@ -1346,15 +1346,6 @@ async def import_profile(
         if agent_data.env:
             config["env"] = agent_data.env
 
-        # Create the profile
-        profile = database.create_profile(
-            profile_id=profile_id,
-            name=profile_name,
-            description=agent_data.description,
-            config=config,
-            is_builtin=False
-        )
-
-        return profile
+        return _insert_agent(profile_id, profile_name, agent_data.description, config)
 
     return await run_sync(_load)

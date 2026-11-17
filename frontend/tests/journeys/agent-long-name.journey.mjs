@@ -146,9 +146,9 @@ await runJourney({
 		},
 		act: ({ page, mark }) => steps(page, mark),
 		verify: ({ page, log }) => check(page, log)
-	}, {
-		name: 'duplicate-after-back-keeps-phone-list-open',
-		viewports: ['phone'],
+	}, ...['phone', 'desktop'].map((viewport) => ({
+		name: viewport === 'phone' ? 'duplicate-after-back-keeps-phone-list-open' : 'duplicate-after-leaving-keeps-source-selected',
+		viewports: [viewport],
 		async setup({ page, status }) { await gotoApp(page, status); },
 		async act({ page, mark }) {
 			const key = uniq().slice(-5);
@@ -168,12 +168,19 @@ await runJourney({
 				await route.fulfill({ response: result });
 			});
 			try {
-				await mark('duplicate through the phone More menu and hold its actual response');
-				await page.locator('summary[aria-label="More"]').filter({ visible: true }).click({ timeout: 5_000 });
+				await mark('duplicate and hold its actual response');
+				if (viewport === 'phone') {
+					await page.locator('summary[aria-label="More"]').filter({ visible: true }).click({ timeout: 5_000 });
+				}
 				await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
 				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
-				await mark('back to the list before letting the copy response reach the editor');
-				await back.click();
+				const projects = page.locator('section.view-panel[aria-label="Projects"]').filter({ visible: true });
+				await mark('leave the agent detail before letting the response reach the editor');
+				if (viewport === 'phone') await back.click();
+				else {
+					await workspace(page).getByRole('button', { name: 'Projects', exact: true }).click();
+					await projects.waitFor({ timeout: 5_000 });
+				}
 				expect(await held.promise === 201, 'the one real create succeeded');
 				// Wait for the success notification request: selection, if any, precedes it.
 				const completion = page.waitForRequest((request) => request.method() === 'POST' &&
@@ -181,7 +188,14 @@ await runJourney({
 					(request.postData() ?? '').includes(`Duplicated as ${source} copy.`), { timeout: 5_000 });
 				release.resolve();
 				await completion;
-				expect(!(await back.isVisible()), 'a finished duplicate does not reopen detail');
+				if (viewport === 'phone') {
+					expect(!(await back.isVisible()), 'a finished duplicate does not reopen detail');
+				} else {
+					expect(await projects.isVisible(), 'the duplicate does not pull focus back to Agents');
+					await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+					const name = page.getByRole('textbox', { name: 'Name', exact: true });
+					expect(await name.inputValue() === source, 'the original selection survives leaving and returning');
+				}
 				const rows = await agentsNamed(page, source);
 				expect(rows.length === 2 && rows.some(({ name }) => name === `${source} copy`), 'source and exactly one copy persisted');
 			} finally {
@@ -190,6 +204,6 @@ await runJourney({
 			}
 		},
 		verify: () => {}
-	}],
+	}))],
 	allow: [...DEV_INSTANCE_NOISE]
 });

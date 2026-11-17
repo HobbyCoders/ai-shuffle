@@ -10,7 +10,8 @@
 	 * a new agent saves once it has a name. Delete and restore confirm inline
 	 * in the detail's danger zone.
 	 */
-	import { tick, untrack } from 'svelte';
+	import { getContext, onDestroy, tick, untrack } from 'svelte';
+	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
 	import { ViewShell, ViewPanel, PanelSearch, PanelIconButton } from '$lib/components/layout/view';
 	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -231,9 +232,14 @@
 	let stacked = $state(platform.isMobile);
 	let pane = $state<'list' | 'detail'>('list');
 	function showDetail() { pane = 'detail'; }
-	let backCount = 0;
+	const featurePanel = getContext<FeaturePanelContext>(FEATURE_PANEL_CONTEXT);
+	let navigationIntent = 0;
+	$effect(() => {
+		if (featurePanel?.active === false) navigationIntent += 1;
+	});
+	onDestroy(() => { navigationIntent += 1; });
 	function backToList() {
-		backCount += 1;
+		navigationIntent += 1;
 		pane = 'list';
 	}
 
@@ -819,9 +825,9 @@
 		const source = editingProfile;
 		if (!source || duplicating) return;
 		const sourceKey = openKey;
-		const sourceBack = backCount;
-		const stillInSource = () => root?.isConnected === true && viewMode === 'form' &&
-			editingProfile?.id === source.id && openKey === sourceKey && backCount === sourceBack;
+		const sourceIntent = navigationIntent;
+		const stillInSource = () => featurePanel?.active !== false && viewMode === 'form' &&
+			editingProfile?.id === source.id && openKey === sourceKey && navigationIntent === sourceIntent;
 		duplicating = true;
 		try {
 			await flushPendingPersist();
@@ -835,7 +841,7 @@
 				config: JSON.parse(JSON.stringify(latest.config ?? {}))
 			});
 			void loadData(true);
-			// Back or another selection leaves the copy in the list without opening it.
+			// Navigating away leaves the persisted copy in the list without opening it.
 			await selectProfile(copy, 'profile', stillInSource);
 			notify(`Duplicated as ${name}.`, { severity: 'success' });
 		} catch (e: any) {
