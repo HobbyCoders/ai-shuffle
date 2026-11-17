@@ -390,9 +390,14 @@ def get_note_attachment_data(attachment_id: str) -> Optional[bytes]:
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT data FROM note_attachments WHERE id = %s", (attachment_id,))
+        cursor.execute("SELECT data, blob_hash FROM note_attachments WHERE id = %s", (attachment_id,))
         row = cursor.fetchone()
-        if not row or row["data"] is None:
+        if not row:
+            return None
+        if row["data"] is None and row["blob_hash"]:
+            from app.network.blobs import read_local
+            return read_local(row["blob_hash"], _conn=conn)
+        if row["data"] is None:
             return None
         # psycopg2 returns BYTEA as a memoryview; normalize to bytes.
         return bytes(row["data"])

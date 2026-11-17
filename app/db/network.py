@@ -1789,7 +1789,8 @@ def delete_conflict(conflict_id: int) -> bool:
 
 def expire_conflicts(*, stop=None) -> int:
     from app.db.retention import mutate_batches
-    return mutate_batches("sync_conflicts", f"expires_at <= %s AND NOT ({_PINNED})", (_now(),), stop=stop)
+    return mutate_batches("sync_conflicts", f"expires_at <= %s AND NOT ({_PINNED})", (_now(),),
+                          stop=stop, lock_batch=lock_state)
 
 
 # ---------------------------------------------------------------------------

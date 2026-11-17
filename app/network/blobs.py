@@ -59,7 +59,7 @@ def register_present(hash_value: str, size: int) -> None:
     store.upsert_blob(hash_value, size=size, present=True, holder=ctx.device_id if ctx else None)
 
 
-def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
+def read_local(hash_value: str, *, _conn=None, _cursor=None) -> Optional[bytes]:
     """Bytes for a hash from the artifact store or a note attachment, else None."""
     try:
         from app.core.artifact_store import artifact_path
@@ -68,13 +68,13 @@ def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
             return path.read_bytes()
     except Exception:  # noqa: BLE001
         pass
-    with nullcontext(_conn) if _conn is not None else get_db() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT data FROM note_attachments WHERE blob_hash = %s AND data IS NOT NULL LIMIT 1", (hash_value,))
+    with nullcontext(_conn) if _conn is not None or _cursor is not None else get_db() as conn:
+        cursor = _cursor if _cursor is not None else conn.cursor()
+        # Dismissal can move the last bytes between these tables. Read one
+        # database snapshot, including under PostgreSQL READ COMMITTED.
+        cursor.execute("""SELECT data FROM note_attachments WHERE blob_hash=%s AND data IS NOT NULL
+                          UNION ALL SELECT data FROM sync_conflict_bytes WHERE hash=%s LIMIT 1""", (hash_value, hash_value))
         row = cursor.fetchone()
-        if row is None:
-            cursor.execute("SELECT data FROM sync_conflict_bytes WHERE hash=%s", (hash_value,))
-            row = cursor.fetchone()
     if row and row["data"] is not None:
         data = row["data"]
         return data.tobytes() if isinstance(data, memoryview) else bytes(data)
@@ -104,7 +104,7 @@ def read_local_range(hash_value: str, offset: int, length: int) -> Optional[Tupl
 
 def note_missing(hash_value: str, size: int, holder: Optional[str], *, _cursor=None) -> None:
     """A record arrived whose bytes we do not have."""
-    if read_local(hash_value) is not None:
+    if read_local(hash_value, _cursor=_cursor) is not None:
         store.upsert_blob(hash_value, size=size, present=True, holder=holder, _cursor=_cursor)
         return
     store.upsert_blob(hash_value, size=size, present=False, holder=holder, _cursor=_cursor)
@@ -179,8 +179,13 @@ async def fetch_one(hash_value: str) -> bool:
     ctx = engine.context()
     if ctx is None:
         return False
-    if await run_sync(read_local, hash_value) is not None:
+    from app.core.artifact_store import artifact_path
+    if await run_sync(artifact_path, hash_value) is not None:
         return True
+    local = await run_sync(read_local, hash_value)
+    if local is not None:
+        # The artifact endpoint serves a file, not a note or recovery row.
+        return await run_sync(store_fetched, hash_value, local)
     existing = await run_sync(store.get_blob, hash_value)
     holders = list((existing or {}).get("holders") or [])
     online = transport.online_devices()

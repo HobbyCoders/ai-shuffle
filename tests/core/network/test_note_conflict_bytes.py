@@ -61,3 +61,44 @@ def test_parent_delete_keeps_bytes_until_both_conflicts_dismissed(pg_workers, pr
         assert blobs.read_local_range(digest, 1, 4) == (data[1:5], len(data))
         assert store.delete_conflict(pins[1]["id"])
         assert blobs.read_local(digest) is None
+
+
+def test_metadata_only_second_cascade_claims_first_recovery_copy(pg_workers):
+    a, b, c = (pg_workers(name) for name in ("a", "b", "c"))
+    with a.active():
+        engine.create_network("Home")
+    join(a, b)
+    join(a, c)
+    with a.active():
+        for note in ("first", "second", "survivor"):
+            notes.create_note(note, note, "body")
+        engine.scan_all()
+    converge([a, b, c])
+    data = b"recover this file"
+    digest = hashlib.sha256(data).hexdigest()
+    with b.active():
+        notes.create_note_attachment("one", "first", "one", "one", "text/plain", len(data), data)
+        engine.scan_all()
+    with a.active():
+        notes.delete_note("first")
+        engine.scan_all()
+    assert exchange(a, b).retry == 0
+    with c.active():
+        for aid, note in (("two", "second"), ("three", "survivor")):
+            notes.create_note_attachment(aid, note, aid, aid, "text/plain", len(data), data)
+        engine.scan_all()
+    assert exchange(c, b).retry == 0
+    with b.active():
+        assert b.sql("SELECT data FROM note_attachments WHERE id='two'")[0]["data"] is None
+        assert notes.get_note_attachment_data("two") == data
+    with a.active():
+        notes.delete_note("second")
+        engine.scan_all()
+    assert exchange(a, b).retry == 0
+    with b.active():
+        pins = {c["record_id"]: c["id"] for c in store.list_conflicts() if c["collection"] == "note_attachments"}
+        assert store.delete_conflict(pins["one"])
+        assert blobs.read_local(digest) == data
+        assert store.delete_conflict(pins["two"])
+        assert notes.get_note_attachment_data("three") == data
+        assert not b.sql("SELECT hash FROM sync_conflict_bytes")

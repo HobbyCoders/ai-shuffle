@@ -45,7 +45,7 @@ def set_timeout(cursor):
 
 def mutate_batches(table, where, params=(), *, keys=("id",), update=None,
                    update_params=(), returning=None, consume=None, stop=None,
-                   batch_size=None, max_batches=None, columns=()):
+                   batch_size=None, max_batches=None, columns=(), lock_batch=None):
     """Keyset-page maintenance DELETEs/UPDATEs in independently committed batches.
 
     Identifiers and SQL fragments are internal constants, never request input.
@@ -62,6 +62,8 @@ def mutate_batches(table, where, params=(), *, keys=("id",), update=None,
         with get_db() as conn:
             cur = conn.cursor()
             set_timeout(cur)
+            if lock_batch is not None:
+                lock_batch(cur)
             after = ""
             args = tuple(params)
             if boundary is not None:

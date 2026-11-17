@@ -710,7 +710,7 @@ def _retain_cascaded_attachments(cursor, note_id, clock, origin):
         rid = identity["id"]
         row = _read_row(cursor, child, rid)
         digest = row.get("blob_hash")
-        if not digest or row.get("data") is None:
+        if not digest:
             continue
         version = store.get_record(cursor, child.name, rid)
         if not version or version["origin_device_id"] != origin:
@@ -720,9 +720,9 @@ def _retain_cascaded_attachments(cursor, note_id, clock, origin):
                                losing_record=serialize_row(child, row, cursor=cursor),
                                winning_clock=clock, winning_device_id=origin)
         cursor.execute("""INSERT INTO sync_conflict_bytes (hash, data)
-                          SELECT blob_hash, data FROM note_attachments WHERE id=%s AND EXISTS
+                          SELECT blob_hash, data FROM note_attachments WHERE blob_hash=%s AND data IS NOT NULL AND EXISTS
                           (SELECT 1 FROM sync_conflicts WHERE collection='note_attachments'
-                           AND losing_record ->> 'blob_hash' = %s) ON CONFLICT (hash) DO NOTHING""", (rid, digest))
+                           AND losing_record ->> 'blob_hash' = %s) LIMIT 1 ON CONFLICT (hash) DO NOTHING""", (digest, digest))
 
 
 def materialize(
