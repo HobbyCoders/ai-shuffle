@@ -44,6 +44,7 @@ def test_accept_edit_with_deleted_assignment(pg_workers, snapshot, child, field)
     with a.active():
         if snapshot:
             engine.apply_snapshot_chunk(chunk)
+            assert a.sql(f"SELECT name, {field} FROM {child} WHERE id='child'")[0] == {"name": "edited", field: None}
         delivered = exchange(b, a)
         assert not delivered.retry and not delivered.rejected, delivered.reasons
         assert database.get_tag("later")
@@ -54,3 +55,59 @@ def test_accept_edit_with_deleted_assignment(pg_workers, snapshot, child, field)
         if field == "profile_id":
             database.create_profile("parent", "Replacement", None, {})
             assert a.sql(f"SELECT {field} FROM {child} WHERE id='child'")[0][field] is None
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+@pytest.mark.parametrize("case", ["same", "replacement", "legacy"])
+@pytest.mark.parametrize("child", ["templates", "api_users"])
+def test_delayed_assignment_after_join(pg_workers, monkeypatch, snapshot, case, child):
+    a, b, c = (pg_workers(n) for n in "abc")
+    with a.active():
+        engine.create_network("Home")
+        database.create_profile("agent", "Original", None, {})
+        engine.scan_all()
+    join(a, b)
+    if case == "replacement":
+        with a.active():
+            profiles.delete_profile("agent")
+            engine.scan_collection("agents")
+            database.create_profile("agent", "Different", None, {})
+            engine.scan_collection("agents")
+    # C joined after any replacement. Its state copy has no history of
+    # the old agent's deletion. B still refers to its original.
+    join(a, c)
+    with c.active():
+        assert not c.sql("SELECT 1 FROM sync_ops WHERE collection='agents' AND record_id='agent'")
+    with b.active(), monkeypatch.context() as m:
+        if case == "legacy":
+            serialize = engine.serialize_row
+            def legacy(*args, **kwargs):
+                record = serialize(*args, **kwargs)
+                if record:
+                    record.pop("_profile_incarnation", None)
+                return record
+            m.setattr(engine, "serialize_row", legacy)
+        if child == "templates":
+            templates.create_template("delayed", "peer edit", "prompt")
+        else:
+            api_users.create_api_user("delayed", "peer edit", "test-hash")
+        with database.get_db() as conn:
+            conn.cursor().execute(f"UPDATE {child} SET profile_id='agent' WHERE id='delayed'")
+        engine.scan_collection(child)
+        chunk = engine.snapshot_chunk(child, 0)
+        database.create_tag("tail", "tail")
+        engine.scan_all()
+    with c.active():
+        def verify():
+            expected = "agent" if case == "same" else None
+            assert c.sql(f"SELECT name, profile_id FROM {child} WHERE id='delayed'")[0] == {
+                "name": "peer edit", "profile_id": expected}
+            assert any(r["record_id"] == "delayed" and r["losing_record"] == {"profile_id": "agent"}
+                       for r in store.list_conflicts()) == (case != "same")
+        if snapshot:
+            engine.apply_snapshot_chunk(chunk)
+            verify()
+        result = exchange(b, c)
+        assert not result.retry and not result.rejected, result.reasons
+        verify()
+        assert database.get_tag("tail")

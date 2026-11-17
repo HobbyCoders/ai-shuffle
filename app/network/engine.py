@@ -598,6 +598,14 @@ def serialize_row(coll: policy.Collection, row: Mapping[str, Any], *, cursor=Non
         if not nested_rekey and coll.name == "automations" and isinstance(record.get("triggers"), list):
             # The legacy materializer expects TEXT here, not a wire JSON array.
             record["triggers"] = json.dumps(record["triggers"])
+    if coll.name in ("templates", "api_users") and cursor is not None and record.get("profile_id"):
+        # Read the binding, not just the parent by name. A scan may have
+        # obtained its candidate child before a concurrent FK clear.
+        cursor.execute(f"SELECT a.assignment_incarnation FROM {coll.table} c JOIN agents a ON a.id=c.profile_id "
+                       "WHERE c.id=%s AND c.profile_id=%s", (record["id"], record["profile_id"]))
+        bound = cursor.fetchone()
+        if bound and bound["assignment_incarnation"]:
+            record["_profile_incarnation"] = bound["assignment_incarnation"]
     if encrypted_columns:
         record["_enc"] = sorted(set(encrypted_columns))
     if coll.serialize_hook is not None:
@@ -2108,23 +2116,52 @@ def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any
     ``origin_device_id`` is the worker that wrote the copy (the envelope's
     signer, or a snapshot item's recorded origin).
     """
-    # SET NULL links converge to the same value whichever operation arrives
-    # first. Mere absence isn't evidence of deletion: keep the usual FK retry.
+    # A known deletion or an unproven live agent loses only the optional
+    # assignment. A never-seen parent still gets the ordinary FK retry.
+    if coll.name == "agents":
+        # A state copy can go directly from one live agent to a different
+        # one without replaying the intermediate deletion. Do not carry the
+        # old agent's optional assignments across that replacement either.
+        rid, clock = version
+        witness = plaintext.get("assignment_incarnation")
+        cursor.execute("SELECT assignment_incarnation FROM agents WHERE id=%s FOR UPDATE", (rid,))
+        previous = cursor.fetchone()
+        if previous and previous["assignment_incarnation"] != witness:
+            for child in ("api_users", "templates"):
+                cursor.execute(f"UPDATE {child} SET profile_id=NULL WHERE profile_id=%s RETURNING id", (rid,))
+                for row in cursor.fetchall():
+                    old = store.get_record(cursor, child, row["id"]) or {}
+                    store.add_conflict(cursor, collection=child, record_id=row["id"],
+                                       losing_clock=int(old.get("clock", 0)),
+                                       losing_device_id=old.get("origin_device_id", ctx.device_id),
+                                       losing_record={"profile_id": rid}, winning_clock=clock,
+                                       winning_device_id=origin_device_id)
+        # Legacy parents have no positive identity. SQL's creation default
+        # is only for local creates, never for an old peer's mirror.
+        return {**plaintext, "assignment_incarnation": witness}
     reference = {"templates": ("profile_id", "agents"), "api_users": ("profile_id", "agents"),
                  "connectors": ("api_user_id", "api_users")}.get(coll.name)
     if reference:
         column, parent = reference
         target = plaintext.get(column)
         if isinstance(target, str) and target:
-            tombstone = store.get_record(cursor, parent, target)
-            if tombstone and tombstone["deleted"]:
+            parent_version = store.get_record(cursor, parent, target) or {}
+            ambiguous = parent_version.get("deleted")
+            if parent == "agents" and not ambiguous:
+                # Keep the parent stable through the child write, even against
+                # a local delete/recreate between the identity and FK checks.
+                cursor.execute("SELECT assignment_incarnation FROM agents WHERE id=%s FOR SHARE", (target,))
+                agent = cursor.fetchone()
+                ambiguous = agent is not None and (not agent["assignment_incarnation"] or
+                            agent["assignment_incarnation"] != plaintext.get("_profile_incarnation"))
+            if ambiguous:
                 rid, clock = version
                 # Only the assignment lost. Do not copy connector config or
                 # unrelated credential fields into conflict metadata.
                 store.add_conflict(cursor, collection=coll.name, record_id=rid,
                                    losing_clock=clock, losing_device_id=origin_device_id,
-                                   losing_record={column: target}, winning_clock=int(tombstone["clock"]),
-                                   winning_device_id=tombstone["origin_device_id"])
+                                   losing_record={column: target}, winning_clock=int(parent_version.get("clock", 0)),
+                                   winning_device_id=parent_version.get("origin_device_id", ctx.device_id))
                 return {**plaintext, column: None}
     if coll.name == "sessions":
         from app.network import catalog

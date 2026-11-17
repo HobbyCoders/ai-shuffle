@@ -163,6 +163,7 @@ def create_postgres_schema(cursor: Any) -> None:
             config JSONB NOT NULL,
             mcp_tools JSONB DEFAULT '[]',
             avatar_color TEXT,
+            assignment_incarnation TEXT DEFAULT (gen_random_uuid()::text),
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         )

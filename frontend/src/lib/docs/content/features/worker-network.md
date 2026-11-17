@@ -70,6 +70,8 @@ never deletes chats, messages or their search/history records.
 
 If two workers change the same setting while they cannot reach each other, the later change wins. The other version is kept for 30 days, so nothing is lost without a trace.
 
+If a template or API key names an agent that was deleted and recreated, the worker keeps the other edits and leaves the assignment empty. The conflict shows which agent ID to review. An older worker sends only the ID, so its assignment can also need review even when an agent with that ID is present. This rule concerns the optional agent choice, not the agents an API key is authorized to use.
+
 ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. The network founder renews these logins; if the founder is no longer an active worker, the active worker with the lowest device id takes over. If a renewal has not reached this worker, the login-expired message names the renewing worker. This cannot repair a login whose refresh token has already been invalidated.
 
 ## Remove a device

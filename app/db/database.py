@@ -2604,6 +2604,9 @@ def _run_column_migrations(cursor: Any) -> None:
     if table_exists(cursor, "agents") and not column_exists(cursor, "agents", "avatar_color"):
         cursor.execute("ALTER TABLE agents ADD COLUMN avatar_color TEXT")
         migrations_applied.append("agents.avatar_color")
+    if table_exists(cursor, "agents") and not column_exists(cursor, "agents", "assignment_incarnation"):
+        cursor.execute("ALTER TABLE agents ADD COLUMN assignment_incarnation TEXT DEFAULT (gen_random_uuid()::text)")
+        migrations_applied.append("agents.assignment_incarnation")
 
     # Rename sessions.is_favorite -> is_active (v63). Favorites were reworked
     # into an "Active group": the flag now marks the session the user is

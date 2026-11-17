@@ -213,7 +213,7 @@ def translate_sql(sql: str) -> str:
     translation is intentionally lexical (regex-based) rather than a full
     parser, which is sufficient for the app's static query strings.
     """
-    s = sql
+    s = sql.replace("gen_random_uuid()::text", "lower(hex(randomblob(16)))")
 
     # --- parameter placeholders -------------------------------------------
     # Protect psycopg2 '%%' escapes, translate named + positional params,
