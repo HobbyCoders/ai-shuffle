@@ -130,6 +130,7 @@ export interface V2SessionState {
 	 *  the same `model_info` note). Comparing actual-vs-requested per turn
 	 *  avoids flagging a mere selection change as a reroute. */
 	liveRequestedModel: string | null;
+	liveModelTurnId?: string | null;
 	/** Resolved model provider for the turn `liveModel` reports on (from the
 	 *  same `model_info` note). null = native Anthropic; non-null = a gateway
 	 *  provider session (e.g. OpenRouter). A provider session can never be
@@ -2702,6 +2703,7 @@ function reduceInternal(
 					...state,
 					liveModel: model || null,
 					liveRequestedModel: requested || null,
+					liveModelTurnId: str(event.turn_id) || state.liveTurnId,
 					liveProvider: provider || null,
 					liveRerouted: typeof rerouted === 'boolean' ? rerouted : null,
 					liveRerouteReason: reason || null,

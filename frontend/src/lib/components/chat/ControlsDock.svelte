@@ -322,8 +322,9 @@
 	// comparison applies (exact-ID comparison false-flags dated snapshot ids),
 	// and a provider session is never flagged on that heuristic (R1). Unknown
 	// models never flag; a note missing either model never flags.
-	const liveModel = $derived($activeSession.liveModel);
-	const liveRequestedModel = $derived($activeSession.liveRequestedModel);
+	const pickedAfterTurn = $derived(!!$activeSession.modelPickAfterTurn && $activeSession.modelPickAfterTurn === $activeSession.liveModelTurnId);
+	const liveModel = $derived(pickedAfterTurn ? null : $activeSession.liveModel);
+	const liveRequestedModel = $derived(pickedAfterTurn ? null : $activeSession.liveRequestedModel);
 	// Compare actual vs what was REQUESTED for that same turn (both from the
 	// model_info note) — never the live selection, which the user may have
 	// changed since.

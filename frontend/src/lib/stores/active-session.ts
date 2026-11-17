@@ -176,6 +176,8 @@ export interface ActiveSessionState {
 	 *  the same `model_info` note). Transient — reset on every session switch /
 	 *  new chat and re-derived from the feed replay, same as `liveModel`. */
 	liveRequestedModel: string | null;
+	liveModelTurnId?: string | null;
+	modelPickAfterTurn?: string | null;
 	/** Resolved model provider for the turn `liveModel` reports on (from the same
 	 *  `model_info` note). null = native Anthropic; non-null = a gateway provider
 	 *  session, in which case the composer suppresses the reroute pill (a provider
@@ -1493,7 +1495,7 @@ export const activeSession = {
 			// placeholder included (#418).
 			const implied = !isFastModeCapable(model || getDefaultModel()) || composerPreferences.fastForModel(model) != null;
 			return {
-				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode,
+				...s, modelPickAfterTurn: s.liveTurnId || s.liveModelTurnId, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode,
 				...(implied && (fastMode !== s.fastMode || s.bindingUnhydrated?.fast) ? markBindingPicked(s, 'fast') : {}),
 			};
 		});

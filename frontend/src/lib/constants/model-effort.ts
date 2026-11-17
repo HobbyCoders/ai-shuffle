@@ -42,7 +42,9 @@ export function resolveEffortModel(
 	const composite = decodeProviderModel(selected);
 	if (!selectionIsRequestedModel(selected, liveRequestedModel, liveProvider)) return selected;
 	if (liveProvider && !composite) return encodeProviderModel(liveProvider, liveModel || selected);
-	if (isReroute(liveModel, liveRequestedModel, liveProvider, liveRerouted)) return liveModel!;
+	if (isReroute(liveModel, liveRequestedModel, liveProvider, liveRerouted)) {
+		return composite && !decodeProviderModel(liveModel) ? encodeProviderModel(liveProvider || composite.providerId, liveModel!) : liveModel!;
+	}
 	return selected;
 }
 

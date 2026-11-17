@@ -689,6 +689,7 @@ function transcriptPatch(
 		cancelledPeerTurnIds: rs.cancelledPeerTurnIds,
 		liveModel: rs.liveModel,
 		liveRequestedModel: rs.liveRequestedModel,
+		liveModelTurnId: rs.liveModelTurnId,
 		liveProvider: rs.liveProvider,
 		liveRerouted: rs.liveRerouted,
 		liveRerouteReason: rs.liveRerouteReason,
