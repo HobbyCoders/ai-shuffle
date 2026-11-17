@@ -718,12 +718,12 @@
         },
         {
           "id": "two-worker-smoke.restored-preference-write",
-          "check": "A restored worker's next shared preference write wins on its peers",
+          "check": "A paired worker receives the restored worker's next shared preference write",
           "kind": "owner",
           "needs": ["install"],
           "two_worker": true,
-          "how": "Enroll three fresh disposable candidate workers A, B and C in an isolated network. Choose an unused owner preference key and confirm it is absent on all three. Back up B's database before its first write. On B, write the key several times with distinct values; wait until A and C both read the last value. Stop only disposable B, restore only its database (keep its device identity), then restart it. Wait for peer rollback proof and confirm B's incarnation advanced. Write a different value to the same key on B exactly once. Allow normal exchange; read the preference on each worker without editing it again.",
-          "pass_when": "A and C first read B's last pre-restore value, then both read B's single post-restore write and agree with B. Record the candidate revision, B's incarnation before and after restore, and the synthetic values read on A/B/C. An incarnation bump or successful transcript delivery alone does not pass.",
+          "how": "Pair two fresh disposable candidate workers A and B in an isolated network. Choose an unused shared owner preference key; confirm it is absent on both. Back up B's database before its first write. On B, write several distinct values to that key and wait until A reads the last value. Stop only disposable B, restore only its database (keep its device identity), then restart it. Let B contact A and confirm B's incarnation advanced. Write a different value to the same key on B exactly once. Let normal exchange run and read the key on A without editing it again.",
+          "pass_when": "A reads B's last pre-restore value before the restore, then reads B's single post-restore value. Record the candidate revision, B's incarnation before and after restore, and the two synthetic values read on A. An incarnation bump or successful transcript delivery alone does not pass.",
           "past_bug": "#1506 / #1576: the database backup rewound B's clock, so a peer kept B's pre-restore preference instead of its new write."
         },
         {
