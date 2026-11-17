@@ -9,6 +9,7 @@
 	import { NO_CALL_ROOM, nextCallRoom, type CallRoom } from './callDockRoom';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
+	import { attachRefusals } from '$lib/stores/session/attach-refusals';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { openSession } from '$lib/services/session-navigation';
 	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
@@ -514,6 +515,10 @@
 	data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
+	{#if $activeSession.sessionId && attachRefusals.has($activeSession.sessionId)}
+		<Banner severity="error" message={attachRefusals.get($activeSession.sessionId)!} dismissible
+			onDismiss={() => attachRefusals.delete($activeSession.sessionId!)} />
+	{/if}
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so

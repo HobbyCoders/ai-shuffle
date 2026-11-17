@@ -174,7 +174,13 @@ function lateAnswerAfterSwitch(fail) {
 		expect((await sheet(page).getByRole('alert').count()) === 0, 'no error text carried into this chat\'s sheet');
 		await sheet(page).getByRole('button', { name: 'Cancel', exact: true }).click();
 		await sheet(page).waitFor({ state: 'hidden', timeout: 10_000 });
-		if (!fail) {
+		if (fail) {
+			const refusal = page.getByRole('alert').filter({ hasText: 'journey: attach refused late' });
+			expect(!(await refusal.isVisible()), 'the refusal does not appear on the other chat');
+			await openFromSidebar(page, state.a.title);
+			await waitChat(page, { session: state.a.tag, loading: 'false' });
+			await refusal.waitFor({ timeout: 10_000 });
+		} else {
 			const row = await api(page, 'GET', `/sessions/${state.a.id}`);
 			expect(!!(row.project_id || row.project_v2_id), 'the attach still happened on the first chat');
 		}

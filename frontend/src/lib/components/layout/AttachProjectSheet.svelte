@@ -16,6 +16,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { attachProject } from '$lib/api/sessions';
 	import { getErrorMessage } from '$lib/api/client';
+	import { attachRefusals } from '$lib/stores/session/attach-refusals';
 	import { notify } from '$lib/stores/notifications';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import {
@@ -261,6 +262,7 @@
 		// The page moved to another chat while waiting. The attach still happened
 		// on the server; that chat shows its project when it is opened again.
 		const left = () => sessionId !== id || activeSession.current.sessionId !== id;
+		attachRefusals.delete(id);
 		attaching = true;
 		error = null;
 		try {
@@ -290,7 +292,7 @@
 		} catch (e) {
 			const message = getErrorMessage(e, 'Could not attach the project.');
 			if (left()) {
-				// The sheet belongs to another chat now; say it outside it.
+				attachRefusals.set(id, `Could not attach ${name}: ${message}`);
 				closeIfMounted();
 				notify(message, { severity: 'error' });
 			} else {
