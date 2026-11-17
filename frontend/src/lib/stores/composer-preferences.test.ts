@@ -19,11 +19,12 @@ it('uses the server benchmark default only before any per-model choice, includin
  expect(resolveModelEffort('prov:codex:gpt-6.1-sol').defaultValue).toBe('low'); // Auto slider, web + mobile
  expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('high');
  expect(p.effortForModel('prov:codex:other')).toBeNull();
+ expect(p.effortForModel('prov:codex:other','low')).toBe('low');
  expect(p.current.modelEfforts).toEqual({}); // implicit default never saves a pick
  p.rememberEffort('prov:codex:gpt-6.1-sol','low');
  expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('low');
  p.rememberEffort('prov:codex:gpt-6.1-sol',null);
- expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBeNull();
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol','high')).toBeNull();
 });
 
 it('migrates the legacy effort only for the last selected model', async () => {

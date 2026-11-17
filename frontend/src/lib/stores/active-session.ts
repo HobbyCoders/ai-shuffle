@@ -1544,7 +1544,7 @@ export const activeSession = {
 			// placeholder included (#418).
 			const implied = !isFastModeCapable(model || getDefaultModel()) || composerPreferences.fastForModel(model) != null;
 			return {
-				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode,
+				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model, s.effortLevelOverride), fastMode,
 				...(implied && (fastMode !== s.fastMode || s.bindingUnhydrated?.fast) ? markBindingPicked(s, 'fast') : {}),
 			};
 		});
@@ -1714,7 +1714,7 @@ export const activeSession = {
 		const mode = _state.mode === 'voice' ? _state.mode : listedComposeMode({projectId:own.project, projectV2Id:own.projectV2Id});
 		const code = mode !== 'chat';
 		_update(s => ({...s, mode,
-			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
+			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model, s.effortLevelOverride),
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...composerCheckoutDefaults(code, {projectId:own.project, projectV2Id:own.projectV2Id}, own),

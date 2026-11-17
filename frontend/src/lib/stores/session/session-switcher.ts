@@ -338,7 +338,7 @@ function sessionModelBinding(row: { model?: string | null; provider_id?: string 
 }
 
 export function getPersistedEffort(): string | null {
-	return composerPreferences.effortForModel(getPersistedModel()) ?? composerPreferences.current.effort;
+	return composerPreferences.effortForModel(getPersistedModel(), composerPreferences.current.effort);
 }
 
 export function normalizePermissionMode(mode: string | null | undefined): string | null {
