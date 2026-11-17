@@ -86,7 +86,7 @@
 	<span class="tb-newchat-worker"><i aria-hidden="true"></i><b>{selfWorkerName($workerInstalls)}</b></span>
 {/snippet}
 
-<header class="topbar" class:no-rule={!rule}>
+<header class="topbar" class:no-rule={!rule} class:phone-detail={phoneWidth && !!phoneBack.onclick}>
 	{#if phoneWidth && phoneBack.onclick}
 		<button class="tb-back" onclick={phoneBack.onclick} aria-label={`Back to ${phoneBack.label}`}><ChevronLeft size={20} /><span>{phoneBack.label}</span></button>
 	{:else if onToggleSidebar}
@@ -127,7 +127,11 @@
 	{/if}
 
 	<div class="tb-right">
-		{#if phoneWidth && phoneBack.onclick}{@render phoneBack.status?.()}{:else if phoneWidth && phonePanelActions.label === title}{@render phonePanelActions.content?.()}{/if}
+		{#if phoneWidth && phoneBack.onclick}
+			{#if phoneBack.status}<div class="tb-status">{@render phoneBack.status()}</div>{/if}
+		{:else if phoneWidth && phonePanelActions.label === title}
+			{@render phonePanelActions.content?.()}
+		{/if}
 		{#if actions}
 			{@render actions()}
 		{/if}
@@ -239,6 +243,13 @@
 	@media (max-width: 600px) {
 		.topbar { height: 56px; gap: 0; padding: 0 4px; }
 		.tb-right { gap: 0; }
+		/* Keep the actions at their natural widths. The status wraps in the
+		   remaining space and may grow the bar for a long save error. */
+		.topbar.phone-detail { height: auto; min-height: 56px; }
+		.phone-detail .tb-right { flex: 0 1 auto; min-width: 0; }
+		.phone-detail .tb-right > :global(:not(.tb-status)) { flex-shrink: 0; }
+		.tb-status { min-width: 0; padding-block: 4px; }
+		.tb-back { flex: none; }
 	}
 
 	:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }

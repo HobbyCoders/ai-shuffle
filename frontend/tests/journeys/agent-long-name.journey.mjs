@@ -149,6 +149,17 @@ await runJourney({
 	}, {
 		name: 'failed-save-stays-in-header-until-success',
 		viewports: ['desktop', 'phone'],
+		expectShift: [{
+			step: 'show the reason for a rejected create in the header',
+			moved: /^(?:div\.main-content|div\.tb-right|button\.tb-back)(?: in .*)?$/,
+			maxValue: 0.09,
+			reason: 'the phone app bar grows to show the full rejection'
+		}, {
+			step: 'save corrected draft through API and clear the error',
+			moved: /^(?:div\.main-content|div\.tb-right|button\.tb-back)(?: in .*)?$/,
+			maxValue: 0.15,
+			reason: 'the phone app bar returns to its usual height after the error clears'
+		}],
 		allow: [{ kind: 'failed_requests', status: 422, url: /\/api\/v1\/agents$/, reason: 'intentional one-shot rejection of the draft create in this case' }],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
@@ -157,19 +168,47 @@ await runJourney({
 			await page.getByRole('button', { name: 'New agent', exact: true }).filter({ visible: true }).first().click();
 			await page.getByRole('dialog', { name: 'New agent' }).getByRole('button', { name: 'Create', exact: true }).click();
 		},
-		async act({ page, mark }) {
+		async act({ page, mark, log }) {
+			const phone = page.viewportSize().width <= 600;
+			const reason = phone
+				? 'name: String should have at most 100 characters'
+				: 'Test: rejected agent save';
 			await mark('show the reason for a rejected create in the header');
 			await page.route('**/api/v1/agents', (route) => route.request().method() === 'POST'
-				? route.fulfill({ status: 422, json: { detail: 'Test: rejected agent save' } })
+				? route.fulfill({ status: 422, json: { detail: reason } })
 				: route.fallback());
 			const field = page.getByRole('textbox', { name: 'Name', exact: true });
 			const key = uniq().slice(-5);
 			const candidate = `Try ${key}`;
 			const corrected = `Fix ${key}`;
 			await field.fill(candidate);
-			const status = page.getByRole('status').filter({ hasText: /^Save failed: Test: rejected agent save$/ });
+			const header = phone ? page.locator('header.topbar') : page;
+			const status = header.getByRole('status').filter({ hasText: `Save failed: ${reason}` });
 			await status.waitFor();
 			await page.unroute('**/api/v1/agents');
+			if (phone) {
+				const back = header.getByRole('button', { name: 'Back to Agents', exact: true });
+				const more = header.locator('summary[aria-label="More"]');
+				const bell = header.getByRole('button', { name: /^Notifications/ });
+				await back.focus();
+				await page.keyboard.press('Tab');
+				expect(await more.evaluate((el) => el === document.activeElement), 'Tab should reach More from Back');
+				await page.keyboard.press('Tab');
+				expect(await bell.evaluate((el) => el === document.activeElement), 'Tab should reach Notifications from More');
+				const bounds = await status.evaluate((el) => {
+					const bar = el.closest('header').getBoundingClientRect();
+					const range = document.createRange();
+					range.selectNodeContents(el.firstElementChild);
+					const lines = Array.from(range.getClientRects(), ({ left, top, right, bottom }) => ({ left, top, right, bottom }));
+					return { lines, bar: { left: bar.left, right: bar.right, top: bar.top, bottom: bar.bottom }, viewport: innerWidth };
+				});
+				const [backBox, moreBox, bellBox] = await Promise.all([back.boundingBox(), more.boundingBox(), bell.boundingBox()]);
+				log(JSON.stringify({ ...bounds, backBox, moreBox, bellBox }));
+				expect(bounds.lines.length > 1 && bounds.lines.every((line) =>
+					line.left >= backBox.x + backBox.width - 1 && line.right <= moreBox.x + 1 &&
+					line.top >= bounds.bar.top && line.bottom <= bounds.bar.bottom), 'all reason text should fit between Back and More inside the app bar');
+				expect(bellBox.x + bellBox.width <= bounds.viewport, 'Notifications should fit in the viewport');
+			}
 
 			await mark('save corrected draft through API and clear the error');
 			await field.fill(corrected);
