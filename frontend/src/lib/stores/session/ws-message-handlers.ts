@@ -733,6 +733,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				if (sessionId === open.sessionId && open.mode === 'chat') {
 					update(s => ({
 						...s, mode: 'code', project: attachedProject, projectV2Id,
+						sessionRowProject: { sessionId, projectId: attachedProject },
 						worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', selectedWorktreeBranch: null,
 						permissionModeOverride: permissionMode, ...markBindingHydrated(s, 'permission'),
 					}));

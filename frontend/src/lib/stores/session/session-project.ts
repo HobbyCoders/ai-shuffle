@@ -67,6 +67,15 @@ export function agentProjectOnThisWorker(
 	return local === rowProjectId && projects.some((p) => p.id === local) ? local : undefined;
 }
 
+/** The open chat's stored legacy id, if the page holds it for THIS chat (#1659). */
+export function openChatRowProjectId(state: {
+	sessionId: string | null;
+	sessionRowProject?: { sessionId: string; projectId: string | null } | null;
+}): string | null | undefined {
+	const held = state.sessionRowProject;
+	return state.sessionId && held?.sessionId === state.sessionId ? held.projectId : undefined;
+}
+
 /** Persisted snapshot / skip-restore: v2-only keeps `''`, never the last local default. */
 export function resolvePersistedProject(
 	persisted: { project?: string; projectV2Id?: string | null },

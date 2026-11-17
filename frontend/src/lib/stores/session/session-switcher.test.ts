@@ -22,6 +22,7 @@ import { get } from 'svelte/store';
 import { openDropdown, openHeaderDropdown } from '../header-dropdowns';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from '../worker-selection';
 import { _resetProseQuestions, observeLastUserMessage, proseQuestionSessions } from './prose-questions';
+import { agentProjectOnThisWorker, openChatRowProjectId } from './session-project';
 
 // session-switcher looks up the session row in appData to tailor the load-error
 // message for remote (cross-install) sessions (B4). Mock it so tests can seed the
@@ -85,6 +86,7 @@ function fullState(overrides: Partial<ActiveSessionState> = {}): ActiveSessionSt
 	return {
 		worktreeCheckoutPending: false,
 		sessionId: 'session-A',
+		sessionRowProject: null,
 		mode: 'code',
 		title: 'Session A',
 		messages: [{ id: 'm1', role: 'user', content: 'hi' }],
@@ -1037,6 +1039,37 @@ describe('session-switcher · a chat another worker runs holds the shared projec
 		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false, device_name: 'This worker', model: 'm' } });
 		await vi.waitFor(() => expect(getState().modelOverride).toBe('m'));
 		expect(getState()).toMatchObject({ isRemote: true, project: '', projectV2Id: 'pv2-theirs' });
+		switcher.destroy();
+	});
+
+	it('a chat outside the loaded sidebar pages takes its stored legacy id from /live for the agents check (#1659)', async () => {
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { project_id: 'mine', project_v2_id: 'pv2-theirs', is_remote: true } });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-old');
+		await vi.waitFor(() => expect(getState().isRemote).toBe(true));
+		expect(getState()).toMatchObject({ project: '', projectV2Id: 'pv2-theirs' });
+		const catalog = [{ project_v2_id: 'pv2-theirs', local_project_id: 'mine' }];
+		expect(agentProjectOnThisWorker(getState(), openChatRowProjectId(getState()), [{ id: 'mine' }], catalog)).toBe('mine');
+		switcher.destroy();
+	});
+
+	it('switching to a remote chat with no stored legacy id does not keep the last chat\'s (#1659)', async () => {
+		_mockSessions.current = [
+			{ id: 'session-B', project_id: 'mine', project_v2_id: 'pv2-theirs', is_remote: true },
+			{ id: 'session-C', project_id: null, project_v2_id: 'pv2-theirs', is_remote: true },
+		];
+		vi.mocked(api.get).mockResolvedValue({ session_meta: {} });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(openChatRowProjectId(getState())).toBe('mine');
+		await switcher.switchSession('session-C');
+		expect(openChatRowProjectId(getState())).toBeNull();
+		const catalog = [{ project_v2_id: 'pv2-theirs', local_project_id: 'mine' }];
+		expect(agentProjectOnThisWorker(getState(), openChatRowProjectId(getState()), [{ id: 'mine' }], catalog)).toBeUndefined();
+		// A chat with no row and no /live word yet holds nothing either.
+		await switcher.switchSession('session-D');
+		expect(openChatRowProjectId(getState())).toBeUndefined();
 		switcher.destroy();
 	});
 

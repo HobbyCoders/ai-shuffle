@@ -692,8 +692,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
 		// The owner also decides whether the row's legacy id names a project here
 		// (#1659); an owner not known yet is settled by /live below.
+		const rowProjectSource = projectId !== undefined ? projectId : row?.project_id;
 		const { project: targetProject, projectV2Id: targetV2 } = resolveSessionProject({
-			projectId: projectId !== undefined ? projectId : row?.project_id,
+			projectId: rowProjectSource,
 			projectV2Id: projectV2Id !== undefined ? projectV2Id : (row?.project_v2_id ?? undefined),
 			ephemeralProject: ephemeral?.project,
 			ephemeralProjectV2Id: ephemeral?.projectV2Id,
@@ -744,6 +745,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			title: resolvedTitle,
 			project: targetProject,
 			projectV2Id: targetV2,
+			// The stored legacy id, only for the agents check (#1659). A re-open
+			// with no row keeps what /live already said for this chat.
+			sessionRowProject: rowProjectSource !== undefined
+				? { sessionId, projectId: rowProjectSource ?? null }
+				: (state.sessionRowProject?.sessionId === sessionId ? state.sessionRowProject : null),
 			// Start empty; the authoritative messages load from the SSE feed
 			// (full replay from_seq=0) started below. No cache-first render —
 			// showing a stale snapshot first caused a visible flash before history.
@@ -1036,6 +1042,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Do not replace a project selection made while the request was in flight.
 			// An owner that changes with this answer re-resolves even then: the
 			// legacy id must not outlive the owner it was valid for (#1659).
+			// The stored legacy id, for the agents check only (#1659): a chat
+			// outside the loaded sidebar pages has no row to read it from.
+			if (meta.project_id !== undefined) patch.sessionRowProject = { sessionId, projectId: meta.project_id ?? null };
 			const ownerChanges = metaOwner !== undefined && getState().isRemote !== undefined
 				&& metaOwner !== getState().isRemote;
 			if ((meta.project_id !== undefined || meta.project_v2_id !== undefined)
@@ -1178,6 +1187,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			...s,
 			sessionId: null,
 			createdFromComposer: false,
+			sessionRowProject: null,
 			isRemote: undefined,
 			ownerDeviceName: undefined,
 			mode,
