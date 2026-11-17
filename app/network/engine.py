@@ -687,6 +687,13 @@ def _project_legacy_agent(coll: policy.Collection, record_id: str,
     return {**record, "is_builtin": False}
 
 
+def _provider_selection(coll: policy.Collection, record_id: str) -> bool:
+    """Whether writing this record takes the model provider slot lock first."""
+    from app.db.model_provider_slots import SLOT_SETTING_PREFIX
+    return coll.name == "model_providers" or (
+        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX))
+
+
 def _billing_refresh_needed(cursor, coll, record_id, record):
     """Private post-commit signal; never a synced collection or trust marker."""
     if coll.name != "model_providers" or not record:
@@ -701,19 +708,22 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
 def materialize(
     cursor: Any, coll: policy.Collection, record_id: str,
     record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
+    if_absent: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
 
     ``origin_device_id`` is the device that signed the record, when known.
+    ``if_absent``: the caller saw no row under lock (``_check_local``). A
+    row inserted since is a local change no op carries yet, so the write
+    then raises ``TransientApplyError`` (the op waits; its retry signs the
+    row first) instead of replacing it.
     """
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
     from app.db.model_provider_slots import (
-        SLOT_SETTING_PREFIX, lock_model_provider_slots, reconcile_model_provider_slots,
+        lock_model_provider_slots, reconcile_model_provider_slots,
     )
-    provider_selection = coll.name == "model_providers" or (
-        coll.name == "system_settings" and record_id.startswith(SLOT_SETTING_PREFIX)
-    )
+    provider_selection = _provider_selection(coll, record_id)
     if provider_selection:
         lock_model_provider_slots(cursor)
     if record is not None:
@@ -909,8 +919,10 @@ def materialize(
             insert_values.append(default)
     conflict = ", ".join(coll.keys)
     sql = (f"INSERT INTO {coll.table} ({', '.join(insert_columns)}) VALUES ({', '.join(['%s'] * len(insert_columns))}) "
-           f"ON CONFLICT ({conflict}) DO UPDATE SET {updates}")
+           f"ON CONFLICT ({conflict}) " + ("DO NOTHING" if if_absent else f"DO UPDATE SET {updates}"))
     cursor.execute(sql, tuple(insert_values))
+    if if_absent and cursor.rowcount == 0:
+        raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + coll.name)
     if provider_selection:
         # The shared slot register, not row arrival order, selects the account.
         reconcile_model_provider_slots(cursor)
@@ -974,10 +986,10 @@ def _owns_session(cursor, ctx: NetworkContext, session_ids: Sequence[Optional[st
     return cursor.fetchone() is not None
 
 
-def _read_row(cursor, coll: policy.Collection, record_id: str) -> Optional[dict]:
+def _read_row(cursor, coll: policy.Collection, record_id: str, *, lock: bool = False) -> Optional[dict]:
     keys = _local_keys(coll, record_id)
     where = " AND ".join(f"{k} = %s" for k in coll.keys)
-    cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}", keys)
+    cursor.execute(f"SELECT * FROM {coll.table} WHERE {where}" + (" FOR UPDATE" if lock else ""), keys)
     row = cursor.fetchone()
     return dict(row) if row else None
 
@@ -1892,13 +1904,15 @@ def _provider_credentials_kept(coll: policy.Collection, incoming: Mapping[str, A
     return stored != received
 
 
-def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_id: str,
+def _merge_losing_provider_credentials(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
                                        incoming: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
     """A row-LWW loser can still carry the newest subscription generation.
 
     Keep the ordinary fields and their winning clock/origin. Leave the winning
     hash unchanged so scan publishes the combined row, including to old peers.
     Never revive a tombstone, and never advance with an unversioned bundle.
+    Like a winning replacement, a merge that would change the row waits while
+    it holds an unsigned local change (``_check_local``, #1605).
     """
     if (coll.name != "model_providers" or existing["deleted"]
             or not incoming.get("codex_last_refresh")):
@@ -1909,6 +1923,12 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
         return False
     from app.db.model_provider_slots import lock_model_provider_slots, reconcile_model_provider_slots
     lock_model_provider_slots(cursor)
+    cursor.execute("SELECT 1 FROM model_providers WHERE id = %s "
+                   "AND (codex_last_refresh IS NULL OR codex_last_refresh < %s) FOR UPDATE",
+                   (record_id, incoming["codex_last_refresh"]))
+    if cursor.fetchone() is None:
+        return False  # not newer: nothing changes
+    _check_local(cursor, ctx, coll, record_id, existing, deleting=False, incoming=incoming)
     encrypted = list(incoming.get("_enc") or [])
     values = [_column_value(coll, name, incoming[name], encrypted)
               for name in _PROVIDER_CREDENTIAL_FIELDS]
@@ -1993,7 +2013,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
-            cursor, coll, env.record_id, plaintext, existing)
+            cursor, ctx, coll, env.record_id, plaintext, existing)
         if merged:
             result.touched.append((env.collection, env.record_id, env.op))
         # The network already moved past this write; keep it as a conflict
@@ -2025,10 +2045,14 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
+    # A local change no op carries yet waits to be signed first (#1605).
+    present = _check_local(cursor, ctx, coll, env.record_id, existing, deleting=env.op == OP_DELETE,
+                           incoming=plaintext if env.op == OP_UPSERT else None)
+
     # Keep the local loser (a concurrent local edit) for the conflicts list.
-    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
+    if existing is not None and existing["origin_device_id"] != env.origin_device_id:
         local_row = _read_row(cursor, coll, env.record_id)
-        if local_row is not None:
+        if local_row is not None and not bool(existing["deleted"]):
             try:
                 local_plain = serialize_row(coll, local_row, cursor=cursor)
             except ApplyError:
@@ -2039,19 +2063,30 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                    losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
                                    losing_record=redact_secrets(local_plain), winning_clock=env.clock,
                                    winning_device_id=env.origin_device_id)
+        elif local_row is None and bool(existing["deleted"]) and env.op == OP_UPSERT:
+            # A deletion this upsert brings back: its loser on every worker,
+            # the one that signed it included.
+            store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
+                               losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
+                               losing_record={"_deleted": True}, winning_clock=env.clock,
+                               winning_device_id=env.origin_device_id)
 
     refresh_billing = False
     if env.op == OP_DELETE:
         if coll.name == "presence":
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
-        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
+        if present is not False:
+            # Absent when read under lock: a row inserted since is a newer
+            # local change, which the scanner publishes over this tombstone.
+            materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
         plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
-            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
+            row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id,
+                              if_absent=present is False)
         except _KeepObservation as kept:
             if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                 store.put_record(cursor, env.collection, env.record_id, clock=env.clock,
@@ -2294,6 +2329,259 @@ def _observe_clock(cursor, clock: int) -> None:
     store.observe_clock(cursor, clock)
 
 
+# An apply never destroys a local change this worker's scanner has not
+# published yet (#1605) unless that change was signed first, through
+# ``record()`` as the scanner signs it. Then ordinary last-writer-wins decides
+# between the two and the loser is a conflict like any scanned edit's. Two
+# steps enforce it in every apply path (live chunk, one-by-one, pending
+# drain, state copy):
+#
+# 1. ``_sign_unscanned``, at the start of the apply transaction, under the
+#    state lock and before the batch's clock is observed, signs such changes
+#    of the records the batch touches (and of the shared children a parent's
+#    deletion cascades into). It is the same transaction as the apply, so a
+#    crash or rollback undoes both.
+# 2. ``_check_local``, just before a winning peer version replaces the row,
+#    reads it again FOR UPDATE. A change still unsigned (the outbox is held,
+#    the batch proves this worker was restored, credential storage is locked,
+#    an app write landed after step 1) makes the op wait
+#    (``TransientApplyError``, retried like a missing dependency); the retry's
+#    step 1 signs it.
+#
+# Lock order: network_state, the provider slot lock or a deleted connector's
+# journal lock where materialize takes them, the record's row, then its
+# cascaded children. Domain writers that lock a shared row and then sign it in
+# the same transaction take network_state first (``_delete_permission_rules``,
+# ``rename_member``, ``publish_presence``). A losing provider credential merge
+# goes through step 2 too: it changes the row as a winning op would.
+
+# Shared children a parent's deletion removes through ON DELETE CASCADE:
+# parent collection -> (child collection, foreign-key column). A test checks
+# this list against the schema's foreign keys.
+_CASCADE_CHILDREN: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "agents": (("permission_rules", "profile_id"),),
+    "api_users": (("api_user_credentials", "api_user_id"), ("api_user_profiles", "api_user_id"),
+                  ("user_credential_policies", "api_user_id")),
+    "notes": (("note_attachments", "note_id"),),
+}
+
+LOCAL_CHANGE_WAITS = "A local change is waiting to be signed"
+
+
+def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) -> bool:
+    """Whether this worker's scanner publishes this record."""
+    return (ctx.bootstrap_state == BOOTSTRAP_READY and coll.name != "session_active"
+            and coll.name in policy.SCANNED_COLLECTIONS
+            and not (coll.name == "presence" and record_id != ctx.device_id))
+
+
+def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+                          plaintext: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
+    """Whether a nested-secret row still says what the signed op its sync
+    record names says, the quorum fingerprint aside.
+
+    ``_nested_rekey`` is in these rows' hash so that the scanner republishes
+    them when the quorum changes. A peer's presence op therefore changes the
+    hash of a row nobody edited here, and signing that row during an apply
+    would put this worker's old copy above the peer edit about to replace
+    it. The stored hash cannot be compared without the fingerprint, so the
+    row is compared with the retained op. No such op, or one that reads
+    differently, proves nothing: the row then counts as changed.
+    """
+    def content(record: Mapping[str, Any]) -> str:
+        return content_hash(coll, {name: value for name, value in record.items() if name != "_nested_rekey"})
+
+    from app.network.keyring import open_envelope
+    current = content(plaintext)
+    for data in store.record_ops(cursor, coll.name, record_id, origin_device_id=existing["origin_device_id"],
+                                 clock=int(existing["clock"])):
+        try:
+            env = Envelope.from_dict(data)
+            if env.op == OP_UPSERT and content(open_envelope(ctx, env)[0]) == current:
+                return True
+        except (crypto.CryptoError, envelope_mod.EnvelopeError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return False
+
+
+def _unsigned(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+              row: Optional[Mapping[str, Any]], existing: Optional[Mapping[str, Any]],
+              incoming_hash: Optional[str] = None, *, deleting: bool = False) -> bool:
+    """Whether the apply must have this row signed first: ``record()`` would
+    sign something for it (the scanner's rule) that is a local change.
+
+    A row that differs from its sync record, or a live record whose row is
+    gone, unless the incoming version deletes the record (``deleting``): the
+    row is gone either way, here usually through the cascade of its parent's
+    tombstone earlier in the same stream.
+    A row no scan can read for good (or not shared) is not a change,
+    nor is one that already holds the incoming version (``incoming_hash``):
+    replacing it loses nothing. Nor is a nested-secret row that differs from
+    its record only by the quorum (``_holds_signed_version``): republishing
+    for that stays the regular scanner's job.
+    Raises ``TransientApplyError`` while credential storage is locked.
+    """
+    live = existing is not None and not bool(existing["deleted"])
+    if row is None:
+        return live and not deleting and _incoming_row_is_shared(coll, record_id, None)
+    try:
+        plaintext = serialize_row(coll, row, cursor=cursor)
+    except TransientApplyError:
+        if not encryption.is_encryption_ready():
+            raise TransientApplyError("Credential storage is locked; a local change of " + coll.name
+                                      + " waits for it") from None
+        return False
+    except ApplyError:
+        return False
+    if plaintext is None:
+        return False
+    current = content_hash(coll, plaintext)
+    if current == incoming_hash or (live and existing["content_hash"] == current):
+        return False
+    return not (live and "_nested_rekey" in plaintext
+                and _holds_signed_version(cursor, ctx, coll, record_id, plaintext, existing))
+
+
+def _children(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str, *,
+              lock: bool) -> List[Tuple[policy.Collection, str, dict]]:
+    """The scanned shared children a deletion of the record cascades into."""
+    found = []
+    for child_name, column in _CASCADE_CHILDREN.get(coll.name, ()):
+        child = policy.collection(child_name)
+        cursor.execute(f"SELECT * FROM {child.table} WHERE {column} = %s ORDER BY " + ", ".join(child.keys)
+                       + (" FOR UPDATE" if lock else ""), (record_id,))
+        for row in cursor.fetchall():
+            row = dict(row)
+            child_id = child.record_id(row)
+            if _scanned_here(ctx, child, child_id):
+                found.append((child, child_id, row))
+    return found
+
+
+def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked: bool) -> bool:
+    """Step 1 (see above): sign the unscanned local changes ``items`` would replace.
+
+    ``items`` are envelopes or snapshot items (collection, record_id, op or
+    deleted). Unless ``locked`` says the caller holds the state lock, take it
+    when any item is in a scanned collection; return whether it is held. A
+    batch with nothing scanned (transcript events) costs no extra round trip.
+    Nothing is signed while the batch carries proof that this worker was
+    restored from a backup (``_own_ahead_proof``): the sequence numbers it
+    would allocate are taken by its own retained ops.
+    """
+    wanted: Dict[Tuple[str, str], List[Any]] = {}
+    for data in items:
+        if not isinstance(data, Mapping):
+            continue
+        name, record_id = data.get("collection"), data.get("record_id")
+        if not (isinstance(name, str) and isinstance(record_id, str) and name in policy.SCANNED_COLLECTIONS):
+            continue
+        deleting = data.get("op") == OP_DELETE or data.get("deleted") is True
+        # A state copy's item is plaintext: a row already equal to it (the
+        # record's only item here) is no change. An envelope's hash is of its
+        # sealed bytes, not comparable.
+        record_data = None if deleting else data.get("record")
+        incoming = None
+        if isinstance(record_data, Mapping):
+            try:  # as the apply sees it (see apply_snapshot_items)
+                projected = _project_legacy_agent(policy.collection(name), record_id, record_data)
+                incoming = None if projected is None else content_hash(policy.collection(name), projected)
+            except (ValueError, KeyError, TypeError, ApplyError):
+                incoming = None
+        # [some item deletes it, the one item's hash, every item deletes it]
+        if (name, record_id) in wanted:
+            previous = wanted[(name, record_id)]
+            wanted[(name, record_id)] = [previous[0] or deleting, None, previous[2] and deleting]
+        else:
+            wanted[(name, record_id)] = [deleting, incoming, deleting]
+    if not wanted or ctx.bootstrap_state != BOOTSTRAP_READY:
+        return locked
+    if not locked:
+        store.lock_state(cursor)
+    if getattr(_own_ahead_batch, "found", False):
+        return True
+    for (name, record_id), (deleting, incoming, only_deleted) in sorted(wanted.items()):
+        coll = policy.collection(name)
+        try:
+            targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming, only_deleted)]
+            if deleting:
+                targets += [(*child, None, False) for child in _children(cursor, ctx, coll, record_id, lock=False)]
+        except (ValueError, KeyError, TypeError, ApplyError):
+            continue  # malformed: the apply refuses it
+        for target, target_id, row, target_hash, target_deleted in targets:
+            if not _scanned_here(ctx, target, target_id):
+                continue
+            try:
+                if _unsigned(cursor, ctx, target, target_id, row,
+                             store.get_record(cursor, target.name, target_id), target_hash,
+                             deleting=target_deleted):
+                    record(cursor, target.name, target_id, row, ctx=ctx)
+            except ApplyError:
+                continue  # step 2 makes the op wait
+    return True
+
+
+def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
+                 existing: Optional[Mapping[str, Any]], *, deleting: bool,
+                 incoming: Optional[Mapping[str, Any]] = None) -> Optional[bool]:
+    """Step 2 (see above): lock the row a winning peer version replaces; wait
+    while it holds an unsigned change.
+
+    Returns whether the row existed (None: not a scanned record). The
+    caller's write must not replace a row that appeared since (``materialize``
+    ``if_absent``); a deletion skips a row that was absent.
+    """
+    if not _scanned_here(ctx, coll, record_id):
+        return None
+    if _provider_selection(coll, record_id):
+        from app.db.model_provider_slots import lock_model_provider_slots
+        lock_model_provider_slots(cursor)
+    if coll.name == "connectors" and deleting:
+        # A connector's deletion takes its journal lock before the row (#1399);
+        # batch callers already hold it (_lock_deleted_connectors).
+        from app.db.watches import lock_connector
+        lock_connector(cursor, record_id)
+    row = _read_row(cursor, coll, record_id, lock=True)
+    targets = [(coll, record_id, row, existing,
+                content_hash(coll, incoming) if incoming is not None and not deleting else None, deleting)]
+    if deleting and row is not None:
+        targets += [(child, child_id, child_row, store.get_record(cursor, child.name, child_id), None, False)
+                    for child, child_id, child_row in _children(cursor, ctx, coll, record_id, lock=True)]
+    for target, target_id, target_row, known, target_hash, target_deleted in targets:
+        if _unsigned(cursor, ctx, target, target_id, target_row, known, target_hash, deleting=target_deleted):
+            raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + target.name)
+    return row is not None
+
+
+# Set by ``_apply_batch`` for the whole batch: it carries verified proof that
+# this worker's history went backwards (see ``_own_ahead_proof``).
+_own_ahead_batch = threading.local()
+
+
+def _own_ahead_proof(items: Sequence[Any], ctx: NetworkContext) -> bool:
+    """Whether ``items`` hold an op this device signed in its current
+    incarnation past its outbox: the proof ``apply_envelope`` turns into
+    ``own_ahead`` (restore from backup, #1570). Checked for the whole batch
+    before any of it applies, wherever the proof sits in it.
+    """
+    own = [data for data in items if isinstance(data, Mapping)
+           and data.get("origin_device_id") == ctx.device_id
+           and data.get("origin_incarnation") == ctx.identity.incarnation]
+    if not own:
+        return False
+    with get_db() as conn:
+        held = store.own_watermark(conn.cursor(), ctx.device_id, ctx.identity.incarnation)
+    for data in own:
+        try:
+            env = Envelope.from_dict(data)
+        except envelope_mod.EnvelopeError:
+            continue
+        if (env.network_id == ctx.network_id and env.origin_seq > held
+                and env.verify_signature(ctx.identity.signing_public)):
+            return True
+    return False
+
+
 def _count_outcome(result: ApplyResult, outcome: str) -> None:
     if outcome == "applied":
         result.applied += 1
@@ -2354,7 +2642,7 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
             return
         # These dependencies can recover without a membership/key change.
         short_retry = isinstance(error, TransientApplyError) and str(error).startswith(
-            ("Referenced record has not arrived yet", "Credential storage is locked"))
+            ("Referenced record has not arrived yet", "Credential storage is locked", LOCAL_CHANGE_WAITS))
         ceiling = PENDING_DEPENDENCY_RETRY_MAX if short_retry else PENDING_RETRY_MAX
         delay = (min(ceiling, old.delay * 2)
                  if old is not None and old.seq == seq else PENDING_RETRY_BASE)
@@ -2389,6 +2677,7 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
+            _sign_unscanned(cursor, ctx, window, locked=True)  # #1605
             _lock_deleted_session_handoffs(cursor, window)
             _lock_deleted_connectors(cursor, window)
             _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
@@ -2474,6 +2763,7 @@ def _apply_one(data: Mapping[str, Any], ctx: NetworkContext, result: ApplyResult
             # the frontier. Otherwise a slow single-op apply can replay an old
             # owner-ordered row after a concurrent batch has advanced it.
             store.lock_state(cursor)
+            _sign_unscanned(cursor, ctx, [data], locked=True)  # #1605
             outcome = apply_envelope(cursor, data, ctx=ctx, result=result)
     except TransientApplyError as exc:
         result.retry_operation(data, str(exc))
@@ -2712,9 +3002,11 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
         with get_db() as conn:
             cursor = conn.cursor()
             savepoints = type(cursor).__module__.startswith("psycopg2")
+            # Before the chunk's clock: see _sign_unscanned (#1605).
+            locked = _sign_unscanned(cursor, ctx, chunk, locked=False)
             if seen:
                 store.observe_clock(cursor, seen)
-            else:
+            elif not locked:
                 store.lock_state(cursor)
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
@@ -2864,6 +3156,7 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
         data.get("record_id") for data in items
         if isinstance(data, Mapping) and data.get("collection") == "agents" and data.get("op") == OP_DELETE
     }
+    _own_ahead_batch.found = _own_ahead_proof(items, ctx)
     try:
         # Keep wire order, but do not let a session header force the event
         # tail behind it onto the per-envelope path.
@@ -2900,6 +3193,7 @@ def _apply_batch(envelopes: Iterable[Mapping[str, Any]], *,
         result._pending_drains.clear()
     finally:
         _batch_agent_deletions.ids = None
+        _own_ahead_batch.found = False
     if result.own_ahead:
         restored_from_backup(result.own_ahead, ctx.identity.incarnation,
                              evidence_network_id=ctx.network_id, evidence_device_id=ctx.device_id,
@@ -3174,6 +3468,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     touched: List[Tuple[str, str, str]] = []
     if not items:
         return 0, touched
+    # Before the page's clock: see _sign_unscanned (#1605).
+    _sign_unscanned(cursor, ctx, ({**item, "collection": coll.name} for item in items), locked=False)
     store.observe_clock(cursor, max(int(item["clock"]) for item in items))
     ids = [item["record_id"] for item in items]
     if coll.name == "sessions":
@@ -3235,10 +3531,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             if conflict:
                 store.add_conflict(cursor, **conflict)
             if not item["deleted"] and _merge_losing_provider_credentials(
-                    cursor, coll, item["record_id"], item["record"], existing):
+                    cursor, ctx, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
             continue
+        present = _check_local(cursor, ctx, coll, item["record_id"], existing, deleting=bool(item["deleted"]),
+                               incoming=None if item["deleted"] else item["record"])
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
             if isinstance(record_data, dict):
@@ -3255,7 +3553,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
             continue
         if item["deleted"]:
-            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+            if present is not False:  # see _apply_in_order
+                materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
@@ -3263,7 +3562,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             try:
                 row = materialize(cursor, coll, item["record_id"], prepared,
-                                  origin_device_id=item["origin_device_id"])
+                                  origin_device_id=item["origin_device_id"], if_absent=present is False)
             except _KeepObservation as kept:
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
@@ -3734,6 +4033,8 @@ def publish_presence(*, capabilities: Optional[dict] = None, version: Optional[s
     changed = False
     with get_db() as conn:
         cursor = conn.cursor()
+        # network_state before the presence and member rows (see _check_local).
+        store.lock_state(cursor)
         cursor.execute(
             """INSERT INTO network_presence (device_id, endpoints, capabilities, version, source_revision, platform, incarnation,
                                              instance_id, updated_at)

@@ -793,20 +793,20 @@ class PeerLink:
             if caught_up:
                 break
             if current == marks:
-                raise PeerError("Peer sync could not fill missing updates")
+                # While the outbox is held, a peer op for a row with an
+                # unsigned local change waits (``engine._check_local``). The
+                # streams were just compared: open the outbox on that view,
+                # as after the pull, and ask for the same batch once more.
+                if not engine.outbox_held():
+                    raise PeerError("Peer sync could not fill missing updates")
+                ctx, released = await self._compare_streams(client, ctx, theirs)
+                if not released:
+                    raise PeerError("Peer sync could not fill missing updates")
+                continue
             # This is already the next request's committed frontier. A later
             # local write can safely be advertised on the following exchange.
             marks = current
-        if await self._check_rollback(client, ctx, theirs):
-            ctx = engine.require_context()
-        # Do not wait for the scanner's next wake or another network pass.
-        # Existing catalog cursors survive the hold; publish only their tail.
-        if engine.outbox_held():
-            released = await asyncio.to_thread(release_hold_for_peer_view, self.device_id,
-                                               theirs.get(ctx.device_id) or {})
-            if released:
-                self.syncing = True
-                await asyncio.to_thread(catalog.publish_owned)
+        ctx, _ = await self._compare_streams(client, ctx, theirs)
         # Stored addresses follow the same rule as dialed ones (``endpoints``).
         their_endpoints = exchange.get("endpoints")
         their_endpoints = validate_endpoints(their_endpoints) if isinstance(their_endpoints, list) else []
@@ -851,6 +851,24 @@ class PeerLink:
         self.contact_kick_used = False
         self.last_error, self.last_error_code = self.sync_warning, None
         return summary
+
+    async def _compare_streams(self, client: httpx.AsyncClient, ctx: engine.NetworkContext,
+                               theirs: Dict[str, Dict[str, int]]) -> tuple[engine.NetworkContext, bool]:
+        """Check the peer's view of our stream for a rollback, then open a
+        held outbox on it. Returns the current context and whether this call
+        opened the outbox."""
+        if await self._check_rollback(client, ctx, theirs):
+            ctx = engine.require_context()
+        # Do not wait for the scanner's next wake or another network pass.
+        # Existing catalog cursors survive the hold; publish only their tail.
+        released = False
+        if engine.outbox_held():
+            released = await asyncio.to_thread(release_hold_for_peer_view, self.device_id,
+                                               theirs.get(ctx.device_id) or {})
+            if released:
+                self.syncing = True
+                await asyncio.to_thread(catalog.publish_owned)
+        return ctx, released
 
     def _note_stalled_pull(self, ctx, before, current, theirs, checked, summary) -> None:
         """Retain head diagnostics without turning ordinary catch-up into bootstrap.

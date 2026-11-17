@@ -434,10 +434,14 @@ def _delete_permission_rules(where: str, params: tuple[str, ...]) -> int:
     Waiting for the periodic scan leaves a window in which a peer can restore
     a deleted row before its deletion has been versioned locally.
     """
+    from app.db import network as store
     from app.network import engine
 
     with get_db() as conn:
         cursor = conn.cursor()
+        # network_state before the rows, the order an incoming apply takes
+        # them; engine.record below would otherwise wait for it holding them.
+        store.lock_state(cursor)
         cursor.execute(f"DELETE FROM permission_rules WHERE {where} RETURNING id", params)
         deleted = cursor.fetchall()
         for row in deleted:
