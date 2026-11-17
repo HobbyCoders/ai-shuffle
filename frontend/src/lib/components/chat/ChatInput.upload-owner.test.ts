@@ -49,7 +49,8 @@ beforeEach(async () => {
 afterEach(() => {
 	cleanup();
 	vi.useRealTimers();
-	Object.assign(activeSession.current, { sessionId: null, isRemote: undefined });
+	// No draft left behind for the next test's newChat() to keep.
+	Object.assign(activeSession.current, { sessionId: null, isRemote: undefined, draft: '' });
 	vi.restoreAllMocks();
 });
 
@@ -167,7 +168,8 @@ describe('a paste or attachment started on a New chat that takes its id (#1659)'
 	/** The user opens another chat (a navigation). */
 	function navigateTo(id: string) {
 		bumpInitGeneration();
-		Object.assign(activeSession.current, { sessionId: id, project: '', projectV2Id: null, isRemote: false });
+		// As the switcher does: the chat's saved draft comes with it.
+		Object.assign(activeSession.current, { sessionId: id, project: '', projectV2Id: null, isRemote: false, draft: sessionEphemeralCache.peekDraft(id) || '' });
 	}
 	/** A New chat whose first message is sent and waiting for its chat. */
 	async function sendOnNewChat(): Promise<{ container: HTMLElement; editor: HTMLElement }> {
@@ -243,6 +245,128 @@ describe('a paste or attachment started on a New chat that takes its id (#1659)'
 		await waitFor(() => expect(editor.innerHTML).toContain('uploads/b.txt'));
 		expect(editor.innerHTML).toContain('uploads/a.txt');
 		expect(storedDraft(null)).not.toContain('uploads/');
+	});
+
+	/** A real switch from the chat list (the switcher saves and restores drafts). */
+	async function switchTo(id: string) {
+		activeSession.switchSession(id);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe(id));
+		await settle();
+	}
+	const chips = (editor: HTMLElement, path: string) => editor.querySelectorAll(`[data-path="${path}"]`).length;
+	const settle = () => new Promise(r => setTimeout(r, 20));
+
+	for (const kind of ['attachment', 'large paste'] as const) {
+		const path = kind === 'attachment' ? 'uploads/a.txt' : 'uploads/pasted.txt';
+		const begin = async (started: Awaited<ReturnType<typeof startOnNewChat>>) => {
+			if (kind === 'attachment') await pickFile(started.container);
+			else paste(started.editor, 'q'.repeat(LARGE_PASTE_BYTES));
+			await waitFor(() => expect(started.upload).toHaveBeenCalledOnce());
+		};
+		const result = kind === 'attachment' ? uploaded : { ...uploaded, path, filename: 'pasted.txt' };
+
+		it(`${kind}: the created chat chosen again before it finishes gets it in its editor, once`, async () => {
+			const started = await startOnNewChat();
+			await begin(started);
+			adopt('made');
+			await settle();
+			await switchTo('made'); // chosen again from the list: a real switch to the open chat
+			started.finish(result);
+			await waitFor(() => expect(chips(started.editor, path)).toBe(1));
+			await settle();
+			expect(chips(started.editor, path)).toBe(1);
+			expect(storedDraft(null)).not.toContain(path);
+		});
+
+		it(`${kind}: left for another chat and back before it finishes, it lands in the editor, once`, async () => {
+			const started = await startOnNewChat();
+			await begin(started);
+			adopt('made');
+			await settle();
+			await switchTo('chat-b');
+			await switchTo('made');
+			started.finish(result);
+			await waitFor(() => expect(chips(started.editor, path)).toBe(1));
+			await settle();
+			expect(chips(started.editor, path)).toBe(1);
+			expect(storedDraft('chat-b')).not.toContain(path);
+		});
+
+		it(`${kind}: finished while away, it is in the created chat when it is opened again, once`, async () => {
+			const started = await startOnNewChat();
+			await begin(started);
+			adopt('made');
+			await settle();
+			await switchTo('chat-b');
+			started.finish(result);
+			await waitFor(() => expect(storedDraft('made')).toContain(path));
+			expect(chips(started.editor, path)).toBe(0);
+			await switchTo('made');
+			await waitFor(() => expect(chips(started.editor, path)).toBe(1));
+			await settle();
+			expect(chips(started.editor, path)).toBe(1);
+		});
+
+		it(`${kind}: left for a fresh New chat before it took an id, it is not put in that New chat`, async () => {
+			const started = await startOnNewChat();
+			await begin(started);
+			bumpInitGeneration(); // a fresh New chat: id still none, a new navigation
+			Object.assign(activeSession.current, { sessionId: null });
+			await settle();
+			started.finish(result);
+			await waitFor(() => expect(started.container.textContent).toContain("wasn't added"));
+			expect(chips(started.editor, path)).toBe(0);
+			expect(started.editor.textContent).not.toContain('qqqq');
+			expect(storedDraft(null)).not.toContain(path);
+		});
+	}
+
+	it('an open chat chosen again before its attachment finishes still gets it in the editor', async () => {
+		let finish!: (value: unknown) => void;
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finish = done; }) as never);
+		Object.assign(activeSession.current, { isRemote: false });
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		await switchTo('owned');
+		finish(uploaded);
+		await waitFor(() => expect(chips(editor, 'uploads/a.txt')).toBe(1));
+	});
+
+	it('a chat chosen again while its owner is being confirmed is not refused as a different chat', async () => {
+		const upload = vi.spyOn(api, 'uploadFile').mockResolvedValue(uploaded as never);
+		Object.assign(activeSession.current, { isRemote: undefined });
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		await pickFile(container);
+		await settle();
+		expect(upload).not.toHaveBeenCalled();
+		await switchTo('owned');
+		expect(upload).not.toHaveBeenCalled();
+		activeSession.reconcileOwner([row(false)]);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		expect(upload.mock.calls[0][0]).toBe('/projects/app/upload');
+		await waitFor(() => expect(chips(editor, 'uploads/a.txt')).toBe(1));
+	});
+
+	it('two files, the created chat chosen again between them: both land in its editor', async () => {
+		const { container, editor } = await sendOnNewChat();
+		const finishes: Array<(value: unknown) => void> = [];
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finishes.push(done); }) as never);
+		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+		Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'a.txt'), new File(['y'], 'b.txt')] });
+		await fireEvent.change(input);
+		await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+		adopt('made');
+		await settle();
+		finishes[0](uploaded);
+		await waitFor(() => expect(chips(editor, 'uploads/a.txt')).toBe(1));
+		await switchTo('made');
+		await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+		finishes[1]({ ...uploaded, path: 'uploads/b.txt', filename: 'b.txt' });
+		await waitFor(() => expect(chips(editor, 'uploads/b.txt')).toBe(1));
+		expect(chips(editor, 'uploads/a.txt')).toBe(1);
 	});
 
 	it('left before it took an id: the result goes back to the New chat slot, not the open chat', async () => {
