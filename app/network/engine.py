@@ -1940,7 +1940,7 @@ def _item_incarnation(item: Mapping[str, Any]) -> int:
 
 
 def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: int,
-                 held: Mapping[str, Any], *, incoming_hash: Optional[str] = None) -> int:
+                 held: Mapping[str, Any], *, incoming_hash: Optional[str] = None, retaining_op: bool = False) -> int:
     """``envelope.compare`` of a version against the one held, on every path that picks a winner.
 
     The held incarnation is read only for an exact (clock, origin) tie, the
@@ -1955,6 +1955,12 @@ def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: 
                 and incoming_hash == (held["content_hash"] or "")):
             return 0
         held_incarnation = store.version_incarnation(cursor, collection, held)
+        if retaining_op and held.get("origin_incarnation") is None and incarnation < held_incarnation:
+            # The losing envelope is about to join the forwarding log. Pin the
+            # winner while its retained op is still unambiguous; a later lookup
+            # would see both incarnations at this clock and return the earlier.
+            cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s",
+                           (held_incarnation, collection, held["record_id"]))
     return envelope_mod.compare(clock, origin, held_clock, held_origin, incarnation, held_incarnation)
 
 
@@ -2042,7 +2048,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # the stream) the replicas still agree, which no stream-order rule can
     # promise (#1568).
     wins = existing is None or _versus_held(cursor, env.collection, env.clock, env.origin_device_id,
-                                            env.origin_incarnation, existing) > 0
+                                            env.origin_incarnation, existing, retaining_op=True) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)

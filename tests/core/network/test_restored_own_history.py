@@ -518,13 +518,17 @@ async def _copy_state(sender, receiver):
             await transport.PeerLink(sender.device_id, [served.base_url]).receive_state(client, engine.context())
 
 
-async def test_state_copy_exports_the_incarnation_of_a_retained_legacy_op(workers):
+@pytest.mark.parametrize("receive_op", [False, True], ids=["snapshot", "op-before-snapshot"])
+async def test_state_copy_exports_the_incarnation_of_a_retained_legacy_op(workers, receive_op):
     a, b, c = _equal_clock_fork(workers)
     # Simulate an upgrade: the signed op survives, the denormalized column is NULL.
     with a.active(), get_db() as conn:
         conn.cursor().execute("UPDATE sync_records SET origin_incarnation = NULL "
                               "WHERE collection = 'user_preferences' AND record_id LIKE %s", ("%theme",))
-    await _copy_state(c, a)
+    if receive_op:
+        _exchange(c, a)  # retaining the tied loser must not relabel the held version
+    else:
+        await _copy_state(c, a)
     assert owner_pref(a, "theme") == "new"
     await _copy_state(a, c)
     assert owner_pref(c, "theme") == "new"
