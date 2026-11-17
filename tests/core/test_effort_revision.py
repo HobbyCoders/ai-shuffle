@@ -341,12 +341,13 @@ class TestPathsThatDidNotPickALevel:
             {"prompt": "hi", "overrides": {"effort": "high", "effort_rev": 3}})
         assert body.overrides.model_dump(exclude_none=True) == {"effort": "high", "effort_rev": 3}
 
-    @pytest.mark.parametrize("snapshot_rev, saved", [(0, ("low", 1)), (1, ("max", 2))])
+    @pytest.mark.parametrize("snapshot_rev, saved", [(0, ("low", 1)), (None, ("low", 1)), (1, ("max", 2))])
     async def test_a_voice_context_snapshot_is_admitted_like_a_send(self, mock_db, monkeypatch, snapshot_rev, saved):
         """S6: a browser in a call shows high/0; another device saves low/1; the
         browser's routine context save used to restore high at revision 2,
         and the delegation then ran on it. A snapshot at the row's revision
-        still saves its level, and the saved pair is announced either way."""
+        still saves its level, and the saved pair is announced either way. One
+        with no revision (an older app) keeps a level picked since, too."""
         from app.api import voice, voice_context
 
         make_profile("agent", {})
@@ -354,7 +355,7 @@ class TestPathsThatDidNotPickALevel:
         db.set_session_run_binding("s", effort="low", effort_explicit=True)    # (low, 1)
         monkeypatch.setattr(voice, "_load_voice_session", AsyncMock(return_value=db.get_session("s")))
         monkeypatch.setattr(voice_context, "check_session_access", lambda request, session: None)
-        level = "high" if snapshot_rev == 0 else "max"
+        level = "max" if snapshot_rev == 1 else "high"
         body = voice_context.VoiceContextPatch(model="opus", effort=level, effort_rev=snapshot_rev, fast=False)
         with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
             answer = await voice_context.update_voice_session_context(None, "s", body, token="t")
@@ -363,12 +364,18 @@ class TestPathsThatDidNotPickALevel:
         assert broadcast.await_args.kwargs["updates"] == {"effort": saved[0], "effort_rev": saved[1]}
         assert not db.get_session("s")["fast"]
 
-    def test_a_voice_context_pick_without_a_revision_is_still_saved(self, mock_db):
-        """S6: the documented API call names no revision; it is a pick."""
+    @pytest.mark.parametrize("picked, saved", [(False, ("max", 1)), (True, ("low", 1))])
+    def test_a_voice_context_pick_without_a_revision_is_still_saved(self, mock_db, picked, saved):
+        """S6: a voice-context level with no revision (an older app's routine
+        snapshot) is admitted like an unversioned send: saved at revision 0,
+        never over a level picked since. The rest of the PATCH still applies."""
         from app.api import voice_context
 
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high", mode="voice")
-        db.set_session_run_binding("s", effort="low", effort_explicit=True)    # (low, 1)
-        voice_context._persist_patch("s", voice_context.VoiceContextPatch(effort="max"))
-        assert _pair("s") == ("max", 2)
+        if picked:
+            db.set_session_run_binding("s", effort="low", effort_explicit=True)    # (low, 1)
+        voice_context._persist_patch(
+            "s", voice_context.VoiceContextPatch(effort="max", model="sonnet"))
+        assert _pair("s") == saved
+        assert db.get_session("s")["model"] == "sonnet"
