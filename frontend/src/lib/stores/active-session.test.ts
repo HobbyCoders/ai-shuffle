@@ -1223,6 +1223,24 @@ describe('live effort and Fast mode selection', () => {
 			expect(activeSession.current.effortRev).toBe(3);
 		});
 
+		it('a level saved elsewhere after a switch away survives the delayed refusal (stage-2 review S1)', async () => {
+			let refuse!: (reason: unknown) => void;
+			vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+			const pending = activeSession.setEffortLevelOverride('max');
+			// Switch to another chat; the cached copy of this one holds high at 2.
+			activeSession.current.sessionId = 'another-chat';
+			try {
+				announce({ effort: 'low', effort_rev: 3 });
+				expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+				refuse(refusal);
+				await pending;
+				// Max was refused against revision 2: it must not land on revision 3.
+				expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+			} finally {
+				activeSession.current.sessionId = 'live-knobs';
+			}
+		});
+
 		it('the delayed answer of an earlier pick never replaces the held newer level (review S10)', async () => {
 			const low = deferred();
 			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise).mockRejectedValueOnce(refusal);

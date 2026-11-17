@@ -1012,7 +1012,12 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
 				// A level saved elsewhere while this request was under way is newer
 				// than the pick: it stands, as it does over a late answer (#1609).
-				if (_state.sessionId === sessionId && _state.effortRev !== sentEffortRev) return;
+				// After a switch the chat's level lives in its cached copy, which
+				// an announcement may have moved on: compare that revision, so an
+				// old pick is never paired with a newer one.
+				const heldRev = _state.sessionId === sessionId
+					? _state.effortRev : sessionEphemeralCache.restore(sessionId)?.effortRev;
+				if (heldRev !== sentEffortRev) return;
 				// Nothing was saved, so the level keeps the revision held now: a
 				// level another device saves later has a newer one and replaces
 				// it, and no earlier answer or announcement does.

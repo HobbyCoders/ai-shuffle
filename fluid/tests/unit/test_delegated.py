@@ -227,7 +227,9 @@ def test_golden_frame_mapping() -> None:
 @pytest.mark.parametrize(("model", "stored"), [
     ("claude-sonnet-4-6", {"model": "claude-sonnet-4-6"}),
     ("<synthetic>", {}),
-    (None, {}),
+    # The provider named none: the turn's model (stage-2 review S2).
+    (None, {"model": "sonnet"}),
+    ("", {"model": "sonnet"}),
 ])
 def test_the_stored_assistant_node_names_the_model_that_answered(model, stored) -> None:
     """The transcript reads a node's model from provider_meta (#1643)."""
@@ -242,6 +244,23 @@ def test_the_stored_assistant_node_names_the_model_that_answered(model, stored) 
 
     assert mapped.message is not None
     assert mapped.message.provider_meta == stored
+
+
+def test_a_frame_without_a_model_names_the_one_reported_earlier_this_turn() -> None:
+    """Stage-2 review S2: the served model id beats the alias the turn began with;
+    a sub-agent's frame is not the turn's model and gets none."""
+    mapper = StreamJsonMapper(
+        session_id="s1", turn_id="t1", model="sonnet", user_node_id="node_user",
+    )
+    text = [{"type": "text", "text": "hi"}]
+    mapper.feed({"type": "assistant", "message": {
+        "id": "msg_1", "role": "assistant", "model": "claude-sonnet-4-6", "content": text}})
+    later = mapper.feed({"type": "assistant", "message": {
+        "id": "msg_2", "role": "assistant", "content": text}})
+    assert later.message.provider_meta == {"model": "claude-sonnet-4-6"}
+    child = mapper.feed({"type": "assistant", "parent_tool_use_id": "toolu_1", "message": {
+        "id": "msg_3", "role": "assistant", "content": text}})
+    assert child.message is None or child.message.provider_meta == {}
 
 
 # ─── Announced tool surface (init frame) ─────────────────────────────────────

@@ -1286,11 +1286,17 @@ class StreamJsonMapper:
         self._block_cursor += len(blocks)
 
         # The model that answered, for the stored node: the transcript reads
-        # it back as the message's model (#1643).
-        meta = (
-            {"model": model} if isinstance(model, str) and model and model != "<synthetic>"
-            else {}
-        )
+        # it back as the message's model (#1643). A main-thread frame that
+        # names none falls back to the turn's model (the one the CLI reported
+        # earlier this turn, else the one it was started with). A synthetic
+        # frame (the CLI's own notice) names no model.
+        if model == "<synthetic>":
+            meta = {}
+        elif isinstance(model, str) and model:
+            meta = {"model": model}
+        else:
+            fallback = (self.reported_model or self.model) if main_thread else None
+            meta = {"model": fallback} if isinstance(fallback, str) and fallback else {}
         return Mapped(
             events=events, message=Message(role="assistant", content=content, provider_meta=meta),
             node_id=node_id, opened_call=opened,
