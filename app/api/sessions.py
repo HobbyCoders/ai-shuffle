@@ -1330,6 +1330,8 @@ async def get_live_session(
         "model": session.get("model") or session.get("launched_model"),
         "provider_id": session.get("provider_id"),
         "effort": session.get("effort"),
+        # The revision that level belongs to (#1609); 0 for one never changed.
+        "effort_rev": int(session.get("effort_rev") or 0),
         "context_window": session.get("context_window"),
         # The rest of the composer binding (#418). A hidden Task worker has no
         # sidebar row, so without these the composer showed the previous chat's

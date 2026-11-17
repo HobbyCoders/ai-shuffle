@@ -775,6 +775,12 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     effort = raw.get("effort")
     if isinstance(effort, str) and effort in VALID_EFFORTS:
         overrides["effort"] = effort
+    # The effort revision the sending client last saw, so this worker can tell
+    # an outdated level from a pick (turn_manager.EFFORT_REV). It rides with
+    # or without a level: a client on Auto names none.
+    effort_rev = raw.get("effort_rev")
+    if type(effort_rev) is int and effort_rev >= 0:
+        overrides["effort_rev"] = effort_rev
     context_window = raw.get("context_window")
     if context_window is not None:
         if type(context_window) is not int or not 0 < context_window <= _MAX_CONTEXT_WINDOW:
@@ -917,8 +923,9 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
     # make a turn live synchronously.
     from app.db import turns as turns_db
     had_live = await run_sync(turns_db.get_live_turn, session_id) is not None
+    effort_seen: Dict[str, Any] = {}
     turn_id = await turn_manager.submit_async(
-        session_id, source, prompt=prompt,
+        session_id, source, prompt=prompt, effort_seen=effort_seen,
         profile_id=body.get("profile_id"), project_id=row.get("project_id") or None,
         overrides=_turn_overrides(body.get("overrides")),
         # A per-message mode counts only when the sending worker states this is
@@ -943,6 +950,12 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         from app.core.session_runtime import try_steer_pending
         await try_steer_pending(session_id)
     result = {"turn_id": turn_id, "session_id": session_id}
+    if effort_seen:
+        # The saved level and its revision, when the sender's revision is no
+        # longer the row's: the sending worker pushes it to its own clients,
+        # which this worker's sockets do not reach (#1609).
+        result["effort"] = effort_seen.get("effort")
+        result["effort_rev"] = effort_seen["effort_rev"]
     if payload.get("compact_first"):
         queued = await run_sync(turns_db.get_turn, turn_id)
         result["compact_turn_id"] = queued["payload"]["compact_before_turn_id"]

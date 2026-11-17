@@ -283,6 +283,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 				modelOverride: null,
 				permissionModeOverride: null,
 				effortLevelOverride: null,
+				effortRev: undefined,
 				contextWindowChoice: DEFAULT_CONTEXT_WINDOW_CHOICE,
 				contextWindowPin: undefined,
 				// Agent, access and Fast are the linked chat's own too (#418): the
@@ -414,6 +415,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 							: (persisted.permissionModeOverride ?? s.permissionModeOverride),
 						effortLevelOverride:
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
+						// The revision that level was acknowledged at; /live replaces
+						// both when the chat's saved level is newer (#1609).
+						effortRev: persisted.sessionId ? persisted.effortRev : undefined,
 						fastMode: binding ? binding.fastMode : (persisted.fastMode ?? s.fastMode),
 						workspaceProjectIds: persisted.workspaceProjectIds ?? [],
 						contextWindowChoice:

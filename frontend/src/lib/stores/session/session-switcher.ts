@@ -42,6 +42,7 @@ import { resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
 import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
+import { effortIsNewer, effortRevOf, restoredEffort } from './effort-revision';
 import {
 	cacheComposerBinding,
 	COMPOSER_BINDING_FIELDS,
@@ -103,6 +104,7 @@ interface LiveSnapshot {
 		model?: string | null;
 		provider_id?: string | null;
 		effort?: string | null;
+		effort_rev?: number;
 		context_window?: number | null;
 		workspace_project_ids?: string[];
 		title?: string;
@@ -455,6 +457,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			effortRev: state.effortRev,
 			// Agent, access and Fast, with which of them are real values (#418).
 			...cacheComposerBinding(state),
 			permissionModeOverride: state.permissionModeOverride,
@@ -520,6 +523,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			projectV2Id: state.projectV2Id,
 			modelOverride: state.modelOverride,
 			effortLevelOverride: state.effortLevelOverride,
+			effortRev: state.effortRev,
 			...cacheComposerBinding(state),
 			profile: state.profile,
 			permissionModeOverride: state.permissionModeOverride,
@@ -828,7 +832,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			mode: normalizeSessionMode(row?.mode),
 			modelOverride: ephemeral?.modelOverride ?? sessionModelBinding(row),
 			permissionModeOverride: normalizePermissionMode(binding.permissionModeOverride),
-			effortLevelOverride: ephemeral?.effortLevelOverride ?? row?.effort ?? null,
+			...restoredEffort(ephemeral, row),
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
 			fastMode: binding.fastMode,
@@ -919,6 +923,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialFolders = getState().workspaceProjectIds;
 		const initialModel = getState().modelOverride;
 		const initialEffort = getState().effortLevelOverride;
+		const initialEffortRev = getState().effortRev;
 		const initialContextChoice = getState().contextWindowChoice;
 		const initialContextPin = getState().contextWindowPin;
 		const initialFastMode = getState().fastMode;
@@ -1034,8 +1039,17 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (initialModel == null && getState().modelOverride === initialModel && meta.model !== undefined) {
 				patch.modelOverride = sessionModelBinding(meta);
 			}
-			if (initialEffort == null && getState().effortLevelOverride === initialEffort && meta.effort !== undefined) {
+			// The saved effort with its revision (#1609). A newer revision than
+			// the one held replaces the level, which a reload restored from the
+			// browser and may be older; a pick or an announcement that landed
+			// during this fetch holds a revision at least as new and is kept.
+			// A server with no revision fills a hole only, as before.
+			const metaEffortRev = effortRevOf(meta.effort_rev);
+			if (meta.effort !== undefined && getState().effortLevelOverride === initialEffort
+				&& getState().effortRev === initialEffortRev
+				&& (metaEffortRev === undefined ? initialEffort == null : effortIsNewer(metaEffortRev, initialEffortRev))) {
 				patch.effortLevelOverride = meta.effort;
+				if (metaEffortRev !== undefined) patch.effortRev = metaEffortRev;
 			}
 			// Reloads restore a browser snapshot before /live arrives. Replace
 			// its old acknowledged window, but not a pick made during this fetch.
@@ -1207,6 +1221,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// last pick carries over except Accept Edits (nothing to edit).
 			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
+			// A new chat has no saved level to be behind of.
+			effortRev: undefined,
 			fastMode: getPersistedFastMode(),
 			// A compose has no server binding to wait for.
 			bindingUnhydrated: {},

@@ -39,6 +39,7 @@ vi.mock('$lib/stores/active-session', async () => {
 			init: async () => { await composerPreferences.hydrate(); },
 			applyComposerDefaults: vi.fn(),
 			adoptAttachedProject: vi.fn(),
+			adoptRowEffort: vi.fn(),
 			resetForAccountChange: vi.fn(),
 			newChat: vi.fn(),
 			validateSelectedProfile: vi.fn(),

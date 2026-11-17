@@ -607,6 +607,61 @@ describe('session-switcher · authoritative binding hydration', () => {
 		switcher.destroy();
 	});
 
+	// #1609: /live names the revision of the saved effort. A reload restores
+	// the level this browser last showed, which another device may have changed.
+	it('replaces a restored level with a saved one of a newer revision', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { effort: 'low', effort_rev: 3 } });
+		const { switcher, getState } = makeSwitcher(fullState({ effortLevelOverride: 'high', effortRev: 2 }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+		switcher.destroy();
+	});
+
+	it('takes the saved level and revision when it holds no revision', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { effort: null, effort_rev: 1 } });
+		const { switcher, getState } = makeSwitcher(fullState({ effortLevelOverride: 'high', effortRev: undefined }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState().effortLevelOverride).toBeNull();
+		expect(getState().effortRev).toBe(1);
+		switcher.destroy();
+	});
+
+	it('keeps a level it holds at the saved revision or a newer one', async () => {
+		// A level fitted to a newly picked model is not saved until the next
+		// send: the row still names the old level at the same revision.
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { effort: 'high', effort_rev: 3 } });
+		const { switcher, getState } = makeSwitcher(fullState({ effortLevelOverride: 'low', effortRev: 3 }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: { effort: 'high', effort_rev: 2 } });
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+		switcher.destroy();
+	});
+
+	it('keeps a level adopted while the snapshot was in flight', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ effortLevelOverride: 'high', effortRev: 2 }));
+		const pending = switcher.refreshSessionMetadata('session-A');
+		// An announcement of revision 4 lands before the older /live answer.
+		deps.update(s => ({ ...s, effortLevelOverride: 'max', effortRev: 4 }));
+		resolve({ session_meta: { effort: 'low', effort_rev: 3 } });
+		await pending;
+		expect(getState()).toMatchObject({ effortLevelOverride: 'max', effortRev: 4 });
+		switcher.destroy();
+	});
+
+	it('opens a chat on the row when it changed while the chat was not open here', async () => {
+		vi.mocked(api.get).mockResolvedValue({ session_meta: {} });
+		_mockSessions.current = [{ id: 'session-C', model: 'opus', effort: 'low', effort_rev: 3 }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState());
+		ephemeralStore.set('session-C', { effortLevelOverride: 'high', effortRev: 2, modelOverride: 'opus' } as never);
+		await switcher.switchSession('session-C');
+		expect(getState()).toMatchObject({ sessionId: 'session-C', effortLevelOverride: 'low', effortRev: 3 });
+		switcher.destroy();
+	});
+
 	it('keeps edits made while the binding snapshot is in flight', async () => {
 		let resolve!: (value: unknown) => void;
 		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));

@@ -2280,6 +2280,88 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('session_updated handler (effort revision, #1609)', () => {
+		afterEach(() => sessionEphemeralCache.clear());
+
+		function openAt(effort: string | null, effortRev: number | undefined, rowRev?: number) {
+			let state = { ...mockState(), effortLevelOverride: effort, effortRev };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+				sessionEffortRev: vi.fn(() => rowRev),
+			});
+			handlers = createMessageHandlers(deps);
+			return {
+				announce(sessionId: string, effort: string | null, effort_rev?: number) {
+					handlers.handleMessage({ event_type: 'session_updated', session_id: sessionId,
+						data: { updates: { effort, ...(effort_rev !== undefined ? { effort_rev } : {}) } } });
+				},
+				get state() { return state; },
+			};
+		}
+
+		it('adopts a newer level with its revision, in the composer and the row', () => {
+			const tab = openAt('high', 2, 2);
+			tab.announce('session-1', 'low', 3);
+			expect(tab.state.effortLevelOverride).toBe('low');
+			expect(tab.state.effortRev).toBe(3);
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { effort: 'low', effort_rev: 3 });
+			expect(deps.onPersistSession).toHaveBeenCalled();
+		});
+
+		it('ignores an announcement older than the level it holds', () => {
+			// Two picks: the push for the first arrives after the second's.
+			const tab = openAt('max', 5, 5);
+			tab.announce('session-1', 'low', 4);
+			expect(tab.state.effortLevelOverride).toBe('max');
+			expect(tab.state.effortRev).toBe(5);
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+			expect(deps.onPersistSession).not.toHaveBeenCalled();
+		});
+
+		it('the revision it already holds is not news', () => {
+			const tab = openAt('max', 5, 5);
+			tab.announce('session-1', 'max', 5);
+			expect(deps.update).not.toHaveBeenCalled();
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+		});
+
+		it('adopts any revision when it holds none (a chat created here)', () => {
+			const tab = openAt('high', undefined);
+			tab.announce('session-1', null, 1);
+			expect(tab.state.effortLevelOverride).toBeNull();
+			expect(tab.state.effortRev).toBe(1);
+		});
+
+		it('keeps taking a level with no revision from a worker too old to count', () => {
+			const tab = openAt('high', 2, 2);
+			tab.announce('session-1', 'low');
+			expect(tab.state.effortLevelOverride).toBe('low');
+			// Its own revision is unchanged: nothing newer was named.
+			expect(tab.state.effortRev).toBe(2);
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { effort: 'low' });
+		});
+
+		it('orders the cached copy of a chat not on screen the same way', () => {
+			const tab = openAt('high', 2);
+			sessionEphemeralCache.save('elsewhere', { ...tab.state, effortLevelOverride: 'max', effortRev: 5 } as never);
+			tab.announce('elsewhere', 'low', 4);
+			expect(sessionEphemeralCache.restore('elsewhere')).toMatchObject({ effortLevelOverride: 'max', effortRev: 5 });
+			tab.announce('elsewhere', 'low', 6);
+			expect(sessionEphemeralCache.restore('elsewhere')).toMatchObject({ effortLevelOverride: 'low', effortRev: 6 });
+			// The chat on screen is another chat.
+			expect(tab.state.effortLevelOverride).toBe('high');
+		});
+
+		it('an older level does not go into a row that holds a newer one, other fields still do', () => {
+			const tab = openAt('max', 5, 5);
+			handlers.handleMessage({ event_type: 'session_updated', session_id: 'session-1',
+				data: { updates: { effort: 'low', effort_rev: 4, fast: true } } });
+			expect(tab.state.effortLevelOverride).toBe('max');
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalledWith('session-1', expect.objectContaining({ effort: 'low' }));
+		});
+	});
+
 	describe('user_session_updated handler (working time, #1619)', () => {
 		it('patches work_ms and work_started_at into the row without a list reload', async () => {
 			vi.useFakeTimers();

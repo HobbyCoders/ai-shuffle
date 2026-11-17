@@ -141,6 +141,9 @@ export interface Session {
 	// the binding moved onto the row.
 	model?: string | null;
 	effort?: string | null;
+	/** How many times `effort` has changed (#1609); absent from a server too
+	 *  old to count. See stores/session/effort-revision.ts. */
+	effort_rev?: number;
 	permission_mode?: string | null;
 	/** Fast service tier for this session's run binding. Null on sessions
 	 *  created before the flag existed, and on models that never supported it. */

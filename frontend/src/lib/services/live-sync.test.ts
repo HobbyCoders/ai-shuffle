@@ -10,7 +10,7 @@ vi.mock('./resource-sync', async (importOriginal) => {
  m.clear.mockImplementation(sync.clear.bind(sync));
  return { ...actual, resourceSync: { subscribe: vi.fn(sync.subscribe.bind(sync)), invalidate: m.invalidate, clear: m.clear } };
 });
-vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),dropMissingProject:vi.fn(),adoptAttachedProject:vi.fn(),resetForAccountChange:vi.fn()}}));
+vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),dropMissingProject:vi.fn(),adoptAttachedProject:vi.fn(),adoptRowEffort:vi.fn(),resetForAccountChange:vi.fn()}}));
 vi.mock('$lib/stores/app-data.svelte',()=>({appData:{current:{sessions:[]},loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadProjectCatalog:m.loadProjectCatalog,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
@@ -201,6 +201,13 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(m.loadSessions).toHaveBeenCalled();
   expect(activeSession.adoptAttachedProject).toHaveBeenCalledWith([]);
   expect(vi.mocked(m.loadSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.adoptAttachedProject).mock.invocationCallOrder[0]);
+ });
+ it('adopts a newer effort revision into the open chat once the session list reloads (#1609)',async()=>{
+  stop=startLiveSync();account('alice');
+  const subscription=vi.mocked(resourceSync.subscribe).mock.calls.filter(([names])=>names.includes('sessions')).at(-1);
+  await subscription?.[1]();
+  expect(activeSession.adoptRowEffort).toHaveBeenCalledWith([]);
+  expect(vi.mocked(m.loadSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.adoptRowEffort).mock.invocationCallOrder[0]);
  });
  it('refreshes session project assignments when a project is changed or removed',async()=>{
   stop=startLiveSync();account('alice');

@@ -762,6 +762,42 @@ describe('message-sender effort', () => {
 	});
 });
 
+// #1609: the worker keeps a newer level when this tab's view of it is outdated.
+describe('message-sender effort revision', () => {
+	async function sent(state: Partial<ActiveSessionState>, rows: { id: string; effort?: string | null; effort_rev?: number }[] = []) {
+		const { deps, wsConn } = makeDeps(baseState({ modelOverride: 'opus', ...state }));
+		deps.appData = { ...deps.appData, current: { sessions: rows } };
+		await createMessageSender(deps).sendMessage('hello');
+		return (wsConn.send.mock.calls.find(([message]) => (message as any).type === 'query')?.[0] as any).overrides;
+	}
+
+	it('sends the revision it holds beside the level', async () => {
+		expect(await sent({ sessionId: 'ses-1', effortLevelOverride: 'low', effortRev: 3 }))
+			.toMatchObject({ effort: 'low', effort_rev: 3 });
+	});
+
+	it('sends the revision on Auto too, where no level travels', async () => {
+		const overrides = await sent({ sessionId: 'ses-1', effortLevelOverride: null, effortRev: 0 });
+		expect(overrides.effort_rev).toBe(0);
+		expect(overrides).not.toHaveProperty('effort');
+	});
+
+	it('sends none while it knows none, so the worker saves the level as before', async () => {
+		expect(await sent({ sessionId: 'ses-1', effortLevelOverride: 'low' })).not.toHaveProperty('effort_rev');
+	});
+
+	it('a chat created in this tab takes the revision of its sidebar row', async () => {
+		const row = { id: 'ses-1', effort: 'low', effort_rev: 0 };
+		expect(await sent({ sessionId: 'ses-1', effortLevelOverride: 'low' }, [row])).toMatchObject({ effort_rev: 0 });
+		// A row that names another level is not this composer's revision.
+		expect(await sent({ sessionId: 'ses-1', effortLevelOverride: 'high' }, [row])).not.toHaveProperty('effort_rev');
+	});
+
+	it('sends none when the send creates the chat', async () => {
+		expect(await sent({ effortLevelOverride: 'low', effortRev: 3 })).not.toHaveProperty('effort_rev');
+	});
+});
+
 describe('message-sender context-window override', () => {
 	it('sends a numeric context_window that can force a 1M Claude model to normal 200k', async () => {
 		const { deps, wsConn } = makeDeps(baseState({

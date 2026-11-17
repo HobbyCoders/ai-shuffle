@@ -27,6 +27,7 @@ import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
+import { effortRevToSend } from './effort-revision';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
@@ -212,7 +213,7 @@ export interface MessageSenderDeps {
 		loadApiUserSessions: () => void;
 		/** The sidebar's chats: the ones a compose started now cannot create. */
 		current?: {
-			sessions: { id: string }[];
+			sessions: { id: string; effort?: string | null; effort_rev?: number }[];
 			/** Which shared projects this worker has a checkout of. */
 			clusterProjects?: { project_v2_id: string; local_project_id: string | null }[];
 		};
@@ -340,6 +341,15 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		const binding = sendableComposerBinding(_state);
 		if (binding.permissionMode) overrides.permission_mode = binding.permissionMode;
 		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+		if (_state.sessionId) {
+			// The effort revision this client last saw, with or without a level
+			// (Auto names none): the worker saves the level only while that is
+			// still the chat's revision, and otherwise answers with the saved
+			// one (#1609). See effort-revision.ts.
+			const effortRev = effortRevToSend(_state,
+				deps.appData.current?.sessions.find(s => s.id === _state.sessionId));
+			if (effortRev !== undefined) overrides.effort_rev = effortRev;
+		}
 		// Always an explicit boolean. Omitting the key when fast mode is OFF made
 		// the backend fall back to the session row, which still held the earlier
 		// `true` — so turning fast mode off never reached the CLI. `false` is a
@@ -728,6 +738,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				// The worker can acknowledge a newer pin before a lost reply is retried.
 				// Its revision precondition is not a new owner instruction.
 				delete retryOverrides.context_window_base;
+				delete retryOverrides.effort_rev;
 				const clientMessageId = options?.compactFirst
 					? compactRetryId(_state.sessionId!, JSON.stringify({ prompt, profile: queryProfileId,
 						project: _state.project, uploadPaths: options.pendingUploadPaths, uploadReferences: options.pendingUploadReferences, overrides: retryOverrides }), newLocalPendingId)

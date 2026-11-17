@@ -115,6 +115,9 @@ class SessionRow(TypedDict):
     # fall back to ``launched_model`` and then the agent's legacy config.
     model: Optional[str]
     effort: Optional[str]
+    # Counts the changes of ``effort``; NULL reads as 0. See
+    # ``set_session_run_binding``.
+    effort_rev: Optional[int]
     permission_mode: Optional[str]
     # A delegated worker's dispatch ceiling, fixed at creation; NULL for every
     # other session. See ``session_modes.turn_permission_mode``.
@@ -990,7 +993,8 @@ def set_session_run_binding(
     clear_effort: bool = False,
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
-) -> None:
+    effort_rev_base: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
     """Persist the run binding a turn actually used onto its session.
 
     Agents do not pin a model, so the session row carries the choice. The
@@ -1016,6 +1020,19 @@ def set_session_run_binding(
     effort binding (the live settings endpoint's model-default choice).
     ``fast_pinned`` marks a delegated worker whose fast mode the owner set in
     the worker's own chat, so a parent's later toggle leaves it alone.
+
+    Every write that changes ``effort`` adds one to ``effort_rev`` in the same
+    statement; a write of the level the row already holds leaves it alone, so
+    one revision always names one level. ``effort_rev_base`` is the revision a
+    sending composer last saw: the effort is then written only while it is
+    still the row's revision, and a level sent from any other view is dropped
+    (#1609). A base above the row's revision means the row lost its count (a
+    database restored from a backup under an open tab): the row's level
+    stands and its revision moves past the base, so that client adopts it
+    instead of holding a revision no answer can ever exceed. The other fields
+    are written either way. Returns the row's ``{"effort", "effort_rev"}``
+    after the write, or ``None`` when nothing was written or the session does
+    not exist.
     """
     _ph = ph()
     updates: List[str] = []
@@ -1031,9 +1048,35 @@ def set_session_run_binding(
                 updates.append(f"provider_id = {_ph}")
                 values.append(rebound_provider)
     clean_effort = (effort or "").strip()
-    if clean_effort or clear_effort:
-        updates.append(f"effort = {_ph}")
-        values.append(clean_effort or None)
+    writes_effort = bool(clean_effort or clear_effort)
+    level = clean_effort or None
+    # Every right-hand side reads the row as it was before this statement.
+    if effort_rev_base is None:
+        if writes_effort:
+            updates.append(f"effort = {_ph}")
+            values.append(level)
+            updates.append(
+                f"effort_rev = CASE WHEN effort IS DISTINCT FROM {_ph} "
+                "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
+            values.append(level)
+    else:
+        base = int(effort_rev_base)
+        if writes_effort:
+            updates.append(
+                f"effort = CASE WHEN COALESCE(effort_rev, 0) = {_ph} THEN {_ph} ELSE effort END")
+            values.extend((base, level))
+            updates.append(
+                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
+                f"WHEN COALESCE(effort_rev, 0) = {_ph} AND effort IS DISTINCT FROM {_ph} "
+                "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
+            values.extend((base, base, base, level))
+        else:
+            # A send that names no level (Auto) writes none, and still moves
+            # a row that lost its count past the sender's revision.
+            updates.append(
+                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
+                "ELSE effort_rev END")
+            values.extend((base, base))
     clean_permission = (permission_mode or "").strip()
     if clean_permission:
         updates.append(f"permission_mode = {_ph}")
@@ -1065,14 +1108,19 @@ def set_session_run_binding(
         values.append(json.dumps(normalize_workspace_project_ids(workspace_project_ids)))
 
     if not updates:
-        return
+        return None
     values.append(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
+            f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} "
+            "RETURNING effort, effort_rev",
             values,
         )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return {"effort": row["effort"] or None, "effort_rev": int(row["effort_rev"] or 0)}
 
 
 def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:
@@ -1098,11 +1146,19 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
         return
     placeholder = ph()
     assignments = ", ".join(f"{field} = {placeholder}" for field in changes)
+    values = list(changes.values())
+    if "effort" in changes:
+        # The same revision rule as ``set_session_run_binding``: a changed
+        # level is a new revision (the right-hand side reads the old row).
+        assignments += (
+            f", effort_rev = CASE WHEN effort IS DISTINCT FROM {placeholder} "
+            "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
+        values.append(changes["effort"])
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET {assignments} WHERE id = {placeholder}",
-            [*changes.values(), session_id],
+            [*values, session_id],
         )
 
 

@@ -906,6 +906,79 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.effortLevelOverride).toBe('medium');
 	});
 
+	// #1609: the worker counts the changes of a chat's effort. Its answer to a
+	// pick and its announcements name the revision, and the composer never
+	// goes back to an older one.
+	it('holds the revision the worker answered a pick with', async () => {
+		activeSession.current.effortRev = 2;
+		sessionEphemeralCache.save('live-knobs', { ...activeSession.current } as never);
+		vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'low', effort_rev: 3, fast: false });
+		await activeSession.setEffortLevelOverride('low');
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.effortRev).toBe(3);
+		expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+	});
+
+	it('an answer that arrives after a newer announcement does not undo it', async () => {
+		activeSession.current.effortRev = 2;
+		let acknowledge!: (value: { effort: string; effort_rev: number; fast: boolean }) => void;
+		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setEffortLevelOverride('low');
+		// Another tab picked max after this pick was saved; its push got here first.
+		Object.assign(activeSession.current, { effortLevelOverride: 'max', effortRev: 4 });
+		sessionEphemeralCache.save('live-knobs', { ...activeSession.current } as never);
+		acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+		await pending;
+		expect(activeSession.current.effortLevelOverride).toBe('max');
+		expect(activeSession.current.effortRev).toBe(4);
+		expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'max', effortRev: 4 });
+	});
+
+	it('its own announcement arriving before the answer changes nothing', async () => {
+		activeSession.current.effortRev = 2;
+		let acknowledge!: (value: { effort: string; effort_rev: number; fast: boolean }) => void;
+		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));
+		const pending = activeSession.setEffortLevelOverride('low');
+		Object.assign(activeSession.current, { effortLevelOverride: 'low', effortRev: 3 });
+		acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+		await pending;
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.effortRev).toBe(3);
+	});
+
+	it('takes the answer of a worker whose count is behind its own', async () => {
+		// The database was restored from a backup under this open tab: nothing
+		// newer arrived since the pick, so the lower revision is the saved one.
+		activeSession.current.effortRev = 9;
+		vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'low', effort_rev: 2, fast: false });
+		await activeSession.setEffortLevelOverride('low');
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.effortRev).toBe(2);
+	});
+
+	it('an answer from a worker that does not count leaves the held revision alone', async () => {
+		activeSession.current.effortRev = undefined;
+		vi.spyOn(api, 'put').mockResolvedValueOnce({ effort: 'low', fast: false });
+		await activeSession.setEffortLevelOverride('low');
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.effortRev).toBeUndefined();
+	});
+
+	it('takes a newer level from the reloaded row of the open chat, and no older one', () => {
+		// A level saved on the worker that runs the chat reaches a page on
+		// another worker only as the replicated row.
+		Object.assign(activeSession.current, { effortLevelOverride: 'high', effortRev: 2 });
+		expect(activeSession.adoptRowEffort([{ id: 'live-knobs', effort: 'low', effort_rev: 2 }])).toBe(false);
+		expect(activeSession.adoptRowEffort([{ id: 'another-chat', effort: 'low', effort_rev: 9 }])).toBe(false);
+		expect(activeSession.current.effortLevelOverride).toBe('high');
+		expect(activeSession.adoptRowEffort([{ id: 'live-knobs', effort: 'low', effort_rev: 3 }])).toBe(true);
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+		expect(activeSession.current.effortRev).toBe(3);
+		// The list is a reload: a response older than a push leaves the push alone.
+		expect(activeSession.adoptRowEffort([{ id: 'live-knobs', effort: 'high', effort_rev: 2 }])).toBe(false);
+		expect(activeSession.current.effortLevelOverride).toBe('low');
+	});
+
 	it('supports explicit default effort and turning Fast mode off', async () => {
 		const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: null, fast: false });
 		activeSession.current.fastMode = true;

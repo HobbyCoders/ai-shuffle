@@ -203,8 +203,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         pin = ({"fast_pinned": True}
                if not inherited and "fast" in changes and session.get("is_worker") else {})
         try:
-            await run_sync(database.set_session_run_binding, session_id, **stored,
-                           clear_effort=stored["effort"] is None, **pin)
+            saved = await run_sync(database.set_session_run_binding, session_id, **stored,
+                                   clear_effort=stored["effort"] is None, **pin)
         except Exception:
             if connected:
                 await state.adapter.set_run_settings(**old)
@@ -217,6 +217,11 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
+        if "effort" in changes and isinstance(saved, dict):
+            # The revision the saved level now has (#1609), for the picker and
+            # for the announcement. Kept off ``selected``: that is the turn's
+            # run binding, and a revision is not part of it.
+            selected = {**selected, "effort_rev": saved["effort_rev"]}
         waiting = fast_waiting_turn(session_id)
         return {**selected, "fast_applies_turn": waiting} if waiting else selected
 
@@ -277,9 +282,12 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
     Without it another tab, the phone or the other worker's browser keeps its
     older window or effort until a reload, and its next send carries it and
     pins it again (#1895, #1579). Effort goes out only when the request set it,
-    an explicit Auto (``None``) included. Every socket gets it, the picker's own
-    too: the REST call names no device, and the value is the one the picker
-    already applied. A client that does not know a field reloads the row.
+    an explicit Auto (``None``) included, and with the revision the level now
+    has, so a client can tell an announcement older than what it holds
+    (#1609); an owner too old to report one sends the level alone. Every
+    socket gets it, the picker's own too: the REST call names no device, and
+    the value is the one the picker already applied. A client that does not
+    know a field reloads the row.
     """
     if not isinstance(result, dict):
         return
@@ -288,6 +296,8 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
         updates["context_window"] = result["context_window"]
     if effort_asked and "effort" in result:
         updates["effort"] = result["effort"]
+        if type(result.get("effort_rev")) is int:
+            updates["effort_rev"] = result["effort_rev"]
     if not updates:
         return
     try:

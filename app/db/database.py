@@ -2553,6 +2553,15 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast_pinned BOOLEAN")
         migrations_applied.append("sessions.fast_pinned")
 
+    # Effort revision (#1609): counts the changes of ``sessions.effort`` so a
+    # send carrying an older view of the level cannot save it over a newer
+    # pick (``set_session_run_binding``). NULL on every pre-existing row = 0.
+    # Additive/nullable, no index, no SCHEMA_VERSION bump (the migrations
+    # fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "effort_rev"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN effort_rev INTEGER")
+        migrations_applied.append("sessions.effort_rev")
+
     # Snooze (sidebar): a settled chat that returns to Active on its own at
     # this time. NULL on every pre-existing row = not snoozed. Projected from
     # the shared membership record. Additive/nullable, no index, no

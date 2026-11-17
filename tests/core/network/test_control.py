@@ -1098,3 +1098,79 @@ async def test_a_forwarded_turn_without_a_source_is_refused_not_read_as_the_owne
         with pytest.raises(ValueError, match="source is required"):
             await control.handle("turns", body, from_device="peer")
         submit.assert_not_awaited()
+
+
+async def test_control_turns_keep_a_newer_effort_and_answer_with_it(workers, monkeypatch):
+    """#1609: an effort pick does not reach a browser on another worker. Its
+    next send names the revision it still holds, so the owner keeps the newer
+    level and answers with it; the revision then travels with the row."""
+    a, b = workers("a"), workers("b")
+    served = _served_client(monkeypatch, a)
+    from app.core import turn_manager
+    real_submit = turn_manager.submit_async
+
+    async def submit_without_running(session_id, source, **kwargs):
+        return await real_submit(session_id, source, no_kick=True, **kwargs)
+
+    monkeypatch.setattr(turn_manager, "submit_async", submit_without_running)
+    with a.active():
+        engine.create_network("Home", device_name="A")
+    join(a, b)
+    with a.active():
+        database.create_session(session_id="s-effort", profile_id="default", project_id=None, title="On A",
+                                is_active=True, model="opus", effort="high")
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        mirror = database.get_session("s-effort")
+        assert (mirror["effort"], mirror["effort_rev"]) == ("high", None)
+    with a.active():
+        # Picked on the owner; B's browser is not told.
+        database.set_session_run_binding("s-effort", effort="low")
+        store.touch_member(b.device_id, endpoints=[])
+    from app.db import turns as turns_db
+    with b.active():
+        store.touch_member(a.device_id, endpoints=[served.base_url])
+        answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
+                                           overrides={"model": "opus", "effort": "high", "effort_rev": 0})
+        assert (answer["effort"], answer["effort_rev"]) == ("low", 1)
+    with a.active():
+        row = database.get_session("s-effort")
+        assert (row["effort"], row["effort_rev"]) == ("low", 1)
+        latest = turns_db.get_latest_turn("s-effort")["overrides"]
+        assert latest["effort"] == "low" and "effort_rev" not in latest
+    with b.active():
+        # Holding the answered revision, B's own change is saved and answered.
+        answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
+                                           overrides={"model": "opus", "effort": "max", "effort_rev": 1})
+        assert (answer["effort"], answer["effort_rev"]) == ("max", 2)
+        # A current send that changes nothing answers with no level.
+        answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
+                                           overrides={"model": "opus", "effort": "max", "effort_rev": 2})
+        assert "effort_rev" not in answer
+        # A revision that is not a count is dropped: the send is one without.
+        for bad in (True, -1, "2"):
+            answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
+                                               overrides={"model": "opus", "effort": "low", "effort_rev": bad})
+            assert "effort_rev" not in answer
+    with a.active():
+        row = database.get_session("s-effort")
+        assert (row["effort"], row["effort_rev"]) == ("low", 3)
+        engine.scan_all()
+    converge([a, b])
+    with b.active():
+        # The mirror holds the owner's level with the owner's revision.
+        mirror = database.get_session("s-effort")
+        assert (mirror["effort"], mirror["effort_rev"]) == ("low", 3)
+
+
+def test_session_effort_revision_does_not_resign_rows_that_never_changed_effort():
+    """``effort_rev`` joined the sessions collection late: a row whose effort
+    never changed hashes as it did before the field existed, so an upgrade
+    does not republish every session, and a changed revision is a new record."""
+    from app.network import policy
+    sessions = policy.COLLECTIONS["sessions"]
+    assert "effort_rev" in sessions.fields and "effort_rev" in sessions.late_fields
+    before = {"id": "s", "title": "t", "effort": "high"}
+    assert engine.content_hash(sessions, {**before, "effort_rev": None}) == engine.content_hash(sessions, before)
+    assert engine.content_hash(sessions, {**before, "effort_rev": 1}) != engine.content_hash(sessions, before)

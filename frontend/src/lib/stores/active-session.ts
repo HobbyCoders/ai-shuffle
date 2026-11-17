@@ -46,6 +46,7 @@ import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { queueHydration } from './session/queue-hydration';
 import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } from './session/composer-binding';
+import { effortFromRow, effortIsNewer, effortRevOf } from './session/effort-revision';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
@@ -234,6 +235,10 @@ export interface ActiveSessionState {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	/** The open chat's effort revision as this client last saw it (undefined:
+	 *  not known, or a new chat). Sent with each message so the worker can tell
+	 *  an outdated level from a pick (#1609). See session/effort-revision.ts. */
+	effortRev?: number;
 	/** Fast service tier for this session — faster output at a higher price, and
 	 *  a cleared prompt cache whenever it flips. Only offered on models that
 	 *  support it (`isFastModeCapable`); false everywhere else. */
@@ -376,6 +381,8 @@ export interface PersistedSession {
 	modelOverride: string | null;
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
+	/** The revision `effortLevelOverride` was last acknowledged at (#1609). */
+	effortRev?: number;
 	fastMode?: boolean;
 	/** Which of profile / access / Fast this snapshot holds as real values.
 	 *  Absent on snapshots written before #418, which are not trusted for them. */
@@ -756,6 +763,7 @@ const { handleMessage } = createMessageHandlers({
 	appLoadSessions: () => appData.loadSessions(),
 	appLoadApiUserSessions: () => appData.loadApiUserSessions(),
 	mergeSessionPatch: (sessionId, patch) => appData.mergeSessionPatch(sessionId, patch),
+	sessionEffortRev: (sessionId) => effortRevOf(appData.current.sessions.find(s => s.id === sessionId)?.effort_rev),
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),
@@ -885,6 +893,16 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	let selected = value;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
+	// The revision the saved effort has, when the worker counts them (#1609).
+	let savedEffortRev: number | undefined;
+	// The revisions held when the pick was made. An answer naming an older
+	// revision than the one held now is outdated only when a newer level
+	// arrived in between; when nothing arrived, the worker's count is behind
+	// this client's (a restored database) and its answer is the level to show.
+	const heldEffortRev = _state.effortRev;
+	const cachedEffortRev = sessionId ? sessionEphemeralCache.restore(sessionId)?.effortRev : undefined;
+	const overtaken = (now: number | undefined, held: number | undefined) =>
+		field === 'effort' && savedEffortRev !== undefined && now !== undefined && now !== held && savedEffortRev < now;
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -892,7 +910,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
+			return api.put<{ effort: string | null; effort_rev?: number; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
@@ -903,6 +921,15 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
 			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
+			if (field === 'effort') {
+				savedEffortRev = effortRevOf(saved.effort_rev);
+				if (savedEffortRev !== undefined) {
+					// The row patch a list load in flight must not undo, as for the window.
+					if (effortIsNewer(savedEffortRev, effortRevOf(appData.current.sessions.find(s => s.id === sessionId)?.effort_rev))) {
+						appData.mergeSessionPatch(sessionId, { effort: saved.effort, effort_rev: savedEffortRev });
+					}
+				}
+			}
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
 				// Navigation reads the sidebar row before its /live refresh. Keep
@@ -910,8 +937,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				appData.mergeSessionPatch(sessionId, { context_window: saved.context_window });
 			}
 			const cached = sessionEphemeralCache.restore(sessionId);
-			if (cached) sessionEphemeralCache.save(sessionId, {
+			// An answer older than a level the cached copy took since is not news.
+			if (cached && !overtaken(cached.effortRev, cachedEffortRev)) sessionEphemeralCache.save(sessionId, {
 				...cached, [stateKey]: selected,
+				...(field === 'effort' && savedEffortRev !== undefined ? { effortRev: savedEffortRev } : {}),
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
 		} catch (error) {
@@ -937,8 +966,13 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
 	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
+	// An answer that arrives after the announcement of a newer level (another
+	// tab or device picked since) names an older revision: the newer level
+	// stays (#1609). The same revision is this pick's own announcement.
+	if (overtaken(_state.effortRev, heldEffortRev)) return;
 	_update(s => ({
 		...s, [stateKey]: selected,
+		...(field === 'effort' && savedEffortRev !== undefined ? { effortRev: savedEffortRev } : {}),
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
 		// A context-window answer says nothing about Fast.
@@ -1245,6 +1279,22 @@ export const activeSession = {
 			permissionModeOverride: permissionMode,
 			...markBindingHydrated(s, 'permission'),
 		}));
+		persistSession();
+		return true;
+	},
+
+	/**
+	 * The refreshed row of the open session names a newer effort revision than
+	 * this page holds (#1609): a level saved on the worker that runs the chat
+	 * (this page is on another one and gets no push for it), or a push this
+	 * page missed. Take the row's level, so the composer shows it now and the
+	 * next send does not carry the older one.
+	 */
+	adoptRowEffort(sessionsList: { id: string; effort?: string | null; effort_rev?: number }[]): boolean {
+		const sessionId = _state.sessionId;
+		const news = sessionId ? effortFromRow(_state, sessionsList.find(s => s.id === sessionId)) : null;
+		if (!news) return false;
+		_update(s => ({ ...s, ...news }));
 		persistSession();
 		return true;
 	},

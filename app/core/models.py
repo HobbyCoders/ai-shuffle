@@ -426,6 +426,10 @@ class Session(SessionBase):
     # falls back to launched_model and then the agent's legacy config.
     model: Optional[str] = None
     effort: Optional[str] = None
+    # How many times ``effort`` has changed (#1609). A composer sends the
+    # revision it last saw with each message, and adopts a level it is told
+    # about only when its revision is newer than the one it holds.
+    effort_rev: int = 0
     permission_mode: Optional[str] = None
     context_window: Optional[int] = None
     # What this session actually RAN on, as opposed to what was picked.
@@ -529,6 +533,12 @@ class Session(SessionBase):
         for can never leave the API.
         """
         return normalize_session_mode(value)
+
+    @field_validator("effort_rev", mode="before")
+    @classmethod
+    def _coalesce_effort_rev(cls, value):
+        """NULL ``sessions.effort_rev`` (an effort never changed) reads as 0."""
+        return int(value or 0)
 
     @field_validator("is_worker", mode="before")
     @classmethod

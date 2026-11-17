@@ -1938,6 +1938,11 @@ class ChatWebSocketHandler:
             except control.ControlRefused as exc:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
+            if isinstance(submitted, dict) and type(submitted.get("effort_rev")) is int:
+                # The owner saved a different effort revision than this client
+                # sent: its sockets do not reach this worker's clients, so
+                # tell them here (#1609).
+                await turn_manager.announce_effort(session_id, submitted)
             if not client_message_id:
                 await self.send_json({"type": "query_queued", "session_id": session_id})
             return submitted

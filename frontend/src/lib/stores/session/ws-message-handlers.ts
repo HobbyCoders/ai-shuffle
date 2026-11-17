@@ -33,6 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
+import { effortIsNewer, effortRevOf } from './effort-revision';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -119,6 +120,9 @@ export interface MessageHandlerDeps {
 	 *  refetch (e.g. is_active from user_session_updated). Returns true when the
 	 *  row exists locally and was updated. */
 	mergeSessionPatch: (sessionId: string, patch: Record<string, unknown>) => boolean;
+	/** The effort revision the sidebar row of a session holds, when it is
+	 *  loaded here and names one (#1609). */
+	sessionEffortRev?: (sessionId: string) => number | undefined;
 
 	// Internal mutable state (shared reference)
 	internal: InternalMutableState;
@@ -207,8 +211,10 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'work_started_at',
 	// A context-window pick made on another tab or device (#1895).
 	'context_window',
-	// An effort pick, or Auto (null), made on another tab or device (#1579).
+	// An effort pick, or Auto (null), made on another tab or device (#1579),
+	// and the revision it has (#1609).
 	'effort',
+	'effort_rev',
 	// A user message was persisted (any device): patched at once so a
 	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
@@ -628,18 +634,30 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					}));
 					onPersistSession();
 				}
-				// An effort pick saved from another tab or device, Auto (null)
-				// included (#1579): adopt it on screen and in the cached copy a
-				// switch-back restores, or this composer's next send carries the
-				// older level and pins it again. The row patch below covers the rest.
+				// An effort level saved from another tab or device, or by a send
+				// (this client's own included, when the worker kept a newer level),
+				// Auto (null) included (#1579): adopt it on screen and in the cached
+				// copy a switch-back restores, or this composer's next send carries
+				// the older level. It names the revision the level has, and each
+				// copy takes it only when that is newer than the one it holds, so
+				// a push that arrives late cannot undo a newer level (#1609).
+				let rowUpdates = updates;
 				if (updatedSessionId && 'effort' in updates
 					&& (updates.effort === null || typeof updates.effort === 'string')) {
 					const effort = updates.effort as string | null;
+					const rev = effortRevOf(updates.effort_rev);
+					const adopted = { effortLevelOverride: effort, ...(rev !== undefined ? { effortRev: rev } : {}) };
 					const cached = sessionEphemeralCache.restore(updatedSessionId);
-					if (cached) sessionEphemeralCache.save(updatedSessionId, { ...cached, effortLevelOverride: effort });
-					if (updatedSessionId === getState().sessionId) {
-						update(s => ({ ...s, effortLevelOverride: effort }));
+					if (cached && effortIsNewer(rev, cached.effortRev)) {
+						sessionEphemeralCache.save(updatedSessionId, { ...cached, ...adopted });
+					}
+					if (updatedSessionId === getState().sessionId && effortIsNewer(rev, getState().effortRev)) {
+						update(s => ({ ...s, ...adopted }));
 						onPersistSession();
+					}
+					if (!effortIsNewer(rev, deps.sessionEffortRev?.(updatedSessionId))) {
+						const { effort: _level, effort_rev: _rev, ...rest } = updates;
+						rowUpdates = rest;
 					}
 				}
 				// A settle dismisses the session's waits server-side (#2324);
@@ -653,7 +671,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// stale paginated response re-flipping the card the user just
 				// settled/unsettled, and no reload storm per turn (W1). Only an
 				// unknown row or a list-reshaping field falls back to a reload.
-				applyRowUpdates(updatedSessionId, updates);
+				applyRowUpdates(updatedSessionId, rowUpdates);
 			}
 
 			// message_added from server-side queue processing (_process_next_queued)

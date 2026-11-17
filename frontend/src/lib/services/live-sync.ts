@@ -92,6 +92,8 @@ export function startLiveSync() {
    // A project attached elsewhere (another tab, or the worker that runs this
    // chat) turns the open no-project chat into a project session here too.
    activeSession.adoptAttachedProject(appData.current.sessions);
+   // So does an effort level saved there, or one whose push this page missed.
+   activeSession.adoptRowEffort(appData.current.sessions);
   }),
   resourceSync.subscribe(['projects'], async () => {
    await Promise.all([appData.loadProjectCatalog(projectsInvalidatedAt), appData.loadSessions(), refreshProjectsOverviewIfUsed()]);

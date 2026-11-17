@@ -220,6 +220,34 @@ def _split_window_base(
     return rest, raw or None, True
 
 
+# Override key a composer sends with every message of an open chat: the
+# session's effort revision (``sessions.effort_rev``) as that client last saw
+# it. An effort pick is not pushed to every open client (a viewer on another
+# worker hears nothing), so a client can still hold an older level and send
+# it. When the revision differs from the row's, the send's level is outdated:
+# it is not saved, the turn runs on the saved level, and the sender is told
+# that level and its revision (#1609). A send without the key (an older
+# client, the API) keeps the earlier behaviour: its level is saved. Never
+# stored on the turn.
+EFFORT_REV = "effort_rev"
+
+
+def _split_effort_rev(
+    overrides: Optional[Dict[str, Any]],
+) -> Tuple[Optional[Dict[str, Any]], Optional[int]]:
+    """``(overrides without the revision, revision or None when none was sent)``.
+
+    A revision that is not a whole number from 0 up is treated as not sent.
+    """
+    if not overrides or EFFORT_REV not in overrides:
+        return overrides, None
+    raw = overrides[EFFORT_REV]
+    rest = {k: v for k, v in overrides.items() if k != EFFORT_REV} or None
+    if type(raw) is not int or raw < 0:
+        return rest, None
+    return rest, raw
+
+
 # Payload flag on a person's message that was given a live Task worker's own
 # binding (see ``_active_worker_turn``). A turn carrying it is still the worker's
 # work, so a later message in the same chat joins it the same way.
@@ -309,6 +337,7 @@ def _submit_blocking(
     reactivated: dict[str, Any] | None = None,
     caller: Optional[str] = None,
     person_entered: Any = False,
+    effort_seen: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Every BLOCKING part of :func:`submit` (reactivation, run binding,
     wakeup supersede, enqueue) — and nothing else.
@@ -320,6 +349,12 @@ def _submit_blocking(
     ``window_pin``, when given, receives ``{"context_window": pin}`` if the
     send carried a ``context_window_base`` that is not the pin saved after it,
     so :func:`submit_async` can push the pin to the chat's open clients.
+
+    ``effort_seen``, when given, receives the row's ``{"effort", "effort_rev"}``
+    if the send carried an ``effort_rev`` (:data:`EFFORT_REV`) the row no
+    longer holds afterwards: an older revision, whose level was not saved, or
+    the one this send's own level replaced. :func:`submit_async` pushes it to
+    the chat's open clients and hands it to a forwarding worker.
 
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
@@ -385,6 +420,7 @@ def _submit_blocking(
             _supersede_wakeups(session_id)
         return held_id
     overrides, window_base, has_window_base = _split_window_base(overrides)
+    overrides, effort_rev = _split_effort_rev(overrides)
     if source == "connector":
         # Connector turns always go through their API user's approval policy.
         overrides = {**(overrides or {}), "_permission_ceiling": "default"}
@@ -414,14 +450,34 @@ def _submit_blocking(
         try:
             from app.db import database
 
-            database.set_session_run_binding(
+            saved = database.set_session_run_binding(
                 session_id,
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode") if explicit_permission else None,
                 fast=overrides.get("fast"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
+                effort_rev_base=effort_rev,
             )
+            if effort_rev is not None:
+                # ``saved`` is the row after the write (a revision always
+                # makes one), or None for a session that does not exist.
+                if saved is not None and saved["effort_rev"] != effort_rev:
+                    if (overrides.get("effort") or None) != saved["effort"]:
+                        # The client's view of the level is outdated (another
+                        # tab, device or worker picked since): its level must
+                        # not replace the newer one, which this turn runs on.
+                        logger.info(
+                            "Ignoring outdated effort %s for session %s "
+                            "(client revision %s, saved %s at revision %s)",
+                            overrides.get("effort"), session_id, effort_rev,
+                            saved["effort"], saved["effort_rev"],
+                        )
+                        overrides = {k: v for k, v in overrides.items() if k != "effort"}
+                        if saved["effort"]:
+                            overrides["effort"] = saved["effort"]
+                    if effort_seen is not None:
+                        effort_seen.update(saved)
             if overrides.get("context_window"):
                 # Checked against the model just saved, as the picker checks
                 # it. A window the model does not offer is ignored: never
@@ -586,8 +642,13 @@ async def submit_async(
     no_kick: bool = False,
     caller: Optional[str] = None,
     person_entered: Any = False,
+    effort_seen: Optional[Dict[str, Any]] = None,
 ) -> str:
     """:func:`submit` for async callers — identical semantics, off the loop.
+
+    ``effort_seen``: see :func:`_submit_blocking`. The pair is pushed to this
+    worker's open clients here; a caller that forwards for another worker
+    passes a dict to learn it too.
 
     ``person_entered`` (both forms): only the host's admission points of the
     owner's own input pass True (the chat socket's composer send, a worktree
@@ -616,6 +677,7 @@ async def submit_async(
 
         held = await owner_confirm.on_owner_message(session_id, prompt)
     window_pin: Dict[str, int] = {}
+    effort_seen = {} if effort_seen is None else effort_seen
     reactivated: dict[str, Any] = {}
     try:
         turn_id = await asyncio.to_thread(
@@ -636,6 +698,7 @@ async def submit_async(
             reactivated=reactivated,
             caller=caller,
             person_entered=person_entered,
+            effort_seen=effort_seen,
         )
     finally:
         if reactivated:
@@ -650,6 +713,8 @@ async def submit_async(
         _kick(session_id)
     if window_pin:
         await _announce_window_pin(session_id, window_pin["context_window"])
+    if effort_seen:
+        await announce_effort(session_id, effort_seen)
     return turn_id
 
 
@@ -747,6 +812,26 @@ async def _announce_window_pin(session_id: str, window: int) -> None:
         )
     except Exception:  # noqa: BLE001 — the turn is queued either way.
         logger.warning("Could not announce the context window of %s", session_id, exc_info=True)
+
+
+async def announce_effort(session_id: str, seen: Dict[str, Any]) -> None:
+    """Push the chat's saved effort level and its revision to its open clients.
+
+    The same ``session_updated`` push a picker change sends. A client adopts
+    it only when the revision is newer than the one it holds, so the sender of
+    an outdated level shows the saved one and its next send's ``effort_rev``
+    matches (#1609).
+    """
+    try:
+        from app.core.sync_engine import sync_engine
+
+        await sync_engine.broadcast_session_updated(
+            session_id=session_id,
+            updates={"effort": seen.get("effort") or None, "effort_rev": int(seen["effort_rev"])},
+            source_device_id=None,
+        )
+    except Exception:  # noqa: BLE001 — the turn is queued either way.
+        logger.warning("Could not announce the effort of %s", session_id, exc_info=True)
 
 
 def remove_queued(turn_id: str) -> Optional[Dict[str, Any]]:
