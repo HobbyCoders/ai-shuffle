@@ -1484,9 +1484,14 @@
 	function latestTurnTailNow(pendingRemoval?: HTMLElement): number | null {
 		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
-		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
-		const anchor = document.getElementById(turnAnchorId(latestTurnId));
-		if (!anchor || !containerRef.contains(anchor)) return MIN_TRANSCRIPT_TAIL_RESERVE;
+		const anchor = latestTurnId ? document.getElementById(turnAnchorId(latestTurnId)) : null;
+		if (!anchor || !containerRef.contains(anchor)) {
+			// No prompt is mounted: none yet, or a long turn paged it out above the
+			// window. Every mounted row is after it, so no prompt-first room is owed,
+			// but queued and error controls dock in this reserve and still need it;
+			// without them the queue grows up over the rows above it.
+			return Math.max(readingFloorReserve(), MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent());
+		}
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = transcriptContentEnd();
