@@ -7,9 +7,22 @@ import { expect, openNewChat, scriptTag, typeAndSend, waitChat, waitTurnSettled 
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 import { frames } from './lib/timeline.mjs';
 
-const movie = 'https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4';
+const movie = '/__journey__/streaming-inline-html.mp4';
 const fixture = fileURLToPath(new URL('../../../android/app/src/androidTest/assets/native-media.mp4', import.meta.url));
 const ghost = 'https://example.com/reasoning-ghost.mp4';
+
+async function waitForVideo(page, playing = false) {
+	const status = await page.waitForFunction((playing) => {
+		const video = document.querySelector('video');
+		if (video?.error) {
+			return `Video MediaError ${video.error.code}: ${video.error.message} (${video.currentSrc || video.src})`;
+		}
+		return playing ? video?.currentTime > 0.1 : video?.readyState >= 2;
+	}, playing);
+	const result = await status.jsonValue();
+	await status.dispose();
+	expect(result === true, String(result));
+}
 
 async function observe(page, selector) {
 	await page.evaluate((selector) => {
@@ -55,22 +68,30 @@ await runJourney({
 		{
 			name: 'image-alt-stable-player',
 			async setup(ctx) {
-				// Real MP4 bytes/decoder, no external-network dependency in CI. The
-				// producing path still emits the actual media URL from the scenario.
-				await ctx.page.route(movie, (route) => route.fulfill({ path: fixture, contentType: 'video/mp4' }));
+				// The built app (unlike Vite) has media-src 'self' blob:. Keep the
+				// scenario's URL same-origin: CSP blocks external media before a route
+				// can fulfil it. Real MP4 bytes/decoder, never the external network.
+				ctx.mediaRequests = [];
+				await ctx.page.route((url) => url.pathname === movie, (route) => {
+					ctx.mediaRequests.push(route.request().headers().range || 'no Range');
+					return route.fulfill({ path: fixture, contentType: 'video/mp4' });
+				});
 				await openNewChat(ctx);
 			},
-			async act({ page, variant, mark, log }) {
+			async act({ page, variant, mark, log, mediaRequests }) {
 				await mark('stream image alt HTML before a real media URL');
 				await typeAndSend(page, scriptTag(variant, 'stream-image-alt-html', { tps: 4 }));
 				await page.locator('[role="article"]:has(video)').filter({ hasText: 'later03' }).waitFor();
-				await page.waitForFunction(() => document.querySelector('video')?.readyState >= 2);
+				await waitForVideo(page);
+				expect(mediaRequests.length > 0, 'the fixture route served the actual media request');
+				expect(await page.evaluate(() => new URL(document.querySelector('video').currentSrc).origin === location.origin), 'media is same-origin under the built app CSP');
+				log(`fixture requests: ${JSON.stringify(mediaRequests)}`);
 				await page.evaluate(async () => {
 					const video = document.querySelector('video');
 					video.muted = true;
 					await video.play();
 				});
-				await page.waitForFunction(() => document.querySelector('video')?.currentTime > 0.1);
+				await waitForVideo(page, true);
 				await mark('stable prefix: preserve player and playback position during later deltas');
 				await page.evaluate(() => {
 					const video = document.querySelector('video');
