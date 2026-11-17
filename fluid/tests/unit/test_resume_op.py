@@ -9,9 +9,9 @@ failed call saw and the transcript gains only the answer.
 
 import asyncio
 from collections.abc import AsyncIterator
+from itertools import pairwise
 
 import pytest
-
 from fluid.engine import native
 from fluid.engine.native import NativeLoop
 from fluid.events import (
@@ -76,6 +76,136 @@ def _events_since(loop: NativeLoop, sid: str, mark: int) -> list:
     return loop.bus.log(sid)[mark:]
 
 
+@pytest.fixture
+async def resumed_wire_requests():
+    """The producing NativeLoop path: fail, Resume, two tools, then answer."""
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([_bad_request()])
+    provider.caps = ProviderCaps(explicit_cache_breakpoints=True, max_cache_breakpoints=4)
+    loop = NativeLoop(provider=provider, store=store, model="stealth/ox-alpha", session_id=sid,
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    _stub_environment(loop, "old environment")
+    await _turn(loop, UserTurn(content="question"))
+    _stub_environment(loop, "Current time: 2026-11-09T18:00:00+00:00 (UTC)")
+    _rescript(provider, [
+        _tool_call("t1", "mcp__wx__get_weather", '{"city": "Paris"}'),
+        _tool_call("t2", "mcp__wx__get_weather", '{"city": "London"}'),
+        _text("answer"),
+    ])
+    mark = len(loop.bus.log(sid))
+    request_mark = len(provider.requests)
+    await _turn(loop, Resume())
+    assert not any(isinstance(e, ErrorEvent) for e in _events_since(loop, sid, mark))
+    assert len(provider.requests) - request_mark == 3
+    return provider.requests[request_mark:]
+
+
+def _wire_history(body):
+    """Canonical wire content and its history-cache boundary.
+
+    Ignore ONLY cache_control (transport metadata, not prompt content), and
+    normalize Chat Completions' string/text-part representations. Keep roles,
+    tool-call fields, tool IDs and every content byte; flattening blocks makes
+    Anthropic's adjacent-user merging immaterial to the comparison.
+    """
+    import json
+
+    records = []
+    marked_end = 0
+    for message in body["messages"]:
+        if message["role"] == "system":
+            continue
+        fields = {k: v for k, v in message.items() if k != "content"}
+        content = message.get("content")
+        parts = [{"type": "text", "text": content}] if isinstance(content, str) else content
+        for part in parts or [None]:
+            marker = isinstance(part, dict) and "cache_control" in part
+            clean = {k: v for k, v in part.items() if k != "cache_control"} if isinstance(part, dict) else part
+            record = json.dumps({**fields, "content": clean}, sort_keys=True, ensure_ascii=False)
+            records.append(record.encode("utf-8") + b"\n")
+            if marker:
+                marked_end = len(records)
+    return records, marked_end
+
+
+@pytest.mark.parametrize("dialect", ["anthropic", "openrouter"])
+@pytest.mark.parametrize("extra_tail", [False, True])
+async def test_resume_wire_cache_prefix_survives_two_tool_calls(resumed_wire_requests, dialect, extra_tail):
+    import json
+    from dataclasses import replace
+
+    from fluid.messages import Message, Text
+    from fluid.providers.anthropic.serialize import build_request_body as anthropic_body
+    from fluid.providers.openrouter.serialize import (
+        build_request_body as openrouter_body,
+    )
+
+    build = anthropic_body if dialect == "anthropic" else openrouter_body
+    model = "claude-sonnet-4-6" if dialect == "anthropic" else "anthropic/claude-sonnet-4.6"
+    bodies = []
+    for request in resumed_wire_requests:
+        messages = list(request.messages)
+        if extra_tail:
+            # A second request-only reminder after the clock must not become
+            # cacheable just because it is now the last message.
+            messages.append(Message(role="user", content=[Text("active plan")]))
+        before = [m.to_dict() for m in messages]
+        body = build(replace(request, model=model, messages=messages))
+        assert [m.to_dict() for m in messages] == before  # no source mutation
+        assert "cache_volatile" not in json.dumps(body)
+        assert json.dumps(body).count("Current time:") == 1
+        bodies.append(body)
+    histories = [_wire_history(body) for body in bodies]
+    for (previous, boundary), (following, next_boundary) in pairwise(histories):
+        assert b"".join(following).startswith(b"".join(previous[:boundary]))
+        assert 0 < boundary < len(previous)  # never the volatile clock/plan
+        assert b"Current time:" not in b"".join(previous[:boundary])
+        assert next_boundary > boundary  # cache grows across both tools
+    for body in bodies[1:]:
+        assert body.get("system") == bodies[0].get("system")
+        assert body.get("tools") == bodies[0].get("tools")
+
+
+@pytest.mark.parametrize("dialect", ["openrouter", "local", "openai_responses", "gemini"])
+async def test_resume_wire_note_follows_completed_tool_results(resumed_wire_requests, dialect):
+    import importlib
+
+    build = importlib.import_module(f"fluid.providers.{dialect}.serialize").build_request_body
+    for request in resumed_wire_requests:
+        body = build(request)
+        pending = set()
+        completed = []
+        if dialect in ("openrouter", "local"):
+            for message in body["messages"]:
+                pending.update(call["id"] for call in message.get("tool_calls", []))
+                if message["role"] == "tool":
+                    pending.remove(message["tool_call_id"])
+                    completed.append(message["tool_call_id"])
+                elif message["role"] == "user":
+                    assert not pending  # no user note interrupts a call/result pair
+            last = body["messages"][-1]
+            assert last["role"] == "user"
+            assert "Current time:" in last["content"]
+        else:
+            for item in body["input"]:
+                if item.get("type") == "function_call":
+                    pending.add(item.get("call_id") or item["id"])
+                elif item.get("type") in ("function_call_output", "function_result"):
+                    pending.remove(item["call_id"])
+                    completed.append(item["call_id"])
+                elif item.get("role") == "user" or item.get("type") == "user_input":
+                    assert not pending
+            last = body["input"][-1]
+            assert last.get("role") == "user" or last.get("type") == "user_input"
+            assert "Current time:" in last["content"][-1]["text"]
+        assert not pending
+        assert completed == ["t1", "t2"][:len(completed)]
+        assert len(completed) == resumed_wire_requests.index(request)
+
+
 # ─── (a) resume from tool results, over the persisted store ──────────────────
 
 
@@ -124,10 +254,9 @@ async def test_resume_continues_from_a_tool_result_head(tmp_path) -> None:
     assert not any(isinstance(e, ErrorEvent) for e in events)
     assert provider.calls == 1
     request = provider.requests[-1]
-    assert [m.role for m in request.messages] == [n.message.role for n in before]
-    assert request.messages[0].text() == "weather in Paris?\n\nCurrent time: 2026-11-09T18:00:00+00:00 (UTC)"
-    assert [m.to_dict() for m in request.messages[1:]] == [n.message.to_dict() for n in before[1:]]
-    assert request.messages[-1].to_dict() == original
+    assert [m.to_dict() for m in request.messages[:-1]] == [n.message.to_dict() for n in before]
+    assert request.messages[-1].text() == "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
+    assert request.messages[-2].to_dict() == original
     assert head.message.to_dict() == original
 
     after = await store.load_path(sid)
@@ -280,13 +409,15 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     assert after[1].message.text() == "4"
     # The resumed call sees the same user, with a fresh request-local clock.
     assert provider.calls == 1
-    assert [m.role for m in provider.requests[-1].messages] == ["user"]
-    assert provider.requests[-1].messages[0].text() == "what is 2 + 2?\n\n" + clock
+    request = provider.requests[-1]
+    assert [m.role for m in request.messages] == ["user", "user"]
+    assert request.messages[0].text() == "what is 2 + 2?"
+    assert request.messages[-1].text() == clock
     assert after[0].message.text() == "what is 2 + 2?"
-    from fluid.context.trim import estimate_tokens_of_text
-    assert sent_overheads == [overhead + estimate_tokens_of_text("\n\n" + clock)]
+    from fluid.context.trim import estimate_tokens_of_messages
+    assert sent_overheads == [overhead + estimate_tokens_of_messages(request.messages[-1:])]
     assert loop._context_overhead_tokens() == overhead
-    assert loop._resume_environment is loop._resume_anchor is None
+    assert loop._resume_environment is None
 
     next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
     _stub_environment(loop, next_clock)
@@ -297,7 +428,7 @@ async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
 
 @pytest.mark.parametrize("duplicate", [False, True])
 @pytest.mark.parametrize("retry", [False, True])
-async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(duplicate, retry):
+async def test_resume_history_is_append_only_with_a_request_only_clock_across_two_tool_calls(duplicate, retry):
 
     store = MemoryStore()
     sid = (await store.create_session()).session_id
@@ -310,7 +441,6 @@ async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(dupli
         await _turn(loop, UserTurn(content="question"))
     await _turn(loop, UserTurn(content="question"))
     before = await store.load_path(sid)
-    anchor_index = len(before) - 1
     clock = "Current time: 2026-11-09T18:00:00+00:00 (UTC)"
     _stub_environment(loop, clock)
     scripts = [_tool_call("t1", "mcp__wx__get_weather", '{"city":"Paris"}'),
@@ -323,18 +453,20 @@ async def test_resume_clock_is_an_append_only_prefix_across_two_tool_calls(dupli
     requests = provider.requests[mark:]
     assert len(requests) == len(scripts)
     for request in requests:
-        assert [i for i, message in enumerate(request.messages) if clock in message.text()] == [anchor_index]
-        assert request.messages[anchor_index].text().count(clock) == 1
-    for previous, following in zip(requests, requests[1:]):
-        assert [m.to_dict() for m in following.messages[:len(previous.messages)]] == [m.to_dict() for m in previous.messages]
+        assert [i for i, message in enumerate(request.messages) if clock in message.text()] == [len(request.messages) - 1]
+        assert request.messages[-1].text() == clock
+    for previous, following in pairwise(requests):
+        # Only the request-local suffix moves; every stored history message
+        # stays byte-identical and in order, including on an empty retry.
+        assert [m.to_dict() for m in following.messages[:len(previous.messages) - 1]] == [m.to_dict() for m in previous.messages[:-1]]
     after = await store.load_path(sid)
     assert [n.message.to_dict() for n in after[:len(before)]] == [n.message.to_dict() for n in before]
     assert all(clock not in n.message.text() for n in after)
-    assert loop._resume_environment is loop._resume_anchor is None
+    assert loop._resume_environment is None
 
-async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhead(monkeypatch):
+async def test_resume_compaction_preserves_the_request_only_clock_and_its_overhead(monkeypatch):
     from fluid.context.compaction import Promotion
-    from fluid.context.trim import estimate_tokens_of_text
+    from fluid.context.trim import estimate_tokens_of_messages
 
     store = MemoryStore()
     sid = (await store.create_session()).session_id
@@ -376,19 +508,20 @@ async def test_resume_compaction_drops_even_a_single_node_anchor_and_its_overhea
     await _turn(loop, Resume())
     requests = provider.requests[mark:]
     assert folded and len(requests) == 3
-    assert [sum(clock in m.text() for m in r.messages) for r in requests] == [1, 0, 0]
+    assert [sum(clock in m.text() for m in r.messages) for r in requests] == [1, 1, 1]
     assert "[checkpoint summary" in requests[1].messages[0].text()
-    assert overheads == [estimate_tokens_of_text("\n\n" + clock), 0, 0]
-    assert loop._resume_environment is loop._resume_anchor is None
+    assert all(r.messages[-1].text() == clock for r in requests)
+    assert overheads == [estimate_tokens_of_messages(requests[0].messages[-1:])] * 3
+    assert loop._resume_environment is None
     assert all(clock not in n.message.text() for n in await store.load_path(sid))
-    # Ordinary input after retirement gets its normal fresh note, not the old clock.
+    # Ordinary input after Resume gets its normal fresh note, not the old clock.
     next_clock = "Current time: 2026-11-09T19:00:00+00:00 (UTC)"
     _stub_environment(loop, next_clock)
     await _turn(loop, UserTurn(content="next question"))
     assert provider.requests[-1].messages[-1].text() == "next question" + next_clock
     assert not any(clock in m.text() for m in provider.requests[-1].messages)
 @pytest.mark.parametrize("exit_kind", ["error", "cancel", "blocked_hook", "hook_error"])
-async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kind):
+async def test_resume_clock_is_cleared_on_all_early_exits(monkeypatch, exit_kind):
     from unittest.mock import AsyncMock
 
     store = MemoryStore()
@@ -401,7 +534,7 @@ async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kin
     baseline = loop._context_overhead_tokens()
     entered = asyncio.Event()
     async def fail_or_wait(*args):
-        assert loop._resume_anchor is not None and loop._resume_environment == clock
+        assert loop._resume_environment == clock
         entered.set()
         if exit_kind == "error":
             raise RuntimeError("fixture failure")
@@ -424,7 +557,7 @@ async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kin
                 await loop.wait_turn()
         else:
             await loop.wait_turn()
-    assert loop._resume_environment is loop._resume_anchor is None
+    assert loop._resume_environment is None
     assert loop._context_overhead_tokens() == baseline
     assert all(clock not in n.message.text() for n in await store.load_path(sid))
     next_clock = "Current time: next ordinary turn"
@@ -434,9 +567,9 @@ async def test_resume_anchor_is_cleared_on_all_early_exits(monkeypatch, exit_kin
     assert not any(clock in m.text() for m in provider.requests[-1].messages)
 
 @pytest.mark.parametrize("rewrite", ["fold", "window", "escalation"])
-def test_resume_admission_releases_a_removed_anchor_before_refusing(monkeypatch, rewrite):
+def test_resume_admission_reserves_the_clock_even_when_history_is_replaced(monkeypatch, rewrite):
     from fluid.context.compaction import Promotion
-    from fluid.context.trim import estimate_tokens_of_text
+    from fluid.context.trim import estimate_tokens_of_messages
     from fluid.messages import Message, Text
     from fluid.store.base import SessionNode
 
@@ -455,16 +588,23 @@ def test_resume_admission_releases_a_removed_anchor_before_refusing(monkeypatch,
             loop._compactor.rehydrate([fold])
             return [fold]
         monkeypatch.setattr(loop._compactor, "escalate", escalate)
-    loop._resume_anchor = anchor.node_id
-    loop._resume_environment = "Current time: " + "x" * 4000
-    reserved = estimate_tokens_of_text("\n\n" + loop._resume_environment)
+    clock = "Current time: " + "x" * 4000
+    loop._resume_environment = clock
+    reserved = estimate_tokens_of_messages([Message(role="user", content=[Text(clock)])])
     overhead = loop._context_overhead_tokens()
-    # Both the live view and its single-node replacement fit without the
-    # retired clock, but neither fits with that stale reservation.
+    # Neither a fold, a window replacement nor escalation may drop this
+    # Resume's fresh facts to squeeze a known-oversized request through.
     loop.context_window = max(400, loop._compactor.estimate_view_tokens(nodes, overhead - reserved) + 10)
     promotions, refusal = loop._admission_promotions(nodes, overhead_tokens=overhead,
                                                     measured=None, measured_current=False)
-    assert refusal is None
+    assert refusal is not None
     assert len(promotions) == (rewrite == "escalation")
-    assert loop._resume_environment is loop._resume_anchor is None
-    assert loop._context_overhead_tokens() == overhead - reserved
+    assert loop._resume_environment == clock
+    assert loop._context_overhead_tokens() == overhead
+    assert loop._with_resume_clock([n.message for n in nodes])[-1].text() == clock
+    # With enough headroom, the same history and clock are admitted together.
+    loop.context_window = loop._compactor.estimate_view_tokens(nodes, overhead) + 10
+    _, refusal = loop._admission_promotions(nodes, overhead_tokens=overhead,
+                                            measured=None, measured_current=False)
+    assert refusal is None
+    assert loop._resume_environment == clock

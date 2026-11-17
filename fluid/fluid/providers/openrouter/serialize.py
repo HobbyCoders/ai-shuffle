@@ -27,7 +27,7 @@ from fluid.providers._chat_completions import (
     translate_message,
     translate_tools,
 )
-from fluid.providers.base import ProviderRequest
+from fluid.providers.base import ProviderRequest, cacheable_history_end
 
 __all__ = ["ChatCompletionsNormalizer", "build_request_body"]
 
@@ -110,10 +110,14 @@ def build_request_body(
             ]
             breakpoints -= 1
         messages.append(system)
-    for msg in request.messages:
+    history_start = stable_end = len(messages)
+    cache_end = cacheable_history_end(request.messages)
+    for i, msg in enumerate(request.messages):
         messages.extend(translate_message(msg))
+        if i < cache_end:
+            stable_end = len(messages)
     if breakpoints > 0:
-        _mark_trailing_breakpoint(messages)
+        _mark_trailing_breakpoint(messages[history_start:stable_end])
 
     body: dict[str, Any] = {
         "model": request.model,
