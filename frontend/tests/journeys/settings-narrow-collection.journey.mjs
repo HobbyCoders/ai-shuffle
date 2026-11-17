@@ -113,19 +113,20 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
  {
   name: 'desktop-category-opens-at-top', viewports: ['desktop'],
   async setup({ page, status }) {
+   await stubHooks(page);
    await openSettings(page, status, 1440);
+   await page.setViewportSize({ width: 1440, height: 900 });
    await category(page, 'General');
-   await page.getByRole('heading', { name: 'General', exact: true }).filter({ visible: true }).first().waitFor();
   },
   async act({ page, mark }) {
    await mark('scroll General in the shared Settings viewport');
    await page.locator('.settings-viewport').evaluate(el => el.scrollTo({ top: 300 }));
    expect((await scrollState(page)).page > 100, 'General was scrolled');
-   await mark('select System from the category index');
-   await category(page, 'System');
-   await page.getByRole('heading', { name: 'System', exact: true, level: 1 }).filter({ visible: true }).first().waitFor();
+   await mark('select Hooks from the category index');
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
    const { page: top } = await scrollState(page);
-   expect(top === 0, `System opens at the top (scrollTop=${top})`);
+   expect(top === 0, `Hooks opens at the top (scrollTop=${top})`);
   }
  },
  {
