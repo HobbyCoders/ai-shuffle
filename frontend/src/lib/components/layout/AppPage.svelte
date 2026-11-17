@@ -29,7 +29,7 @@
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
-	import { recoveringOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
+	import { recoveringOpening, keepOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
@@ -372,8 +372,13 @@
 			const place = activeSession.current;
 			if (!navigationClaimed && pendingOpening()?.id === opening.id && initGeneration === getInitGeneration()
 				&& !place.sessionId && !place.isCreatingWorktree && place.project === opening.project && place.projectV2Id === opening.shared) {
-				if (opening.dispatched) recoveringOpening.set({ note: opening, ready: true });
-				else {
+				if (opening.dispatched) {
+					// init advanced the epoch. Adopt only the pre-init attempt whose
+					// account, navigation and project still matched after the loads.
+					const adopted = { ...opening, generation: initGeneration };
+					keepOpening(adopted);
+					recoveringOpening.set({ note: adopted, ready: true });
+				} else {
 					activeSession.setPendingRestorePrompt(opening.prompt, opening.paths);
 					finishOpening(opening.id);
 				}

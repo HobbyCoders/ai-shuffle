@@ -518,8 +518,8 @@
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
 	{#if $recoveringOpening && !$activeSession.sessionId && pendingOpening()?.id === $recoveringOpening.note.id
-		&& openingGeneration() === $recoveringOpening.note.generation && (!$recoveringOpening.ready ||
-		($activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))}
+		&& (!$recoveringOpening.ready || (openingGeneration() === $recoveringOpening.note.generation &&
+		$activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))}
 		<OpeningRecovery {...$recoveringOpening} />
 	{:else}
 	{#if showEmptyHero}
