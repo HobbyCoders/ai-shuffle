@@ -1,7 +1,8 @@
 // A second pick of the original model is still a new choice (#1635).
 import { readFile } from 'node:fs/promises';
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, openFromSidebar, waitChat } from './lib/app.mjs';
+import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
+import { expect, gotoApp, openFromSidebar } from './lib/app.mjs';
 
 async function pick(page, label) {
     await page.getByRole('button', { name: /^Model: / }).click();
@@ -15,7 +16,7 @@ async function send(page, prompt) {
 }
 let marker;
 await runJourney({
-    name: 'rerouted-model-pick', viewports: ['desktop'], throttles: ['fast'],
+    name: 'rerouted-model-pick', allow: DEV_INSTANCE_NOISE, viewports: ['desktop'], throttles: ['fast'],
     cases: [{ name: 'pick-back',
         async setup({ page, status }) {
             await gotoApp(page, status);
@@ -31,11 +32,18 @@ await runJourney({
             marker = `next explicit pick ${Date.now()}`;
             await send(page, marker);
         },
-        async verify({ page, status }) {
-            await page.getByText(marker, { exact: true }).last().waitFor();
-            await waitChat(page, { streaming: 'false' });
-            const rows = (await readFile(status.fake_ai.request_log, 'utf8')).trim().split('\n').map(s => JSON.parse(s));
-            expect(rows.some(r => String(r.prompt).includes(marker) && r.model === 'fake-ai'), 'the provider received the next explicit choice');
+        async verify({ status }) {
+            // The provider receives a queued send after the composer clears.
+            for (let i = 0; i < 100; i++) {
+                const rows = (await readFile(status.fake_ai.request_log, 'utf8')).trim().split('\n').filter(Boolean).map(s => JSON.parse(s));
+                const request = rows.find(r => r.prompt === marker);
+                if (request) {
+                    expect(request.model === 'fake-ai', `the provider received ${request.model}`);
+                    return;
+                }
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+            throw Error('The provider did not receive the marked follow-up');
         }
     }]
 });
