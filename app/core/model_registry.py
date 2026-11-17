@@ -458,9 +458,14 @@ def _session_model_provider(session):
         profile = database.get_profile(row["profile_id"]) if row.get("profile_id") else None
         model = ((profile or {}).get("config") or {}).get("model") or DEFAULT_MODEL
     provider_id = row.get("provider_id") if row.get("mode") != "voice" else None
-    if model.startswith("prov:"):
+    explicit_provider = model.startswith("prov:")
+    if explicit_provider:
         _, provider_id, model = model.split(":", 2)
     provider = resolve_model_provider(provider_id, include_token=False) if provider_id else None
+    if row.get("model") and not explicit_provider and provider:
+        from app.core.query_options import native_pick_leaves_provider
+        if native_pick_leaves_provider(model, provider):
+            provider = None
     return model, provider
 
 

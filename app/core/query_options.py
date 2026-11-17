@@ -187,6 +187,11 @@ def decode_provider_model(value: Any) -> Optional[tuple]:
     return provider_id, model_id
 
 
+def native_pick_leaves_provider(model, provider):
+    from app.core.provider_agent import curated_model_ids
+    return is_native_claude_model(model) and model not in curated_model_ids(provider)
+
+
 def is_native_claude_model(value: Any) -> bool:
     """Whether ``value`` names a model the NATIVE/delegated Claude leg serves.
 
@@ -1459,18 +1464,10 @@ def build_options_from_profile(
         _bound_provider_row = database.resolve_model_provider(
             provider_id, include_token=False
         )
-        if is_native_claude_model(_override_model):
-            from app.core.provider_agent import curated_model_ids
-
-            if _override_model not in curated_model_ids(_bound_provider_row):
-                logger.info(
-                    "[Provider] Model override %r clears the session's provider "
-                    "binding %r for this turn (native Claude pick).",
-                    _override_model,
-                    provider_id,
-                )
-                provider_id = None
-                _bound_provider_row = None
+        if native_pick_leaves_provider(_override_model, _bound_provider_row):
+            logger.info("[Provider] Native model %r clears provider %r for this turn", _override_model, provider_id)
+            provider_id = None
+            _bound_provider_row = None
 
     # Last-resort floor: a native session with nothing bound anywhere (a fresh
     # row whose first turn carried no selection, an agent with no legacy model)
