@@ -142,6 +142,42 @@ async function twoChatsWithoutProject(ctx) {
 	ctx.state = { a: { ...a, tag: tagA }, b: { ...b, tag: tagB } };
 }
 
+async function retryBeforeOriginalAnswer({ page, mark, state, status }) {
+	await openSheetAndPick(page);
+	const url = '**/attach-project';
+	// The first route waits until the retry has committed. Both requests go
+	// to the real owner, which must then refuse the first as already attached.
+	const first = await routeAttach(page, status, { hold: true });
+	await mark('hold the first attachment and leave A');
+	await sheet(page).getByRole('button', { name: `Attach ${PROJECT}`, exact: true }).click();
+	await within(first.requested, 30_000, 'first attach');
+	await page.goBack();
+	await waitChat(page, {session: state.b.tag, loading: 'false'});
+	await mark('return to A before its first attach completes');
+	await page.goForward();
+	await waitChat(page, {session: state.a.tag, loading: 'false'});
+	await openSheetAndPick(page);
+	await mark('attach successfully on the second try');
+	await page.route(url, route => answerAsOwner(route, status), {times: 1});
+	const retry = page.waitForResponse(r => r.url().endsWith('/attach-project'));
+	await sheet(page).getByRole('button', {name: `Attach ${PROJECT}`, exact: true}).click();
+	expect((await retry).status() === 200, 'retry committed on the owner');
+	await sheet(page).waitFor({state:'hidden'});
+	const committed = await api(page, 'GET', `/sessions/${state.a.id}`);
+	expect(!!committed.project_v2_id, 'retry attached A to a project');
+	await mark('release the first request after the retry');
+	const old = page.waitForResponse(r => r.url().endsWith('/attach-project'));
+	first.release();
+	const response = await old;
+	expect(response.status() === 409 && /already has a project/i.test((await response.json()).detail), 'owner refused the obsolete attach');
+	await within(first.done, 30_000, 'old attach handler');
+	await twoFrames(page);
+	await waitChat(page, {session: state.a.tag, loading: 'false'});
+	expect(!(await page.getByRole('alert').filter({hasText:/already has a project/i}).isVisible()), 'no stale refusal in A');
+	expect(!(await pill(page).isVisible()), 'A still shows the attached project');
+	expect((await api(page, 'GET', `/sessions/${state.a.id}`)).project_v2_id === committed.project_v2_id, 'A kept the same attached project');
+}
+
 /** Press Attach with the answer held, move back to the other chat, then let the answer through. */
 function lateAnswerAfterSwitch(fail, returnFirst = false) {
 	return async ({ page, mark, state, status }) => {
@@ -250,6 +286,8 @@ await runJourney({
 				expect(sentTwice > sentOnce, `the resend reached the AI with the file (${sentOnce} → ${sentTwice})`);
 			}
 		},
+		{ name: 'retry-before-old-refusal', setup: twoChatsWithoutProject, act: retryBeforeOriginalAnswer,
+			allow: [{ kind: 'failed_requests', status: 409, url: /\/attach-project$/, reason: 'the owner refuses the original attach after the retry committed' }] },
 		{ name: 'late-success-after-switch', setup: twoChatsWithoutProject, act: lateAnswerAfterSwitch(false) },
 		{
 			name: 'late-error-after-return',
