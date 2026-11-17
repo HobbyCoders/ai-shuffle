@@ -209,11 +209,13 @@ def up_workers(args: argparse.Namespace) -> int:
 
             def supervise_worker(instance: devloop.Instance) -> None:
                 try:
-                    code = supervise([sys.executable, "-m", "app.main"], instance.env, instance.database,
+                    command = [sys.executable, "-m", "app.main"] if args.ci else [
+                        sys.executable, "-m", "scripts.devloop.peer_fixture", instance.data["peer_fixture_dir"]]
+                    code = supervise(command, instance.env, instance.database,
                                      ttl=max(0.001, deadline - time.monotonic()), owner_pid=owner_pid,
                                      stopped=stopped, restart=None if args.ci else instance.gate.restart,
                                      on_start=instance.on_app_start, on_exit=instance.on_app_exit,
-                                     stop_timeout=devloop.APP_STOP_SECONDS)
+                                     stop_timeout=15)  # allow bounded stream drain and normal lifespan shutdown
                     if code:
                         errors.append(f"worker app exited with code {code}")
                         devloop.log.error("%s", errors[-1])
@@ -236,6 +238,10 @@ def up_workers(args: argparse.Namespace) -> int:
                     worker_args = argparse.Namespace(**{**vars(args), "ci": False})
                     instance = devloop.Instance(worker_args, home, env, fake, vite_port,
                                                 status_writer=lambda data, n=index: status.update(n, data))
+                    if not args.ci:
+                        fixture_dir = home / "peer-fixture"
+                        fixture_dir.mkdir(mode=0o700)
+                        instance.data["peer_fixture_dir"] = str(fixture_dir)
                     instances.append(instance)
                     instance.stopped = stopped
                     instance.data["mode"] = "ci" if args.ci else "dev"
@@ -280,6 +286,14 @@ def up_workers(args: argparse.Namespace) -> int:
                 begun = announced = False
                 pair_deadline = None
                 while not stopped.wait(0.5):
+                    if not args.ci:
+                        for instance in instances:
+                            marker = Path(instance.data["peer_fixture_dir"]) / "restart"
+                            try:
+                                marker.unlink()
+                            except FileNotFoundError:
+                                continue
+                            instance.gate.request()
                     if not all(i.data["state"] == "ready" for i in instances) or status.network:
                         pair_deadline = None
                         continue
