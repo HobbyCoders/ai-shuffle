@@ -2048,7 +2048,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
-        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx)
+        plaintext = _prepare_mirror(cursor, coll, plaintext, origin_device_id=env.origin_device_id, ctx=ctx,
+                                    version=(env.record_id, env.clock))
         refresh_billing = _billing_refresh_needed(cursor, coll, env.record_id, plaintext)
         try:
             row = materialize(cursor, coll, env.record_id, plaintext, origin_device_id=env.origin_device_id)
@@ -2101,12 +2102,30 @@ def _valid_snooze(value: Any) -> bool:
 
 
 def _prepare_mirror(cursor, coll: policy.Collection, plaintext: Mapping[str, Any], *,
-                    origin_device_id: Optional[str] = None, ctx: Optional[NetworkContext] = None) -> Mapping[str, Any]:
+                    origin_device_id: str, ctx: NetworkContext, version: tuple[str, int]) -> Mapping[str, Any]:
     """Owner-ordered rows may reference local-only rows; drop what we cannot see.
 
     ``origin_device_id`` is the worker that wrote the copy (the envelope's
     signer, or a snapshot item's recorded origin).
     """
+    # SET NULL links converge to the same value whichever operation arrives
+    # first. Mere absence isn't evidence of deletion: keep the usual FK retry.
+    reference = {"templates": ("profile_id", "agents"), "api_users": ("profile_id", "agents"),
+                 "connectors": ("api_user_id", "api_users")}.get(coll.name)
+    if reference:
+        column, parent = reference
+        target = plaintext.get(column)
+        if isinstance(target, str) and target:
+            tombstone = store.get_record(cursor, parent, target)
+            if tombstone and tombstone["deleted"]:
+                rid, clock = version
+                # Only the assignment lost. Do not copy connector config or
+                # unrelated credential fields into conflict metadata.
+                store.add_conflict(cursor, collection=coll.name, record_id=rid,
+                                   losing_clock=clock, losing_device_id=origin_device_id,
+                                   losing_record={column: target}, winning_clock=int(tombstone["clock"]),
+                                   winning_device_id=tombstone["origin_device_id"])
+                return {**plaintext, column: None}
     if coll.name == "sessions":
         from app.network import catalog
         return catalog.prepare_session_mirror(cursor, dict(plaintext), origin_device_id=origin_device_id,
@@ -3259,7 +3278,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],
-                                       ctx=ctx)
+                                       ctx=ctx, version=(item["record_id"], int(item["clock"])))
             refresh_billing = _billing_refresh_needed(cursor, coll, item["record_id"], prepared)
             try:
                 row = materialize(cursor, coll, item["record_id"], prepared,
