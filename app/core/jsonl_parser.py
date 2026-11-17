@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from app.core.config import settings
 from app.core.harness_reminders import strip_harness_reminders
 from app.core.query_streaming import extract_mcp_image
-from app.core.session_title import derive_session_title
+from app.core.session_title import derive_session_title, recorded_attachment_paths
 from app.core.transcript_tags import first_tagged_text
 from app.core.system_message_filter import is_hidden_system_subtype
 
@@ -2684,7 +2684,13 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
             if entry.get("isMeta") or entry.get("isSidechain"):
                 continue
 
-            message_data = entry.get("message", {})
+            message_data = entry.get("message")
+            if message_data is None and entry.get("role") in ("user", "assistant"):
+                # DB-backed JSONL export writes flat chat rows, not CLI envelopes.
+                message_data = entry
+                entry_type = entry["role"]
+            if not isinstance(message_data, dict):
+                continue
             role = message_data.get("role")
             content = message_data.get("content")
 
@@ -2693,7 +2699,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                     message_count += 1
                     if title is None:
                         # First user message is the title
-                        title = derive_session_title(content)
+                        title = derive_session_title(content, recorded_attachment_paths(entry.get("metadata")))
                 elif isinstance(content, list):
                     # Check for text blocks
                     for block in content:
@@ -2702,7 +2708,7 @@ def _get_session_title_and_preview(jsonl_path: Path) -> tuple[Optional[str], Opt
                             if text and not _is_system_content(text) and not _is_task_notification(text):
                                 message_count += 1
                                 if title is None:
-                                    title = derive_session_title(text)
+                                    title = derive_session_title(text, recorded_attachment_paths(entry.get("metadata")))
                                 break
 
             elif entry_type == "assistant" and role == "assistant":

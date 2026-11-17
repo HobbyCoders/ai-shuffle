@@ -49,8 +49,8 @@ The one rule, by what the caller knows about the message's attachments:
   guessed;
 * unknown (``None``): only leading tokens are guessed and stripped (above),
   since an ``@`` later in prose may be a mention. Callers that never see the
-  attachment list (the API query lanes, the JSONL listing and import) are in
-  this state.
+  attachment list (the API query lanes) are in this state. JSONL imports
+  preserve mentions instead of guessing when no upload was recorded.
 
 Then the result is truncated by code points. The client's optimistic title
 (``deriveSessionTitle`` in ``frontend/src/lib/utils/message-presentation.ts``)
@@ -187,6 +187,18 @@ def _attachment_names(text: str, known_paths: Iterable[str]) -> str:
 
 _SPACE_RUN = re.compile(r"[ \t]{2,}")
 _LINE_EDGE_SPACES = re.compile(r"[ \t]*\n[ \t]*")
+
+
+def recorded_attachment_paths(metadata: object) -> list[str]:
+    """Display identities only, from this message. Never resolve a path or an owner."""
+    if not isinstance(metadata, dict):
+        return []
+    paths = metadata.get("upload_paths")
+    refs = metadata.get("upload_references")
+    values = list(paths) if isinstance(paths, list) else []
+    if isinstance(refs, list):
+        values.extend(ref.get("path") for ref in refs if isinstance(ref, dict))
+    return list(dict.fromkeys(path for path in values if isinstance(path, str) and path))
 
 
 def derive_session_title(

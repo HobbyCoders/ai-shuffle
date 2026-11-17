@@ -443,6 +443,41 @@ def _jsonl(world, name="0f0e0d0c-aaaa-bbbb-cccc-000000000001.jsonl", lines=None)
 
 
 class TestImportJsonl:
+    @pytest.mark.parametrize("source, words, metadata, title", [
+        ("flat", "inspect @/uploads/my photo", {"upload_paths": ["/uploads/my photo"]}, "inspect"),
+        ("json", "@/uploads/my photo", {"upload_references": [{"path": "/uploads/my photo"}]}, "my photo"),
+        ("json", "@lee inspect @/notes/p", {}, "@lee inspect @/notes/p"),
+    ])
+    def test_attachment_title_export_to_listing_and_import(self, client, world, source, words, metadata, title):
+        if source == "flat":
+            sid = "legacy"
+            database.create_session(sid, "agent-a")
+            database.add_session_message(sid, "user", words, metadata=metadata)
+        else:
+            response = _upload(client, _export(messages=[{"role": "user", "content": words, "metadata": metadata}]))
+            assert response.status_code == 200, response.text
+            sid = response.json()["session_id"]
+        exported = client.get(f"/api/v1/sessions/{sid}/export", params={"format": "jsonl"})
+        assert exported.status_code == 200, exported.text
+        path = _jsonl(world)
+        path.write_bytes(exported.content)
+        from app.core.jsonl_parser import _get_session_title_and_preview
+        assert _get_session_title_and_preview(path) == (title, None, 1)
+        imported = client.post("/api/v1/sessions/import-jsonl", json={"jsonl_path": str(path)})
+        assert imported.status_code == 200, imported.text
+        assert imported.json()["title"] == title
+        assert database.get_session(imported.json()["session_id"])["title"] == title
+
+    def test_plain_cli_mention_survives_import_and_raw_export_is_verbatim(self, client, world):
+        path = _jsonl(world)
+        data = b'{ "type":"user", "message":{"role":"user","content":"@team inspect @/notes/a"}}\r\n'
+        path.write_bytes(data)
+        imported = client.post("/api/v1/sessions/import-jsonl", json={"jsonl_path": str(path)})
+        assert imported.status_code == 200, imported.text
+        assert imported.json()["title"] == "@team inspect @/notes/a"
+        sid = imported.json()["session_id"]
+        assert client.get(f"/api/v1/sessions/{sid}/export", params={"format": "jsonl"}).content == data
+
     def test_imports_then_reports_already_exists(self, client, world):
         p = _jsonl(world)
         r = client.post("/api/v1/sessions/import-jsonl", json={"jsonl_path": str(p)})

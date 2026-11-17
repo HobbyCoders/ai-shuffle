@@ -684,6 +684,8 @@ async def import_session(
         turn_increment=session_data.get('turn_count') or len([m for m in messages_data if m.get('role') == 'user'])
     )
 
+    from app.core.session_title import recorded_attachment_paths
+
     # Create JSONL file for the session
     jsonl_path = None
     try:
@@ -728,6 +730,9 @@ async def import_session(
                         "uuid": msg_uuid,
                         "timestamp": timestamp
                     }
+                    paths = recorded_attachment_paths(msg.get('metadata'))
+                    if paths:
+                        entry['metadata'] = {'upload_paths': paths}
                     f.write(json.dumps(entry) + '\n')
 
                 elif role == 'assistant':
@@ -982,7 +987,7 @@ async def import_jsonl_session(
         )
 
     # Get title and preview from JSONL
-    title, preview, message_count = _get_session_title_and_preview(jsonl_path)
+    title, preview, message_count = await run_sync(_get_session_title_and_preview, jsonl_path)
     if not title:
         title = f"Imported: {sdk_session_id[:8]}..."
 
