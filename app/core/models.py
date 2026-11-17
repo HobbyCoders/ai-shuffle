@@ -5,7 +5,7 @@ Pydantic models for API requests and responses
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Optional, List, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator, computed_field, model_validator
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
 # no app imports at all (the same discipline that lets the DB migrations use it).
@@ -183,8 +183,19 @@ class ProfileConfig(BaseModel):
 
 
 
-ProfileName = Annotated[str, Field(min_length=1, max_length=100)]
+PROFILE_NAME_MAX_LENGTH = 100
+ProfileName = Annotated[str, Field(min_length=1, max_length=PROFILE_NAME_MAX_LENGTH)]
 PROFILE_ID_MAX_LENGTH = 50
+_PROFILE_NAME_ADAPTER = TypeAdapter(ProfileName)
+
+
+def profile_name_error(name: object) -> str | None:
+    """Validate the effective name for writes outside a typed request field."""
+    try:
+        _PROFILE_NAME_ADAPTER.validate_python(name, strict=True)
+    except ValidationError:
+        return f"Agent name must be between 1 and {PROFILE_NAME_MAX_LENGTH} characters."
+    return None
 
 
 class ProfileBase(BaseModel):
@@ -1011,7 +1022,6 @@ class AgentImportData(AgentExportData):
     an old file that carries it imports and the key is ignored like any other
     unknown field.
     """
-    name: ProfileName
     thinking_mode: Optional[str] = None
     system_prompt_type: Optional[str] = None
     system_prompt_preset: Optional[str] = None
