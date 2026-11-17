@@ -511,6 +511,35 @@ def test_a_state_copy_breaks_the_equal_clock_tie_the_same_way(workers):
     assert _lost_themes(c, b.device_id) == ["lost-1"]
 
 
+async def _copy_state(sender, receiver):
+    served = ServedBy(sender, f"https://{sender.name}.example.com")
+    with receiver.active():
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            await transport.PeerLink(sender.device_id, [served.base_url]).receive_state(client, engine.context())
+
+
+async def test_state_copy_exports_the_incarnation_of_a_retained_legacy_op(workers):
+    a, b, c = _equal_clock_fork(workers)
+    # Simulate an upgrade: the signed op survives, the denormalized column is NULL.
+    with a.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE sync_records SET origin_incarnation = NULL "
+                              "WHERE collection = 'user_preferences' AND record_id LIKE %s", ("%theme",))
+    await _copy_state(c, a)
+    assert owner_pref(a, "theme") == "new"
+    await _copy_state(a, c)
+    assert owner_pref(c, "theme") == "new"
+    assert _theme_incarnation(c) == 2
+    assert _lost_themes(c, b.device_id) == ["lost-1"]
+
+
+async def test_repeated_state_copy_keeps_one_conflict_per_losing_fork(workers):
+    a, b, c = _equal_clock_fork(workers)
+    for _ in range(2):
+        await _copy_state(c, a)
+        assert _lost_themes(a, b.device_id) == ["lost-0", "lost-1"]
+    assert owner_pref(a, "theme") == "new"
+
+
 def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
     from app.network import transcripts
     a, b = _network(workers, "a", "b")
@@ -533,7 +562,8 @@ def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
         assert not newer("t", 1) and not newer("t", None)
 
 
-def test_a_replay_keeps_the_post_restore_write_it_displaces(workers):
+@pytest.mark.parametrize("delete", [False, True], ids=["edit", "deletion"])
+def test_a_replay_keeps_the_post_restore_write_it_displaces(workers, delete):
     """B's published write after the restore loses to a later lost version it
     gets back: the write is kept as a conflict, by value, like any other device's."""
     a, b = _network(workers, "a", "b")
@@ -549,7 +579,13 @@ def test_a_replay_keeps_the_post_restore_write_it_displaces(workers):
     assert len(clocks) == 31  # v0, then lost-0..29
     _restore(b, backup)
     _detect_restore(a, b, 1)  # proves only B's first op past the backup
-    set_owner_pref(b, "theme", "new")
+    if delete:
+        from app.core import owner_auth
+        with b.active():
+            assert database.delete_user_preference("admin", owner_auth.preference_identity(), "theme")
+            engine.scan_all()
+    else:
+        set_owner_pref(b, "theme", "new")
     written = _theme(b)[0]
     assert clocks[-1] > written
     _exchange(b, a)
@@ -559,8 +595,15 @@ def test_a_replay_keeps_the_post_restore_write_it_displaces(workers):
     # The lost versions "new" outranked (a tie included) came back as conflicts,
     # and so did "new" itself once a later lost version displaced it.
     beaten = [f"lost-{n}" for n, clock in enumerate(clocks[1:]) if clock <= written]
-    assert _lost_themes(b, b.device_id) == sorted([*beaten, "new"])
-    assert _lost_themes(a, b.device_id) == ["new"]
+    if delete:
+        for worker in (a, b):
+            with worker.active():
+                deletions = [r for r in store.list_conflicts() if r["record_id"].endswith("theme")
+                             and r["losing_record"] == {"_deleted": True}]
+            assert [(r["losing_device_id"], r["losing_clock"]) for r in deletions] == [(b.device_id, written)]
+    else:
+        assert _lost_themes(b, b.device_id) == sorted([*beaten, "new"])
+        assert _lost_themes(a, b.device_id) == ["new"]
     _converge([a, b])
     assert owner_pref(a, "theme") == owner_pref(b, "theme") == "lost-29"
 

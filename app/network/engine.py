@@ -2080,21 +2080,28 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # Keep the local loser (a concurrent local edit) for the conflicts list:
     # another device's version, or this device's from the other side of a
     # restore fork. A newer op of the same stream simply supersedes its own.
-    if existing is not None and not bool(existing["deleted"]) and (
+    if existing is not None and (
             existing["origin_device_id"] != env.origin_device_id
             or _restore_fork(cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)):
-        local_row = _read_row(cursor, coll, env.record_id)
-        if local_row is not None:
-            try:
-                local_plain = serialize_row(coll, local_row, cursor=cursor)
-            except ApplyError:
-                local_plain = None
-            incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
-            if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
-                store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
-                                   losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
-                                   losing_record=redact_secrets(local_plain), winning_clock=env.clock,
-                                   winning_device_id=env.origin_device_id)
+        losing_record = None
+        if existing["deleted"]:
+            if env.op == OP_UPSERT:
+                losing_record = {"_deleted": True}
+        else:
+            local_row = _read_row(cursor, coll, env.record_id)
+            if local_row is not None:
+                try:
+                    local_plain = serialize_row(coll, local_row, cursor=cursor)
+                except ApplyError:
+                    local_plain = None
+                incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
+                if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
+                    losing_record = redact_secrets(local_plain)
+        if losing_record is not None:
+            store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
+                               losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
+                               losing_record=losing_record, winning_clock=env.clock,
+                               winning_device_id=env.origin_device_id)
 
     refresh_billing = False
     if env.op == OP_DELETE:
@@ -3083,9 +3090,10 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
             "order_seq": version.get("order_seq"), "record": None}
-    if version.get("origin_incarnation") is not None:
-        # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
-        item["origin_incarnation"] = int(version["origin_incarnation"])
+    # A pre-upgrade row can still name its incarnation through its retained op.
+    incarnation = store.version_incarnation(cursor, coll.name, version)
+    if incarnation:
+        item["origin_incarnation"] = incarnation
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
