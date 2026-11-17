@@ -26,7 +26,7 @@ JOBS = [
     ("android-play.yml", "bundle", "release"),
     ("android-play.yml", "publish", "release"),
     ("android-play-enrollment.yml", "export", "main"),
-    ("android.yml", "publish", "release"),
+    ("android-download.yml", "publish", "release"),
 ]
 
 
@@ -259,13 +259,10 @@ def test_pr_triggers_are_only_for_read_only_secret_free_checks():
                 for step in job.get("steps", []):
                     if "secrets." in str(step):
                         assert not permits(step["if"], event="pull_request"), step["name"]
-    # Only the call of android.yml may be granted more than read access: its
-    # owner-only publishing job asks for it and runs from no event of ci.yml.
     jobs = workflow("ci.yml")["jobs"]
-    assert [key for key, job in jobs.items() if "write" in str(job.get("permissions", {})) and "uses" in job] == ["android"]
-    assert jobs["android"]["permissions"] == {"contents": "write"}
+    assert not any("write" in str(job.get("permissions", {})) for job in jobs.values() if "uses" in job)
     assert "with" not in jobs["android"] and "secrets" not in jobs["android"]
-    publish = workflow("android.yml")["jobs"]["publish"]["if"]
+    publish = workflow("android-download.yml")["jobs"]["publish"]["if"]
     for event in ("pull_request", "push", "schedule"):
         assert not permits(publish, event=event, ref=MAIN)
     # A manual run of ci.yml cannot ask for it either: ci.yml sets no `publish_download`.
@@ -291,7 +288,7 @@ def test_nightly_hosted_completion_is_guarded_but_stable_stays_owner_only():
 @pytest.mark.parametrize("ref", [MAIN, TAG, "refs/pull/123/merge"])
 def test_android_prs_cannot_sign_or_publish_even_as_owner_with_publish_requested(ref):
     config = workflow("android.yml")
-    assert set(config["jobs"]) == {"build", "android-ui", "publish"}
+    assert set(config["jobs"]) == {"build", "android-ui"}
     for name in ("build", "android-ui"):
         assert "if" not in config["jobs"][name]
         assert config["jobs"][name].get("permissions", config["permissions"]) == {"contents": "read"}
@@ -305,7 +302,7 @@ def test_android_prs_cannot_sign_or_publish_even_as_owner_with_publish_requested
     # event isolation, not absent PR secrets or a failed dependency, must deny it.
     for step in release_steps:
         assert not permits(step["if"], event="pull_request", ref=ref), step["name"]
-    assert not permits(config["jobs"]["publish"]["if"], event="pull_request", ref=ref)
+    assert not permits(workflow("android-download.yml")["jobs"]["publish"]["if"], event="pull_request", ref=ref)
 
 
 def test_android_signing_steps_are_owner_gated_without_gating_unsigned_ci():
@@ -328,7 +325,7 @@ def test_existing_opt_ins_and_success_dependencies_still_fail_closed():
     for name, job, flag in [
         ("android-play.yml", "publish", "publish_to_play"),
         ("android-play-enrollment.yml", "export", "confirm_existing_key_export"),
-        ("android.yml", "publish", "publish_download"),
+        ("android-download.yml", "publish", "publish_download"),
         ("desktop-macos-artifact.yml", "macos", "build_macos"),
     ]:
         assert not permits(workflow(name)["jobs"][job]["if"], **{flag: False})

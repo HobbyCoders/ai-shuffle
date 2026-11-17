@@ -156,15 +156,10 @@ jobs:
     with:
       main_suite: true
 
-  # The emulators run only when the app shell or the phone UI changed. android.yml
-  # also holds the owner's publishing job, which asks for write access and so
-  # must be allowed it here; that job runs only on the owner's manual run or a
-  # release tag with publish_download set, never from this workflow.
+  # Verification never needs permission to publish a download.
   android:
     needs: [plan]
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') && needs.plan.outputs.android != 'true' }}
-    permissions:
-      contents: write
     uses: ./.github/workflows/android.yml
 
   android-minified:

@@ -163,7 +163,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertLess(build["steps"].index(smoke_build), build["steps"].index(exported["android-notification-smoke-apks"]))
         for name in ["Decode release keystore", "Build release APK", "Verify APK is signed with the release key", "Prepare public APK download", "Upload public download files"]:
             step = next(s for s in build["steps"] if s.get("name") == name)
-            self.assertEqual(step["if"], jobs["publish"]["if"])
+            self.assertEqual(step["if"], workflow("android-download.yml")["jobs"]["publish"]["if"])
         self.assertEqual(exported["android-download"]["with"]["retention-days"], "1")
         self.assertEqual(jobs["android-ui"]["needs"], "build")
         legs = {str(leg["api"]): leg for leg in jobs["android-ui"]["strategy"]["matrix"]["include"]}
@@ -177,7 +177,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual([s.get("id") for s in jobs["android-ui"]["steps"] if "continue-on-error" in s], ["emulator_tests"])
         gate = next(s for s in jobs["android-ui"]["steps"] if s.get("id") == "emulator_result")
         self.assertEqual(gate["if"], "always()")
-        self.assertEqual(jobs["publish"]["needs"], ["build", "android-ui"])
+        self.assertEqual(workflow("android-download.yml")["jobs"]["publish"]["needs"], "verify")
 
     def test_both_api36_readiness_callers_cache_and_verify_the_alternate_provider(self):
         for filename, jobname in (("android.yml", "android-ui"), ("ci-android-minified.yml", "smoke")):
@@ -207,7 +207,7 @@ class ArtifactPolicyTests(unittest.TestCase):
                 self.assertIn(";${{ matrix.target }};x86_64", avd["run"])
 
     def test_manual_only_binary_upload_gates_execute(self):
-        android = workflow("android.yml")["jobs"]["publish"]["if"]
+        android = workflow("android-download.yml")["jobs"]["publish"]["if"]
         desktop = workflow("desktop.yml")
         preview = next(s for j in desktop["jobs"].values() for s in uploads(j) if s["with"]["name"] == "windows-preview-installer")
         self.assertEqual(desktop["on"]["workflow_dispatch"]["inputs"]["upload_preview"]["default"], "false")
@@ -311,7 +311,7 @@ class ArtifactPolicyTests(unittest.TestCase):
         self.assertEqual(config["on"]["workflow_dispatch"]["inputs"]["platform"]["options"], ["mac", "linux", "android"])
         build = config["jobs"]["android-build"]
         # The APK comes from Android CI's own release path, built for this tag.
-        self.assertEqual(build["uses"], "./.github/workflows/android.yml")
+        self.assertEqual(build["uses"], "./.github/workflows/android-download.yml")
         self.assertEqual(build["with"], {"publish_download": "true", "release_tag": "${{ github.ref_name }}"})
         self.assertIn("inputs.platform == 'android'", build["if"])
         self.assertIn("github.ref_type == 'tag'", build["if"])

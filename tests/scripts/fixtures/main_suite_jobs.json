@@ -26,12 +26,6 @@
    "conclusion": "success"
   },
   {
-   "id": 103,
-   "name": "android / Publish verified Android download",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 5,
    "name": "android-and-docs",
    "status": "completed",

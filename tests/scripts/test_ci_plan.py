@@ -157,7 +157,6 @@ NOT_IN_CI = {
     "windows-suite.yml": {"suite", "selected"},
     "desktop.yml": {"package", "runtime", "windows-preview", "stable-installer-channel"},
     "ci-frontend.yml": {"journey-plan", "journeys", "record-journeys"},
-    "android.yml": {"publish"},
 }
 TOKEN = re.compile(r"[A-Za-z0-9_.\-/]+")
 MODULE = re.compile(r"-m\s+([A-Za-z_][A-Za-z0-9_.]*)")
@@ -400,8 +399,7 @@ def job(name, conclusion="success", status="completed"):
 
 
 ANDROID = [job("android / Build and test Android app"), job("android / Android emulator verification (API 34)"),
-           job("android / Android emulator verification (API 36)"),
-           job("android / Publish verified Android download", "skipped")]
+           job("android / Android emulator verification (API 36)")]
 OTHER = [job("backend / backend-shard 1"), job("android-minified / Minified releaseSmoke (API 34)"), job("CI", None, "in_progress")]
 
 
@@ -420,7 +418,7 @@ def test_an_area_passed_when_its_own_jobs_all_finished_without_a_failure():
     # Another area's failure, or the verdict job still running, takes nothing away.
     assert plan.area_passed("android", ANDROID + [job("backend / backend-shard 1", "failure")] + OTHER[1:])
     # The emulator its workflow lets fail.
-    assert plan.area_passed("android", [ANDROID[0], ANDROID[1], {**ANDROID[2], "conclusion": "failure"}, ANDROID[3]])
+    assert plan.area_passed("android", [ANDROID[0], ANDROID[1], {**ANDROID[2], "conclusion": "failure"}])
 
 
 @pytest.mark.parametrize("bad", [
@@ -576,9 +574,8 @@ def test_a_record_of_this_repositorys_own_run_on_the_same_files_counts():
     # Jobs its workflow defines are not listed: the emulators wait for the build
     # and appear only when it finishes, so a run read part-way shows the build alone.
     {"jobs": [ANDROID[0]]},
-    {"jobs": [ANDROID[0], ANDROID[3]]},
-    {"jobs": [ANDROID[0], ANDROID[2], ANDROID[3]]},
-    {"jobs": ANDROID[:3]},
+    {"jobs": [ANDROID[0], ANDROID[2]]},
+    {"jobs": ANDROID[:2]},
     # The job list could not be read whole.
     {"total": 500},
     {"total": "odd"},

@@ -126,7 +126,7 @@ class CostPolicyTests(unittest.TestCase):
             "group": "android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}" + DAILY_OR_MANUAL,
             "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
         })
-        self.assertEqual(set(config["jobs"]), {"build", "android-ui", "publish"})
+        self.assertEqual(set(config["jobs"]), {"build", "android-ui"})
         for name in ("build", "android-ui"):
             job = config["jobs"][name]
             self.assertNotIn("if", job)  # Includes drafts and forks.

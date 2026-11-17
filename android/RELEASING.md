@@ -33,7 +33,7 @@ release tag, after `release.yml` has created the tag's GitHub release:
 2. In Actions, run **Publish a platform installer** (`platform-installer.yml`)
    with **Use workflow from** set to the tag (`vX.Y.Z`), platform `android`,
    and the build run ID left empty.
-3. The workflow calls Android CI (`android.yml`) with the tag as
+3. The workflow calls **Verified Android download** (`android-download.yml`) with the tag as
    `release_tag`. That builds the release APK with `versionName` set to the
    tag, checks it is signed with the release key, runs the unit, lint, hub
    and emulator checks, and attaches `AI-Shuffle-Android.apk`, its `.sha256`
@@ -59,7 +59,7 @@ Check the result at `https://hobbycoders.com/v1/desktop/installers`
 hub's `PUBLIC_APP_DOWNLOADS` is `enabled`; until then the page says the APK
 download is paused. The page caches the hub's answer for a minute.
 
-The rolling `android-latest` release (Android CI dispatched on main with
+The rolling `android-latest` release (**Verified Android download** dispatched on main with
 `publish_download`) is separate and never reaches the hub.
 
 ### Google Play link on the downloads page

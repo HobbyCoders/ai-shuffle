@@ -38,8 +38,9 @@ def test_workflow_job_dependencies_exist(path):
 
 
 def test_android_publication_only_needs_the_retained_app_jobs():
-    config = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
-    assert set(config["jobs"]["publish"]["needs"]) == {"build", "android-ui"}
+    config = yaml.load((ROOT / ".github/workflows/android-download.yml").read_text(), Loader=yaml.BaseLoader)
+    assert config["jobs"]["publish"]["needs"] == "verify"
+    assert config["jobs"]["verify"]["uses"] == "./.github/workflows/android.yml"
     assert "account-hub" not in config["jobs"]
 
 

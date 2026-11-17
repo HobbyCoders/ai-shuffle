@@ -69,7 +69,7 @@ jobs:
       pull-requests: read
     name: Build and verify the release APK
     if: inputs.platform == 'android' && inputs.build_run_id == '' && !inputs.release_assets && github.ref_type == 'tag'
-    uses: ./.github/workflows/android.yml
+    uses: ./.github/workflows/android-download.yml
     with:
       publish_download: true
       release_tag: ${{ github.ref_name }}

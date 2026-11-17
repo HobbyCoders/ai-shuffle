@@ -10,17 +10,11 @@ name: Android CI
 # publish_download; normal CI only stages APKs for emulator verification.
 # A merge must not ship a client before its workers serve /mobile/
 # (docs/mobile-desktop-ui-split.md).
-# The publish job only fires from a dispatch or a release workflow_call that
-# sets publish_download.
+# android-download.yml calls this workflow before publishing a verified build.
 #
 # Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
   workflow_dispatch:
-    inputs:
-      publish_download:
-        description: Publish only after compatible workers and account hub are deployed and verified
-        type: boolean
-        default: false
   workflow_call:
     inputs:
       publish_download:
@@ -431,28 +425,4 @@ jobs:
             android/app/build/outputs/ui-screenshots/
             android/app/build/outputs/connected_android_test_additional_output/
           if-no-files-found: warn
-
-  publish:
-    name: Publish verified Android download
-    needs: [build, android-ui]
-    if: github.repository == 'HobbyCoders/ai-shuffle' && github.actor_id == '76577322' && github.triggering_actor == github.actor && ((github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))) && inputs.publish_download && (inputs.release_tag != '' || github.ref == 'refs/heads/main')
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      contents: write
-    # Never interrupt an asset upload midway through replacing the rolling APK.
-    concurrency:
-      group: android-download-${{ inputs.release_tag || 'android-latest' }}
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: android-download
-          path: android-download
-      - name: Publish APK and checksum
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: bash android/ci/publish-apk.sh android-download
 

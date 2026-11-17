@@ -46,7 +46,7 @@ def verify(root):
     if (policy.get("needs") != "preflight" or
             not any("windows_installer_policy.py" in s.get("run", "") for s in policy.get("steps", []))):
         raise ValueError("Windows decision must follow preflight and verify hub/input evidence")
-    if jobs.get("android-apk", {}).get("uses") != "./.github/workflows/android.yml":
+    if jobs.get("android-apk", {}).get("uses") != "./.github/workflows/android-download.yml":
         raise ValueError("Release must call the android-apk workflow")
     def require(actual, expected, reason):
         if actual != expected:

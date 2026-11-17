@@ -207,10 +207,12 @@ class PlayWorkflowTests(unittest.TestCase):
         reports = next(step for step in steps if step.get("name") == "Upload test reports")
         self.assertEqual(reports["if"], "failure() || steps.emulator_tests.outcome == 'failure'")
         self.assertIn("android-emulator/", reports["with"]["path"])
-        self.assertIn("android-ui", workflow["jobs"]["publish"]["needs"])
+        download = yaml.load((ROOT / ".github/workflows/android-download.yml").read_text(), Loader=yaml.BaseLoader)
+        self.assertEqual(download["jobs"]["publish"]["needs"], "verify")
+        self.assertEqual(download["jobs"]["verify"]["uses"], "./.github/workflows/android.yml")
         release = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
         apk = release["jobs"]["android-apk"]
-        self.assertEqual(apk["uses"], "./.github/workflows/android.yml")
+        self.assertEqual(apk["uses"], "./.github/workflows/android-download.yml")
         self.assertNotIn("continue-on-error", apk)
 
     def test_notification_permission_input_requires_fresh_focused_window_bounds(self):

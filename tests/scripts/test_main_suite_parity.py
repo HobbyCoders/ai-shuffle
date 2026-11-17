@@ -272,10 +272,8 @@ def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_v
     gate = jobs["ci"]
     assert gate["permissions"] == {"contents": "read", "actions": "write", "issues": "write"}
     assert [name for name, job in jobs.items() if job.get("permissions", {}).get("actions") == "write"] == ["ci"]
-    # android.yml holds the owner's publishing job, which asks for write access; a
-    # caller must allow what a called job asks for. It runs from no event of ci.yml.
-    assert [name for name, job in jobs.items() if job.get("permissions", {}).get("contents") == "write"] == ["android"]
-    publish = workflow("android.yml")["jobs"]["publish"]
+    assert not any(job.get("permissions", {}).get("contents") == "write" for job in jobs.values())
+    publish = workflow("android-download.yml")["jobs"]["publish"]
     assert publish["permissions"] == {"contents": "write"}
     assert "inputs.publish_download" in publish["if"] and "github.actor_id == '76577322'" in publish["if"]
     assert "github.event_name == 'pull_request'" not in publish["if"] and "'schedule'" not in publish["if"]

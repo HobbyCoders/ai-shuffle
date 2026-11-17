@@ -101,10 +101,9 @@ not run again on the next push unless their files change.
 request cancels its running checks. Permissions are `contents: read`, with
 these exceptions: the `plan` and `javascript` jobs read Actions data; the `CI`
 job may cancel its own run and, on a push to main or the merge queue's run for
-it, report journey issues; and
-the `android` call is allowed `contents: write` because `android.yml` holds the
-owner's publishing job, which never runs from `ci.yml`. None of the workflows
-in the list above references secrets or requires private checkout access.
+it, report journey issues. Android verification inherits `contents: read`; the
+release and installer workflows call `android-download.yml` to publish after
+verification passes. No pull-request caller passes signing secrets.
 Fork PRs use the ordinary read-only `pull_request` context, never
 `pull_request_target`, and leave no pass records.
 
@@ -253,7 +252,7 @@ entries still use the existing verified, bounded-transfer fallback.
 
 Only build/test and emulator jobs run on PRs. Existing owner/event/ref/input
 predicates still exclude PRs from every Firebase/signing/release-staging step
-and the write-permission publish job, even when evaluated with owner identity
+even when evaluated with owner identity
 and publication inputs enabled. `tests/scripts/test_owner_publication_policy.py`
 checks those actual predicates; no release guard is relaxed. In `android.yml`,
 API 36 retains its existing release-advisory status (tracking #2375); its failures

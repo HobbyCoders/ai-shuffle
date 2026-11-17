@@ -540,7 +540,7 @@ jobs:
     needs: [create-release, android]
     permissions:
       contents: write
-    uses: ./.github/workflows/android.yml
+    uses: ./.github/workflows/android-download.yml
     with:
       release_tag: ${{ needs.create-release.outputs.release_tag }}
       publish_download: true
@@ -703,7 +703,7 @@ jobs:
   stage-apk:
     needs: [preflight, stage-begin]
     permissions:
-      contents: write
+      contents: read
     uses: ./.github/workflows/android.yml
     with:
       release_tag: ${{ needs.preflight.outputs.release_tag }}

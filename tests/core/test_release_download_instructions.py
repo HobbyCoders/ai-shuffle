@@ -136,13 +136,14 @@ def test_release_orchestration_defaults_to_docker_play_and_signed_apk():
     for name in ("desktop", "docker", "android", "android-apk"):
         assert workflow["jobs"][name]["with"]["release_tag"] == "${{ needs.create-release.outputs.release_tag }}"
     apk = workflow["jobs"]["android-apk"]
-    assert apk["uses"] == "./.github/workflows/android.yml"
+    assert apk["uses"] == "./.github/workflows/android-download.yml"
     assert apk["needs"] == ["create-release", "android"]
     assert apk["with"]["publish_download"] == "true"
     assert apk["secrets"] == "inherit"
     assert apk["permissions"]["contents"] == "write"
-    child = yaml.load((ROOT / ".github/workflows/android.yml").read_text(), Loader=yaml.BaseLoader)
-    assert child["jobs"]["publish"]["needs"] == ["build", "android-ui"]
+    child = yaml.load((ROOT / ".github/workflows/android-download.yml").read_text(), Loader=yaml.BaseLoader)
+    assert child["jobs"]["publish"]["needs"] == "verify"
+    assert child["jobs"]["verify"]["uses"] == "./.github/workflows/android.yml"
     publish = child["jobs"]["publish"]["steps"][-1]
     assert publish["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
     assert publish["run"] == "bash android/ci/publish-apk.sh android-download"
