@@ -37,7 +37,8 @@
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { appendToChatDraft, sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import type { JSONContent } from '@tiptap/core';
 	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
 	import { trackSend } from '$lib/stores/session/message-sender';
 	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
@@ -51,7 +52,8 @@
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration, tabRestoreTarget } from '$lib/stores/session/session-init';
-	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
+	import { agentProjectOnThisWorker } from '$lib/stores/session/session-project';
 	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
@@ -64,7 +66,7 @@
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify, type NotificationSeverity } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
-	import { attachmentBlockReason } from './attach-disable';
+	import { attachmentBlockReason, composerUploadTarget, UPLOAD_CHAT_CHANGED, UPLOAD_OWNER_UNKNOWN } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
 	import { composerShell } from './composer-shell';
@@ -140,6 +142,14 @@
 		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
 	);
 	const mentionsAvailable = $derived(!!mentionProjectId);
+	// Project agents are this worker's own (#1659: never by the legacy id of a
+	// chat another worker runs).
+	const subagentProjectId = $derived(agentProjectOnThisWorker(
+		$activeSession,
+		$sessions.find(session => session.id === $activeSession.sessionId)?.project_id,
+		$projects,
+		$clusterProjects
+	));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
@@ -387,7 +397,11 @@
 		composerSelections.set(sessionId, { from, to });
 	}
 
-	let isUploading = $state(false);
+	// Every accepted upload (picker, drop, large paste) counts until it settles:
+	// Send stays blocked until the last one has, so no result can arrive after
+	// the message it belonged with went (#1659).
+	let uploadsPending = $state(0);
+	const isUploading = $derived(uploadsPending > 0);
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
 
@@ -466,6 +480,9 @@
 			// included) and becomes the adopted chat's draft, moved out of the New
 			// chat slot the send emptied (#1361).
 			detachComposerDictation(editorRef.getEditor());
+			// That chat is this compose's now: a paste or attachment started on the
+			// New chat lands there too (originChat), even after leaving it.
+			if (newSessionId) composeAdoptions.set(getInitGeneration(), newSessionId);
 			prevSessionId = newSessionId;
 			saveDraftImmediately();
 			writeDraft(null, '');
@@ -694,37 +711,37 @@
 	/** Take a large paste as a .txt attachment; false keeps it inline. */
 	function handleLargePaste(text: string): boolean {
 		if (!attachSupported || !$anyCredential || isUploading) return false;
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
+		if (attachBlockNow()) return false;
 		const file = pastedTextFile(text);
-		isUploading = true;
+		// The paste belongs to this chat even if another one is open by the time
+		// the upload settles (#1659).
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
-		uploadComposerFile(file)
-			.then(result => {
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
-				inputValue = editorRef?.getMessage() ?? '';
-			})
+		uploadComposerFile(file, origin)
+			.then(result => placeUploadedChip(origin, result))
 			.catch((error: unknown) => {
-				// Never lose the paste: fall back to inline.
-				editorRef?.insertPlainText(text);
-				inputValue = editorRef?.getMessage() ?? '';
+				// Never lose the paste: fall back to inline, in the chat it was pasted into.
+				placeInChat(origin, () => editorRef?.insertPlainText(text), restoreMessageDocument(text));
+				if (!ownsComposer() || !originIsOpen(origin)) return;
 				const err = error as { detail?: string };
 				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
 			})
-			.finally(() => { isUploading = false; });
+			.finally(() => { uploadsPending -= 1; });
 		return true;
+	}
+
+	/** Why attaching is refused right now, if it is: the same decision an
+	 *  upload gets (composerUploadTarget), including who runs the chat. */
+	function attachBlockNow(): string | null {
+		return attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId, $activeSession.isRemote);
 	}
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	// The attach circle left of the editor. Why it cannot attach right now, if
 	// it cannot: shown as its tooltip on desktop. On the phone a blocked attach
 	// stays tappable so the tap can say why (triggerFileUpload).
-	const attachBlock = $derived(attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId));
+	const attachBlock = $derived(attachBlockNow());
 	const attachDisabled = $derived(!$anyCredential || isUploading || (!platform.isMobile && !!attachBlock));
 	const attachTitle = $derived(!$anyCredential ? NO_CREDENTIAL_REASON : isUploading ? 'Uploading…' : (attachBlock ?? 'Attach files'));
 
@@ -1796,34 +1813,105 @@
 	// pinned to this directory, which is what makes the resulting @ref openable.
 	// Mirrors `CHAT_UPLOADS_DIRNAME` in app/core/session_modes.py.
 	const CHAT_UPLOADS_DIRNAME = 'chat-uploads';
+	/** How long an upload waits for the open chat's owner before refusing. */
+	const OWNER_WAIT_MS = 5000;
 
 	/**
 	 * Upload one composer attachment to whichever endpoint this lane owns.
 	 * Both call sites (the picker and the drop handler) go through here so the
 	 * two can never drift onto different targets.
 	 */
-	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
-		if (projectLane !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
-			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
+	/**
+	 * Which compose a result belongs to (#1659): the chat it started in, or a New
+	 * chat together with the chat its own send turns it into. Taking the created
+	 * id is not a navigation (it keeps the init generation); opening another chat
+	 * or a fresh New chat is.
+	 */
+	type ComposeOrigin = { sessionId: string | null; navigation: number };
+	/** The chat each New-chat compose (by its navigation) took as its id. */
+	const composeAdoptions = new Map<number, string>();
+	function captureOrigin(): ComposeOrigin {
+		return { sessionId: $activeSession.sessionId, navigation: getInitGeneration() };
+	}
+	/**
+	 * Whether the composer still shows the compose the result started in. Once
+	 * it names a chat (from the start, or the New chat took its created id),
+	 * that chat open is that compose open, however it was reached: opened again
+	 * from the list, or left and come back to (both move the navigation count).
+	 * A New chat that has not taken an id is one slot: any New chat open is it,
+	 * as before #1659 (the count also moves on first landing and on pressing New
+	 * chat again, without the user leaving).
+	 */
+	function originIsOpen(origin: ComposeOrigin): boolean {
+		const chat = originChat(origin);
+		return chat !== null
+			? $activeSession.sessionId === chat
+			: $activeSession.sessionId === null;
+	}
+	/** The chat the origin names now: a New chat's created id once it took one. */
+	function originChat(origin: ComposeOrigin): string | null {
+		return origin.sessionId ?? composeAdoptions.get(origin.navigation) ?? null;
+	}
+
+	async function uploadComposerFile(file: File, origin: ComposeOrigin): Promise<FileUploadResponse> {
+		// The upload belongs to the chat it started in: never send it to the
+		// target of a chat opened meanwhile.
+		if (!originIsOpen(origin)) throw { detail: UPLOAD_CHAT_CHANGED };
+		// Where it goes follows who runs the chat (#1659): composerUploadTarget
+		// is the one decision. Owner not known yet: wait for the row or /live.
+		let target = composerUploadTarget($activeSession, projectLane);
+		const waitFor = originChat(origin);
+		if (target.kind === 'wait' && waitFor) {
+			const owner = await activeSession.waitForOwner(waitFor, OWNER_WAIT_MS);
+			if (owner === 'left') throw { detail: UPLOAD_CHAT_CHANGED };
+			if (owner !== 'known') throw { detail: UPLOAD_OWNER_UNKNOWN };
+			target = composerUploadTarget($activeSession, projectLane);
 		}
-		if (projectLane === 'chat') {
-			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+		switch (target.kind) {
+			case 'chat':
+				return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+			case 'session':
+				return api.uploadFile(`/sessions/${encodeURIComponent(target.sessionId)}/upload`, file);
+			case 'project':
+				return api.uploadFile(
+					`/projects/${target.project}/upload`,
+					file,
+					$activeSession.sessionId ?? undefined,
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+				);
+			case 'blocked':
+				throw { detail: target.reason };
+			default:
+				throw { detail: UPLOAD_OWNER_UNKNOWN };
 		}
-		return api.uploadFile(
-			`/projects/${$activeSession.project}/upload`,
-			file,
-			$activeSession.sessionId ?? undefined,
-			$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
-		);
+	}
+
+	/**
+	 * Put what a composer action produced into the chat it started in: the open
+	 * editor while that chat is still open, otherwise that chat's stored draft,
+	 * never the editor of a chat opened meanwhile (#1659). After a sign-out or
+	 * account change it is dropped with the old account's composer.
+	 */
+	function placeInChat(origin: ComposeOrigin, intoEditor: () => void, doc: JSONContent) {
+		if (!ownsComposer()) return;
+		if (originIsOpen(origin)) {
+			intoEditor();
+			inputValue = editorRef?.getMessage() ?? '';
+		} else {
+			appendToChatDraft(originChat(origin), doc);
+		}
+	}
+
+	/** Place one uploaded file as a chip in the chat it was attached in. */
+	function placeUploadedChip(origin: ComposeOrigin, result: FileUploadResponse) {
+		const chip = { path: result.path, filename: result.filename, fullPath: result.full_path, size: result.size, type: 'file' as const };
+		placeInChat(origin, () => editorRef?.insertFileChip(chip), {
+			type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: chip }] }]
+		});
 	}
 
 	function triggerFileUpload() {
-		const block = attachmentBlockReason(
-			$activeSession.project,
-			$activeSession.projectV2Id,
-			projectLane,
-			$activeSession.sessionId
-		);
+		const block = attachBlockNow();
 		if (block) {
 			errorMessage = block;
 			return;
@@ -1837,33 +1925,26 @@
 		if (!files || files.length === 0) return;
 		// A code-lane upload needs the project in the URL; a chat-lane one has no
 		// project by construction and must not be turned away for missing it.
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return;
+		if (attachBlockNow()) return;
 
-		isUploading = true;
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(files)) {
-				const result = await uploadComposerFile(file);
+				const result = await uploadComposerFile(file, origin);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
 				}
-				// Insert as inline chip at cursor position
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				// An inline chip at the cursor, in the chat it was attached in.
+				placeUploadedChip(origin, result);
 			}
-			// Update inputValue for state sync
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 			input.value = '';
 		}
 	}
@@ -1938,37 +2019,26 @@
 		// error the user cannot act on.
 		if (!attachSupported) return;
 
-		const dropBlock = attachmentBlockReason(
-			$activeSession.project,
-			$activeSession.projectV2Id,
-			projectLane,
-			$activeSession.sessionId
-		);
+		const dropBlock = attachBlockNow();
 		if (dropBlock) {
 			errorMessage = dropBlock;
 			return;
 		}
 
-		isUploading = true;
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
-				const result = await uploadComposerFile(file);
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				const result = await uploadComposerFile(file, origin);
+				placeUploadedChip(origin, result);
 			}
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 		}
 	}
 </script>
@@ -2108,7 +2178,7 @@
 							bind:this={fileAutocompleteRef}
 							inputValue={plainTextValue}
 							projectId={mentionProjectId}
-							subagentProjectId={$activeSession.project || undefined}
+							subagentProjectId={subagentProjectId}
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}

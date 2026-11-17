@@ -416,6 +416,10 @@
 	/** A flick this fast (px/ms) over FLICK_MIN_DX commits short of the arm point. */
 	const FLICK_VELOCITY = 0.9;
 	const FLICK_MIN_DX = 60;
+	/** Endpoint-only fallback when a busy page cannot sample the flick speed.
+	 *  A brisk short drag also commits; a pause counts toward these 350ms.
+	 *  Keep the sampled route for later flicks on an unstarved page. */
+	const QUICK_SWIPE_MS = 350;
 	const LONG_PRESS_MS = 480;
 	/** Slide-out, then fold: the row height collapses at FOLD_AT and the
 	 *  action runs at COMMIT_AT, once the row is gone. */
@@ -440,6 +444,7 @@
 	let pointerType = '';
 	let startX = 0;
 	let startY = 0;
+	let startT = 0;
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
 	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
@@ -470,6 +475,7 @@
 		pointerType = event.pointerType;
 		startX = lastX = event.clientX;
 		startY = event.clientY;
+		startT = event.timeStamp;
 		lastT = performance.now();
 		velocity = 0;
 		axis = null;
@@ -539,13 +545,26 @@
 		clearLongPress();
 		pressing = false;
 		pointerId = null;
+		// The lift can differ from the last delivered move (including a reversal).
+		// Neither easing the painted row nor missing moves changes these endpoints.
+		const dx = event.clientX - startX;
+		const dy = event.clientY - startY;
+		if (axis === null) {
+			// With no decisive move delivered, apply the usual axis/eligibility
+			// checks at lift. Never reconsider an axis already locked by a move.
+			const horizontal = Math.abs(dx) >= AXIS_LOCK && Math.abs(dx) > Math.abs(dy);
+			const allowed = dx < 0 || swipe.right !== null;
+			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) return;
+			axis = 'x';
+		}
 		if (axis !== 'x') return;
 		axis = null;
 		// The click this gesture leaves behind must not open the session.
 		suppressNextClick = true;
-		const dx = dragX ?? 0;
+		const elapsed = event.timeStamp - startT;
+		const quick = Math.abs(dx) >= FLICK_MIN_DX && elapsed >= 0 && elapsed <= QUICK_SWIPE_MS;
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
-		if (dx !== 0 && (armed || flick)) {
+		if (dx !== 0 && (Math.abs(dx) > armDistance || quick || flick)) {
 			if (dx < 0) slideOut(-1, leftAction);
 			else {
 				// Snooze waits for a time: the row stays put, and the picker opens.

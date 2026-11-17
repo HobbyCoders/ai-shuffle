@@ -256,6 +256,36 @@ describe('media markdown while a reply streams (#1619)', () => {
 		expect(view.container.querySelector('p')).toBeNull();
 	});
 
+	it('keeps the exact #1627 chunk sequence player-free through settle', async () => {
+		reducedMotion();
+		const chunks = ['Intro <a href="/docs">label', '\n\nhttps://example.com/clip.mp4'];
+		const view = await stream(chunks, 'clip.mp4');
+		expect(view.container.querySelector('video')).toBeNull();
+		await view.rerender({ content: chunks.join(''), streaming: false, sessionId: 'remote-chat' });
+		expect(view.container.querySelector('video')).toBeNull();
+	});
+
+	// Raw HTML that has not closed keeps the next paragraph's URL out of the
+	// settled render (as text, or swallowed and dropped by the sanitizer); the
+	// streaming render must not draw a player for it either (#1627).
+	it.each(['<a href="/docs">', '<style>', '<STYLE>', '<textarea>', '<iframe>', '<xmp>', '<template>'])(
+		'draws no player for a URL after an unclosed raw %s, streaming and settled',
+		async (tag) => {
+			reducedMotion();
+			const head = `Intro.\n\nMore ${tag}label`;
+			const view = await stream([head, '\n\nhttps://example.com/clip.mp4\n\nTail words.'], 'Intro.');
+			expect(view.container.querySelector('video')).toBeNull();
+			await view.rerender({ content: `${head}\n\nhttps://example.com/clip.mp4\n\nTail words.`, streaming: false, sessionId: 'remote-chat' });
+			expect(view.container.querySelector('video')).toBeNull();
+		}
+	);
+
+	it('draws the player once the raw <a> before it has closed', async () => {
+		reducedMotion();
+		const view = await stream(['Intro <a href="/docs">label</a>', '\n\nhttps://example.com/clip.mp4'], 'Intro');
+		await waitFor(() => expect(view.container.querySelector('video')).toBeTruthy());
+	});
+
 	it('keeps a settled image mounted while later paragraphs stream', async () => {
 		const view = await stream([`Start.\n\n![A](${art})\n\nOne`, ' two', '\n\nThree']);
 		const img = players(view.container)[0];
@@ -263,5 +293,34 @@ describe('media markdown while a reply streams (#1619)', () => {
 		await view.rerender({ content: `Start.\n\n![A](${art})\n\nOne two\n\nThree four`, streaming: true, sessionId: 'remote-chat' });
 		await waitFor(() => expect(view.container.textContent).toContain('four'));
 		expect(players(view.container)[0]).toBe(img);
+	});
+
+	// A player the reader started must not be replaced on every later delta,
+	// with closed inline HTML before it too (#1627 review).
+	it.each([
+		['plain text', 'Intro important.'],
+		['a closed <b>', 'Intro <b>important</b>.'],
+		['a closed raw <a>', 'Intro <a href="/docs">label</a>.'],
+		['a closed raw <a> with > in a quoted attribute', 'Intro <a href="/docs" title="x>y">label</a>.'],
+		['a <br>', 'Intro<br>important.'],
+		['HTML in image alt text', 'Intro ![<a href="/docs">](/a.png).'],
+		['a <b> in image alt text', 'Intro ![<b>](/a.png).'],
+		['HTML in a media link label', '[<style>](/movie.mp4)']
+	])('keeps a playing video and its time while later words stream after %s', async (_case, intro) => {
+		reducedMotion();
+		// The first streamed render is all tail; from the next delta the split holds.
+		let text = `${intro}\n\nhttps://example.com/clip.mp4\n\nOne\n\nTwo two`;
+		const view = await stream([text.slice(0, -4), ' two'], 'two');
+		const video = view.container.querySelector('video[src="https://example.com/clip.mp4"]') as HTMLVideoElement;
+		expect(video).toBeTruthy();
+		video.currentTime = 7;
+		for (const word of [' three', ' four', ' five', ' six']) {
+			text += word;
+			await view.rerender({ content: text, streaming: true, sessionId: 'remote-chat' });
+		}
+		await waitFor(() => expect(view.container.textContent).toContain('six'));
+		expect(view.container.querySelector('video[src="https://example.com/clip.mp4"]')).toBe(video);
+		expect(video.isConnected).toBe(true);
+		expect(video.currentTime).toBe(7);
 	});
 });

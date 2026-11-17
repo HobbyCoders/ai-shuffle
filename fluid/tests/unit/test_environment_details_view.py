@@ -26,7 +26,11 @@ from pathlib import Path
 import pytest
 from fluid.context.compaction import CompactionConfig
 from fluid.context.compiler import PromptInputs, compile_prompt
-from fluid.context.environment import ENVIRONMENT_DETAILS_HEADER, environment_note_parts
+from fluid.context.environment import (
+    ENVIRONMENT_DETAILS_HEADER,
+    ENVIRONMENT_NOTE_HEADER,
+    environment_note_parts,
+)
 from fluid.context.trim import estimate_tokens_of_messages
 from fluid.engine.native import NativeLoop, _add_pinned_block
 from fluid.events import Resume, UserTurn
@@ -117,9 +121,10 @@ def _commit(repo: Path, message: str) -> None:
 _UNPINNED = replace(CompactionConfig(), pinned_blocks=("# Harness scratch\n",))
 
 
-def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str, **kwargs) -> NativeLoop:
+def _loop(repo: Path, provider: ScriptedProvider, store: MemoryStore, sid: str, *,
+          include_env: bool = True, **kwargs) -> NativeLoop:
     compiled = compile_prompt(PromptInputs(
-        base="b", cwd=str(repo), include_env=True,
+        base="b", cwd=str(repo), include_env=include_env,
         include_global_instructions=False, include_project_instructions=False,
         include_skills=False, include_agents=False, include_plugins=False,
     ))
@@ -272,8 +277,11 @@ async def test_details_under_a_pin_ending_mid_text_are_pinned_so_a_revert_is_res
     _assert_holds(three, details_a)
     assert "none in venv/.venv" in _blocks(three.messages)[-1]
     stored = (await store.load_path(sid))[2].message
-    assert stored.pinned_text() == memory + details_b
-    assert "trailing host text" not in stored.pinned_text()
+    pinned = stored.pinned_text()
+    assert pinned.startswith(memory) and pinned.endswith(details_b)
+    note = pinned[len(memory):-len(details_b)]
+    assert note.startswith(_OPEN + ENVIRONMENT_NOTE_HEADER) and note.endswith(_CLOSE)
+    assert "trailing host text" not in pinned
 
 
 async def test_a_real_fold_between_two_calls_keeps_the_details_in_view(git_repo: Path) -> None:
@@ -388,6 +396,182 @@ async def test_an_oversized_open_turn_digest_keeps_the_details(git_repo: Path) -
     assert "d" * 24_000 not in pinned.messages[-1].text()  # the turn was digested
     _assert_holds(pinned, _details(git_repo))
     assert not _blocks(control.messages)
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("include_env", [False, True])
+async def test_admission_keeps_one_note_per_turn(git_repo: Path, oversized: bool, include_env: bool) -> None:
+    """#1656: real intake, compactor, admission and two provider calls, then
+    a later turn. Small blocks bypass intake stubs but exceed admission."""
+    store, sid = await _session()
+    provider = ScriptedProvider([_call("get_weather", "t1", {"city": "Oslo"}), _text("ok")])
+    loop = _loop(git_repo, provider, store, sid, include_env=include_env,
+                 context_window=32_000, max_tokens=8192)
+    content = [Text(c * 24_000) for c in "abcd"] if oversized else "hello"
+    await _turn(loop, UserTurn(content=content))
+    first, followup = provider.requests
+    sent = "\n".join(m.text() for m in first.messages)
+    header = ENVIRONMENT_NOTE_HEADER if include_env else "Runtime facts as of this message ("
+    assert sent.count(header) == 1
+    assert sent.count("Worker Python:") == 1
+    assert any(m.text().startswith("[compacted turn") for m in first.messages) == oversized
+    if include_env:
+        assert "Current time:" in sent and "Current branch: main" in sent
+    assert followup.messages[:len(first.messages)] == first.messages
+    await _turn(loop, UserTurn(content="later"))
+    later = provider.requests[-1]
+    # One per user turn, or one held runtime-only block for the whole path.
+    assert sum(m.text().count(header) for m in later.messages) == (2 if include_env else 1)
+    assert sum(m.text().count("Worker Python:") for m in later.messages) == 1
+    assert later.messages[:len(followup.messages)] == followup.messages
+
+
+@pytest.mark.parametrize("include_env", [False, True])
+async def test_legacy_resume_pins_environment_before_admission(git_repo: Path, include_env: bool) -> None:
+    """S8: a failed pre-pinning turn, with a compiled environment section
+    too, must not lose its replacement note when Resume digests its anchor.
+    Two failed Resumes also must not turn a harness note into user intent."""
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed, failed, _text("ok")])
+    asked = "Please run `cat README.md` for me"
+    loop = _loop(git_repo, provider, store, sid, include_env=include_env,
+                 context_window=200_000, max_tokens=8192)
+    await _turn(loop, UserTurn(content=[Text(asked), *(Text(c * 24_000) for c in "abcd")]))
+    for node in store._nodes[sid].values():
+        node.message.context_pin = None  # legacy metadata, not a seeded consumer-only fixture
+    header = ENVIRONMENT_NOTE_HEADER if include_env else "Runtime facts as of this message ("
+    for _ in range(2):
+        loop = _loop(git_repo, provider, store, sid, include_env=include_env,
+                     context_window=32_000, max_tokens=8192)
+        await _turn(loop, Resume())
+        request = provider.requests[-1]
+        assert request.messages[0].text().startswith("[compacted turn")
+        assert sum(m.text().count(header) for m in request.messages) == 1
+        assert sum(m.text().count("Worker Python:") for m in request.messages) == 1
+        assert loop.ctx.extra["bash_file_guard_user_text"].startswith(asked)
+    assert provider.requests[-1].messages == provider.requests[-2].messages
+    await _turn(loop, UserTurn(content="next"))
+    assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
+
+
+@pytest.mark.parametrize("include_env", [False, True])
+@pytest.mark.parametrize("old_repair", [False, True])
+async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(
+    git_repo: Path, include_env: bool, old_repair: bool,
+) -> None:
+    """S1: a real UserPromptSubmit gate must accept all three Resumes,
+    even when an older transcript ends in a harness-only repair."""
+    from fluid.events import TurnStarted
+    from fluid.hooks.bus import TURN_START, HookBus, HookDecision
+
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed, failed, failed, _text("ok")])
+    loop = _loop(git_repo, provider, store, sid, include_env=include_env,
+                 context_window=200_000, max_tokens=8192)
+    await _turn(loop, UserTurn(content=[Text("original request"), *(Text(c * 24_000) for c in "abcd")]))
+    (original,) = await store.load_path(sid)
+    original.message.context_pin = None  # pre-pinning transcript, produced by the real loop
+    if old_repair:
+        note = environment_note_parts(git_repo)[0]
+        await store.append(sid, SessionNode(
+            node_id="old-repair", parent_id=original.node_id,
+            message=Message(role="user", content=[Text(note)],
+                            provider_meta={"harness_note": True}).pin_context(note),
+        ))
+    prompts = []
+    hooks = HookBus()
+
+    async def require_original(event, payload):
+        prompts.append(payload["prompt"])
+        return HookDecision(action="allow" if payload["prompt"] == original.message.text() else "deny")
+
+    hooks.on(TURN_START, require_original)
+    for count in range(1, 4):
+        loop = _loop(git_repo, provider, store, sid, include_env=include_env, hooks=hooks,
+                     context_window=32_000, max_tokens=8192)
+        await _turn(loop, Resume())
+        assert len(provider.requests) == count + 1  # the hook did not block this Resume
+        assert prompts == [original.message.text()] * count
+        starts = [e for e in await store.events_since(sid, 0) if isinstance(e, TurnStarted)]
+        assert starts[-1].node_id == original.node_id
+        assert provider.requests[-1].messages[0].text().startswith("[compacted turn")
+        assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
+    assert provider.requests[-1].messages == provider.requests[-2].messages
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("old_repair", [False, True])
+async def test_resume_clock_is_fresh_last_and_not_stored(git_repo: Path, oversized: bool, old_repair: bool) -> None:
+    """S2: advancing clocks survive admission without accumulating repairs,
+    including a transcript imported from the earlier repair-node design."""
+    from datetime import UTC, datetime
+
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed])
+    loop = _loop(git_repo, provider, store, sid, context_window=200_000, max_tokens=8192)
+    loop.ctx.extra["time_context"] = lambda _: {"now": datetime(2026, 11, 14, tzinfo=UTC), "zone": "UTC"}
+    content = [Text(c * 24_000) for c in "abcd"] if oversized else "original request"
+    await _turn(loop, UserTurn(content=content))
+    (original,) = await store.load_path(sid)
+    original.message.context_pin = None  # pre-pinning transcript
+    if old_repair:
+        note, details = environment_note_parts(git_repo, time_context={
+            "now": datetime(2026, 11, 13, tzinfo=UTC), "zone": "UTC",
+        })
+        block = note + "\n\n" + details
+        await store.append(sid, SessionNode(
+            node_id="old-repair", parent_id=original.node_id,
+            message=Message(role="user", content=[Text(block)],
+                            provider_meta={"harness_note": True}).pin_context(block),
+        ))
+    stored = copy.deepcopy(await store.load_path(sid))
+    for day in (15, 16, 17):
+        loop = _loop(git_repo, provider, store, sid, context_window=32_000, max_tokens=8192)
+        loop.ctx.extra["time_context"] = lambda _, day=day: {
+            "now": datetime(2026, 11, day, tzinfo=UTC), "zone": "UTC",
+        }
+        await _turn(loop, Resume())
+        sent = "\n".join(m.text() for m in provider.requests[-1].messages)
+        dates = [int(line.split("Nov ")[1].split(",")[0])
+                 for line in sent.splitlines() if line.startswith("Current time:")]
+        assert dates[-1] == day and dates.count(day) == 1
+        if oversized:
+            assert any(m.text().startswith("[compacted turn") for m in provider.requests[-1].messages)
+            assert dates == ([13, day] if old_repair else [day])
+        assert await store.load_path(sid) == stored  # no new node and no rewritten history
+
+
+async def test_runtime_facts_follow_the_selected_path_and_survive_a_wake(git_repo: Path) -> None:
+    store, sid = await _session()
+    await store.append(sid, SessionNode(
+        node_id="root", parent_id=None,
+        message=Message(role="user", content=[Text("legacy root")]),
+    ))
+    provider = ScriptedProvider([_text("ok")])
+    loop = _loop(git_repo, provider, store, sid, include_env=False)
+    await _turn(loop, UserTurn(content="first"))
+    # A fresh engine must use the held pin, not re-send a duplicate.
+    loop = _loop(git_repo, provider, store, sid, include_env=False)
+    await _turn(loop, UserTurn(content="wake"))
+    assert "Worker Python:" not in provider.requests[-1].messages[-1].text()
+    # The fork parent never held the facts: engine memory must not suppress them.
+    await _turn(loop, UserTurn(content="fork", parent_node_id="root"))
+    assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
+    assert "Worker Python:" in provider.requests[-1].messages[-1].text()
+
+
+async def test_runtime_only_resume_over_held_facts_is_byte_identical(git_repo: Path) -> None:
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed, _text("ok")])
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False), UserTurn(content="first"))
+    stored = len(store._nodes[sid])
+    await _turn(_loop(git_repo, provider, store, sid, include_env=False), Resume())
+    assert provider.requests[-1].messages == provider.requests[-2].messages
+    assert len(store._nodes[sid]) == stored + 1  # only the assistant reply
 
 
 async def test_an_overflow_escalation_keeps_the_details_in_view(git_repo: Path) -> None:

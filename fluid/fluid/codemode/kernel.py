@@ -16,6 +16,7 @@ arbitrary code, so the hard gate lives host-side, never in the kernel.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -109,6 +110,27 @@ HostCall = Callable[[str, dict], Awaitable[HostReply]]
 # host-call bound, so an approval a user takes ten minutes to answer never
 # looks like a hung tool. Optional: without it, human waits are charged.
 HostWaitCredit = Callable[[], float]
+
+
+@dataclass
+class HostCallSalvage:
+    """The reply a host call already has, kept for its per-call deadline.
+
+    The kernel opens one per host call (``current_host_call_salvage``) and
+    the bridge files the tool's finished, capped reply in it before the
+    post-processing that can still take time (PostToolUse hooks), then the
+    final reply. When the per-call ceiling expires after that, the kernel
+    returns the filed reply instead of a bare cancellation, so a Bash that
+    timed out inside the ceiling keeps its output (#1549). A turn cancel
+    never reads it.
+    """
+
+    reply: HostReply | None = None
+
+
+current_host_call_salvage: ContextVar[HostCallSalvage | None] = ContextVar(
+    "fluid_current_host_call_salvage", default=None,
+)
 
 
 @runtime_checkable

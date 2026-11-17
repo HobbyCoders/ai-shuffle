@@ -286,6 +286,8 @@ def environment_block(
 # copy, inside the host-pinned range, and the compactor keeps the newest
 # copy in view through any fold (CompactionConfig.pinned_blocks).
 ENVIRONMENT_DETAILS_HEADER = "# Environment details\n"
+# Per-turn date and branch; the newest pinned copy survives a digest (#1656).
+ENVIRONMENT_NOTE_HEADER = "Environment as of this message:\n"
 
 
 def environment_note_parts(
@@ -312,7 +314,7 @@ def environment_note_parts(
     details.append(runtime_facts(cwd_str))
     body = "\n".join(lines)
     details_body = "\n".join(details)
-    note = f"<system-reminder>\nEnvironment as of this message:\n{body}\n</system-reminder>"
+    note = f"<system-reminder>\n{ENVIRONMENT_NOTE_HEADER}{body}\n</system-reminder>"
     return note, f"<system-reminder>\n{ENVIRONMENT_DETAILS_HEADER}{details_body}\n</system-reminder>"
 
 

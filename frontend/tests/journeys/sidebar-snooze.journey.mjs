@@ -525,6 +525,50 @@ await runJourney({
 				await expectDrawer(page, false, `a slow 150px drag did not close the drawer on a ${width}px screen`);
 			}
 		}] : []),
+		// Isolate each fresh chat's setup from the recording: inserting sixteen
+		// rows during one recording measures the fixtures' accumulated layout
+		// shifts, not flick reliability. Eight independent trials per direction.
+		...Array.from({ length: 8 }, (_, trial) => [1, -1].map((direction) => ({
+			name: `${mobileShell ? 'native' : 'responsive'}-flick-commits-${direction > 0 ? 'right' : 'left'}-${trial + 1}`,
+			viewports: mobileShell ? ['phone', 'fold-inner'] : ['phone'],
+			async setup(ctx) {
+				await swipeSetup(ctx);
+				if (mobileShell && ctx.page.viewportSize().width === 884) {
+					await resizeWindow(ctx.page, { width: 884, height: 768 });
+				}
+				if (mobileShell) await expectDrawer(ctx.page, true, 'the drawer must be fully open before touching a row');
+			},
+			async act({ page, mark, log }) {
+				const id = page.__snoozeChat;
+				const row = page.locator(CARD(id));
+				await row.scrollIntoViewIfNeeded();
+				const box = await row.boundingBox();
+				const x = box.x + box.width * (direction > 0 ? 0.25 : 0.75);
+				const y = box.y + box.height / 2;
+				await row.evaluate((frame) => {
+					frame.__flickTrace = [];
+					for (const kind of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+						frame.addEventListener(kind, (e) => frame.__flickTrace.push({
+							kind, x: e.clientX, y: e.clientY, t: e.timeStamp, handled: performance.now(), trusted: e.isTrusted
+						}), { capture: true });
+					}
+				});
+				await mark(`80px/20ms flick ${direction > 0 ? 'right' : 'left'}, trial ${trial + 1}/8`);
+				await touchPath(page, Array.from({ length: 9 }, (_, i) => ({
+					x: x + direction * 10 * i, y, t: i * 2.5
+				})), 22);
+				log(`${page.viewportSize().width}x${page.viewportSize().height}: ${JSON.stringify(await row.evaluate((frame) => frame.__flickTrace))}`);
+				if (direction > 0) {
+					await snoozePicker(page).waitFor({ timeout: 5000 });
+					await expectRowInPlace(page, id);
+					const saved = await api(page, 'GET', `/sessions/${id}`);
+					expect(saved.is_active && !saved.snoozed_until, 'opening the picker must not change the chat');
+				} else {
+					// Wait for the action's server result, not a timer guess or painted transform.
+					await waitSaved(page, id, (saved) => !saved.is_active && !saved.snoozed_until, 'the flick never settled the chat');
+				}
+			}
+		}))).flat(),
 		{
 			name: `${mobileShell ? 'native' : 'responsive'}-swipe-right-settled`,
 			viewports: ['phone'],

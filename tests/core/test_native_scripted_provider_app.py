@@ -689,6 +689,7 @@ async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_promp
     assert len(provider.requests) == 2
     expected = deepcopy(provider.requests[0].body)
     content = expected["messages"][-1]["content"]
-    cache = content[-1].pop("cache_control")
-    content.append({"type": "text", "text": "\n\n" + clock_note, "cache_control": cache})
+    # Resume adds a request-only suffix. The cache marker stays on the
+    # unchanged history prefix, before the fresh note.
+    content.append({"type": "text", "text": clock_note})
     assert provider.requests[1].body == expected

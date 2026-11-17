@@ -1,0 +1,9 @@
+{
+  "description": "#1627: an unclosed inline anchor must suppress a following video autolink throughout streaming and settle.",
+  "tps": 2,
+  "steps": [
+    {
+      "text": "Intro <a href=\"/docs\">label\n\nhttps://example.com/clip.mp4"
+    }
+  ]
+}

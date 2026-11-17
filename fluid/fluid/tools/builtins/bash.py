@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 import re
 import signal
@@ -24,12 +25,23 @@ from fluid.tools.priority import (
     priority_creationflags,
     raise_oom_score_adj,
 )
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, current_call_in_cell
+from fluid.tools.registry import (
+    ToolCtx,
+    ToolOutcome,
+    ToolSpec,
+    current_call_in_cell,
+    current_call_time_left,
+)
 from fluid.tools.shell import resolve_shell
 
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
+# Seconds kept clear, after a timeout, for the kill, the 2s drain of the pipe
+# and the result's way back, when a code-mode cell's per-call ceiling bounds
+# the call: the timeout is cut so the whole run ends inside it (#1549).
+KILL_GRACE_S = 5.0
+_DRAIN_S = 2.0
 # Bytes of a command's output kept in memory while it runs: the first half
 # and the last half, the middle dropped as it streams. Far above what the
 # model sees inline, so the spill file holds the whole output of all but a
@@ -335,6 +347,28 @@ def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
     timeout = clamp_timeout(input.get("timeout", DEFAULT_TIMEOUT_S))
+    # Inside a cell the kernel cancels the call at its per-call ceiling, and a
+    # cancelled call returns nothing. Read the time left now, on the input
+    # that actually runs (after every hook and approval rewrite), and cut the
+    # timeout so a timeout lands first and keeps the output (#1549).
+    held = ""
+    time_left = current_call_time_left.get()
+    if time_left is not None:
+        room = math.floor((time_left() - KILL_GRACE_S) * 10) / 10
+        if room < MIN_TIMEOUT_S:
+            return ToolOutcome(
+                text=(
+                    "Bash was not run: this cell's per-call ceiling has too "
+                    "little time left for it. Call Bash outside the cell, or "
+                    "give the cell a longer timeout."
+                ),
+                is_error=True,
+            )
+        if room < timeout:
+            held = (
+                f" (cut from {timeout:g}s to fit the time left on this cell's "
+                "per-call ceiling; a longer run belongs outside the cell)")
+            timeout = room
     cwd = input.get("cwd") or ctx.cwd
     # The settings stack's ``env`` (ctx.extra["settings_env"], set by the
     # loader) rides on top of the process environment for the child only;
@@ -367,19 +401,23 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
     capture = _Capture()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     try:
         await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=timeout)
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        # One deadline for the whole run: a command that closes its output
+        # and then hangs gets the time left, not a second full timeout.
+        await asyncio.wait_for(proc.wait(), timeout=max(0.0, deadline - loop.time()))
     except TimeoutError:
         await kill_tree(proc)
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
-            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=2.0)
+            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
         text = (
-            f"command timed out after {timeout:g}s and was killed. Raise "
+            f"command timed out after {timeout:g}s{held} and was killed. Raise "
             "the timeout parameter for a genuinely long command, narrow "
             "the command's scope, or use Monitor for a long-running job "
             "(serves=true only for a service meant to stay up). Do not "
@@ -389,7 +427,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         partial = _render(capture, ctx, timed_out=True)
         if partial.strip():
             text += "\n" + fence_shell_output(
-                partial, "Bash partial output (command timed out; output up to the timeout)")
+                partial,
+                "Bash partial output (command timed out; output up to the timeout, may be incomplete)")
         return ToolOutcome(text=text, is_error=True)
     except asyncio.CancelledError:
         # Any cancellation (a user stop, a turn cancel, a host deadline): this

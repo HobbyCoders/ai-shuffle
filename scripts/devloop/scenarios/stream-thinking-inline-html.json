@@ -1,0 +1,10 @@
+{
+  "description": "#1627: actual OpenAI reasoning deltas through ThinkingBlock, not seeded transcript text.",
+  "tps": 3,
+  "steps": [
+    {
+      "reasoning": "Intro <a href=\"/docs\">label\n\nhttps://example.com/reasoning-ghost.mp4\n\nThinking continues while the unclosed anchor suppresses the later autolink.",
+      "text": "Reasoning complete."
+    }
+  ]
+}

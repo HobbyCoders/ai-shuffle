@@ -655,6 +655,8 @@ Older clients may still send `"archived": true`; this means ordinary Settle, eve
 
 There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. On touch, a left swipe settles a row or brings it back to Active, and a right swipe opens the snooze picker for that row (see Snooze below): it moves to **Snoozed** once you pick a time, and stays where it was if you close the picker.
 
+Row swipes are judged where you lift, not at the last move the page received. Drag past 40% of the row (capped at 160px), or move at least 60px horizontally from the press and lift within 350ms. That short-swipe route includes brisk drags and counts any pause before moving; returning below 60px before lifting cancels it. The existing speed-based flick route also remains available for later flicks, but a short flick after a pause longer than 350ms can still cancel when a busy page misses its speed samples. The first decisive move locks the axis: a horizontal lock stays horizontal even if you lift diagonally, while a vertical start stays with list scrolling even if it ends horizontally. Only when no decisive move arrived does the lift choose the axis; horizontal displacement must then exceed vertical displacement.
+
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -H "Authorization: Bearer aih_your_key" \

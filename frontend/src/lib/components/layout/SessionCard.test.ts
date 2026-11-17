@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
+import { cleanup, createEvent, fireEvent, render, screen } from '@testing-library/svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -573,6 +573,10 @@ describe('SessionCard swipe gestures', () => {
 	/** A slow drag (400ms between samples), so no flick reading decides it. */
 	function slowClock() {
 		let clock = 1000;
+		let stamp = 1000;
+		// These legacy slow-drag fixtures must be slow by event time too, not
+		// only by handler time. Explicitly stamped events below override this.
+		vi.spyOn(Event.prototype, 'timeStamp', 'get').mockImplementation(() => (stamp += 400));
 		return vi.spyOn(performance, 'now').mockImplementation(() => (clock += 400));
 	}
 
@@ -763,6 +767,143 @@ describe('SessionCard swipe gestures', () => {
 		await up(frame, { x: 100, id: 2 });
 		await fireEvent.click(card, { detail: 1 });
 		expect(onOpen).toHaveBeenCalledWith('session-a');
+	});
+
+	/** Event time and handler time are deliberately independent (#1637). */
+	async function timedPointer(el: Element, kind: 'pointerDown' | 'pointerMove' | 'pointerUp', x: number, y: number, t: number) {
+		const event = createEvent[kind](el, {
+			pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: x, clientY: y
+		});
+		Object.defineProperty(event, 'timeStamp', { value: 1000 + t });
+		await fireEvent(el, event);
+	}
+
+	describe('endpoint routes are independent of delivered move count', () => {
+		const gestures = [
+			{ name: 'quick 80px flick', dx: 80, dy: 0, duration: 22, commits: true },
+			{ name: 'pause 260ms then 80px/64ms flick', dx: 80, dy: 0, duration: 326, pause: 260, commits: true },
+			{ name: 'slow drag short of the arm point', dx: 80, dy: 0, duration: 900, commits: false },
+			{ name: 'slow drag past the arm point', dx: 170, dy: 0, duration: 900, commits: true },
+			{ name: 'reversal returning below 60px', dx: 10, dy: 0, duration: 166, peak: 100, commits: false },
+			{ name: 'mostly vertical scroll', dx: 80, dy: 160, duration: 166, commits: false },
+			{ name: 'brisk short drag (accepted commit)', dx: 80, dy: 0, duration: 302, commits: true },
+			{ name: 'inclusive 60px/350ms boundary', dx: 60, dy: 0, duration: 350, commits: true },
+			{ name: 'short drag beyond 350ms without sampled speed', dx: 80, dy: 0, duration: 351, commits: false },
+		];
+		for (const gesture of gestures) {
+			it.each([1, 2, 4, 8])(`${gesture.name}, %i delivered moves, either direction`, async (moves) => {
+				for (const direction of [1, -1]) {
+					const clock = slowClock(); // no sampled-speed route; only endpoints decide
+					const onSnooze = vi.fn();
+					const { container } = renderCard({ is_active: true }, { onSnooze });
+					const { frame, card } = parts(container);
+					await timedPointer(card, 'pointerDown', 200, 20, 0);
+					for (let i = 1; i <= moves; i++) {
+						const fraction = i / moves;
+						const t = fraction * (gesture.duration - 2);
+						const pause = gesture.pause ?? 0;
+						const progress = Math.max(0, (t - pause) / (gesture.duration - 2 - pause));
+						const dx = gesture.peak !== undefined
+							? (fraction <= 0.5 ? gesture.peak * fraction * 2
+								: gesture.peak + (gesture.dx - gesture.peak) * (fraction - 0.5) * 2)
+							: gesture.dx * progress;
+						await timedPointer(frame, 'pointerMove', 200 + direction * dx, 20 + gesture.dy * progress, t);
+					}
+					await timedPointer(frame, 'pointerUp', 200 + direction * gesture.dx, 20 + gesture.dy, gesture.duration);
+					await vi.advanceTimersByTimeAsync(450);
+					expect(onSnooze).toHaveBeenCalledTimes(direction > 0 && gesture.commits ? 1 : 0);
+					expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 && gesture.commits ? 1 : 0);
+					cleanup();
+					mocks.setSessionActive.mockClear();
+					clock.mockRestore();
+					vi.restoreAllMocks();
+				}
+			});
+		}
+	});
+
+	it.each([
+		[80, 10, false], // reversal only at lift: do not use the stale move
+		[40, 80, true], // missing final move: lift completes the short swipe
+		[80, 170, true], // long slow drag crosses the arm point only at lift
+	])('uses the lift position, not the last move (%ipx -> %ipx), either direction', async (lastMove, lift, commits) => {
+		for (const direction of [1, -1]) {
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			const { frame, card } = parts(container);
+			slowClock();
+			await timedPointer(card, 'pointerDown', 200, 20, 0);
+			await timedPointer(frame, 'pointerMove', 200 + direction * lastMove, 20, 100);
+			await timedPointer(frame, 'pointerUp', 200 + direction * lift, 20, lift === 170 ? 900 : 166);
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).toHaveBeenCalledTimes(direction > 0 && commits ? 1 : 0);
+			expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 && commits ? 1 : 0);
+			cleanup();
+			mocks.setSessionActive.mockClear();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it.each([1, -1])('keeps a horizontal lock at a diagonally displaced lift (direction %i)', async (direction) => {
+		slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await timedPointer(card, 'pointerDown', 200, 20, 0);
+		await timedPointer(frame, 'pointerMove', 200 + direction * 40, 20, 100);
+		await timedPointer(frame, 'pointerUp', 200 + direction * 80, 120, 200);
+		await vi.advanceTimersByTimeAsync(450);
+		expect(onSnooze).toHaveBeenCalledTimes(direction > 0 ? 1 : 0);
+		expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 ? 1 : 0);
+	});
+
+	it.each([
+		['horizontal endpoints', 80, 0, true],
+		['vertical-dominant endpoints', 80, 100, false],
+		['equal horizontal and vertical endpoints', 80, 80, false],
+	] as const)('decides an undelivered axis from %s at lift', async (_name, dx, dy, commits) => {
+		for (const direction of [1, -1]) {
+			slowClock();
+			const onSnooze = vi.fn();
+			const { container } = renderCard({ is_active: true }, { onSnooze });
+			const { frame, card } = parts(container);
+			await timedPointer(card, 'pointerDown', 200, 20, 0);
+			await timedPointer(frame, 'pointerUp', 200 + direction * dx, 20 + dy, 200);
+			await vi.advanceTimersByTimeAsync(450);
+			expect(onSnooze).toHaveBeenCalledTimes(direction > 0 && commits ? 1 : 0);
+			expect(mocks.setSessionActive).toHaveBeenCalledTimes(direction < 0 && commits ? 1 : 0);
+			cleanup();
+			mocks.setSessionActive.mockClear();
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps main's vertical axis lock ahead of the endpoint route", async () => {
+		slowClock();
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await timedPointer(card, 'pointerDown', 200, 20, 0);
+		await timedPointer(frame, 'pointerMove', 204, 80, 80);
+		await timedPointer(frame, 'pointerMove', 280, 40, 164);
+		await timedPointer(frame, 'pointerUp', 280, 40, 166);
+		// Horizontal endpoints would qualify, but the first decisive move was
+		// vertical: this is still the list's scroll, not a row swipe.
+		expect(onSnooze).not.toHaveBeenCalled();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it("keeps main's sampled-speed route after a pause longer than 350ms", async () => {
+		const ticks = [1000, 1020, 1040];
+		vi.spyOn(performance, 'now').mockImplementation(() => ticks.shift() ?? 1040);
+		const onSnooze = vi.fn();
+		const { container } = renderCard({ is_active: true }, { onSnooze });
+		const { frame, card } = parts(container);
+		await timedPointer(card, 'pointerDown', 20, 20, 0);
+		await timedPointer(frame, 'pointerMove', 60, 20, 400);
+		await timedPointer(frame, 'pointerMove', 100, 20, 420);
+		await timedPointer(frame, 'pointerUp', 100, 20, 422);
+		expect(onSnooze).toHaveBeenCalledWith('session-a');
 	});
 
 	it('commits a fast flick short of the arm point', async () => {
