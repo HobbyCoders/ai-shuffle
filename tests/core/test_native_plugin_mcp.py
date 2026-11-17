@@ -34,6 +34,10 @@ def _install(home: Path, name: str, servers: dict[str, Any], source: str = "test
     manifest.parent.mkdir(parents=True)
     manifest.write_text(json.dumps({"name": name, "version": "1.0.0"}), encoding="utf-8")
     (root / ".mcp.json").write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    index = home / ".fluid/plugins/installed_plugins.json"
+    registry = json.loads(index.read_text(encoding="utf-8")) if index.exists() else {"plugins": {}}
+    registry["plugins"][f"{name}@{source}"] = [{"scope": "user", "installPath": str(root)}]
+    index.write_text(json.dumps(registry), encoding="utf-8")
     return root
 
 
@@ -202,6 +206,38 @@ async def test_delegated_client_consumes_installed_revision(plugin_home, tmp_pat
         assert (await client.call_tool("plugin_ping", {}))["text"] == "pong"
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize(("owner_enable", "install_state", "eligible"), [
+    (True, "reviewed", True),
+    (False, "reviewed", False),
+    (None, "reviewed", False),
+    (True, "pending", False),
+    (True, "missing", False),
+])
+def test_owner_approval_for_tool_discovery(tmp_path, monkeypatch, owner_enable, install_state, eligible):
+    """Eligibility only: an empty manifest, no server and no child process."""
+    from fluid.context.plugins import discover_plugins
+
+    home = tmp_path / "home"
+    project = tmp_path / "workspace"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    root = _install(home, "sample", {})
+    ref = "sample@testmp"
+    (project / ".fluid").mkdir(parents=True)
+    (project / ".fluid/settings.json").write_text(json.dumps({"enabledPlugins": {ref: True}}))
+    if owner_enable is not None:
+        (home / ".fluid/settings.json").write_text(json.dumps({"enabledPlugins": {ref: owner_enable}}))
+    index = home / ".fluid/plugins/installed_plugins.json"
+    if install_state == "missing":
+        index.unlink()
+    elif install_state == "pending":
+        index.write_text(json.dumps({"plugins": {ref: [{
+            "scope": "user", "installPath": str(root), "approval": "pending",
+        }]}}))
+    plugins = discover_plugins(project, owner_approved_only=True)
+    assert [plugin.root for plugin in plugins] == ([root] if eligible else [])
 
 
 def test_delegated_session_ceiling_and_reserved_names(plugin_home, tmp_path):

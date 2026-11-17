@@ -6352,6 +6352,7 @@ def _fluid_plugin_servers(options: SessionOptions, *, delegated: bool) -> dict[s
         # The delegated map goes into a file. Expand plugin/project paths but
         # never materialize values from the worker's environment in that file.
         mcp_env={} if delegated else None,
+        owner_approved_only=True,
     ))
 
 

@@ -190,7 +190,9 @@ def _latest_version_dir(base: Path) -> Path | None:
     return max(versions, key=lambda d: _version_key(d.name))
 
 
-def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None) -> tuple[Path, str | None] | None:
+def resolve_plugin_root(
+    name: str, marketplace: str, *, home: Path | None = None, require_install_record: bool = False,
+) -> tuple[Path, str | None] | None:
     """Where ``name@marketplace`` lives on disk, with its version when known.
 
     Returns ``None`` when the plugin is enabled in settings but not installed —
@@ -211,18 +213,30 @@ def resolve_plugin_root(name: str, marketplace: str, *, home: Path | None = None
             records = installed.get("plugins", {}).get(f"{name}@{marketplace}")
             if isinstance(records, dict):
                 records = [records]  # Legacy single-record registry.
+            if require_install_record:
+                if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+                    return None
+                records = [r for r in records if r.get("scope") in (None, "user", "global")]
+                # The installer publishes exactly one current record. The
+                # owner's Enable action removes its pending approval marker.
+                if len(records) != 1 or "approval" in records[0]:
+                    return None
             if isinstance(records, list) and records:
                 for record in records:
                     if not isinstance(record, dict) or record.get("scope") not in (None, "user", "global"):
                         continue
                     raw = record.get("installPath")
                     path = Path(raw) if isinstance(raw, str) and raw else None
+                    if require_install_record and (not path or not path.is_absolute()):
+                        return None
                     if path and path.is_dir() and path.resolve().parent == cache.resolve():
                         return path, record.get("version") or path.name
                 log.warning("installed plugin %s@%s has no applicable confined cache path", name, marketplace)
                 return None
         except (OSError, ValueError, TypeError, AttributeError):
-            pass  # Older/CLI-only installs may have only the cache layout.
+            if require_install_record:
+                return None
+            # Older/CLI-only installs may have only the cache layout.
     if cache.is_dir():
         version_dir = _latest_version_dir(cache)
         if version_dir is not None:
@@ -333,9 +347,10 @@ def load_plugin(
     disabled_mcp: set[str] | None = None,
     home: Path | None = None,
     mcp_env: Mapping[str, str] | None = None,
+    require_install_record: bool = False,
 ) -> Plugin | None:
     """Resolve and read one plugin. ``None`` when it is not installed."""
-    resolved = resolve_plugin_root(name, marketplace, home=home)
+    resolved = resolve_plugin_root(name, marketplace, home=home, require_install_record=require_install_record)
     if resolved is None:
         log.warning(
             "enabled plugin %s@%s is not installed under %s — skipping",
@@ -391,6 +406,7 @@ def discover_plugins(
     sources: tuple[str, ...] | list[str] = SETTING_SOURCES,
     home: Path | None = None,
     mcp_env: Mapping[str, str] | None = None,
+    owner_approved_only: bool = False,
 ) -> list[Plugin]:
     """Every enabled, installed plugin visible from ``cwd``.
 
@@ -405,6 +421,13 @@ def discover_plugins(
         load_settings_stack(cwd, sources=tuple(sources)) if settings is None else settings
     )
     enabled = [ref for ref, on in enabled_plugins(resolved_settings).items() if on]
+    if enabled and owner_approved_only:
+        # Project/local preferences may narrow the tool surface, not grant
+        # permission to execute a marketplace install. Require a literal user
+        # enable as written by PluginService, not a truthy settings value.
+        owner = load_settings_stack(cwd, sources=("user",)).get("enabledPlugins")
+        enabled = [ref for ref in enabled if "user" in sources and isinstance(owner, dict)
+                   and owner.get(ref) is True]
     if not enabled:
         return []
     _, disabled_servers = mcp_toggles(resolved_settings)
@@ -415,7 +438,10 @@ def discover_plugins(
         if not name:
             continue
         try:
-            plugin = load_plugin(name, marketplace, cwd=cwd, disabled_mcp=disabled, home=home, mcp_env=mcp_env)
+            plugin = load_plugin(
+                name, marketplace, cwd=cwd, disabled_mcp=disabled, home=home, mcp_env=mcp_env,
+                require_install_record=owner_approved_only,
+            )
         except Exception as exc:  # noqa: BLE001 — one bad plugin never breaks the rest
             log.warning("skipping plugin %s: %s", ref, exc)
             continue
