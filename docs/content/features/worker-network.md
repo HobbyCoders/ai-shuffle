@@ -70,6 +70,8 @@ never deletes chats, messages or their search/history records.
 
 If two workers change the same setting while they cannot reach each other, the later change wins. The other version is kept for 30 days, so nothing is lost without a trace.
 
+If a peer deletes a note while another worker has added an attachment, that worker keeps a recovery copy of the attachment. Its conflict does not expire after 30 days. Dismissing the last conflict that needs the copy releases it.
+
 ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. The network founder renews these logins; if the founder is no longer an active worker, the active worker with the lowest device id takes over. If a renewal has not reached this worker, the login-expired message names the renewing worker. This cannot repair a login whose refresh token has already been invalidated.
 
 ## Remove a device

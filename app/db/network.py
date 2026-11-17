@@ -227,6 +227,12 @@ def create_schema(cursor) -> None:
         )
     """)
     cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_conflict_bytes (
+            hash TEXT PRIMARY KEY,
+            data BYTEA NOT NULL
+        )
+    """)
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_peers (
             device_id TEXT PRIMARY KEY,
             base_url TEXT,
@@ -1745,10 +1751,16 @@ def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, 
          winning_device_id, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat()))
 
 
+# A recovery copy belongs to all local losing attachment records naming it.
+# Unlike ordinary conflict metadata those records need an explicit dismissal.
+_PINNED = """collection='note_attachments' AND EXISTS
+    (SELECT 1 FROM sync_conflict_bytes WHERE hash = losing_record ->> 'blob_hash')"""
+
+
 def list_conflicts(limit: int = 200) -> List[dict]:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM sync_conflicts WHERE expires_at > %s ORDER BY created_at DESC, id DESC LIMIT %s",
+        cursor.execute(f"SELECT * FROM sync_conflicts WHERE expires_at > %s OR ({_PINNED}) ORDER BY created_at DESC, id DESC LIMIT %s",
                        (_now(), limit))
         rows = rows_to_list(cursor.fetchall())
     for row in rows:
@@ -1759,13 +1771,25 @@ def list_conflicts(limit: int = 200) -> List[dict]:
 def delete_conflict(conflict_id: int) -> bool:
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM sync_conflicts WHERE id = %s", (conflict_id,))
-        return bool(cursor.rowcount)
+        # Serialize last-reference removal with stream and state-copy delivery.
+        lock_state(cursor)
+        cursor.execute("DELETE FROM sync_conflicts WHERE id = %s RETURNING collection, losing_record", (conflict_id,))
+        row = cursor.fetchone()
+        if row and row["collection"] == "note_attachments":
+            digest = (_load(row["losing_record"]) or {}).get("blob_hash")
+            # Another live attachment may have arrived while the conflict owned
+            # its only payload. Give it the bytes before releasing our copy.
+            cursor.execute("""UPDATE note_attachments SET data=c.data FROM sync_conflict_bytes c
+                              WHERE blob_hash=c.hash AND c.hash=%s AND note_attachments.data IS NULL""", (digest,))
+            cursor.execute("""DELETE FROM sync_conflict_bytes WHERE hash=%s AND NOT EXISTS
+                              (SELECT 1 FROM sync_conflicts WHERE collection='note_attachments'
+                               AND losing_record ->> 'blob_hash' = %s)""", (digest, digest))
+        return row is not None
 
 
 def expire_conflicts(*, stop=None) -> int:
     from app.db.retention import mutate_batches
-    return mutate_batches("sync_conflicts", "expires_at <= %s", (_now(),), stop=stop)
+    return mutate_batches("sync_conflicts", f"expires_at <= %s AND NOT ({_PINNED})", (_now(),), stop=stop)
 
 
 # ---------------------------------------------------------------------------

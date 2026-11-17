@@ -450,7 +450,7 @@ def leave_network() -> dict:
     with get_db() as conn:
         cursor = conn.cursor()
         store.lock_state(cursor)  # State lock first, like the other network-state writers.
-        for table in ("sync_pending", "sync_conflicts", "sync_watermarks", "sync_records", "sync_ops",
+        for table in ("sync_pending", "sync_conflicts", "sync_conflict_bytes", "sync_watermarks", "sync_records", "sync_ops",
                       "sync_peers", "network_presence", "network_catalog_cursors", "network_membership_records",
                       "network_joins", "network_member_names", "network_instance_aliases", "network_members",
                       "network_transcript_backfill", "network_transcript_backfill_state",
@@ -698,9 +698,36 @@ def _billing_refresh_needed(cursor, coll, record_id, record):
                 or _provider_value_changed(coll, previous, "balance_key", record["balance_key"])))
 
 
+def _retain_cascaded_attachments(cursor, note_id, clock, origin):
+    # Parent first: no insert may pass its FK check between this inventory
+    # and DELETE. Lock each child before inspecting its metadata and bytes.
+    cursor.execute("SELECT id FROM notes WHERE id=%s FOR UPDATE", (note_id,))
+    if cursor.fetchone() is None:
+        return
+    child = policy.collection("note_attachments")
+    cursor.execute("SELECT id FROM note_attachments WHERE note_id=%s ORDER BY id FOR UPDATE", (note_id,))
+    for identity in cursor.fetchall():
+        rid = identity["id"]
+        row = _read_row(cursor, child, rid)
+        digest = row.get("blob_hash")
+        if not digest or row.get("data") is None:
+            continue
+        version = store.get_record(cursor, child.name, rid)
+        if not version or version["origin_device_id"] != origin:
+            store.add_conflict(cursor, collection=child.name, record_id=rid,
+                               losing_clock=int(version["clock"]) if version else 0,
+                               losing_device_id=version["origin_device_id"] if version else context().device_id,
+                               losing_record=serialize_row(child, row, cursor=cursor),
+                               winning_clock=clock, winning_device_id=origin)
+        cursor.execute("""INSERT INTO sync_conflict_bytes (hash, data)
+                          SELECT blob_hash, data FROM note_attachments WHERE id=%s AND EXISTS
+                          (SELECT 1 FROM sync_conflicts WHERE collection='note_attachments'
+                           AND losing_record ->> 'blob_hash' = %s) ON CONFLICT (hash) DO NOTHING""", (rid, digest))
+
+
 def materialize(
     cursor: Any, coll: policy.Collection, record_id: str,
-    record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None,
+    record: Optional[Mapping[str, Any]], *, origin_device_id: Optional[str] = None, deletion_clock: Optional[int] = None,
 ) -> Optional[dict[str, Any]]:
     """Write (or delete) the domain row. Returns the row as re-read, or None.
 
@@ -741,6 +768,8 @@ def materialize(
                     record.get("session_id"), (existing or {}).get("session_id")))):
             return existing
     if record is None:
+        if coll.name == "notes" and deletion_clock is not None:
+            _retain_cascaded_attachments(cursor, record_id, deletion_clock, origin_device_id)
         if coll.name == "sessions":
             # The FK cascade deletes staged hand-off rows: hold their headers
             # before this DELETE locks the session (#1215). Batch callers
@@ -2044,7 +2073,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.op == OP_DELETE:
         if coll.name == "presence":
             cursor.execute("DELETE FROM network_instance_aliases WHERE device_id = %s", (env.origin_device_id,))
-        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id)
+        materialize(cursor, coll, env.record_id, None, origin_device_id=env.origin_device_id, deletion_clock=env.clock)
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
                          content_hash="", deleted=True, order_seq=env.order_seq)
     else:
@@ -3255,7 +3284,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                winning_device_id=existing["origin_device_id"] if existing else ctx.device_id)
             continue
         if item["deleted"]:
-            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"])
+            materialize(cursor, coll, item["record_id"], None, origin_device_id=item["origin_device_id"], deletion_clock=int(item["clock"]))
             local_hash = ""
         else:
             prepared = _prepare_mirror(cursor, coll, item["record"], origin_device_id=item["origin_device_id"],

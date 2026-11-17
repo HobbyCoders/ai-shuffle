@@ -72,6 +72,9 @@ def read_local(hash_value: str, *, _conn=None) -> Optional[bytes]:
         cursor = conn.cursor()
         cursor.execute("SELECT data FROM note_attachments WHERE blob_hash = %s AND data IS NOT NULL LIMIT 1", (hash_value,))
         row = cursor.fetchone()
+        if row is None:
+            cursor.execute("SELECT data FROM sync_conflict_bytes WHERE hash=%s", (hash_value,))
+            row = cursor.fetchone()
     if row and row["data"] is not None:
         data = row["data"]
         return data.tobytes() if isinstance(data, memoryview) else bytes(data)
