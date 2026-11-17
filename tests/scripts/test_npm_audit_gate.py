@@ -149,6 +149,16 @@ def test_main_without_a_lockfile_fails(tmp_path):
                      lockfile=tmp_path / "missing.json") == 1
 
 
+def test_shrinkwrap_decides_dev_status_like_npm(tmp_path, monkeypatch):
+    (tmp_path / "package-lock.json").write_text(json.dumps({"packages": DEV}))
+    (tmp_path / "npm-shrinkwrap.json").write_text(json.dumps({"packages": lock("picomatch", dev=False)}))
+    monkeypatch.chdir(tmp_path)
+    assert gate.active_lockfile() == Path("npm-shrinkwrap.json")
+    assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 1
+    (tmp_path / "npm-shrinkwrap.json").unlink()
+    assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 0
+
+
 def test_checked_in_exceptions_are_complete_and_dated():
     for entry in gate.load_exceptions():
         assert entry["id"].startswith("GHSA-") and entry["packages"]

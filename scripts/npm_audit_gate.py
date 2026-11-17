@@ -85,8 +85,15 @@ def evaluate(report, exceptions, today, lock=None):
     return blocking, excepted, unused
 
 
-def main(argv=None, run=subprocess.run, today=None, lockfile=Path("package-lock.json")):
+def active_lockfile(directory=Path(".")):
+    """The lockfile npm audits: npm-shrinkwrap.json takes precedence over package-lock.json."""
+    shrinkwrap = Path(directory) / "npm-shrinkwrap.json"
+    return shrinkwrap if shrinkwrap.exists() else Path(directory) / "package-lock.json"
+
+
+def main(argv=None, run=subprocess.run, today=None, lockfile=None):
     today = today or _dt.date.today()
+    lockfile = lockfile or active_lockfile()
     try:
         result = run(AUDIT, capture_output=True, text=True, timeout=TIMEOUT)
         if result.stderr.strip():
