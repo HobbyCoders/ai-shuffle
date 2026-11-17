@@ -356,8 +356,10 @@
 
 	// All editor navigation shares the same save/discard decision. A named note
 	// is flushed before moving on; an untitled or failed draft requires consent.
-	async function changeEditor(action: () => void, current = () => true) {
+	async function changeEditor(action: () => void, restoredEntryCurrent?: () => boolean) {
 		const request = ++navigationRequest;
+		const landing = shellHistory.restored;
+		const current = restoredEntryCurrent ?? (() => !shellHistory.restored || shellHistory.restored === landing);
 		cancelAutosave();
 		if (saving || (hasUnsavedChanges && editorTitle.trim())) await saveNote();
 		if (request !== navigationRequest || !current()) return;
@@ -370,6 +372,10 @@
 			uploading = false;
 			persistDraft();
 			action();
+			// A committed editor choice is navigation even when ViewShell is still
+			// waiting for an older selection to appear in a partial list. Browser
+			// restores only display their entry; they never push another one.
+			if (!restoredEntryCurrent) shellHistory.detail('notes', { panel: editingNote?.id ?? (isCreatingNew ? 'new' : null) });
 		};
 		if (hasUnsavedChanges) {
 			pendingConfirm = {

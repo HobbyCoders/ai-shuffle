@@ -117,12 +117,12 @@ function writingCase(name, native = false, mid = false) {
 function historyCase(name) {
  const idA = 'history-note-a', idB = 'history-note-b';
  let release, saving;
- let started, notes, listUnavailable;
+ let started, notes, listUnavailable, firstPage;
  return {
   name, viewports: ['desktop'],
   allow: name === 'unavailable-notes-list' ? [{ kind: 'failed_requests', status: 503, url: /\/notes(\?|$)/, reason: 'this case makes the Notes list unavailable for one reload' }] : [],
   async setup({ page, status }) {
-   listUnavailable = false;
+   listUnavailable = false; firstPage = null;
    const gate = new Promise(resolve => release = resolve);
    started = new Promise(resolve => saving = resolve);
    notes = [idA, idB].map(id => ({ id, title: id, content: '', tags: [], is_pinned: false,
@@ -132,7 +132,11 @@ function historyCase(name) {
     const path = new URL(route.request().url()).pathname.split('/notes')[1];
     const note = notes.find(n => path === '/' + n.id);
     if (!path && listUnavailable) return route.fulfill({ status: 503, json: { detail: 'Notes list is temporarily unavailable' } });
-    if (!path) return route.fulfill({ json: notes });
+    if (!path && new URL(route.request().url()).searchParams.get('search') === idB) {
+     saving(); await gate;
+     return route.fulfill({ json: notes.filter(n => n.id === idB) });
+    }
+    if (!path) return route.fulfill({ json: firstPage ?? notes });
     if (route.request().method() === 'PATCH' && note) {
      saving(); await gate; Object.assign(note, route.request().postDataJSON());
     }
@@ -148,7 +152,30 @@ function historyCase(name) {
    await mark('open note A'); await open(idA); await landed(idA);
    await mark('open note B'); await open(idB); await landed(idB);
    const length = await page.evaluate(() => history.length);
-   if (name === 'unavailable-notes-list') {
+   if (name === 'select-while-restore-pending') {
+    await mark('reload B with a full first page that does not contain B');
+    firstPage = [notes[0], ...Array.from({ length: 99 }, (_, i) => ({ ...notes[0], id: `other-${i}`, title: `Other ${i}` }))];
+    await reloadForHistory(page, mark);
+    const row = id => page.locator('[data-settings-item]').filter({ hasText: id });
+    await row(idA).waitFor(); await landed(idB);
+    expect(!await heading.isVisible(), 'B is not on the first page');
+    // Start a search for B, then clear it to show the first page while its response is in flight.
+    const search = page.getByPlaceholder('Search notes', { exact: true });
+    await search.fill(idB); await started; await search.fill(''); await row(idA).waitFor();
+    await mark('select A while the old search for B is outstanding');
+    await open(idA); await heading.waitFor();
+    expect(await heading.inputValue() === idA, 'the explicit choice opened A');
+    const late = page.waitForResponse(r => new URL(r.url()).searchParams.get('search') === idB);
+    release(); await (await late).finished();
+    await landed(idA);
+    expect(await heading.inputValue() === idA, 'the old result did not select B');
+    await mark('reload A with both notes available');
+    firstPage = null; await reloadForHistory(page, mark); await heading.waitFor();
+    expect(await heading.inputValue() === idA, 'reload follows the last explicit selection');
+    expect(await page.evaluate(() => history.length) === length + 1, 'the selection pushed exactly one entry');
+    await page.goBack(); await landed(idB);
+    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
+   } else if (name === 'unavailable-notes-list') {
     await mark('reload B while the Notes list is unavailable');
     listUnavailable = true; await reloadForHistory(page, mark);
     await page.getByRole('button', { name: 'Retry', exact: true }).first().waitFor();
@@ -183,4 +210,4 @@ await runJourney({
  name: 'notes-writing', allow: DEV_INSTANCE_NOISE,
  // The history cases intercept Notes responses across document reloads.
  browser: () => ({ context: { serviceWorkers: 'block' } }),
- cases: [historyCase('late-save-after-forward'), historyCase('deleted-note-entry'), historyCase('unavailable-notes-list'), writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), ...(mobileShell ? [writingCase('native-note-writing', true)] : [])] });
+ cases: [historyCase('late-save-after-forward'), historyCase('deleted-note-entry'), historyCase('unavailable-notes-list'), historyCase('select-while-restore-pending'), writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), ...(mobileShell ? [writingCase('native-note-writing', true)] : [])] });
