@@ -393,21 +393,65 @@ async def test_a_missed_native_turn_repeating_an_earlier_prompt_is_reseeded(monk
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("record", ["interrupt", "typed", "reseeded"])
-async def test_interrupt_marker_cannot_substitute_for_a_native_turn(monkeypatch, tmp_path, record):
+@pytest.mark.asyncio
+async def test_stale_interrupt_handle_reseeds_native_image_turn_once(mock_db, monkeypatch, tmp_path):
+    from fluid.messages.content import Image
+    from app.core.provider.fluid_pg_store import PgFluidStore
+
+    marker = "[Request interrupted by user]"
+    options = _options(tmp_path)
+    store = PgFluidStore()
+    await _seed(store, PELICAN)
+    first = (await _connect(monkeypatch, store, options))["cli_session_id"]
+    project = _projects(tmp_path) / cli_project_dir_name(options.cwd)
+    stale = project / f"{first}.jsonl"
+    # The CLI wrote a long response followed by its interrupt notification.
+    with stale.open("a", encoding="utf-8") as stream:
+        for entry in [_assistant("x" * fluid_transcript.CLI_TRANSCRIPT_TAIL_BYTES),
+                      _user([{"type": "text", "text": marker}])]:
+            stream.write(json.dumps(entry) + "\n")
+    before = stale.read_bytes()
+    # A native turn then submitted that same text WITH an image.
+    await store.append(SID, SessionNode(node_id="n3", parent_id="n2", message=Message(
+        role="user", content=[Text(marker), Image(media_type="image/png", data="aGk=")],
+    )))
+    second = (await _connect(monkeypatch, store, options))["cli_session_id"]
+    assert second and second != first
+    new_lines = (project / f"{second}.jsonl").read_text(encoding="utf-8").splitlines()
+    blocks = json.loads(new_lines[-1])["message"]["content"]
+    assert [b["type"] for b in blocks] == ["text", "image"] and blocks[0]["text"] == marker
+    assert (await _connect(monkeypatch, store, options))["cli_session_id"] == second
+    assert stale.read_bytes() == before
+
+
+@pytest.mark.parametrize("tail_cut", [False, True])
+@pytest.mark.parametrize("record", ["interrupt", "typed", "reseeded", "image", "image-and-interrupt", "absent"])
+async def test_interrupt_marker_cannot_substitute_for_a_native_turn(monkeypatch, tmp_path, record, tail_cut):
     marker = "[Request interrupted by user]"
     store = MemoryStore()
     await _seed(store, _turns("first", marker), handle="cli-handle")
     entry = _user([{"type": "text", "text": marker}])
     if record == "typed":
         entry["promptId"] = "typed-prompt"
-    if record == "reseeded":
-        [entry] = fluid_transcript.build_cli_transcript_entries([entry], "cli-handle", str(tmp_path))
-    _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("first") + [entry])
+    if record.startswith("image"):
+        entry["message"]["content"].append({"type": "image", "source": {
+            "type": "base64", "media_type": "image/png", "data": "aW1hZ2U="}})
+    entries = [_user("first"), _assistant("x" * (1024 * 1024 + 1) if tail_cut else "ok")]
+    if record == "reseeded" or record.startswith("image"):
+        # Use the real materializer: text-only becomes a string; an image
+        # keeps the array. Neither is given a promptId by the CLI writer.
+        entries = fluid_transcript.build_cli_transcript_entries(entries + [entry], "cli-handle", str(tmp_path))
+        if record == "image-and-interrupt":
+            entries.append(_user([{"type": "text", "text": marker}]))
+    elif record != "absent":
+        entries.append(entry)
+    path = _write_cli_jsonl(tmp_path, "cli-handle", entries)
+    assert (path.stat().st_size > fluid_transcript.CLI_TRANSCRIPT_TAIL_BYTES) == tail_cut
     calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
     captured = await _connect(monkeypatch, store, _options(tmp_path))
-    assert captured["cli_session_id"] == ("new-uuid" if record == "interrupt" else "cli-handle")
-    assert len(calls) == int(record == "interrupt")
+    needs_reseed = record == "interrupt" or (record == "absent" and not tail_cut)
+    assert captured["cli_session_id"] == ("new-uuid" if needs_reseed else "cli-handle")
+    assert len(calls) == int(needs_reseed)
 
 
 @pytest.mark.asyncio
@@ -559,6 +603,10 @@ def test_a_cut_tail_is_reported(tmp_path):
     assert complete and len(prompts) == 50
     prompts, complete = fluid_transcript.cli_transcript_prompt_tail(path, tail_bytes=200)
     assert not complete and prompts[-1] == "prompt 49" and len(prompts) < 50
+    # A tail starting exactly at a line boundary still sees that entry.
+    last_line = len((json.dumps(_user("prompt 49")) + "\n").encode())
+    prompts, complete = fluid_transcript.cli_transcript_prompt_tail(path, tail_bytes=last_line)
+    assert not complete and prompts == ["prompt 49"]
 
 
 @pytest.mark.parametrize("text,is_command", [
