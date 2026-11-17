@@ -34,6 +34,20 @@ function recording(timeline: Entry[], extra: Record<string, unknown> = {}) {
 const NEW_CHAT = { path: "/", surface: "new", session: "none", composer: "centre", messages: "0", loading: "false", streaming: "false" };
 
 describe("reversal", () => {
+  it("compares painted frames within the new document, not across a reload", () => {
+    const rec = recording([
+      state(0, 0, { surface: "settings" }),
+      mark(8, "reload Settings"),
+      { ...state(16, 1, { surface: null }), documentStart: true },
+      state(32, 2, { surface: "settings" }),
+      state(48, 3, { surface: "chat" }),
+      state(64, 4, { surface: "settings" }),
+    ]);
+    expect(detectReversals(rec)).toMatchObject([
+      { field: "surface", path: ["settings", "chat", "settings"], indices: [4, 5], step: 1 },
+    ]);
+  });
+
   it("flags a one-frame flicker A -> B -> A on one field", () => {
     const rec = recording([
       state(0, 0, NEW_CHAT),

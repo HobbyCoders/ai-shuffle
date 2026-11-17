@@ -1,6 +1,6 @@
 // The actual Automation notice deep-links to Claude in Settings, with every phone Back step.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, reloadForHistory } from './lib/app.mjs';
+import { expect, gotoApp } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 await runJourney({ name: 'settings-detail-link', allow: DEV_INSTANCE_NOISE, cases: [{
@@ -21,14 +21,12 @@ await runJourney({ name: 'settings-detail-link', allow: DEV_INSTANCE_NOISE, case
   await page.setViewportSize({width:390,height:844});
   await onSecurity('after the resize');
   await mark('reload at phone width');
-  await reloadForHistory(page, mark);
-  await mark('page reloaded at phone width');
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await onSecurity('after the reload');
   await mark('Back reaches the list, and a reload then stays on the list');
   await page.locator('.topbar').getByRole('button',{name:'Back to Settings',exact:true}).click();
   await page.getByRole('navigation',{name:'Settings',exact:true}).waitFor();
-  await reloadForHistory(page, mark);
-  await mark('list reloaded');
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await page.getByRole('navigation',{name:'Settings',exact:true}).waitFor({timeout:15000});
   expect(await page.locator('.settings-shell[data-view="page"]').count()===0,'the list stays the list after Back');
  }

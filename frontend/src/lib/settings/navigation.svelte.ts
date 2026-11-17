@@ -181,7 +181,7 @@ export class SettingsNavigation {
 
 	setTab(category: CategoryId, item: string, tab: string): void {
 		this.tabs[tabKey(category, item)] = tab;
-		shellHistory.detail('settings', { settings: this.position(this.view) }, true);
+		shellHistory.detail('settings', { settings: { ...shellHistory.place?.settings, ...this.position(this.view) } }, true);
 		this.persist();
 	}
 
@@ -251,6 +251,12 @@ export class SettingsNavigation {
 	showList(category: CategoryId = this.category): void {
 		if (this.stacked) this.back();
 		else if (this.onePane[category]) {
+			const here = shellHistory.place?.settings;
+			if (here?.category === category && here.listDepth !== undefined) {
+				history.go(here.listDepth - here.depth);
+				return;
+			}
+			// A retained or directly linked detail might not have a list to pop to.
 			this.clearSelection(category);
 			shellHistory.detail('settings', { settings: this.position('page') }, true);
 		}
@@ -331,6 +337,10 @@ export class SettingsNavigation {
 	private moveTo(view: SettingsView): void {
 		const previous = shellHistory.place?.settings;
 		const next = this.position(view, previous?.depth ?? 0);
+		if (view === 'detail' && previous?.category === next.category) {
+			if (previous.view === 'page' && !previous.item) next.listDepth = previous.depth;
+			else if (previous.listDepth !== undefined) next.listDepth = previous.listDepth;
+		}
 		this.view = view;
 		if (previous && JSON.stringify(previous) === JSON.stringify(next)) return;
 		next.depth++;

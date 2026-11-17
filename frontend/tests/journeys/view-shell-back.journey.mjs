@@ -1,6 +1,6 @@
 // Selected desktop details must gain a usable Back step when resized into a stack.
 import { runJourney } from './runner.mjs';
-import { SEEDED, expect, gotoApp, holdBootLoad, reloadForHistory, sidebarRow } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, holdBootLoad, sidebarRow } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -176,7 +176,7 @@ await runJourney({
 				await mark('Forward restores Model');
 				await page.goForward(); await model.waitFor({ timeout: 5000 });
 				if (nested) await page.evaluate(() => window.__journeyBootHold?.release?.());
-				await mark('reload Model in place'); await reloadForHistory(page, mark); await model.waitFor();
+				await mark('reload Model in place'); await page.reload({ waitUntil: 'domcontentloaded' }); await model.waitFor();
 				expect(await back.isVisible() === nested, 'only a nested page has Back to controls');
 				await model.getByRole('button', { name: 'Close chat controls' }).click();
 				await page.waitForFunction(() => !String(history.state?.['sveltekit:metadata']?.state).includes('mobileControls'));

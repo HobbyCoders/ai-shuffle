@@ -61,14 +61,20 @@ async function category(page, name) {
  await page.getByRole('heading', { name, exact: true, level: 1 }).filter({ visible: true }).first().waitFor();
 }
 
+const entryKey = page => page.evaluate(() => navigation.currentEntry.key);
+
 async function sameLogger(page) {
  await category(page, 'Logs');
  await page.locator('.st-lcol [data-settings-item]').filter({ visible: true }).first().waitFor();
  expect(await visibleLogRows(page) === 4, 'Logs lists the four stubbed lines');
+ const listEntry = await entryKey(page);
  await page.locator('.st-lcol [data-settings-item]').filter({ hasText: 'Alpha started' }).first().click();
  await button(page, 'Same logger').waitFor();
+ const detailEntry = await entryKey(page);
+ expect(detailEntry !== listEntry, 'opening a log entry pushes its detail');
  await button(page, 'Same logger').click();
- await page.waitForFunction(() => [...document.querySelectorAll('.st-lcol [data-settings-item]')].filter(el => el.checkVisibility()).length === 2, null, { timeout: 5000 }).catch(() => {});
+ await page.waitForFunction(() => [...document.querySelectorAll('.st-lcol [data-settings-item]')].filter(el => el.checkVisibility()).length === 2, null, { timeout: 5000 });
+ return { listEntry, detailEntry };
 }
 
 // App hooks for the phone scroll case: enough rows that the list scrolls.
@@ -166,11 +172,17 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   },
   async act({ page, mark }) {
    await mark('Same logger closes the entry and shows the filtered list');
-   await sameLogger(page);
+   const previousEntry = await entryKey(page);
+   const { listEntry } = await sameLogger(page);
    expect(await listShown(page), 'the filtered list is on screen');
    expect(await visibleLogRows(page) === 2, `two alpha lines listed (${await visibleLogRows(page)})`);
    expect(await replaceState(page) !== 'detail', 'no entry hides the list');
    expect(await focusInList(page), 'focus is in the list');
+   expect(await entryKey(page) === listEntry, 'Same logger returns to the existing Logs list entry');
+   await mark('browser Back leaves Logs');
+   await page.goBack();
+   await page.getByRole('heading', { name: 'Logs', exact: true, level: 1 }).waitFor({ state: 'hidden' });
+   expect(await entryKey(page) === previousEntry, 'Back reaches the entry before Logs in one step');
   }
  },
  {
@@ -629,9 +641,17 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
    expect(!(await page.locator('.st-dback').filter({ visible: true }).count()), 'no page Back in the split');
 
    await mark('Logs: Same logger keeps the entry open beside the filtered list');
-   await sameLogger(page);
+   const { listEntry, detailEntry } = await sameLogger(page);
+   expect(await entryKey(page) === detailEntry, 'Same logger keeps the same split detail entry');
    expect(await listShown(page) && await visibleLogRows(page) === 2, 'filtered list beside the entry');
    expect(await page.getByRole('button', { name: 'Same logger', exact: true }).filter({ visible: true }).count() === 1, 'the entry is still open');
+
+   await mark('select another log in split view, then narrow the window');
+   await page.locator('.st-lcol [data-settings-item]').filter({ hasText: 'Alpha ready' }).first().click();
+   await page.setViewportSize({ width: 800, height: 800 });
+   await button(page, 'Same logger').click();
+   await page.locator('.st-lcol [data-settings-item]').filter({ visible: true }).first().waitFor();
+   expect(await entryKey(page) === listEntry && await visibleLogRows(page) === 2, 'both details lead back to the original filtered list');
   }
  }
 ] });

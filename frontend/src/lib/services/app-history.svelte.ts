@@ -9,6 +9,8 @@ export interface SettingsPlace {
  item: string | null;
  tab: string | null;
  depth: number;
+ /** Nearest list in this uninterrupted run of collection details. */
+ listDepth?: number;
 }
 
 export interface Place {
