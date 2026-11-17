@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import FileResponse
 
 from app.api.auth import require_auth, get_api_user_from_request
+from app.api.common import download_scope, peer_download_user
 from app.api.sessions_helpers import require_session
 from app.network import control, tokens
 from app.network.files import forward_file
@@ -138,15 +139,15 @@ async def get_file_by_path(
         session = await require_session(request, session_id)
         owner = control.owner_of(session)
         if owner:
-            project_id = (get_api_user_from_request(request) or {}).get("project_id")
-            return await forward_file(request, owner, session_id, path, project_id)
+            scope = await run_sync(download_scope, get_api_user_from_request(request), session)
+            return await forward_file(request, owner, session_id, path, **scope)
     return await _serve_file(path, request)
 
 
 @router.get("/peer/{session_id}", include_in_schema=False)
 async def peer_file(
     session_id: str, path: str, request: Request,
-    project_id: str | None = None,
+    project_id: str | None = None, project_v2_id: str | None = None,
     _device: str = Depends(tokens.require_worker_device),
 ):
     try:
@@ -155,10 +156,8 @@ async def peer_file(
         raise HTTPException(404, "Session not found") from None
     except PermissionError:
         raise HTTPException(409, "This worker does not own the session") from None
-    if project_id and session.get("project_id") != project_id:
-        raise HTTPException(403, "Session is outside the requested project")
     # The authenticated viewer forwards scope, never its cookie or API key.
-    request.state.api_user = {"project_id": project_id} if project_id else None
+    request.state.api_user = await run_sync(peer_download_user, session, project_id, project_v2_id)
     return await _serve_file(path, request)
 
 

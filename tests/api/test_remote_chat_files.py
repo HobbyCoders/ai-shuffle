@@ -28,7 +28,7 @@ def test_routes_before_resolving_remote_path(client, monkeypatch):
     monkeypatch.setattr(api, "require_file_access", local)
     response = client.get("/api/files/by-path", params={"path": "/linux/report.zip", "session_id": "chat"})
     assert response.content == b"remote file"
-    assert forward.await_args.args[1:] == ("remote", "chat", "/linux/report.zip", None)
+    assert forward.await_args.args[1:] == ("remote", "chat", "/linux/report.zip")
     local.assert_not_called()
 
 
@@ -196,4 +196,4 @@ def test_forward_scope_comes_from_authenticated_user(client, monkeypatch):
     forward = AsyncMock(return_value=Response(b"scoped"))
     monkeypatch.setattr(api, "forward_file", forward)
     assert client.get("/api/files/by-path?path=/file&session_id=chat&project_id=other").status_code == 200
-    assert forward.await_args.args[-1] == "allowed"
+    assert forward.await_args.kwargs == {"project_id": "allowed"}

@@ -292,6 +292,38 @@ def assigned_origin(api_user: Optional[dict]) -> Optional[str]:
     return origin_for_legacy_project(assigned)
 
 
+def download_scope(api_user: Optional[dict], session: dict) -> dict:
+    """Forward only the authenticated scope. Older owners still need the slug."""
+    slug = (api_user or {}).get("project_id")
+    if not slug:
+        return {}
+    scope = {"project_id": slug}
+    shared = session.get("project_v2_id")
+    if shared:
+        from app.db.projects_v2 import project_v2_id_for_origin
+        if project_v2_id_for_origin(assigned_origin(api_user)) != shared:
+            raise HTTPException(403, "Session is outside the requested project")
+        scope["project_v2_id"] = shared
+    return scope
+
+
+def peer_download_user(session: dict, slug: Optional[str], shared: Optional[str]) -> Optional[dict]:
+    """Map the shared scope to this worker's own roots; never fall back on a miss."""
+    if shared is not None:
+        from app.core.project_setup import _registered_row
+        from app.db.projects_v2 import get_project_v2
+        if not shared or session.get("project_v2_id") != shared:
+            raise HTTPException(403, "Session is outside the requested project")
+        project = get_project_v2(shared)
+        local = _registered_row(project["origin"]) if project else None
+        if not local or not local.get("id"):
+            raise HTTPException(403, "No local checkout for requested project")
+        return {"project_id": local["id"]}
+    if slug is not None and (not slug or session.get("project_id") != slug):
+        raise HTTPException(403, "Session is outside the requested project")
+    return {"project_id": slug} if slug else None
+
+
 def validate_project_access(request: Request, project_id: str) -> dict:
     """
     Validate that the requester has access to the project AND that it exists.

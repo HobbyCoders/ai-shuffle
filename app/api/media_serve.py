@@ -33,6 +33,7 @@ from fastapi.responses import FileResponse
 
 from app.api.auth import get_api_user_from_request, require_auth
 from app.api.common import is_path_safe, require_file_access
+from app.api.common import download_scope, peer_download_user
 from app.api.sessions_helpers import require_session
 from app.core.config import settings
 from app.db.async_database import run_sync
@@ -98,9 +99,7 @@ def build_media_module(
         owner = control.owner_of(session)
         if not owner:
             return None
-        project_id = (get_api_user_from_request(request) or {}).get("project_id")
-        if project_id:
-            params["project_id"] = project_id
+        params.update(await run_sync(download_scope, get_api_user_from_request(request), session))
         return await forward_download(
             request, owner, config.prefix + "/peer/" + quote(session_id, safe=""), params,
         )
@@ -108,7 +107,7 @@ def build_media_module(
     @router.get("/peer/{session_id}", include_in_schema=False)
     async def peer_media(
         session_id: str, request: Request, path: str | None = None,
-        filename: str | None = None, project_id: str | None = None,
+        filename: str | None = None, project_id: str | None = None, project_v2_id: str | None = None,
         _device: str = Depends(tokens.require_worker_device),
     ):
         try:
@@ -117,11 +116,9 @@ def build_media_module(
             raise HTTPException(404, "Session not found") from None
         except PermissionError:
             raise HTTPException(409, "This worker does not own the session") from None
-        if project_id and session.get("project_id") != project_id:
-            raise HTTPException(403, "Session is outside the requested project")
         if (path is None) == (filename is None):
             raise HTTPException(400, "Supply exactly one media path or filename")
-        request.state.api_user = {"project_id": project_id} if project_id else None
+        request.state.api_user = await run_sync(peer_download_user, session, project_id, project_v2_id)
         if path is not None:
             return await by_path(path=path, request=request)
         return await by_filename(filename=filename, request=request)

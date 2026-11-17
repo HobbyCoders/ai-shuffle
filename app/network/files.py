@@ -10,10 +10,12 @@ from app.network import transport
 from app.network.browser_panel import UNAVAILABLE, peer_link
 
 
-async def forward_file(request: Request, owner: str, session_id: str, path: str, project_id: str | None):
+async def forward_file(request: Request, owner: str, session_id: str, path: str, project_id: str | None = None, project_v2_id: str | None = None):
     params = {"path": path}
     if project_id:
         params["project_id"] = project_id
+    if project_v2_id:
+        params["project_v2_id"] = project_v2_id
     return await forward_download(
         request, owner, "/api/files/peer/" + quote(session_id, safe=""), params,
     )

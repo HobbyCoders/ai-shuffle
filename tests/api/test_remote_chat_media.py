@@ -112,6 +112,32 @@ def test_peer_rechecks_device_ownership_and_file_scope(media, monkeypatch):
     assert access.call_args.args[2].state.api_user == {"project_id": "allowed"}
 
 
+def test_download_maps_shared_project_to_owner_checkout(media, monkeypatch):
+    from app.core import project_setup
+    from app.db import projects_v2
+
+    client, _, prefix, path = media
+    origin = "git:example/team"
+    shared = projects_v2.project_v2_id_for_origin(origin)
+    monkeypatch.setattr(common, "assigned_origin", lambda user: origin if user["project_id"] == "mine" else None)
+    monkeypatch.setattr(media_serve, "get_api_user_from_request", lambda _: {"project_id": "mine"})
+    monkeypatch.setattr(media_serve, "require_session", AsyncMock(return_value={"project_v2_id": shared}))
+    forward = AsyncMock(return_value=Response(b"forwarded"))
+    monkeypatch.setattr(media_serve, "forward_download", forward)
+    assert client.get(f"{prefix}/{path.name}", params={"session_id": "chat"}).is_success
+    params = forward.await_args.args[-1]
+    assert params == {"filename": path.name, "project_v2_id": shared, "project_id": "mine"}
+
+    client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
+    monkeypatch.setattr(control, "_require_owned", lambda _: {"project_id": "owner", "project_v2_id": shared})
+    monkeypatch.setattr(projects_v2, "get_project_v2", lambda key: {"origin": origin} if key == shared else None)
+    monkeypatch.setattr(project_setup, "_registered_row", lambda key: {"id": "owner"} if key == origin else None)
+    access = Mock()
+    monkeypatch.setattr(media_serve, "require_file_access", access)
+    assert client.get(f"{prefix}/peer/chat", params={"path": str(path), "project_v2_id": shared, "project_id": "mine"}).content == path.read_bytes()
+    assert access.call_args.args[2].state.api_user == {"project_id": "owner"}
+
+
 def test_owner_offline_does_not_serve_viewer_file(media, monkeypatch):
     client, _, prefix, path = media
     monkeypatch.setattr(media_serve, "forward_download", AsyncMock(side_effect=HTTPException(503)))
