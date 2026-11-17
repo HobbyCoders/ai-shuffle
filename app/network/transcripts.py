@@ -674,7 +674,15 @@ def _newer_than_snapshot(cursor, session_id: str, coll: policy.Collection, items
         if base is None:
             return True
         try:
-            if engine._versus_held(cursor, coll.name, *base, held) < 0:
+            # The newest item's clock bounds an omitted row, but its content
+            # says nothing about that row (even another identical tombstone).
+            incoming_hash = None
+            if copied and copied.get("deleted") == bool(held["deleted"]):
+                if copied["deleted"]:
+                    incoming_hash = ""
+                elif copied.get("record") is not None:
+                    incoming_hash = engine.content_hash(coll, copied["record"])
+            if engine._versus_held(cursor, coll.name, *base, held, incoming_hash=incoming_hash) < 0:
                 return True
         except engine.TransientApplyError:
             # Replacing this whole log would discard a row of unproven

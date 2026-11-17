@@ -1523,6 +1523,28 @@ def version_ops(cursor, collection: str, version: Mapping[str, Any]) -> List[dic
     return [_load(row["envelope"], {}) for row in cursor.fetchall()]
 
 
+def later_streams_complete(cursor, origin: str, after: int, streams: dict) -> bool:
+    """Are all later streams present, with no missing sequence through the advertised head?
+
+    An adopted watermark can be ahead of the entire forwarding log; an own
+    stream can have a log head but no received watermark. Check both. Seqs
+    start at one and are unique within each stream.
+    """
+    through = max(map(int, streams))
+    cursor.execute("SELECT incarnation, MAX(seq) AS head, COUNT(*) AS n FROM sync_ops "
+                   "WHERE origin_device_id = %s AND incarnation > %s GROUP BY incarnation", (origin, after))
+    rows = cursor.fetchall()
+    return (len(rows) == through - after and all(
+        int(r["n"]) == int(r["head"]) == streams.get(str(r["incarnation"])) for r in rows)
+        and all(after < int(r["incarnation"]) <= through for r in rows))
+
+
+def later_record_op(cursor, collection: str, record_id: str, origin: str, after: int) -> bool:
+    cursor.execute("SELECT 1 FROM sync_ops WHERE collection = %s AND record_id = %s "
+                   "AND origin_device_id = %s AND incarnation > %s LIMIT 1", (collection, record_id, origin, after))
+    return cursor.fetchone() is not None
+
+
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
     """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
     cursor.execute(

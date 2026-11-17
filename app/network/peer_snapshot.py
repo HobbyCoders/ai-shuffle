@@ -270,13 +270,14 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                 # on an older build requires every collection it knows.
                 names = [c.name for c in policy.ordered_collections() if c.name not in deferred]
                 names += sorted(policy.RETIRED_COLLECTIONS)
+                coverage = engine.SnapshotCoverage(manifest["watermarks"])
                 for name in names:
                     offset, limit, after_record_id = 0, PAGE_ITEMS[fmt], None
                     while True:
                         try:
                             chunk, next_record_id = engine.snapshot_page(
                                 name, offset, after_record_id=after_record_id, ctx=ctx, limit=limit, _conn=conn,
-                                encoding=encoding, recipient=recipient)
+                                encoding=encoding, recipient=recipient, coverage=coverage)
                         except engine.SnapshotBodyTooLarge:
                             # Compresses under MAX_PAGE, but the recipient also
                             # caps what a page expands to.
@@ -299,6 +300,15 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                         after_record_id = next_record_id
                         if not chunk["more"]:
                             break
+                # These rows have no provable incarnation. Keep them, but tail
+                # the fully retained post-restore streams by signed exchange.
+                # Otherwise the next relay would have the same row with only
+                # a watermark, not the evidence that the streams were unrelated.
+                for origin in coverage.state_only_origins:
+                    streams = manifest["watermarks"].get(origin, {})
+                    for inc in list(streams):
+                        if int(inc) > 1:
+                            del streams[inc]
                 # Give the recipient the full download window after capture,
                 # sized to the transfer so a large copy can finish.
                 manifest["expires_at"] = int(time.time()) + TTL + _download_allowance(manifest["pages"])
@@ -563,6 +573,8 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
     index = _applied_pages(directory, manifest)
     first = True
     queued = 0
+    initial_only = {origin for origin, streams in manifest["watermarks"].items()
+                    if not any(int(inc) > 1 for inc in streams)}
     while first or index < len(pages):
         touched = []
         with store.get_db() as conn:
@@ -588,7 +600,8 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
             while index < end:
                 chunk = _read_page(directory, index, pages[index])
                 page_touched = []
-                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
+                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched,
+                                                       initial_only=initial_only)
                 # Provider rows by id, upserts too: a disable or new key that
                 # arrives here ends the row's running agents (an edit that
                 # changes nothing an agent holds keeps them).

@@ -527,6 +527,46 @@ async def _copy_state(sender, receiver):
             await transport.PeerLink(sender.device_id, [served.base_url]).receive_state(client, engine.context())
 
 
+@pytest.mark.parametrize("hole", [False, True], ids=["unrelated", "missing-later-envelope"])
+async def test_relay_of_an_unchanged_state_only_row_after_restore(workers, hole):
+    a, b, c = _network(workers, "a", "b", "c")
+    set_owner_pref(b, "theme", "original")
+    await _copy_state(b, a)
+    backup = b.raw.serialize()
+    set_owner_pref(b, "other", "proof")
+    _exchange(b, a)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    set_owner_pref(b, "unrelated", "new")
+    _exchange(b, a)
+    with a.active(), get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE sync_records SET origin_incarnation=NULL WHERE collection='user_preferences' "
+                    "AND record_id LIKE %s RETURNING *", ("%theme",))
+        assert not store.version_ops(cur, "user_preferences", cur.fetchone())
+        if hole:
+            cur.execute("DELETE FROM sync_ops WHERE origin_device_id=%s AND incarnation=2", (b.device_id,))
+            assert cur.rowcount > 0
+    before = _streams(c, b.device_id)
+    if hole:
+        # Missing later envelope: the very same retained row and watermark
+        # could hide a competing write instead of the unrelated one.
+        with pytest.raises(transport.PeerError, match="unresolved legacy"):
+            await _copy_state(a, c)
+        assert _streams(c, b.device_id) == before and owner_pref(c, "theme") is None
+        await _copy_state(b, c)  # use a peer that can explain the record
+    else:
+        await _copy_state(a, c)
+        assert _head(c, b.device_id, 1) == _head(a, b.device_id, 1)
+        assert _head(c, b.device_id, 2) == 0 and _theme_incarnation(c) is None
+        assert owner_pref(c, "theme") == "original" and owner_pref(c, "unrelated") == "new"
+        _exchange(a, c)
+        await _copy_state(a, c)  # exact repeat neither relabels nor rolls the frontier back
+        assert _theme_incarnation(c) is None and not _lost_themes(c, b.device_id)
+    assert _head(c, b.device_id, 2) == _head(b, b.device_id, 2) > 0
+    assert owner_pref(c, "theme") == "original" and owner_pref(c, "unrelated") == "new"
+
+
 @pytest.mark.parametrize("receive_op", [False, True], ids=["snapshot", "op-before-snapshot"])
 async def test_state_copy_exports_the_incarnation_of_a_retained_legacy_op(workers, receive_op):
     a, b, c = _equal_clock_fork(workers)
@@ -606,17 +646,17 @@ async def test_two_retained_owner_ops_export_the_held_title(workers, old_first):
     assert all(_chat(worker)[0] == "new title" for worker in (a, b, c))
 
 
-@pytest.mark.parametrize("case", ["two-matches", "no-match", "no-ops", "older-match"])
+@pytest.mark.parametrize("case", ["two-matches", "no-match", "no-ops", "older-match", "pruned-winner"])
 async def test_unsafe_legacy_copy_does_not_consume_the_repair_stream(workers, case):
     a, b, c, old = _legacy_titles(workers, same_title=case == "two-matches")
     with a.active(), get_db() as conn:
         cursor = conn.cursor()
-        if case == "no-match":  # only the losing op survived retention
+        if case in ("no-match", "pruned-winner"):  # only the losing op survived retention
             cursor.execute("DELETE FROM sync_ops WHERE collection='sessions' AND record_id='chat' AND incarnation=2")
             assert cursor.rowcount == 1
         elif case == "no-ops":  # snapshot frontier still proves the origin forked
             cursor.execute("DELETE FROM sync_ops WHERE collection='sessions' AND record_id='chat'")
-        elif case == "older-match":  # old LWW build kept its first value on the tie
+        if case in ("older-match", "pruned-winner"):  # old LWW build kept its first value on the tie
             cursor.execute("UPDATE sessions SET title='old title' WHERE id='chat'")
             cursor.execute("UPDATE sync_records SET content_hash=%s WHERE collection='sessions' AND record_id='chat'",
                            (old["content_hash"],))
@@ -644,6 +684,50 @@ async def test_repeated_state_copy_keeps_one_conflict_per_losing_fork(workers):
     assert owner_pref(a, "theme") == "new"
 
 
+async def test_compacted_legacy_anchor_allows_only_the_matching_owner_repair(workers, monkeypatch):
+    from app.network import transcripts
+    source, peer = _network(workers, "a", "b")
+    _session(source, "chat", events=2)
+    _converge([source, peer])
+    coll = engine.policy.collection("session_events")
+    with source.active(), get_db() as conn:
+        cur = conn.cursor()
+        items = [engine.snapshot_item(cur, coll, v) for v in
+                 store.records_with_prefixes(cur, coll.name, ["chat|"]).values()]
+        original = events_db.get_events("chat")
+    with peer.active(), get_db() as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM sync_ops WHERE collection='session_events' AND record_id='chat|1'")
+        assert cur.rowcount == 1
+        cur.execute("UPDATE sync_records SET origin_incarnation=NULL WHERE collection='session_events' "
+                    "AND record_id='chat|1'")
+        cur.execute("INSERT INTO network_transcript_repairs (session_id,reason,token) VALUES ('chat','test','current')")
+
+    def state():
+        with get_db() as conn:
+            cur = conn.cursor()
+            return (events_db.get_events("chat"), events_db.get_log_epoch("chat"),
+                    store.records_with_prefixes(cur, coll.name, ["chat|"]), store.transcript_repair_token(cur, "chat"),
+                    store.local_watermarks(), store.list_conflicts(), events_db.get_rewrite_token("chat"))
+
+    served = ServedBy(source, "https://a.example.com")
+    monkeypatch.setattr(transcripts, "_link", lambda device: transport.PeerLink(device, [served.base_url]))
+    with peer.active():
+        before = state()
+        changed = [{**x, "record": {**x["record"], "payload": {"content": "not the same"}}}
+                   if x["record_id"] == "chat|1" else x for x in items]
+        for token, copy in [("old", items), ("current", changed)]:
+            assert transcripts.install_owner_log("chat", source.device_id, copy, 2, engine.context(), token=token) is None
+            assert state() == before
+        async with httpx.AsyncClient(transport=served.transport()) as client:
+            await transcripts.repair_queued(client)
+        log, epoch, versions, token, marks, losses, rewrite = state()
+        assert [(r["seq"], r["payload"]) for r in log] == [(r["seq"], r["payload"]) for r in original]
+        # An identical first event keeps the log epoch (its id).
+        assert epoch == before[1] and token is None and versions["chat|1"]["origin_incarnation"] == 1
+        assert (marks, losses) == before[4:6] and rewrite and rewrite != before[6]
+
+
 def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
     from app.network import transcripts
     a, b = _network(workers, "a", "b")
@@ -665,6 +749,13 @@ def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
         assert newer("s", None)  # an older build's copy does not displace a known version
         # With no payload evidence, do not replace the log (or clear its repair token).
         assert newer("t", 1) and newer("t", None)
+        store.put_record(cursor, coll.name, "u|1", clock=5, origin_device_id=b.device_id,
+                         content_hash="", deleted=True, order_seq=1)
+        tomb = {"record_id": "u|1", "deleted": True, "record": None, "clock": 5,
+                "origin_device_id": b.device_id, "origin_incarnation": 1}
+        assert not transcripts._newer_than_snapshot(cursor, "u", coll, [tomb], 2)
+        # An identical tombstone at another seq is just the fallback bound.
+        assert transcripts._newer_than_snapshot(cursor, "u", coll, [{**tomb, "record_id": "u|2"}], 2)
 
 
 @pytest.mark.parametrize("delete", [False, True], ids=["edit", "deletion"])

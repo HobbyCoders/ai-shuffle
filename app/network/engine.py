@@ -1939,7 +1939,21 @@ def _item_incarnation(item: Mapping[str, Any]) -> int:
     return value if type(value) is int and value >= 1 else 0
 
 
-def _held_incarnation(cursor, collection, held, *, ctx=None, exporting=False, exported_hash=None):
+@dataclass
+class SnapshotCoverage:
+    """Evidence scoped to one repeatable-read capture, never cached across transactions."""
+    watermarks: dict
+    state_only_origins: set = field(default_factory=set)
+    complete: dict = field(default_factory=dict)
+
+    def later_streams_complete(self, cursor, origin, after):
+        key = (origin, after)
+        if key not in self.complete:
+            self.complete[key] = store.later_streams_complete(cursor, origin, after, self.watermarks[origin])
+        return self.complete[key]
+
+
+def _held_incarnation(cursor, collection, held, *, ctx=None, exporting=False, exported_hash=None, coverage=None):
     """Recover a legacy version only when one retained signed write explains it.
 
     Legacy owner-ordered and LWW rows need not have kept the same side of
@@ -1978,10 +1992,24 @@ def _held_incarnation(cursor, collection, held, *, ctx=None, exporting=False, ex
         # A copy adopts the publisher's entire frontier. Don't pass a peer
         # over a retained winner which this old row doesn't represent. Nor
         # should a pending local edit travel under another write's identity.
-        if (ops and (not incarnation or any(i > incarnation for i in retained)
-                     or exported_hash != held["content_hash"])) or (
-                not ops and store.highest_incarnation(cursor, held["origin_device_id"]) > 1):
+        origin = held["origin_device_id"]
+        known = (max(map(int, coverage.watermarks.get(origin, {})), default=0) if coverage is not None
+                 else store.highest_incarnation(cursor, origin))
+        ctx = ctx or require_context()
+        if origin == ctx.device_id:
+            known = max(known, ctx.identity.incarnation)
+        explained = max(1, incarnation)
+        if ((ops or known > 1) and exported_hash != held["content_hash"]
+                or ops and (not incarnation or max(retained) > incarnation)):
             raise TransientApplyError("Cannot copy unresolved legacy restore fork; sync signed history first")
+        if known > explained:
+            # A state-only row has no envelope. Don't label it incarnation 1:
+            # prove instead that adopting these later streams cannot skip a
+            # write to *this record*. A missing envelope defeats that proof.
+            if (coverage is None or str(known) not in coverage.watermarks.get(origin, {})
+                    or not coverage.later_streams_complete(cursor, origin, explained)
+                    or store.later_record_op(cursor, collection, held["record_id"], origin, explained)):
+                raise TransientApplyError("Cannot copy unresolved legacy restore fork; sync signed history first")
     return incarnation
 
 
@@ -3086,7 +3114,7 @@ def snapshot_chunk(collection: str, offset: int = 0, *, ctx: Optional[NetworkCon
 
 def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional[str] = None,
                   ctx: Optional[NetworkContext] = None, limit: int = SNAPSHOT_CHUNK, _conn=None,
-                  encoding: Optional[str] = None, recipient: Optional[str] = None):
+                  encoding: Optional[str] = None, recipient: Optional[str] = None, coverage=None):
     """Seek through one repeatable-read export without rescanning earlier pages.
 
     The record cursor stays local; the signed/encrypted page still uses the
@@ -3095,7 +3123,8 @@ def snapshot_page(collection: str, offset: int = 0, *, after_record_id: Optional
     that asked for it: an older worker cannot open such a page).
     """
     return _snapshot_page(collection, offset, ctx=ctx, limit=limit, _conn=_conn,
-                          keyset=True, after_record_id=after_record_id, encoding=encoding, recipient=recipient)
+                          keyset=True, after_record_id=after_record_id, encoding=encoding, recipient=recipient,
+                          coverage=coverage)
 
 
 #: Largest page body accepted after decompression.
@@ -3138,7 +3167,7 @@ def seal_snapshot_chunk(collection: str, offset: int, items: list, more: bool, *
 
 def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *,
                   row: Optional[Mapping[str, Any]] = None, row_known: bool = False,
-                  nested_rekey: Optional[bool] = None) -> dict:
+                  nested_rekey: Optional[bool] = None, coverage=None) -> dict:
     """One record as a snapshot carries it: its sync version and its row (None when deleted)."""
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
@@ -3151,14 +3180,15 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
             item["deleted"] = True
     exported_hash = (content_hash(coll, item["record"]) if version.get("origin_incarnation") is None
                      and not item["deleted"] else "")
-    incarnation = _held_incarnation(cursor, coll.name, version, exporting=True, exported_hash=exported_hash)
+    incarnation = _held_incarnation(cursor, coll.name, version, exporting=True, exported_hash=exported_hash,
+                                   coverage=coverage)
     if incarnation:
         item["origin_incarnation"] = incarnation
     return item
 
 
 def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None,
-                   recipient=None):
+                   recipient=None, coverage=None):
     """Build a page and return its private continuation cursor."""
     ctx = ctx or require_context()
     retired = collection in policy.RETIRED_COLLECTIONS
@@ -3185,7 +3215,8 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
         if coll is not None and coll.map_secrets is not None:
             nested_rekey = nested_secret_sync.enabled(cursor) and (
                 recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
-        items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
+        items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey, coverage=coverage)
+                 for version in versions]
         if keyset:
             # A live record without a readable row here (lost without a
             # tombstone, or now local only) is not a deletion: nobody signed
@@ -3195,6 +3226,8 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
             # record because their readers advance the offset by ``count``.
             items = [item for item, version in zip(items, versions)
                      if not item["deleted"] or bool(version["deleted"])]
+        if coverage is not None:
+            coverage.state_only_origins.update(item["origin_device_id"] for item in items if not _item_incarnation(item))
     signed = seal_snapshot_chunk(collection, offset, items, more, ctx=ctx, encoding=encoding)
     return signed, versions[-1]["record_id"] if versions else after_record_id
 
@@ -3232,7 +3265,7 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False,
                          body: Optional[Mapping[str, Any]] = None,
-                         _touched: Optional[list] = None) -> int:
+                         _touched: Optional[list] = None, initial_only=()) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
 
     A page for a collection this build does not know (retired here, or added
@@ -3247,7 +3280,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
     coll = policy.collection(body["collection"])
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         applied, touched = apply_snapshot_items(conn.cursor(), coll, body["items"], ctx=ctx,
-                                                validated_membership=validated_membership)
+                                                validated_membership=validated_membership, initial_only=initial_only)
     if _touched is not None:
         _touched.extend(touched)
     if touched and _conn is None:
@@ -3263,7 +3296,7 @@ SNAPSHOT_SQL_BATCH = 500
 
 def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]], *,
                          ctx: NetworkContext, validated_membership: bool = False,
-                         existed: Iterable[str] = ()
+                         existed: Iterable[str] = (), initial_only=()
                          ) -> Tuple[int, List[Tuple[str, str, str]]]:
     """Apply one page of opened snapshot items in the caller's transaction.
 
@@ -3316,9 +3349,16 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         conflict = None
         incarnation = _item_incarnation(item)
         incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
-        comparison = 1 if existing is None else _versus_held(
-            cursor, coll.name, int(item["clock"]), item["origin_device_id"], incarnation, existing,
-            incoming_hash=incoming_hash)
+        if (existing and not incarnation and item["origin_device_id"] in initial_only
+                and existing["clock"] == item["clock"] and existing["origin_device_id"] == item["origin_device_id"]
+                and bool(existing["deleted"]) == bool(item["deleted"]) and incoming_hash == existing["content_hash"]):
+            # Exact repeat, *not* proof of identity. Keep the local version.
+            # This signed copy doesn't advance this origin's later streams.
+            comparison = 0
+        else:
+            comparison = 1 if existing is None else _versus_held(
+                cursor, coll.name, int(item["clock"]), item["origin_device_id"], incarnation, existing,
+                incoming_hash=incoming_hash)
         if existing is not None and coll.name != "membership" and (
                 existing["origin_device_id"] != item["origin_device_id"]
                 or _restore_fork(cursor, ctx, coll.name, item["origin_device_id"], incarnation, existing)):

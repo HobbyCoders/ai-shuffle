@@ -225,8 +225,15 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   upgraded row without its incarnation, compare its content or deletion with
   the retained signed writes. If no unique write explains a fork, or the row
   represents a loser while the winner is in its log, that worker refuses the
-  state copy. The recipient can still get the signed history from another peer;
-  it hasn't advanced its watermark on the strength of the refused copy.
+  state copy. A row received only through state copy has no signed envelope.
+  If all later streams are intact and none touched this record, a peer can
+  relay the unchanged row without assigning it an incarnation. The copy takes
+  the initial watermark; later streams for this origin follow by signed sync.
+  If a later envelope is missing, it could have been either an unrelated edit
+  or a competing write to this record. The same row and watermark survive in
+  both cases. Refuse the copy rather than guess: request state from the owner
+  or another peer that can establish the version. The refused copy doesn't
+  advance the recipient's watermark.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement
