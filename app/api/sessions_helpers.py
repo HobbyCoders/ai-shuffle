@@ -815,9 +815,17 @@ def _annotate_cluster_fields(sessions: List[dict]) -> None:
             session["controllable"] = True
 
         pid = session.get("project_id")
-        if pid and pid in project_names:
+        # Legacy ids are per worker: on a chat another worker runs, a project
+        # here with the row's id can be an unrelated one (#1659). The shared
+        # project names and groups such a row when this worker knows it. A chat
+        # this worker runs stays with its local project whatever its shared id
+        # is: a relinked or unlinked project's chats keep their first one.
+        shared = pv2_by_id.get(session.get("project_v2_id")) if is_remote else None
+        if shared and shared.get("name"):
+            session["project_name"] = shared["name"]
+        elif pid and pid in project_names:
             session["project_name"] = project_names[pid]
-        if pid and project_link_groups.get(pid):
+        if not shared and pid and project_link_groups.get(pid):
             session["link_group_id"] = project_link_groups[pid]
 
         # v2-projects: emit project_v2_id + origin. Authoritative source is the

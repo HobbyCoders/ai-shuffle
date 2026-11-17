@@ -941,6 +941,130 @@ describe('session-switcher · isRestoringSession clears on navigation', () => {
 	});
 });
 
+// #1659. Legacy project ids are per worker. A chat another worker runs keeps
+// that worker's id on this worker's copy of the row whenever a project with the
+// same id exists here, related or not; who runs the chat decides, never a
+// comparison of ids.
+describe('session-switcher · a chat another worker runs holds the shared project alone (#1659)', () => {
+	const cachedWithLocalProject = {
+		title: 'Mirrored', draft: '', scrollTop: 0,
+		project: 'app', projectV2Id: 'pv2-theirs',
+		modelOverride: null, permissionModeOverride: null, effortLevelOverride: null,
+		worktreeIntent: 'local' as const, deviceIntent: null, worktreeId: null, worktreeBranch: '',
+		worktreeBaseBranch: 'main', selectedWorktreeBranch: null, worktreeMode: 'new' as const, worktreeDeleted: false,
+	};
+
+	const reset = () => {
+		_mockSessions.current = [];
+		vi.mocked(api.get).mockReset().mockResolvedValue(null);
+	};
+	beforeEach(reset);
+	afterEach(reset);
+
+	it('switching to a mirrored row does not take its colliding local id', async () => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true }];
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ sessionId: 'session-B', project: '', projectV2Id: 'pv2-theirs', isRemote: true });
+		switcher.destroy();
+	});
+
+	it('switching away and back does not bring the local id back from the row, the caller or the cache', async () => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true }];
+		const { switcher, getState, ephemeralStore } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		// What a page saved before this rule held, and what a sidebar click passes.
+		ephemeralStore.set('session-B', cachedWithLocalProject);
+		await switcher.switchSession('session-B', 'app', null, null, 'pv2-theirs');
+		expect(getState()).toMatchObject({ project: '', projectV2Id: 'pv2-theirs' });
+		await switcher.switchSession('session-C', 'proj-A', null, null, 'pv2-A');
+		expect(getState()).toMatchObject({ sessionId: 'session-C', project: 'proj-A', projectV2Id: 'pv2-A' });
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ sessionId: 'session-B', project: '', projectV2Id: 'pv2-theirs' });
+		switcher.destroy();
+	});
+
+	it('a reload drops the local id a saved snapshot restored once /live says who runs the chat', async () => {
+		vi.mocked(api.get).mockResolvedValueOnce({ session_meta: {
+			project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true, device_name: 'Owner',
+		} });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'app', projectV2Id: 'pv2-theirs' }));
+		await switcher.refreshSessionMetadata('session-A');
+		expect(getState()).toMatchObject({ project: '', projectV2Id: 'pv2-theirs', isRemote: true });
+		switcher.destroy();
+	});
+
+	it('a deep link with no row leaves the owner unknown, so uploads wait, until /live says another worker runs it', async () => {
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B', 'app', null, null, 'pv2-theirs');
+		// Owner unknown: the composer holds every project upload on this
+		// (`uploadNeedsOwner`), so the local id cannot receive a file here.
+		expect(getState()).toMatchObject({ project: 'app', projectV2Id: 'pv2-theirs', isRemote: undefined });
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true } });
+		await vi.waitFor(() => expect(getState().project).toBe(''));
+		expect(getState()).toMatchObject({ projectV2Id: 'pv2-theirs', isRemote: true });
+		switcher.destroy();
+	});
+
+	it('a /live answer that changes the owner re-resolves the project even after it changed during the fetch', async () => {
+		// A stale row (or a hand-off) said this worker runs it; /live says another does.
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false }];
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', isRemote: false });
+		deps.update(s => ({ ...s, project: 'app2' }));
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true } });
+		await vi.waitFor(() => expect(getState().isRemote).toBe(true));
+		expect(getState()).toMatchObject({ project: '', projectV2Id: 'pv2-theirs' });
+		switcher.destroy();
+	});
+
+	it('a /live answer asked for before a newer owner observation leaves the owner and project alone', async () => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false }];
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		let observed = 0;
+		deps.ownerObservation = () => observed;
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', isRemote: false });
+		// A newer sessions refresh reports the hand-off while /live is out.
+		observed++;
+		deps.update(s => ({ ...s, isRemote: true, project: '' }));
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false, device_name: 'This worker', model: 'm' } });
+		await vi.waitFor(() => expect(getState().modelOverride).toBe('m'));
+		expect(getState()).toMatchObject({ isRemote: true, project: '', projectV2Id: 'pv2-theirs' });
+		switcher.destroy();
+	});
+
+	it('keeps a mirrored row\'s local id when the row has no shared id to hold instead', async () => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: null, is_remote: true }];
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', projectV2Id: null });
+		switcher.destroy();
+	});
+
+	// A relinked or unlinked project's own chats keep their first shared id by
+	// design, so the two ids disagreeing says nothing about a chat run here.
+	it.each([
+		{ name: 'relinked', project_v2_id: 'pv2-former-identity' },
+		{ name: 'unlinked', project_v2_id: 'pv2-before-unlink' },
+	])('a chat this worker runs keeps its local project after the project was $name', async ({ project_v2_id }) => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id, is_remote: false }];
+		vi.mocked(api.get).mockResolvedValue({ session_meta: { project_id: 'app', project_v2_id, is_remote: false } });
+		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', projectV2Id: project_v2_id, isRemote: false });
+		await switcher.refreshSessionMetadata('session-B');
+		expect(getState()).toMatchObject({ project: 'app', projectV2Id: project_v2_id, isRemote: false });
+		switcher.destroy();
+	});
+});
+
 describe('session-switcher · remote-only project survives switch', () => {
 	it('does not inherit the leaving local project when the target is v2-only', async () => {
 		const { switcher, getState } = makeSwitcher(fullState({

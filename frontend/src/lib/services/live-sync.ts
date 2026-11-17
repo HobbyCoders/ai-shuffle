@@ -89,6 +89,8 @@ export function startLiveSync() {
  const unsubscribeResources = [
   resourceSync.subscribe(['sessions', 'tags'], async () => {
    await appData.loadSessions();
+   // The open chat handed to or taken from another worker (#1659).
+   activeSession.reconcileOwner(appData.current.sessions);
    // A project attached elsewhere (another tab, or the worker that runs this
    // chat) turns the open no-project chat into a project session here too.
    activeSession.adoptAttachedProject(appData.current.sessions);

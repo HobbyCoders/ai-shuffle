@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
 	ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+	ATTACHMENTS_REMOTE_UNLINKED,
 	SELECT_PROJECT_TO_UPLOAD,
 	attachmentBlockReason,
+	composerUploadTarget,
 	isRemoteOnlyCompose
 } from './attach-disable';
 
@@ -44,5 +46,55 @@ describe('attachmentBlockReason', () => {
 		// passing its lane must not turn that into a blanket bypass.
 		expect(attachmentBlockReason(null, 'pv2-remote', 'code')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
 		expect(attachmentBlockReason('', 'pv2-remote', 'voice')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+	});
+});
+
+describe('composerUploadTarget: where an open chat\'s upload goes (#1659)', () => {
+	const owners = { unknown: undefined, local: false, remote: true } as const;
+	const holdings = {
+		'a local project': { project: 'app', projectV2Id: null },
+		'the shared id only': { project: '', projectV2Id: 'pv2' },
+		'both': { project: 'app', projectV2Id: 'pv2' },
+		'none': { project: '', projectV2Id: null }
+	} as const;
+	const session = { kind: 'session', sessionId: 's' };
+	const project = { kind: 'project', project: 'app' };
+	const none = { kind: 'blocked', reason: SELECT_PROJECT_TO_UPLOAD };
+	// Owner unknown: a local id waits (it may name an unrelated project here).
+	// Owner remote: the session upload whatever the store holds; with no shared
+	// id there is none, and the local id may name an unrelated project: refused.
+	// Owner local: the local project. A shared id alone: the session upload.
+	const expected: Record<keyof typeof owners, Record<keyof typeof holdings, unknown>> = {
+		unknown: { 'a local project': { kind: 'wait' }, 'the shared id only': session, both: { kind: 'wait' }, none },
+		local: { 'a local project': project, 'the shared id only': session, both: project, none },
+		remote: { 'a local project': { kind: 'blocked', reason: ATTACHMENTS_REMOTE_UNLINKED }, 'the shared id only': session, both: session, none }
+	};
+	for (const [owner, isRemote] of Object.entries(owners)) {
+		for (const [holding, ids] of Object.entries(holdings)) {
+			it(`owner ${owner}, holding ${holding}`, () => {
+				expect(composerUploadTarget({ sessionId: 's', ...ids, isRemote }))
+					.toEqual(expected[owner as keyof typeof owners][holding as keyof typeof holdings]);
+			});
+		}
+	}
+
+	it('a new chat uploads to the project picked for it, and the chat lane to its own folder', () => {
+		expect(composerUploadTarget({ sessionId: null, project: 'app', projectV2Id: 'pv2' })).toEqual(project);
+		expect(composerUploadTarget({ sessionId: null, project: '', projectV2Id: 'pv2' }))
+			.toEqual({ kind: 'blocked', reason: ATTACHMENTS_NEED_LOCAL_CHECKOUT });
+		expect(composerUploadTarget({ sessionId: null, project: '', projectV2Id: null })).toEqual(none);
+		for (const isRemote of Object.values(owners)) {
+			expect(composerUploadTarget({ sessionId: 's', project: 'app', projectV2Id: 'pv2', isRemote }, 'chat')).toEqual({ kind: 'chat' });
+		}
+	});
+});
+
+describe('attachmentBlockReason follows composerUploadTarget (#1659)', () => {
+	it('tells a remote chat with no shared id why before a file is picked', () => {
+		expect(attachmentBlockReason('app', null, 'code', 's', true)).toBe(ATTACHMENTS_REMOTE_UNLINKED);
+		expect(attachmentBlockReason('app', 'pv2', 'code', 's', true)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'code', 's', false)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'code', 's', undefined)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'chat', 's', true)).toBeNull();
 	});
 });

@@ -211,7 +211,7 @@ describe('ChatInput attachments per lane', () => {
 	it('routes the picker and the drop handler through one upload helper', () => {
 		// Two call sites, one target decision. Letting them each pick an endpoint
 		// is how the button and the drop counterpart drift apart.
-		const callSites = chatInput.match(/await uploadComposerFile\(file\)/g) ?? [];
+		const callSites = chatInput.match(/await uploadComposerFile\(file, origin\)/g) ?? [];
 		expect(callSites).toHaveLength(2);
 	});
 
