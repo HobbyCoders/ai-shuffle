@@ -447,6 +447,16 @@
 				]
 			},
 		{
+			"why": "where a composer upload goes in a project chat another worker runs (#1659)",
+			"journeys": ["mirrored-project-upload"],
+			"globs": [
+				"frontend/tests/journeys/mirrored-project-upload.journey.mjs",
+				"frontend/src/lib/components/chat/attach-disable.ts",
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/services/live-sync.ts"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [
