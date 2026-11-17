@@ -4580,6 +4580,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                                 INTERRUPTED_META_KEY: (
                                     "transport_failure" if transport else "provider_error"
                                 ),
+                                # Kept output names its model too (#1643).
+                                "model": result.served_model or self.model,
                             },
                         ),
                     )
@@ -4638,6 +4640,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
 
+            # The model that answered, for the stored node: the transcript
+            # reads it back as the message's model (#1643).
+            result.message.provider_meta.setdefault("model", result.served_model or self.model)
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )

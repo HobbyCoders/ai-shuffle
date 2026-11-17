@@ -276,7 +276,8 @@ async def test_raised_standard_cap_is_saved_and_reaches_compaction(mock_db, monk
     db.create_session(session_id="cap", profile_id="cap-role", model="fable")
     monkeypatch.setattr(api.control, "_require_owned", db.get_session)
     result = await api.apply_run_settings("cap", api.RunSettingsUpdate(context_window=450_000))
-    assert result == {"context_window": 450_000}
+    # The answer names the pin's revision too (#1640).
+    assert result == {"context_window": 450_000, "context_window_rev": 1}
     assert db.get_session("cap")["context_window"] == 450_000
     with patch("app.core.query_options.get_security_instructions", return_value=""):
         options, _ = build_options_from_profile(db.get_profile("cap-role"), session_id="cap", overrides={})
@@ -327,13 +328,17 @@ async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
 
     await api.update_run_settings(None, "announce", api.RunSettingsUpdate(context_window=200_000))
     broadcast.assert_awaited_once_with(
-        session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
+        session_id="announce", updates={"context_window": 200_000, "context_window_rev": 1},
+        source_device_id=None)
 
     broadcast.reset_mock()
     await api.handle_run_settings({"session_id": "announce", "context_window": 1_000_000}, "peer")
     broadcast.assert_awaited_once_with(
-        session_id="announce", updates={"context_window": 1_000_000}, source_device_id=None)
+        session_id="announce", updates={"context_window": 1_000_000, "context_window_rev": 2},
+        source_device_id=None)
 
+    # An owner that does not count the pin yet answers without a revision, and
+    # the announcement goes out as it always did.
     broadcast.reset_mock()
     monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
     monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"context_window": 200_000}))

@@ -2239,6 +2239,73 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('session_updated handler (pin revision, #1640)', () => {
+		function openAt(pin: number | null, rev: number | undefined, rowRev?: number) {
+			let state: ActiveSessionState = { ...mockState(), contextWindowChoice: '1m', contextWindowPin: pin, contextWindowRev: rev };
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+				sessionPinRev: vi.fn(() => rowRev),
+			});
+			handlers = createMessageHandlers(deps);
+			return {
+				announce(sessionId: string, context_window: number | null, context_window_rev?: number) {
+					handlers.handleMessage({ event_type: 'session_updated', session_id: sessionId,
+						data: { updates: { context_window, ...(context_window_rev !== undefined ? { context_window_rev } : {}) } } });
+				},
+				get state() { return state; },
+			};
+		}
+
+		it('drops the pin a model switch cleared, so the next send names no pin as its base', () => {
+			const tab = openAt(1_000_000, 2, 2);
+			tab.announce('session-1', null, 3);
+			expect(tab.state.contextWindowPin).toBeNull();
+			expect(tab.state.contextWindowRev).toBe(3);
+			// The picker keeps showing the choice; only the saved pin is gone.
+			expect(tab.state.contextWindowChoice).toBe('1m');
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { context_window: null, context_window_rev: 3 });
+			expect(deps.onPersistSession).toHaveBeenCalled();
+		});
+
+		it('ignores a clear that arrives after a newer pick (review S11)', () => {
+			// The pin was cleared at revision 3 and picked again at 4; the push of
+			// the clear is delivered last.
+			const tab = openAt(1_000_000, 4, 4);
+			tab.announce('session-1', null, 3);
+			expect(tab.state.contextWindowPin).toBe(1_000_000);
+			expect(tab.state.contextWindowRev).toBe(4);
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+			expect(deps.onPersistSession).not.toHaveBeenCalled();
+		});
+
+		it('ignores the same revision again, and a clear that names none', () => {
+			const tab = openAt(200_000, 3, 3);
+			tab.announce('session-1', 1_000_000, 3);
+			tab.announce('session-1', null);
+			expect(tab.state.contextWindowPin).toBe(200_000);
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+		});
+
+		it('adopts a newer pick with its revision', () => {
+			const tab = openAt(1_000_000, 2, 2);
+			tab.announce('session-1', 200_000, 3);
+			expect(tab.state.contextWindowPin).toBe(200_000);
+			expect(tab.state.contextWindowRev).toBe(3);
+			expect(tab.state.contextWindowChoice).toBe('standard');
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { context_window: 200_000, context_window_rev: 3 });
+		});
+
+		it('orders the row of a chat not on screen by the row\'s own revision', () => {
+			const tab = openAt(1_000_000, 9, 4);
+			tab.announce('session-2', null, 4);
+			expect(deps.mergeSessionPatch).not.toHaveBeenCalled();
+			tab.announce('session-2', null, 5);
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-2', { context_window: null, context_window_rev: 5 });
+			expect(tab.state.contextWindowPin).toBe(1_000_000);
+		});
+	});
+
 	describe('session_updated handler (effort pick or Auto from another device, #1579)', () => {
 		afterEach(() => sessionEphemeralCache.clear());
 

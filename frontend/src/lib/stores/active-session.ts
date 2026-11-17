@@ -47,7 +47,7 @@ import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { queueHydration } from './session/queue-hydration';
 import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } from './session/composer-binding';
-import { effortFromRow, effortIsNewer, effortRevOf } from './session/effort-revision';
+import { effortFromRow, effortIsNewer, effortRevOf, pinIfNewer } from './session/effort-revision';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
@@ -69,6 +69,7 @@ import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
+import { resolveModelEffort } from '$lib/constants/model-effort';
 import { standardContextCap } from './session/context-window';
 import { clearSentQuestions } from './session/sent-questions';
 import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
@@ -261,6 +262,8 @@ export interface ActiveSessionState {
 	 *  acknowledged (null: none saved; undefined: not known yet). Sent beside a
 	 *  send's window so the worker can tell an outdated window from a pick (#1895). */
 	contextWindowPin?: number | null;
+	/** The revision of that pin (#1640); a pin told with an older one is not applied. */
+	contextWindowRev?: number;
 	pendingPermissions: PermissionRequestType[];
 	/** Slice B (SDK 0.1.81): permission requests the user deferred — visible as a
 	 *  "N deferred" pill below the chat. Re-broadcast on `requeue_deferred_permissions`. */
@@ -791,6 +794,7 @@ const { handleMessage } = createMessageHandlers({
 	appLoadApiUserSessions: () => appData.loadApiUserSessions(),
 	mergeSessionPatch: (sessionId, patch) => appData.mergeSessionPatch(sessionId, patch),
 	sessionEffortRev: (sessionId) => effortRevOf(appData.current.sessions.find(s => s.id === sessionId)?.effort_rev),
+	sessionPinRev: (sessionId) => effortRevOf(appData.current.sessions.find(s => s.id === sessionId)?.context_window_rev),
 	internal,
 	onNewChat: () => activeSession.newChat(),
 	onPersistSession: () => persistSession(),
@@ -928,8 +932,32 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	// this client's (a restored database) and its answer is the level to show.
 	const heldEffortRev = _state.effortRev;
 	const cachedEffortRev = sessionId ? sessionEphemeralCache.restore(sessionId)?.effortRev : undefined;
+	const overtakenBy = (saved: number | undefined, now: number | undefined, held: number | undefined) =>
+		saved !== undefined && now !== undefined && now !== held && saved < now;
 	const overtaken = (now: number | undefined, held: number | undefined) =>
-		field === 'effort' && savedEffortRev !== undefined && now !== undefined && now !== held && savedEffortRev < now;
+		field === 'effort' && overtakenBy(savedEffortRev, now, held);
+	// The same for the context-window pin and its own revision (#1640).
+	let savedPinRev: number | undefined;
+	const heldPinRev = _state.contextWindowRev;
+	// An explicit level the worker refused only because the chat still runs the
+	// model before this pick: kept here and sent with the next message (#1633).
+	let held = false;
+	// The revision held when the request left (an earlier pick of this client
+	// has been answered by then: picks are sent one at a time).
+	let sentEffortRev = heldEffortRev;
+	// An answer that is not shown as the pick (a newer pick is on its way, or
+	// the model changed since) is still what this client's own request saved,
+	// at its revision. Holding that revision keeps the announcement of the same
+	// write, whenever it arrives, from replacing a newer level held here, and
+	// lets the next send's revision match (#1633).
+	const noteOwnAnswer = () => {
+		if (field !== 'effort' || savedEffortRev === undefined) return;
+		if (_state.sessionId !== sessionId || sessionOwnerEpoch() !== ownerEpoch) return;
+		if (_state.effortRev !== undefined && savedEffortRev <= _state.effortRev) return;
+		const sameModel = (_state.modelOverride || getDefaultModel()) === selectedModel;
+		_update(s => ({ ...s, ...(sameModel ? { effortLevelOverride: selected as string | null } : {}), effortRev: savedEffortRev }));
+		persistSession();
+	};
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -937,7 +965,8 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; effort_rev?: number; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
+			sentEffortRev = _state.effortRev;
+			return api.put<{ effort: string | null; effort_rev?: number; fast: boolean; context_window: number; context_window_rev?: number; fast_applies_turn?: string | null }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
@@ -959,9 +988,17 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			}
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
+				savedPinRev = effortRevOf(saved.context_window_rev);
 				// Navigation reads the sidebar row before its /live refresh. Keep
-				// an acknowledged pick there too, including across in-flight loads.
-				appData.mergeSessionPatch(sessionId, { context_window: saved.context_window });
+				// an acknowledged pick there too, including across in-flight loads,
+				// unless the row already names a newer pin.
+				const rowRev = effortRevOf(appData.current.sessions.find(s => s.id === sessionId)?.context_window_rev);
+				if (pinIfNewer({ contextWindowRev: rowRev }, savedWindow, savedPinRev)) {
+					appData.mergeSessionPatch(sessionId, {
+						context_window: saved.context_window,
+						...(savedPinRev !== undefined ? { context_window_rev: savedPinRev } : {}),
+					});
+				}
 			}
 			const cached = sessionEphemeralCache.restore(sessionId);
 			// An answer older than a level the cached copy took since is not news.
@@ -971,16 +1008,32 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
 		} catch (error) {
-			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
-					{ session_id: sessionId, persist: false });
+			if (sessionOwnerEpoch() !== ownerEpoch) return;
+			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
+				// A level saved elsewhere while this request was under way is newer
+				// than the pick: it stands, as it does over a late answer (#1609).
+				if (_state.sessionId === sessionId && _state.effortRev !== sentEffortRev) return;
+				// Nothing was saved, so the level keeps the revision held now: a
+				// level another device saves later has a newer one and replaces
+				// it, and no earlier answer or announcement does.
+				held = true;
+			} else {
+				if (generation === runSettingGenerations[field]) {
+					notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
+						{ session_id: sessionId, persist: false });
+				}
+				return;
 			}
-			return;
 		} finally {
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
 		}
 	}
-	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
+	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return noteOwnAnswer();
+	if (held && sessionId) {
+		// The copy a switch-back restores keeps it too, at its own revision.
+		const cached = sessionEphemeralCache.restore(sessionId);
+		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, effortLevelOverride: selected as string | null });
+	}
 	if (field === 'context_window') {
 		selected = sessionId ? selected : contextChoiceFromWindow(value as number, selectedModel);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
@@ -992,21 +1045,38 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
-	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
+	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return noteOwnAnswer();
 	// An answer that arrives after the announcement of a newer level (another
 	// tab or device picked since) names an older revision: the newer level
 	// stays (#1609). The same revision is this pick's own announcement.
 	if (overtaken(_state.effortRev, heldEffortRev)) return;
+	// The same for a window answer that a newer pin overtook (#1640).
+	if (field === 'context_window' && overtakenBy(savedPinRev, _state.contextWindowRev, heldPinRev)) return;
 	_update(s => ({
 		...s, [stateKey]: selected,
 		...(field === 'effort' && savedEffortRev !== undefined ? { effortRev: savedEffortRev } : {}),
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
 		// A context-window answer says nothing about Fast.
-		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
-		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
+		...(field !== 'context_window' && !held ? { fastAppliesTurnId: fastAppliesTurn } : {}),
+		...(field === 'context_window' && sessionId && savedWindow != null
+			? { contextWindowPin: savedWindow, ...(savedPinRev !== undefined ? { contextWindowRev: savedPinRev } : {}) } : {})
 	}));
 	persistSession();
+}
+
+/**
+ * The refusal an effort pick gets when only the chat's running model lacks the
+ * level (#1633): the picked model, which runs from the next message, offers
+ * it. Auto and every other refusal (connecting, busy, control refused) are not
+ * held.
+ */
+const LEVEL_REFUSAL = 'This model does not support the selected effort level';
+function isHoldableEffortRefusal(error: unknown, value: unknown, selectedModel: string): boolean {
+	if (typeof value !== 'string') return false;
+	const failure = error as { status?: unknown; detail?: unknown } | null;
+	if (failure?.status !== 409 || failure.detail !== LEVEL_REFUSAL) return false;
+	return resolveModelEffort(selectedModel).options.some((option) => option.value === value);
 }
 
 /** A send or restore owns the composer; defaults must not touch it. */
@@ -1318,11 +1388,18 @@ export const activeSession = {
 	 * page missed. Take the row's level, so the composer shows it now and the
 	 * next send does not carry the older one.
 	 */
-	adoptRowEffort(sessionsList: { id: string; effort?: string | null; effort_rev?: number }[]): boolean {
+	adoptRowEffort(sessionsList: { id: string; effort?: string | null; effort_rev?: number; context_window?: number | null; context_window_rev?: number }[]): boolean {
 		const sessionId = _state.sessionId;
-		const news = sessionId ? effortFromRow(_state, sessionsList.find(s => s.id === sessionId)) : null;
-		if (!news) return false;
-		_update(s => ({ ...s, ...news }));
+		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
+		const news = effortFromRow(_state, row);
+		// The pin the same way (#1640): a model saved by any writer may have
+		// dropped it, and the row is how every page learns, on any worker.
+		const pin = row && effortRevOf(row.context_window_rev) !== undefined
+			? pinIfNewer(_state, row.context_window, row.context_window_rev) : null;
+		if (!news && !pin) return false;
+		// A saved window is shown as its choice, as a push of it is.
+		const choice = pin ? contextChoiceFromWindow(pin.contextWindowPin, _state.modelOverride || getDefaultModel()) : null;
+		_update(s => ({ ...s, ...news, ...pin, ...(choice ? { contextWindowChoice: choice } : {}) }));
 		persistSession();
 		return true;
 	},

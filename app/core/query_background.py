@@ -839,7 +839,7 @@ async def _start_background_turn(
     if overrides:
         try:
             effort_seen: Dict[str, Any] = {}
-            overrides = await run_sync(
+            overrides, _saved = await run_sync(
                 turn_manager.persist_send_binding, session_id, overrides, effort_rev,
                 permission_mode=overrides.get("permission_mode"), effort_seen=effort_seen,
             )

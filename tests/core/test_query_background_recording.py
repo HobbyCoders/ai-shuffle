@@ -504,7 +504,7 @@ async def test_start_background_query_stamps_run_binding(mock_db):
         if fn is database.get_session:
             return {"id": sid, "sdk_session_id": None}
         if fn is turn_manager.persist_send_binding:
-            return a[1]
+            return a[1], None
         return {"id": "row-1"}
 
     with ExitStack() as stack:

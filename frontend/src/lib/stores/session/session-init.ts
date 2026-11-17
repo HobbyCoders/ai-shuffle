@@ -286,6 +286,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 				effortRev: undefined,
 				contextWindowChoice: DEFAULT_CONTEXT_WINDOW_CHOICE,
 				contextWindowPin: undefined,
+				contextWindowRev: undefined,
 				// Agent, access and Fast are the linked chat's own too (#418): the
 				// seed's last-used picks are not, so they wait for /live as
 				// placeholders that are neither shown as its binding nor sent.

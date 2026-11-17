@@ -506,8 +506,14 @@ class TestSubmitPersistsTheBinding:
             )
         expected = [call(session_id="s-push", updates={"is_active": True, "snoozed_until": None}, source_device_id=None)]
         if pushed is not None:
-            expected.append(call(session_id="s-push", updates={"context_window": pushed}, source_device_id=None))
-            assert db.get_session("s-push")["context_window"] == pushed
+            row = db.get_session("s-push")
+            assert row["context_window"] == pushed
+            # The pin goes with its revision (#1640): one more when this send
+            # saved the window, the row's own when the send was dropped.
+            rev = int(row["context_window_rev"] or 0)
+            assert rev == (1 if pushed == sent else 0)
+            expected.append(call(session_id="s-push", source_device_id=None,
+                                 updates={"context_window": pushed, "context_window_rev": rev}))
         assert broadcast.await_args_list == expected
         assert db.get_session("s-push")["is_active"]
 

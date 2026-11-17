@@ -224,6 +224,26 @@ def test_golden_frame_mapping() -> None:
     assert node_msgs[0].text() == "Hello from the golden turn."
 
 
+@pytest.mark.parametrize(("model", "stored"), [
+    ("claude-sonnet-4-6", {"model": "claude-sonnet-4-6"}),
+    ("<synthetic>", {}),
+    (None, {}),
+])
+def test_the_stored_assistant_node_names_the_model_that_answered(model, stored) -> None:
+    """The transcript reads a node's model from provider_meta (#1643)."""
+    mapper = StreamJsonMapper(
+        session_id="s1", turn_id="t1", model="sonnet", user_node_id="node_user",
+    )
+    message = {"id": "msg_1", "role": "assistant",
+               "content": [{"type": "text", "text": "hi"}]}
+    if model is not None:
+        message["model"] = model
+    mapped = mapper.feed({"type": "assistant", "message": message})
+
+    assert mapped.message is not None
+    assert mapped.message.provider_meta == stored
+
+
 # ─── Announced tool surface (init frame) ─────────────────────────────────────
 
 

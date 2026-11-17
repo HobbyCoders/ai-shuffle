@@ -33,7 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
-import { effortIsNewer, effortRevOf } from './effort-revision';
+import { effortIsNewer, effortRevOf, pinIfNewer } from './effort-revision';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -123,6 +123,8 @@ export interface MessageHandlerDeps {
 	/** The effort revision the sidebar row of a session holds, when it is
 	 *  loaded here and names one (#1609). */
 	sessionEffortRev?: (sessionId: string) => number | undefined;
+	/** The same for its context-window pin (#1640). */
+	sessionPinRev?: (sessionId: string) => number | undefined;
 
 	// Internal mutable state (shared reference)
 	internal: InternalMutableState;
@@ -209,8 +211,10 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'last_turn_stopped',
 	'work_ms',
 	'work_started_at',
-	// A context-window pick made on another tab or device (#1895).
+	// A context-window pick made on another tab or device (#1895), and the
+	// revision it has (#1640).
 	'context_window',
+	'context_window_rev',
 	// An effort pick, or Auto (null), made on another tab or device (#1579),
 	// and the revision it has (#1609).
 	'effort',
@@ -623,16 +627,24 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				}
 				// A context-window pick saved from another tab, device or worker:
 				// adopt it, so this composer neither shows nor sends the older one.
-				const pickedChoice = contextChoiceFromWindow(
-					updates.context_window as number | null | undefined,
-					getState().modelOverride || getDefaultModel()
-				);
-				if (pickedChoice && updatedSessionId && updatedSessionId === getState().sessionId) {
-					update(s => ({
-						...s, contextWindowChoice: pickedChoice,
-						contextWindowPin: updates.context_window as number,
-					}));
-					onPersistSession();
+				// "No pin" (null) is a pin a model switch dropped (#1640): the next
+				// send's base must say so too. Both come with the pin's revision,
+				// and only a newer one than the held is applied, so a push that
+				// arrives late cannot undo a newer pin.
+				let rowUpdates = updates;
+				if ('context_window' in updates && updatedSessionId) {
+					const window = updates.context_window as number | null | undefined;
+					const news = updatedSessionId === getState().sessionId
+						? pinIfNewer(getState(), window, updates.context_window_rev) : null;
+					if (news) {
+						const pickedChoice = contextChoiceFromWindow(window, getState().modelOverride || getDefaultModel());
+						update(s => ({ ...s, ...(pickedChoice ? { contextWindowChoice: pickedChoice } : {}), ...news }));
+						onPersistSession();
+					}
+					if (!pinIfNewer({ contextWindowRev: deps.sessionPinRev?.(updatedSessionId) }, window, updates.context_window_rev)) {
+						const { context_window: _window, context_window_rev: _pinRev, ...rest } = rowUpdates;
+						rowUpdates = rest;
+					}
 				}
 				// An effort level saved from another tab or device, or by a send
 				// (this client's own included, when the worker kept a newer level),
@@ -641,7 +653,6 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 				// the older level. It names the revision the level has, and each
 				// copy takes it only when that is newer than the one it holds, so
 				// a push that arrives late cannot undo a newer level (#1609).
-				let rowUpdates = updates;
 				if (updatedSessionId && 'effort' in updates
 					&& (updates.effort === null || typeof updates.effort === 'string')) {
 					const effort = updates.effort as string | null;
@@ -656,7 +667,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 						onPersistSession();
 					}
 					if (!effortIsNewer(rev, deps.sessionEffortRev?.(updatedSessionId))) {
-						const { effort: _level, effort_rev: _rev, ...rest } = updates;
+						const { effort: _level, effort_rev: _rev, ...rest } = rowUpdates;
 						rowUpdates = rest;
 					}
 				}

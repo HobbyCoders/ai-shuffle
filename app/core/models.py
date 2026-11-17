@@ -432,6 +432,9 @@ class Session(SessionBase):
     effort_rev: int = 0
     permission_mode: Optional[str] = None
     context_window: Optional[int] = None
+    # How many times ``context_window`` has changed (#1640), ordered by a
+    # composer the same way as ``effort_rev``.
+    context_window_rev: int = 0
     # What this session actually RAN on, as opposed to what was picked.
     # ``launched_model`` tracks the CURRENT one and is rewritten by every
     # mid-session switch; ``first_model`` records the one it started with and is
@@ -534,10 +537,10 @@ class Session(SessionBase):
         """
         return normalize_session_mode(value)
 
-    @field_validator("effort_rev", mode="before")
+    @field_validator("effort_rev", "context_window_rev", mode="before")
     @classmethod
     def _coalesce_effort_rev(cls, value):
-        """NULL ``sessions.effort_rev`` (an effort never changed) reads as 0."""
+        """A NULL revision (a value never changed) reads as 0."""
         return int(value or 0)
 
     @field_validator("is_worker", mode="before")

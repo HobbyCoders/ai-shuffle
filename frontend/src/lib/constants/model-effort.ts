@@ -1,6 +1,6 @@
 /** Effective effort capabilities shared by every composer surface. */
 import {
-	decodeProviderModel, encodeProviderModel, getDefaultModel, getNativeModel, getProviders,
+	decodeProviderModel, encodeProviderModel, getDefaultModel, getModelLabel, getNativeModel, getProviders,
 	isRegistryHydrated, isReroute, normalizeModel
 } from './models.svelte';
 
@@ -34,6 +34,30 @@ export function resolveEffortModel(
 	if (liveProvider && !composite) return encodeProviderModel(liveProvider, liveModel || selected);
 	if (isReroute(liveModel, liveRequestedModel, liveProvider, liveRerouted)) return liveModel!;
 	return selected;
+}
+
+/**
+ * Whether the composer's selection is still the model a turn REQUESTED (#1635).
+ * A reroute note describes that turn only: once another model is picked, the
+ * chip names the pick. The note names the bare provider model id, so a
+ * `prov:` pick matches on its model id; native aliases match through the
+ * registry, and two values the picker labels the same are the same pick.
+ */
+export function selectionIsRequestedModel(
+	selection: string | null,
+	requested: string | null,
+	liveProvider: string | null = null
+): boolean {
+	if (!requested) return false;
+	const selected = selection || getDefaultModel();
+	if (selected === requested) return true;
+	const pick = decodeProviderModel(selected);
+	const asked = decodeProviderModel(requested);
+	if (pick && !asked) {
+		return pick.modelId === requested && (!liveProvider || liveProvider === pick.providerId);
+	}
+	if (!pick && !asked && normalizeModel(selected) === normalizeModel(requested)) return true;
+	return getModelLabel(selected) === getModelLabel(requested);
 }
 
 export function resolveModelEffort(value: string | null | undefined) {
@@ -86,4 +110,16 @@ export function reconcileModelEffort(value: string | null, capability: ReturnTyp
 		Math.abs(EFFORT_OPTIONS.findIndex(level => level.value === option.value) - rank)
 		< Math.abs(EFFORT_OPTIONS.findIndex(level => level.value === best.value) - rank) ? option : best
 	).value;
+}
+
+/**
+ * What a model switch did to a pinned effort level (#1641): the composer fits
+ * the level to the new model's own levels, and says so.
+ */
+export function effortFitNotice(previous: string, fitted: string | null, model: string): string {
+	const label = (value: string) => EFFORT_OPTIONS.find((option) => option.value === value)?.label ?? value;
+	const name = getModelLabel(model);
+	return fitted
+		? `Effort set to ${label(fitted)}: ${name} has no ${label(previous)}.`
+		: `Effort set to Auto: ${name} has no ${label(previous)}.`;
 }
