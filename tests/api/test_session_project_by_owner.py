@@ -62,7 +62,10 @@ def test_own_chat_of_a_moved_project_is_not_marked_as_run_elsewhere(mock_db, tmp
     sessions_helpers._annotate_cluster_fields([row])
     assert row["is_remote"] is False
     assert row["project_id"] == "proj"
+    # The sidebar names and groups it by its local project, as before: the
+    # project's current link group wins over the chat's first shared identity.
     assert row["project_name"] == "Proj"
+    assert row.get("link_group_id") == second
 
 
 def _mirrored_row(project_v2_id):
@@ -81,13 +84,29 @@ def _unrelated_local_app(tmp_path, link_group=None):
         database.set_project_link_group("app", link_group)
 
 
-def test_mirrored_row_with_a_colliding_legacy_id_is_marked_as_run_elsewhere(mock_db, tmp_path):
+@pytest.mark.parametrize("local_link_group", [None, "git:dddddddddddddddd"], ids=["unlinked", "linked"])
+def test_mirrored_row_with_a_colliding_legacy_id_goes_by_its_shared_project(
+        mock_db, tmp_path, local_link_group):
     """Another worker's chat whose legacy id is also an unrelated project's id here."""
-    _unrelated_local_app(tmp_path)
+    _unrelated_local_app(tmp_path, local_link_group)
     theirs = projects_v2.upsert_project("git:cccccccccccccccc", "Their project")
     row = _mirrored_row(theirs["id"])
     sessions_helpers._annotate_cluster_fields([row])
     # The marker, and the shared id the page then holds alone.
     assert row["is_remote"] is True
     assert row["project_v2_id"] == theirs["id"]
+    # The sidebar's label and grouping key (link group, else origin) are the
+    # shared project's, never the unrelated local project's.
+    assert row["project_name"] == "Their project"
+    assert "link_group_id" not in row
     assert row["origin"] == "git:cccccccccccccccc"
+
+
+def test_mirrored_row_without_a_known_shared_project_keeps_the_local_reading(mock_db, tmp_path):
+    """Nothing else names the project, so the row reads as it did before."""
+    _unrelated_local_app(tmp_path, "git:dddddddddddddddd")
+    for row in (_mirrored_row(None), _mirrored_row("pv2-not-synced-here")):
+        sessions_helpers._annotate_cluster_fields([row])
+        assert row["is_remote"] is True
+        assert row["project_name"] == "Unrelated local project"
+        assert row["link_group_id"] == "git:dddddddddddddddd"
