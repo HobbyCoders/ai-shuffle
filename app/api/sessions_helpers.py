@@ -372,7 +372,7 @@ def api_user_owns_session(api_user: dict, session: dict) -> bool:
     return False
 
 
-def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -> None:
+def check_session_access_for_api_user(api_user: Optional[dict], session: dict, *, remote_download: bool = False) -> None:
     """Enforce an API user's access to a session.
 
     Pure helper (no Request): ``api_user`` is None for the owner (full
@@ -395,7 +395,11 @@ def check_session_access_for_api_user(api_user: Optional[dict], session: dict) -
 
     # Check project restriction
     # (a projectless session passes only because it is the caller's own).
-    if api_user.get("project_id") and session.get("project_id"):
+    from app.network.control import owner_of
+    if remote_download and api_user.get("project_id") and session.get("project_v2_id") and owner_of(session):
+        from app.api.common import download_scope
+        download_scope(api_user, session)  # local slugs cannot authorize a mirror
+    elif api_user.get("project_id") and session.get("project_id"):
         if api_user["project_id"] != session["project_id"]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -415,7 +419,7 @@ def check_session_access(request: Request, session: dict) -> None:
     check_session_access_for_api_user(get_api_user_from_request(request), session)
 
 
-async def require_session(request: Request, session_id: str) -> dict:
+async def require_session(request: Request, session_id: str, *, remote_download: bool = False) -> dict:
     """Fetch a session, verify it exists, and check access in one call.
 
     Replaces the repeated pattern of:
@@ -432,7 +436,10 @@ async def require_session(request: Request, session_id: str) -> dict:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session not found: {session_id}"
         )
-    check_session_access(request, session)
+    if remote_download:
+        await run_sync(check_session_access_for_api_user, get_api_user_from_request(request), session, remote_download=True)
+    else:
+        check_session_access(request, session)
     return session
 
 

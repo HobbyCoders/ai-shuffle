@@ -293,18 +293,17 @@ def assigned_origin(api_user: Optional[dict]) -> Optional[str]:
 
 
 def download_scope(api_user: Optional[dict], session: dict) -> dict:
-    """Forward only the authenticated scope. Older owners still need the slug."""
+    """A shared chat travels on the shared-aware route, never with a viewer slug."""
     slug = (api_user or {}).get("project_id")
     if not slug:
         return {}
-    scope = {"project_id": slug}
     shared = session.get("project_v2_id")
     if shared:
         from app.db.projects_v2 import project_v2_id_for_origin
         if project_v2_id_for_origin(assigned_origin(api_user)) != shared:
             raise HTTPException(403, "Session is outside the requested project")
-        scope["project_v2_id"] = shared
-    return scope
+        return {"project_v2_id": shared}
+    return {"project_id": slug}
 
 
 def peer_download_user(session: dict, slug: Optional[str], shared: Optional[str]) -> Optional[dict]:
@@ -319,7 +318,7 @@ def peer_download_user(session: dict, slug: Optional[str], shared: Optional[str]
         if not local or not local.get("id"):
             raise HTTPException(403, "No local checkout for requested project")
         return {"project_id": local["id"]}
-    if slug is not None and (not slug or session.get("project_id") != slug):
+    if slug is not None and (not slug or session.get("project_v2_id") or session.get("project_id") != slug):
         raise HTTPException(403, "Session is outside the requested project")
     return {"project_id": slug} if slug else None
 

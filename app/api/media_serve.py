@@ -95,15 +95,16 @@ def build_media_module(
     async def route_to_owner(request, session_id, **params):
         if not session_id:
             return None
-        session = await require_session(request, session_id)
+        session = await require_session(request, session_id, remote_download=True)
         owner = control.owner_of(session)
         if not owner:
             return None
         params.update(await run_sync(download_scope, get_api_user_from_request(request), session))
         return await forward_download(
-            request, owner, config.prefix + "/peer/" + quote(session_id, safe=""), params,
+            request, owner, config.prefix + ("/peer-shared/" if "project_v2_id" in params else "/peer/") + quote(session_id, safe=""), params,
         )
 
+    @router.get("/peer-shared/{session_id}", include_in_schema=False)
     @router.get("/peer/{session_id}", include_in_schema=False)
     async def peer_media(
         session_id: str, request: Request, path: str | None = None,

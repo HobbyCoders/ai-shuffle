@@ -126,7 +126,8 @@ def test_download_maps_shared_project_to_owner_checkout(media, monkeypatch):
     monkeypatch.setattr(media_serve, "forward_download", forward)
     assert client.get(f"{prefix}/{path.name}", params={"session_id": "chat"}).is_success
     params = forward.await_args.args[-1]
-    assert params == {"filename": path.name, "project_v2_id": shared, "project_id": "mine"}
+    assert forward.await_args.args[-2] == f"{prefix}/peer-shared/chat"
+    assert params == {"filename": path.name, "project_v2_id": shared}
 
     client.app.dependency_overrides[tokens.require_worker_device] = lambda: "viewer"
     monkeypatch.setattr(control, "_require_owned", lambda _: {"project_id": "owner", "project_v2_id": shared})
@@ -134,7 +135,7 @@ def test_download_maps_shared_project_to_owner_checkout(media, monkeypatch):
     monkeypatch.setattr(project_setup, "_registered_row", lambda key: {"id": "owner"} if key == origin else None)
     access = Mock()
     monkeypatch.setattr(media_serve, "require_file_access", access)
-    assert client.get(f"{prefix}/peer/chat", params={"path": str(path), "project_v2_id": shared, "project_id": "mine"}).content == path.read_bytes()
+    assert client.get(f"{prefix}/peer-shared/chat", params={"path": str(path), "project_v2_id": shared}).content == path.read_bytes()
     assert access.call_args.args[2].state.api_user == {"project_id": "owner"}
 
 

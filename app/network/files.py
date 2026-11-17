@@ -17,7 +17,7 @@ async def forward_file(request: Request, owner: str, session_id: str, path: str,
     if project_v2_id:
         params["project_v2_id"] = project_v2_id
     return await forward_download(
-        request, owner, "/api/files/peer/" + quote(session_id, safe=""), params,
+        request, owner, ("/api/files/peer-shared/" if project_v2_id else "/api/files/peer/") + quote(session_id, safe=""), params,
     )
 
 

@@ -191,6 +191,23 @@ async def test_expired_device_token_is_reauthenticated_once(monkeypatch):
     assert client.is_closed
 
 
+
+
+def test_shared_project_key_authorizes_its_own_mirrored_session(monkeypatch):
+    from app.api.sessions_helpers import check_session_access_for_api_user
+    from app.api import common
+    from app.db.projects_v2 import project_v2_id_for_origin
+
+    origin = "git:example/team"
+    monkeypatch.setattr(common, "assigned_origin", lambda user: origin)
+    monkeypatch.setattr(control, "owner_of", lambda session: "peer")
+    check_session_access_for_api_user(
+        {"id": "key", "project_id": "viewer-slug"},
+        {"api_user_id": "key", "project_id": "owner-slug", "project_v2_id": project_v2_id_for_origin(origin)},
+        remote_download=True,
+    )
+
+
 def test_forward_scope_comes_from_authenticated_user(client, monkeypatch):
     monkeypatch.setattr(api, "get_api_user_from_request", lambda _: {"project_id": "allowed"})
     forward = AsyncMock(return_value=Response(b"scoped"))

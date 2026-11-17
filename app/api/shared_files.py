@@ -136,7 +136,7 @@ async def get_file_by_path(
     Any file in the workspace can be made downloadable by the agent.
     """
     if session_id:
-        session = await require_session(request, session_id)
+        session = await require_session(request, session_id, remote_download=True)
         owner = control.owner_of(session)
         if owner:
             scope = await run_sync(download_scope, get_api_user_from_request(request), session)
@@ -144,6 +144,7 @@ async def get_file_by_path(
     return await _serve_file(path, request)
 
 
+@router.get("/peer-shared/{session_id}", include_in_schema=False)
 @router.get("/peer/{session_id}", include_in_schema=False)
 async def peer_file(
     session_id: str, path: str, request: Request,
