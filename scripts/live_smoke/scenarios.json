@@ -717,6 +717,16 @@
           "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
         },
         {
+          "id": "two-worker-smoke.restored-preference-write",
+          "check": "A restored worker's next shared preference write wins on its peers",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Enroll three fresh disposable candidate workers A, B and C in an isolated network. Choose an unused owner preference key and confirm it is absent on all three. Back up B's database before its first write. On B, write the key several times with distinct values; wait until A and C both read the last value. Stop only disposable B, restore only its database (keep its device identity), then restart it. Wait for peer rollback proof and confirm B's incarnation advanced. Write a different value to the same key on B exactly once. Allow normal exchange; read the preference on each worker without editing it again.",
+          "pass_when": "A and C first read B's last pre-restore value, then both read B's single post-restore write and agree with B. Record the candidate revision, B's incarnation before and after restore, and the synthetic values read on A/B/C. An incarnation bump or successful transcript delivery alone does not pass.",
+          "past_bug": "#1506 / #1576: the database backup rewound B's clock, so a peer kept B's pre-restore preference instead of its new write."
+        },
+        {
           "id": "two-worker-smoke.shared-settings-rollout",
           "check": "Shared secrets, provider replacements and plugin intent survive independently keyed and mixed-version workers",
           "kind": "owner",
