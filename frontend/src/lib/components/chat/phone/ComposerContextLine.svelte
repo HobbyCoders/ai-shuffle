@@ -68,7 +68,7 @@
 	>
 		{#each parts as part, index (index)}
 			{#if index > 0}<span class="ccl-sep" aria-hidden="true">·</span>{/if}
-			<span class="ccl-part" class:ccl-last={index === parts.length - 1}>{part}</span>
+			<span class="ccl-part" class:ccl-last={index === parts.length - 1} class:ccl-project={newChat && index === 1}>{part}</span>
 		{/each}
 		<ChevronDown size={14} strokeWidth={2} aria-hidden="true" class="ccl-chev" />
 	</button>
@@ -111,7 +111,9 @@
 	/* Whole names first. Only a name too long for the line gives way, the last
 	   one before the others, and it ellipsizes at its end rather than mid-word. */
 	.ccl-part { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-	.ccl-part.ccl-last { flex: 0 10 auto; }
+	.ccl-part.ccl-last:not(.ccl-project) { flex: 0 10 auto; }
+	/* In a new chat the project stays readable, but a long project cannot crowd out the agent. */
+	.ccl-part.ccl-project { flex: none; max-width: 45%; }
 	.ccl-sep { flex: none; opacity: 0.7; }
 	.ccl-btn :global(.ccl-chev) { flex: none; opacity: 0.8; }
 </style>

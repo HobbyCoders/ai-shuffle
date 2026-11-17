@@ -11,7 +11,7 @@
 // agents on a throwaway instance but never delete one (owner-only by design,
 // tests/api/test_preview_project_management.py).
 import { runJourney } from './runner.mjs';
-import { api, expect, gotoApp, showSidebar, uniq, waitChat } from './lib/app.mjs';
+import { api, expect, gotoApp, pick, pickProject, showSidebar, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const NAME_MAX = 100;
@@ -287,6 +287,51 @@ await runJourney({
 			expect(list[0] === full && list[1] === other, 'list title distinguishes same-prefix names');
 			expect(titles[0] === full && titles[1] === other, 'picker title distinguishes same-prefix names');
 			expect(selected === full, 'chip tooltip names the selected agent');
+		},
+		verify: () => {}
+	}, {
+		name: 'phone-context-keeps-project-readable',
+		viewports: ['phone'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark, log }) {
+			const key = uniq().slice(-6);
+			const fullName = `zz${key}`.padEnd(100, 'w');
+			await api(page, 'POST', '/agents', { id: `context-${key}`, name: fullName, config: {} });
+			const phone = page.viewportSize();
+			const desktop = { width: 1440, height: 900 };
+			const hero = page.getByRole('region', { name: 'New chat' });
+			await mark('pick the real long agent in the wide layout, then measure the phone composer');
+			await page.setViewportSize(desktop);
+			const menu = page.getByRole('menu', { name: 'Agent selection' });
+			await pick(hero.getByRole('button', { name: /^Agent:/ }), menu,
+				menu.getByRole('button', { name: fullName, exact: true }),
+				hero.getByRole('button', { name: `Agent: ${fullName}`, exact: true }));
+			await page.setViewportSize(phone);
+			const measure = async (label) => {
+				const context = page.getByRole('button', { name: `Chat context: ${fullName} · ${label}. Open chat controls`, exact: true });
+				return context.evaluate((button) => {
+					const [agent, project] = button.querySelectorAll('.ccl-part');
+					return {
+						agentWidth: agent.clientWidth,
+						clipped: agent.scrollWidth > agent.clientWidth && getComputedStyle(agent).textOverflow === 'ellipsis',
+						projectWidth: project.clientWidth,
+						projectStyle: [project.className, getComputedStyle(project).flexShrink, getComputedStyle(project).maxWidth],
+						projectFull: project.scrollWidth <= project.clientWidth,
+						inside: button.getBoundingClientRect().right <= innerWidth
+					};
+				});
+			};
+			await mark('measure No project then attach the seeded project');
+			const noProject = await measure('No project');
+			await page.setViewportSize(desktop);
+			await pickProject(page, hero);
+			await page.setViewportSize(phone);
+			const picked = await measure('Dev sandbox');
+			for (const [label, measured] of [['No project', noProject], ['Dev sandbox', picked]]) {
+				log(`${label}: ${JSON.stringify(measured)}`);
+				expect(measured.projectWidth > 0 && measured.projectFull, `${label} stays fully readable`);
+				expect(measured.agentWidth > 0 && measured.clipped && measured.inside, 'agent ellipsizes within the screen');
+			}
 		},
 		verify: () => {}
 	}],
