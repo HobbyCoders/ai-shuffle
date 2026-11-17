@@ -43,7 +43,7 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
-	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel } from '$lib/constants/model-effort';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel, EFFORT_OPTIONS } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
@@ -504,6 +504,57 @@
 		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
 	});
 
+	// Observe the result of a pick made here, not background binding or catalog updates.
+	let pendingEffortNotice = $state<{ sessionId: string | null; model: string; from: string; to: string | null } | null>(null);
+	let pendingEffortTimer: ReturnType<typeof setTimeout> | undefined;
+	let effortNoticeId: string | undefined;
+	function clearPendingEffortNotice() {
+		clearTimeout(pendingEffortTimer);
+		pendingEffortNotice = null;
+	}
+	function dismissEffortNotice() {
+		clearPendingEffortNotice();
+		if (effortNoticeId) notify.dismissLive(effortNoticeId);
+		effortNoticeId = undefined;
+	}
+	function pickModel(value: string | null) {
+		dismissEffortNotice();
+		const from = effortValue;
+		const previousModel = effortModel;
+		activeSession.setModelOverride(value);
+		if (!from || voiceLane || effortModel === previousModel) return;
+		// Predict what the existing reconciliation will show, but wait until
+		// the composer actually has that level (the live save can be refused).
+		const to = reconcileModelEffort(effortValue, effortCapability);
+		if (from === to) return;
+		pendingEffortNotice = { sessionId: voiceSessionId, model: effortModel, from, to };
+		pendingEffortTimer = setTimeout(clearPendingEffortNotice, 6000);
+	}
+	function pickEffort(value: string | null) {
+		dismissEffortNotice();
+		return activeSession.setEffortLevelOverride(value);
+	}
+	$effect(() => {
+		void voiceSessionId;
+		return dismissEffortNotice;
+	});
+	$effect(() => {
+		const pick = pendingEffortNotice;
+		if (!pick) return;
+		if (pick.sessionId !== voiceSessionId || pick.model !== effortModel || voiceLane) {
+			clearPendingEffortNotice();
+			return;
+		}
+		if (effortValue !== pick.to) return;
+		clearPendingEffortNotice();
+		const from = EFFORT_OPTIONS.find(option => option.value === pick.from)?.label ?? pick.from;
+		const to = effortLevels.find(option => option.value === pick.to)?.label;
+		const message = to ? `Reasoning effort changed from ${from} to ${to}.`
+			: effortLevels.length ? `Reasoning effort changed from ${from} to Auto.`
+				: `Reasoning effort was ${from}. It isn't adjustable on this model.`;
+		effortNoticeId = notify.banner(message, { severity: 'info', persist: false, duration_ms: 6000 });
+	});
+
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).
@@ -699,7 +750,7 @@
 						onSelect={(v) => {
 							// Choosing a model closes the picker, as on the phone; the
 							// context-window controls are in the same panel when reopened (#1526).
-							activeSession.setModelOverride(v);
+							pickModel(v);
 							dismissPopover();
 						}}
 						onRequestClose={dismissPopover}
@@ -738,7 +789,7 @@
 						explanation={effortCapability.explanation}
 						defaultValue={effortCapability.defaultValue}
 						value={effortValue}
-						onSelect={(v) => activeSession.setEffortLevelOverride(v)}
+						onSelect={pickEffort}
 						{fastSupported}
 						fastEnabled={fastMode}
 						{fastPending}
@@ -770,7 +821,7 @@
 	modelLabel={modelButtonLabel}
 		{modelLocked}
 	modelNotice={modelNotice}
-	onModelSelect={(value) => activeSession.setModelOverride(value)}
+	onModelSelect={pickModel}
 	contextChoice={$activeSession.contextWindowChoice}
 	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 	contextStandardTokens={contextStandardTokens}
@@ -780,7 +831,7 @@
 	effortKnown={effortCapability.known}
 	effortDefaultValue={effortCapability.defaultValue}
 	{effortValue}
-	onEffortSelect={(value) => activeSession.setEffortLevelOverride(value)}
+	onEffortSelect={pickEffort}
 	{fastSupported}
 	fastEnabled={fastMode}
 	{fastPending}

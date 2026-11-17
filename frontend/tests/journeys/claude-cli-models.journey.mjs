@@ -77,6 +77,46 @@ async function openClaudeChat({ page, status }) {
 	await pickAccess(page, 'Bypass');
 }
 
+const idleTabs = new WeakMap();
+const effortButton = (page) => page.getByRole('button', { name: /^Effort:/ }).first();
+const chatControls = (page) => page.getByRole('button', { name: /^All chat controls/ });
+const effortRadio = (page, label) => page.getByRole('radio', { name: label, exact: true });
+
+async function pickXHigh(page) {
+	if (await chatControls(page).isVisible()) {
+		await openPopup(chatControls(page), effortRadio(page, 'XHigh'));
+		await effortRadio(page, 'XHigh').click();
+		await page.getByRole('button', { name: 'Close chat controls' }).click();
+	} else {
+		const slider = page.getByRole('slider', { name: 'Reasoning effort' });
+		await openPopup(effortButton(page), slider);
+		await slider.press('End');
+		await slider.press('ArrowLeft');
+		await page.keyboard.press('Escape');
+	}
+	await checkEffort(page, 'XHigh');
+}
+
+async function checkEffort(page, label) {
+	if (await chatControls(page).isVisible()) {
+		await openPopup(chatControls(page), effortRadio(page, label));
+		await page.getByRole('radio', { name: label, exact: true, checked: true }).waitFor({ timeout: 5000 });
+		await page.getByRole('button', { name: 'Close chat controls' }).click();
+	} else {
+		await page.getByRole('button', { name: `Effort: ${label}`, exact: true }).first().waitFor({ timeout: 5000 });
+	}
+}
+
+async function chooseModel(page, label) {
+	const modelButton = page.getByRole('button', { name: /^Model:/ }).first();
+	const models = page.getByRole('dialog', { name: 'Choose model' });
+	await openPopup(modelButton, models);
+	await models.getByRole('textbox', { name: 'Search models' }).fill(label);
+	await models.getByRole('option', { name: new RegExp(`^${label.replace('.', '\\.')}\\b`) }).first().click();
+	await models.waitFor({ state: 'hidden', timeout: 5000 });
+	await page.getByRole('button', { name: new RegExp(`^Model: .*${label.replace('.', '\\.')}`) }).first().waitFor();
+}
+
 await runJourney({
 	name: 'claude-cli-models',
 	// What is listed and which model runs do not depend on CPU speed.
@@ -156,6 +196,56 @@ await runJourney({
 					expect(ran.length > 0 && ran.every((value) => value === VERSION), `the CLI ran ${VERSION} (got ${ran})`);
 					await page.getByRole('button', { name: new RegExp(`^Model: .*${VERSION_LABEL.replace('.', '\\.')}`) }).first().waitFor();
 				} finally {
+					await setEnabled(page, false).catch(() => {});
+				}
+			}
+		},
+		{
+			name: 'effort-fit-notice',
+			async setup({ page, status, variant }) {
+				await gotoApp(page, status);
+				await setEnabled(page, true);
+				await openClaudeChat({ page, status });
+				await chooseModel(page, 'Opus 5.5');
+				await pickXHigh(page);
+				const token = `effort fit ${uniq()}`;
+				await typeAndSend(page, `${token} ${scriptTag(variant, 'default')}`);
+				await waitTurnSettled(page, { messagesAtLeast: 2 });
+				await checkEffort(page, 'XHigh');
+
+				const session = await chatIdByToken(page, token);
+				const idle = await page.context().newPage();
+				await gotoApp(idle, status, `/?session=${encodeURIComponent(session)}`);
+				idleTabs.set(page, idle);
+				await page.bringToFront();
+			},
+			async act({ page, mark, log }) {
+				const idle = idleTabs.get(page);
+				const anyNotice = (tab) => tab.getByRole('status').filter({ has: tab.getByText(/Reasoning effort changed/) });
+				try {
+					await mark('switch Opus 5.5 XHigh to Opus 4.6');
+					await chooseModel(page, VERSION_LABEL);
+					const notice = anyNotice(page);
+					await notice.waitFor({ timeout: 3000 });
+					const text = await notice.getByText('Reasoning effort changed from XHigh to High.', { exact: true }).innerText();
+					expect(text === 'Reasoning effort changed from XHigh to High.', `status names both levels (got ${text})`);
+					log(`polite status: ${text}`);
+					expect(await notice.count() === 1, 'exactly one status in the tab that picked');
+					expect(await anyNotice(idle).count() === 0, 'no notice in the idle tab');
+					const dismiss = notice.getByRole('button', { name: 'Dismiss' });
+					await dismiss.focus();
+					await dismiss.press('Enter');
+					await notice.waitFor({ state: 'hidden' });
+					await checkEffort(page, 'High');
+
+					await mark('switch to Sonnet 5.5, which also offers High');
+					await chooseModel(page, 'Sonnet 5.5');
+					await checkEffort(page, 'High');
+					expect(await anyNotice(page).count() === 0, 'no notice when High is unchanged');
+					expect(await anyNotice(idle).count() === 0, 'still no notice in the idle tab');
+					log('unchanged High and idle tab: no status');
+				} finally {
+					await idle.close();
 					await setEnabled(page, false).catch(() => {});
 				}
 			}
