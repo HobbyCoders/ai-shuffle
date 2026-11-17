@@ -290,47 +290,46 @@ def _bookend_stdout(
         return f"…[{prints} prints, {chars} chars cut]…\n"
 
     marker_size = len(marker(len(segments), total))
-    room = max(0, cap - marker_size)
-    # Preserve short summaries in input order. Each isolated group can split
-    # one gap into two, so charge for that extra marker too. Leave at least
-    # half the room for the first and last prints, even with many summaries.
-    short_budget = room // 2
-    shorts: list[tuple[int, int, str]] = []
-    offset = 0
-    for i, segment in enumerate(segments):
-        if segment and len(segment) == shares[i]:
-            adjacent = shorts and shorts[-1][0] == i - 1
-            cost = len(segment) + (0 if adjacent else marker_size)
-            if cost <= short_budget:
-                shorts.append((i, offset, segment))
-                short_budget -= cost
-                room -= cost
-        offset += len(segment)
+    room = max(0, cap - marker_size)  # one gap between the bookends
+    n = len(segments)
+    mid = n // 2
+    left_chars = sum(map(len, segments[:mid]))
+    right_chars = total - left_chars
+    left_room = max(min(room // 2, left_chars), room - right_chars)
 
-    def window(indices: range, budget: int, *, tail: bool) -> tuple[str, int]:
-        parts = []
-        whole = 0
+    def choose(indices: range, span: int, budget: int):
+        # Walk from the middle OUT. Once the remaining outer window fits,
+        # take it whole: none of its prints have been charged as summaries.
+        left = indices.step < 0
+        shorts = []
+        short_budget = budget // 2
         for i in indices:
             part = segments[i]
-            if len(part) > budget:
-                # Prefer complete prints unless even the edge print won't fit.
-                if not whole and budget:
-                    parts.append(part[-budget:] if tail else part[:budget])
-                break
-            parts.append(part)
-            whole += 1
-            budget -= len(part)
-        return "".join(reversed(parts) if tail else parts), whole
+            if span <= budget:
+                edge = segments[:i + 1] if left else segments[i:]
+                return "".join(edge), len(edge), shorts
+            if i == indices[-1]:  # even the outermost print won't fit whole
+                edge_text = part[:budget] if left else part[len(part) - budget:]
+                return edge_text, 0, shorts
+            if part and len(part) == shares[i]:
+                # A separate run needs one more gap marker. Limit the total
+                # reservation so even a dense middle leaves room at the edge.
+                adjacent = shorts and i == shorts[-1][0] + indices.step
+                cost = len(part) + (0 if adjacent else marker_size)
+                if cost <= short_budget:
+                    offset = span - len(part) if left else total - span
+                    shorts.append((i, offset, part))
+                    short_budget -= cost
+                    budget -= cost
+            span -= len(part)
+        return "", 0, shorts
 
-    n = len(segments)
-    head, first = window(range(n), room // 2, tail=False)
-    tail, last = window(range(n - 1, -1, -1), room - room // 2, tail=True)
+    head, first, left_shorts = choose(range(mid - 1, -1, -1), left_chars, left_room)
+    tail, last, right_shorts = choose(range(mid, n), right_chars, room - left_room)
     kept = len(head) + len(tail)
     parts = [head]
     cursor, pos = first, len(head)
-    for i, offset, part in shorts:
-        if offset < len(head) or offset + len(part) > total - len(tail):
-            continue  # already in a bookend
+    for i, offset, part in [*reversed(left_shorts), *right_shorts]:
         if pos < offset:
             parts.append(marker(i - cursor, offset - pos))
         parts.append(part)

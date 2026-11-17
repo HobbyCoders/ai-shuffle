@@ -401,11 +401,14 @@ async def test_kernel_stdout_cap_fair_shares_across_prints() -> None:
         await kernel.stop()
 
 
-@pytest.mark.parametrize("case", ["digit-boundary", "middle-summary"])
+@pytest.mark.parametrize("case", ["digit-boundary", "middle-summary", "edge-summaries"])
 async def test_kernel_stdout_payload_and_spill(case: str) -> None:
     if case == "digit-boundary":
         code = "for i in range(400): print('R' * 118)"
         lines = ["R" * 118] * 400
+    elif case == "edge-summaries":
+        code = "for s in ['a']*999 + ['filler'*7]*600 + ['C']*6 + ['END-STATUS:'+'z'*3480]: print(s)"
+        lines = ["a"] * 999 + ["filler" * 7] * 600 + ["C"] * 6 + ["END-STATUS:" + "z" * 3480]
     else:
         code = "for i in range(1202): print('OK!' if i == 600 else 'filler' * 7)"
         lines = ["filler" * 7] * 600 + ["OK!"] + ["filler" * 7] * 601
@@ -426,6 +429,10 @@ async def test_kernel_stdout_payload_and_spill(case: str) -> None:
         for half, count in ((before, 600), (after, 601)):
             missing = count - half.count(lines[0])
             assert f"…[{missing} prints, {missing * (len(lines[0]) + 1)} chars cut]…" in half
+    elif case == "edge-summaries":
+        assert payload.startswith("a\n" * 999)
+        assert payload.endswith("C\n" * 6 + lines[-1])
+        assert payload.count("chars cut]") == 1
     else:
         assert payload.splitlines() == ["RRRRRR…[-113 chars]"] * len(lines)
     assert "stdout truncated: kept" in notice
