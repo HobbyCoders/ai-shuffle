@@ -110,6 +110,7 @@ interface LiveSnapshot {
 		provider_id?: string | null;
 		effort?: string | null;
 		effort_rev?: number;
+		effort_pick?: string | null;
 		context_window?: number | null;
 		workspace_project_ids?: string[];
 		title?: string;
@@ -464,6 +465,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			effortLevelOverride: state.effortLevelOverride,
 			effortRev: state.effortRev,
+			effortPick: state.effortPick,
 			// Agent, access and Fast, with which of them are real values (#418).
 			...cacheComposerBinding(state),
 			permissionModeOverride: state.permissionModeOverride,
@@ -530,6 +532,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride: state.modelOverride,
 			effortLevelOverride: state.effortLevelOverride,
 			effortRev: state.effortRev,
+			effortPick: state.effortPick,
 			...cacheComposerBinding(state),
 			profile: state.profile,
 			permissionModeOverride: state.permissionModeOverride,
@@ -1072,7 +1075,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				&& getState().effortRev === initialEffortRev
 				&& (metaEffortRev === undefined ? initialEffort == null : effortIsNewer(metaEffortRev, initialEffortRev))) {
 				patch.effortLevelOverride = meta.effort;
-				if (metaEffortRev !== undefined) patch.effortRev = metaEffortRev;
+				if (metaEffortRev !== undefined) { patch.effortRev = metaEffortRev; patch.effortPick = meta.effort_pick; }
 			}
 			// Reloads restore a browser snapshot before /live arrives. Replace
 			// its old acknowledged window, but not a pick made during this fetch.
@@ -1246,6 +1249,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			effortLevelOverride: getPersistedEffort(),
 			// Its initial row is revision zero, unlike an unversioned restored chat.
 			effortRev: 0,
+			effortPick: undefined,
 			fastMode: getPersistedFastMode(),
 			// A compose has no server binding to wait for.
 			bindingUnhydrated: {},

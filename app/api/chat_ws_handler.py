@@ -1920,6 +1920,7 @@ class ChatWebSocketHandler:
         if placed_remote and not await self._may_send_elsewhere(session_id):
             return
         owner_device = await self._network_owner(session_id) if placed_remote else None
+        _, requested_rev = turn_manager._split_effort_rev(overrides)
         if owner_device:
             from app.network import control
             # submit_turn exports this send's lifted blobs; the owner imports
@@ -1939,10 +1940,13 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
             if isinstance(submitted, dict) and type(submitted.get("effort_rev")) is int:
-                # The owner saved a different effort revision than this client
-                # sent: its sockets do not reach this worker's clients, so
-                # tell them here (#1609).
-                await turn_manager.announce_effort(session_id, submitted)
+                if submitted["effort_rev"] <= (requested_rev or 0):
+                    await self.send_json({"type": "effort_restored", "session_id": session_id,
+                                          "client_message_id": client_message_id,
+                                          "effort": submitted.get("effort"), "effort_rev": submitted["effort_rev"],
+                                          "effort_pick": submitted.get("effort_pick")})
+                else:
+                    await turn_manager.announce_effort(session_id, submitted)
             if not client_message_id:
                 await self.send_json({"type": "query_queued", "session_id": session_id})
             return submitted
@@ -1951,9 +1955,11 @@ class ChatWebSocketHandler:
         # supersede, enqueue). ``submit_async`` pays ONE thread hop for all
         # three and still fires the kick on this loop, so the send path never
         # blocks the worker's other sockets.
+        seen: dict = {}
         turn_id = await turn_manager.submit_async(
             session_id,
             "user",
+            effort_seen=seen,
             prompt=prompt,
             profile_id=submit_profile_id,
             project_id=project_id,
@@ -1967,6 +1973,9 @@ class ChatWebSocketHandler:
             # three places a person-entered row is admitted, for the owner only.
             person_entered=self._person_entry,
         )
+        if seen and seen["effort_rev"] <= (requested_rev or 0):
+            await self.send_json({"type": "effort_restored", "session_id": session_id,
+                                  "client_message_id": client_message_id, **seen})
 
         if str(turn_id or "").startswith(session_handoff.HELD_PREFIX):
             await self._v2_broadcast_queue(session_id)

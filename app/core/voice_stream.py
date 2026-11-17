@@ -344,6 +344,8 @@ async def delegate_to_selected_model(session_id: str, transcript: str, on_submit
     # send cannot save it over a level picked since, and runs on that one
     # instead (#1609, turn_manager.EFFORT_REV).
     overrides[turn_manager.EFFORT_REV] = int(row.get("effort_rev") or 0)
+    if row.get("effort_pick"):
+        overrides["effort_pick"] = row["effort_pick"]
     if provider_id is None and normal_conversation:
         provider_id = row.get("provider_id")
     # The voice guidance is NOT a system-prompt append: that changed the

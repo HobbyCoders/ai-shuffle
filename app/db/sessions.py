@@ -994,6 +994,7 @@ def set_session_run_binding(
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
     effort_rev_base: Optional[int] = None,
+    effort_pick_base: Optional[str] = None,
     effort_explicit: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Persist the run binding a turn actually used onto its session.
@@ -1024,14 +1025,12 @@ def set_session_run_binding(
 
     Every write that changes ``effort`` adds one to ``effort_rev`` in the same
     statement; an explicit pick also advances it for the same level, so
-    one revision always names one level. ``effort_rev_base`` is the revision a
+    a revision and pick identity name one choice. ``effort_rev_base`` is the revision a
     sending composer last saw: the effort is then written only while it is
-    still the row's revision, and a level sent from any other view is dropped
-    (#1609). A base above the row's revision means the row lost its count (a
-    database restored from a backup under an open tab): the row's level
-    stands and its revision moves past the base, so that client adopts it
-    instead of holding a revision no answer can ever exceed. A level with no
-    base (an older client, the API, a connector) is written only on a row
+    still the row's revision and its owner-issued pick identity matches
+    (#1609). A base above the row's revision can follow a database restore;
+    it never advances the owner's counter. A level with no base (an older
+    client, the API, a connector) is written only on a row
     whose effort never changed (revision 0): it cannot tell whether it is
     older than the row's. ``effort_explicit`` is a change the person asked
     for (the run-settings endpoint): written whatever the revision. The other fields
@@ -1055,39 +1054,27 @@ def set_session_run_binding(
     clean_effort = (effort or "").strip()
     writes_effort = bool(clean_effort or clear_effort)
     level = clean_effort or None
-    # Every right-hand side reads the row as it was before this statement.
-    if effort_explicit:
-        if writes_effort:
-            updates.append(f"effort = {_ph}")
-            values.append(level)
-            updates.append("effort_rev = COALESCE(effort_rev, 0) + 1")
-    elif effort_rev_base is None:
-        if writes_effort:
-            updates.append(
-                f"effort = CASE WHEN COALESCE(effort_rev, 0) = 0 THEN {_ph} ELSE effort END")
-            values.append(level)
-            updates.append(
-                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) = 0 AND effort IS DISTINCT FROM {_ph} "
-                "THEN 1 ELSE effort_rev END")
-            values.append(level)
-    else:
-        base = int(effort_rev_base)
-        if writes_effort:
-            updates.append(
-                f"effort = CASE WHEN COALESCE(effort_rev, 0) = {_ph} THEN {_ph} ELSE effort END")
-            values.extend((base, level))
-            updates.append(
-                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
-                f"WHEN COALESCE(effort_rev, 0) = {_ph} AND effort IS DISTINCT FROM {_ph} "
-                "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
-            values.extend((base, base, base, level))
+    # Only the owner mints a pick identity. A restored row can reuse a counter,
+    # but a new pick never reuses the identity a pre-restore tab still holds.
+    if writes_effort:
+        from uuid import uuid4
+
+        if effort_explicit:
+            admit, bases = "TRUE", []
+            changed = admit  # even picking the same level invalidates snapshots
         else:
-            # A send that names no level (Auto) writes none, and still moves
-            # a row that lost its count past the sender's revision.
-            updates.append(
-                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
-                "ELSE effort_rev END")
-            values.extend((base, base))
+            admit = f"COALESCE(effort_rev, 0) = {_ph} AND effort_pick IS NOT DISTINCT FROM {_ph}"
+            bases = [effort_rev_base or 0, effort_pick_base]
+            changed = f"({admit}) AND effort IS DISTINCT FROM {_ph}"
+        changed_values = bases if effort_explicit else [*bases, level]
+        updates.extend((
+            f"effort = CASE WHEN {admit} THEN {_ph} ELSE effort END",
+            f"effort_rev = CASE WHEN {changed} THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END",
+            f"effort_pick = CASE WHEN {changed} THEN {_ph} ELSE effort_pick END",
+        ))
+        values.extend([*bases, level, *changed_values, *changed_values, uuid4().hex])
+    elif effort_rev_base is not None:
+        updates.append("effort_rev = effort_rev")  # Auto still needs an admission result
     clean_permission = (permission_mode or "").strip()
     if clean_permission:
         updates.append(f"permission_mode = {_ph}")
@@ -1125,13 +1112,13 @@ def set_session_run_binding(
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} "
-            "RETURNING effort, effort_rev",
+            "RETURNING effort, effort_rev, effort_pick",
             values,
         )
         row = cursor.fetchone()
     if row is None:
         return None
-    return {"effort": row["effort"] or None, "effort_rev": int(row["effort_rev"] or 0)}
+    return {"effort": row["effort"] or None, "effort_rev": int(row["effort_rev"] or 0), "effort_pick": row["effort_pick"]}
 
 
 def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:
@@ -1164,7 +1151,10 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
         assignments += (
             f", effort_rev = CASE WHEN effort IS DISTINCT FROM {placeholder} "
             "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
-        values.append(changes["effort"])
+        from uuid import uuid4
+        assignments += (f", effort_pick = CASE WHEN effort IS DISTINCT FROM {placeholder} "
+                        f"THEN {placeholder} ELSE effort_pick END")
+        values.extend((changes["effort"], changes["effort"], uuid4().hex))
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(

@@ -33,7 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
-import { effortIsNewer, effortRevOf } from './effort-revision';
+import { cancelEffortRecovery, effortIsNewer, effortRevOf, takeEffortRecovery } from './effort-revision';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -215,6 +215,7 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	// and the revision it has (#1609).
 	'effort',
 	'effort_rev',
+	'effort_pick',
 	// A user message was persisted (any device): patched at once so a
 	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
@@ -646,17 +647,18 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					&& (updates.effort === null || typeof updates.effort === 'string')) {
 					const effort = updates.effort as string | null;
 					const rev = effortRevOf(updates.effort_rev);
-					const adopted = { effortLevelOverride: effort, ...(rev !== undefined ? { effortRev: rev } : {}) };
+					const adopted = { effortLevelOverride: effort, ...(rev !== undefined ? { effortRev: rev, effortPick: typeof updates.effort_pick === 'string' ? updates.effort_pick : null } : {}) };
 					const cached = sessionEphemeralCache.restore(updatedSessionId);
 					if (cached && effortIsNewer(rev, cached.effortRev)) {
 						sessionEphemeralCache.save(updatedSessionId, { ...cached, ...adopted });
 					}
 					if (updatedSessionId === getState().sessionId && effortIsNewer(rev, getState().effortRev)) {
+						cancelEffortRecovery(updatedSessionId);
 						update(s => ({ ...s, ...adopted }));
 						onPersistSession();
 					}
 					if (!effortIsNewer(rev, deps.sessionEffortRev?.(updatedSessionId))) {
-						const { effort: _level, effort_rev: _rev, ...rest } = updates;
+						const { effort: _level, effort_rev: _rev, effort_pick: _pick, ...rest } = updates;
 						rowUpdates = rest;
 					}
 				}
@@ -1311,6 +1313,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					'Already sent: the agent read this message before it could be cancelled. Send a follow-up to correct it.',
 					{ category: 'queued-message-already-delivered', session_id: removalSessionId, persist: false }
 				);
+				break;
+			}
+
+			case 'effort_restored': {
+				const sid = getState().sessionId;
+				const rev = effortRevOf(data.effort_rev);
+				if (!sid || data.session_id !== sid || rev === undefined || (data.effort !== null && typeof data.effort !== 'string')) break;
+				if (!takeEffortRecovery(sid, data.client_message_id, rev, getState().effortRev, getState().effortPick)) break;
+				const adopted = { effortLevelOverride: data.effort as string | null, effortRev: rev, effortPick: typeof data.effort_pick === 'string' ? data.effort_pick : null };
+				update(s => ({ ...s, ...adopted }));
+				const cached = sessionEphemeralCache.restore(sid);
+				if (cached) sessionEphemeralCache.save(sid, { ...cached, ...adopted });
+				applyRowUpdates(sid, { effort: adopted.effortLevelOverride, effort_rev: rev, effort_pick: adopted.effortPick });
+				onPersistSession();
 				break;
 			}
 

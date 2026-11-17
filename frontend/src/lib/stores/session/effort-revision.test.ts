@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { effortFromRow, effortIsNewer, effortRevOf, effortRevToSend, restoredEffort } from './effort-revision';
+import { cancelEffortRecovery, noteEffortSend, takeEffortRecovery, effortFromRow, effortIsNewer, effortRevOf, effortRevToSend, restoredEffort } from './effort-revision';
+
+it('only resets the sending chat for its still-current request; a later pick wins', () => {
+	noteEffortSend('a', 'first', 7);
+	expect(takeEffortRecovery('b', 'first', 1, 7)).toBe(false);
+	expect(takeEffortRecovery('a', 'wrong', 1, 7)).toBe(false);
+	expect(takeEffortRecovery('a', 'first', 1, 7)).toBe(true);
+	noteEffortSend('a', 'second', 7);
+	cancelEffortRecovery('a');
+	expect(takeEffortRecovery('a', 'second', 1, 7)).toBe(false);
+});
+
+it('cannot use a call answer after another pick reused the held counter', () => {
+	noteEffortSend('a', 'call', 2, 'old');
+	expect(takeEffortRecovery('a', 'call', 1, 2, 'fresh')).toBe(false);
+});
 
 describe('effortRevOf', () => {
 	it('reads a count and nothing else', () => {

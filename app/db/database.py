@@ -2561,6 +2561,9 @@ def _run_column_migrations(cursor: Any) -> None:
     if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "effort_rev"):
         cursor.execute("ALTER TABLE sessions ADD COLUMN effort_rev INTEGER")
         migrations_applied.append("sessions.effort_rev")
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "effort_pick"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN effort_pick TEXT")
+        migrations_applied.append("sessions.effort_pick")
 
     # Snooze (sidebar): a settled chat that returns to Active on its own at
     # this time. NULL on every pre-existing row = not snoozed. Projected from

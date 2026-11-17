@@ -455,7 +455,7 @@ _register(Collection(
             "mode", "hidden", "is_worker", "pr_number", "pr_url", "pr_state", "pull_requests", "work_ms",
             "work_started_at", "last_user_message_at", "last_user_message_seq", "last_user_message_epoch",
             "last_assistant_question_seq", "last_assistant_question_epoch", "away_mode", "provenance_owner", "fast_pinned",
-            "push_attention_state", "effort_rev"),
+            "push_attention_state", "effort_rev", "effort_pick"),
     json_fields=("placement", "workspace_project_ids", "pull_requests", "push_attention_state"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
     materialize_hook=_materialize_session_questions,
@@ -465,7 +465,7 @@ _register(Collection(
     # changed), so an upgrade does not re-sign every session. A record from an
     # older owner omits it and the mirror keeps NULL, which reads as 0; that
     # owner ignores the revision a send carries (#1609).
-    late_fields=("effort_rev",),
+    late_fields=("effort_rev", "effort_pick"),
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
                   "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
                   "workspace_facts"),

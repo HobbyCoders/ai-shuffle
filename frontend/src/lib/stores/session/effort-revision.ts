@@ -10,6 +10,22 @@
  * client was never told is outdated.
  */
 
+// Only this tab's latest send may take an owner revision lower than its own
+// after a database restore. A pick or an intervening effort push cancels it.
+let pending: { chat: string; command: string; base: number; pick?: string | null } | undefined;
+export function noteEffortSend(chat: string | null, command: string, base: unknown, pick?: string | null) {
+	pending = chat && typeof base === 'number' ? { chat, command, base, pick } : undefined;
+}
+export function cancelEffortRecovery(chat: string | null) {
+	if (pending?.chat === chat) pending = undefined;
+}
+export function takeEffortRecovery(chat: string | null, command: unknown, _rev: number, held: number | undefined, heldPick?: string | null) {
+	if (!pending || pending.chat !== chat || pending.command !== command) return false;
+	const { base, pick } = pending;
+	pending = undefined;
+	return base === held && (pick ?? null) === (heldPick ?? null);
+}
+
 /** A revision as the server sends it, or undefined (a server too old to send one). */
 export function effortRevOf(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
@@ -27,9 +43,9 @@ export function effortIsNewer(rev: number | undefined, held: number | undefined)
 }
 
 /** The level and the revision it was last acknowledged at, as a client holds them. */
-type HeldEffort = { effortLevelOverride: string | null; effortRev?: number };
+type HeldEffort = { effortLevelOverride: string | null; effortRev?: number; effortPick?: string | null };
 /** The same pair as a session row carries it. */
-type RowEffort = { effort?: string | null; effort_rev?: number };
+type RowEffort = { effort?: string | null; effort_rev?: number; effort_pick?: string | null };
 
 /**
  * The level and revision a chat opens with: the copy cached when this client
@@ -45,10 +61,10 @@ type RowEffort = { effort?: string | null; effort_rev?: number };
  */
 export function restoredEffort(cached: HeldEffort | null | undefined, row: RowEffort | undefined): HeldEffort {
 	const rowRev = effortRevOf(row?.effort_rev);
-	const fromRow = { effortLevelOverride: row?.effort ?? null, effortRev: rowRev };
+	const fromRow = { effortLevelOverride: row?.effort ?? null, effortRev: rowRev, effortPick: row?.effort_pick };
 	if (!cached) return fromRow;
 	const cachedRev = effortRevOf(cached.effortRev);
-	const held = { effortLevelOverride: cached.effortLevelOverride ?? null, effortRev: cachedRev };
+	const held = { effortLevelOverride: cached.effortLevelOverride ?? null, effortRev: cachedRev, effortPick: cached.effortPick };
 	if (cachedRev !== undefined) return rowRev !== undefined && rowRev > cachedRev ? fromRow : held;
 	if (rowRev !== undefined || held.effortLevelOverride == null) return fromRow;
 	return held;
@@ -67,7 +83,7 @@ export function restoredEffort(cached: HeldEffort | null | undefined, row: RowEf
 export function effortFromRow(state: HeldEffort, row: RowEffort | undefined): HeldEffort | null {
 	const rowRev = effortRevOf(row?.effort_rev);
 	if (!row || rowRev === undefined || (state.effortRev !== undefined && rowRev <= state.effortRev)) return null;
-	return { effortLevelOverride: row.effort ?? null, effortRev: rowRev };
+	return { effortLevelOverride: row.effort ?? null, effortRev: rowRev, effortPick: row?.effort_pick };
 }
 
 /**
@@ -77,6 +93,10 @@ export function effortFromRow(state: HeldEffort, row: RowEffort | undefined): He
  * A chat created in this tab was never told a revision. Its sidebar row names
  * one, and that is the composer's as long as the row names the same level.
  */
+export function effortPickToSend(state: HeldEffort, row: RowEffort | undefined) {
+	return state.effortRev !== undefined ? state.effortPick : row?.effort_pick;
+}
+
 export function effortRevToSend(state: HeldEffort, row: RowEffort | undefined): number | undefined {
 	if (state.effortRev !== undefined) return state.effortRev;
 	const rowRev = effortRevOf(row?.effort_rev);

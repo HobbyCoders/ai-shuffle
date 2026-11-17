@@ -1142,11 +1142,11 @@ async def test_control_turns_keep_a_newer_effort_and_answer_with_it(workers, mon
     with b.active():
         # Holding the answered revision, B's own change is saved and answered.
         answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
-                                           overrides={"model": "opus", "effort": "max", "effort_rev": 1})
+                                           overrides={"model": "opus", "effort": "max", "effort_rev": 1, "effort_pick": answer["effort_pick"]})
         assert (answer["effort"], answer["effort_rev"]) == ("max", 2)
         # A current send that changes nothing answers with no level.
         answer = await control.submit_turn(a.device_id, "s-effort", prompt="go",
-                                           overrides={"model": "opus", "effort": "max", "effort_rev": 2})
+                                           overrides={"model": "opus", "effort": "max", "effort_rev": 2, "effort_pick": answer["effort_pick"]})
         assert "effort_rev" not in answer
         # A revision that is not a count is dropped: the send is one without,
         # which runs its level but cannot save it over a changed one.

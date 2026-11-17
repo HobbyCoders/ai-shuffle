@@ -24,6 +24,7 @@ export interface SessionEphemeral {
 	effortLevelOverride: string | null;
 	/** The effort revision that level was last acknowledged at (#1609). */
 	effortRev?: number;
+	effortPick?: string | null;
 	/** Fast service tier — part of the run binding, cached like the rest of it. */
 	fastMode?: boolean;
 	/** Which of profile / access / Fast this entry holds as real values (#418).

@@ -377,6 +377,7 @@ def create_postgres_schema(cursor: Any) -> None:
             -- saves its level only when that is still the row's (#1609).
             -- NULL = never changed (read as 0).
             effort_rev INTEGER,
+            effort_pick TEXT,
             -- Snooze: when a settled (is_active = FALSE) chat returns to
             -- Active on its own. NULL = not snoozed. Projected from the shared
             -- membership record (network_session_active.snoozed_until).

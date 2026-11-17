@@ -781,6 +781,8 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     effort_rev = raw.get("effort_rev")
     if type(effort_rev) is int and effort_rev >= 0:
         overrides["effort_rev"] = effort_rev
+        if isinstance(raw.get("effort_pick"), str) and len(raw["effort_pick"]) == 32:
+            overrides["effort_pick"] = raw["effort_pick"]
     context_window = raw.get("context_window")
     if context_window is not None:
         if type(context_window) is not int or not 0 < context_window <= _MAX_CONTEXT_WINDOW:
@@ -956,6 +958,7 @@ async def _submit_forwarded_turn(body: Dict[str, Any], from_device: str,
         # which this worker's sockets do not reach (#1609).
         result["effort"] = effort_seen.get("effort")
         result["effort_rev"] = effort_seen["effort_rev"]
+        result["effort_pick"] = effort_seen.get("effort_pick")
     if payload.get("compact_first"):
         queued = await run_sync(turns_db.get_turn, turn_id)
         result["compact_turn_id"] = queued["payload"]["compact_before_turn_id"]

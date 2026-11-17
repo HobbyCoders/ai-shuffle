@@ -4,6 +4,14 @@ import {
 	isRegistryHydrated, isReroute, normalizeModel
 } from './models.svelte';
 
+import type { ActiveSessionState } from '$lib/stores/active-session';
+
+export function fittedSendEffort(state: ActiveSessionState) {
+	const model = state.mode === 'voice' ? state.modelOverride : resolveEffortModel(
+		state.modelOverride, state.liveModel, state.liveRequestedModel, state.liveProvider, state.liveRerouted);
+	return reconcileModelEffort(state.effortLevelOverride, resolveModelEffort(model));
+}
+
 export const EFFORT_OPTIONS = [
 	{ value: 'none', label: 'None', description: 'No reasoning' },
 	{ value: 'minimal', label: 'Minimal', description: 'Minimal reasoning' },

@@ -33,7 +33,7 @@
 	import { handoffPending } from '$lib/stores/handoff-pending';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
+	import { persistVoiceContext, idleVoiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
@@ -171,7 +171,7 @@
 		if (!ownsComposer()) return;
 		if (state.mode !== 'voice' || !state.sessionId || state.isRestoringSession) return;
 		const owner = state.sessionId;
-		void persistVoiceContext(owner, voiceContextFor(state, get(sessions).find(session => session.id === owner))).catch(() => {
+		void persistVoiceContext(owner, idleVoiceContextFor(state)).catch(() => {
 			if (get(activeSession).sessionId === owner) {
 				notify('Could not save voice execution settings. Try again before requesting work.', { severity: 'error' });
 			}

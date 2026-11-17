@@ -270,6 +270,8 @@ def persist_send_binding(
     """
     from app.db import database
 
+    overrides = dict(overrides)
+    pick = overrides.pop("effort_pick", None)
     saved = database.set_session_run_binding(
         session_id,
         model=overrides.get("model"),
@@ -277,11 +279,11 @@ def persist_send_binding(
         permission_mode=permission_mode,
         fast=overrides.get("fast"),
         workspace_project_ids=overrides.get("workspace_project_ids"),
-        effort_rev_base=effort_rev,
+        effort_rev_base=effort_rev, effort_pick_base=pick,
     )
     # ``saved`` is the row after the write (a revision always makes one), or
     # None for a session that does not exist.
-    if effort_rev is None or saved is None or saved["effort_rev"] == effort_rev:
+    if effort_rev is None or saved is None or (saved["effort_rev"], saved.get("effort_pick")) == (effort_rev, pick):
         return overrides
     if (overrides.get("effort") or None) != saved["effort"]:
         # The client's view of the level is outdated (another tab, device or
@@ -499,7 +501,8 @@ def _submit_blocking(
         overrides = overrides or None
         payload = {**(payload or {}), WORKER_BOUND: True}
         explicit_permission = False
-    elif source in _BINDING_SOURCES and overrides:
+    elif source in _BINDING_SOURCES and (overrides or effort_rev is not None):
+        overrides = overrides or {}
         try:
             from app.db import database
 
@@ -743,7 +746,8 @@ async def submit_async(
         _kick(session_id)
     if window_pin:
         await _announce_window_pin(session_id, window_pin["context_window"])
-    if effort_seen:
+    _, requested_rev = _split_effort_rev(overrides)
+    if effort_seen and effort_seen["effort_rev"] > (requested_rev or 0):
         await announce_effort(session_id, effort_seen)
     return turn_id
 
@@ -857,7 +861,8 @@ async def announce_effort(session_id: str, seen: Dict[str, Any]) -> None:
 
         await sync_engine.broadcast_session_updated(
             session_id=session_id,
-            updates={"effort": seen.get("effort") or None, "effort_rev": int(seen["effort_rev"])},
+            updates={"effort": seen.get("effort") or None, "effort_rev": int(seen["effort_rev"]),
+                     "effort_pick": seen.get("effort_pick")},
             source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — the turn is queued either way.

@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 const update = vi.hoisted(() => vi.fn(async (_owner: string, _context: unknown) => ({})));
 vi.mock('$lib/api/voice', () => ({ updateVoiceContext: update }));
-import { persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
+import { idleVoiceContextFor, persistVoiceContext, voiceContextFor } from './voiceExecutionContext';
+import { hydrateModelRegistry } from '$lib/constants/models';
+import { effortRegistryFixture } from '$lib/test-stubs/effort-registry';
+vi.mock('$lib/api/client', () => ({ api: { get: async () => effortRegistryFixture } }));
 import type { ActiveSessionState } from '$lib/stores/active-session';
 
 describe('voice execution context', () => {
@@ -22,6 +25,14 @@ describe('voice execution context', () => {
 	it('carries the shown effort with the revision it was saved at', () => {
 		const state = { sessionId: 'chat', effortRev: 3, modelOverride: 'opus', effortLevelOverride: 'low' } as unknown as ActiveSessionState;
 		expect(voiceContextFor(state)).toMatchObject({ effort: 'low', effort_rev: 3 });
+		expect(idleVoiceContextFor(state)).not.toHaveProperty('effort');
+		expect(idleVoiceContextFor(state)).not.toHaveProperty('effort_rev');
+	});
+	it('fits a deliberate call snapshot without writing an idle fit', async () => {
+		await hydrateModelRegistry();
+		const state = { sessionId: 'a', modelOverride: 'prov:or:single', effortRev: 2, effortPick: 'held', effortLevelOverride: 'xhigh' } as ActiveSessionState;
+		expect(voiceContextFor(state)).toMatchObject({ effort: 'high', effort_rev: 2, effort_pick: 'held' });
+		expect(idleVoiceContextFor(state)).not.toHaveProperty('effort_pick');
 	});
 	it('never sends a level without its revision (stage-1 review S6)', () => {
 		// A snapshot with no revision would be saved as a pick over a level
@@ -70,6 +81,6 @@ describe('voice execution context', () => {
 	it('retries a failed setting instead of treating it as saved', async () => {
 		update.mockRejectedValueOnce(new Error('offline'));
 		await expect(persistVoiceContext('retry', { fast: false })).rejects.toThrow('offline');
-		await expect(persistVoiceContext('retry', { fast: false })).resolves.toBeUndefined();
+		await expect(persistVoiceContext('retry', { fast: false })).resolves.toEqual({});
 	});
 });

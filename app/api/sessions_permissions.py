@@ -226,7 +226,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             # The revision the saved level now has (#1609), for the picker and
             # for the announcement. Kept off ``selected``: that is the turn's
             # run binding, and a revision is not part of it.
-            selected = {**selected, "effort_rev": saved["effort_rev"]}
+            selected = {**selected, "effort_rev": saved["effort_rev"], "effort_pick": saved.get("effort_pick")}
         waiting = fast_waiting_turn(session_id)
         return {**selected, "fast_applies_turn": waiting} if waiting else selected
 
@@ -303,6 +303,7 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
         updates["effort"] = result["effort"]
         if type(result.get("effort_rev")) is int:
             updates["effort_rev"] = result["effort_rev"]
+            updates["effort_pick"] = result.get("effort_pick")
     if not updates:
         return
     try:

@@ -471,6 +471,16 @@ describe('remembered worker on send', () => {
 });
 
 describe('message-sender voice ownership', () => {
+	it('routes a call-send owner answer through the command-scoped text recovery handler', async () => {
+		const { deps } = makeDeps(baseState({ sessionId: 'owner', effortRev: 7 }));
+		const answer = vi.fn();
+		voice.isCallActiveFor.mockReturnValueOnce(true);
+		context.voiceContextFor.mockReturnValueOnce({ effort_rev: 7, effort: 'high' });
+		context.persistVoiceContext.mockImplementationOnce(async () => ({ effort: 'low', effort_rev: 1 }) as never);
+		expect(await createMessageSender({ ...deps, onEffortAnswer: answer }).sendMessage('call')).toBe(true);
+		expect(answer).toHaveBeenCalledWith(expect.objectContaining({ type: 'effort_restored', session_id: 'owner',
+			client_message_id: expect.any(String), effort: 'low', effort_rev: 1 }));
+	});
 	it('releases a never-settling context save after ten seconds without sending', async () => {
 		vi.useFakeTimers();
 		try {
