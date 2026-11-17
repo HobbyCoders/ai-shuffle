@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	agentProjectOnThisWorker,
 	resolvePersistedProject,
 	resolveSessionProject
 } from './session-project';
@@ -81,5 +82,26 @@ describe('resolvePersistedProject', () => {
 			{ project: '', projectV2Id: null },
 			'proj-default'
 		)).toEqual({ project: 'proj-default', projectV2Id: null });
+	});
+});
+
+describe('agentProjectOnThisWorker (#1659)', () => {
+	const projects = [{ id: 'app' }, { id: 'mine' }];
+	const catalog = [
+		{ project_v2_id: 'pv2-theirs', local_project_id: 'mine' },
+		{ project_v2_id: 'pv2-elsewhere', local_project_id: null }
+	];
+	it('a chat this worker runs offers its own project', () => {
+		expect(agentProjectOnThisWorker({ project: 'app', projectV2Id: 'pv2-theirs' }, projects, catalog)).toBe('app');
+	});
+	it('a chat another worker runs offers this worker\'s checkout of the same shared project', () => {
+		// Its legacy id was `app` (an unrelated project here); the shared id links `mine`.
+		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-theirs' }, projects, catalog)).toBe('mine');
+	});
+	it('no checkout here, or a catalog entry naming a project this worker lacks: no project agents', () => {
+		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-elsewhere' }, projects, catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-unknown' }, projects, catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-theirs' }, [{ id: 'app' }], catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker({ project: '', projectV2Id: null }, projects, catalog)).toBeUndefined();
 	});
 });

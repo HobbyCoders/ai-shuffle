@@ -470,7 +470,10 @@
 			"globs": [
 				"frontend/tests/journeys/remote-chat-mentions.journey.mjs",
 				"frontend/src/lib/components/FileAutocomplete.svelte",
-				"app/api/session_files.py"
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/stores/session/session-project.ts",
+				"app/api/session_files.py",
+				"app/api/sessions_helpers.py"
 			]
 		},
 		{

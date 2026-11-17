@@ -45,6 +45,25 @@ export function resolveSessionProject(input: {
 	return { project: '', projectV2Id: null };
 }
 
+/**
+ * The project on THIS worker whose agents the composer offers. A chat this
+ * worker runs names it directly. A chat another worker runs holds only its
+ * shared id (above), so its agents come from this worker's own checkout of
+ * that same project, found through the catalog by the shared id; the legacy
+ * id, which may name an unrelated project here, is never used. No local
+ * checkout: no project agents.
+ */
+export function agentProjectOnThisWorker(
+	state: { project: string; projectV2Id: string | null },
+	projects: readonly { id: string }[],
+	catalog: readonly { project_v2_id: string; local_project_id: string | null }[]
+): string | undefined {
+	if (state.project) return state.project;
+	if (!state.projectV2Id) return undefined;
+	const local = catalog.find((p) => p.project_v2_id === state.projectV2Id)?.local_project_id;
+	return local && projects.some((p) => p.id === local) ? local : undefined;
+}
+
 /** Persisted snapshot / skip-restore: v2-only keeps `''`, never the last local default. */
 export function resolvePersistedProject(
 	persisted: { project?: string; projectV2Id?: string | null },

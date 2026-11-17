@@ -52,7 +52,8 @@
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration, tabRestoreTarget } from '$lib/stores/session/session-init';
-	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
+	import { agentProjectOnThisWorker } from '$lib/stores/session/session-project';
 	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
@@ -141,6 +142,9 @@
 		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
 	);
 	const mentionsAvailable = $derived(!!mentionProjectId);
+	// Project agents are this worker's own (#1659: never by the legacy id of a
+	// chat another worker runs).
+	const subagentProjectId = $derived(agentProjectOnThisWorker($activeSession, $projects, $clusterProjects));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
@@ -2169,7 +2173,7 @@
 							bind:this={fileAutocompleteRef}
 							inputValue={plainTextValue}
 							projectId={mentionProjectId}
-							subagentProjectId={$activeSession.project || undefined}
+							subagentProjectId={subagentProjectId}
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}
