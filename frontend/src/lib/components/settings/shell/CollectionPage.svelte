@@ -132,7 +132,7 @@
 	// place is reset here too. Beside the list (split panes) none of this
 	// runs: the pane reset above handles a newly picked item.
 	const shownItem = $derived(
-		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
+		(settingsNav.stacked || replace) && settingsNav.view === 'page' ? null : openItem
 	);
 	// Back puts the row it was opened from where it was on screen, so a list
 	// laid out again meanwhile (the phone turned) still shows that row; with
@@ -259,7 +259,7 @@
 	// into the detail's title, or back to the row it was opened from.
 	let lastOpen: string | null | undefined;
 	$effect(() => {
-		const current = openItem ?? null;
+		const current = shownItem;
 		const previous = lastOpen;
 		lastOpen = current;
 		if (previous === undefined || previous === current) return;
@@ -343,7 +343,7 @@
 	bind:this={el}
 	{onfocusin}
 	style:--st-list-width="{width}px"
-	data-replace={replace ? (openItem ? 'detail' : 'list') : undefined}
+	data-replace={replace ? (shownItem ? 'detail' : 'list') : undefined}
 	data-narrow={narrow ? '' : undefined}
 >
 	<ListDivider bind:width {containerWidth} onchange={(w) => (preferred = w)} />
@@ -379,7 +379,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={onPaneScroll}>
+	<section class="st-dpane st-scroll" aria-label="Details" hidden={replace && !!openItem && !shownItem} bind:this={pane} onscroll={onPaneScroll}>
 		<!-- A detail that is only a state ("Not found", "Loading…", no access)
 		     has no Back of its own. Where it replaces the list, this one shows
 		     (settings.css); everywhere else it is not displayed. -->

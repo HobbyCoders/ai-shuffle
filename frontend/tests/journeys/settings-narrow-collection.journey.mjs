@@ -667,6 +667,42 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
    expect(await entryKey(page) === second, 'second detail survives list return');
   }
  },
+ ...[390, 800].map(width => ({
+  name: `same-logger-retained-list-${width}`, viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) { await stub(page); await openSettings(page, status, 1280); },
+  async act({ page, mark }) {
+   const row = name => page.locator('.st-lcol [data-settings-item]').filter({ hasText: name }).first();
+   const detail = name => page.locator('.st-dpane').getByText(name, { exact: true }).filter({ visible: true }).first();
+   await mark('revisit Logs with a selected row beside its list');
+   await category(page, 'Logs');
+   await row('Alpha started').click(); await detail('Alpha started').waitFor();
+   await category(page, 'Integrations');
+   const before = await entryKey(page);
+   // The Logs nav label now includes the error count.
+   await settingsNav(page).getByRole('button', { name: /^Logs\b/ }).click();
+   await detail('Alpha started').waitFor();
+   const list = await entryKey(page);
+   await row('Alpha ready').click(); await detail('Alpha ready').waitFor();
+   const opened = await entryKey(page);
+   await mark('return to the filtered list where the detail replaces it');
+   await page.setViewportSize({ width, height: 844 });
+   await row('Alpha ready').waitFor({ state: 'hidden' });
+   await button(page, 'Same logger').click(); await row('Alpha ready').waitFor();
+   expect(await entryKey(page) === list, 'returned to the existing list entry despite its retained selection');
+   expect(await visibleLogRows(page) === 2 && await focusInList(page), 'two filtered rows and focus in the list');
+   expect(!await detail('Alpha started').count(), 'retained detail does not displace the narrow list');
+   await mark('Back leaves Logs; Forward retraces the list and detail');
+   await page.goBack();
+   await page.getByRole('heading', { name: 'Integrations', exact: true, level: 1 }).filter({ visible: true }).first().waitFor();
+   expect(await entryKey(page) === before, 'one Back leaves Logs');
+   await page.goForward(); await row('Alpha ready').waitFor();
+   expect(await entryKey(page) === list, 'Forward lands on the original list');
+   await page.setViewportSize({ width: 1280, height: 800 }); await detail('Alpha started').waitFor();
+   expect(await entryKey(page) === list && await visibleLogRows(page) === 2, 'widening reveals the retained selection without navigating');
+   await page.goForward(); await detail('Alpha ready').waitFor();
+   expect(await entryKey(page) === opened, 'Forward restores the explicit detail entry');
+  }
+ })),
  {
   name: 'wide-split-unchanged', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {

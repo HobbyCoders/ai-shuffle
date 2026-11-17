@@ -331,7 +331,8 @@ export class SettingsNavigation {
 		const previous = shellHistory.place?.settings;
 		const next = this.position(view, previous?.depth ?? 0);
 		if (view === 'detail' && previous?.category === next.category) {
-			if (previous.view === 'page' && !previous.item) next.listDepth = previous.depth;
+			// A category entry is the list even when it remembers a selected row for split view.
+			if (previous.view === 'page') next.listDepth = previous.depth;
 			else if (previous.listDepth !== undefined) next.listDepth = previous.listDepth;
 		}
 		this.view = view;
