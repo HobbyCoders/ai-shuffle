@@ -228,7 +228,7 @@ export interface ActiveSessionState {
 	 * project a chat uses is `project`/`projectV2Id`. A tag for another chat
 	 * reads as absent, so a writer that misses it cannot leak the last chat's.
 	 */
-	sessionRowProject?: { sessionId: string | null; projectId: string | null; sentV2Id?: string | null } | null;
+	sessionRowProject?: { sessionId: string | null; projectId: string | null; sentV2Id?: string | null; sentMode?: SessionMode } | null;
 	totalTokensIn: number;
 	totalTokensOut: number;
 	totalCacheCreationTokens: number;
@@ -550,7 +550,7 @@ function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 		if (!prev.sessionId && next.sessionId && next.createdFromComposer
 			&& next.sessionRowProject?.sessionId === null) {
 			const { projectId, sentV2Id } = next.sessionRowProject;
-			next = { ...next, project: projectId ?? '', projectV2Id: sentV2Id ?? null,
+			next = { ...next, mode: next.sessionRowProject.sentMode ?? next.mode, project: projectId ?? '', projectV2Id: sentV2Id ?? null,
 				sessionRowProject: { sessionId: next.sessionId, projectId } };
 		}
 		next = holdSharedProjectForRemote(next);

@@ -631,7 +631,7 @@ describe('the open chat\'s owner changes or settles (#1659)', () => {
 		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
 		vi.spyOn(api, 'post').mockImplementation(async () => {
 			// A different selection before the creation response binds the id.
-			activeSession.setProject('picked-later');
+			activeSession.setProject('');
 			return { session_id: 'owned' };
 		});
 		Object.assign(activeSession.current, {
@@ -640,13 +640,26 @@ describe('the open chat\'s owner changes or settles (#1659)', () => {
 		});
 		// The real create path: newSessionWorker marks the owner, then the id binds.
 		await expect(activeSession.startSessionWithoutPrompt()).resolves.toBe('owned');
-		expect(activeSession.current).toMatchObject({ sessionId: 'owned', isRemote: true, project: '', projectV2Id: 'v2-theirs' });
+		expect(activeSession.current).toMatchObject({ sessionId: 'owned', mode: 'code', isRemote: true, project: '', projectV2Id: 'v2-theirs' });
 		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
 		// The project the compose sent is the row's stored id, for the agents check.
 		expect(openChatRowProjectId(activeSession.current)).toBe('app');
 		// Its first row (same owner) leaves it so.
 		activeSession.reconcileOwner([row(true)]);
 		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+		vi.restoreAllMocks();
+	});
+
+	it('a later project pick cannot give an opening projectless chat a code lane', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		vi.spyOn(api, 'post').mockImplementation(async () => {
+			activeSession.setProject('later', 'v2-later');
+			return { session_id: 'owned' };
+		});
+		Object.assign(activeSession.current, { sessionId: null, mode: 'chat', profile: 'coding', project: '', projectV2Id: null,
+			deviceIntent: { id: 'peer', name: 'Peer worker' }, isRemote: undefined, isRestoringSession: false });
+		await expect(activeSession.startSessionWithoutPrompt()).resolves.toBe('owned');
+		expect(activeSession.current).toMatchObject({ sessionId: 'owned', mode: 'chat', project: '', projectV2Id: null });
 		vi.restoreAllMocks();
 	});
 
