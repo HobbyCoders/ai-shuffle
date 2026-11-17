@@ -1903,6 +1903,7 @@ class HarnessAdapter(ProviderAdapter):
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
+        submitted_prompt = prompt
         if self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_delegated_command, expand_native_command
 
@@ -1977,6 +1978,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
+                submitted_prompt=submitted_prompt if content != submitted_prompt else None,
                 context_pin=self._memory_context_pin(content),
                 host_time_note=bool(note) and self._host_time_note_rendered,
                 accepted_at=(getattr(self, "_owner_receipt", {}).get("owner_message_at") if source in ("user", "queue") else None),
@@ -2691,6 +2693,7 @@ class HarnessAdapter(ProviderAdapter):
                 if name in ("TurnStarted", "ContextCompaction"):
                     rows.append({
                         "_cls": name, "node_id": getattr(event, "node_id", None),
+                        "context_node_id": getattr(event, "context_node_id", None),
                         "reason": getattr(event, "reason", None),
                         "model": getattr(event, "model", None),
                         "provider": getattr(event, "provider", None),
@@ -2709,7 +2712,7 @@ class HarnessAdapter(ProviderAdapter):
             return True
         started = False
         for row in rows:
-            if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
+            if row.get("_cls") == "TurnStarted" and (row.get("context_node_id") or row.get("node_id")) == node_id:
                 started = True
                 # A new adapter may use a different model/provider (including
                 # switching between native and CLI). Its own history, not the
@@ -2759,8 +2762,8 @@ class HarnessAdapter(ProviderAdapter):
     def _observe_memory_event(self, event: Any) -> None:
         """Follow the live turn for the # Memory bookkeeping.
 
-        A turn that carried a full snapshot names its user node in
-        TurnStarted: that node becomes the trusted one. A Claude Code
+        A turn that carried a full snapshot names its context node (the
+        user node on ordinary turns) in TurnStarted: trust that node. A Claude Code
         compaction drops the trust, so the next user message carries the full
         snapshot again, unless the SessionStart hook already put the current
         one back for that compaction (:meth:`_memory_put_back_held`). A
@@ -2771,8 +2774,7 @@ class HarnessAdapter(ProviderAdapter):
         name = type(event).__name__
         if name == "TurnStarted" and self._memory_full_pending:
             self._memory_full_pending = False
-            node_id = getattr(event, "node_id", None)
-            self._memory_trusted_node = node_id or None
+            self._memory_trusted_node = getattr(event, "context_node_id", None) or event.node_id
         elif name == "ContextCompacting" and getattr(event, "active", False):
             self._memory_compacting_seq = int(getattr(event, "seq", -1))
         elif name == "ContextCompaction":
@@ -3498,6 +3500,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         from fluid.messages.content import Text as FluidText
         from fluid.messages.content import ToolResultBlock as FluidToolResult
+        from fluid.messages.content import is_harness_note
 
         from app.core.provider.fluid_transcript import prompt_text
 
@@ -3509,7 +3512,7 @@ class HarnessAdapter(ProviderAdapter):
             if role == "assistant" and prompts:
                 has_pair = True
                 continue
-            if role != "user":
+            if role != "user" or is_harness_note(message):
                 continue
             blocks = []
             for block in getattr(message, "content", None) or []:

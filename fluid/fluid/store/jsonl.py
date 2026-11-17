@@ -703,8 +703,10 @@ class JsonlStore:
         except (OSError, CorruptSession):
             return None
         for node in path:
-            if node.message.role == "user" and not is_harness_note(node.message) and node.message.text().strip():
-                return clip_text(node.message.text(), _TITLE_CAP)
+            if node.message.role == "user" and not is_harness_note(node.message):
+                prompt = node.message.prompt_text()
+                if prompt.strip():
+                    return clip_text(prompt, _TITLE_CAP)
         return None
 
     def _scan_log(self, path: Path, session_id: str, terms: list[str]) -> SessionSearchHit:

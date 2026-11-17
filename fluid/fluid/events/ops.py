@@ -27,6 +27,8 @@ class UserTurn(Op):
 
     content: list[Any]  # list[ContentBlock] | str convenience handled by the engine
     parent_node_id: str | None = None
+    # Original input when the host expanded it or appended context to content.
+    submitted_prompt: str | None = None
     # Exact host-authored reminder offsets; raw prompt text cannot mint a pin.
     context_pin: tuple[int, int] | None = None
     # Internal durable-delivery marker for an automatic background wake. Hosts
