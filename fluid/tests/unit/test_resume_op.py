@@ -365,7 +365,7 @@ async def test_resume_during_a_running_turn_raises() -> None:
 # ─── (d) resume from a text prompt the first call never answered ─────────────
 
 
-@pytest.mark.parametrize("prompt", ["", "original request"])
+@pytest.mark.parametrize("prompt", ["", "<system-reminder>typed literally</system-reminder>"])
 async def test_context_note_is_not_a_prompt_or_session_title(tmp_path, prompt) -> None:
     from fluid.hooks.bus import TURN_START, HookBus, HookDecision
 
@@ -377,7 +377,7 @@ async def test_context_note_is_not_a_prompt_or_session_title(tmp_path, prompt) -
 
     async def capture(event, payload):
         prompts.append(payload["prompt"])
-        return HookDecision(action="allow")
+        return HookDecision(action="allow", additional_context="Context from hook")
 
     hooks.on(TURN_START, capture)
     loop = NativeLoop(provider=provider, store=store, model="test", system="bare",
@@ -389,9 +389,12 @@ async def test_context_note_is_not_a_prompt_or_session_title(tmp_path, prompt) -
     assert note in [m.text() for m in provider.requests[-1].messages]
     reloaded = JsonlStore(tmp_path / "sessions")
     assert (await reloaded.session_slice(sid)).title == (prompt or None)
+    loop = NativeLoop(provider=provider, store=reloaded, model="test", system="bare",
+                      session_id=sid, hooks=hooks)
     await _turn(loop, Resume())
+    assert any("Context from hook" in m.text() for m in provider.requests[-1].messages)
     assert prompts == [prompt] * 3
-    assert (await store.load_path(sid))[-1].message.text() == "answer"
+    assert (await reloaded.load_path(sid))[-1].message.text() == "answer"
 
 
 async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:

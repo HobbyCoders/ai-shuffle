@@ -472,7 +472,8 @@ async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(
                  context_window=200_000, max_tokens=8192)
     await _turn(loop, UserTurn(content=[Text("original request"), *(Text(c * 24_000) for c in "abcd")]))
     (original,) = await store.load_path(sid)
-    original.message.context_pin = None  # pre-pinning transcript, produced by the real loop
+    original.message.context_pin = None  # legacy node without host provenance
+    original.message.submitted_prompt = None
     if old_repair:
         note = environment_note_parts(git_repo)[0]
         await store.append(sid, SessionNode(

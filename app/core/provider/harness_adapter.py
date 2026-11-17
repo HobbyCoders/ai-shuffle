@@ -1906,6 +1906,7 @@ class HarnessAdapter(ProviderAdapter):
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
+        submitted_prompt = prompt
         if self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_delegated_command, expand_native_command
 
@@ -1980,6 +1981,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
+                submitted_prompt=submitted_prompt if content != submitted_prompt else None,
                 context_pin=self._memory_context_pin(content),
                 host_time_note=bool(note) and self._host_time_note_rendered,
                 accepted_at=(getattr(self, "_owner_receipt", {}).get("owner_message_at") if source in ("user", "queue") else None),

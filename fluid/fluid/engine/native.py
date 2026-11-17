@@ -2769,7 +2769,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
             await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
-                sid, turn_id, prompt.message.text(), with_context=False
+                sid, turn_id, prompt.message.prompt_text(), with_context=False
             )
             if blocked:
                 return
@@ -2782,6 +2782,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._run_manual_compaction(sid, turn_id, op.source)
             return
 
+        submitted_prompt = op.submitted_prompt
+        if submitted_prompt is None:
+            submitted_prompt = op.content if isinstance(op.content, str) else _plain_text(op.content)
         op, question_ids = await self._question_turn_content(op)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
@@ -2842,7 +2845,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             thinking=self._session_thinking.get(sid),
         ))
         await self._emit_profile_resolved(sid, turn_id)
-        blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
+        blocked, hook_context = await self._turn_start_hook(sid, turn_id, submitted_prompt)
         if blocked:
             return
         if hook_context:
@@ -2860,6 +2863,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             details_at += 1
         if details_block is not None:
             _add_pinned_block(user_node.message, details_block, details_at)
+        user_node.message.record_prompt(submitted_prompt)
         await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
