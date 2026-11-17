@@ -43,7 +43,7 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
-	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel } from '$lib/constants/model-effort';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel, selectionIsRequestedModel } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
@@ -329,6 +329,7 @@
 	// changed since.
 	const rerouted = $derived(
 		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider, $activeSession.liveRerouted)
+		&& selectionIsRequestedModel(modelValue, liveRequestedModel, $activeSession.liveProvider)
 	);
 	const hasModelRoute = $derived(Boolean($activeSession.sessionId || getClaudeAuth().auth_kind || decodeProviderModel(modelValue)));
 	const selectedModelLabel = $derived(hasModelRoute ? getModelLabel(modelValue) : 'Select model');

@@ -111,6 +111,9 @@ describe('authoritative effort capabilities', () => {
   expect(resolveEffortModel('sonnet', 'haiku', 'opus', null)).toBe('sonnet');
   expect(resolveEffortModel('glm', 'glm', 'glm', 'or')).toBe('prov:or:glm');
   expect(resolveEffortModel('prov:other:glm', 'glm', 'glm', 'or')).toBe('prov:other:glm');
+  expect(resolveEffortModel('prov:or:argon', 'pro', 'argon', 'or', true)).toBe('pro');
+  expect(resolveEffortModel('prov:or:hydrogen', 'pro', 'argon', 'or', true)).toBe('prov:or:hydrogen');
+  expect(resolveEffortModel('prov:other:argon', 'pro', 'argon', 'or', true)).toBe('prov:other:argon');
  });
  it('prefers the backend rerouted flag over the family heuristic', () => {
   // Same family, but the backend says a safety check moved the turn.

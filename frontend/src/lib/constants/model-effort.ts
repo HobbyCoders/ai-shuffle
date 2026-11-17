@@ -1,7 +1,7 @@
 /** Effective effort capabilities shared by every composer surface. */
 import {
 	decodeProviderModel, encodeProviderModel, getDefaultModel, getNativeModel, getProviders,
-	isRegistryHydrated, isReroute, normalizeModel
+	canonicalEffortModel, isRegistryHydrated, isReroute
 } from './models.svelte';
 
 export const EFFORT_OPTIONS = [
@@ -17,6 +17,19 @@ export const EFFORT_OPTIONS = [
 export const UNKNOWN_EFFORT = 'Reasoning effort capabilities are not known yet. Refresh models in provider settings to try again.';
 export const NO_ADJUSTABLE_EFFORT = 'Adjustable reasoning effort is not available for this model in AI Shuffle.';
 
+/** A model_info frame describes one turn, not the user's next model pick. */
+export function selectionIsRequestedModel(selection: string | null, requested: string | null, liveProvider: string | null): boolean {
+	if (!requested) return false;
+	const selected = selection || getDefaultModel();
+	if (selected === requested) return true;
+	const pick = decodeProviderModel(selected), asked = decodeProviderModel(requested);
+	if (pick || asked) {
+		return !!pick && pick.modelId === (asked?.modelId ?? requested)
+			&& (asked ? pick.providerId === asked.providerId : !liveProvider || pick.providerId === liveProvider);
+	}
+	return canonicalEffortModel(selected) === canonicalEffortModel(requested);
+}
+
 /** Only apply live routing information while it still describes the selected turn. */
 export function resolveEffortModel(
 	selection: string | null,
@@ -27,10 +40,7 @@ export function resolveEffortModel(
 ): string {
 	const selected = selection || getDefaultModel();
 	const composite = decodeProviderModel(selected);
-	const requested = decodeProviderModel(liveRequestedModel);
-	const sameRequest = !!liveRequestedModel && (selected === liveRequestedModel ||
-		(!composite && !requested && normalizeModel(selected) === normalizeModel(liveRequestedModel)));
-	if (!sameRequest) return selected;
+	if (!selectionIsRequestedModel(selected, liveRequestedModel, liveProvider)) return selected;
 	if (liveProvider && !composite) return encodeProviderModel(liveProvider, liveModel || selected);
 	if (isReroute(liveModel, liveRequestedModel, liveProvider, liveRerouted)) return liveModel!;
 	return selected;
