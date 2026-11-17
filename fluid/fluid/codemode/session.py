@@ -637,6 +637,57 @@ class CodeModeSession:
                 # to know they were reached from inside the kernel (ToolSearch
                 # otherwise prints wire names the kernel cannot import).
                 extra["in_kernel_call"] = True
+            finished = False
+
+            async def _finish(reply: HostReply) -> None:
+                # Everything a reply contributes outside the kernel (images for
+                # the cell outcome, the call record, friction, harvested facts,
+                # the ToolResult event) happens here, once, whether the reply
+                # came back normally or was salvaged at the per-call ceiling.
+                nonlocal finished
+                if finished:
+                    return
+                finished = True
+                collected_images.extend(reply.images)
+                record["ok"] = reply.result is not None
+                record["shell_exit_code"] = reply.shell_exit_code
+                if reply.result is not None:
+                    out, is_error = reply.result, False
+                elif reply.denied:
+                    out, is_error = reply.message or "permission denied", True
+                else:
+                    out, is_error = reply.error or "tool error", True
+                if self._skills is not None:
+                    # Best-effort friction detection over this in-kernel call; the
+                    # entries ride out with the cell's journal record.
+                    try:
+                        self._friction_pending.extend(
+                            self._friction.observe(name, kwargs, out, is_error)
+                        )
+                    except Exception:
+                        pass
+                    # Facts a tool result establishes on its own (the browser
+                    # host) go straight to the memory store, tool-provenance,
+                    # so the next session does not rediscover them.
+                    try:
+                        from fluid.context.runtime_facts import (
+                            harvest_tool_facts,
+                            write_harvested_facts,
+                        )
+
+                        harvested = harvest_tool_facts(name, out)
+                        if harvested:
+                            write_harvested_facts(
+                                self._skills, (extra or {}).get("memory_project"), harvested,
+                            )
+                    except Exception:
+                        pass
+                await loop._emit(ToolResult(
+                    session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                    name=name, output=out, is_error=is_error,
+                    images=[{"media_type": image.media_type, "data": image.data} for image in reply.images],
+                ))
+
             try:
                 reply = await bridge.on_host_call(
                     name, kwargs, tool_use_id=tool_use_id
@@ -646,25 +697,21 @@ class CodeModeSession:
                 # cancelled this call. The ToolUse above already went out;
                 # without a matching ToolResult the transcript would show a
                 # call that never returned. A tool that had already finished
-                # (its reply filed for the kernel, #1549) is reported as such.
+                # (its reply filed for the kernel, #1549) is finished exactly
+                # as a normal reply is: the kernel hands that reply to the cell.
                 filed = getattr(current_host_call_salvage.get(), "reply", None)
-                if filed is not None:
-                    output = filed.result if filed.result is not None else (
-                        filed.error or filed.message or "tool error")
-                    failed = filed.result is None
-                    record["ok"] = not failed
-                    record["shell_exit_code"] = filed.shell_exit_code
-                else:
-                    output = (
-                        f"{name} was cancelled before it returned (per-call "
-                        "ceiling or turn watchdog); the cell stops here."
-                    )
-                    failed = True
                 try:
-                    await loop._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                        name=name, is_error=failed, output=output,
-                    ))
+                    if filed is not None:
+                        await _finish(filed)
+                    else:
+                        await loop._emit(ToolResult(
+                            session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                            name=name, is_error=True,
+                            output=(
+                                f"{name} was cancelled before it returned (per-call "
+                                "ceiling or turn watchdog); the cell stops here."
+                            ),
+                        ))
                 except Exception:  # noqa: BLE001 — the cancel must still land
                     pass
                 raise
@@ -675,45 +722,7 @@ class CodeModeSession:
                         extra["tool_use_id"] = previous
                     else:
                         extra.pop("tool_use_id", None)
-            collected_images.extend(reply.images)
-            record["ok"] = reply.result is not None
-            record["shell_exit_code"] = reply.shell_exit_code
-            if reply.result is not None:
-                out, is_error = reply.result, False
-            elif reply.denied:
-                out, is_error = reply.message or "permission denied", True
-            else:
-                out, is_error = reply.error or "tool error", True
-            if self._skills is not None:
-                # Best-effort friction detection over this in-kernel call; the
-                # entries ride out with the cell's journal record.
-                try:
-                    self._friction_pending.extend(
-                        self._friction.observe(name, kwargs, out, is_error)
-                    )
-                except Exception:
-                    pass
-                # Facts a tool result establishes on its own (the browser
-                # host) go straight to the memory store, tool-provenance,
-                # so the next session does not rediscover them.
-                try:
-                    from fluid.context.runtime_facts import (
-                        harvest_tool_facts,
-                        write_harvested_facts,
-                    )
-
-                    harvested = harvest_tool_facts(name, out)
-                    if harvested:
-                        write_harvested_facts(
-                            self._skills, (extra or {}).get("memory_project"), harvested,
-                        )
-                except Exception:
-                    pass
-            await loop._emit(ToolResult(
-                session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                name=name, output=out, is_error=is_error,
-                images=[{"media_type": image.media_type, "data": image.data} for image in reply.images],
-            ))
+            await _finish(reply)
             return reply
 
         result = await kernel.exec(

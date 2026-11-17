@@ -567,3 +567,85 @@ async def test_a_slow_result_event_does_not_cost_the_cell_its_reply(tmp_path) ->
         await session.aclose()
     assert asyncio.get_running_loop().time() - started < 15
     assert "QUICK-RESULT" in out.text and "did not return within" not in out.text
+
+
+# A valid 1x1 GIF.
+_GIF = bytes.fromhex(
+    "47494638396101000100800000000000ffffff21f90401000000002c00000000"
+    "010001000002024401003b"
+)
+
+
+@pytest.mark.parametrize("hook_delay", [0.0, 2.0])
+async def test_a_salvaged_reply_keeps_its_images(tmp_path, hook_delay) -> None:
+    """A salvaged reply is finished like a normal one: the real Read's image
+    reaches the cell outcome and the ToolResult event, with or without the
+    ceiling expiring inside a slow PostToolUse hook."""
+    from fluid.hooks.bus import POST_TOOL_USE
+    from fluid.tools.builtins import read
+
+    (tmp_path / "pixel.gif").write_bytes(_GIF)
+
+    async def slow_hook(event: str, payload: dict):
+        await asyncio.sleep(hook_delay)
+
+    hooks = HookBus()
+    hooks.on(POST_TOOL_USE, slow_hook)
+    registry = ToolRegistry()
+    registry.register_builtin(read.SPEC, read.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=1))
+    loop = _Loop(tmp_path, hooks=hooks)
+    code = (
+        "from tools.Read import Read\n"
+        f"print(Read(file_path={str(tmp_path / 'pixel.gif')!r}))\n"
+    )
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 1})
+    finally:
+        await session.aclose()
+    assert not out.is_error, out.text
+    assert "did not return within" not in out.text
+    assert ("PostToolUse hooks did not finish" in out.text) == bool(hook_delay)
+    assert [image.media_type for image in out.images] == ["image/gif"]
+    events = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Read"]
+    assert len(events) == 1 and not events[0].is_error
+    assert [image["media_type"] for image in events[0].images] == ["image/gif"]
+
+
+@needs_bash
+@posix_only
+async def test_the_native_loop_hands_the_model_bash_output_salvaged_from_a_slow_hook(tmp_path) -> None:
+    """The slow-PostToolUse-hook case through the real native loop: the next
+    model request carries what Bash printed before its timeout, with the note
+    that the hooks did not finish, not the bare ceiling error."""
+    from fluid.engine.native import NativeLoop
+    from fluid.events import UserTurn
+    from fluid.hooks.bus import POST_TOOL_USE
+    from fluid.store.base import MemoryStore
+
+    async def slow_bash_hook(event: str, payload: dict):
+        if payload.get("name") == "Bash":
+            await asyncio.sleep(6)
+
+    hooks = HookBus()
+    hooks.on(POST_TOOL_USE, slow_bash_hook)
+    hang = _py("print('BASH-SAID-THIS', flush=True); import time; time.sleep(60)")
+    in_cell = f"from tools.Bash import Bash\nBash(command={hang!r}, timeout=60)\n"
+    coded = _Scripted([
+        _tool_call("run_python", {"code": in_cell, "timeout": 2}, "c1"), _final_text("done")])
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=7))
+    loop = NativeLoop(
+        provider=coded, store=MemoryStore(), model="claude-sonnet-5", registry=registry,
+        codemode=session, hooks=hooks, permissions=PermissionEngine("never_ask"), ctx=_ctx(tmp_path),
+    )
+    try:
+        await loop.submit(UserTurn(content="run it"))
+        await loop.wait_turn()
+    finally:
+        await loop.aclose()
+    seen = _last_tool_result(coded.requests[1])
+    assert "BASH-SAID-THIS" in seen and "cut from 60s" in seen
+    assert "PostToolUse hooks did not finish" in seen
+    assert "did not return within" not in seen and "cancelled before" not in seen
