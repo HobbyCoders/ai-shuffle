@@ -43,7 +43,7 @@
 	import ModelPickerPanel from '$lib/components/settings/ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from '$lib/components/settings/model-picker-focus';
 	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
-	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel } from '$lib/constants/model-effort';
+	import { resolveEffortModel, resolveModelEffort, reconcileModelEffort, autoEffortLabel, selectionIsRequestedModel, effortFitNotice } from '$lib/constants/model-effort';
 	// The controls sheet is the mobile app's; the web build registers none.
 	import { phoneLayout } from './phone/phone-layout.svelte';
 	import { Globe, SlidersHorizontal, Lock, SquareTerminal } from 'lucide-svelte';
@@ -327,8 +327,11 @@
 	// Compare actual vs what was REQUESTED for that same turn (both from the
 	// model_info note) — never the live selection, which the user may have
 	// changed since.
+	// ...and only while the selection is still that requested model: a model
+	// picked since is what the next message runs, so the chip names it (#1635).
 	const rerouted = $derived(
 		isReroute(liveModel, liveRequestedModel, $activeSession.liveProvider, $activeSession.liveRerouted)
+		&& selectionIsRequestedModel(modelValue, liveRequestedModel, $activeSession.liveProvider)
 	);
 	const hasModelRoute = $derived(Boolean($activeSession.sessionId || getClaudeAuth().auth_kind || decodeProviderModel(modelValue)));
 	const selectedModelLabel = $derived(hasModelRoute ? getModelLabel(modelValue) : 'Select model');
@@ -499,9 +502,43 @@
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
+	// A model picked here, in this chat: only that pick says when it changes
+	// the effort level (#1641). Opening a chat, its binding loading, a reroute
+	// or another tab's change fit the level silently. Plain, not reactive: only
+	// the effect reads them.
+	let modelPick: { model: string } | null = null;
+	let fitNoticeId: string | null = null;
+	function dismissFitNotice() {
+		if (fitNoticeId) notify.dismissLive(fitNoticeId);
+		fitNoticeId = null;
+	}
+	function pickModel(value: string | null) {
+		dismissFitNotice();
+		const pick = { model: effortModel };
+		modelPick = pick;
+		activeSession.setModelOverride(value);
+		// The effect below has run by now; the pick speaks for that run only.
+		void tick().then(() => { if (modelPick === pick) modelPick = null; });
+	}
 	$effect(() => {
-		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
+		// The notice describes one chat: switching chats or closing the dock
+		// takes it, and a pick not yet fitted, away.
+		void voiceSessionId;
+		return () => { modelPick = null; dismissFitNotice(); };
+	});
+	$effect(() => {
+		// Read once: the fit below updates the store, and so ``effortValue``.
+		const previous = effortValue;
+		const reconciled = reconcileModelEffort(previous, effortCapability);
+		const switched = modelPick !== null && modelPick.model !== effortModel;
+		if (switched) modelPick = null;
+		if (reconciled === previous) return;
+		activeSession.setEffortLevelOverride(reconciled, false);
+		if (switched && previous && !voiceLane) {
+			// A passing banner: the fit is a local adjustment, not an event worth
+			// keeping in every device's notification history.
+			fitNoticeId = notify.banner(effortFitNotice(previous, reconciled, effortModel), { severity: 'info', persist: false, duration_ms: 6000 });
+		}
 	});
 
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
@@ -699,7 +736,7 @@
 						onSelect={(v) => {
 							// Choosing a model closes the picker, as on the phone; the
 							// context-window controls are in the same panel when reopened (#1526).
-							activeSession.setModelOverride(v);
+							pickModel(v);
 							dismissPopover();
 						}}
 						onRequestClose={dismissPopover}
@@ -770,7 +807,7 @@
 	modelLabel={modelButtonLabel}
 		{modelLocked}
 	modelNotice={modelNotice}
-	onModelSelect={(value) => activeSession.setModelOverride(value)}
+	onModelSelect={(value) => pickModel(value)}
 	contextChoice={$activeSession.contextWindowChoice}
 	onContextChoiceSelect={(choice) => activeSession.setContextWindowChoice(choice)}
 	contextStandardTokens={contextStandardTokens}
