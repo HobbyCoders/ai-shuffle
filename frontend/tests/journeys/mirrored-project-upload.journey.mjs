@@ -30,8 +30,17 @@
 //   handoff-while-open    a local project chat is handed to another worker while
 //                         open: the first upload goes to the local project, the
 //                         next one through the session upload
+//   new-chat-runs-elsewhere  a new project chat set to run on another worker
+//                         ("Runs on"), sent, then a file attached without
+//                         leaving it: the upload goes through the session upload
+//
+// The new-chat case has no second worker either: the worker list gains a peer
+// that has every project, the chat frame's worker pick is taken off before it
+// reaches this dev instance (it would refuse a worker it does not know), and
+// the created chat's rows and /live then say the peer runs it. What the page
+// does between the pick and the upload is the real path.
 import { runJourney } from './runner.mjs';
-import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, waitChat, waitChatOpen } from './lib/app.mjs';
+import { PROJECT, SEEDED, expect, gotoApp, openFromSidebar, openNewChat, seededChatId, sendButton, uniq, waitChat, waitChatOpen, withChatSetup } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const PEER = 'Peer worker';
@@ -125,6 +134,97 @@ async function scriptPage(page, status, { remote = true, hideOwner = false, fail
 		},
 		{ id: seededChatId(status, 'other_project'), peer: PEER, remote, hideOwner, failLive, holdReads, plantSnapshot, snapshotKey: SNAPSHOT_KEY, localProject: LOCAL_PROJECT }
 	);
+}
+
+/**
+ * A peer worker that has every project, for the new-chat case. Its pick is
+ * taken off the chat frame (this dev instance would refuse a worker it does not
+ * know), and the chat that frame creates is then reported as run by the peer.
+ */
+async function scriptPeer(page) {
+	await page.addInitScript(({ peer }) => {
+		window.__uploads = window.__uploads || [];
+		window.__createdIds = [];
+		window.__pickedPeer = 0;
+		const PEER_ID = 'journey-peer';
+		const NativeSocket = window.WebSocket;
+		window.WebSocket = class extends NativeSocket {
+			constructor(...args) {
+				super(...args);
+				this.addEventListener('message', (event) => {
+					try {
+						const frame = JSON.parse(event.data);
+						if (frame.type === 'session_created' && frame.session_id && window.__pickedPeer) window.__createdIds.push(frame.session_id);
+					} catch { /* not JSON */ }
+				});
+			}
+			send(data) {
+				try {
+					const frame = JSON.parse(data);
+					if (frame && frame.target_instance_id === PEER_ID) {
+						window.__pickedPeer += 1;
+						delete frame.target_instance_id;
+						return super.send(JSON.stringify(frame));
+					}
+				} catch { /* not JSON */ }
+				return super.send(data);
+			}
+		};
+		const original = window.fetch.bind(window);
+		const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+		const asJson = async (response) => (response.ok ? response.clone().json().catch(() => null) : null);
+		const created = (id) => window.__createdIds.includes(id);
+		const mark = (value) => {
+			if (Array.isArray(value)) return value.map(mark);
+			if (!value || typeof value !== 'object') return value;
+			const out = {};
+			for (const [k, v] of Object.entries(value)) out[k] = mark(v);
+			if (created(out.id)) Object.assign(out, { is_remote: true, device_name: peer });
+			return out;
+		};
+		const peerRow = (self) => ({ ...self, install_id: PEER_ID, device_name: peer, is_self: false, online: true, approved: true, state: 'ready', setup: null });
+		window.fetch = async (input, init) => {
+			const url = new URL(typeof input === 'string' ? input : input.url, location.href);
+			const path = url.pathname;
+			const method = (init?.method || (typeof input === 'object' && input.method) || 'GET').toUpperCase();
+			if (method === 'POST' && /\/upload$/.test(path)) {
+				window.__uploads.push({ path });
+				return json({ path: 'uploads/note.txt', filename: 'note.txt', full_path: `/journey${path}/note.txt`, size: 4 });
+			}
+			const syncOf = path.match(/^\/api\/v1\/sessions\/([^/]+)\/sync-status$/);
+			if (syncOf && created(syncOf[1])) return json({ state: 'current', scope: 'session', initial_caught_up: true, pending_updates: 0 });
+			const response = await original(input, init);
+			if (method !== 'GET') return response;
+			if (path === '/api/v1/cluster/installs') {
+				const body = await asJson(response);
+				const self = body?.installs?.find((i) => i.is_self);
+				if (!self) return response;
+				return json({ ...body, installs: [...body.installs, { ...self, id: PEER_ID, device_id: PEER_ID, legacy_instance_id: null, device_name: peer, is_self: false, online: true, approved: true }] });
+			}
+			if (path === '/api/v1/projects/overview') {
+				const body = await asJson(response);
+				if (!body?.projects) return response;
+				for (const p of body.projects) {
+					const self = p.workers?.find((w) => w.is_self);
+					if (self) p.workers.push(peerRow(self));
+				}
+				return json(body);
+			}
+			if (path === '/api/v1/projects/workers') {
+				const body = await asJson(response);
+				const self = body?.workers?.find((w) => w.is_self);
+				if (!self) return response;
+				body.workers.push(peerRow(self));
+				return json(body);
+			}
+			if (!response.ok || !path.startsWith('/api/v1/sessions') || /\/(events|stream)$/.test(path)) return response;
+			if (!(response.headers.get('content-type') || '').includes('application/json')) return response;
+			const body = await asJson(response);
+			if (body === null) return response;
+			if (body.session_meta && created(path.split('/')[4])) Object.assign(body.session_meta, { is_remote: true, device_name: peer });
+			return new Response(JSON.stringify(mark(body)), { status: response.status, headers: response.headers });
+		};
+	}, { peer: PEER });
 }
 
 /** Pick a file through the composer's own file input (as the attach button's picker does). */
@@ -238,6 +338,45 @@ await runJourney({
 				await mark('attach after the hand-off');
 				await pickFile(page);
 				await expectUploads(page, chatId, ['project', 'session']);
+			}
+		},
+		{
+			name: 'new-chat-runs-elsewhere',
+			viewports: ['desktop', 'phone'],
+			allow: [
+				{ kind: 'failed_requests', status: 500, url: /\/projects\/[^/]+\/git\/status/, reason: 'the scripted peer is not a real network: this dev instance refuses the remote project\'s git status' },
+				{ kind: 'errors', message: /Failed to load git repository: .*has not joined a network/, reason: 'the same refused git status, logged' }
+			],
+			async setup(ctx) {
+				await scriptPeer(ctx.page);
+				await openNewChat(ctx, { project: PROJECT });
+			},
+			async act({ page, mark }) {
+				const hero = page.getByRole('region', { name: 'New chat' });
+				await mark('set Runs on to the other worker');
+				await withChatSetup(page, async () => {
+					await hero.getByRole('button', { name: /^(Runs on |Runner: )/ }).click();
+					const menu = page.getByRole('menu', { name: /^(Where this session runs|Runner selection)$/ });
+					const item = menu.getByRole('menuitemradio', { name: new RegExp(`^${PEER}`) });
+					await item.waitFor({ timeout: 20_000 });
+					await item.click();
+				});
+				await mark('send');
+				const box = page.getByRole('textbox', { name: 'Message' });
+				await box.click();
+				await box.fill(`Runs elsewhere ${uniq()}`);
+				await sendButton(page).click();
+				await page.waitForFunction(() => window.__createdIds.length > 0, null, { timeout: 30_000 });
+				expect(await page.evaluate(() => window.__pickedPeer > 0), 'the chat frame carried the other worker as its pick');
+				const chatId = await page.evaluate(() => window.__createdIds[0]);
+				await waitChat(page, { surface: 'active', session: /^s:/ }, { timeout: 60_000 });
+				await page.waitForTimeout(1500);
+				await mark('attach a file without leaving the chat');
+				await pickFile(page);
+				await page.waitForFunction(() => window.__uploads.length >= 1, null, { timeout: 15_000 });
+				await page.waitForTimeout(500);
+				const got = await uploads(page);
+				expect(JSON.stringify(got) === JSON.stringify([`/api/v1/sessions/${chatId}/upload`]), `uploads went to ${JSON.stringify(got)}, expected the session upload`);
 			}
 		}
 	],
