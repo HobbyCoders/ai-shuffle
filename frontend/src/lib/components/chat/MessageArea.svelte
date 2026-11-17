@@ -1648,6 +1648,7 @@
 	// and put back where it was when the container observer sees a new width.
 	let readingAnchor: (ReadingAnchor & { width: number }) | null = null;
 	let observedWidth = 0;
+	let observedColumnWidth = 0;
 	let readingAnchorRaf: number | null = null;
 
 	function captureReadingAnchor() {
@@ -1686,6 +1687,13 @@
 		const width = containerRef.clientWidth;
 		const changed = observedWidth > 0 && width !== observedWidth;
 		observedWidth = width;
+		// A reading floor measured before the prose reflowed is not a scroll target
+		// after it: wider prose ends higher, and the stale floor would hold a blank
+		// viewport above the tail controls. The column's width, not the container's,
+		// so a scrollbar appearing beside a fixed-measure column keeps the floor.
+		const columnWidth = chatColumnRef?.clientWidth ?? 0;
+		if (observedColumnWidth > 0 && columnWidth !== observedColumnWidth) followedViewportEnd = 0;
+		observedColumnWidth = columnWidth;
 		const anchor = readingAnchor;
 		if (changed && anchor && anchor.width !== width && !shouldAutoScroll && !currentTurnAnchorId && chatColumnRef) {
 			const row = chatColumnRef.querySelector<HTMLElement>(`:scope > [data-transcript-key="${CSS.escape(anchor.key)}"]`);

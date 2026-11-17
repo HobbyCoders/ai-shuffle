@@ -114,8 +114,19 @@ await runJourney({
 			expect(settled.lastBottom === null || settled.queueTop >= settled.lastBottom - 0.5, `the queued bubble stays below the last transcript row: ${JSON.stringify(settled)}`);
 			expect(settled.reserve >= settled.controls + 24, `the room under the transcript holds the queue (${settled.reserve}px for ${settled.controls}px)`);
 		},
-		// Unrecorded: Stop folds the finished turn, a move of its own.
-		async verify({ page }) {
+		// Unrecorded: a resize and Stop each move the layout on their own.
+		async verify({ page, variant, log }) {
+			if (variant.viewport === 'phone') {
+				// Unfolding: wider prose ends higher. The room kept under the transcript
+				// must follow it, not hold the narrow layout's end as blank viewport.
+				const { height } = page.viewportSize();
+				await page.setViewportSize({ width: 700, height });
+				await page.waitForTimeout(600);
+				const after = (await watchTail(page, 300)).at(-1);
+				log(`after widening to 700px: ${JSON.stringify(after)}`);
+				expect(after.rowBottom !== null && after.rowBottom > 0, `the running-task row is still on screen after widening, not scrolled off above blank room: ${JSON.stringify(after)}`);
+				expect(after.queueTop >= after.rowBottom - 0.5, `the queued bubble stays below the running-task row after widening: ${JSON.stringify(after)}`);
+			}
 			await stopEverything(page);
 			await page.waitForFunction((sel) => document.querySelector(sel) === null, TASK_ROW, { timeout: 15_000 });
 			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
