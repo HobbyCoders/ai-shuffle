@@ -9,7 +9,7 @@
 	 * - In-panel navigation for `/docs/<category>/<slug>#anchor` and `#anchor` links
 	 * - Existing .prose CSS styling
 	 */
-	import { tick, untrack } from 'svelte';
+	import { tick } from 'svelte';
 	import { marked, type Renderer, type Tokens } from 'marked';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -201,7 +201,10 @@
 		const target = find;
 		if (!target || !contentEl || target.key === foundKey) return;
 		foundKey = target.key;
-		untrack(() => revealMatch(target.query));
+		// Reveal after ViewShell has reset the new detail’s scroll position.
+		void tick().then(() => {
+			if (find?.key === target.key) revealMatch(target.query);
+		});
 	});
 </script>
 
