@@ -456,9 +456,12 @@ async def test_legacy_resume_pins_environment_before_admission(git_repo: Path, i
 
 
 @pytest.mark.parametrize("include_env", [False, True])
-async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(git_repo: Path, include_env: bool) -> None:
+@pytest.mark.parametrize("old_repair", [False, True])
+async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(
+    git_repo: Path, include_env: bool, old_repair: bool,
+) -> None:
     """S1: a real UserPromptSubmit gate must accept all three Resumes,
-    even when a failed Resume left a harness-only repair at the head."""
+    even when an older transcript ends in a harness-only repair."""
     from fluid.events import TurnStarted
     from fluid.hooks.bus import TURN_START, HookBus, HookDecision
 
@@ -470,6 +473,13 @@ async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(git_repo: P
     await _turn(loop, UserTurn(content=[Text("original request"), *(Text(c * 24_000) for c in "abcd")]))
     (original,) = await store.load_path(sid)
     original.message.context_pin = None  # pre-pinning transcript, produced by the real loop
+    if old_repair:
+        note = environment_note_parts(git_repo)[0]
+        await store.append(sid, SessionNode(
+            node_id="old-repair", parent_id=original.node_id,
+            message=Message(role="user", content=[Text(note)],
+                            provider_meta={"harness_note": True}).pin_context(note),
+        ))
     prompts = []
     hooks = HookBus()
 
@@ -489,6 +499,49 @@ async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(git_repo: P
         assert provider.requests[-1].messages[0].text().startswith("[compacted turn")
         assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
     assert provider.requests[-1].messages == provider.requests[-2].messages
+
+
+@pytest.mark.parametrize("oversized", [False, True])
+@pytest.mark.parametrize("old_repair", [False, True])
+async def test_resume_clock_is_fresh_last_and_not_stored(git_repo: Path, oversized: bool, old_repair: bool) -> None:
+    """S2: advancing clocks survive admission without accumulating repairs,
+    including a transcript imported from the earlier repair-node design."""
+    from datetime import UTC, datetime
+
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed])
+    loop = _loop(git_repo, provider, store, sid, context_window=200_000, max_tokens=8192)
+    loop.ctx.extra["time_context"] = lambda _: {"now": datetime(2026, 11, 14, tzinfo=UTC), "zone": "UTC"}
+    content = [Text(c * 24_000) for c in "abcd"] if oversized else "original request"
+    await _turn(loop, UserTurn(content=content))
+    (original,) = await store.load_path(sid)
+    original.message.context_pin = None  # pre-pinning transcript
+    if old_repair:
+        note, details = environment_note_parts(git_repo, time_context={
+            "now": datetime(2026, 11, 13, tzinfo=UTC), "zone": "UTC",
+        })
+        block = note + "\n\n" + details
+        await store.append(sid, SessionNode(
+            node_id="old-repair", parent_id=original.node_id,
+            message=Message(role="user", content=[Text(block)],
+                            provider_meta={"harness_note": True}).pin_context(block),
+        ))
+    stored = copy.deepcopy(await store.load_path(sid))
+    for day in (15, 16, 17):
+        loop = _loop(git_repo, provider, store, sid, context_window=32_000, max_tokens=8192)
+        loop.ctx.extra["time_context"] = lambda _, day=day: {
+            "now": datetime(2026, 11, day, tzinfo=UTC), "zone": "UTC",
+        }
+        await _turn(loop, Resume())
+        sent = "\n".join(m.text() for m in provider.requests[-1].messages)
+        dates = [int(line.split("Nov ")[1].split(",")[0])
+                 for line in sent.splitlines() if line.startswith("Current time:")]
+        assert dates[-1] == day and dates.count(day) == 1
+        if oversized:
+            assert any(m.text().startswith("[compacted turn") for m in provider.requests[-1].messages)
+            assert dates == ([13, day] if old_repair else [day])
+        assert await store.load_path(sid) == stored  # no new node and no rewritten history
 
 
 async def test_runtime_facts_follow_the_selected_path_and_survive_a_wake(git_repo: Path) -> None:

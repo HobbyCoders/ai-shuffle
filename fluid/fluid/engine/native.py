@@ -218,7 +218,6 @@ from fluid.providers.base import (
 )
 from fluid.context.environment import (
     ENVIRONMENT_DETAILS_HEADER,
-    ENVIRONMENT_NOTE_HEADER,
     environment_note_parts,
 )
 from fluid.providers.pricing import PricingResolver
@@ -1313,7 +1312,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         # already harvested them into the memory store.
         self._runtime_facts_sent: str | None = None
         self._resume_environment: str | None = None
-        self._resume_anchor: str | None = None
         self._runtime_facts_harvested = False
         self._runtime_facts_rehydrated = False
         # System text of the request in flight / the last completed one, for
@@ -2595,7 +2593,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             raise
         finally:
             self._stop_turn_watchdog()
-            self._resume_environment = self._resume_anchor = None
+            self._resume_environment = None
             # Covers early hook/Resume exits and cancellation before the
             # agent loop starts, as well as its normal terminal paths. Stop
             # must never leave queued peers or a failed write to a later turn.
@@ -2664,7 +2662,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             return
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
-        self._resume_environment = self._resume_anchor = None
+        self._resume_environment = None
         self._peer_delivery_sealed = False
         meta = await self._ensure_session()
         sid = meta.session_id
@@ -2718,8 +2716,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # so the request is the one the failed call sent and the new
                 # reply branches beside the kept partial text.
                 head = path[-2]
-            # Inference keeps a pinned repair at the head, but hooks and
-            # turn provenance belong to the underlying resumed input.
+            # An older transcript may end in a harness-only repair. Inference
+            # keeps that head; hooks and provenance belong to the resumed input.
             prompt = head
             if head is not None and is_harness_note(head.message):
                 prompt = next((n for n in reversed(path)
@@ -2755,22 +2753,14 @@ class NativeLoop(BackgroundLifecycleMixin):
                 )
                 await self._append_node(sid, head)
                 prompt = head
-            environment_node = await self._store_resume_environment(sid, head)
-            if environment_node is not None:
-                head = environment_node
-            # Fix the request-only clock to one real message for this turn.
-            # A tool-result head uses its preceding input, never the result;
-            # matching node ids (not text) survives reloads and duplicate inputs.
-            anchor = next((n for n in reversed([*path, prompt])
-                           if n.message.role == "user" and not is_harness_note(n.message)
-                           and not any(
-                               isinstance(b, ToolResultBlock) for b in n.message.content)), None)
-            if anchor is not None and environment_node is None:
-                self._resume_anchor = anchor.node_id
-                # Request-only: never stored, so never a copy the path holds.
-                self._resume_environment = await self._environment_reminder()
-            # Keep turn provenance on the resumed input: a later retry must
-            # not mistake the new harness-only environment node for user intent.
+            # One request-only tail note is reserved before admission and
+            # attached after rendering, so no digest can retire or reorder it.
+            # No repair nodes are stored: retries cannot accumulate stale facts.
+            if self._runtime_facts_only():
+                self._runtime_facts_sent = await self._held_runtime_facts(sid, head.node_id)
+            self._resume_environment = await self._environment_reminder()
+            # Keep turn provenance on the resumed input, never an older
+            # harness-only environment node.
             await self._emit(TurnStarted(
                 session_id=sid, node_id=prompt.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
@@ -3359,38 +3349,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         sections = self.system_sections.sections if self.system_sections else None
         return sections is not None and not any(s.kind == "environment" for s in sections)
 
-    async def _store_resume_environment(self, sid: str, parent: SessionNode) -> SessionNode | None:
-        """Restore missing pinned facts before admission can digest a Resume.
-
-        This includes legacy full-environment transcripts, not just hosts
-        sending runtime facts alone. A request-only note is lost when its
-        anchor is digested; old nodes must not be rewritten (#1656).
-        """
-        if self.system_sections is None:
-            return None
-        if self._runtime_facts_only():
-            self._runtime_facts_sent = await self._held_runtime_facts(sid, parent.node_id)
-        elif await self.holds_pinned_block(sid, ENVIRONMENT_NOTE_HEADER, parent.node_id):
-            return None
-        parts = await self._environment_reminder_parts()
-        if not parts:
-            return None
-        note, details = parts
-        if details is not None and await self.holds_pinned_block(
-            sid, ENVIRONMENT_DETAILS_HEADER, parent.node_id,
-        ) == details:
-            details = None
-        block = "\n\n".join(part for part in (note, details) if part)
-        node = SessionNode(
-            node_id=new_id("node"), parent_id=parent.node_id,
-            message=Message(
-                role="user", content=[Text(block)],
-                provider_meta={HARNESS_NOTE_META_KEY: True},
-            ).pin_context(block),
-        )
-        await self._append_node(sid, node)
-        return node
-
     async def _held_runtime_facts(self, sid: str, leaf_node_id: str | None) -> str | None:
         block = await self.holds_pinned_block(sid, _RUNTIME_FACTS_PIN, leaf_node_id)
         if block is None or _RUNTIME_FACTS_HEADER not in block:
@@ -3951,8 +3909,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         history: system prompt + tool schemas. Priced with the same estimator
         the usage breakdown uses, so the trigger and the report agree."""
         total = estimate_tokens_of_text(self.system)
-        if self._resume_environment:
-            total += estimate_tokens_of_text("\n\n" + self._resume_environment)
+        total += self._resume_clock_tokens()
         for api in self._tools_api():
             try:
                 total += estimate_tokens_of_text(json.dumps(api))
@@ -4028,7 +3985,6 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         while True:
             nodes = await self._context_path(sid, parent.node_id)
-            self._resume_clock_tokens(nodes)
             if num_calls == 0:
                 await self._note_wake_turn_starts(sid, nodes)
             from fluid.tools.builtins.plan import reminder as plan_reminder
@@ -4103,9 +4059,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             if admitted:
                 promotions.extend(admitted)
                 rendered = self._compactor.view(nodes)
-            history = self._with_resume_clock(nodes, rendered)
-            # Compaction can retire the anchor. Account for only the clock
-            # actually sent, including on later calls of this same Resume.
+            history = self._with_resume_clock(rendered)
             # The plan note is history once written (below), not overhead.
             overhead_tokens = self._context_overhead_tokens()
             history = sanitize_assistant_history(repair_dangling_tool_calls(history))
@@ -5010,14 +4964,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             measured, float(estimate or 0), current=measured_current,
         )
 
-        resume_cost = estimate_tokens_of_text("\n\n" + self._resume_environment) if self._resume_environment else 0
         def size() -> int:
-            nonlocal overhead_tokens, resume_cost
-            # Escalation may remove the anchor too: retire its reservation
-            # before deciding to trim more history or refuse the request.
-            current_cost = self._resume_clock_tokens(nodes)
-            overhead_tokens += current_cost - resume_cost
-            resume_cost = current_cost
             return int(self._compactor.estimate_view_tokens(nodes, overhead_tokens) * scale)
 
         before = size()
@@ -5198,28 +5145,21 @@ class NativeLoop(BackgroundLifecycleMixin):
         effort = thinking.get("effort") if isinstance(thinking, dict) else None
         return effort if isinstance(effort, str) else None
 
-    def _resume_clock_tokens(self, nodes: list[SessionNode]) -> int:
-        if not self._resume_environment:
-            return 0
-        if (not any(n.node_id == self._resume_anchor for n in nodes)
-                or (self._compactor.active and self._resume_anchor in self._compactor._covered_ids(nodes))):
-            self._resume_environment = self._resume_anchor = None
-            return 0
-        return estimate_tokens_of_text("\n\n" + self._resume_environment)
+    def _resume_clock_note(self) -> Message:
+        assert self._resume_environment is not None
+        return Message(
+            role="user", content=[Text(self._resume_environment)],
+            provider_meta={HARNESS_NOTE_META_KEY: True},
+        ).pin_context(self._resume_environment)
 
-    def _with_resume_clock(self, nodes: list[SessionNode], rendered: list[Message]) -> list[Message]:
-        if self._resume_clock_tokens(nodes):
-            for i, (start, end, message) in enumerate(self._compactor.view_segments(nodes)):
-                if (start == end and nodes[start].node_id == self._resume_anchor
-                        and message.role == "user" and not any(
-                            isinstance(b, ToolResultBlock) for b in message.content)):
-                    return [*rendered[:i], replace(
-                        rendered[i], content=[*rendered[i].content, Text("\n\n" + self._resume_environment)],
-                    ), *rendered[i + 1:]]
-            # A fold/window removed the original message: never move the
-            # clock to a new tail, or reattach it later during this turn.
-            self._resume_environment = self._resume_anchor = None
-        return rendered
+    def _resume_clock_tokens(self) -> int:
+        return estimate_tokens_of_messages([self._resume_clock_note()]) if self._resume_environment else 0
+
+    def _with_resume_clock(self, rendered: list[Message]) -> list[Message]:
+        # Apply after every render (including admission digests), at the tail
+        # after any historical environment facts. Its cost is reserved as
+        # overhead, not attached to a transcript anchor a digest can retire.
+        return [*rendered, self._resume_clock_note()] if self._resume_environment else rendered
 
     def _build_request(
         self, history: list[Message], *, sticky: bool = True,
