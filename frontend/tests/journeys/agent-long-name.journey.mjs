@@ -196,6 +196,15 @@ await runJourney({
 			await name.fill(draftName);
 			await description.fill('Edited description');
 			await page.getByText(/^Too long: 101 of 100 characters/).waitFor();
+			const dialog = page.getByRole('dialog', { name: 'Fix the agent name or discard edits?' });
+			const stay = dialog.getByRole('button', { name: 'Stay and fix', exact: true }).filter({ visible: true }).last();
+			await mark('starting a blank agent also asks before replacing the draft');
+			const backToAgents = page.getByRole('button', { name: 'Back to Agents', exact: true });
+			if (await backToAgents.isVisible()) await backToAgents.click();
+			await page.getByRole('button', { name: 'New agent', exact: true }).filter({ visible: true }).first().click();
+			await page.getByRole('dialog', { name: 'New agent' }).getByRole('button', { name: 'Create', exact: true }).click();
+			await stay.click({ timeout: 5_000 });
+			expect(await description.inputValue() === 'Edited description', 'stay after New agent keeps the edited form');
 			const switchAgent = async () => {
 				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
 				if (await back.isVisible()) await back.click();
@@ -203,15 +212,26 @@ await runJourney({
 			};
 			await mark('request a switch with a name error and another field edited');
 			await switchAgent();
-			const dialog = page.getByRole('dialog', { name: 'Fix the agent name or discard edits?' });
 			await dialog.getByText(/^Too long: 101 of 100 characters/).waitFor({ timeout: 5_000 });
-			await dialog.getByRole('button', { name: 'Stay and fix', exact: true }).filter({ visible: true }).last().click();
+			expect((await dialog.ariaSnapshot()).includes('Too long: 101 of 100 characters'), 'the dialog exposes the validation reason');
+			await stay.click();
 			expect(await name.inputValue() === draftName, 'the invalid name stays in the editor');
 			expect(await description.inputValue() === 'Edited description', 'the other edited field stays in the editor');
 			await mark('only explicit discard switches and resets the draft');
 			await switchAgent();
-			await dialog.getByRole('button', { name: 'Discard and switch' }).click();
-			await page.getByRole('heading', { level: 2, name: target.name, exact: true }).waitFor();
+			const renamed = `Renamed ${key}`;
+			await api(page, 'PUT', `/agents/${target.id}`, { name: renamed });
+			// Let the dialog remain open while the live list receives the new name.
+			await row(renamed).waitFor({ state: 'attached' });
+			const discard = dialog.getByRole('button', { name: 'Discard and switch' });
+			await discard.press('Enter');
+			const heading = page.getByRole('heading', { level: 2, name: renamed, exact: true });
+			await heading.waitFor();
+			await page.waitForFunction((text) => document.activeElement?.textContent?.trim() === text, renamed);
+			await description.fill('New destination description');
+			await page.getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
+			const savedTarget = await api(page, 'GET', `/agents/${target.id}`);
+			expect(savedTarget.name === renamed && savedTarget.description === 'New destination description', 'autosave must keep the newer destination name');
 			const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
 			if (await back.isVisible()) await back.click();
 			await row(first.name).click();
@@ -219,6 +239,43 @@ await runJourney({
 			expect(await description.inputValue() === 'Original', 'reopened agent has the original description');
 			const stored = await api(page, 'GET', `/agents/${first.id}`);
 			expect(stored.description === 'Original', 'discard never wrote the edited description');
+		},
+		verify: () => {}
+	}, {
+		name: 'switch-flushes-edits-to-the-source-agent',
+		viewports: ['desktop'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark }) {
+			const key = uniq().slice(-6);
+			const source = await api(page, 'POST', '/agents', { id: `source-${key}`, name: `Source ${key}`, config: {} });
+			const target = await api(page, 'POST', '/agents', { id: `target-${key}`, name: `Target ${key}`, description: 'Untouched', config: {} });
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			const row = (agent) => page.locator('[data-settings-item]').filter({ hasText: agent.name });
+			await row(source).click();
+			const description = page.getByRole('textbox', { name: 'Description', exact: true });
+			const received = Promise.withResolvers();
+			const release = Promise.withResolvers();
+			const endpoint = `**/api/v1/agents/${source.id}`;
+			await page.route(endpoint, async (route) => {
+				if (route.request().method() !== 'PUT') return route.fallback();
+				const response = await route.fetch();
+				received.resolve();
+				await release.promise;
+				await route.fulfill({ response });
+			}, { times: 1 });
+			await mark('hold a real autosave response while a switch is pending');
+			try {
+				await description.fill('First edit');
+				await Promise.race([received.promise, page.waitForTimeout(5_000).then(() => { throw new Error('no source autosave'); })]);
+				await row(target).click();
+				await description.fill('Second edit');
+			} finally {
+				release.resolve();
+			}
+			await page.getByRole('heading', { level: 2, name: target.name, exact: true }).waitFor({ timeout: 5_000 });
+			expect((await api(page, 'GET', `/agents/${source.id}`)).description === 'Second edit', 'both edits belong to the source');
+			expect((await api(page, 'GET', `/agents/${target.id}`)).description === 'Untouched', 'the destination was not written');
 		},
 		verify: () => {}
 	}],

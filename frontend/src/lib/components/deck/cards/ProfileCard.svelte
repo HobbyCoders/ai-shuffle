@@ -256,7 +256,9 @@
 	let saveState = $state<'idle' | 'saving' | 'saved'>('idle');
 	let saveError = $state('');
 	let duplicating = $state(false);
-	let pendingSwitch = $state<{ profile: Profile; tab?: AgentTab; problem: string } | null>(null);
+	type AgentTransition = { open: (fromConfirmation: boolean) => void | Promise<void>; available?: () => boolean };
+	let pendingSwitch = $state<{ destination: AgentTransition; problem: string } | null>(null);
+	let transitionInFlight = false;
 
 	const sections = $derived(
 		sectionAgents(profiles, {
@@ -396,7 +398,6 @@
 	}
 
 	async function openNewForm(nextTab: AgentTab = 'profile') {
-		await flushPendingPersist();
 		remoteChange = '';
 		saveState = 'idle';
 		saveError = '';
@@ -412,36 +413,59 @@
 		root?.querySelector<HTMLInputElement>('.st-dpane input.st-txt')?.focus();
 	}
 
-	/** Open an agent, saving the open one's pending edits first. */
-	async function selectProfile(profile: Profile, nextTab?: AgentTab, discard = false) {
-		if (pendingSwitch && !discard) return;
-		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
-		if (!alreadyOpen) {
-			if (discard) {
-				await dropPending();
-				pendingSwitch = null;
-			} else {
-				await flushPendingPersist();
-				if (pendingSwitch) return;
-				const problem = agentNameProblem(profileForm.name);
-				if (viewMode === 'form' && formSnapshot() !== lastPersisted && problem) {
-					pendingSwitch = { profile, tab: nextTab, problem };
-					return;
-				}
+	/** Leave the current form only after its writes settle or the user discards it. */
+	async function switchAgent(destination: AgentTransition, discard = false) {
+		if (transitionInFlight || (pendingSwitch && !discard)) return;
+		transitionInFlight = true;
+		try {
+			if (discard) await dropPending();
+			else await flushPendingPersist();
+			if (destination.available && !destination.available()) {
+				notify('That agent is no longer available.', { severity: 'error' });
+				if (discard) await stayAndFixName();
+				return;
 			}
-			remoteChange = '';
-			saveState = 'idle';
-			if (draftId !== profile.id) draftId = null;
-			openEditForm(profile);
-			tab = nextTab ?? 'profile';
-			openKey += 1;
-			rememberSelection(profile.id);
-		} else if (nextTab) {
-			tab = nextTab;
+			const problem = agentNameProblem(profileForm.name);
+			if (!discard && viewMode === 'form' && formSnapshot() !== lastPersisted && problem) {
+				pendingSwitch = { destination, problem };
+				return;
+			}
+			pendingSwitch = null;
+			await destination.open(discard);
+		} finally {
+			transitionInFlight = false;
 		}
-		showDetail();
-		await tick();
-		root?.querySelector('.st-dpane')?.scrollTo?.({ top: 0 });
+	}
+
+	async function selectProfile({ id }: Profile, nextTab?: AgentTab) {
+		if (viewMode === 'form' && editingProfile?.id === id) {
+			if (nextTab) tab = nextTab;
+			showDetail();
+			return;
+		}
+		await switchAgent({
+			available: () => profiles.some((p) => p.id === id),
+			open: async (fromConfirmation) => {
+				// Do not keep the old row object while the discard dialog is open.
+				const profile = profiles.find((p) => p.id === id);
+				if (!profile) return;
+				remoteChange = '';
+				saveState = 'idle';
+				if (draftId !== id) draftId = null;
+				openEditForm(profile);
+				tab = nextTab ?? 'profile';
+				openKey += 1;
+				rememberSelection(id);
+				showDetail();
+				await tick();
+				root?.querySelector('.st-dpane')?.scrollTo?.({ top: 0 });
+				if (fromConfirmation) focusEditorHeading();
+			}
+		});
+	}
+
+	function focusEditorHeading() {
+		root?.querySelector<HTMLElement>('.st-dpane [data-settings-heading="detail"]')?.focus({ preventScroll: true });
 	}
 
 	async function stayAndFixName() {
@@ -722,9 +746,10 @@
 
 	function schedulePersist() {
 		if (saveTimer) clearTimeout(saveTimer);
+		const source = openKey;
 		saveTimer = setTimeout(() => {
 			saveTimer = null;
-			void persistNow();
+			if (viewMode === 'form' && openKey === source) void persistNow();
 		}, 500);
 	}
 
@@ -759,13 +784,17 @@
 	}
 
 	async function flushPendingPersist() {
-		const hadTimer = !!saveTimer;
-		if (saveTimer) {
-			clearTimeout(saveTimer);
-			saveTimer = null;
-		}
-		if (hadTimer || saveInFlight) {
-			await persistNow();
+		const source = openKey;
+		// A change made while a write is in flight may still be in the debounce.
+		await tick();
+		while (openKey === source) {
+			if (saveInFlight && inFlightPromise) await inFlightPromise;
+			else if (saveTimer) {
+				clearTimeout(saveTimer);
+				saveTimer = null;
+				await persistNow();
+			} else return;
+			await tick();
 		}
 	}
 
@@ -891,17 +920,22 @@
 
 	/** New agent dialog: start from a built-in's prompt and tools. */
 	async function newFromBuiltin(id: string) {
-		const source = profiles.find((p) => p.id === id);
 		showNewDialog = false;
-		await openNewForm();
-		if (!source) return;
-		const config = source.config ?? {};
-		const sp = (config.system_prompt || {}) as { content?: string; append?: string };
-		profileForm.system_prompt_content = sp.content || sp.append || '';
-		toolSelectionMode = resolveToolMode(config);
-		profileForm.allowed_tools = [...(config.allowed_tools ?? [])];
-		profileForm.disallowed_tools = [...(config.disallowed_tools ?? [])];
-		profileForm.description = source.description ?? '';
+		await switchAgent({
+			available: () => profiles.some((p) => p.id === id),
+			open: async () => {
+				const source = profiles.find((p) => p.id === id);
+				if (!source) return;
+				await openNewForm();
+				const config = source.config ?? {};
+				const sp = (config.system_prompt || {}) as { content?: string; append?: string };
+				profileForm.system_prompt_content = sp.content || sp.append || '';
+				toolSelectionMode = resolveToolMode(config);
+				profileForm.allowed_tools = [...(config.allowed_tools ?? [])];
+				profileForm.disallowed_tools = [...(config.disallowed_tools ?? [])];
+				profileForm.description = source.description ?? '';
+			}
+		});
 	}
 
 	/** Opens the editor populated with AI-generated agent data, as a draft. */
@@ -954,13 +988,18 @@
 
 	async function handleGeneratedProfile(data: AgentExport | unknown) {
 		showGenerateDialog = false;
-		await flushPendingPersist();
-		remoteChange = '';
-		saveState = 'idle';
-		saveError = '';
-		draftId = null;
-		openFormFromGenerated(data as AgentExport);
-		showDetail();
+		await switchAgent({ open: async (fromConfirmation) => {
+			remoteChange = '';
+			saveState = 'idle';
+			saveError = '';
+			draftId = null;
+			openFormFromGenerated(data as AgentExport);
+			showDetail();
+			if (fromConfirmation) {
+				await tick();
+				focusEditorHeading();
+			}
+		} });
 	}
 
 	function assignToGroup(profileId: string, groupName: string) {
@@ -1174,7 +1213,7 @@
 		onClose={() => (showNewDialog = false)}
 		onBlank={() => {
 			showNewDialog = false;
-			void openNewForm();
+			void switchAgent({ open: () => openNewForm() });
 		}}
 		onFromBuiltin={newFromBuiltin}
 		onDescribe={(text) => {
@@ -1196,7 +1235,7 @@
 	danger
 	onCancel={stayAndFixName}
 	onConfirm={() => {
-		if (pendingSwitch) void selectProfile(pendingSwitch.profile, pendingSwitch.tab, true);
+		if (pendingSwitch) void switchAgent(pendingSwitch.destination, true);
 	}}
 />
 

@@ -53,6 +53,7 @@
 		onConfirm,
 		onCancel
 	}: Props = $props();
+	const uid = $props.id();
 
 	/**
 	 * Portal the overlay to document.body so its `position: fixed` box resolves
@@ -100,7 +101,8 @@
 		class="ui-overlay ui-surface"
 		role="dialog"
 		aria-modal="true"
-		aria-labelledby="confirm-title"
+		aria-labelledby={`${uid}-title`}
+		aria-describedby={`${uid}-message`}
 		tabindex="-1"
 	>
 		<button
@@ -113,8 +115,8 @@
 		<div
 			class="ui-dialog"
 		>
-			<header class="ui-dialog-header"><h2 id="confirm-title" class="ui-dialog-title">{title}</h2></header>
-			<div class="ui-dialog-body"><p class="mt-2 text-sm text-muted-foreground whitespace-pre-line">{message}</p>
+			<header class="ui-dialog-header"><h2 id={`${uid}-title`} class="ui-dialog-title">{title}</h2></header>
+			<div class="ui-dialog-body"><p id={`${uid}-message`} class="mt-2 text-sm text-muted-foreground whitespace-pre-line">{message}</p>
 
 			{#if checkboxLabel}
 <Checkbox bind:checked={checkboxChecked}>{checkboxLabel}</Checkbox>
