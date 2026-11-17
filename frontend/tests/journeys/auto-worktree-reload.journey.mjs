@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { runJourney } from "./runner.mjs";
 import {
   openNewChat,
@@ -27,6 +28,18 @@ function reloadCase(outcome) {
           .click();
         await hero.getByRole("button", { name: /^Worktree branch:/ }).waitFor();
       });
+      // Neither of these creates materializes its requested branch. The desktop
+      // Git panel still resolves that branch on reload. Give the naming step
+      // a real checkout from this devloop rather than mocking its Git status.
+      if (outcome === "ambiguous" || outcome === "refused") {
+        const branch = execFileSync("git", ["branch", "--show-current"], {
+          cwd: ctx.status.seed.worktree_path, encoding: "utf8",
+        }).trim();
+        expect(branch === "feature/second", "devloop's seeded branch checkout");
+        await page.route("**/projects/dev-sandbox/git/generate-branch-name", route =>
+          route.fulfill({ json: { branch_name: branch, display_name: branch } }),
+        );
+      }
       const evidence = { creates: 0, queries: 0, receipts: 0, id: null };
       ctx.evidence = evidence;
       page.on("websocket", (ws) =>
@@ -86,6 +99,10 @@ function reloadCase(outcome) {
           )
             return new Promise(() => {});
           if (path.endsWith("/sessions/with-worktree")) {
+            if ((outcome === "ambiguous" || outcome === "refused") &&
+                JSON.parse(init.body).branch_name !== "feature/second") {
+              throw Error("opening did not target the seeded checkout");
+            }
             if (outcome === "ambiguous") {
               window.__reloadReady = true;
               return new Promise(() => {});

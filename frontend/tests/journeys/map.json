@@ -695,6 +695,19 @@
 			]
 		},
 		{
+			"why": "recover an interrupted auto-worktree opening by its exact receipt without resending",
+			"journeys": ["auto-worktree-reload"],
+			"globs": [
+				"frontend/tests/journeys/auto-worktree-reload.journey.mjs",
+				"frontend/src/lib/stores/session/worktree-opening.ts",
+				"frontend/src/lib/stores/session/message-sender.ts",
+				"frontend/src/lib/components/layout/OpeningRecovery.svelte",
+				"frontend/src/lib/components/layout/AppPage.svelte",
+				"frontend/src/lib/components/layout/ChatView.svelte",
+				"app/api/sessions_worktree.py"
+			]
+		},
+		{
 			"why": "a new worktree chat with the native harness or Claude Code, including delegated CLI startup and session binding",
 			"journeys": ["new-worktree-session"],
 			"globs": [
