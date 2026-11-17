@@ -138,7 +138,8 @@
 	const label = $derived(KIND_LABEL[kind]);
 	const Icon = $derived(KIND_ICON[kind]);
 	const remembered = $derived(generationChoices.remembered[kind]);
-	const remember = $derived(rememberTouched ? rememberPick : currentPrice.total === 0);
+	// Nothing unpriced runs unasked, so an unpriced pick is never remembered.
+	const remember = $derived(currentPrice.priced && (rememberTouched ? rememberPick : currentPrice.total === 0));
 	// A caller-owned pick (automation job choice) never touches remembered/last picks.
 	const handoff = $derived(variant === 'settings' && !!onpick);
 
@@ -331,8 +332,14 @@
 		}
 	}
 
+	// A chat pick of a local fal model with no bounded price may still run:
+	// the owner approves that one run on the permission prompt, shown fal's raw
+	// rate (generation_resolver.INTERACTIVE_UNPRICED_APPROVAL).
+	const approvable = $derived(
+		variant === 'chat' && !handoff && !!current && current.source === 'fal' && !currentPrice.priced && !!currentPrice.rate && !elsewhere(current)
+	);
 	const canUse = $derived(
-		!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !collapsed
+		!!current?.available && (currentPrice.priced || approvable) && !quoting && !quoteError && !saving && !collapsed
 	);
 
 	async function use() {
@@ -606,8 +613,15 @@
 			<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{quoteError}</p>
 		{:else if currentPrice.asksFirst}
 			<p class="gcc-note" role="note">Above $0.10, so I'll ask again before spending.</p>
+			{#if currentPrice.detail}<p class="gcc-note gcc-basis" role="note">{currentPrice.detail}</p>{/if}
+		{:else if current && approvable}
+			<p class="gcc-note warn" role="note" data-testid="gcc-unbounded">
+				<TriangleAlert aria-hidden="true" />{currentPrice.detail ? `${currentPrice.detail} ` : ''}fal charges {currentPrice.rate}, so the total is not bounded. You'll be asked to approve this one run.
+			</p>
 		{:else if current && !currentPrice.priced}
-			<p class="gcc-note warn" role="note"><TriangleAlert aria-hidden="true" />This price is unknown, so it cannot run. Pick another option.</p>
+			<p class="gcc-note warn" role="note"><TriangleAlert aria-hidden="true" />{currentPrice.detail ? `${currentPrice.detail} ` : 'This price is unknown. '}It cannot run{variant === 'chat' ? '' : ' unattended'}. Pick another option.</p>
+		{:else if currentPrice.detail}
+			<p class="gcc-note gcc-basis" role="note">{currentPrice.detail}</p>
 		{/if}
 		{#if outcome}
 			{@const view = outcome.view}
@@ -644,7 +658,7 @@
 					<input
 						type="checkbox"
 						checked={remember}
-						disabled={settled}
+						disabled={settled || !currentPrice.priced}
 						onchange={(event) => {
 							rememberTouched = true;
 							rememberPick = event.currentTarget.checked;

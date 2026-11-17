@@ -6,6 +6,7 @@ import {
 	modelLabel,
 	pickMessage,
 	priceView,
+	rateText,
 	quickChips,
 	rememberedResult,
 	repliedFigure,
@@ -157,6 +158,10 @@ describe('labels and prices', () => {
 		expect(priceView({ ...PRICE, amount: '0', total: '0', status: 'included' } as never, 'image')).toMatchObject({ figure: 'Included', priced: true });
 		expect(priceView({ ...PRICE, amount: null, total: null, status: 'unknown' } as never, 'image')).toMatchObject({ figure: 'Unknown', priced: false });
 		expect(priceView(null, 'audio').priced).toBe(false);
+		const unbounded = priceView({ ...PRICE, amount: null, total: null, status: 'unknown', detail: 'Billed by usage.', rate: { amount: '0.0214', unit: '1000 tokens' } } as never, 'video');
+		expect(unbounded).toMatchObject({ figure: 'Unknown', priced: false, note: '$0.0214 per 1000 tokens', rate: '$0.0214 per 1000 tokens', detail: 'Billed by usage.' });
+		expect(priceView({ ...PRICE, basis: 'length up to 30 s (the model picks it)' } as never, 'video').detail).toBe('Estimate assumes length up to 30 s (the model picks it).');
+		expect(rateText({ amount: '0.30', unit: 'seconds' })).toBe('$0.30 per second');
 	});
 
 	it('builds short quick-setting chips', () => {

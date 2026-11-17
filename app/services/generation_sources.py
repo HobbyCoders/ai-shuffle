@@ -12,7 +12,6 @@ from dataclasses import replace
 from decimal import Decimal
 from urllib.parse import urlencode
 
-import httpx
 
 from app.core.generation_resolver import Candidate, DO_NOT_RETRY, INCLUDED_PRICE, RunContext, UNKNOWN_PRICE, price_total
 from app.db.async_database import run_sync
@@ -127,10 +126,17 @@ class Sources:
             # Discovery offers text generation endpoints only; an exactly named
             # model (runFalModel, image-to-video, audio-to-audio...) keeps any category.
             models = [m for m in models if (m.endpoint_id == model if model else m.category.startswith("text-to-"))]
-            for m in models[:max(1, min(limit, 50))]:
+            models = models[:max(1, min(limit, 50))]
+            from app.services import fal_pricing
+            try:
+                # One pricing request for the page; fal rate-limits per-model reads.
+                rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
+            except fal_pricing.PricingRequestFailed:
+                rows = None
+            for m in models:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-                price = await self.fal_price(m.endpoint_id, options, prompt=prompt)
+                price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))
@@ -180,34 +186,21 @@ class Sources:
                                          available=False, reason=capability.get("reason") or "No verified media schema is available for this account."))
         return entries
 
-    async def fal_price(self, model, options, *, prompt=None):
-        """Read declared provider rates and resolve quantities with its schema."""
+    async def fal_price(self, model, options, *, prompt=None, rows=None):
+        """Read declared provider rates and resolve quantities with its schema.
+
+        ``rows`` is an already fetched ``{endpoint: row}`` batch (a catalog
+        page); otherwise this endpoint's row is read through the shared cache.
+        """
+        from app.services import fal_pricing
+        from app.services.fal_schema import schema_service
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                response = await client.get("https://api.fal.ai/v1/models/pricing", params={"endpoint_id": model},
-                                            headers={"Authorization": "Key " + (await self.fal_key() or "")})
-                if response.status_code != 200:
-                    return dict(UNKNOWN_PRICE)
-                rows = response.json().get("prices", [])
-            row = next((r for r in rows if isinstance(r, dict) and r.get("endpoint_id") == model), {})
-            if row.get("currency") != "USD" or not isinstance(row.get("unit"), str):
-                return dict(UNKNOWN_PRICE)
-            rate = Decimal(str(row["unit_price"]))
-            from app.services.fal_schema import schema_service
+            if rows is None or model not in rows:
+                rows = await fal_pricing.rates.rows([model], await self.fal_key())
             schema = await schema_service.get_schema(model, await self.fal_key())
-            if schema is None or not rate.is_finite() or rate < 0:
-                return dict(UNKNOWN_PRICE)
-            # Discovery and execution must resolve exactly the same defaults.
-            # Partial validation permits models with required per-call media;
-            # missing quantities or prompt-dependent prices still stay unknown.
-            defaults = {f.name: f.default for f in schema.fields
-                        if not f.is_primary_text and f.default is not None}
-            values = schema.validate_options({**defaults, **options}, "", partial=True)
-            quantity, count = schema.pricing_quantity(row["unit"], values, prompt)
-            amount = rate * quantity
-            return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount * count), "status": "estimated"}
-        except (httpx.HTTPError, ValueError, TypeError, KeyError, ArithmeticError, AttributeError):
-            return dict(UNKNOWN_PRICE)
+            return fal_pricing.price_from_row(rows.get(model), schema, options, prompt)
+        except fal_pricing.PricingRequestFailed as exc:
+            return fal_pricing.unknown("pricing_request_failed", str(exc))
 
     async def prepare(self, candidate, options, prompt):
         if candidate.worker != self.local_worker():
@@ -260,6 +253,11 @@ class Sources:
             return True
         from app.network.generation import reserve
         return await reserve(price_total(candidate.price))
+
+    async def reserve_amount(self, amount):
+        """Reserve a stated amount on this worker (an owner-approved unpriced run)."""
+        from app.network.generation import reserve
+        return await reserve(amount)
 
     async def execute(self, candidate, prompt, context):
         try:

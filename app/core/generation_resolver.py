@@ -38,6 +38,11 @@ UNREADABLE_SKIP_MESSAGE = ("Generation skipped: the user's saved generation choi
                            "unattended run has no known choice to use. Nothing was submitted.")
 UNREADABLE_CHOOSE_MESSAGE = (" The user's saved generation choices could not be read, so none was used; "
                              "tell them briefly.")
+# The one loosening of "nothing unpriced runs": in a chat turn with the app's
+# permission prompt, the person may approve ONE run of a local fal model whose
+# total cannot be bounded, after seeing fal's raw rate. Unattended runs, remote
+# workers and clients without a prompt keep refusing. Set False to remove it.
+INTERACTIVE_UNPRICED_APPROVAL = True
 # Validates saved options alone when a remembered choice fails to prepare.
 _NEUTRAL_PROMPT = "A preview of this choice."
 # The chat shows a ``choose`` result as a choice card; the pick arrives as the
@@ -357,6 +362,42 @@ class Resolver:
             return False
         return True
 
+    def _may_ask_unpriced(self, candidate, context) -> bool:
+        """INTERACTIVE_UNPRICED_APPROVAL applies: see its comment."""
+        local = getattr(self.backend, "local_worker", None)
+        rate = (candidate.price or {}).get("rate")
+        return (INTERACTIVE_UNPRICED_APPROVAL and not context.unattended and context.spend_prompt is not None
+                and candidate.source == "fal" and isinstance(rate, dict) and local is not None
+                and hasattr(self.backend, "reserve_amount") and candidate.worker == local())
+
+    async def _run_unpriced(self, kind, candidate, prompt, context) -> dict:
+        """One owner-approved run with no bounded total. The permission prompt
+        states fal's rate and that the total is not bounded; nothing here
+        accepts a receipt or an agent's ``confirmed``. The cap check reserves
+        one billing unit (the least it can cost) and refuses a day already at
+        the cap."""
+        if context.not_the_approved_call is not None:
+            from app.core import owner_confirm
+            from app.core.generation_confirmations import SPEND_TOOL, spend_request
+
+            if not owner_confirm.is_approved_call(context.session_id, SPEND_TOOL, spend_request(kind, candidate, prompt)):
+                return await context.not_the_approved_call()
+        declined = await context.spend_prompt(kind, candidate, prompt)
+        if declined is not None:
+            return result("refused", price=candidate.price, reason="declined", kind=kind,
+                          choice=candidate.choice(), error=declined)
+        try:
+            reserved = await self.backend.reserve_amount(Decimal(str(candidate.price["rate"]["amount"])))
+        except (ValueError, InvalidOperation, KeyError) as exc:
+            return result("refused", price=candidate.price, reason="budget_unavailable", error=str(exc))
+        if not reserved:
+            return result("refused", price=candidate.price, reason="daily_cap", error="The daily spending cap would be exceeded.")
+        output = await self.backend.execute(candidate, prompt, context)
+        if not isinstance(output, dict) or not output.get("success"):
+            output = no_retry(output)
+        return result("completed" if output.get("success") else "failed", price=candidate.price,
+                      choice=candidate.choice(), result=output, unpriced_approved=True)
+
     async def _generate_on_approved_wake(self, kind, args, context, exclude_sources) -> dict:
         """A call on a wake carrying the owner's Approve of one spend (#523).
 
@@ -537,9 +578,13 @@ class Resolver:
                     return result("skipped", price=candidate.price, reason="stored_choice_unpriced", kind=kind,
                                   choice=candidate.choice(), message=UNPRICED_SKIP_MESSAGE)
                 return await reoffer("remembered_unpriced")
+            if total is None and self._may_ask_unpriced(candidate, context):
+                return await self._run_unpriced(kind, candidate, prompt, context)
             if total is None:
+                detail = candidate.price.get("detail") if isinstance(candidate.price, dict) else None
                 return result("refused", price=candidate.price, reason="price_unavailable",
-                              error="A reliable price is unavailable; generation was not submitted.", choice=candidate.choice())
+                              error=f"A reliable price is unavailable{f' ({detail.rstrip(chr(46))})' if detail else ''}; "
+                                    "generation was not submitted.", choice=candidate.choice())
             if context.not_the_approved_call is not None:
                 from app.core import owner_confirm
                 from app.core.generation_confirmations import SPEND_TOOL, spend_request

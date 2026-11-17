@@ -28,9 +28,30 @@ def _expired(value, now):
 def spend_request(kind, candidate, prompt) -> dict:
     """The request the owner approves, which also identifies its retry (#523)."""
     price = candidate.price or {}
-    return {"kind": kind, "prompt": prompt, "model": candidate.model, "account": candidate.account,
-            "worker": candidate.worker, "options": candidate.options,
-            "price": str(price.get("total") or price.get("amount") or "?")}
+    request = {"kind": kind, "prompt": prompt, "model": candidate.model, "account": candidate.account,
+               "worker": candidate.worker, "options": candidate.options,
+               "price": str(price.get("total") or price.get("amount") or "?")}
+    rate = price.get("rate") if price.get("total") is None else None
+    if isinstance(rate, dict):
+        # An unpriced run (generation_resolver.INTERACTIVE_UNPRICED_APPROVAL).
+        request["price"] = "not bounded"
+        request["rate"] = rate_text(rate)
+    return request
+
+
+def rate_text(rate) -> str:
+    """fal's raw rate, e.g. "$0.30 per second" or "$0.0214 per 1000 tokens"."""
+    unit = str(rate.get("unit") or "").strip() or "unit"
+    if re.fullmatch(r"[a-z]+s", unit):
+        unit = unit[:-1]
+    return f"${rate.get('amount')} per {unit}"
+
+
+def unpriced_question(kind, candidate) -> str:
+    price = candidate.price or {}
+    why = price.get("detail") or "The total is not known in advance."
+    return (f"Run {candidate.model} for this {kind} with no price limit? fal charges {rate_text(price.get('rate') or {})}. "
+            f"{why} The total is not bounded.")
 
 
 async def ask_on_prompt(session_id, profile_id, kind, candidate, prompt):
@@ -49,7 +70,8 @@ async def ask_on_prompt(session_id, profile_id, kind, candidate, prompt):
     tool_input = spend_request(kind, candidate, prompt)
     amount = tool_input["price"]
     cost = f"${amount}" if price.get("currency") == "USD" else f"{amount} {price.get('currency') or ''}".strip()
-    question = f"Spend about {cost} to generate this {kind} with {candidate.model}?"
+    question = (unpriced_question(kind, candidate) if tool_input["price"] == "not bounded"
+                else f"Spend about {cost} to generate this {kind} with {candidate.model}?")
     decision = await provider_agent_approvals.route_permission({
         "request_id": f"generation-{uuid.uuid4()}",
         "session_id": session_id,

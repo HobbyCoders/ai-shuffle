@@ -35,6 +35,14 @@ export interface GenerationPrice {
 	amount: string | null;
 	total: string | null;
 	status: 'estimated' | 'quoted' | 'included' | 'reported' | 'unknown' | string;
+	/** Unknown only: machine-readable cause (app/services/fal_pricing.py REASONS). */
+	reason?: string;
+	/** Unknown only: a short sentence saying why. */
+	detail?: string;
+	/** Unknown only: fal's raw rate, when it lists one. */
+	rate?: { amount: string; unit: string };
+	/** Estimated: the assumptions behind the figure (e.g. "length up to 30 s"). */
+	basis?: string;
 }
 
 /** fal schema field (app/services/fal_schema.py ParamField). */
@@ -278,6 +286,17 @@ export interface PriceView {
 	/** Above the confirmation threshold: the agent asks before spending. */
 	asksFirst: boolean;
 	total: number | null;
+	/** Why the price is unknown, or the assumptions behind an estimate. */
+	detail?: string;
+	/** Unknown price with fal's raw rate, e.g. `$0.30 per second`. */
+	rate?: string;
+}
+
+/** fal's raw rate in words: `$0.30 per second`, `$0.0214 per 1000 tokens`. */
+export function rateText(rate: GenerationPrice['rate']): string | undefined {
+	if (!rate || money(rate.amount) === null) return undefined;
+	const unit = (rate.unit || '').trim() || 'unit';
+	return `$${rate.amount} per ${/^[a-z]+s$/.test(unit) ? unit.slice(0, -1) : unit}`;
 }
 
 export function priceView(price: GenerationPrice | null | undefined, kind: GenerationKind): PriceView {
@@ -287,7 +306,16 @@ export function priceView(price: GenerationPrice | null | undefined, kind: Gener
 	const amount = money(price.amount);
 	const total = money(price.total);
 	if (amount === null || total === null || price.status === 'unknown') {
-		return { figure: 'Unknown', note: 'price unavailable', priced: false, asksFirst: false, total: null };
+		const rate = rateText(price.rate);
+		return {
+			figure: 'Unknown',
+			note: rate ?? 'price unavailable',
+			priced: false,
+			asksFirst: false,
+			total: null,
+			...(price.detail ? { detail: price.detail } : {}),
+			...(rate ? { rate } : {})
+		};
 	}
 	const count = amount > 0 ? Math.round(total / amount) : 1;
 	const note = count > 1 ? `${count} × ${formatUsd(amount)}` : `per ${noun}${price.status === 'estimated' ? ', estimated' : ''}`;
@@ -296,7 +324,8 @@ export function priceView(price: GenerationPrice | null | undefined, kind: Gener
 		note,
 		priced: true,
 		asksFirst: Math.max(total, amount) > CONFIRM_ABOVE_USD,
-		total
+		total,
+		...(price.basis ? { detail: `Estimate assumes ${price.basis}.` } : {})
 	};
 }
 
@@ -406,7 +435,9 @@ export function repliedFigure(reply: string): string | null {
  */
 export function pickMessage(tool: string, kind: GenerationKind, option: GenerationOption, options: Record<string, unknown>, price: PriceView, remember: boolean): string {
 	const label = `${sourceLabel(option.source)} · ${modelLabel(option.model)}`;
-	const cost = price.priced ? (price.figure === 'Included' ? ', included in my plan' : ` (${price.figure})`) : '';
+	const cost = price.priced
+		? price.figure === 'Included' ? ', included in my plan' : ` (${price.figure})`
+		: price.rate ? ` (no bounded price, ${price.rate}; ask me to approve it)` : '';
 	const args = JSON.stringify({ source: option.account, model: option.model, worker: option.worker, options });
 	const memory = remember ? ` I saved it as my choice for ${KIND_LABEL[kind].plural}.` : '';
 	return `Use ${label} for this ${KIND_LABEL[kind].noun}${cost}.${memory}\nCall ${tool} again with the same prompt and ${args}.`;

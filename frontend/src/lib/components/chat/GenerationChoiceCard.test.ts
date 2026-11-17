@@ -76,6 +76,8 @@ const OPENAI: GenerationOption = {
 	schema: null
 };
 
+const UNKNOWN_PRICE_FIXTURE = { currency: 'USD', unit: 'item', amount: null, total: null, status: 'unknown' };
+
 function card(props: Record<string, unknown> = {}) {
 	return render(GenerationChoiceCard, {
 		props: { kind: 'image', options: [FAL, GROK, OPENAI], tool: 'generateImage', prompt: 'a lighthouse at dusk', toolId: 'tool-1', answeredBy: null, ...props }
@@ -265,6 +267,40 @@ describe('GenerationChoiceCard', () => {
 		await fireEvent.click(screen.getByRole('button', { name: /Advanced/ }));
 		await fireEvent.input(screen.getByLabelText(/Seed/), { target: { value: '7' } });
 		expect(await screen.findByText(/do not match the declared input schema/, {}, { timeout: 2000 })).toBeTruthy();
+		expect((screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
+	it('lets the owner approve one unbounded fal run, showing why and fal’s raw rate', async () => {
+		const unbounded = {
+			...UNKNOWN_PRICE_FIXTURE,
+			reason: 'billed_by_usage',
+			detail: 'fal bills this model by what each run uses, which is not known in advance.',
+			rate: { amount: '0.30', unit: 'seconds' }
+		};
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { options: Record<string, unknown> } }) => ({
+			ok: true, priced: false, options: body.choice.options, price: unbounded
+		}));
+		card({ options: [{ ...FAL, price: unbounded }] });
+		const note = await screen.findByTestId('gcc-unbounded');
+		expect(note.textContent).toContain('$0.30 per second');
+		expect(note.textContent).toContain('not bounded');
+		expect(note.textContent).toContain('bills this model by what each run uses');
+		expect((screen.getByRole('checkbox', { name: /Use this every time/ }) as HTMLInputElement).disabled).toBe(true);
+		const use = screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement;
+		await waitFor(() => expect(use.disabled).toBe(false));
+		await fireEvent.click(use);
+		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+		expect(String(mocks.send.mock.calls[0][0])).toContain('no bounded price, $0.30 per second');
+		expect(mocks.put.mock.calls[0][1]).toMatchObject({ remember: false });
+	});
+
+	it('cannot run an unknown price fal lists no rate for, and says why', async () => {
+		const missing = { ...UNKNOWN_PRICE_FIXTURE, reason: 'no_pricing_row', detail: 'fal lists no price for this model.' };
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { options: Record<string, unknown> } }) => ({
+			ok: true, priced: false, options: body.choice.options, price: missing
+		}));
+		card({ options: [{ ...FAL, price: missing }] });
+		expect(await screen.findByText(/fal lists no price for this model\. It cannot run/)).toBeTruthy();
 		expect((screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 

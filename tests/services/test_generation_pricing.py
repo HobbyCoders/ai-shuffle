@@ -124,7 +124,8 @@ async def test_fal_preset_defaults_are_normalized_and_priced_like_saved_options(
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=response)), **kw))
     assert (await backend.fal_price("fake/model", {}))["total"] == "0.025"
     assert (await backend.fal_price("fake/model", {"image_size": "square_hd", "num_images": 3}))["total"] == "0.150"
-    assert await backend.fal_price("fake/model", {"image_size": "unrecognized"}) == UNKNOWN_PRICE
+    unknown = await backend.fal_price("fake/model", {"image_size": "unrecognized"})
+    assert {k: unknown[k] for k in UNKNOWN_PRICE} == UNKNOWN_PRICE and unknown["reason"] == "invalid_options"
 
 
 async def test_audio_choose_has_input_dependent_character_price(backend, monkeypatch):

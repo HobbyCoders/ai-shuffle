@@ -213,7 +213,11 @@ async def test_flat_fal_prices_count_canonical_options_and_unknown_is_not_zero(b
     assert price == {**PRICE, "total": "0.15"}
     assert requests[0].url.params["endpoint_id"] == "fake/model"
     response["prices"][0]["unit"] = "megapixel"
-    assert await backend.fal_price("fake/model", {}) == UNKNOWN_PRICE
+    from app.services import fal_pricing
+    fal_pricing.rates.clear()  # rates are cached; a changed rate is a fresh read
+    price = await backend.fal_price("fake/model", {})
+    assert {k: price[k] for k in UNKNOWN_PRICE} == UNKNOWN_PRICE
+    assert price["reason"] == "needs_option" and price["rate"] == {"amount": "0.05", "unit": "megapixel"}
 
 
 async def test_plan_image_is_included_and_reserves_nothing(backend, monkeypatch):

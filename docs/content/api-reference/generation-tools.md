@@ -25,8 +25,23 @@ The same source/account/model/options on several workers is one option: a usable
 local holder is preferred, otherwise the holder is chosen by worker ID. Different
 accounts or options remain separate. A single quoted match exposes its price both
 on the option and at the top level; with several matches, read each option's price.
-Default options are resolved by the same pricing code used for generation. Prices
-that depend on missing call inputs (for example text length) remain unknown.
+Default options are resolved by the same pricing code used for generation. fal
+prices come from fal's per-endpoint rate and unit (image, megapixel, second,
+minute, second blocks such as "5 seconds", characters, video tokens). A
+quantity set to `auto` or left unset is priced at the largest value the
+model declares (for example the longest duration), so the estimate never
+under-reserves the daily cap. An estimate built on such an assumption carries
+`price.basis`, for example `length up to 30 s (the model picks it)`. Picking
+the options lowers the quote to what they cost.
+
+A price that still cannot be computed has `status: "unknown"`, null
+`amount`/`total` (never zero), a machine-readable `price.reason`, a sentence
+in `price.detail` and, when fal lists one, its raw `price.rate`
+(`{"amount": "0.0214", "unit": "1000 tokens"}`). Reasons are
+`no_pricing_row`, `pricing_request_failed`, `schema_unavailable`,
+`unsupported_unit`, `billed_by_usage`, `depends_on_input` (for example input
+video length), `needs_option` (pick a size or length), `length_not_declared`,
+`needs_prompt`, `rate_not_listed` and `invalid_options`.
 
 `searchModels` returns compact schemas by default: declared field names, types,
 required flags, enums, defaults and numeric bounds, without descriptions or the
@@ -41,7 +56,13 @@ Media-related boolean switches such as `generate_audio` stay boolean, not file i
 Every call to the four generation tools or `runFalModel`, including subscription
 images priced **Included**, goes through the guard below: a known price,
 confirmation above the threshold and the daily cap. Nothing unpriced is
-submitted, including unattended calls.
+submitted unattended. One interactive exception: in a chat turn with a
+permission prompt, a local fal model with no bounded price but a listed fal
+rate may run once if the user approves it on that prompt. The prompt shows
+fal's rate and says the total is not bounded; one billing unit is reserved
+against the daily cap first, and a full cap refuses it. Remote workers,
+unattended runs and clients without a prompt keep refusing. The choice card
+never remembers an unpriced pick.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
