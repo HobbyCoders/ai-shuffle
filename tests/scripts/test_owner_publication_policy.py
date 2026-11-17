@@ -159,8 +159,11 @@ def test_javascript_audits_use_npm_11_without_reducing_scope(step_name, director
     step = next(step for step in job["steps"] if step.get("name") == step_name)
     assert step.get("working-directory", job.get("defaults", {}).get("run", {}).get("working-directory")) == directory
     audits = [command.strip() for command in re.split(r"\n|&&", step["run"])
-              if re.search(r"\baudit\b", command)]
-    assert audits == ["npx -y npm@11 audit --audit-level=high"]
+              if "audit" in command]
+    assert audits == ["python3 ../scripts/npm_audit_gate.py"]
+    # The gate runs the same full npm 11 audit (dev dependencies included).
+    gate = (ROOT / "scripts/npm_audit_gate.py").read_text()
+    assert 'AUDIT = ["npx", "-y", "npm@11", "audit", "--json"]' in gate
 
 
 def test_fluid_ripgrep_uses_signed_ubuntu_sources_not_optional_runner_feeds():
