@@ -251,6 +251,7 @@ JSON body, all optional:
 |-------|-------|
 | `model` | A model id, or a provider model selection (`prov:...`) that must exist on that provider |
 | `effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
+| `effort_rev` | Optional. The chat's effort revision (`effort_rev` on the session) your `effort` was read at. With it, `effort` is saved only while that is still the chat's revision, so a level read before someone else changed it is not written back; the saved level is sent to open clients. Without it, `effort` is saved as a new pick |
 | `permission_mode` | `default`, `auto`, `acceptEdits` or `bypassPermissions` |
 | `context_window` | Integer greater than 0 |
 | `fast` | Boolean |

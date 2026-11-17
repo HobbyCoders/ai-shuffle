@@ -3,14 +3,24 @@ import type { ActiveSessionState } from '$lib/stores/active-session';
 import { selectedContextWindow } from '$lib/stores/session/context-window';
 import { getDefaultModel } from '$lib/constants/models';
 import { isBindingUnhydrated } from '$lib/stores/session/composer-binding';
+import { effortRevToSend } from '$lib/stores/session/effort-revision';
 
 const writes = new Map<string, { key: string; done: Promise<void> }>();
 
-export function voiceContextFor(state: ActiveSessionState): VoiceExecutionContext {
+/**
+ * The worker context a call should use, as the composer shows it. A snapshot,
+ * not a pick (picks are saved by the run-settings endpoint): its level rides
+ * with the revision it was saved at, so a level from an outdated view never
+ * replaces a newer one (#1609), and is left out when that revision is unknown.
+ * `row` is the chat's sidebar row, which names the revision of a chat created
+ * in this tab.
+ */
+export function voiceContextFor(state: ActiveSessionState, row?: { effort?: string | null; effort_rev?: number }): VoiceExecutionContext {
 	const model = state.modelOverride || getDefaultModel();
+	const effortRev = state.sessionId ? effortRevToSend(state, row) : undefined;
 	return {
 		model,
-		effort: state.effortLevelOverride || null,
+		...(effortRev === undefined ? {} : { effort: state.effortLevelOverride || null, effort_rev: effortRev }),
 		// An existing session's access and Fast still loading are placeholders
 		// (#418): leave the key out so the call keeps the session's own value.
 		// `null` is not "unknown" here — it explicitly clears to inherit.

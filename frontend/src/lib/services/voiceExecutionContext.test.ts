@@ -15,13 +15,23 @@ describe('voice execution context', () => {
 		expect(voiceContextFor(state).permission_mode).toBe('default');
 	});
 	it('explicitly clears inherited effort and inapplicable model context', () => {
-		const context = voiceContextFor({ modelOverride: 'unknown-model', effortLevelOverride: null, contextWindowChoice: '1m' } as unknown as ActiveSessionState);
-		expect(context.effort).toBeNull();
+		const context = voiceContextFor({ sessionId: 'chat', effortRev: 2, modelOverride: 'unknown-model', effortLevelOverride: null, contextWindowChoice: '1m' } as unknown as ActiveSessionState);
+		expect(context).toMatchObject({ effort: null, effort_rev: 2 });
 		expect(context.context_window).toBeNull();
 	});
-	it('carries the picked effort in every chat', () => {
-		const state = { sessionId: 'chat', modelOverride: 'opus', effortLevelOverride: 'low' } as unknown as ActiveSessionState;
-		expect(voiceContextFor(state).effort).toBe('low');
+	it('carries the shown effort with the revision it was saved at', () => {
+		const state = { sessionId: 'chat', effortRev: 3, modelOverride: 'opus', effortLevelOverride: 'low' } as unknown as ActiveSessionState;
+		expect(voiceContextFor(state)).toMatchObject({ effort: 'low', effort_rev: 3 });
+	});
+	it('never sends a level without its revision (stage-1 review S6)', () => {
+		// A snapshot with no revision would be saved as a pick over a level
+		// another device saved since. Unknown revision: the level stays out.
+		const state = { sessionId: 'chat', modelOverride: 'opus', effortLevelOverride: 'high' } as unknown as ActiveSessionState;
+		expect(voiceContextFor(state)).not.toHaveProperty('effort');
+		expect(voiceContextFor(state, { effort: 'low', effort_rev: 1 })).not.toHaveProperty('effort');
+		// A chat created in this tab: its row names the revision of the level shown.
+		expect(voiceContextFor(state, { effort: 'high', effort_rev: 4 })).toMatchObject({ effort: 'high', effort_rev: 4 });
+		expect(voiceContextFor({ ...state, sessionId: null })).not.toHaveProperty('effort');
 	});
 	it('leaves out an open chat\'s access and Fast while they are still loading (#418)', () => {
 		const state = {

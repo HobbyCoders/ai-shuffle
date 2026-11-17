@@ -30,6 +30,10 @@ class VoiceContextPatch(BaseModel):
 
     model: Optional[str] = None
     effort: Optional[str] = None
+    # The revision the composer's level was last saved at (#1609). With it,
+    # ``effort`` is a snapshot of what the composer shows, saved only while
+    # that is still the row's revision; without it, an explicit pick.
+    effort_rev: Optional[int] = Field(None, ge=0)
     permission_mode: Optional[str] = None
     context_window: Optional[int] = Field(None, gt=0)
     fast: Optional[bool] = None
@@ -113,6 +117,14 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
     # A window is checked once the model change is stored, as the picker checks
     # it; one the model does not offer is ignored (null still clears the pin).
     window = kwargs.pop("context_window") if kwargs.get("context_window") else None
+    effort_rev = kwargs.pop("effort_rev", None)
+    if effort_rev is not None and "effort" in kwargs:
+        # A snapshot is admitted like a send's level (#1609): a level from a
+        # view older than the row's revision leaves the saved one in place.
+        effort = kwargs.pop("effort")
+        database.set_session_run_binding(
+            session_id, effort=effort, clear_effort=effort is None,
+            effort_rev_base=effort_rev)
     row = database.get_session(session_id) or {}
     if kwargs:
         if row.get("mode") == "voice":
@@ -155,6 +167,14 @@ async def update_voice_session_context(
     if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):
         raise HTTPException(400, "Chat conversations use the default permission ceiling.")
     updated = await run_sync(_persist_patch, session_id, body)
+    saved_rev = int(updated.get("effort_rev") or 0)
+    if "effort" in body.model_fields_set and body.effort_rev is not None and saved_rev != body.effort_rev:
+        # The sender's view was outdated (or this changed the level): every
+        # open client, the sender included, adopts the saved pair.
+        from app.core import turn_manager
+
+        await turn_manager.announce_effort(
+            session_id, {"effort": updated.get("effort"), "effort_rev": saved_rev})
     return VoiceContextResponse(
         session_id=session_id,
         model=updated.get("model"),
