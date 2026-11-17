@@ -62,6 +62,7 @@
 	<ListItem
 		id={p.id}
 		name={p.name}
+		title={p.name}
 		summary={p.description || 'No description'}
 		meta={metaOf(p)}
 		selected={selectedId === p.id}
@@ -94,6 +95,7 @@
 				<ListItem
 					id="__draft"
 					name={draft.name.trim() || 'New agent'}
+					title={draft.name.trim() || undefined}
 					summary="Name it to save"
 					selected={selectedId === ''}
 					onselect={onSelectDraft}

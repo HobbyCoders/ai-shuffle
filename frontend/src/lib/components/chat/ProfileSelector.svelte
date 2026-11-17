@@ -118,7 +118,7 @@
 		class:pending={profilePending}
 		aria-busy={profilePending || undefined}
 		onclick={handleProfileClick}
-		title="Change agent"
+		title={profileUnset ? 'Choose an agent' : selectedProfileName}
 		aria-label="Agent: {selectedProfileName}"
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}
@@ -136,7 +136,7 @@
 		class:pending={profilePending}
 		aria-busy={profilePending || undefined}
 		onclick={handleProfileClick}
-		title="Change agent"
+		title={profileUnset ? 'Choose an agent' : selectedProfileName}
 		aria-label="Agent: {selectedProfileName}"
 		aria-haspopup="menu"
 		aria-expanded={showProfileDropdown}

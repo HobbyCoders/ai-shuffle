@@ -257,6 +257,38 @@ await runJourney({
 			expect(rect && rect.y >= 0 && rect.y + rect.height <= page.viewportSize().height, 'Name field remains in view');
 		},
 		verify: () => {}
+	}, {
+		name: 'truncated-agent-names-have-full-labels',
+		viewports: ['desktop'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark, log }) {
+			const key = uniq().slice(-6);
+			const full = `zz${key}`.padEnd(99, 'w') + 'A';
+			const other = full.slice(0, -1) + 'B';
+			for (const [index, name] of [full, other].entries()) {
+				await api(page, 'POST', '/agents', { id: `label-${key}-${index}`, name, config: {} });
+			}
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			await mark('read the two full names in the Agents list');
+			const list = await Promise.all([full, other].map((name) =>
+				page.locator('[data-settings-item]').filter({ hasText: name }).getAttribute('title')));
+			await workspace(page).getByRole('button', { name: 'New chat', exact: true }).click();
+			await waitChat(page, { surface: 'new' });
+			const hero = page.getByRole('region', { name: 'New chat' });
+			await hero.getByRole('button', { name: /^Agent:/ }).click();
+			await mark('read the two full names in the picker and the selected chip');
+			const picker = page.getByRole('menu', { name: 'Agent selection' });
+			const choices = [full, other].map((name) => picker.getByRole('button', { name, exact: true }));
+			const titles = await Promise.all(choices.map((choice) => choice.getAttribute('title')));
+			await choices[0].click();
+			const selected = await hero.getByRole('button', { name: `Agent: ${full}`, exact: true }).getAttribute('title');
+			log(`full list titles: ${list[0] === full && list[1] === other}; full picker titles: ${titles[0] === full && titles[1] === other}; full chip title: ${selected === full}`);
+			expect(list[0] === full && list[1] === other, 'list title distinguishes same-prefix names');
+			expect(titles[0] === full && titles[1] === other, 'picker title distinguishes same-prefix names');
+			expect(selected === full, 'chip tooltip names the selected agent');
+		},
+		verify: () => {}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
 });

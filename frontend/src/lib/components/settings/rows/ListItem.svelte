@@ -38,6 +38,7 @@
 		name: string;
 		/** Preserve a collection row's existing accessible action name. */
 		ariaLabel?: string;
+		title?: string;
 		summary?: string;
 		meta?: string;
 		icon?: SettingsIcon;
@@ -67,6 +68,7 @@
 		id,
 		name,
 		ariaLabel,
+		title,
 		summary,
 		meta,
 		icon,
@@ -108,6 +110,7 @@
 	{disabled}
 	aria-current={isSelected ? 'true' : undefined}
 	aria-label={ariaLabel}
+	{title}
 	data-settings-item={id}
 	data-settings-nav-item
 	onclick={select}

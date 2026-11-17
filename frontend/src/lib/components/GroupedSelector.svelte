@@ -309,6 +309,7 @@
 		type="button"
 		class="menu-item"
 		class:selected={selectedId === item.id}
+		title={entityType === 'profiles' ? item.name : undefined}
 		{...itemNaming(item)}
 		{...rowProps('item', item.id)}
 		onclick={() => handleSelect(item.id)}
@@ -482,6 +483,7 @@
 					type="button"
 					class="menu-item"
 					class:selected={selectedId === item.id}
+					title={entityType === 'profiles' ? item.name : undefined}
 					onclick={() => handleSelect(item.id)}
 				>
 					{#if itemIcon}
