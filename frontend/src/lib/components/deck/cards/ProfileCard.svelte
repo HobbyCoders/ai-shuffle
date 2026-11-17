@@ -1053,7 +1053,7 @@
 	data-stacked={stacked || undefined}
 	data-view={stacked ? (pane === 'detail' ? 'detail' : 'page') : undefined}
 >
-	<ViewShell label="Agents" historyType="profile" selection={selectedId ?? 'new'} {restoreSelection} inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
+	<ViewShell label="Agents" historyType="build" selection={selectedId ?? 'new'} {restoreSelection} inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
 		{#snippet panel()}
 		<ViewPanel title="Agents" count={loading && profiles.length === 0 ? undefined : profiles.length}
 			listLabel="Agent list" filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}>

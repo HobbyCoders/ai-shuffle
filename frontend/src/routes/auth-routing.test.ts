@@ -3,7 +3,11 @@ import { writable, get } from 'svelte/store';
 import type { Component } from 'svelte';
 
 const mocks = vi.hoisted(() => ({ goto: vi.fn(), init: vi.fn(), destroy: vi.fn(), hydrate: vi.fn(), history: vi.fn() }));
-vi.mock('$app/navigation', () => ({ goto: mocks.goto }));
+vi.mock('$app/navigation', () => ({ goto: (url: string, options?: { shallow?: boolean; replace?: boolean; persistState?: boolean; state?: App.PageState }) => {
+	// Initializing the current browser entry does not navigate the auth route.
+	if (url === location.href && options?.shallow && options.replace && options.persistState && options.state && 'shell' in options.state) return Promise.resolve();
+	return mocks.goto(url);
+} }));
 vi.mock('$lib/stores/theme.svelte', () => ({ theme: { init: vi.fn() } }));
 vi.mock('$lib/stores/pwa.svelte', () => ({ pwa: { init: vi.fn(), current: { updateReady: false } } }));
 vi.mock('$lib/constants/models', () => ({ ensureModelRegistryHydrated: mocks.hydrate, setReadyProviders: vi.fn() }));

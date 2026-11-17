@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { tick } from 'svelte';
+import { shellHistory } from '$lib/services/app-history.svelte';
 import { page } from '$app/state';
 import { writable, type Writable } from 'svelte/store';
 vi.mock('$app/navigation', () => ({ pushState: vi.fn(), goto: vi.fn() }));
@@ -51,7 +52,7 @@ beforeEach(() => {
  list.set([{ id: 'one', name: 'One', path: '/one', session_count: 2 }, { id: 'two', name: 'Two', path: '/two' }]);
  view.set({ type: 'project' }); overview.set([]); supported.set(false);
 });
-afterEach(() => { cleanup(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); shellHistory.stop(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('Projects master/detail', () => {
  it('keeps the path only in its full-width field and makes removal copy wrap', async () => {
   const { container } = render(ProjectCard);
@@ -91,6 +92,7 @@ describe('Projects master/detail', () => {
  it.each(['narrow browser', 'phone app'])('starts with the list and uses shared back navigation on %s', async mode => {
   if (mode === 'phone app') platform.set('mobile');
   else Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true });
+  shellHistory.start({ shell: { id: 'projects', place: { type: 'project', panel: null } } }, null);
   const historyBack = vi.spyOn(history, 'back').mockImplementation(() => {});
   const result = render(ProjectCard); await tick();
   expect(result.container.querySelector('[data-pane="panel"]')).toBeTruthy();

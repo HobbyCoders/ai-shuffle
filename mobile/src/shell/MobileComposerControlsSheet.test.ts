@@ -19,14 +19,19 @@ import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
 import { __resetWatches } from '$lib/stores/watches';
 import { page } from '$app/state';
+import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 
 vi.hoisted(() => {
 	vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({}) }));
 });
 afterAll(() => vi.unstubAllGlobals());
-beforeEach(() => platform.set('mobile'));
+beforeEach(() => {
+	platform.set('mobile');
+	shellHistory.start({ shell: { id: 'chat', place: { type: 'session' } } }, null);
+});
 afterEach(() => {
 	cleanup();
+	shellHistory.stop();
 	vi.restoreAllMocks();
 	platform.set('desktop');
 	appMode.set('code');
@@ -617,8 +622,8 @@ describe('Chat controls panel', () => {
 		page.state = { mobileControls: true };
 		render(MobileComposerControlsSheet, { props: props({ open: true }) });
 		await fireEvent.click(within(panel()).getByRole('button', { name: /^Context and usage/ }));
-		// The page pushed its entry (the stubbed router only records it here).
-		page.state = { mobileControls: true, mobileControlsPage: 'usage' };
+		// Land the nested entry: unlike a quick-bar page, it has a controls-list parent.
+		page.state = { mobileControls: true, mobileControlsPage: 'usage', mobileControlsList: 'controls' };
 		await tick();
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
 		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
@@ -632,21 +637,25 @@ describe('Chat controls panel', () => {
 	it('pops both entries when the panel closes from a page, and one from the list (#705)', async () => {
 		page.state = { mobileControls: true };
 		const { rerender } = render(MobileComposerControlsSheet, { props: props({ open: true }) });
+		const list = { mobileControls: true, shell: { id: shellHistory.entryId!, place: { type: 'session' } } } satisfies ShellState;
 		await fireEvent.click(within(panel()).getByRole('button', { name: /^Context and usage/ }));
-		page.state = { mobileControls: true, mobileControlsPage: 'usage' };
+		page.state = { mobileControls: true, mobileControlsPage: 'usage', mobileControlsList: list.shell.id };
 		await tick();
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
 		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
 		await rerender(props({ open: false }));
-		expect(go).toHaveBeenCalledExactlyOnceWith(-2);
-		expect(back).not.toHaveBeenCalled();
+		expect(back).toHaveBeenCalledTimes(1);
+		page.state = list; await tick();
+		expect(back).toHaveBeenCalledTimes(2);
+		expect(go).not.toHaveBeenCalled();
 
 		// Reopened and closed from the list: only the panel's entry to pop.
-		go.mockClear();
+		back.mockClear();
 		page.state = { mobileControls: true };
 		await rerender(props({ open: true }));
 		await rerender(props({ open: false }));
-		expect(go).toHaveBeenCalledExactlyOnceWith(-1);
+		expect(back).toHaveBeenCalledOnce();
+		expect(go).not.toHaveBeenCalled();
 	});
 
 	it('opens Export as a page with its button pinned under the choices', async () => {

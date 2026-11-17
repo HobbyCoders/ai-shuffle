@@ -122,7 +122,7 @@ export class SettingsNavigation {
 	selected = $state<Partial<Record<CategoryId, string>>>({});
 	tabs = $state<Record<string, string>>({});
 	/** Phone-stack step. Only meaningful while `stacked`. */
-	view = $state<SettingsView>('page');
+	view = $state<SettingsView>('index');
 	/** True when the shell shows one pane at a time (phone app or ≤600px wide). */
 	stacked = $state(false);
 	/**
@@ -238,6 +238,7 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = this.view === 'detail' ? 'page' : 'index';
+		shellHistory.detail('settings', { settings: this.position(this.view) }, true);
 		this.persist();
 	}
 
@@ -248,8 +249,11 @@ export class SettingsNavigation {
 	 * shows; beside the list it stays open.
 	 */
 	showList(category: CategoryId = this.category): void {
-		if (!this.stacked && this.onePane[category]) this.clearSelection(category);
-		this.back();
+		if (this.stacked) this.back();
+		else if (this.onePane[category]) {
+			this.clearSelection(category);
+			shellHistory.detail('settings', { settings: this.position('page') }, true);
+		}
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */
@@ -260,6 +264,7 @@ export class SettingsNavigation {
 			return;
 		}
 		this.view = 'index';
+		shellHistory.detail('settings', { settings: this.position('index') }, true);
 		this.persist();
 	}
 
@@ -303,7 +308,7 @@ export class SettingsNavigation {
 		this.category = 'general';
 		this.selected = {};
 		this.tabs = {};
-		this.view = 'page';
+		this.view = 'index';
 		this.stacked = false;
 		this.onePane = {};
 		this.pendingAnchor = null;

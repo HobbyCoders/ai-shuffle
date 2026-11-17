@@ -491,6 +491,8 @@
 					if (idx >= 0) notes[idx] = saved;
 					else notes = [saved, ...notes];
 					if (generation !== editorGeneration) return;
+					// The server resolved the draft's identity, not a new navigation.
+					if (isCreatingNew && shellHistory.place?.panel === 'new') shellHistory.detail('notes', { panel: saved.id }, true);
 					isCreatingNew = false;
 					editingNote = saved;
 					hasUnsavedChanges = revision !== editRevision;

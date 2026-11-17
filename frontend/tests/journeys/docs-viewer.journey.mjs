@@ -5,7 +5,7 @@
 // another word; and a page holding the query's words together ranks first in
 // the Docs panel and in Spotlight, whose rows read as text, not Markdown.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
+import { expect, gotoApp, reloadForHistory, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const workspace = (page) => page.getByRole('navigation', { name: 'Workspace', exact: true });
@@ -170,8 +170,7 @@ await runJourney({
 			await page.goBack(); await waitTitle(page, 'Updates');
 			const length = await page.evaluate(() => history.length);
 			await mark('reload the article mid-chain without dropping Forward');
-			await page.reload({ waitUntil: 'domcontentloaded' });
-			await mark('article reappears');
+			await reloadForHistory(page, mark);
 			await waitTitle(page, 'Updates', 30000);
 			expect(await page.evaluate(() => history.length) === length, 'reload leaves stack length unchanged');
 			await page.goForward(); await index.waitFor();

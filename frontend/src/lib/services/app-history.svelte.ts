@@ -1,3 +1,4 @@
+import { randomUUID } from '$lib/utils/id';
 import { goto } from '$app/navigation';
 import type { ActiveView, ViewType } from '$lib/stores/layout.svelte';
 import type { CategoryId, SettingsView } from '$lib/settings/types';
@@ -66,7 +67,7 @@ function viewPlace(view: ActiveView | null): Place {
 
 function write(place: Place, replace = false, overlay: App.PageState = {}) {
  if (!mounted) return;
- const id = globalThis.crypto.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+ const id = randomUUID();
  const entry = { id, place };
  restored = null;
  current = entry;

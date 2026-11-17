@@ -93,7 +93,7 @@
 			settingsNav.stacked = narrow;
 			if (place?.settings) settingsNav.follow(place.settings);
 			else {
-				const base = settingsNav.position(narrow ? 'index' : 'page', 0);
+				const base = settingsNav.position(settingsNav.view, 0);
 				settingsNav.follow(base);
 				shellHistory.detail('settings', { settings: base }, true);
 			}
