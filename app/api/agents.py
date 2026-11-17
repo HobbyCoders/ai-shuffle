@@ -9,6 +9,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from fastapi.responses import JSONResponse
+from psycopg2.errors import UniqueViolation
 from pydantic import BaseModel, Field
 
 from app.core.models import (
@@ -798,15 +799,19 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             profile_id = f"{base_id}-{counter}"
             counter += 1
 
-        profile = database.create_profile(
-            profile_id=profile_id,
-            name=request.name,
-            description=request.description,
-            config=request.config.model_dump(exclude_none=True),
-            is_builtin=False,
-        )
-
-        return profile
+        try:
+            return database.create_profile(
+                profile_id=profile_id,
+                name=request.name,
+                description=request.description,
+                config=request.config.model_dump(exclude_none=True),
+                is_builtin=False,
+            )
+        except UniqueViolation as exc:
+            # Another request can claim the id after the last probe.
+            if exc.diag.constraint_name != "agents_pkey":
+                raise
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent ID already exists") from exc
 
     return await run_sync(_load)
 

@@ -49,6 +49,7 @@
 		isAdmin: boolean;
 		folder: string;
 		saveState: 'idle' | 'saving' | 'saved' | 'error';
+		duplicating: boolean;
 		remoteChange: string;
 		tab: AgentTab;
 		counts: { tools: number | undefined; subagents: number; chats: number | null };
@@ -90,6 +91,7 @@
 		isAdmin,
 		folder,
 		saveState,
+		duplicating,
 		remoteChange,
 		tab,
 		counts,
@@ -201,7 +203,7 @@
 {/snippet}
 
 {#snippet primary()}
-	<button type="button" class="st-btn" title="Duplicate" aria-label="Duplicate" disabled={draft} onclick={onDuplicate}>
+	<button type="button" class="st-btn" title="Duplicate" aria-label="Duplicate" disabled={draft || duplicating} onclick={onDuplicate}>
 		<Copy /><span class="lbl">Duplicate</span>
 	</button>
 	<button type="button" class="st-btn" title="Export .json" aria-label="Export .json" disabled={draft} onclick={onExport}>

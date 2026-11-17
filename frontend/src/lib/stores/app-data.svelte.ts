@@ -909,8 +909,9 @@ export const appData = {
 	},
 
 	async createProfile(data: { id: string; name: string; description?: string; config: Record<string, unknown> }) {
-		await api.post('/agents', data);
+		const profile = await api.post<Profile>('/agents', data);
 		await appData.loadProfiles();
+		return profile;
 	},
 
 	async updateProfile(profileId: string, data: { name: string; description?: string; config: Record<string, unknown> }) {

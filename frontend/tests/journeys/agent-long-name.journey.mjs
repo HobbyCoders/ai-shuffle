@@ -54,7 +54,22 @@ async function steps(page, mark) {
 
 	await mark('duplicate it');
 	await page.getByRole('heading', { level: 2, name, exact: true }).waitFor();
-	await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
+	let creates = 0;
+	const countCreate = (request) => {
+		if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/agents') creates++;
+	};
+	page.on('request', countCreate);
+	try {
+		// Both clicks can arrive before a response (or even a UI render).
+		await page.getByRole('button', { name: 'Duplicate', exact: true }).evaluate((button) => {
+			button.click();
+			button.click();
+		});
+		await page.getByRole('heading', { level: 2, name: / copy$/ }).waitFor();
+		expect(creates === 1, `exactly one create for two rapid clicks: ${creates}`);
+	} finally {
+		page.off('request', countCreate);
+	}
 	created = await waitAgents(page, stem(), 2);
 	const copyName = created.find((a) => a.name !== name)?.name;
 

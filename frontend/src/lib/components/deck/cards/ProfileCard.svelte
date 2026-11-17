@@ -253,6 +253,7 @@
 	const selectedId = $derived(viewMode !== 'form' ? null : editingProfile ? editingProfile.id : '');
 	const isNew = $derived(!editingProfile || editingProfile.id === draftId);
 	let saveState = $state<'idle' | 'saving' | 'saved' | 'error'>('idle');
+	let duplicating = $state(false);
 
 	const sections = $derived(
 		sectionAgents(profiles, {
@@ -810,29 +811,27 @@
 	/** A copy of the open agent under a new name, then open it. */
 	async function duplicateAgent() {
 		const source = editingProfile;
-		if (!source) return;
-		await flushPendingPersist();
-		const latest = profiles.find((p) => p.id === source.id) ?? source;
-		const name = duplicateAgentName(
-			latest.name,
-			profiles.map((p) => p.name)
-		);
-		const id = uniqueAgentId(name, profiles.map((p) => p.id));
-		const config = JSON.parse(JSON.stringify(latest.config ?? {}));
-		const data: { id: string; name: string; description?: string; config: Record<string, unknown> } = {
-			id,
-			name,
-			description: latest.description ?? undefined,
-			config
-		};
+		if (!source || duplicating) return;
+		duplicating = true;
 		try {
-			await tabsStore.createProfile(data);
+			await flushPendingPersist();
+			const latest = profiles.find((p) => p.id === source.id) ?? source;
+			const name = duplicateAgentName(latest.name, profiles.map((p) => p.name));
+			const id = uniqueAgentId(name, profiles.map((p) => p.id));
+			const copy = await tabsStore.createProfile({
+				id,
+				name,
+				description: latest.description ?? undefined,
+				config: JSON.parse(JSON.stringify(latest.config ?? {}))
+			});
 			void loadData(true);
-			const fresh = profiles.find((p) => p.id === id);
-			if (fresh) await selectProfile(fresh, 'profile');
+			// An async duplicate must not pull the editor away from a newer selection.
+			if (editingProfile?.id === source.id) await selectProfile(copy, 'profile');
 			notify(`Duplicated as ${name}.`, { severity: 'success' });
 		} catch (e: any) {
 			notify('Duplicate failed: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
+		} finally {
+			duplicating = false;
 		}
 	}
 
@@ -1088,6 +1087,7 @@
 						isAdmin={$isAdminStore}
 						folder={openFolder}
 						{saveState}
+						{duplicating}
 						{remoteChange}
 						{tab}
 						{counts}

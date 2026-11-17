@@ -454,11 +454,14 @@ describe('create, duplicate, delete', () => {
 		expect(ai.querySelector('textarea')?.value).toBe('Turns merged PRs into release notes.');
 	});
 
-	it('duplicates the open agent under a new name and opens the copy', async () => {
+	it('duplicates only once for rapid clicks and opens the copy', async () => {
 		render(ProfileCard);
 		await heading('Researcher');
-		await fireEvent.click(screen.getByRole('button', { name: 'Duplicate' }));
-		await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+		const duplicate = screen.getByRole('button', { name: 'Duplicate' });
+		duplicate.click();
+		duplicate.click();
+		await heading('Researcher copy');
+		expect(mocks.post).toHaveBeenCalledTimes(1);
 		const [path, payload] = mocks.post.mock.calls[0];
 		expect(path).toBe('/agents');
 		expect(payload).toMatchObject({ id: 'researcher-copy', name: 'Researcher copy', description: 'Original description' });
