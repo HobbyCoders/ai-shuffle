@@ -339,7 +339,11 @@ function sessionModelBinding(row: { model?: string | null; provider_id?: string 
 }
 
 export function getPersistedEffort(): string | null {
-	return composerPreferences.effortForModel(getPersistedModel(), composerPreferences.current.effort);
+	// A clean account has neither a last pin nor a remembered choice. Do not
+	// turn that absence into an explicit Auto before consulting the catalog.
+	const { effort, modelEfforts } = composerPreferences.current;
+	const inherited = effort ?? (Object.keys(modelEfforts).length ? null : undefined);
+	return composerPreferences.effortForModel(getPersistedModel(), inherited);
 }
 
 export function normalizePermissionMode(mode: string | null | undefined): string | null {
