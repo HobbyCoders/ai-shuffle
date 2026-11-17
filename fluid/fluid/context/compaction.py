@@ -200,8 +200,13 @@ class CompactionConfig:
     # only while its header is listed here (newest_pinned_block).
     # fluid.state.SCRATCH_HEADER and fluid.context.environment.
     # ENVIRONMENT_DETAILS_HEADER (the native loop's recent commits and
-    # runtime facts, sent only when the path holds no identical copy).
-    pinned_blocks: tuple[str, ...] | None = ("# Harness scratch\n", "# Environment details\n")
+    # runtime facts, sent only when the path holds no identical copy), the
+    # per-turn date/branch note, and runtime facts without an environment
+    # section. A digest keeps the newest note verbatim (#1656).
+    pinned_blocks: tuple[str, ...] | None = (
+        "# Harness scratch\n", "# Environment details\n",
+        "Environment as of this message:\n", "Runtime facts as of this message (",
+    )
     # Intake: user Text blocks longer than this always render as a stub.
     intake_stub_chars: int = 25_000
     intake_preview_chars: int = 500

@@ -218,6 +218,7 @@ from fluid.providers.base import (
 )
 from fluid.context.environment import (
     ENVIRONMENT_DETAILS_HEADER,
+    ENVIRONMENT_NOTE_HEADER,
     environment_note_parts,
 )
 from fluid.providers.pricing import PricingResolver
@@ -259,8 +260,9 @@ log = logging.getLogger(__name__)
 DEFAULT_TURN_WATCHDOG_SECONDS = 900.0
 # Header of the runtime-facts block (see _environment_reminder); the resume
 # path finds the last one sent by this exact text.
+_RUNTIME_FACTS_PIN = "Runtime facts as of this message ("
 _RUNTIME_FACTS_HEADER = (
-    "Runtime facts as of this message (worker-side, read-only checks; "
+    _RUNTIME_FACTS_PIN + "worker-side, read-only checks; "
     "shown on the first turn and again only when they change):\n"
 )
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
@@ -2746,25 +2748,31 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
+            prompt = head
+            environment_node = await self._store_resume_environment(sid, head)
+            if environment_node is not None:
+                head = environment_node
             # Fix the request-only clock to one real message for this turn.
             # A tool-result head uses its preceding input, never the result;
             # matching node ids (not text) survives reloads and duplicate inputs.
-            anchor = next((n for n in reversed([*path, head])
+            anchor = next((n for n in reversed([*path, prompt])
                            if n.message.role == "user" and not is_harness_note(n.message)
                            and not any(
                                isinstance(b, ToolResultBlock) for b in n.message.content)), None)
-            if anchor is not None:
+            if anchor is not None and environment_node is None:
                 self._resume_anchor = anchor.node_id
                 # Request-only: never stored, so never a copy the path holds.
                 self._resume_environment = await self._environment_reminder()
+            # Keep turn provenance on the resumed input: a later retry must
+            # not mistake the new harness-only environment node for user intent.
             await self._emit(TurnStarted(
-                session_id=sid, node_id=head.node_id, turn_id=turn_id,
+                session_id=sid, node_id=prompt.node_id, turn_id=turn_id,
                 model=self.model, provider=self.provider.name, source=op.source,
                 thinking=self._session_thinking.get(sid),
             ))
             await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
-                sid, turn_id, head.message.text(), with_context=False
+                sid, turn_id, prompt.message.text(), with_context=False
             )
             if blocked:
                 return
@@ -2808,13 +2816,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             if notes is not None:
                 content.append(Text(notes))
         self.ctx.extra["time_turn_source"] = op.source
+        if self._runtime_facts_only():
+            # The path, not engine memory, decides what survives a fold.
+            self._runtime_facts_sent = await self._held_runtime_facts(sid, op.parent_node_id)
         env = await self._environment_reminder_parts()
+        env_note: str | None = None
         details_block: str | None = None
         details_at = len(content)
         if env is not None:
             env_note, details_block = env
-            content.append(Text(env_note))
-            details_at = len(content)
+            # Insert both into the host-pinned range once the node exists.
             # Held on the path this turn extends (the fork or rewind parent,
             # else the head), live or carried verbatim by a fold: not resent.
             if details_block is not None and await self.holds_pinned_block(
@@ -2847,6 +2858,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         if scratch_note and op.context_pin is None:
             user_node.message.pin_context(scratch_note)
+        if env_note is not None:
+            _add_pinned_block(user_node.message, env_note, details_at)
+            details_at += 1
         if details_block is not None:
             _add_pinned_block(user_node.message, details_block, details_at)
         await self._append_node(sid, user_node)
@@ -3324,34 +3338,61 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self._deferred_announced.update(parse_deferred_catalog(text))
 
     async def _rehydrate_runtime_facts(self, sid: str, head_node_id: str | None) -> None:
-        """Seed the last-sent runtime facts from the stored transcript (once).
+        """Recover only a pinned copy the rendered path keeps through folds.
 
-        A fresh engine over an existing session would otherwise re-send the
-        runtime-facts block on its first turn even when nothing changed —
-        every park/wake is a fresh engine in the app, so that would be most
-        turns. The block's body is recovered from the newest user node that
-        carries it.
+        An unpinned legacy copy can disappear on admission, so it must be
+        sent once more, pinned (#1656), even after a park/wake.
         """
         if self._runtime_facts_sent is not None or self._runtime_facts_rehydrated:
             return
         self._runtime_facts_rehydrated = True
-        if head_node_id is None:
-            return
-        try:
-            nodes = await self.store.load_path(sid, head_node_id)
-        except Exception:  # a store that cannot replay just re-sends once
-            return
-        for node in reversed(nodes):
-            if node.message.role != "user":
-                continue
-            for block in node.message.content:
-                text = getattr(block, "text", None)
-                if not isinstance(text, str) or _RUNTIME_FACTS_HEADER not in text:
-                    continue
-                start = text.index(_RUNTIME_FACTS_HEADER) + len(_RUNTIME_FACTS_HEADER)
-                end = text.find("\n</system-reminder>", start)
-                self._runtime_facts_sent = text[start:end if end >= 0 else None].strip("\n")
-                return
+        if head_node_id is not None:
+            self._runtime_facts_sent = await self._held_runtime_facts(sid, head_node_id)
+
+    def _runtime_facts_only(self) -> bool:
+        sections = self.system_sections.sections if self.system_sections else None
+        return sections is not None and not any(s.kind == "environment" for s in sections)
+
+    async def _store_resume_environment(self, sid: str, parent: SessionNode) -> SessionNode | None:
+        """Restore missing pinned facts before admission can digest a Resume.
+
+        This includes legacy full-environment transcripts, not just hosts
+        sending runtime facts alone. A request-only note is lost when its
+        anchor is digested; old nodes must not be rewritten (#1656).
+        """
+        if self.system_sections is None:
+            return None
+        if self._runtime_facts_only():
+            self._runtime_facts_sent = await self._held_runtime_facts(sid, parent.node_id)
+        elif await self.holds_pinned_block(sid, ENVIRONMENT_NOTE_HEADER, parent.node_id):
+            return None
+        parts = await self._environment_reminder_parts()
+        if not parts:
+            return None
+        note, details = parts
+        if details is not None and await self.holds_pinned_block(
+            sid, ENVIRONMENT_DETAILS_HEADER, parent.node_id,
+        ) == details:
+            details = None
+        block = "\n\n".join(part for part in (note, details) if part)
+        node = SessionNode(
+            node_id=new_id("node"), parent_id=parent.node_id,
+            message=Message(
+                role="user", content=[Text(block)],
+                provider_meta={HARNESS_NOTE_META_KEY: True},
+            ).pin_context(block),
+        )
+        await self._append_node(sid, node)
+        return node
+
+    async def _held_runtime_facts(self, sid: str, leaf_node_id: str | None) -> str | None:
+        block = await self.holds_pinned_block(sid, _RUNTIME_FACTS_PIN, leaf_node_id)
+        if block is None or _RUNTIME_FACTS_HEADER not in block:
+            return None
+        start = block.index(_RUNTIME_FACTS_HEADER) + len(_RUNTIME_FACTS_HEADER)
+        end = block.find("\n</system-reminder>", start)
+        return block[start:end if end >= 0 else None].strip("\n")
+
 
     async def _rehydrate_read_files(self, sid: str, head_node_id: str | None) -> None:
         """Seed the read-before-edit ledger from the stored transcript (once).
