@@ -127,6 +127,26 @@ await runJourney({
 			expect(where.inView, `the second "Removed" is at the top of the pane (${JSON.stringify(where)})`);
 		}
 	}, {
+		name: 'desktop-reselect-current-article',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			await waitTitle(page, 'Changelog');
+		},
+		async act({ page, mark }) {
+			const pane = page.locator('[data-view-shell="Docs"] .view-main-slot');
+			const before = await page.evaluate(() => history.length);
+			await mark('scroll the Changelog and reselect it in the desktop list');
+			await pane.evaluate((el) => el.scrollTo({ top: 900 }));
+			expect(await pane.evaluate((el) => el.scrollTop) === 900, 'the Changelog was scrolled');
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			const after = await pane.evaluate((el) => el.scrollTop);
+			expect(after === 0, `reselecting the current article resets its offset (scrollTop=${after})`);
+			expect(await page.evaluate(() => history.length) === before, 'reselection adds no history entry');
+		}
+	}, {
 		name: 'desktop-no-history-and-reload',
 		viewports: ['desktop'],
 		async setup({ page, status }) {
