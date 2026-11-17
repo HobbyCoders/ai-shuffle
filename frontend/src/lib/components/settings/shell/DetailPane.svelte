@@ -33,6 +33,8 @@
 
 	interface Props {
 		name: string;
+		/** Keep this title on one line even when the header actions reflow. */
+		truncateTitle?: boolean;
 		/** Optional editable heading; keeps the shared header geometry. */
 		heading?: Snippet;
 		/** Settings retains its measure; collection details share one centered reading column. */
@@ -87,6 +89,7 @@
 
 	let {
 		name,
+		truncateTitle = false,
 		heading,
 		width = 'settings',
 		contentFirst = false, compactHeader = false,
@@ -171,7 +174,7 @@
 		<div class="st-identity">{#if tile}{@render tile()}{:else if hasIdentity}<Tile size="lg" {icon} text={glyph} status={statusText ? undefined : status} ring="bg" />{/if}</div>
 		<div class="st-dh-main">
 			<div class="st-dhn">
-				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail" title={primary ? name : undefined}>{name}</h2>{/if}
+				{#if heading}{@render heading()}{:else}<h2 tabindex="-1" data-settings-heading="detail" class:truncate-title={truncateTitle} title={primary || truncateTitle ? name : undefined}>{name}</h2>{/if}
 				{#if status && !statusText && !tile && !identity && !glyph}<StatusDot tone={status} />{/if}
 				{#if badge}<span class="badge">{badge}</span>{/if}
 				{@render badges?.()}
@@ -270,7 +273,8 @@
 	}
 	/* With actions beside it, a long title shrinks to one line with an ellipsis
 	   so the actions stay on the title row (the full name is its tooltip). */
-	.st-dh:has(> .st-dha) h2 {
+	.st-dh:has(> .st-dha) h2,
+	h2.truncate-title {
 		min-width: 0;
 		max-width: 100%;
 		white-space: nowrap;
@@ -331,7 +335,7 @@
 	}
 	/* All multi-action headers reflow together when the content, not the window, is narrow. */
 	@container detail-header (width < 520px) {
-		.st-dh:has(> .st-dha) h2 { white-space: normal; overflow-wrap: anywhere; }
+		.st-dh:has(> .st-dha) h2:not(.truncate-title) { white-space: normal; overflow-wrap: anywhere; }
 		.st-dh:has(> .st-dha) { grid-template-columns: minmax(0, 1fr); gap: 8px; }
 		.st-dh:global(:has(> .st-identity > *)):has(> .st-dha) { grid-template-columns: auto minmax(0, 1fr); }
 		.st-dha { grid-column: 1 / -1; justify-content: flex-start; }

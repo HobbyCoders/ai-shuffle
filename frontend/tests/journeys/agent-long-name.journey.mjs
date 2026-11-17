@@ -221,6 +221,42 @@ await runJourney({
 			expect(stored.description === 'Original', 'discard never wrote the edited description');
 		},
 		verify: () => {}
+	}, {
+		name: 'phone-agent-heading-stays-bounded',
+		viewports: ['phone'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark, log }) {
+			const key = uniq().slice(-6);
+			const original = `Heading ${key}`;
+			await api(page, 'POST', '/agents', { id: `heading-${key}`, name: original, config: {} });
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			await page.locator('[data-settings-item]').filter({ hasText: original }).click();
+			const field = page.getByRole('textbox', { name: 'Name', exact: true });
+			const heights = [];
+			for (const length of [100, 450]) {
+				const fullName = `zz${key}`.padEnd(length, 'w');
+				await mark(`measure heading for ${length} unbroken characters`);
+				await field.fill(fullName);
+				const heading = page.getByRole('heading', { level: 2, name: fullName, exact: true });
+				const measured = await heading.evaluate((el) => ({
+					height: el.getBoundingClientRect().height,
+					lineHeight: parseFloat(getComputedStyle(el).lineHeight),
+					ellipsis: getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth,
+					title: el.title
+				}));
+				log(`${length} characters: heading ${measured.height}px / line ${measured.lineHeight}px`);
+				heights.push(measured);
+			}
+			for (const measured of heights) {
+				expect(measured.height <= measured.lineHeight * 2, `heading uses at most two lines: ${measured.height}px`);
+				expect(measured.ellipsis, 'the name ends in an ellipsis');
+			}
+			expect(heights[0].title.length === 100 && heights[1].title.length === 450, 'full name remains available');
+			const rect = await field.boundingBox();
+			expect(rect && rect.y >= 0 && rect.y + rect.height <= page.viewportSize().height, 'Name field remains in view');
+		},
+		verify: () => {}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
 });

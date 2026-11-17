@@ -263,6 +263,7 @@
 	<DetailPane
 		width="reading"
 		name={title}
+		truncateTitle
 		{badges}
 		{subtitle}
 		{primary}
