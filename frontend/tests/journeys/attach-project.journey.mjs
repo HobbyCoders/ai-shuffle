@@ -157,6 +157,7 @@ function lateAnswerAfterSwitch(fail, returnFirst = false) {
 		expect(!(await sheet(page).isVisible()), 'the sheet closed when the page moved to the other chat');
 		expect((await pill(page).getAttribute('aria-expanded')) === 'false', 'the other chat\'s pill is not expanded');
 		if (returnFirst) {
+			await mark('go forward to the first chat before its attach answers');
 			await page.goForward();
 			await waitChat(page, { session: state.a.tag, loading: 'false' });
 			attach.release();
