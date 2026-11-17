@@ -155,6 +155,11 @@ def test_shrinkwrap_decides_dev_status_like_npm(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert gate.active_lockfile() == Path("npm-shrinkwrap.json")
     assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 1
+    (tmp_path / "npm-shrinkwrap.json").write_text("")  # npm skips an empty shrinkwrap
+    assert gate.active_lockfile() == Path("package-lock.json")
+    assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 0
+    (tmp_path / "npm-shrinkwrap.json").write_text("{not json")
+    assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 1
     (tmp_path / "npm-shrinkwrap.json").unlink()
     assert gate.main(run=fake_run(json.dumps(PICOMATCH_ONLY)), today=TODAY) == 0
 
