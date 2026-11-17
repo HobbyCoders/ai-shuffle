@@ -351,9 +351,12 @@ class ModelSchema:
                 continue
             elif "minute" in declaration:
                 in_minutes = True
-            elif "second" in declaration or name in ("duration", "duration_seconds", "duration_sec", "seconds"):
-                # fal states lengths in seconds; a plain "duration" naming no
-                # unit is seconds too (minutes and milliseconds say so).
+            elif "second" in declaration or (
+                    name in ("duration", "duration_seconds", "duration_sec", "seconds")
+                    and (field.description or field.minimum is not None or field.maximum is not None)):
+                # fal states lengths in seconds; a described or bounded plain
+                # "duration" naming no unit is seconds too (minutes and
+                # milliseconds say so). A bare undeclared field is not guessed.
                 in_minutes = False
             else:
                 continue
