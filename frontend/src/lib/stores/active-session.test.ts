@@ -1114,6 +1114,175 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.effortLevelOverride).toBe('low');
 	});
 
+	// #1633: the picker asks the worker, which judges a level against the model
+	// the chat still runs. A level the PICKED model offers is held here and
+	// goes with the next message, which saves the model and the level together.
+	// Nothing was saved, so the held level keeps the revision held at that
+	// moment: only a newer revision (a level saved elsewhere since) replaces it.
+	describe('a level held for a picked model that has not run yet (#1633)', () => {
+		const refusal = { status: 409, detail: 'This model does not support the selected effort level' };
+		const announce = (updates: Record<string, unknown>) => hoisted.onMessage!({
+			event_type: 'session_updated', session_id: 'live-knobs', data: { updates },
+		});
+		const deferred = () => {
+			let acknowledge!: (value: { effort: string; effort_rev: number; fast: boolean }) => void;
+			const promise = new Promise<{ effort: string; effort_rev: number; fast: boolean }>(resolve => { acknowledge = resolve; });
+			return { promise, acknowledge };
+		};
+		beforeEach(() => {
+			Object.assign(activeSession.current, { modelOverride: 'opus', effortLevelOverride: 'high', effortRev: 2 });
+			sessionEphemeralCache.save('live-knobs', { ...activeSession.current } as never);
+		});
+		afterEach(() => { activeSession.current.modelOverride = null; activeSession.current.effortRev = undefined; });
+
+		it('holds the level at the revision it has, with no error, here and in the cached copy', async () => {
+			const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+			vi.spyOn(api, 'put').mockRejectedValue(refusal);
+			await activeSession.setEffortLevelOverride('max');
+			expect(error).not.toHaveBeenCalled();
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+			// The next send carries max with revision 2, which the worker saves.
+			expect(activeSession.current.effortRev).toBe(2);
+			expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'max', effortRev: 2 });
+		});
+
+		it('does not hold a level the picked model lacks, Auto, or any other refusal', async () => {
+			const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+			const put = vi.spyOn(api, 'put').mockRejectedValue(refusal);
+			await activeSession.setEffortLevelOverride('no-such-level');
+			await activeSession.setEffortLevelOverride(null);
+			put.mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
+			await activeSession.setEffortLevelOverride('max');
+			put.mockRejectedValue({ status: 503, detail: refusal.detail });
+			await activeSession.setEffortLevelOverride('max');
+			expect(error).toHaveBeenCalledTimes(4);
+			expect(activeSession.current.effortLevelOverride).toBe('high');
+		});
+
+		it('an announcement no newer than the held revision leaves the held level (review S7)', async () => {
+			vi.spyOn(api, 'put').mockRejectedValue(refusal);
+			await activeSession.setEffortLevelOverride('max');
+			announce({ effort: 'low', effort_rev: 2 });
+			announce({ effort: 'low', effort_rev: 1 });
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+			expect(activeSession.current.effortRev).toBe(2);
+		});
+
+		it('a level saved elsewhere since replaces it', async () => {
+			vi.spyOn(api, 'put').mockRejectedValue(refusal);
+			await activeSession.setEffortLevelOverride('max');
+			announce({ effort: 'low', effort_rev: 3 });
+			expect(activeSession.current.effortLevelOverride).toBe('low');
+			expect(activeSession.current.effortRev).toBe(3);
+		});
+
+		it('a level saved elsewhere while the refused request was under way stands', async () => {
+			let refuse!: (reason: unknown) => void;
+			vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+			const pending = activeSession.setEffortLevelOverride('max');
+			announce({ effort: 'low', effort_rev: 3 });
+			refuse(refusal);
+			await pending;
+			expect(activeSession.current.effortLevelOverride).toBe('low');
+			expect(activeSession.current.effortRev).toBe(3);
+		});
+
+		it('a level saved elsewhere after a switch away survives the delayed refusal (stage-2 review S1)', async () => {
+			let refuse!: (reason: unknown) => void;
+			vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+			const pending = activeSession.setEffortLevelOverride('max');
+			// Switch to another chat; the cached copy of this one holds high at 2.
+			activeSession.current.sessionId = 'another-chat';
+			try {
+				announce({ effort: 'low', effort_rev: 3 });
+				expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+				refuse(refusal);
+				await pending;
+				// Max was refused against revision 2: it must not land on revision 3.
+				expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+			} finally {
+				activeSession.current.sessionId = 'live-knobs';
+			}
+		});
+
+		it('a pick queued across a switch compares its own chat\'s revision (stage-2 review S1, round 2)', async () => {
+			// Max waits behind a Fast change; the open chat is another one at
+			// revision 3 when Max leaves. Another device then saves low here at 3.
+			let finishFast!: (value: unknown) => void;
+			let refuse!: (reason: unknown) => void;
+			vi.spyOn(api, 'put')
+				.mockImplementationOnce(() => new Promise(resolve => { finishFast = resolve; }))
+				.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+			const fast = activeSession.setFastMode(true);
+			const pending = activeSession.setEffortLevelOverride('max');
+			Object.assign(activeSession.current, { sessionId: 'another-chat', effortRev: 3 });
+			try {
+				finishFast({ effort: 'high', effort_rev: 2, fast: true, context_window: 0 });
+				await fast;
+				await vi.waitFor(() => expect(refuse).toBeTypeOf('function'));
+				announce({ effort: 'low', effort_rev: 3 });
+				refuse(refusal);
+				await pending;
+				// Max was refused against revision 2: it must not land on revision 3.
+				expect(sessionEphemeralCache.restore('live-knobs')).toMatchObject({ effortLevelOverride: 'low', effortRev: 3 });
+			} finally {
+				Object.assign(activeSession.current, { sessionId: 'live-knobs', effortRev: 2 });
+			}
+		});
+
+		it('the delayed answer of an earlier pick never replaces the held newer level (review S10)', async () => {
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise).mockRejectedValueOnce(refusal);
+			const first = activeSession.setEffortLevelOverride('low');
+			const second = activeSession.setEffortLevelOverride('max');
+			low.acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+			await Promise.all([first, second]);
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+			// The earlier pick was saved at 3: the held level sits on that revision,
+			// so the send matches and the announcement of that write is not news.
+			expect(activeSession.current.effortRev).toBe(3);
+			announce({ effort: 'low', effort_rev: 3 });
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+		});
+
+		it('ends the same when the announcement of the earlier pick arrives before its answer', async () => {
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise).mockRejectedValueOnce(refusal);
+			const first = activeSession.setEffortLevelOverride('low');
+			const second = activeSession.setEffortLevelOverride('max');
+			announce({ effort: 'low', effort_rev: 3 });
+			low.acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+			await Promise.all([first, second]);
+			expect(activeSession.current.effortLevelOverride).toBe('max');
+			expect(activeSession.current.effortRev).toBe(3);
+		});
+
+		it('a saved earlier pick stands when the pick after it fails for another reason', async () => {
+			vi.spyOn(notify, 'error').mockImplementation(() => '');
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise).mockRejectedValueOnce(new TypeError('Failed to fetch'));
+			const first = activeSession.setEffortLevelOverride('low');
+			const second = activeSession.setEffortLevelOverride('medium');
+			low.acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+			await Promise.all([first, second]);
+			// The worker saved low at 3 and nothing since: the composer says so.
+			expect(activeSession.current.effortLevelOverride).toBe('low');
+			expect(activeSession.current.effortRev).toBe(3);
+		});
+
+		it('the answer of a pick made for another model records its revision and keeps the new model\'s level', async () => {
+			const low = deferred();
+			vi.spyOn(api, 'put').mockImplementationOnce(() => low.promise);
+			const first = activeSession.setEffortLevelOverride('low');
+			activeSession.setModelOverride('sonnet');
+			const shown = activeSession.current.effortLevelOverride;
+			low.acknowledge({ effort: 'low', effort_rev: 3, fast: false });
+			await first;
+			expect(activeSession.current.effortLevelOverride).toBe(shown);
+			expect(activeSession.current.effortRev).toBe(3);
+		});
+	});
+
 	it('supports explicit default effort and turning Fast mode off', async () => {
 		const put = vi.spyOn(api, 'put').mockResolvedValue({ effort: null, fast: false });
 		activeSession.current.fastMode = true;

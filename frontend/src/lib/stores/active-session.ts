@@ -68,6 +68,7 @@ import { git } from './git.svelte';
 import { untrack } from 'svelte';
 import { createStore, createSubscribers, shallowEqual } from './store-utils';
 import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
+import { resolveModelEffort } from '$lib/constants/model-effort';
 import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
 import { standardContextCap } from './session/context-window';
 import { clearSentQuestions } from './session/sent-questions';
@@ -931,6 +932,27 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	const cachedEffortRev = sessionId ? sessionEphemeralCache.restore(sessionId)?.effortRev : undefined;
 	const overtaken = (now: number | undefined, held: number | undefined) =>
 		field === 'effort' && savedEffortRev !== undefined && now !== undefined && now !== held && savedEffortRev < now;
+	// An explicit level the worker refused only because the chat still runs the
+	// model before this pick: kept here and sent with the next message (#1633).
+	let held = false;
+	// The revision this pick's chat held when the request left (an earlier pick
+	// of this client has been answered by then: picks are sent one at a time).
+	// Read from that chat, never from whichever chat is open then: a queued pick
+	// can leave after a switch. Null: the chat was neither open nor cached.
+	let sentEffortRev: { rev: number | undefined } | null = { rev: heldEffortRev };
+	// An answer that is not shown as the pick (a newer pick is on its way, or
+	// the model changed since) is still what this client's own request saved,
+	// at its revision. Holding that revision keeps the announcement of the same
+	// write, whenever it arrives, from replacing a newer level held here, and
+	// lets the next send's revision match (#1633).
+	const noteOwnAnswer = () => {
+		if (field !== 'effort' || savedEffortRev === undefined) return;
+		if (_state.sessionId !== sessionId || sessionOwnerEpoch() !== ownerEpoch) return;
+		if (_state.effortRev !== undefined && savedEffortRev <= _state.effortRev) return;
+		const sameModel = (_state.modelOverride || getDefaultModel()) === selectedModel;
+		_update(s => ({ ...s, ...(sameModel ? { effortLevelOverride: selected as string | null } : {}), effortRev: savedEffortRev }));
+		persistSession();
+	};
 	if (sessionId) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
@@ -938,6 +960,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
+			sentEffortRev = chatEffortRev(sessionId);
 			return api.put<{ effort: string | null; effort_rev?: number; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
@@ -972,16 +995,36 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
 			});
 		} catch (error) {
-			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
-					{ session_id: sessionId, persist: false });
+			if (sessionOwnerEpoch() !== ownerEpoch) return;
+			if (field === 'effort' && isHoldableEffortRefusal(error, value, selectedModel)) {
+				// A level saved elsewhere while this request was under way is newer
+				// than the pick: it stands, as it does over a late answer (#1609).
+				// After a switch the chat's level lives in its cached copy, which
+				// an announcement may have moved on: compare that revision, so an
+				// old pick is never paired with a newer one.
+				const heldRev = chatEffortRev(sessionId);
+				if (!sentEffortRev || !heldRev || heldRev.rev !== sentEffortRev.rev) return;
+				// Nothing was saved, so the level keeps the revision held now: a
+				// level another device saves later has a newer one and replaces
+				// it, and no earlier answer or announcement does.
+				held = true;
+			} else {
+				if (generation === runSettingGenerations[field]) {
+					notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
+						{ session_id: sessionId, persist: false });
+				}
+				return;
 			}
-			return;
 		} finally {
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
 		}
 	}
-	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
+	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return noteOwnAnswer();
+	if (held && sessionId) {
+		// The copy a switch-back restores keeps it too, at its own revision.
+		const cached = sessionEphemeralCache.restore(sessionId);
+		if (cached) sessionEphemeralCache.save(sessionId, { ...cached, effortLevelOverride: selected as string | null });
+	}
 	if (field === 'context_window') {
 		selected = sessionId ? selected : contextChoiceFromWindow(value as number, selectedModel);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
@@ -993,7 +1036,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
-	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return;
+	if (_state.sessionId !== sessionId || (field !== 'context_window' && (_state.modelOverride || getDefaultModel()) !== selectedModel)) return noteOwnAnswer();
 	// An answer that arrives after the announcement of a newer level (another
 	// tab or device picked since) names an older revision: the newer level
 	// stays (#1609). The same revision is this pick's own announcement.
@@ -1004,10 +1047,35 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
 		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
 		// A context-window answer says nothing about Fast.
-		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
+		...(field !== 'context_window' && !held ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
 	}));
 	persistSession();
+}
+
+/**
+ * The effort revision chat `sessionId` holds here: the open chat's, or the
+ * cached copy of one that is not open. Null when it is neither, so nothing
+ * can be compared against it.
+ */
+function chatEffortRev(sessionId: string): { rev: number | undefined } | null {
+	if (_state.sessionId === sessionId) return { rev: _state.effortRev };
+	const cached = sessionEphemeralCache.restore(sessionId);
+	return cached ? { rev: cached.effortRev } : null;
+}
+
+/**
+ * The refusal an effort pick gets when only the chat's running model lacks the
+ * level (#1633): the picked model, which runs from the next message, offers
+ * it. Auto and every other refusal (connecting, busy, control refused) are not
+ * held.
+ */
+const LEVEL_REFUSAL = 'This model does not support the selected effort level';
+function isHoldableEffortRefusal(error: unknown, value: unknown, selectedModel: string): boolean {
+	if (typeof value !== 'string') return false;
+	const failure = error as { status?: unknown; detail?: unknown } | null;
+	if (failure?.status !== 409 || failure.detail !== LEVEL_REFUSAL) return false;
+	return resolveModelEffort(selectedModel).options.some((option) => option.value === value);
 }
 
 /** A send or restore owns the composer; defaults must not touch it. */
