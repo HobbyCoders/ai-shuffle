@@ -455,6 +455,42 @@ async def test_legacy_resume_pins_environment_before_admission(git_repo: Path, i
     assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
 
 
+@pytest.mark.parametrize("include_env", [False, True])
+async def test_repeated_legacy_resumes_keep_the_original_hook_prompt(git_repo: Path, include_env: bool) -> None:
+    """S1: a real UserPromptSubmit gate must accept all three Resumes,
+    even when a failed Resume left a harness-only repair at the head."""
+    from fluid.events import TurnStarted
+    from fluid.hooks.bus import TURN_START, HookBus, HookDecision
+
+    store, sid = await _session()
+    failed = [StreamChunk("error", {"message": "scripted failure", "retriable": False})]
+    provider = ScriptedProvider([failed, failed, failed, _text("ok")])
+    loop = _loop(git_repo, provider, store, sid, include_env=include_env,
+                 context_window=200_000, max_tokens=8192)
+    await _turn(loop, UserTurn(content=[Text("original request"), *(Text(c * 24_000) for c in "abcd")]))
+    (original,) = await store.load_path(sid)
+    original.message.context_pin = None  # pre-pinning transcript, produced by the real loop
+    prompts = []
+    hooks = HookBus()
+
+    async def require_original(event, payload):
+        prompts.append(payload["prompt"])
+        return HookDecision(action="allow" if payload["prompt"] == original.message.text() else "deny")
+
+    hooks.on(TURN_START, require_original)
+    for count in range(1, 4):
+        loop = _loop(git_repo, provider, store, sid, include_env=include_env, hooks=hooks,
+                     context_window=32_000, max_tokens=8192)
+        await _turn(loop, Resume())
+        assert len(provider.requests) == count + 1  # the hook did not block this Resume
+        assert prompts == [original.message.text()] * count
+        starts = [e for e in await store.events_since(sid, 0) if isinstance(e, TurnStarted)]
+        assert starts[-1].node_id == original.node_id
+        assert provider.requests[-1].messages[0].text().startswith("[compacted turn")
+        assert sum(m.text().count("Worker Python:") for m in provider.requests[-1].messages) == 1
+    assert provider.requests[-1].messages == provider.requests[-2].messages
+
+
 async def test_runtime_facts_follow_the_selected_path_and_survive_a_wake(git_repo: Path) -> None:
     store, sid = await _session()
     await store.append(sid, SessionNode(

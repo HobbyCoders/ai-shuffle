@@ -2718,7 +2718,13 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # so the request is the one the failed call sent and the new
                 # reply branches beside the kept partial text.
                 head = path[-2]
-            if head is None or head.message.role != "user":
+            # Inference keeps a pinned repair at the head, but hooks and
+            # turn provenance belong to the underlying resumed input.
+            prompt = head
+            if head is not None and is_harness_note(head.message):
+                prompt = next((n for n in reversed(path)
+                               if n.message.role == "user" and not is_harness_note(n.message)), None)
+            if head is None or head.message.role != "user" or prompt is None:
                 await self._emit(TurnStarted(
                     session_id=sid, node_id=head.node_id if head else "",
                     turn_id=turn_id, model=self.model, provider=self.provider.name,
@@ -2748,7 +2754,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
-            prompt = head
+                prompt = head
             environment_node = await self._store_resume_environment(sid, head)
             if environment_node is not None:
                 head = environment_node
