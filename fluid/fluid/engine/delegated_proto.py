@@ -1243,9 +1243,10 @@ class StreamJsonMapper:
         if frame.get("error") == "authentication_failed":
             self._auth_failed = True
         model = msg.get("model")
+        # The CLI's own notice (``<synthetic>``) names no model that answered.
         if (
-            isinstance(model, str) and model and self.reported_model is None
-            and not frame.get("parent_tool_use_id")
+            isinstance(model, str) and model and model != "<synthetic>"
+            and self.reported_model is None and not frame.get("parent_tool_use_id")
         ):
             self.reported_model = model
         main_thread = not frame.get("parent_tool_use_id")

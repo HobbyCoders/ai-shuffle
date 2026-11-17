@@ -263,6 +263,22 @@ def test_a_frame_without_a_model_names_the_one_reported_earlier_this_turn() -> N
     assert child.message is None or child.message.provider_meta == {}
 
 
+def test_a_synthetic_notice_is_never_the_turn_s_model() -> None:
+    """Stage-2 review S3: the CLI's own notice came first and was recorded as
+    the reported model; the next reply without a model then named it."""
+    mapper = StreamJsonMapper(
+        session_id="s1", turn_id="t1", model="sonnet", user_node_id="node_user",
+    )
+    text = [{"type": "text", "text": "hi"}]
+    notice = mapper.feed({"type": "assistant", "message": {
+        "id": "msg_1", "role": "assistant", "model": "<synthetic>", "content": text}})
+    assert notice.message.provider_meta == {}
+    reply = mapper.feed({"type": "assistant", "message": {
+        "id": "msg_2", "role": "assistant", "content": text}})
+    assert reply.message.provider_meta == {"model": "sonnet"}
+    assert mapper.reported_model is None
+
+
 # ─── Announced tool surface (init frame) ─────────────────────────────────────
 
 

@@ -942,9 +942,11 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	// An explicit level the worker refused only because the chat still runs the
 	// model before this pick: kept here and sent with the next message (#1633).
 	let held = false;
-	// The revision held when the request left (an earlier pick of this client
-	// has been answered by then: picks are sent one at a time).
-	let sentEffortRev = heldEffortRev;
+	// The revision this pick's chat held when the request left (an earlier pick
+	// of this client has been answered by then: picks are sent one at a time).
+	// Read from that chat, never from whichever chat is open then: a queued pick
+	// can leave after a switch. Null: the chat was neither open nor cached.
+	let sentEffortRev: { rev: number | undefined } | null = { rev: heldEffortRev };
 	// An answer that is not shown as the pick (a newer pick is on its way, or
 	// the model changed since) is still what this client's own request saved,
 	// at its revision. Holding that revision keeps the announcement of the same
@@ -965,7 +967,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			sentEffortRev = _state.effortRev;
+			sentEffortRev = chatEffortRev(sessionId);
 			return api.put<{ effort: string | null; effort_rev?: number; fast: boolean; context_window: number; context_window_rev?: number; fast_applies_turn?: string | null }>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
@@ -1015,9 +1017,8 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 				// After a switch the chat's level lives in its cached copy, which
 				// an announcement may have moved on: compare that revision, so an
 				// old pick is never paired with a newer one.
-				const heldRev = _state.sessionId === sessionId
-					? _state.effortRev : sessionEphemeralCache.restore(sessionId)?.effortRev;
-				if (heldRev !== sentEffortRev) return;
+				const heldRev = chatEffortRev(sessionId);
+				if (!sentEffortRev || !heldRev || heldRev.rev !== sentEffortRev.rev) return;
 				// Nothing was saved, so the level keeps the revision held now: a
 				// level another device saves later has a newer one and replaces
 				// it, and no earlier answer or announcement does.
@@ -1068,6 +1069,17 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			? { contextWindowPin: savedWindow, ...(savedPinRev !== undefined ? { contextWindowRev: savedPinRev } : {}) } : {})
 	}));
 	persistSession();
+}
+
+/**
+ * The effort revision chat `sessionId` holds here: the open chat's, or the
+ * cached copy of one that is not open. Null when it is neither, so nothing
+ * can be compared against it.
+ */
+function chatEffortRev(sessionId: string): { rev: number | undefined } | null {
+	if (_state.sessionId === sessionId) return { rev: _state.effortRev };
+	const cached = sessionEphemeralCache.restore(sessionId);
+	return cached ? { rev: cached.effortRev } : null;
 }
 
 /**
