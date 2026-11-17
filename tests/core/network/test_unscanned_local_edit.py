@@ -996,12 +996,8 @@ def test_an_unscanned_edit_made_with_a_presence_change_is_still_signed(request, 
 @pytest.mark.parametrize("delivery", ["same chunk", "presence first", "presence first, then a restart"])
 @pytest.mark.parametrize("kind", ["connector", "automation", "oauth setting"])
 def test_a_presence_change_without_a_retained_op(workers, own_data_keys, kind, delivery):
-    """B holds the record without its signed op, as after a state copy. What
-    B's process hashed under the recorded hash still tells a changed quorum
-    from an edit. With neither (a restart between A's presence op and A's
-    edit, before any scan), B's unchanged copy is signed and ordered like the
-    scanner's quorum republish: the workers agree, the loser is a kept
-    conflict and nobody signs again."""
+    """The durable quorum-independent hash survives pruning and restart.
+    B must never sign its unchanged mirror above A's real edit."""
     a, b, collection, record_id, edit, read = _nested_pair(workers, kind, "a")
     with b.active(), database.get_db() as conn:
         cursor = conn.cursor()
@@ -1020,18 +1016,12 @@ def test_a_presence_change_without_a_retained_op(workers, own_data_keys, kind, d
         engine._QUORUM_FREE.clear()  # same chunk: step 1 hashes the row again
     result = exchange(a, b)
     assert result.retry == 0, result.reasons
-    if delivery.endswith("restart"):
-        assert [op["record_id"] for op in _own_ops(b, collection)[signed:]] == [record_id]
-        expected, loser = "converged", a.device_id  # B's clock was ahead
-    else:
-        assert result.lost == 0 and len(_own_ops(b, collection)) == signed
-        expected, loser = "edited on a", None
+    assert result.lost == 0 and len(_own_ops(b, collection)) == signed
+    expected = "edited on a"
     _settle(a, b)
     for worker in (a, b):
         with worker.active():
             assert read(record_id) == expected
-        if loser:
-            assert loser in [c["losing_device_id"] for c in _conflicts(worker, record_id, collection)]
     quiet = [len(_own_ops(worker, collection)) for worker in (a, b)]
     for _ in range(3):
         converge([a, b])
@@ -1546,37 +1536,90 @@ def test_a_state_copy_deletion_keeps_an_unscanned_assignment(workers):
     assert len(_kept_assignment(b, "templates", "profile_id")) == 1
 
 
-def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(workers):
-    """A deletes the parent and then renames the row, later than B's
-    assignment: one batch on B. The assignment is signed once (as the
-    tombstone's child and as the rename's target), loses to the rename, and
-    is kept as a conflict on A, where B's signed op arrives."""
+@pytest.mark.parametrize("replayed", [False, True])
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_nonwinning_parent_delete_never_signs_a_cleared_reference(pg_workers, replayed, snapshot):
     from app.db import profiles, templates
-    a, b = _pair(workers)
+    a, b = _pair(pg_workers)
+    with a.active():
+        database.create_profile(profile_id="p", name="First", description=None, config={})
+        engine.scan_all()
+    _settle(a, b)
+    with a.active():
+        profiles.delete_profile("p")
+        engine.scan_all()
+        tombstone = _own_ops(a, "agents")[-1]
+        chunk = engine.snapshot_chunk("agents", 0)
+    if replayed:
+        assert exchange(a, b).retry == 0
+    _advance_clock(b, 20000)
+    with b.active():
+        if replayed:
+            database.create_profile(profile_id="p", name="New", description=None, config={})
+        else:
+            database.update_profile("p", name="New")
+        templates.create_template("child", "before", "prompt", profile_id="p")
+        engine.scan_all()
+        signed = len(_own_ops(b, "templates"))
+        templates.update_template("child", name="unpublished rename")
+        if snapshot:
+            engine.apply_snapshot_chunk(chunk)
+        else:
+            assert engine.apply_batch([tombstone]).retry == 0
+        assert len(_own_ops(b, "templates")) == signed
+        assert templates.get_template("child")["profile_id"] == "p"
+        assert engine.scan_collection("templates") == 1
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("rename", [False, True])
+def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(pg_workers, rename, pending):
+    """The delete owns one decision about B's assignment, even when the
+    same batch directly edits the template. No signed op names the dead FK."""
+    from app.db import profiles, templates
+    a, b = _pair(pg_workers)
     with a.active():
         database.create_profile(profile_id="parent", name="Agent", description=None, config={})
         templates.create_template("child", "original", "prompt")
         engine.scan_all()
     _settle(a, b)
     with b.active():
-        templates.update_template("child", profile_id="parent")
-    _advance_clock(a, 20000)
+        templates.update_template("child", profile_id="parent", name="from-b" if rename else "original")
+    _advance_clock(b if rename else a, 20000)
     with a.active():
         profiles.delete_profile("parent")
         templates.update_template("child", name="from-a")
         engine.scan_all()
-    result = exchange(a, b)
-    assert result.retry == result.lost == 0, result.reasons
-    assert len(_own_ops(b, "templates")) == 1
+    if pending:
+        frontier = _watermark(b, a)
+        chunk = [op for op in _own_ops(a) if op["origin_seq"] > frontier]
+        with b.active():
+            with database.get_db() as conn:
+                store.stash_pending_batch(conn.cursor(), chunk)
+            result = engine.ApplyResult()
+            assert engine._apply_pending_chunk(a.device_id, chunk[0]["origin_incarnation"], engine.context(), result)
+    else:
+        result = exchange(a, b)
+    assert result.retry == 0, result.reasons
+    ops = _own_ops(b, "templates")
+    assert len(ops) == int(rename)
+    if rename:
+        from app.network.keyring import open_envelope
+        with b.active():
+            plain, _ = open_envelope(engine.context(), envelope.Envelope.from_dict(ops[0]))
+            assert plain["name"] == "from-b" and plain["profile_id"] is None
+    with b.active():
+        database.create_tag("after", "after")
+        engine.scan_all()
     back = exchange(b, a)
     assert back.retry == 0, back.reasons
     _settle(a, b)
     for worker in (a, b):
         with worker.active():
             row = templates.get_template("child")
-            assert row["name"] == "from-a" and row["profile_id"] is None
-    assert any(c["losing_record"].get("profile_id") == "parent" and c["losing_device_id"] == b.device_id
-               for c in _conflicts(a, "child", "templates"))
+            assert row["name"] == ("from-b" if rename else "from-a") and row["profile_id"] is None
+            assert database.get_tag("after")
+    assert len(_kept_assignment(b, "templates", "profile_id")) == 1
     _stream_rounds(a, b)
 
 

@@ -636,6 +636,10 @@ def _without_quorum(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     return content_hash(coll, {name: value for name, value in record.items() if name != "_nested_rekey"})
 
 
+def _baseline(coll, plaintext):
+    return _without_quorum(coll, plaintext) if plaintext and "_nested_rekey" in plaintext else None
+
+
 def _row_hash(coll: policy.Collection, record: Mapping[str, Any]) -> str:
     """``content_hash`` of a row this worker holds, remembered in ``_QUORUM_FREE``."""
     digest = content_hash(coll, record)
@@ -1073,7 +1077,8 @@ def record(cursor, collection: str, record_id: str, row: Optional[Mapping[str, A
     data = env.to_dict()
     store.insert_op(cursor, data, _lane(coll))
     store.put_record(cursor, collection, record_id, clock=clock, origin_device_id=ctx.device_id,
-                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq)
+                     content_hash=new_hash, deleted=plaintext is None, order_seq=order_seq,
+                     quorum_free_hash=_baseline(coll, plaintext))
     if collection == "session_active":
         cursor.execute("UPDATE network_session_active SET local_pending=FALSE WHERE session_id=%s", (record_id,))
     return data
@@ -1156,7 +1161,7 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
         return False
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
                      origin_device_id=existing["origin_device_id"], content_hash=content_hash(coll, after),
-                     deleted=False, order_seq=existing.get("order_seq"))
+                     deleted=False, order_seq=existing.get("order_seq"), quorum_free_hash=_baseline(coll, after))
     return True
 
 
@@ -2122,6 +2127,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
         if coll.name == "presence":
             _learn_presence_alias(cursor, ctx, plaintext, env.origin_device_id)
         local_hash = env.content_hash
+        reserialized = None
         if row is not None:
             try:
                 reserialized = serialize_row(coll, row, cursor=cursor)
@@ -2135,7 +2141,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             # wire hash to a database row's timezone-dependent spelling.
             local_hash = ""
         store.put_record(cursor, env.collection, env.record_id, clock=env.clock, origin_device_id=env.origin_device_id,
-                         content_hash=local_hash, deleted=False, order_seq=env.order_seq)
+                         content_hash=local_hash, deleted=False, order_seq=env.order_seq,
+                         quorum_free_hash=_baseline(coll, reserialized) if local_hash else None)
     # Stored for forwarding only once it applied: a failure above must not
     # leave an op in the log that this worker never materialized.
     store.insert_op(cursor, env.to_dict(), _lane(coll))
@@ -2420,25 +2427,14 @@ def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, 
     them when the quorum changes. A peer's presence op therefore changes the
     hash of a row nobody edited here, and signing that row during an apply
     would put this worker's old copy above the peer edit about to replace
-    it. The stored hash cannot be compared without the fingerprint, so the
-    row is compared with what this process saw under that hash
-    (``_QUORUM_FREE``: step 1 hashes every record of a batch before a presence
-    op in it applies, and so do the scanner and the apply that wrote the
-    row), else with the retained signed op. A reference the row no longer has
-    because this worker applied its parent's tombstone (``_follow_rewrites``)
-    is not a difference.
-
-    Neither one (a record adopted from a state copy, the quorum changed in an
-    earlier transaction, and this process restarted before its scanner saw
-    the row) proves nothing: the row then counts as changed. That keeps the
-    rule that no local change is ever replaced unsigned. The cost, when the
-    row was not edited, is what the scanner's own quorum republish does on
-    its next run anyway: this worker's copy is signed and ordered against the
-    peer's, and the loser is kept as a conflict.
+    it. Save the quorum-independent baseline alongside the version, including
+    when adopting a state copy that has no signed op. For records predating
+    that baseline, try the process memo and then the retained op; if neither
+    proves this is the signed row, preserve it rather than overwrite an edit.
     """
     from app.network.keyring import open_envelope
     current = _without_quorum(coll, plaintext)
-    if _QUORUM_FREE.get((coll.name, existing["content_hash"])) == current:
+    if existing.get("quorum_free_hash") == current or _QUORUM_FREE.get((coll.name, existing["content_hash"])) == current:
         return True
     for data in store.record_ops(cursor, coll.name, record_id, origin_device_id=existing["origin_device_id"],
                                  clock=int(existing["clock"])):
@@ -2619,7 +2615,7 @@ def _follow_rewrites(cursor, candidates: Sequence[Tuple[policy.Collection, str, 
             continue
         store.put_record(cursor, target.name, target_id, clock=int(known["clock"]),
                          origin_device_id=known["origin_device_id"], content_hash=moved,
-                         deleted=False, order_seq=known.get("order_seq"))
+                         deleted=False, order_seq=known.get("order_seq"), quorum_free_hash=_baseline(target, now))
         moved_records.append((target.name, target_id))
     return moved_records
 
@@ -2681,7 +2677,11 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
         store.lock_state(cursor)
     if getattr(_own_ahead_batch, "found", False):
         return True
-    for (name, record_id), (deleting, incoming, only_deleted) in sorted(wanted.items()):
+    # Preserve arrival order: a later direct child edit must not sign a row
+    # whose reference an earlier tombstone may clear. The winning delete
+    # preserves the child under lock; a duplicate/loser projects nothing.
+    deferred = set()
+    for (name, record_id), (deleting, incoming, only_deleted) in wanted.items():
         coll = policy.collection(name)
         try:
             targets = [(coll, record_id, _read_row(cursor, coll, record_id), incoming, only_deleted, None)]
@@ -2695,9 +2695,11 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
                 continue
             try:
                 if cleared is not None:
-                    if _cleared_child_unsigned(cursor, ctx, target, target_id, row, cleared)[1]:
-                        record(cursor, target.name, target_id, {**row, cleared: None}, ctx=ctx)
-                elif _unsigned(cursor, ctx, target, target_id, row,
+                    deferred.add((target.name, target_id))
+                    continue
+                if (target.name, target_id) in deferred:
+                    continue
+                if _unsigned(cursor, ctx, target, target_id, row,
                                store.get_record(cursor, target.name, target_id), target_hash,
                                deleting=target_deleted):
                     record(cursor, target.name, target_id, row, ctx=ctx)
@@ -2744,12 +2746,16 @@ def _check_local(cursor, ctx: NetworkContext, coll: policy.Collection, record_id
     for child, child_id, child_row, cleared in cleared_children:
         changed, unsigned_after = _cleared_child_unsigned(cursor, ctx, child, child_id, child_row, cleared)
         if unsigned_after:
-            raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + child.name)
+            # This parent won. Commit the surviving edit and conflict in the
+            # same savepoint as its cascade, never in speculative preflight.
+            if (getattr(_own_ahead_batch, "found", False) or
+                    record(cursor, child.name, child_id, {**child_row, cleared: None}, ctx=ctx) is None):
+                raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + child.name)
         if changed:
             kept.append((child, child_id, child_row))
     for child, child_id, child_row in kept:
         # The deletion clears this worker's unsigned reference to the record:
-        # keep the row as it was (step 1 signed the rest of the change).
+        # keep the row as it was (the surviving changes are now signed).
         try:
             losing = serialize_row(child, child_row, cursor=cursor)
         except ApplyError:
@@ -3785,6 +3791,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             # Snapshot items have no per-item signature. In particular,
             # their claimed origin is not evidence for an instance alias.
             local_hash = content_hash(coll, item["record"])
+            reserialized = None
             if row is not None:
                 try:
                     reserialized = serialize_row(coll, row, cursor=cursor)
@@ -3800,7 +3807,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"),
+                         quorum_free_hash=_baseline(coll, reserialized) if local_hash and not item["deleted"] else None)
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
         if not item["deleted"] and refresh_billing:
