@@ -339,9 +339,10 @@ def _owned_install(store, cli, root):
         maker.script_template = "import time; time.sleep(30)\n"
         maker.make("claude = unused:main")
     else:
-        # Use a real executable with its own inode, not a coreutils applet:
-        # uutils sleep dispatches on argv[0] and refuses the name "claude".
-        binary.write_bytes(Path(sys.executable).read_bytes())
+        # Bash is already required on POSIX. Unlike Python it does not
+        # need a private runtime beside its executable; unlike a coreutils
+        # applet it can run under the launcher name.
+        binary.write_bytes(Path("/bin/bash").read_bytes())
         binary.chmod(0o755)
         ci._launcher().symlink_to(binary)
     cli.installed, cli.binary_path = True, str(ci._launcher())
@@ -353,7 +354,9 @@ def _owned_install(store, cli, root):
 def test_remove_refused_while_cli_runs(worker):
     store, cli, root = worker
     _owned_install(store, cli, root)
-    running = subprocess.Popen([str(ci._launcher()), "-I", "-S", "-c", "import time; time.sleep(30)"])
+    # A shell builtin keeps the installed executable itself blocked until
+    # cleanup, with no sleep utility or short-lived child to race.
+    running = subprocess.Popen([str(ci._launcher()), "-c", "read -r line"], stdin=subprocess.PIPE)
     try:
         assert ci._in_use() == [running.pid]
         with pytest.raises(ValueError, match="Claude Code is running"):
@@ -369,6 +372,7 @@ def test_remove_refused_while_cli_runs(worker):
             child.kill()
         running.kill()
         running.wait()
+        running.stdin.close()
         psutil.wait_procs(children, timeout=5)
     assert ci._in_use() == []
 
