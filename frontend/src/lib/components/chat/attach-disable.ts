@@ -22,6 +22,11 @@ export const ATTACHMENTS_NEED_LOCAL_CHECKOUT =
 export const ATTACHMENTS_NEED_RUNS_ON =
 	'This project isn’t checked out here, so its attachments need the worker that has it. Pick that worker in Runs on, or send without files.';
 
+/** A chat another worker runs whose project has no shared id: nothing here
+ * names that worker's project, and its id can name an unrelated one here. */
+export const ATTACHMENTS_REMOTE_UNLINKED =
+	'Attachments aren’t available for this chat from this worker: another worker runs it and its project isn’t linked here. Attach the file from the worker that runs the chat, or send without files.';
+
 export const SELECT_PROJECT_TO_UPLOAD = 'Please select a project first to upload files.';
 
 /** The owner of the open chat stayed unknown (its live state did not answer). */
@@ -50,8 +55,9 @@ export type ComposerUploadTarget =
  *     whatever local id the store still holds
  *   - owner local: the local project
  * A shared id with no local id uses the session upload whoever runs the chat.
- * The one remote case without a session upload is a legacy chat with no shared
- * id at all: it keeps its local id as before (the accepted rule).
+ * A remote chat with no shared id (a legacy or not yet linked project) has no
+ * session upload (the server needs the shared id) and its local id may name an
+ * unrelated project here: attaching is refused with a way forward.
  * New chats (no session yet) upload to the project picked for them.
  */
 export function composerUploadTarget(
@@ -66,12 +72,15 @@ export function composerUploadTarget(
 	}
 	if (projectV2Id && (isRemote === true || !project)) return { kind: 'session', sessionId };
 	if (!project) return { kind: 'blocked', reason: SELECT_PROJECT_TO_UPLOAD };
+	if (isRemote === true) return { kind: 'blocked', reason: ATTACHMENTS_REMOTE_UNLINKED };
 	if (isRemote === undefined) return { kind: 'wait' };
 	return { kind: 'project', project };
 }
 
 /**
- * Why attach/drop is blocked, or null when uploads may proceed.
+ * Why attach/drop is blocked, or null when uploads may proceed: the blocked
+ * outcome of {@link composerUploadTarget}, so the attach control says before a
+ * file is picked what an upload would be told after.
  *
  * `mode` defaults to the code lane so callers that predate lanes keep their
  * behaviour: remote-only drafts (`projectV2Id` set, no legacy `project` or
@@ -82,12 +91,11 @@ export function attachmentBlockReason(
 	project: string | null | undefined,
 	projectV2Id: string | null | undefined,
 	mode: SessionMode = 'code',
-	sessionId?: string | null
+	sessionId?: string | null,
+	isRemote?: boolean
 ): string | null {
-	if (mode === 'chat') return null;
-	if (projectV2Id && !project) return sessionId ? null : ATTACHMENTS_NEED_LOCAL_CHECKOUT;
-	if (!project) return SELECT_PROJECT_TO_UPLOAD;
-	return null;
+	const target = composerUploadTarget({ sessionId: sessionId ?? null, project, projectV2Id, isRemote }, mode);
+	return target.kind === 'blocked' ? target.reason : null;
 }
 
 /** True when attach/drop should be inert (remote-only compose). */

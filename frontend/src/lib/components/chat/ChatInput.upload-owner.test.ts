@@ -7,6 +7,8 @@ import { api } from '$lib/api/client';
 import { readDraft } from '$lib/stores/session/draft-persistence';
 import { sessionEphemeralCache } from '$lib/stores/session-cache';
 import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
+import { bumpInitGeneration } from '$lib/stores/session/session-init';
+import { ATTACHMENTS_REMOTE_UNLINKED } from './attach-disable';
 import '$lib/test-stubs/composer-dom';
 
 // #1659. Until the page knows who runs the open chat (a reload, a deep link,
@@ -144,6 +146,138 @@ describe('a paste or attachment that settles after the chat changed (#1659)', ()
 		await waitFor(() => expect(storedDraft('owned')).toContain('uploads/a.txt'));
 		expect(editor.innerHTML).not.toContain('uploads/a.txt');
 		expect(storedDraft('chat-b')).not.toContain('uploads/a.txt');
+	});
+});
+
+// #1659 S7. A New chat whose own send creates its chat takes that id without
+// a navigation: a paste or attachment started before is that chat's, not the
+// New chat slot's. A real navigation (another chat, a fresh New chat) is a leave.
+describe('a paste or attachment started on a New chat that takes its id (#1659)', () => {
+	function paste(target: HTMLElement, text: string) {
+		const event = new Event('paste', { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+		event.clipboardData = { getData: (type: string) => (type === 'text/plain' ? text : ''), types: ['text/plain'], files: [], items: [] };
+		target.dispatchEvent(event);
+	}
+	const storedDraft = (id: string | null) => sessionEphemeralCache.peekDraft(id ?? '__new_chat__') || readDraft(id) || '';
+	/** The send's chat binds to the open New chat (no navigation). */
+	function adopt(id: string) {
+		Object.assign(activeSession.current, { sessionId: id, isRemote: false });
+		activeSession.setDraft('');
+	}
+	/** The user opens another chat (a navigation). */
+	function navigateTo(id: string) {
+		bumpInitGeneration();
+		Object.assign(activeSession.current, { sessionId: id, project: '', projectV2Id: null, isRemote: false });
+	}
+	/** A New chat whose first message is sent and waiting for its chat. */
+	async function sendOnNewChat(): Promise<{ container: HTMLElement; editor: HTMLElement }> {
+		Object.assign(activeSession.current, { sessionId: null, isRemote: undefined, isStreaming: false, liveTurnId: null });
+		activeSession.setDraft('first message');
+		const sends = vi.spyOn(activeSession, 'sendMessage').mockImplementation(() => new Promise<boolean>(() => {}));
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		await waitFor(() => expect(editor.textContent).toBe('first message'));
+		await fireEvent.submit(container.querySelector('form')!);
+		await waitFor(() => expect(sends).toHaveBeenCalledOnce());
+		await waitFor(() => expect(editor.textContent).toBe(''));
+		return { container, editor };
+	}
+	async function startOnNewChat() {
+		const { container, editor } = await sendOnNewChat();
+		let finish!: (value: unknown) => void;
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finish = done; }) as never);
+		return { upload, container, editor, finish: (v: unknown) => finish(v) };
+	}
+
+	it('an attachment finishing after the New chat took its id lands in that chat\'s editor', async () => {
+		const { upload, container, editor, finish } = await startOnNewChat();
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		expect(upload.mock.calls[0][0]).toBe('/projects/app/upload');
+		adopt('made');
+		await new Promise(r => setTimeout(r, 20));
+		finish(uploaded);
+		await waitFor(() => expect(editor.innerHTML).toContain('uploads/a.txt'));
+		expect(storedDraft(null)).not.toContain('uploads/a.txt');
+	});
+
+	it('a large paste finishing after the New chat took its id lands in that chat\'s editor', async () => {
+		const { upload, editor, finish } = await startOnNewChat();
+		paste(editor, 'q'.repeat(LARGE_PASTE_BYTES));
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		adopt('made');
+		await new Promise(r => setTimeout(r, 20));
+		finish({ ...uploaded, path: 'uploads/pasted.txt', filename: 'pasted.txt' });
+		await waitFor(() => expect(editor.innerHTML).toContain('uploads/pasted.txt'));
+		expect(storedDraft(null)).not.toContain('pasted.txt');
+	});
+
+	it('taken its id and then left: the result goes to the created chat\'s draft, not the open chat', async () => {
+		const { upload, container, editor, finish } = await startOnNewChat();
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		adopt('made');
+		await new Promise(r => setTimeout(r, 20));
+		navigateTo('chat-b');
+		await new Promise(r => setTimeout(r, 20));
+		finish(uploaded);
+		await waitFor(() => expect(storedDraft('made')).toContain('uploads/a.txt'));
+		expect(editor.innerHTML).not.toContain('uploads/a.txt');
+		expect(storedDraft('chat-b')).not.toContain('uploads/a.txt');
+		expect(storedDraft(null)).not.toContain('uploads/a.txt');
+	});
+
+	it('two attachments on one New chat, one finished before it took its id and one after, end in the same chat', async () => {
+		const { container, editor } = await sendOnNewChat();
+		const finishes: Array<(value: unknown) => void> = [];
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finishes.push(done); }) as never);
+		const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+		Object.defineProperty(input, 'files', { configurable: true, value: [new File(['x'], 'a.txt'), new File(['y'], 'b.txt')] });
+		await fireEvent.change(input);
+		await waitFor(() => expect(upload).toHaveBeenCalledTimes(1));
+		finishes[0](uploaded);
+		await waitFor(() => expect(upload).toHaveBeenCalledTimes(2));
+		adopt('made');
+		await new Promise(r => setTimeout(r, 20));
+		finishes[1]({ ...uploaded, path: 'uploads/b.txt', filename: 'b.txt' });
+		await waitFor(() => expect(editor.innerHTML).toContain('uploads/b.txt'));
+		expect(editor.innerHTML).toContain('uploads/a.txt');
+		expect(storedDraft(null)).not.toContain('uploads/');
+	});
+
+	it('left before it took an id: the result goes back to the New chat slot, not the open chat', async () => {
+		const { upload, container, editor, finish } = await startOnNewChat();
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		navigateTo('chat-b');
+		await new Promise(r => setTimeout(r, 20));
+		finish(uploaded);
+		await waitFor(() => expect(storedDraft(null)).toContain('uploads/a.txt'));
+		expect(editor.innerHTML).not.toContain('uploads/a.txt');
+		expect(storedDraft('chat-b')).not.toContain('uploads/a.txt');
+	});
+});
+
+// #1659 S6. A chat another worker runs with no shared id: no session upload
+// exists for it and its id may name an unrelated project here. The attach
+// control says so before a file is picked, and nothing is uploaded.
+describe('a chat another worker runs whose project is not linked here (#1659)', () => {
+	it('refuses attaching with a way forward, and uploads nothing', async () => {
+		Object.assign(activeSession.current, { projectV2Id: null, isRemote: true });
+		const upload = vi.spyOn(api, 'uploadFile').mockResolvedValue(uploaded as never);
+		const { container } = render(ChatInput);
+		const attach = container.querySelector('button.composer-attach') as HTMLButtonElement;
+		expect(attach.title).toBe(ATTACHMENTS_REMOTE_UNLINKED);
+		await fireEvent.click(attach);
+		await pickFile(container);
+		await new Promise(r => setTimeout(r, 50));
+		expect(upload).not.toHaveBeenCalled();
+		// It becomes attachable without a reload once a row links the project.
+		activeSession.reconcileOwner([{ ...row(true), project_v2_id: 'pv2-linked' }]);
+		await waitFor(() => expect(attach.title).toBe('Attach files'));
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		expect(upload.mock.calls[0][0]).toBe('/sessions/owned/upload');
 	});
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	ATTACHMENTS_NEED_LOCAL_CHECKOUT,
+	ATTACHMENTS_REMOTE_UNLINKED,
 	SELECT_PROJECT_TO_UPLOAD,
 	attachmentBlockReason,
 	composerUploadTarget,
@@ -60,13 +61,13 @@ describe('composerUploadTarget: where an open chat\'s upload goes (#1659)', () =
 	const project = { kind: 'project', project: 'app' };
 	const none = { kind: 'blocked', reason: SELECT_PROJECT_TO_UPLOAD };
 	// Owner unknown: a local id waits (it may name an unrelated project here).
-	// Owner remote: the session upload whatever the store holds, except a
-	// legacy chat with no shared id, which keeps its local id (accepted rule).
+	// Owner remote: the session upload whatever the store holds; with no shared
+	// id there is none, and the local id may name an unrelated project: refused.
 	// Owner local: the local project. A shared id alone: the session upload.
 	const expected: Record<keyof typeof owners, Record<keyof typeof holdings, unknown>> = {
 		unknown: { 'a local project': { kind: 'wait' }, 'the shared id only': session, both: { kind: 'wait' }, none },
 		local: { 'a local project': project, 'the shared id only': session, both: project, none },
-		remote: { 'a local project': project, 'the shared id only': session, both: session, none }
+		remote: { 'a local project': { kind: 'blocked', reason: ATTACHMENTS_REMOTE_UNLINKED }, 'the shared id only': session, both: session, none }
 	};
 	for (const [owner, isRemote] of Object.entries(owners)) {
 		for (const [holding, ids] of Object.entries(holdings)) {
@@ -85,5 +86,15 @@ describe('composerUploadTarget: where an open chat\'s upload goes (#1659)', () =
 		for (const isRemote of Object.values(owners)) {
 			expect(composerUploadTarget({ sessionId: 's', project: 'app', projectV2Id: 'pv2', isRemote }, 'chat')).toEqual({ kind: 'chat' });
 		}
+	});
+});
+
+describe('attachmentBlockReason follows composerUploadTarget (#1659)', () => {
+	it('tells a remote chat with no shared id why before a file is picked', () => {
+		expect(attachmentBlockReason('app', null, 'code', 's', true)).toBe(ATTACHMENTS_REMOTE_UNLINKED);
+		expect(attachmentBlockReason('app', 'pv2', 'code', 's', true)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'code', 's', false)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'code', 's', undefined)).toBeNull();
+		expect(attachmentBlockReason('app', null, 'chat', 's', true)).toBeNull();
 	});
 });

@@ -46,6 +46,8 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const PEER = 'Peer worker';
 const LOCAL_PROJECT = 'dev-other';
 const SNAPSHOT_KEY = 'ai-shuffle-active-session';
+// attach-disable.ts ATTACHMENTS_REMOTE_UNLINKED, word for word.
+const UNLINKED_REASON = 'Attachments aren’t available for this chat from this worker: another worker runs it and its project isn’t linked here. Attach the file from the worker that runs the chat, or send without files.';
 
 /**
  * Script the page before it loads. In the page, not page.route: the built
@@ -54,10 +56,11 @@ const SNAPSHOT_KEY = 'ai-shuffle-active-session';
  *   hideOwner   its rows carry no `is_remote` (only /live can say who runs it)
  *   failLive    its /live answers 500
  *   holdReads   after the armed reload, its /live waits until window.__releaseLive()
+ *   unlinked    its project has no shared id (a legacy or not yet linked one)
  */
-async function scriptPage(page, status, { remote = true, hideOwner = false, failLive = false, holdReads = false, plantSnapshot = false } = {}) {
+async function scriptPage(page, status, { remote = true, hideOwner = false, failLive = false, holdReads = false, plantSnapshot = false, unlinked = false } = {}) {
 	await page.addInitScript(
-		({ id, peer, remote, hideOwner, failLive, holdReads, plantSnapshot, snapshotKey, localProject }) => {
+		({ id, peer, remote, hideOwner, failLive, holdReads, plantSnapshot, snapshotKey, localProject, unlinked }) => {
 			window.__remote = remote;
 			window.__uploads = window.__uploads || [];
 			window.__sockets = [];
@@ -90,10 +93,12 @@ async function scriptPage(page, status, { remote = true, hideOwner = false, fail
 				const out = {};
 				for (const [k, v] of Object.entries(value)) out[k] = mark(v);
 				if (out.id === id) {
+					if (unlinked) out.project_v2_id = null;
 					if (hideOwner) delete out.is_remote;
 					else if (window.__remote) Object.assign(out, { is_remote: true, device_name: peer });
 				}
 				if (out.session_meta && window.__remote) Object.assign(out.session_meta, { is_remote: true, device_name: peer });
+				if (out.session_meta && unlinked) out.session_meta.project_v2_id = null;
 				return out;
 			};
 			const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -132,7 +137,7 @@ async function scriptPage(page, status, { remote = true, hideOwner = false, fail
 				return new Response(JSON.stringify(mark(body)), { status: response.status, headers: response.headers });
 			};
 		},
-		{ id: seededChatId(status, 'other_project'), peer: PEER, remote, hideOwner, failLive, holdReads, plantSnapshot, snapshotKey: SNAPSHOT_KEY, localProject: LOCAL_PROJECT }
+		{ id: seededChatId(status, 'other_project'), peer: PEER, remote, hideOwner, failLive, holdReads, plantSnapshot, snapshotKey: SNAPSHOT_KEY, localProject: LOCAL_PROJECT, unlinked }
 	);
 }
 
@@ -338,6 +343,30 @@ await runJourney({
 				await mark('attach after the hand-off');
 				await pickFile(page);
 				await expectUploads(page, chatId, ['project', 'session']);
+			}
+		},
+		{
+			// #1659 S6: no session upload exists without a shared id, and the
+			// local id may name an unrelated project here. Refused, said up front.
+			name: 'remote-unlinked-refused',
+			async setup({ page, status }) {
+				await scriptPage(page, status, { unlinked: true });
+				await gotoApp(page, status);
+			},
+			async act({ page, status, mark }) {
+				await mark('open the chat another worker runs');
+				await openMirrored(page);
+				const attach = page.locator('button.composer-attach').first();
+				await page.waitForFunction(
+					(text) => document.querySelector('button.composer-attach')?.getAttribute('title') === text,
+					UNLINKED_REASON, { timeout: 15_000 });
+				expect(await attach.isDisabled(), 'the attach control is refused before a file is picked');
+				await mark('a file picked anyway uploads nothing');
+				await pickFile(page);
+				await page.waitForTimeout(1500);
+				const got = await uploads(page);
+				expect(got.length === 0, `nothing uploads, got ${JSON.stringify(got)}`);
+				void status;
 			}
 		},
 		{

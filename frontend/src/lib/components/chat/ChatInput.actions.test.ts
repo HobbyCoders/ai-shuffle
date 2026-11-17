@@ -9,10 +9,13 @@ const circles = source.split('<div class="send-cluster"')[1].split('\n\t\t\t\t\t
 
 describe('streaming composer actions', () => {
 	it('routes existing remote-only attachments to session staging for picker and drop', () => {
-		expect(source).toContain('`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`');
-		expect(source).toContain('attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)');
-		const gates = source.match(/projectLane,\r?\n\s*\$activeSession.sessionId\r?\n\s*\);/g); // \r? keeps CRLF checkouts matching
-		expect(gates).toHaveLength(2);
+		// One decision picks the endpoint (composerUploadTarget, #1659); the
+		// attach control, picker, drop and large paste gate on the same one,
+		// who runs the chat included.
+		expect(source).toContain('`/sessions/${encodeURIComponent(target.sessionId)}/upload`');
+		expect(source).toContain('attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId, $activeSession.isRemote)');
+		expect(source.match(/attachBlockNow\(\)/g)?.length).toBeGreaterThanOrEqual(5);
+		expect(source).not.toMatch(/attachmentBlockReason\(\s*\$activeSession\.project,[^)]*\$activeSession\.sessionId\s*\)/);
 		// The attach circle is ChatInput's; the controls row carries no attach gate.
 		const dock = readFileSync(resolve(process.cwd(), 'src/lib/components/chat/ControlsDock.svelte'), 'utf8');
 		expect(dock).not.toContain('isRemoteOnlyCompose');
