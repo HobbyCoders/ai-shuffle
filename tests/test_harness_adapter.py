@@ -1527,9 +1527,16 @@ async def test_native_slash_submission_expands_from_selected_sources(tmp_path, m
         events = await _collect(adapter)
         assert isinstance(events[-1], ResultMessage)
         assert requests
-        assert expected in str(requests[0].messages)
+        from fluid.providers.anthropic.serialize import build_request_body
+
+        user = next(m for m in requests[0].messages if m.role == "user")
+        assert user.prompt_text() == "/greet world"
+        wire = build_request_body(requests[0])["messages"]
+        texts = [b["text"] for m in wire if m["role"] == "user"
+                 for b in m["content"] if b["type"] == "text"]
+        assert expected in texts
         if sources:
-            assert "/greet world" not in str(requests[0].messages)
+            assert all("/greet world" not in text for text in texts)
     finally:
         await adapter.disconnect()
 

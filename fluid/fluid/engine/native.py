@@ -2764,6 +2764,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # harness-only environment node.
             await self._emit(TurnStarted(
                 session_id=sid, node_id=prompt.node_id, turn_id=turn_id,
+                context_node_id=head.node_id if context_note else None,
                 model=self.model, provider=self.provider.name, source=op.source,
                 thinking=self._session_thinking.get(sid),
             ))
