@@ -204,6 +204,9 @@
 	onMount(async () => {
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
+		// Reloaded controls can already accept Back, Forward and clicks while the
+		// boot requests are pending. Their existing entry must already have an owner.
+		if ((page.state as ShellState).shell) shellHistory.start(page.state, $activeView);
 		// Navigation origin includes auth + JS loading. This is bootstrap settled,
 		// not proof that a restored transcript or all feature panels are ready.
 		// Bounded, content-free milestones cover boots whose paint sample is
@@ -331,7 +334,7 @@
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
-		shellHistory.start(page.state, $activeView);
+		if (!shellHistory.place) shellHistory.start(page.state, $activeView);
 		if (!deepLinkSessionId && !navigationClaimed) showEntry();
 		bootReconciled = true;
 		performance.mark?.('shuffle:boot.reconciled');

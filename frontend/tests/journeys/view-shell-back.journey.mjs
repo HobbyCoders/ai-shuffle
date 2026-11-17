@@ -1,6 +1,6 @@
 // Selected desktop details must gain a usable Back step when resized into a stack.
 import { runJourney } from './runner.mjs';
-import { SEEDED, expect, gotoApp, reloadForHistory, sidebarRow } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, holdBootLoad, reloadForHistory, sidebarRow } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -159,6 +159,7 @@ await runJourney({
 			await menu(page).click();
 			await page.getByRole('complementary', { name: 'Chats' }).getByText(SEEDED.no_project, { exact: true }).first().click();
 			await waitOpen(page, SEEDED.no_project);
+			await holdBootLoad(page, '/api/v1/tags', 15_000, { releaseOnSignal: true });
 		},
 		async act({ page, mark }) {
 			const model = page.getByRole('dialog', { name: 'Choose model' });
@@ -174,12 +175,18 @@ await runJourney({
 				await page.goBack(); await model.waitFor({ state: 'hidden' });
 				await mark('Forward restores Model');
 				await page.goForward(); await model.waitFor({ timeout: 5000 });
+				if (nested) await page.evaluate(() => window.__journeyBootHold?.release?.());
 				await mark('reload Model in place'); await reloadForHistory(page, mark); await model.waitFor();
 				expect(await back.isVisible() === nested, 'only a nested page has Back to controls');
 				await model.getByRole('button', { name: 'Close chat controls' }).click();
 				await page.waitForFunction(() => !String(history.state?.['sveltekit:metadata']?.state).includes('mobileControls'));
 				expect(['/mobile', '/mobile/'].includes(new URL(page.url()).pathname), `Close returned to the composer, not ${new URL(page.url()).pathname}`);
-				await waitOpen(page, SEEDED.no_project);
+				if (nested) {
+					await page.evaluate(() => window.__journeyBootHold?.release?.());
+					await waitOpen(page, SEEDED.no_project);
+				} else {
+					await page.waitForFunction(() => window.__journeyBootHold?.startedAt && !window.__journeyBootHold.releasedAt);
+				}
 				await page.locator('[data-cell="model"]').waitFor();
 			}
 		}
