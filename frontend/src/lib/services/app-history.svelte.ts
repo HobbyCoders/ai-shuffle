@@ -31,16 +31,17 @@ let mounted = false;
 export const shellHistory = {
  get restored() { return restored; },
  get place() { return current?.place; },
+ get entryId() { return current?.id; },
  start(state: ShellState, view: ActiveView | null) {
   mounted = true;
-  if (state.shell) restored = current = state.shell;
+  if (state.shell) restored = current = { ...state.shell };
   else write(viewPlace(view), true, state);
  },
- stop() { mounted = false; current = null; },
+ stop() { mounted = false; restored = current = null; },
  land(state: ShellState) {
   const entry = state.shell;
   if (!mounted || !entry || entry.id === current?.id || pending.has(entry.id)) return false;
-  restored = current = entry;
+  restored = current = { ...entry };
   return true;
  },
  destination(view: ActiveView) {

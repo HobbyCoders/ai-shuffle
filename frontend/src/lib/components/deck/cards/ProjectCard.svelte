@@ -296,7 +296,8 @@
 
 	function restoreSelection(key: string) {
 		const row = allRows.find(r => r.key === key);
-		if (row) handleRowClick(row);
+		if (!row) return overviewSettled ? 'missing' : 'pending';
+		handleRowClick(row);
 	}
 </script>
 

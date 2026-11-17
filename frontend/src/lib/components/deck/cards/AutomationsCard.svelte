@@ -648,7 +648,11 @@
 		const [view, id] = key.split(':');
 		if (view === 'create') openCreate();
 		else if (view === 'approvals') currentView = 'approvals';
-		else { const row = automations.find(a => a.id === id); if (row) { if (view === 'edit') openEdit(row); else void openDetail(row); } }
+		else {
+			const row = automations.find(a => a.id === id);
+			if (!row) return loading ? 'pending' : 'missing';
+			if (view === 'edit') openEdit(row); else void openDetail(row);
+		}
 	}
 </script>
 <ViewShell label="Automations" historyType="automations" selection={`${currentView}:${selectedAutomation?.id ?? ''}`} {restoreSelection} detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>

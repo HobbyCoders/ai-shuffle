@@ -391,8 +391,9 @@
 		}
 	}
 
-	async function openNewForm(nextTab: AgentTab = 'profile') {
+	async function openNewForm(nextTab: AgentTab = 'profile', current = () => true) {
 		await flushPendingPersist();
+		if (!current()) return;
 		remoteChange = '';
 		saveState = 'idle';
 		draftId = null;
@@ -408,10 +409,11 @@
 	}
 
 	/** Open an agent, saving the open one's pending edits first. */
-	async function selectProfile(profile: Profile, nextTab?: AgentTab) {
+	async function selectProfile(profile: Profile, nextTab?: AgentTab, current = () => true) {
 		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
 		if (!alreadyOpen) {
 			await flushPendingPersist();
+			if (!current()) return;
 			remoteChange = '';
 			saveState = 'idle';
 			if (draftId !== profile.id) draftId = null;
@@ -1003,10 +1005,11 @@
 	]);
 	const openFolder = $derived(editingProfile ? folderOf(editingProfile.id, assignments, folders) : '');
 
-	function restoreSelection(key: string) {
-		if (key === 'new') { void openNewForm(); return; }
+	function restoreSelection(key: string, current: () => boolean) {
+		if (key === 'new') { void openNewForm('profile', current); return; }
 		const row = profiles.find(p => p.id === key);
-		if (row) void untrack(() => selectProfile(row));
+		if (!row) return loading ? 'pending' : 'missing';
+		void untrack(() => selectProfile(row, undefined, current));
 	}
 </script>
 

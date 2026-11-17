@@ -1,6 +1,6 @@
 // Selected desktop details must gain a usable Back step when resized into a stack.
 import { runJourney } from './runner.mjs';
-import { SEEDED, expect, gotoApp, sidebarRow } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, reloadForHistory, sidebarRow } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -153,6 +153,37 @@ await runJourney({
 			}
 		}
 	}, ...(mobileShell ? [{
+		name: 'native-model-history', viewports: ['phone'],
+		async setup({ page, status }) {
+			await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+			await menu(page).click();
+			await page.getByRole('complementary', { name: 'Chats' }).getByText(SEEDED.no_project, { exact: true }).first().click();
+			await waitOpen(page, SEEDED.no_project);
+		},
+		async act({ page, mark }) {
+			const model = page.getByRole('dialog', { name: 'Choose model' });
+			const back = model.getByRole('button', { name: 'Back to chat controls' });
+			for (const nested of [false, true]) {
+				await mark(nested ? 'Model from Controls' : 'Model directly from the bar');
+				if (nested) {
+					await page.locator('[data-cell="controls"]').click();
+					await page.getByRole('dialog').getByRole('button', { name: /^Model:/ }).click();
+				} else await page.locator('[data-cell="model"]').click();
+				await model.waitFor();
+				await mark('Back to the entry under Model');
+				await page.goBack(); await model.waitFor({ state: 'hidden' });
+				await mark('Forward restores Model');
+				await page.goForward(); await model.waitFor({ timeout: 5000 });
+				await mark('reload Model in place'); await reloadForHistory(page, mark); await model.waitFor();
+				expect(await back.isVisible() === nested, 'only a nested page has Back to controls');
+				await model.getByRole('button', { name: 'Close chat controls' }).click();
+				await page.waitForFunction(() => !String(history.state?.['sveltekit:metadata']?.state).includes('mobileControls'));
+				expect(['/mobile', '/mobile/'].includes(new URL(page.url()).pathname), `Close returned to the composer, not ${new URL(page.url()).pathname}`);
+				await waitOpen(page, SEEDED.no_project);
+				await page.locator('[data-cell="model"]').waitFor();
+			}
+		}
+	}, {
 		// A chat picked in the drawer waits for the drawer's own entry to be
 		// popped before it pushes its own. The drawer's marker must never be
 		// copied onto a chat entry, or Back would land on a chat that still

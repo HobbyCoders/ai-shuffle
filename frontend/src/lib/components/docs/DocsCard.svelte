@@ -48,6 +48,8 @@
  function selectDoc(category: string, slug: string, query = '') {
   if (!detailOpen || activeCategory !== category || activeSlug !== slug) shellHistory.detail('docs', { doc: `${category}/${slug}` });
   display(category, slug, query);
+  const scroll = articleEl?.closest('.view-main-slot');
+  if (scroll) scroll.scrollTop = 0;
  }
  function display(category: string, slug: string, query = '') {
   activeCategory = category;
@@ -55,8 +57,6 @@
   tocOpen = false;
   detailOpen = true;
   find = query ? { query, key: ++searches } : null;
-  const scroll = articleEl?.closest('.view-main-slot');
-  if (scroll) scroll.scrollTop = 0;
  }
  function backToList() {
   if (shellHistory.place?.doc) window.history.back();

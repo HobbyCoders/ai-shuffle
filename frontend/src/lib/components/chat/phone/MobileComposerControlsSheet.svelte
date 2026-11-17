@@ -47,7 +47,7 @@
 	 */
 	import { tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { shellHistory } from '$lib/services/app-history.svelte';
+	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
@@ -434,11 +434,12 @@
 	let historyEntry = false;
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
+	let closeThroughList: string | undefined;
 
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
 		try {
-			shellHistory.overlay({ mobileControls: true, mobileControlsPage: target });
+			shellHistory.overlay({ mobileControls: true, mobileControlsPage: target, mobileControlsList: shellHistory.entryId });
 			pageEntry = true;
 		} catch {
 			// Router not ready (tests): Back closes the panel instead.
@@ -488,8 +489,12 @@
 				}
 				if (historyEntry) {
 					historyEntry = false;
-					// Pop the page's entry too, so no dead Back press is left behind.
-					if (page.state?.mobileControls) history.go(pageEntry && page.state?.mobileControlsPage ? -2 : -1);
+					// Never jump over an assumed parent. Retire the second entry only if
+					// Back actually lands on this page's own controls list.
+					if (page.state?.mobileControls) {
+						closeThroughList = page.state.mobileControlsList;
+						history.back();
+					}
 				}
 				pageEntry = false;
 			}
@@ -501,23 +506,23 @@
 		clearTimeout(renderTimer);
 	});
 
-	// Android Back on a page pops that page's entry: return to the list.
+	// Reconstruct the panel from the landed entry, including a Forward during its close slide.
 	$effect(() => {
-		const target = page.state?.mobileControlsPage as Page | undefined;
-		const pageInHistory = !!target;
+		const { mobileControls, mobileControlsPage, mobileControlsList, shell } = page.state as ShellState;
 		untrack(() => {
-			if (target && target !== pageName) { pageEntry = true; setPage(target); }
-			if (!pageInHistory && pageEntry && open) backToMain(true);
-		});
-	});
-
-	// Android Back pops the entry the panel pushed: close without popping again.
-	$effect(() => {
-		const inHistory = !!page.state?.mobileControls;
-		untrack(() => {
-			if (inHistory && !open && !closingPanel) { historyEntry = true; requestOpen(true); }
-			if (!inHistory && historyEntry && open) {
-				historyEntry = false;
+			const closeList = closeThroughList && closeThroughList === shell?.id && mobileControls && !mobileControlsPage;
+			closeThroughList = undefined;
+			if (closeList) { history.back(); return; }
+			if (mobileControls) {
+				historyEntry = true;
+				closingPanel = false;
+				direct = !!mobileControlsPage && !mobileControlsList;
+				pageEntry = !!mobileControlsPage && !direct;
+				if (mobileControlsPage) setPage(mobileControlsPage as Page);
+				else if (pageName !== 'main') backToMain(true);
+				if (!open) requestOpen(true);
+			} else if (historyEntry && open) {
+				historyEntry = pageEntry = false;
 				closePanel();
 			}
 		});

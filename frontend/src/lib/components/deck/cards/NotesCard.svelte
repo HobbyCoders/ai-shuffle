@@ -34,6 +34,7 @@
 		type NoteAttachment
 	} from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { registerReloadBlocker } from '$lib/services/app-update';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { escapeHtml } from '$lib/utils/escape-html';
@@ -346,12 +347,13 @@
 
 	// All editor navigation shares the same save/discard decision. A named note
 	// is flushed before moving on; an untitled or failed draft requires consent.
-	async function changeEditor(action: () => void) {
+	async function changeEditor(action: () => void, current = () => true) {
 		const request = ++navigationRequest;
 		cancelAutosave();
 		if (saving || (hasUnsavedChanges && editorTitle.trim())) await saveNote();
-		if (request !== navigationRequest) return;
+		if (request !== navigationRequest || !current()) return;
 		const apply = () => {
+			if (request !== navigationRequest || !current()) return;
 			cancelAutosave();
 			editorGeneration++;
 			editorSession++;
@@ -403,9 +405,13 @@
     });
 
 	// Open a note for editing
-	function openNote(note: Note) {
-		if (editingNote?.id === note.id) return;
-		void changeEditor(() => selectNote(notes.find((n) => n.id === note.id) ?? note));
+	function openNote(note: Note, current?: () => boolean) {
+		if (editingNote?.id === note.id) {
+			navigationRequest++;
+			if (!current) shellHistory.detail('notes', { panel: note.id });
+			return;
+		}
+		void changeEditor(() => selectNote(notes.find((n) => n.id === note.id) ?? note), current);
 	}
 
 	function selectNote(note: Note) {
@@ -441,8 +447,8 @@
 	}
 
 	// Close editor and go back to list
-	function closeEditor() {
-		void changeEditor(doCloseEditor);
+	function closeEditor(current?: () => boolean) {
+		void changeEditor(doCloseEditor, current);
 	}
 
 	function doCloseEditor() {
@@ -840,9 +846,11 @@
 		}
 	});
 
-	function restoreSelection(key: string) {
-		if (key === 'new') startNewNote();
-		else { const note = notes.find(n => n.id === key); if (note) openNote(note); }
+	function restoreSelection(key: string, current: () => boolean) {
+		if (key === 'new') { void changeEditor(resetNewNote, current); return; }
+		const note = notes.find(n => n.id === key);
+		if (!note) return loading ? 'pending' : 'missing';
+		untrack(() => openNote(note, current));
 	}
 </script>
 

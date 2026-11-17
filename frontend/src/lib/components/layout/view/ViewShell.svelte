@@ -43,12 +43,12 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		main: Snippet<[back: () => void]>;
 		label: string;
 		detailOpen?: boolean;
-		onBack?: () => void;
+		onBack?: (current?: () => boolean) => void;
 		/** Settings already owns its multi-level history; other pages leave this on. */
 		manageHistory?: boolean;
 		historyType?: ViewType;
 		selection?: string | null;
-		restoreSelection?: (key: string) => void;
+		restoreSelection?: (key: string, current: () => boolean) => void | 'pending' | 'missing';
 		/** Existing Settings/Agents provide their own stacked token scope. */
 		inheritScope?: boolean;
 		/** Legacy Settings owns inner page/detail panes; its outer slot is not a detail pane. */
@@ -92,21 +92,38 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		return () => viewPanel.release(token);
 	});
 
-	let followed: string | null = null;
+	// Track landings separately from visible changes: opening an editor may wait for a save.
+	let followed: typeof shellHistory.restored = null;
+	let previousKey: string | null | undefined;
 	$effect(() => {
 		const place = shellHistory.place;
-		if (!active || !historyType || !manageHistory || place?.type !== historyType) return;
-		const key = detailOpen ? selection ?? null : null;
-		const landing = shellHistory.restored;
-		if (landing && landing.id !== followed && place.panel !== undefined) {
-			if (key !== place.panel) {
-				if (place.panel !== null) restoreSelection?.(place.panel);
-				else untrack(() => onBack?.());
-				return;
-			}
-			followed = landing.id;
+		if (!active || !historyType || !manageHistory || place?.type !== historyType) {
+			previousKey = undefined;
+			return;
 		}
-		if (place.panel !== key) shellHistory.detail(historyType, { panel: key }, place.panel === undefined);
+		const key = detailOpen ? selection ?? null : null;
+		const changed = key !== previousKey;
+		previousKey = key;
+		const landing = shellHistory.restored;
+		if (landing && landing !== followed && place.panel !== undefined) {
+			const current = () => shellHistory.restored === landing;
+			if (key !== place.panel) {
+				if (place.panel === null) untrack(() => onBack?.(current));
+				else {
+					const result = restoreSelection?.(place.panel, current);
+					if (result === 'pending') return; // retry when the list settles
+					if (result === 'missing') {
+						shellHistory.detail(historyType, { panel: null }, true);
+						if (key !== null) untrack(() => onBack?.());
+					}
+				}
+			}
+			followed = landing;
+			return;
+		}
+		if ((changed || place.panel === undefined) && place.panel !== key) {
+			shellHistory.detail(historyType, { panel: key }, place.panel === undefined);
+		}
 	});
 	function back() {
 		if (historyType && shellHistory.place?.panel) history.back();
