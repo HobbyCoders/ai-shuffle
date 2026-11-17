@@ -91,17 +91,22 @@ describe('agentProjectOnThisWorker (#1659)', () => {
 		{ project_v2_id: 'pv2-theirs', local_project_id: 'mine' },
 		{ project_v2_id: 'pv2-elsewhere', local_project_id: null }
 	];
+	const remote = (projectV2Id: string | null) => ({ project: '', projectV2Id });
 	it('a chat this worker runs offers its own project', () => {
-		expect(agentProjectOnThisWorker({ project: 'app', projectV2Id: 'pv2-theirs' }, projects, catalog)).toBe('app');
+		expect(agentProjectOnThisWorker({ project: 'app', projectV2Id: 'pv2-theirs' }, 'app', projects, catalog)).toBe('app');
 	});
-	it('a chat another worker runs offers this worker\'s checkout of the same shared project', () => {
-		// Its legacy id was `app` (an unrelated project here); the shared id links `mine`.
-		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-theirs' }, projects, catalog)).toBe('mine');
+	it('a chat another worker runs whose row id is this worker\'s checkout of its shared project offers that project', () => {
+		expect(agentProjectOnThisWorker(remote('pv2-theirs'), 'mine', projects, catalog)).toBe('mine');
 	});
-	it('no checkout here, or a catalog entry naming a project this worker lacks: no project agents', () => {
-		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-elsewhere' }, projects, catalog)).toBeUndefined();
-		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-unknown' }, projects, catalog)).toBeUndefined();
-		expect(agentProjectOnThisWorker({ project: '', projectV2Id: 'pv2-theirs' }, [{ id: 'app' }], catalog)).toBeUndefined();
-		expect(agentProjectOnThisWorker({ project: '', projectV2Id: null }, projects, catalog)).toBeUndefined();
+	it('a chat another worker runs offers nothing when its row id names another project, or it has none', () => {
+		// The collision: the row's legacy id is an unrelated project here.
+		expect(agentProjectOnThisWorker(remote('pv2-theirs'), 'app', projects, catalog)).toBeUndefined();
+		// Shared id only: not widened to this worker's checkout.
+		expect(agentProjectOnThisWorker(remote('pv2-theirs'), null, projects, catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker(remote('pv2-theirs'), undefined, projects, catalog)).toBeUndefined();
+		// No checkout here, a catalog entry naming a project this worker lacks, no shared id.
+		expect(agentProjectOnThisWorker(remote('pv2-elsewhere'), 'mine', projects, catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker(remote('pv2-theirs'), 'mine', [{ id: 'app' }], catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker(remote(null), 'mine', projects, catalog)).toBeUndefined();
 	});
 });

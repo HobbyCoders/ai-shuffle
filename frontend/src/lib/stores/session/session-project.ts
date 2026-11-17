@@ -48,20 +48,23 @@ export function resolveSessionProject(input: {
 /**
  * The project on THIS worker whose agents the composer offers. A chat this
  * worker runs names it directly. A chat another worker runs holds only its
- * shared id (above), so its agents come from this worker's own checkout of
- * that same project, found through the catalog by the shared id; the legacy
- * id, which may name an unrelated project here, is never used. No local
- * checkout: no project agents.
+ * shared id (above), and its project agents are resolved on that worker, so
+ * only a project both sides already agree on is offered: the row's own legacy
+ * id, and only when it IS this worker's checkout of the chat's shared project
+ * (found through the catalog by the shared id). A legacy id naming something
+ * else here (the collision), or none at all: no project agents.
  */
 export function agentProjectOnThisWorker(
 	state: { project: string; projectV2Id: string | null },
+	/** The open chat's session row `project_id`, read only for this check. */
+	rowProjectId: string | null | undefined,
 	projects: readonly { id: string }[],
 	catalog: readonly { project_v2_id: string; local_project_id: string | null }[]
 ): string | undefined {
 	if (state.project) return state.project;
-	if (!state.projectV2Id) return undefined;
+	if (!state.projectV2Id || !rowProjectId) return undefined;
 	const local = catalog.find((p) => p.project_v2_id === state.projectV2Id)?.local_project_id;
-	return local && projects.some((p) => p.id === local) ? local : undefined;
+	return local === rowProjectId && projects.some((p) => p.id === local) ? local : undefined;
 }
 
 /** Persisted snapshot / skip-restore: v2-only keeps `''`, never the last local default. */

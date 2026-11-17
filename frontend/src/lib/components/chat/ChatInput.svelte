@@ -144,7 +144,12 @@
 	const mentionsAvailable = $derived(!!mentionProjectId);
 	// Project agents are this worker's own (#1659: never by the legacy id of a
 	// chat another worker runs).
-	const subagentProjectId = $derived(agentProjectOnThisWorker($activeSession, $projects, $clusterProjects));
+	const subagentProjectId = $derived(agentProjectOnThisWorker(
+		$activeSession,
+		$sessions.find(session => session.id === $activeSession.sessionId)?.project_id,
+		$projects,
+		$clusterProjects
+	));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
