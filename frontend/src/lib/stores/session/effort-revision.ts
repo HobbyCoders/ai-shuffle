@@ -62,11 +62,11 @@ export function restoredEffort(cached: HeldEffort | null | undefined, row: RowEf
  * worker only as the replicated row, and a page that missed a push (a socket
  * gap) only as the reloaded row. The row list is a reload and can be older
  * than what the page holds, so only a revision above the held one counts. A
- * chat created in this tab holds none and opened at revision 0.
+ * new compose starts at 0; an unversioned restored level loses to any revision.
  */
 export function effortFromRow(state: HeldEffort, row: RowEffort | undefined): HeldEffort | null {
 	const rowRev = effortRevOf(row?.effort_rev);
-	if (!row || rowRev === undefined || rowRev <= (state.effortRev ?? 0)) return null;
+	if (!row || rowRev === undefined || (state.effortRev !== undefined && rowRev <= state.effortRev)) return null;
 	return { effortLevelOverride: row.effort ?? null, effortRev: rowRev };
 }
 

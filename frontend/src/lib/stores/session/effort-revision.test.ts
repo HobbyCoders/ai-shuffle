@@ -109,9 +109,14 @@ describe('effortFromRow', () => {
 	});
 
 	it('a chat created here opened at revision 0: its own row is no news, a later change is', () => {
-		expect(effortFromRow({ effortLevelOverride: 'medium' }, { effort: 'high', effort_rev: 0 })).toBeNull();
-		expect(effortFromRow({ effortLevelOverride: 'medium' }, { effort: 'high', effort_rev: 1 }))
+		expect(effortFromRow({ effortLevelOverride: 'medium', effortRev: 0 }, { effort: 'high', effort_rev: 0 })).toBeNull();
+		expect(effortFromRow({ effortLevelOverride: 'medium', effortRev: 0 }, { effort: 'high', effort_rev: 1 }))
 			.toEqual({ effortLevelOverride: 'high', effortRev: 1 });
+	});
+
+	it('replaces an unversioned restored level as soon as the first versioned row arrives', () => {
+		expect(effortFromRow({ effortLevelOverride: 'low' }, { effort: null, effort_rev: 0 }))
+			.toEqual({ effortLevelOverride: null, effortRev: 0 });
 	});
 
 	it('ignores a row with no revision, and a row that is not loaded', () => {

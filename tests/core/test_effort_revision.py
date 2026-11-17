@@ -32,21 +32,22 @@ def _send(session_id, **overrides):
 
 
 class TestRevisionCounter:
-    def test_every_change_of_the_level_is_one_revision(self, mock_db):
+    def test_every_explicit_pick_advances_even_when_the_level_is_unchanged(self, mock_db):
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         assert _pair("s") == ("high", 0)
         pick = {"effort_explicit": True}
         assert db.set_session_run_binding("s", effort="low", **pick) == {"effort": "low", "effort_rev": 1}
-        # Writing the level the row holds is no change: one revision, one level.
-        assert db.set_session_run_binding("s", effort="low", **pick) == {"effort": "low", "effort_rev": 1}
+        # Another explicit pick supersedes snapshots of the same level.
+        assert db.set_session_run_binding("s", effort="low", **pick) == {"effort": "low", "effort_rev": 2}
         # Auto is a level too.
-        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", effort="max", **pick) == {"effort": "max", "effort_rev": 3}
+        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 3}
+        assert db.set_session_run_binding("s", clear_effort=True, **pick) == {"effort": None, "effort_rev": 4}
+        assert db.set_session_run_binding("s", effort="max", **pick) == {"effort": "max", "effort_rev": 5}
         # A write of another field reports the pair and leaves it alone.
-        assert db.set_session_run_binding("s", fast=True) == {"effort": "max", "effort_rev": 3}
-        assert _pair("s") == ("max", 3)
+        assert db.set_session_run_binding("s", fast=True) == {"effort": "max", "effort_rev": 5}
+        assert _pair("s") == ("max", 5)
+        assert db.set_session_run_binding("s", effort="low", effort_rev_base=4) == {"effort": "max", "effort_rev": 5}
 
     def test_nothing_to_write_and_unknown_session(self, mock_db):
         make_profile("agent", {})

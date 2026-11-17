@@ -417,7 +417,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
 						// The revision that level was acknowledged at; /live replaces
 						// both when the chat's saved level is newer (#1609).
-						effortRev: persisted.sessionId ? persisted.effortRev : undefined,
+						effortRev: persisted.sessionId ? persisted.effortRev : 0,
 						fastMode: binding ? binding.fastMode : (persisted.fastMode ?? s.fastMode),
 						workspaceProjectIds: persisted.workspaceProjectIds ?? [],
 						contextWindowChoice:

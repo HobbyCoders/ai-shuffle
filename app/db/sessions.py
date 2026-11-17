@@ -1023,7 +1023,7 @@ def set_session_run_binding(
     the worker's own chat, so a parent's later toggle leaves it alone.
 
     Every write that changes ``effort`` adds one to ``effort_rev`` in the same
-    statement; a write of the level the row already holds leaves it alone, so
+    statement; an explicit pick also advances it for the same level, so
     one revision always names one level. ``effort_rev_base`` is the revision a
     sending composer last saw: the effort is then written only while it is
     still the row's revision, and a level sent from any other view is dropped
@@ -1060,10 +1060,7 @@ def set_session_run_binding(
         if writes_effort:
             updates.append(f"effort = {_ph}")
             values.append(level)
-            updates.append(
-                f"effort_rev = CASE WHEN effort IS DISTINCT FROM {_ph} "
-                "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
-            values.append(level)
+            updates.append("effort_rev = COALESCE(effort_rev, 0) + 1")
     elif effort_rev_base is None:
         if writes_effort:
             updates.append(

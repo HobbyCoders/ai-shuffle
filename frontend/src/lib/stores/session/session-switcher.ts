@@ -1244,8 +1244,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// last pick carries over except Accept Edits (nothing to edit).
 			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
-			// A new chat has no saved level to be behind of.
-			effortRev: undefined,
+			// Its initial row is revision zero, unlike an unversioned restored chat.
+			effortRev: 0,
 			fastMode: getPersistedFastMode(),
 			// A compose has no server binding to wait for.
 			bindingUnhydrated: {},

@@ -458,6 +458,7 @@ function defaultState(): ActiveSessionState {
 		modelOverride: getPersistedModel(),
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
+		effortRev: 0,
 		fastMode: getPersistedFastMode(),
 		bindingUnhydrated: {},
 		bindingPicks: {},
