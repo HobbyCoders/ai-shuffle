@@ -1,4 +1,4 @@
-"""Native plugin MCP discovery, app enablement and delegated isolation."""
+"""Plugin MCP discovery through native and delegated connections."""
 
 from __future__ import annotations
 
@@ -77,7 +77,9 @@ def test_disabled_and_unreviewed_plugins_stay_out(
     service.SETTINGS_FILE.write_text(json.dumps({
         "enabledPlugins": {"demo@testmp": False, "draft@authored": True},
     }), encoding="utf-8")
-    assert ha._native_external_mcp_servers(SessionOptions(model="gpt-4o", cwd=str(tmp_path))) == {}
+    options = SessionOptions(model="sonnet", cwd=str(tmp_path))
+    assert ha._native_external_mcp_servers(options) == {}
+    assert ha._delegated_external_mcp_servers(options) == {}
 
 
 @pytest.mark.asyncio
@@ -133,10 +135,11 @@ def test_plugin_mcp_requires_user_scope(
         model="gpt-4o", cwd=str(tmp_path), mcp_servers=host, setting_sources=sources,
     )
     assert ha._native_external_mcp_servers(options) == host
+    assert ha._delegated_external_mcp_servers(options) == host
 
 
 @pytest.mark.asyncio
-async def test_delegated_path_does_not_copy_plugin_servers(
+async def test_delegated_connect_forwards_plugin_servers_only_to_cli(
     plugin_home: tuple[Path, PluginService], tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -165,7 +168,9 @@ async def test_delegated_path_does_not_copy_plugin_servers(
     adapter = ha.HarnessAdapter()
     try:
         await adapter.connect(options)
-        assert captured["mcp_servers"] == options.mcp_servers
+        assert set(captured["mcp_servers"]) == {"demo", "host"}
+        assert captured["mcp_servers"]["demo"]["args"][-1] == "plugin_ping"
+        assert options.mcp_servers == {"host": _config()}
         registry = adapter._registry
         assert registry is None or not any(
             tool.name.startswith("mcp__demo__")
@@ -173,3 +178,41 @@ async def test_delegated_path_does_not_copy_plugin_servers(
         )
     finally:
         await adapter.disconnect()
+
+@pytest.mark.asyncio
+async def test_delegated_client_consumes_installed_revision(plugin_home, tmp_path):
+    from fluid.tools.mcp.client import McpClient
+
+    home, service = plugin_home
+    base = home / ".fluid/plugins/cache/testmp/demo"
+    # A newer-looking stale cache folder must not replace the installed record.
+    current = base / "active-revision"
+    (base / "1.0.0").rename(current)
+    _install(home, "demo", {"demo": _config("stale_ping")})
+    service.INSTALLED_FILE.write_text(json.dumps({"plugins": {"demo@testmp": [{
+        "scope": "user", "installPath": str(current),
+    }]}}), encoding="utf-8")
+    options = SessionOptions(model="sonnet", cwd=str(tmp_path))
+    config = ha._delegated_external_mcp_servers(options)["demo"]
+    assert config["env"]["CLAUDE_PLUGIN_ROOT"] == str(current)
+    client = McpClient("demo", config)
+    await client.start()
+    try:
+        assert [tool.name for tool in await client.list_tools()] == ["plugin_ping"]
+        assert (await client.call_tool("plugin_ping", {}))["text"] == "pong"
+    finally:
+        await client.aclose()
+
+
+def test_delegated_session_ceiling_and_reserved_names(plugin_home, tmp_path):
+    options = SessionOptions(model="sonnet", cwd=str(tmp_path), mcp_servers={"demo": _config("host")})
+    assert ha._delegated_external_mcp_servers(options) == options.mcp_servers
+    options.mcp_servers = {"demo": {"type": "sdk", "instance": object()}}
+    assert ha._delegated_external_mcp_servers(options) == {}
+    options.mcp_servers = None
+    for extra in ({"one_shot": True}, {"assistant_proactive": {}}, {"session_mode": "chat"}):
+        options.extra = extra
+        assert ha._delegated_external_mcp_servers(options) == {}
+    options.extra = {}
+    options.tool_allowlist = ["Read"]
+    assert ha._delegated_external_mcp_servers(options) == {}

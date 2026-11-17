@@ -305,13 +305,13 @@ def _mcp_servers_for(
             # server process as well as substituting them in the config; a
             # server that reads the variable at runtime (to find its own data
             # files) needs both.
-            env = dict(normalized.get("env") or {})
+            server_env = dict(normalized.get("env") or {})
             for var in root_vars:
-                env.setdefault(var, str(root))
+                server_env.setdefault(var, str(root))
             if data_dir is not None:
                 for var in data_vars:
-                    env.setdefault(var, str(data_dir))
-            normalized = {**normalized, "env": env}
+                    server_env.setdefault(var, str(data_dir))
+            normalized = {**normalized, "env": server_env}
         out[str(name)] = normalized
     if data_dir is not None and out:
         # Created on first use, like Claude Code, so a server can write to it.
@@ -332,6 +332,7 @@ def load_plugin(
     cwd: Path | str | os.PathLike[str] = ".",
     disabled_mcp: set[str] | None = None,
     home: Path | None = None,
+    mcp_env: Mapping[str, str] | None = None,
 ) -> Plugin | None:
     """Resolve and read one plugin. ``None`` when it is not installed."""
     resolved = resolve_plugin_root(name, marketplace, home=home)
@@ -375,7 +376,8 @@ def load_plugin(
             data_dir=data_dir,
             # An agent-written plugin's ${VAR} references never expand to
             # the host app's own secrets (admin password, database settings).
-            env={k: v for k, v in os.environ.items() if not is_app_secret(k)} if authored else None,
+            env={k: v for k, v in (os.environ if mcp_env is None else mcp_env).items()
+                 if not is_app_secret(k)} if authored else mcp_env,
         ),
         format=record.format,
         components=record.components,
@@ -388,6 +390,7 @@ def discover_plugins(
     settings: dict[str, Any] | None = None,
     sources: tuple[str, ...] | list[str] = SETTING_SOURCES,
     home: Path | None = None,
+    mcp_env: Mapping[str, str] | None = None,
 ) -> list[Plugin]:
     """Every enabled, installed plugin visible from ``cwd``.
 
@@ -412,7 +415,7 @@ def discover_plugins(
         if not name:
             continue
         try:
-            plugin = load_plugin(name, marketplace, cwd=cwd, disabled_mcp=disabled, home=home)
+            plugin = load_plugin(name, marketplace, cwd=cwd, disabled_mcp=disabled, home=home, mcp_env=mcp_env)
         except Exception as exc:  # noqa: BLE001 — one bad plugin never breaks the rest
             log.warning("skipping plugin %s: %s", ref, exc)
             continue
