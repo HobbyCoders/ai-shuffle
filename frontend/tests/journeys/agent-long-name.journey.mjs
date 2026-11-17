@@ -163,17 +163,19 @@ await runJourney({
 				? route.fulfill({ status: 422, json: { detail: 'Test: rejected agent save' } })
 				: route.fallback());
 			const field = page.getByRole('textbox', { name: 'Name', exact: true });
-			const candidate = `zzsave${uniq()}`;
+			const key = uniq().slice(-5);
+			const candidate = `Try ${key}`;
+			const corrected = `Fix ${key}`;
 			await field.fill(candidate);
-			const status = page.locator('.agd').getByRole('status').filter({ hasText: /^Save failed: Test: rejected agent save$/ });
+			const status = page.getByRole('status').filter({ hasText: /^Save failed: Test: rejected agent save$/ });
 			await status.waitFor();
 			await page.unroute('**/api/v1/agents');
 
 			await mark('save corrected draft through API and clear the error');
-			await field.fill(`${candidate}-corrected`);
-			await page.locator('.agd').getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
+			await field.fill(corrected);
+			await page.getByRole('status').filter({ hasText: /^Saved$/ }).waitFor();
 			await status.waitFor({ state: 'hidden' });
-			await waitAgents(page, `${candidate}-corrected`, 1);
+			await waitAgents(page, corrected, 1);
 		},
 		verify: () => {}
 	}],
