@@ -415,15 +415,16 @@ export const composerPreferences = {
   checkoutRevisions.set(key, (checkoutRevisions.get(key) ?? 0) + 1);
   saveWorktree(project, {...worktreeFor(project), checkout});
  },
- effortForModel(model: string | null, inherited: string | null = null): string | null {
+ effortForModel(model: string | null, inherited?: string | null): string | null {
   const key = effortModelKey(model), family = legacyEffortFamily(model || getDefaultModel());
   const hasExact = Object.prototype.hasOwnProperty.call(values.modelEfforts, key);
   const hasFamily = !!family && Object.prototype.hasOwnProperty.call(values.modelEfforts, family);
   const capability = resolveModelEffort(model);
   // A replicated NULL is an intentional provider-default choice, not an unset
-  // preference. Only a never-picked model may use the server's measured default.
+  // preference. A never-picked model inherits on a switch (including Auto);
+  // only initialization without a current choice uses the measured default.
   const saved = hasExact ? values.modelEfforts[key]
-   : hasFamily ? values.modelEfforts[family!] : capability.initialValue ?? inherited;
+   : hasFamily ? values.modelEfforts[family!] : inherited === undefined ? capability.initialValue : inherited;
   return reconcileModelEffort(saved ?? null, capability);
  },
  rememberEffort(model: string | null, effort: string | null) {

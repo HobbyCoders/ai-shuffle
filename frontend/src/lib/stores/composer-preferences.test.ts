@@ -18,6 +18,8 @@ it('uses the server benchmark default only before any per-model choice, includin
  const {resolveModelEffort} = await import('$lib/constants/model-effort');
  expect(resolveModelEffort('prov:codex:gpt-6.1-sol').defaultValue).toBe('low'); // Auto slider, web + mobile
  expect(p.effortForModel('prov:codex:gpt-6.1-sol')).toBe('high');
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol','low')).toBe('low');
+ expect(p.effortForModel('prov:codex:gpt-6.1-sol',null)).toBeNull();
  expect(p.effortForModel('prov:codex:other')).toBeNull();
  expect(p.effortForModel('prov:codex:other','low')).toBe('low');
  expect(p.current.modelEfforts).toEqual({}); // implicit default never saves a pick
