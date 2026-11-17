@@ -219,6 +219,16 @@ export interface ActiveSessionState {
 	/** Origin-keyed `projects_v2` id. Set alongside `project` for a local
 	 *  catalog row; set alone (with `project` empty) for remote-only compose. */
 	projectV2Id: string | null;
+	/**
+	 * The open chat's stored legacy project id, as its session row or `/live`
+	 * reports it, tagged with the chat it belongs to (#1659). Read ONLY by
+	 * `agentProjectOnThisWorker` (through `openChatRowProjectId`), which
+	 * offers a remote chat's project agents when this id is this worker's
+	 * checkout of the chat's shared project. No other reader may use it: the
+	 * project a chat uses is `project`/`projectV2Id`. A tag for another chat
+	 * reads as absent, so a writer that misses it cannot leak the last chat's.
+	 */
+	sessionRowProject?: { sessionId: string | null; projectId: string | null; sentV2Id?: string | null } | null;
 	totalTokensIn: number;
 	totalTokensOut: number;
 	totalCacheCreationTokens: number;
@@ -438,6 +448,7 @@ function defaultState(): ActiveSessionState {
 		currentQueryProfileId: null,
 		project: '',
 		projectV2Id: null,
+		sessionRowProject: null,
 		totalTokensIn: 0,
 		totalTokensOut: 0,
 		totalCacheCreationTokens: 0,
@@ -524,10 +535,24 @@ function holdSharedProjectForRemote(s: ActiveSessionState): ActiveSessionState {
 		: s;
 }
 
+/** Record the open chat's stored legacy project id (see `sessionRowProject`). */
+function noteRowProject(sessionId: string, projectId: string | null) {
+	const held = _state.sessionRowProject;
+	if (_state.sessionId !== sessionId || (held?.sessionId === sessionId && held.projectId === projectId)) return;
+	_update(s => ({ ...s, sessionRowProject: { sessionId, projectId } }));
+}
+
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 	const prev = untrack(() => _state);
 	let next = fn(prev);
 	if (next !== _state) {
+		// A chat created from this compose stores the project the compose sent.
+		if (!prev.sessionId && next.sessionId && next.createdFromComposer
+			&& next.sessionRowProject?.sessionId === null) {
+			const { projectId, sentV2Id } = next.sessionRowProject;
+			next = { ...next, project: projectId ?? '', projectV2Id: sentV2Id ?? null,
+				sessionRowProject: { sessionId: next.sessionId, projectId } };
+		}
 		next = holdSharedProjectForRemote(next);
 		if (next.sessionId !== prev.sessionId || next.isRemote !== prev.isRemote) ownerObservations++;
 	}
@@ -1269,6 +1294,7 @@ export const activeSession = {
 		if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
 		_update(s => ({
 			...s, mode, project, projectV2Id,
+			sessionRowProject: { sessionId: sessionId!, projectId: row.project_id ?? null },
 			worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
 			permissionModeOverride: permissionMode,
 			...markBindingHydrated(s, 'permission'),
@@ -1287,7 +1313,12 @@ export const activeSession = {
 	reconcileOwner(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
 		const sessionId = _state.sessionId;
 		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
-		if (!row || row.is_remote === undefined) return false;
+		// The stored legacy id, for the agents check only (see `sessionRowProject`).
+		const rowProject = row && row.project_id !== undefined ? { sessionId: sessionId!, projectId: row.project_id } : null;
+		if (!row || row.is_remote === undefined) {
+			if (rowProject) noteRowProject(rowProject.sessionId, rowProject.projectId);
+			return false;
+		}
 		// A row naming the owner is news even when it repeats it: a `/live`
 		// answer asked for before it is older (#1659).
 		ownerObservations++;
@@ -1295,8 +1326,12 @@ export const activeSession = {
 		// local id is still held beside the shared one (a chat created here to
 		// run elsewhere keeps the project it was created from).
 		const remoteHoldsLocal = row.is_remote && _state.mode !== 'chat' && !!_state.project && !!row.project_v2_id;
-		if (row.is_remote === _state.isRemote && !remoteHoldsLocal) return false;
+		if (row.is_remote === _state.isRemote && !remoteHoldsLocal) {
+			if (rowProject) noteRowProject(rowProject.sessionId, rowProject.projectId);
+			return false;
+		}
 		const patch: Partial<ActiveSessionState> = { isRemote: row.is_remote };
+		if (rowProject) patch.sessionRowProject = rowProject;
 		if (row.device_name !== undefined) patch.ownerDeviceName = row.device_name;
 		if (_state.mode !== 'chat' && (row.project_id !== undefined || row.project_v2_id !== undefined)) {
 			Object.assign(patch, resolveSessionProject({
@@ -1455,6 +1490,7 @@ export const activeSession = {
 			mode: 'code',
 			project: projectId,
 			projectV2Id,
+			sessionRowProject: { sessionId, projectId },
 			worktreeIntent: 'local',
 			worktreeId: null,
 			worktreeBranch: '',

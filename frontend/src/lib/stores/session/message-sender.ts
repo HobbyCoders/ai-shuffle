@@ -288,7 +288,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 	function claimNewSessionWorker() {
 		update(s => {
 			const owner = newSessionWorker(s);
-			return owner ? { ...s, ...owner } : s;
+			return owner ? { ...s, ...owner, sessionRowProject: { sessionId: null, projectId: s.project || null, sentV2Id: s.projectV2Id } } : s;
 		});
 	}
 

@@ -71,6 +71,7 @@ import { bindSessionOwner } from './session-owner';
 import { finishBootReconciliation, getInitGeneration, hasBootProjectPick } from './session/session-init';
 import { captureDestination, stillAtDestination } from '$lib/components/chat/send-destination';
 import { composerUploadTarget } from '$lib/components/chat/attach-disable';
+import { openChatRowProjectId } from './session/session-project';
 
 describe('bootstrap new-chat landing', () => {
 	it('forwards the same-surface landing intent without changing explicit New chat', () => {
@@ -628,7 +629,11 @@ describe('the open chat\'s owner changes or settles (#1659)', () => {
 
 	it('a project chat created here to run on another worker uploads through the session (S4)', async () => {
 		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
-		vi.spyOn(api, 'post').mockResolvedValue({ session_id: 'owned' });
+		vi.spyOn(api, 'post').mockImplementation(async () => {
+			// A different selection before the creation response binds the id.
+			activeSession.setProject('picked-later');
+			return { session_id: 'owned' };
+		});
 		Object.assign(activeSession.current, {
 			sessionId: null, mode: 'code', profile: 'coding', project: 'app', projectV2Id: 'v2-theirs',
 			isRemote: undefined, deviceIntent: { id: 'peer', name: 'Peer worker' }, isRestoringSession: false,
@@ -637,10 +642,20 @@ describe('the open chat\'s owner changes or settles (#1659)', () => {
 		await expect(activeSession.startSessionWithoutPrompt()).resolves.toBe('owned');
 		expect(activeSession.current).toMatchObject({ sessionId: 'owned', isRemote: true, project: '', projectV2Id: 'v2-theirs' });
 		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+		// The project the compose sent is the row's stored id, for the agents check.
+		expect(openChatRowProjectId(activeSession.current)).toBe('app');
 		// Its first row (same owner) leaves it so.
 		activeSession.reconcileOwner([row(true)]);
 		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
 		vi.restoreAllMocks();
+	});
+
+	it('a refreshed row records the open chat\'s stored legacy id even when the owner is unchanged', () => {
+		Object.assign(activeSession.current, { isRemote: true, project: '', sessionRowProject: null });
+		expect(activeSession.reconcileOwner([row(true, { project_id: 'mine' })])).toBe(false);
+		expect(openChatRowProjectId(activeSession.current)).toBe('mine');
+		activeSession.reconcileOwner([row(true, { project_id: null })]);
+		expect(openChatRowProjectId(activeSession.current)).toBeNull();
 	});
 
 	it('a /live answer asked for before a newer row cannot restore the old owner (S2)', async () => {
@@ -653,12 +668,13 @@ describe('the open chat\'s owner changes or settles (#1659)', () => {
 		await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
 		activeSession.reconcileOwner([row(false)]);
 		expect(activeSession.current).toMatchObject({ project: 'app', isRemote: false });
-		// A newer sessions refresh reports the hand-off while /live is out.
-		activeSession.reconcileOwner([row(true)]);
+		// A newer row reports both the hand-off and another stored project.
+		activeSession.reconcileOwner([row(true, { project_id: 'newer' })]);
 		expect(activeSession.current).toMatchObject({ project: '', isRemote: true });
 		answer({ session_meta: { project_id: 'app', project_v2_id: 'v2-theirs', is_remote: false } });
 		await new Promise(r => setTimeout(r, 0));
 		await new Promise(r => setTimeout(r, 0));
+		expect(openChatRowProjectId(activeSession.current)).toBe('newer');
 		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs', isRemote: true });
 		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
 		vi.restoreAllMocks();

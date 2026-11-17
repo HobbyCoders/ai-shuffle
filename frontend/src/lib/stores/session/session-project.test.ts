@@ -106,6 +106,7 @@ describe('agentProjectOnThisWorker (#1659)', () => {
 		expect(agentProjectOnThisWorker(remote('pv2-theirs'), undefined, projects, catalog)).toBeUndefined();
 		// No checkout here, a catalog entry naming a project this worker lacks, no shared id.
 		expect(agentProjectOnThisWorker(remote('pv2-elsewhere'), 'mine', projects, catalog)).toBeUndefined();
+		expect(agentProjectOnThisWorker(remote('pv2-unknown'), 'mine', projects, catalog)).toBeUndefined();
 		expect(agentProjectOnThisWorker(remote('pv2-theirs'), 'mine', [{ id: 'app' }], catalog)).toBeUndefined();
 		expect(agentProjectOnThisWorker(remote(null), 'mine', projects, catalog)).toBeUndefined();
 	});

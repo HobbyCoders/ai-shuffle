@@ -53,7 +53,7 @@
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration, tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { appData, clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
-	import { agentProjectOnThisWorker } from '$lib/stores/session/session-project';
+	import { agentProjectOnThisWorker, openChatRowProjectId } from '$lib/stores/session/session-project';
 	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
@@ -146,7 +146,7 @@
 	// chat another worker runs).
 	const subagentProjectId = $derived(agentProjectOnThisWorker(
 		$activeSession,
-		$sessions.find(session => session.id === $activeSession.sessionId)?.project_id,
+		openChatRowProjectId($activeSession),
 		$projects,
 		$clusterProjects
 	));

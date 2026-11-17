@@ -120,6 +120,12 @@ async function simulateRemoteChat(page, status, key, { offline = false, keepLoca
 				if (body === undefined) return response;
 				// /live describes the open chat without repeating its id.
 				const patched = markRemote(body);
+				if (sessionStorage.getItem('journey:rowless') && url.pathname === '/api/v1/sessions/cursor' && Array.isArray(patched.items)) {
+					patched.items = patched.items.filter(row => row.id !== id);
+				}
+				if (patched?.session_meta && url.pathname === `/api/v1/sessions/${id}/live`) {
+					Object.assign(patched.session_meta, { ...local(), is_remote: true, device_name: peer });
+				}
 				if (url.pathname === `/api/v1/sessions/${id}/live` && patched && typeof patched === 'object' && 'project_id' in patched) {
 					Object.assign(patched, { ...local(), is_remote: true, device_name: peer });
 				}
@@ -366,7 +372,13 @@ await runJourney({
 		},
 		{
 			name: 'remote-chat-keeps-local-agents',
-			setup: start('long', SEEDED.long, { keepLocalId: true }),
+			async setup(ctx) {
+				await start('long', SEEDED.long, { keepLocalId: true })(ctx);
+				await draftSaved(ctx.page);
+				await ctx.page.evaluate(() => sessionStorage.setItem('journey:rowless', '1'));
+				await ctx.page.reload();
+				await waitChatOpen(ctx.page);
+			},
 			async act({ page, mark }) {
 				await mark('open Subagents in a chat on another worker that still holds its local project');
 				await composer(page).click();
