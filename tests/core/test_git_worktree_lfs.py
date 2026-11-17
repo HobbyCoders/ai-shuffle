@@ -1,6 +1,7 @@
 """Real-Git regression coverage for unavailable LFS during worktree creation."""
 import hashlib
 import os
+from pathlib import Path
 import shlex
 import subprocess
 import sys
@@ -15,6 +16,12 @@ POINTER = "version https://git-lfs.github.com/spec/v1\noid sha256:" + "a" * 64 +
 
 def git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True, timeout=10).stdout.strip()
+
+
+def registered_worktrees(repo):
+    return {Path(line.removeprefix("worktree "))
+            for line in git(repo, "worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ")}
 
 
 @pytest.fixture
@@ -58,7 +65,7 @@ def test_missing_lfs_retries_once_with_pointer_files(lfs_repo, tmp_path, caplog,
             if len(adds) == 1:
                 # Real filter failures roll back both files and registration.
                 assert result.returncode != 0 and not dest.exists()
-                assert str(dest) not in git(repo, "worktree", "list", "--porcelain")
+                assert dest not in registered_worktrees(repo)
                 if new_branch:
                     # The failed -b still creates its ref; retry must reuse it.
                     assert git(repo, "rev-parse", "feature") == git(repo, "rev-parse", "main")
@@ -142,7 +149,7 @@ def test_lfs_hook_failure_keeps_registered_worktree(checkout_project, lfs_repo, 
         if "worktree" in args and "add" in args and not first:
             assert result.returncode == 2
             assert dest.is_dir() and (dest / ".git").is_file()
-            assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+            assert dest in registered_worktrees(repo)
             # Interleave the real adoption path before the first caller handles
             # Git's failed hook. A second session can now write into this cwd.
             adopted = checkout_manager.ensure_checkout(checkout_project, "hook-branch", provision_runtime=False)
@@ -205,7 +212,7 @@ def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatc
             mutations.append(args[:2])
         if args[:2] == ["worktree", "add"]:
             assert result.returncode == 2
-            assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+            assert dest in registered_worktrees(repo)
             # A real registered checkout with incomplete files/index simulates
             # the state left when an OS lock prevents Git's checkout rollback.
             if damage == "missing-index":
@@ -226,7 +233,7 @@ def test_registered_partial_checkout_fails_closed(lfs_repo, tmp_path, monkeypatc
     assert not success and "git-lfs: not found" in error
     assert git(dest, "symbolic-ref", "--short", "HEAD") == "partial"
     assert (dest / "agent-work.txt").read_text() == "must survive failed recovery"
-    assert str(dest) in git(repo, "worktree", "list", "--porcelain")
+    assert dest in registered_worktrees(repo)
     assert mutations == [["worktree", "add"]]
     assert lfs_fallback_warning(str(dest)) is None
 

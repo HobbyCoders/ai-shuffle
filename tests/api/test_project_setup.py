@@ -84,7 +84,7 @@ def _bare_remote(ws: Path, name: str = "demo") -> str:
     git(ws.parent, "init", "-q", "--bare", "-b", "main", str(bare))
     git(src, "remote", "add", "origin", str(bare))
     git(src, "push", "-q", "-u", "origin", "main")
-    return "file://" + str(bare)
+    return bare.as_uri()
 
 
 def _peer_project(test_db, project_id: str, name: str, *, remote: str | None = None,
@@ -173,7 +173,7 @@ def test_setup_is_idempotent_while_in_flight(client, ws, test_db):
 def test_setup_of_a_project_already_here_is_done_even_with_an_unserved_remote(client, ws, test_db):
     # A remote outside the workspace is not a source this worker may clone
     # from, but nothing needs cloning when the project is registered here.
-    unserved = "file://" + str(ws.parent / "elsewhere" / "demo.git")
+    unserved = (ws.parent / "elsewhere" / "demo.git").as_uri()
     pv2 = _peer_project(test_db, "demo", "Demo", remote=unserved, instance=ME)
     (ws / "demo").mkdir()
     test_db.execute("UPDATE projects SET path = 'demo' WHERE id = 'demo'")
@@ -223,7 +223,7 @@ def test_setup_never_overwrites_another_folder(client, ws, test_db):
 
 
 def test_missing_repository_is_not_found(client, ws, test_db):
-    gone = "file://" + str(ws / "_remotes" / "gone.git")
+    gone = (ws / "_remotes" / "gone.git").as_uri()
     pv2 = _peer_project(test_db, "gone", "Gone", remote=gone)
     op_id = client.post("/api/v1/projects/setup", json={"project_v2_id": pv2["id"], "install_id": ME}).json()["op_id"]
     _run_setups()
@@ -630,7 +630,7 @@ def _outside_remote(ws: Path, name: str = "demo") -> str:
     git(ws.parent, "init", "-q", "--bare", "-b", "main", str(bare))
     git(src, "remote", "add", "origin", str(bare))
     git(src, "push", "-q", "-u", "origin", "main")
-    return "file://" + str(bare)
+    return bare.as_uri()
 
 
 def test_setup_clones_the_projects_own_remote_from_outside_the_workspace(client, ws, test_db, fresh_records):
