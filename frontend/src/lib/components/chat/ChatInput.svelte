@@ -171,7 +171,7 @@
 		if (!ownsComposer()) return;
 		if (state.mode !== 'voice' || !state.sessionId || state.isRestoringSession) return;
 		const owner = state.sessionId;
-		void persistVoiceContext(owner, voiceContextFor(state)).catch(() => {
+		void persistVoiceContext(owner, voiceContextFor(state, get(sessions).find(session => session.id === owner))).catch(() => {
 			if (get(activeSession).sessionId === owner) {
 				notify('Could not save voice execution settings. Try again before requesting work.', { severity: 'error' });
 			}

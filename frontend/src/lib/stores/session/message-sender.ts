@@ -536,7 +536,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					// Race only persistence, not a continuation that sends: after the
 					// deadline this attempt is dead even if the PATCH later succeeds.
 					await Promise.race([
-						persistVoiceContext(_state.sessionId, voiceContextFor(_state)),
+						persistVoiceContext(_state.sessionId, voiceContextFor(_state,
+							deps.appData.current?.sessions.find(s => s.id === _state.sessionId))),
 						new Promise<never>((_, reject) => {
 							contextTimeout = setTimeout(() => reject(new Error('Voice context save timed out')), VOICE_CONTEXT_SAVE_TIMEOUT_MS);
 						})
