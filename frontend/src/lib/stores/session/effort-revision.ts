@@ -61,6 +61,27 @@ export function effortFromRow(state: HeldEffort, row: RowEffort | undefined): He
 	return { effortLevelOverride: row.effort ?? null, effortRev: rowRev };
 }
 
+/** The context-window pin and the revision it was told at, as a client holds them. */
+type HeldPin = { contextWindowPin?: number | null; contextWindowRev?: number };
+
+/**
+ * The pin a row, `/live`, a push or a picker answer brings, or null when it
+ * is no news (#1640).
+ *
+ * The pin has its own revision (`context_window_rev`) and follows the effort
+ * rule: only a revision above the held one is applied, so an answer or a push
+ * that arrives late never replaces a newer pin, a dropped one included. A
+ * holder that was told no revision takes the first one it gets. Without a
+ * revision (an older worker) a saved window is taken as it always was, and
+ * "no pin" is not: such a worker never drops one.
+ */
+export function pinIfNewer(held: HeldPin, pin: number | null | undefined, rev: unknown): HeldPin | null {
+	const incoming = effortRevOf(rev);
+	if (incoming === undefined) return typeof pin === 'number' && pin > 0 ? { contextWindowPin: pin } : null;
+	if (held.contextWindowRev !== undefined && incoming <= held.contextWindowRev) return null;
+	return { contextWindowPin: pin ?? null, contextWindowRev: incoming };
+}
+
 /**
  * The revision a send carries, or undefined to send none (the worker then
  * saves the level, as it did before revisions).

@@ -31,27 +31,33 @@ def _send(session_id, **overrides):
     return turns.get_turn(turn_id)["overrides"]
 
 
+def _bind(session_id, **binding):
+    """The effort pair a binding write returns (it also names the pin, #1640)."""
+    saved = db.set_session_run_binding(session_id, **binding)
+    return saved and {"effort": saved["effort"], "effort_rev": saved["effort_rev"]}
+
+
 class TestRevisionCounter:
     def test_every_change_of_the_level_is_one_revision(self, mock_db):
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         assert _pair("s") == ("high", 0)
-        assert db.set_session_run_binding("s", effort="low") == {"effort": "low", "effort_rev": 1}
+        assert _bind("s", effort="low") == {"effort": "low", "effort_rev": 1}
         # Writing the level the row holds is no change: one revision, one level.
-        assert db.set_session_run_binding("s", effort="low") == {"effort": "low", "effort_rev": 1}
+        assert _bind("s", effort="low") == {"effort": "low", "effort_rev": 1}
         # Auto is a level too.
-        assert db.set_session_run_binding("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
-        assert db.set_session_run_binding("s", effort="max") == {"effort": "max", "effort_rev": 3}
+        assert _bind("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
+        assert _bind("s", clear_effort=True) == {"effort": None, "effort_rev": 2}
+        assert _bind("s", effort="max") == {"effort": "max", "effort_rev": 3}
         # A write of another field reports the pair and leaves it alone.
-        assert db.set_session_run_binding("s", fast=True) == {"effort": "max", "effort_rev": 3}
+        assert _bind("s", fast=True) == {"effort": "max", "effort_rev": 3}
         assert _pair("s") == ("max", 3)
 
     def test_nothing_to_write_and_unknown_session(self, mock_db):
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus")
-        assert db.set_session_run_binding("s") is None
-        assert db.set_session_run_binding("missing", effort="low") is None
+        assert _bind("s") is None
+        assert _bind("missing", effort="low") is None
 
     def test_a_guarded_write_needs_the_rows_revision(self, mock_db):
         make_profile("agent", {})
@@ -59,10 +65,10 @@ class TestRevisionCounter:
         db.set_session_run_binding("s", effort="low")
         # Revision 0 is no longer the row's: the level is dropped, the other
         # fields of the same write are saved.
-        assert db.set_session_run_binding("s", effort="high", fast=True, effort_rev_base=0) == {
+        assert _bind("s", effort="high", fast=True, effort_rev_base=0) == {
             "effort": "low", "effort_rev": 1}
         assert db.get_session("s")["fast"]
-        assert db.set_session_run_binding("s", effort="high", effort_rev_base=1) == {
+        assert _bind("s", effort="high", effort_rev_base=1) == {
             "effort": "high", "effort_rev": 2}
 
     def test_a_base_above_the_rows_revision_moves_the_row_past_it(self, mock_db):
@@ -72,15 +78,15 @@ class TestRevisionCounter:
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         db.set_session_run_binding("s", effort="low")                    # (low, 1)
-        assert db.set_session_run_binding("s", effort="max", effort_rev_base=7) == {
+        assert _bind("s", effort="max", effort_rev_base=7) == {
             "effort": "low", "effort_rev": 8}
         # A send that names no level (Auto) moves it too.
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=12) == {
+        assert _bind("s", fast=False, effort_rev_base=12) == {
             "effort": "low", "effort_rev": 13}
         # ... and leaves a row alone that is not behind.
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=13) == {
+        assert _bind("s", fast=False, effort_rev_base=13) == {
             "effort": "low", "effort_rev": 13}
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=4) == {
+        assert _bind("s", fast=False, effort_rev_base=4) == {
             "effort": "low", "effort_rev": 13}
 
     def test_the_voice_context_write_counts_too(self, mock_db):

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effortFromRow, effortIsNewer, effortRevOf, effortRevToSend, restoredEffort } from './effort-revision';
+import { effortFromRow, effortIsNewer, effortRevOf, effortRevToSend, pinIfNewer, restoredEffort } from './effort-revision';
 
 describe('effortRevOf', () => {
 	it('reads a count and nothing else', () => {
@@ -94,5 +94,33 @@ describe('effortFromRow', () => {
 	it('ignores a row with no revision, and a row that is not loaded', () => {
 		expect(effortFromRow({ effortLevelOverride: 'high', effortRev: 1 }, { effort: 'low' })).toBeNull();
 		expect(effortFromRow({ effortLevelOverride: 'high' }, undefined)).toBeNull();
+	});
+});
+
+describe('pinIfNewer (#1640)', () => {
+	it('applies a pin only when its revision is above the one held', () => {
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 2 }, 200_000, 3))
+			.toEqual({ contextWindowPin: 200_000, contextWindowRev: 3 });
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 2 }, 200_000, 2)).toBeNull();
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 2 }, 200_000, 1)).toBeNull();
+	});
+
+	it('a dropped pin is a pin like any other: newer applies, older does not', () => {
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 2 }, null, 3))
+			.toEqual({ contextWindowPin: null, contextWindowRev: 3 });
+		// The clear of an earlier model arriving after a newer pick was saved.
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 4 }, null, 3)).toBeNull();
+	});
+
+	it('a holder that was told no revision takes the first one it gets', () => {
+		expect(pinIfNewer({ contextWindowPin: 1_000_000 }, null, 0)).toEqual({ contextWindowPin: null, contextWindowRev: 0 });
+		expect(pinIfNewer({}, 200_000, 5)).toEqual({ contextWindowPin: 200_000, contextWindowRev: 5 });
+	});
+
+	it('without a revision (an older worker) a saved window is taken as before, and "no pin" is not', () => {
+		expect(pinIfNewer({ contextWindowPin: 1_000_000, contextWindowRev: 9 }, 200_000, undefined))
+			.toEqual({ contextWindowPin: 200_000 });
+		expect(pinIfNewer({ contextWindowPin: 1_000_000 }, null, undefined)).toBeNull();
+		expect(pinIfNewer({ contextWindowPin: 1_000_000 }, undefined, undefined)).toBeNull();
 	});
 });

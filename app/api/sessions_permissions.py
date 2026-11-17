@@ -168,7 +168,12 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             window = await run_sync(offered_context_window, session, changes["context_window"])
             if window is None:
                 raise ValueError("This model does not support the selected context window")
-            await run_sync(database.set_session_run_binding, session_id, context_window=window)
+            saved = await run_sync(database.set_session_run_binding, session_id, context_window=window)
+            if isinstance(saved, dict):
+                # The row's pin and its revision after the write (#1640), so the
+                # picker and every announcement can be ordered by a client.
+                return {"context_window": saved["context_window"] or window,
+                        "context_window_rev": saved["context_window_rev"]}
             return {"context_window": window}
         state = get_session_pool().peek(session_id)
         runtime = get_live_runtime(session_id)
@@ -294,6 +299,8 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
     updates: dict = {}
     if result.get("context_window"):
         updates["context_window"] = result["context_window"]
+        if type(result.get("context_window_rev")) is int:
+            updates["context_window_rev"] = result["context_window_rev"]
     if effort_asked and "effort" in result:
         updates["effort"] = result["effort"]
         if type(result.get("effort_rev")) is int:

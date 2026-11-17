@@ -2562,6 +2562,14 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN effort_rev INTEGER")
         migrations_applied.append("sessions.effort_rev")
 
+    # Context-window revision (#1640): counts the changes of
+    # ``sessions.context_window``, a pin dropped by a model switch included, so
+    # a composer never applies an older pin over the one it holds. NULL = 0.
+    # Additive/nullable, no index, no SCHEMA_VERSION bump.
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "context_window_rev"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN context_window_rev INTEGER")
+        migrations_applied.append("sessions.context_window_rev")
+
     # Snooze (sidebar): a settled chat that returns to Active on its own at
     # this time. NULL on every pre-existing row = not snoozed. Projected from
     # the shared membership record. Additive/nullable, no index, no

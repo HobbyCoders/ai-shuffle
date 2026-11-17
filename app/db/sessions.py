@@ -118,6 +118,8 @@ class SessionRow(TypedDict):
     # Counts the changes of ``effort``; NULL reads as 0. See
     # ``set_session_run_binding``.
     effort_rev: Optional[int]
+    # Counts the changes of ``context_window`` the same way (#1640).
+    context_window_rev: Optional[int]
     permission_mode: Optional[str]
     # A delegated worker's dispatch ceiling, fixed at creation; NULL for every
     # other session. See ``session_modes.turn_permission_mode``.
@@ -1030,9 +1032,17 @@ def set_session_run_binding(
     database restored from a backup under an open tab): the row's level
     stands and its revision moves past the base, so that client adopts it
     instead of holding a revision no answer can ever exceed. The other fields
-    are written either way. Returns the row's ``{"effort", "effort_rev"}``
-    after the write, or ``None`` when nothing was written or the session does
-    not exist.
+    are written either way.
+
+    ``context_window_rev`` counts the changes of ``context_window`` the same
+    way, so a composer can order what it is told about the pin. A model write
+    that names no window also drops a saved pin larger than the new model's
+    full window (:func:`_drop_pin_above_model_maximum`, #1640).
+
+    Returns the row's ``{"effort", "effort_rev", "context_window",
+    "context_window_rev"}`` after the write (plus ``context_window_dropped``,
+    the pin a model write dropped), or ``None`` when nothing was written or
+    the session does not exist.
     """
     _ph = ph()
     updates: List[str] = []
@@ -1088,6 +1098,10 @@ def set_session_run_binding(
     if clean_context_window is not None and clean_context_window > 0:
         updates.append(f"context_window = {_ph}")
         values.append(clean_context_window)
+        updates.append(_PIN_REV_BUMP.format(ph=_ph))
+        values.append(clean_context_window)
+    else:
+        clean_context_window = None
     # Boolean binding: False is a real pick ("turn fast mode off"), so it
     # must reach the row. Only an absent field (None) is a no-op.
     if fast is not None:
@@ -1114,13 +1128,79 @@ def set_session_run_binding(
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph} "
-            "RETURNING effort, effort_rev",
+            "RETURNING effort, effort_rev, context_window, context_window_rev",
             values,
         )
         row = cursor.fetchone()
     if row is None:
         return None
-    return {"effort": row["effort"] or None, "effort_rev": int(row["effort_rev"] or 0)}
+    saved = {
+        "effort": row["effort"] or None,
+        "effort_rev": int(row["effort_rev"] or 0),
+        "context_window": row["context_window"] or None,
+        "context_window_rev": int(row["context_window_rev"] or 0),
+    }
+    if clean_model and clean_context_window is None and saved["context_window"]:
+        dropped_rev = _drop_pin_above_model_maximum(session_id)
+        if dropped_rev is not None:
+            saved.update(context_window_dropped=saved["context_window"],
+                         context_window=None, context_window_rev=dropped_rev)
+    return saved
+
+
+# One more revision when the statement changes ``context_window`` (the
+# right-hand side reads the row as it was before the statement).
+_PIN_REV_BUMP = (
+    "context_window_rev = CASE WHEN context_window IS DISTINCT FROM {ph} "
+    "THEN COALESCE(context_window_rev, 0) + 1 ELSE context_window_rev END")
+
+
+def _drop_pin_above_model_maximum(session_id: str) -> Optional[int]:
+    """Clear a saved context window the chat's (new) model cannot hold (#1640).
+
+    The options builder already ignores such a pin, and the API must not
+    report a window the chat no longer has. Only a pin strictly larger than
+    the model's known maximum is cleared; a smaller pin stays the ceiling it
+    is, and an unknown maximum changes nothing. The clear is conditional on
+    the pin AND every field the maximum was judged from (the model, launched
+    model, provider, agent and mode), so a newer model or pick saved
+    meanwhile, such as another model with a valid larger pin, is never erased.
+
+    Returns the pin's new revision when it was cleared, else ``None``. Nothing
+    is announced from here: the clear is a new revision of the row, which
+    every open composer adopts in order (see ``context_window_rev``).
+    """
+    try:
+        row = get_session(session_id)
+        pin = (row or {}).get("context_window")
+        if not row or not pin:
+            return None
+        from app.core.model_registry import session_context_window_maximum
+
+        maximum = session_context_window_maximum(dict(row))
+        if maximum is None or pin <= maximum:
+            return None
+        _ph = ph()
+        judged = ("model", "launched_model", "provider_id", "profile_id", "mode")
+        same = " AND ".join(f"{column} IS NOT DISTINCT FROM {_ph}" for column in judged)
+        with get_db() as conn:
+            cursor = get_cursor(conn)
+            cursor.execute(
+                "UPDATE sessions SET context_window = NULL, "
+                "context_window_rev = COALESCE(context_window_rev, 0) + 1 "
+                f"WHERE id = {_ph} AND context_window = {_ph} AND {same} "
+                "RETURNING context_window_rev",
+                (session_id, pin, *(row.get(column) for column in judged)),
+            )
+            cleared = cursor.fetchone()
+        if cleared is None:
+            return None
+        logger.info("Cleared context window %s on session %s: its model's maximum is %s",
+                    pin, session_id, maximum)
+        return int(cleared["context_window_rev"] or 0)
+    except Exception:  # noqa: BLE001 — the model binding is already saved.
+        logger.warning("Could not check the context window of session %s", session_id, exc_info=True)
+        return None
 
 
 def set_session_voice_binding(session_id: str, config: Dict[str, Any]) -> None:
@@ -1154,12 +1234,17 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
             f", effort_rev = CASE WHEN effort IS DISTINCT FROM {placeholder} "
             "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
         values.append(changes["effort"])
+    if "context_window" in changes:
+        assignments += ", " + _PIN_REV_BUMP.format(ph=placeholder)
+        values.append(changes["context_window"])
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
             f"UPDATE sessions SET {assignments} WHERE id = {placeholder}",
             [*values, session_id],
         )
+    if "model" in changes and not changes.get("context_window"):
+        _drop_pin_above_model_maximum(session_id)
 
 
 def set_session_context_usage(session_id: str, data: Dict[str, Any]) -> None:

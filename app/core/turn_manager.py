@@ -333,7 +333,7 @@ def _submit_blocking(
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
-    window_pin: Optional[Dict[str, int]] = None,
+    window_pin: Optional[Dict[str, Optional[int]]] = None,
     reactivated: dict[str, Any] | None = None,
     caller: Optional[str] = None,
     person_entered: Any = False,
@@ -346,7 +346,9 @@ def _submit_blocking(
     logical operation instead of one per write, while the kick (which needs a
     running event loop) stays with the caller. Never fires the kick.
 
-    ``window_pin``, when given, receives ``{"context_window": pin}`` if the
+    ``window_pin``, when given, receives the saved pin and its revision
+    (``{"context_window": pin, "context_window_rev": n}``, pin ``None`` when
+    the model this send saved dropped it, #1640) if the
     send carried a ``context_window_base`` that is not the pin saved after it,
     so :func:`submit_async` can push the pin to the chat's open clients.
 
@@ -477,7 +479,15 @@ def _submit_blocking(
                         if saved["effort"]:
                             overrides["effort"] = saved["effort"]
                     if effort_seen is not None:
-                        effort_seen.update(saved)
+                        effort_seen.update(effort=saved["effort"], effort_rev=saved["effort_rev"])
+            # A pin the model just saved cannot hold was dropped by that write
+            # (#1640). The client's base is judged against the pin as it was
+            # before this send, the one the client can have seen.
+            dropped = (saved or {}).get("context_window_dropped")
+            if dropped and window_pin is not None:
+                # Open composers still hold the dropped pin as their base.
+                window_pin.update(context_window=None,
+                                  context_window_rev=saved["context_window_rev"])
             if overrides.get("context_window"):
                 # Checked against the model just saved, as the picker checks
                 # it. A window the model does not offer is ignored: never
@@ -487,15 +497,16 @@ def _submit_blocking(
                 from app.core.model_registry import offered_context_window
 
                 row = database.get_session(session_id)
-                if has_window_base and window_base != ((row or {}).get("context_window") or None):
+                pin_before = dropped or (row or {}).get("context_window") or None
+                pin_rev = int((row or {}).get("context_window_rev") or 0)
+                if has_window_base and window_base != pin_before:
                     # The client's view of the pin is outdated (another tab or
                     # device picked since): its window must not replace the
                     # newer pin, which this turn runs on instead.
                     logger.info(
                         "Ignoring outdated context window %s for session %s "
                         "(client base %s, saved pin %s)",
-                        overrides["context_window"], session_id, window_base,
-                        (row or {}).get("context_window"),
+                        overrides["context_window"], session_id, window_base, pin_before,
                     )
                     window = None
                 else:
@@ -503,14 +514,18 @@ def _submit_blocking(
                 if window is None:
                     overrides = {k: v for k, v in overrides.items() if k != "context_window"}
                 else:
-                    database.set_session_run_binding(session_id, context_window=window)
+                    pinned = database.set_session_run_binding(session_id, context_window=window)
+                    if pinned is not None:
+                        pin_rev = pinned["context_window_rev"]
                 saved_pin = window or (row or {}).get("context_window") or None
-                if window_pin is not None and has_window_base and saved_pin and saved_pin != window_base:
+                if window_pin is not None and has_window_base and saved_pin != window_base:
                     # The sending client's pin is now out of date (this send
                     # saved another window, e.g. after a model change, or
                     # another client picked first). The caller tells open
                     # clients, or their next send would be dropped as stale.
-                    window_pin["context_window"] = saved_pin
+                    # It goes with the pin's revision, so a client that already
+                    # holds a newer pin keeps it.
+                    window_pin.update(context_window=saved_pin, context_window_rev=pin_rev)
         except Exception:  # noqa: BLE001 — never let this break an enqueue.
             logger.exception(
                 "run-binding persist failed for session %s", session_id
@@ -676,7 +691,7 @@ async def submit_async(
         from app.core import owner_confirm
 
         held = await owner_confirm.on_owner_message(session_id, prompt)
-    window_pin: Dict[str, int] = {}
+    window_pin: Dict[str, Optional[int]] = {}
     effort_seen = {} if effort_seen is None else effort_seen
     reactivated: dict[str, Any] = {}
     try:
@@ -712,7 +727,7 @@ async def submit_async(
     if not no_kick:
         _kick(session_id)
     if window_pin:
-        await _announce_window_pin(session_id, window_pin["context_window"])
+        await _announce_window_pin(session_id, window_pin)
     if effort_seen:
         await announce_effort(session_id, effort_seen)
     return turn_id
@@ -798,17 +813,23 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
-async def _announce_window_pin(session_id: str, window: int) -> None:
-    """Push the chat's saved context-window pin to its open clients.
+async def _announce_window_pin(session_id: str, pin: Dict[str, Optional[int]]) -> None:
+    """Push the chat's saved context-window pin (None: no pin) to its open clients.
 
     The same ``session_updated`` push a picker change sends (#1895): a client
     adopts it as its pin, so its next send's ``context_window_base`` matches.
+    It carries the pin's revision, and a client applies it only when that is
+    newer than the one it holds, so a push that arrives late changes nothing
+    (#1640).
     """
     try:
         from app.core.sync_engine import sync_engine
 
+        updates: Dict[str, Any] = {"context_window": pin.get("context_window") or None}
+        if type(pin.get("context_window_rev")) is int:
+            updates["context_window_rev"] = pin["context_window_rev"]
         await sync_engine.broadcast_session_updated(
-            session_id=session_id, updates={"context_window": window}, source_device_id=None,
+            session_id=session_id, updates=updates, source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — the turn is queued either way.
         logger.warning("Could not announce the context window of %s", session_id, exc_info=True)

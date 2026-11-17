@@ -441,6 +441,17 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
         value = None
     if value is None or value <= 0:
         return None
+    model, provider = _session_model_provider(session)
+    if is_offered_context_window(value, model, provider):
+        return value
+    logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
+    return None
+
+
+def _session_model_provider(
+    session: Optional[Dict[str, Any]],
+) -> Tuple[str, Optional[ModelProviderRow]]:
+    """The model a chat runs and its provider row, as :func:`offered_context_window` reads them."""
     from app.db import database
     from app.db.model_providers import resolve_model_provider
 
@@ -453,10 +464,21 @@ def offered_context_window(session: Optional[Dict[str, Any]], window: Any) -> Op
     if model.startswith("prov:"):
         _, provider_id, model = model.split(":", 2)
     provider = resolve_model_provider(provider_id) if provider_id else None
-    if is_offered_context_window(value, model, provider):
-        return value
-    logger.debug("Ignoring context window %s: model %r does not offer it", value, model)
-    return None
+    return model, provider
+
+
+def session_context_window_maximum(session: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The full context window of the chat's model, or ``None`` when unknown.
+
+    The same maximum the options builder compares a saved pin against
+    (``query_options.build_options_from_profile``). Blocking: reads the agent
+    and provider rows.
+    """
+    model, provider = _session_model_provider(session)
+    if provider is not None:
+        return resolve_provider_context_window(provider, model)
+    native = get_model(model)
+    return native.context_window if native is not None else None
 
 
 # Anthropic API model ids for the selectable presets. The registry's canonical

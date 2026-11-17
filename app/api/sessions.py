@@ -1333,6 +1333,7 @@ async def get_live_session(
         # The revision that level belongs to (#1609); 0 for one never changed.
         "effort_rev": int(session.get("effort_rev") or 0),
         "context_window": session.get("context_window"),
+        "context_window_rev": int(session.get("context_window_rev") or 0),
         # The rest of the composer binding (#418). A hidden Task worker has no
         # sidebar row, so without these the composer showed the previous chat's
         # agent, Ask and Fast off, and the next owner message sent them. The

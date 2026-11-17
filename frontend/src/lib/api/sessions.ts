@@ -153,6 +153,8 @@ export interface Session {
 	away_mode?: boolean | null;
 	/** Optional persisted concrete context ceiling once the backend stores the override. */
 	context_window?: number | null;
+	/** How many times `context_window` has changed (#1640); orders what a client is told about the pin. */
+	context_window_rev?: number;
 	/** Which sidepanel lane this session belongs to: 'code' (the full agentic
 	 *  workspace), 'chat' (web-only assistant) or 'voice' (Realtime call).
 	 *  Stored as NULL for code sessions — every row predating modes is one — so

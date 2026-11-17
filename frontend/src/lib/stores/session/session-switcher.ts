@@ -42,7 +42,7 @@ import { resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
 import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
-import { effortIsNewer, effortRevOf, restoredEffort } from './effort-revision';
+import { effortIsNewer, effortRevOf, pinIfNewer, restoredEffort } from './effort-revision';
 import {
 	cacheComposerBinding,
 	COMPOSER_BINDING_FIELDS,
@@ -106,6 +106,7 @@ interface LiveSnapshot {
 		effort?: string | null;
 		effort_rev?: number;
 		context_window?: number | null;
+		context_window_rev?: number;
 		workspace_project_ids?: string[];
 		title?: string;
 		worktree_id?: string | null;
@@ -845,6 +846,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 				DEFAULT_CONTEXT_WINDOW_CHOICE,
 			// The pin as the row last reported it; /live and picks refresh it.
 			contextWindowPin: row ? (row.context_window ?? null) : undefined,
+			contextWindowRev: effortRevOf(row?.context_window_rev),
 			// Worktree fields: ephemeral > worktreeInfo from session list > safe defaults
 			worktreeIntent: ephemeral?.worktreeIntent ?? worktreeInfo?.worktreeIntent ?? 'local',
 			// Compose-time only: an existing session's device is already settled
@@ -1057,9 +1059,15 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			if (savedContextChoice && getState().contextWindowChoice === initialContextChoice) {
 				patch.contextWindowChoice = savedContextChoice;
 			}
-			// Never replace a pin a pick or an announcement set during this fetch.
-			if (meta.context_window !== undefined && getState().contextWindowPin === initialContextPin) {
-				patch.contextWindowPin = meta.context_window ?? null;
+			// Never replace a pin a pick or an announcement set during this fetch:
+			// a worker that counts the pin's changes names the revision, and only a
+			// newer one is taken (#1640).
+			if (meta.context_window !== undefined) {
+				if (effortRevOf(meta.context_window_rev) !== undefined) {
+					Object.assign(patch, pinIfNewer(getState(), meta.context_window, meta.context_window_rev) ?? {});
+				} else if (getState().contextWindowPin === initialContextPin) {
+					patch.contextWindowPin = meta.context_window ?? null;
+				}
 			}
 			// An older chat may not be in the paginated session list. Hydrate its
 			// folders from /live, without overwriting an edit made during the fetch.
@@ -1230,6 +1238,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			workspaceProjectIds: keptPlace?.workspaceProjectIds ?? [],
 			contextWindowChoice: getPersistedContextWindowChoice(),
 			contextWindowPin: undefined,
+			contextWindowRev: undefined,
 			pendingPermissions: [],
 			deferredPermissions: [],
 			pendingQuestions: [],
