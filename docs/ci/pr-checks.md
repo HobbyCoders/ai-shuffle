@@ -593,16 +593,17 @@ both output streams are preserved.
 
 The blocking JavaScript audits (frontend, tools and browser-mcp, in their CI jobs
 and again in `supply-chain`) run `scripts/npm_audit_gate.py` from the package
-directory. It runs the full `npx -y npm@11 audit --json`, dev dependencies
-included, and fails on any high or critical advisory, like
-`npm audit --audit-level=high`, except one listed in
-`scripts/npm_audit_exceptions.json` for the named package. An exception is only
+directory. It runs the full `npx -y npm@11 audit --audit-level=high --json`, dev
+dependencies included, and fails on any high or critical advisory, like the plain
+audit, except one listed in `scripts/npm_audit_exceptions.json` for the named
+package while every locked copy of it is a dev dependency. An exception is only
 for an advisory with no patched release: it records the reason and an expiry
-date (at most about six weeks out), and an expired exception blocks again.
+date, and an expired exception blocks again.
 Packages flagged only because they depend on the excepted package pass with it;
 any other advisory on them still blocks. When a fix ships, lock it and delete the
 entry; the gate prints a notice for an entry a package no longer reports.
-Unreadable npm output fails closed.
+Unreadable npm output, or an exit status the report does not account for, fails
+closed.
 The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
