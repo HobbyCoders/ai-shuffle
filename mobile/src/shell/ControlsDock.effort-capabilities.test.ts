@@ -73,6 +73,9 @@ describe('ControlsDock dynamic effort', () => {
   for (const model of ['opus', 'prov:codex:gpt-6.1-sol']) composerPreferences.rememberFast(model, null);
   activeSession.newChat();
   activeSession.setModelOverride('opus');
+  // The fixture has no effort metadata for gpt-6.1-sol: a visible pin
+  // keeps its effort/Fast popover reachable without another case's state.
+  await activeSession.setEffortLevelOverride('high');
   await activeSession.setFastMode(false);
   renderDock();
   await tick();
