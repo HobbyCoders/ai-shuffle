@@ -29,8 +29,7 @@
 	 */
 	import { tick, untrack, type Snippet } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { pushState } from '$app/navigation';
-	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { page } from '$app/state';
 	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
 	import { phonePanelActions } from '$lib/components/layout/view/ViewPanel.svelte';
@@ -176,7 +175,7 @@
 
 	function pushDrawerEntry() {
 		try {
-			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileDrawer: true }));
+			shellHistory.overlay({ mobileDrawer: true });
 		} catch {
 			// Router not ready (early boot, tests): Back just won't close it.
 		}
@@ -192,6 +191,7 @@
 		const inHistory = !!page.state?.mobileDrawer;
 		untrack(() => {
 			if (inHistory) {
+				mounted = drawerOpen = true;
 				entryLive = true;
 				return;
 			}
@@ -233,26 +233,14 @@
 	// The drawer then slides away over the view the action opened.
 	function drawerGo<T extends unknown[]>(action: (...args: T) => void) {
 		return (...args: T) => {
+			const popping = drawerOpen && entryLive;
 			dismissDrawer();
-			action(...args);
+			if (popping) pendingTarget = () => action(...args);
+			else action(...args);
 		};
 	}
 
-	// A Settings target (a deep link into one setting) pushes its own history
-	// step. The drawer's pop above is asynchronous and would land after that
-	// step and undo it, leaving Settings on its index, so open it only once
-	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
-	// Reopening the drawer, any newer navigation (dismissDrawer) or the bar
-	// going away calls a waiting open off.
-	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
-		const popping = drawerOpen && entryLive;
-		dismissDrawer();
-		if (!itemId) return onOpenFeature(type);
-		if (!popping) return onOpenFeature(type, itemId);
-		// SvelteKit updates page.state some time after `popstate`, so the wait
-		// ends in the effect above, when the state no longer has our entry.
-		pendingTarget = () => onOpenFeature(type, itemId);
-	}
+	const drawerOpenFeature = drawerGo(onOpenFeature);
 	$effect(() => () => {
 		pendingTarget = null;
 	});

@@ -39,8 +39,8 @@ describe('Docs shared navigation', () => {
  });
 });
 
-// No router: the phone detail's Back is the in-page one, as Docs keeps no history of its own.
-vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No router in this component test'); } }));
+import { shellHistory } from '$lib/services/app-history.svelte';
+vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 describe('Docs headings, search marks and reload (#1476, #1478)', () => {
  const width = window.innerWidth;
@@ -51,6 +51,7 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
  });
  afterEach(() => {
+  shellHistory.stop();
   vi.unstubAllGlobals();
   Object.defineProperty(window, 'innerWidth', { value: width, configurable: true });
   sessionStorage.clear();
@@ -75,8 +76,9 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   await waitFor(() => expect(view.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel'));
  });
 
- it('reopens the open document after a reload on a wide screen; a phone opens on the list', async () => {
+ it('reopens the entry’s article on desktop and phone', async () => {
   Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  shellHistory.start({}, { type: 'docs' });
   const view = render(DocsCard, {});
   await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
   await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
@@ -89,8 +91,7 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   cleanup();
   Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true });
   const phone = render(DocsCard, { mobile: true });
-  await waitFor(() => expect(phone.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel'));
-  expect(phone.container.querySelector('.docs-content h1')).toBeNull();
+  await waitFor(() => expect(title(phone)).toBe('Frequently asked questions'));
  });
 
  it('marks every search result it opens, also after a document chosen from the list', async () => {

@@ -341,9 +341,9 @@ describe('AppTopBar drawer lifecycle', () => {
 	});
 
 	it('pushes a history entry on open, closes on Back, and pops its own entry when closed in the app', async () => {
-		const nav = await import('$app/navigation');
+		const { shellHistory } = await import('$lib/services/app-history.svelte');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
+		const push = vi.spyOn(shellHistory, 'overlay').mockImplementation((state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {
@@ -378,9 +378,9 @@ describe('AppTopBar drawer lifecycle', () => {
 
 	it('opens a Settings target only once the drawer has popped its entry, so the pop cannot undo it', async () => {
 		vi.useFakeTimers();
-		const nav = await import('$app/navigation');
+		const { shellHistory } = await import('$lib/services/app-history.svelte');
 		const { page } = await import('$app/state');
-		const push = vi.spyOn(nav, 'pushState').mockImplementation(async (_url, state) => {
+		const push = vi.spyOn(shellHistory, 'overlay').mockImplementation((state) => {
 			page.state = state as Record<string, unknown>;
 		});
 		// The real Back is asynchronous: the router hears popstate later.
@@ -425,6 +425,7 @@ describe('AppTopBar drawer lifecycle', () => {
 			page.state = {};
 			window.dispatchEvent(new PopStateEvent('popstate'));
 			await tick();
+			await tick(); // the chat pick, like a feature pick, follows the router’s completed pop
 			expect(props.onOpenSession).toHaveBeenCalledWith('s-2');
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 

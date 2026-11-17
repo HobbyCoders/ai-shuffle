@@ -643,8 +643,15 @@
 		if (fresh) openEdit(fresh, true);
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
+
+	function restoreSelection(key: string) {
+		const [view, id] = key.split(':');
+		if (view === 'create') openCreate();
+		else if (view === 'approvals') currentView = 'approvals';
+		else { const row = automations.find(a => a.id === id); if (row) { if (view === 'edit') openEdit(row); else void openDetail(row); } }
+	}
 </script>
-<ViewShell label="Automations" detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>
+<ViewShell label="Automations" historyType="automations" selection={`${currentView}:${selectedAutomation?.id ?? ''}`} {restoreSelection} detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}

@@ -1,3 +1,4 @@
+import { shellHistory } from '$lib/services/app-history.svelte';
 import { preferenceSync } from '$lib/services/preferences';
 /**
  * Layout Store - Manages the sidebar + main panel layout state
@@ -183,6 +184,7 @@ export const layout = {
 
 	/** Navigate to a chat session */
 	openChat(sessionId: string | null) {
+		shellHistory.destination({ type: 'session', sessionId });
 		_update((s) => ({
 			...s,
 			activeView: { type: 'session', sessionId }
@@ -201,6 +203,7 @@ export const layout = {
 			type = 'settings';
 			itemId = target;
 		}
+		shellHistory.destination({ type });
 		_update((s) => ({
 			...s,
 			activeView: { type, sessionId: null, itemId: itemId ?? null }

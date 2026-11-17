@@ -293,9 +293,14 @@
 			title: t.local && remoteOnly ? `${selectedRow?.name} isn't on ${selfName}. Set it up here to change this.` : undefined,
 			count: t.id === 'workers' && detailMissing > 0 ? `${detailMissing} missing` : undefined })));
 
+
+	function restoreSelection(key: string) {
+		const row = allRows.find(r => r.key === key);
+		if (row) handleRowClick(row);
+	}
 </script>
 
-<ViewShell label="Projects" detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
+<ViewShell label="Projects" historyType="project" selection={selectedKey} {restoreSelection} detailOpen={!!selectedRow} detailKey={selectedKey} onBack={handleBack} bind:stacked>
 	{#snippet panel()}
 		<ViewPanel title="Projects" count={allRows.length} loading={listPending}>
 			{#snippet actions()}<PanelIconButton label="New project" icon={Plus} onclick={() => (showAddModal = true)} />{/snippet}

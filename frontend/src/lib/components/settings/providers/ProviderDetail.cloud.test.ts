@@ -164,7 +164,7 @@ it('saves a gateway, then phone Back recovers the removed setup draft to the lis
 	expect(document.body.textContent).not.toContain(TOKEN);
 	expect(mocks.hydrate).toHaveBeenCalled();
 	expect(providerDrafts.get(setupItem)).toBeUndefined();
-	settingsNav.followHistory({ settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: setupItem });
+	settingsNav.follow({ view: 'detail', depth: 2, category: 'providers', item: setupItem, tab: null });
 	await waitFor(() => expect(settingsNav.view).toBe('page'));
 	expect(settingsNav.selectedItem('providers')).toBeNull();
 	expect(screen.getByRole('group', { name: 'Claude' })).toBeTruthy();

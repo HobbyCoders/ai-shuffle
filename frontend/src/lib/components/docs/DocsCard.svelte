@@ -1,5 +1,6 @@
 <script lang="ts">
- import { onMount } from 'svelte';
+ import { untrack } from 'svelte';
+ import { shellHistory } from '$lib/services/app-history.svelte';
  import { layout } from '$lib/stores/layout.svelte';
  import { platform } from '$lib/stores/platform.svelte';
  import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
@@ -27,40 +28,39 @@
  // From the Markdown itself, with the renderer's anchors: present on the first
  // paint and on every reopen of the same document (#1476).
  const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
- // The tab remembers the open document, so a reload reopens it. Docs keeps no
- // browser history of its own: this is a plain read on mount, and only where
- // list and document show side by side. A phone opens on the list, as before,
- // because opening the stacked detail on load would add ViewShell's Back entry
- // on top of the one the reloaded page already stands on.
- const OPEN_KEY = 'docs.open';
- function remember(doc: string) {
-  try { sessionStorage.setItem(OPEN_KEY, doc); } catch { /* Storage blocked: a reload starts over. */ }
- }
  function known(fullSlug: string): [string, string] | null {
   const [cat, slug] = fullSlug.split('/');
   return cat && slug && getDocBySlug(cat, slug) ? [cat, slug] : null;
  }
- function lastOpen(): [string, string] | null {
-  try { return known(sessionStorage.getItem(OPEN_KEY) ?? ''); } catch { return null; }
- }
- onMount(() => {
-  if (activeSlug || initialItemId || mobile || platform.isMobile || window.innerWidth <= 600) return;
-  const [category, slug] = lastOpen() ?? [activeCategory, docsByCategory[activeCategory]?.[0]?.slug];
-  if (slug) selectDoc(category, slug);
+ // The base Docs entry is the index on a phone, Start Here on desktop.
+ $effect(() => {
+  const place = shellHistory.place;
+  if (place && place.type !== 'docs') return;
+  const fullSlug = place?.doc ?? '';
+  untrack(() => {
+   if (initialItemId) return;
+   const target = known(fullSlug) ?? (!mobile && !platform.isMobile && window.innerWidth > 600
+    ? [categories[0].id, docsByCategory[categories[0].id][0].slug] : null);
+   if (!target) { activeSlug = ''; detailOpen = false; find = null; }
+   else if (activeCategory !== target[0] || activeSlug !== target[1]) display(target[0], target[1]);
+  });
  });
  function selectDoc(category: string, slug: string, query = '') {
+  if (!detailOpen || activeCategory !== category || activeSlug !== slug) shellHistory.detail('docs', { doc: `${category}/${slug}` });
+  display(category, slug, query);
+ }
+ function display(category: string, slug: string, query = '') {
   activeCategory = category;
   activeSlug = slug;
   tocOpen = false;
   detailOpen = true;
   find = query ? { query, key: ++searches } : null;
-  remember(`${category}/${slug}`);
   const scroll = articleEl?.closest('.view-main-slot');
   if (scroll) scroll.scrollTop = 0;
  }
  function backToList() {
-  detailOpen = false;
-  remember('');
+  if (shellHistory.place?.doc) window.history.back();
+  else detailOpen = false;
  }
  function handleSearchResult(fullSlug: string, query = '') {
   const target = known(fullSlug);
@@ -75,7 +75,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} onBack={backToList}>
+<ViewShell label="Docs" manageHistory={false} {detailOpen} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}

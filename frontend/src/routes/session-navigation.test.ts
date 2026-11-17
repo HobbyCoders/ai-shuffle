@@ -22,13 +22,12 @@ vi.mock('$app/navigation', async (importOriginal) => {
 	const { page } = await import('$app/state');
 	return {
 		...(await importOriginal<object>()),
-		pushState: (_url: string, state: Record<string, unknown>) => {
-			chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
-			chatHistory.index += 1;
-			page.state = state;
-		},
-		replaceState: (_url: string, state: Record<string, unknown>) => {
-			chatHistory.entries[chatHistory.index] = state;
+		goto: (_url: string, { state, replace }: { state: Record<string, unknown>; replace?: boolean }) => {
+			if (replace) chatHistory.entries[chatHistory.index] = state;
+			else {
+				chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
+				chatHistory.index++;
+			}
 			page.state = state;
 		},
 	};
@@ -58,6 +57,7 @@ import { resourceSync } from '$lib/services/resource-sync';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import { get } from 'svelte/store';
 import { page } from '$app/state';
+import type { ShellState } from '$lib/services/app-history.svelte';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -259,7 +259,7 @@ describe('chat link history (#859)', () => {
 		// The child's parent crumb.
 		openSessionLink(click(), 'parent');
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		expect(chatHistory.entries.map((entry) => entry.chatSession)).toEqual(['parent', 'worker-child', 'parent']);
+		await waitFor(() => expect(chatHistory.entries.map((entry) => (entry as ShellState).shell?.place.sessionId)).toEqual(['parent', 'worker-child', 'parent']));
 
 		step(-1);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));

@@ -418,6 +418,12 @@
 	function onWindowPointer(event: PointerEvent) {
 		if (pickerOpen && plusWrap && !plusWrap.contains(event.target as Node)) pickerOpen = false;
 	}
+
+	function restoreSelection(key: string) {
+		newTerminal = key === 'new';
+		if (!newTerminal) terminals.select(sessionId, key);
+		detailOpen = true;
+	}
 </script>
 
 <svelte:window onpointerdown={onWindowPointer} />
@@ -582,7 +588,7 @@
 
 {/snippet}
 {#if chatless}
- <ViewShell label="Terminal" {detailOpen} onBack={() => detailOpen = false}>
+ <ViewShell label="Terminal" historyType="terminal" selection={newTerminal ? 'new' : activeId ?? 'new'} {restoreSelection} {detailOpen} onBack={() => detailOpen = false}>
   {#snippet panel()}
    <ViewPanel title="Terminal" loading={probe.status === 'loading'}>
     {#snippet actions()}

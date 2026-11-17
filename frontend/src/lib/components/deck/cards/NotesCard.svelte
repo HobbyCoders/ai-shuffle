@@ -839,6 +839,11 @@
 			}
 		}
 	});
+
+	function restoreSelection(key: string) {
+		if (key === 'new') startNewNote();
+		else { const note = notes.find(n => n.id === key); if (note) openNote(note); }
+	}
 </script>
 
 {#snippet metadata()}
@@ -857,7 +862,7 @@
 
 <svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
 
-<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} detailKey={editorSession} onBack={closeEditor}>
+<ViewShell label="Notes" historyType="notes" selection={editingNote?.id ?? 'new'} {restoreSelection} detailOpen={!!(editingNote || isCreatingNew)} detailKey={editorSession} onBack={closeEditor}>
 	{#snippet panel()}
 		<ViewPanel title="Notes" count={loading ? undefined : notes.length} {loading} listLabel="Notes list">
 			{#snippet actions()}<PanelIconButton label="New note" icon={Plus} onclick={startNewNote} />{/snippet}

@@ -30,7 +30,8 @@
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
+	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
+	import { openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
 	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
@@ -106,18 +107,20 @@
 		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
 		if (follow) layout.openChat(follow);
 	});
-	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
-	// link) reopens that chat. The first run is the page's initial state, not a step.
-	let firstChatHistory = true;
+	function showEntry() {
+		const place = shellHistory.place;
+		if (!place) return;
+		if (place.type === 'session') {
+			if ($activeView?.type === 'session' && $activeView.sessionId === place.sessionId) return;
+			if (place.sessionId) handleOpenSession(place.sessionId);
+			else handleNewSession();
+		} else if ($activeView?.type !== place.type) layout.openFeaturePage(place.type);
+	}
 	$effect(() => {
-		const state = page.state;
-		void (state as { chatSession?: string })?.chatSession;
-		if (firstChatHistory) {
-			firstChatHistory = false;
-			return;
-		}
-		untrack(() => followChatHistory(state));
+		const state = page.state as ShellState;
+		untrack(() => { if (shellHistory.land(state)) showEntry(); });
 	});
+	onDestroy(() => shellHistory.stop());
 	function handleNewSession() {
 		navigationClaimed = true;
 		activeSession.newChat();
@@ -328,6 +331,8 @@
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
+		shellHistory.start(page.state, $activeView);
+		if (!deepLinkSessionId && !navigationClaimed) showEntry();
 		bootReconciled = true;
 		performance.mark?.('shuffle:boot.reconciled');
 		finishBootReconciliation(initGeneration);

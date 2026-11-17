@@ -1,6 +1,6 @@
 // Docs viewer (#1475, #1476, #1478, #1554, #1581): "On this page" is there on
 // every open and reaches a repeated heading by its own anchor; a reload reopens
-// the document; Docs adds no browser history entry of its own; every search
+// the document and its browser Back/Forward chain; every search
 // result opened marks and shows its match, a whole word before letters inside
 // another word; and a page holding the query's words together ranks first in
 // the Docs panel and in Spotlight, whose rows read as text, not Markdown.
@@ -98,7 +98,7 @@ await runJourney({
 			expect(where.inView, `the second "Removed" is at the top of the pane (${JSON.stringify(where)})`);
 		}
 	}, {
-		name: 'desktop-no-history-and-reload',
+		name: 'desktop-article-history-and-reload',
 		viewports: ['desktop'],
 		async setup({ page, status }) {
 			await gotoApp(page, status);
@@ -109,13 +109,13 @@ await runJourney({
 		},
 		async act({ page, mark }) {
 			const length = await page.evaluate(() => history.length);
-			await mark('three documents add no browser history entry');
+			await mark('each article adds a visible Back step');
 			for (const [name, title] of [['Updates', 'Updates'], ['FAQ', 'Frequently asked questions'], ['Changelog', 'Changelog']]) {
 				await docsList(page).getByText(name, { exact: true }).click();
 				await waitTitle(page, title);
 			}
 			const after = await page.evaluate(() => history.length);
-			expect(after === length, `Docs adds no history entry (${length} before, ${after} after)`);
+			expect(after === length + 3, `three article steps (${length} before, ${after} after)`);
 			await mark('a reload reopens the open document');
 			// As settings-reload does: the new document's first paint ends this step,
 			// so the app shell coming back once it hydrates is the next step's change.
@@ -123,6 +123,59 @@ await runJourney({
 			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
 			await mark('the reloaded page reopens the Changelog');
 			await waitTitle(page, 'Changelog', 30_000);
+			expect(await page.evaluate(() => history.length) === after, 'reload adds no entry');
+			await mark('Back and Forward still reach adjacent articles');
+			await page.goBack(); await waitTitle(page, 'Frequently asked questions');
+			await page.goForward(); await waitTitle(page, 'Changelog');
+		}
+	}, {
+		name: 'sections-and-articles',
+		viewports: ['desktop', 'phone'],
+		async setup({ page, status, variant }) {
+			if (variant.viewport === 'phone' && process.argv.includes('--mobile-shell')) {
+				await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+				await page.getByRole('button', { name: /^Open menu/ }).click();
+			} else await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			await waitTitle(page, 'Changelog');
+		},
+		async act({ page, mark }) {
+			await mark('follow an article link; one Back returns to the source article');
+			await page.locator('.docs-content a[href$="/updates"]').first().click();
+			await waitTitle(page, 'Updates');
+			await page.goBack(); await waitTitle(page, 'Changelog');
+			await page.goForward(); await waitTitle(page, 'Updates');
+			await mark('leave the article for Settings and Providers');
+			const menu = page.getByRole('button', { name: /^Open menu/ });
+			if (await menu.isVisible()) await menu.click();
+			else if (new URL(page.url()).pathname.startsWith('/mobile/')) {
+				// The detail Back row replaces the menu button. Swipe the drawer open.
+				const cdp = await page.context().newCDPSession(page);
+				for (const [type, x] of [['touchStart', 12], ['touchMove', 45], ['touchMove', 245], ['touchEnd', 0]]) {
+					await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: x ? [{ x, y: 350 }] : [] });
+				}
+				await cdp.detach();
+				await workspace(page).waitFor();
+			} else if (!await workspace(page).isVisible()) {
+				// A narrow desktop browser can widen without creating a history entry.
+				await page.setViewportSize({ width: 1200, height: 900 });
+			}
+			await openDestination(page, 'Settings');
+			const index = page.getByRole('navigation', { name: 'Settings', exact: true });
+			await index.getByRole('button', { name: 'Providers', exact: true }).click();
+			const heading = page.getByRole('heading', { name: 'Providers', exact: true }).first();
+			await heading.waitFor();
+			await page.goBack(); await index.waitFor();
+			await page.goBack(); await waitTitle(page, 'Updates');
+			const length = await page.evaluate(() => history.length);
+			await mark('reload the article mid-chain without dropping Forward');
+			await page.reload({ waitUntil: 'domcontentloaded' });
+			await mark('article reappears');
+			await waitTitle(page, 'Updates', 30000);
+			expect(await page.evaluate(() => history.length) === length, 'reload leaves stack length unchanged');
+			await page.goForward(); await index.waitFor();
+			await page.goForward(); await heading.waitFor();
 		}
 	}, {
 		name: 'desktop-repeated-search',

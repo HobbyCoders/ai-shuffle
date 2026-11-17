@@ -46,7 +46,8 @@ await runJourney({
 			await mark('Back closes Files detail');
 			await page.locator('.topbar').getByRole('button', { name: 'Back to Files', exact: true }).click();
 			await page.locator('[data-view-shell="Files"][data-pane="panel"]').waitFor();
-			expect(!(await page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'))), 'no hidden Notes detail marker remains after Files Back');
+			await page.goForward();
+			await page.locator('[data-view-shell="Files"][data-pane="detail"]').waitFor();
 		}
 	}, {
 		name: 'selected-desktop-detail-resized-to-phone',

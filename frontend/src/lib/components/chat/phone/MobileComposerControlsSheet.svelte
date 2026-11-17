@@ -47,8 +47,7 @@
 	 */
 	import { tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { pushState } from '$app/navigation';
-	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
@@ -439,7 +438,7 @@
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
 		try {
-			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true, mobileControlsPage: target }));
+			shellHistory.overlay({ mobileControls: true, mobileControlsPage: target });
 			pageEntry = true;
 		} catch {
 			// Router not ready (tests): Back closes the panel instead.
@@ -459,7 +458,7 @@
 				void focusPanel();
 				if (!historyEntry) {
 					try {
-						ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true }));
+						shellHistory.overlay({ mobileControls: true, mobileControlsPage: direct ? pageName : undefined });
 						historyEntry = true;
 					} catch {
 						// Router not ready (tests): Back just won't close the panel.
@@ -504,8 +503,10 @@
 
 	// Android Back on a page pops that page's entry: return to the list.
 	$effect(() => {
-		const pageInHistory = !!page.state?.mobileControlsPage;
+		const target = page.state?.mobileControlsPage as Page | undefined;
+		const pageInHistory = !!target;
 		untrack(() => {
+			if (target && target !== pageName) { pageEntry = true; setPage(target); }
 			if (!pageInHistory && pageEntry && open) backToMain(true);
 		});
 	});
@@ -514,6 +515,7 @@
 	$effect(() => {
 		const inHistory = !!page.state?.mobileControls;
 		untrack(() => {
+			if (inHistory && !open && !closingPanel) { historyEntry = true; requestOpen(true); }
 			if (!inHistory && historyEntry && open) {
 				historyEntry = false;
 				closePanel();

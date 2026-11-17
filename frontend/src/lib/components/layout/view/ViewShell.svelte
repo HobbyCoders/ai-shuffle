@@ -27,16 +27,10 @@ Keep detailOpen true when an item is selected; Shell owns phone push/pop history
 No host (tests), below the desktop rail (<768px), or the phone shell: inline.
 Panel contexts and tokens travel automatically. Off-screen feature pages never claim.
 -->
-<script lang="ts" module>
-	// Retained destinations share the browser stack: retire the old step before
-	// another destination may push its own. A pop is asynchronous.
-	const detailHistory = $state({ retiring: null as string | null });
-</script>
 <script lang="ts">
-	import { getAllContexts, getContext, onMount, tick, untrack, type Snippet } from 'svelte';
-	import { page } from '$app/state';
-	import { pushState } from '$app/navigation';
-	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
+	import { getAllContexts, getContext, onMount, untrack, type Snippet } from 'svelte';
+	import { shellHistory } from '$lib/services/app-history.svelte';
+	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { viewPanel } from '$lib/stores/view-panel.svelte';
@@ -52,6 +46,9 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		onBack?: () => void;
 		/** Settings already owns its multi-level history; other pages leave this on. */
 		manageHistory?: boolean;
+		historyType?: ViewType;
+		selection?: string | null;
+		restoreSelection?: (key: string) => void;
 		/** Existing Settings/Agents provide their own stacked token scope. */
 		inheritScope?: boolean;
 		/** Legacy Settings owns inner page/detail panes; its outer slot is not a detail pane. */
@@ -65,12 +62,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		detailKey?: unknown;
 	}
 	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
-		stacked = $bindable(false), detailKey }: Props = $props();
+		stacked = $bindable(false), detailKey, historyType, selection, restoreSelection }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
 	const token = Symbol('view-panel');
-	const historyKey = $props.id();
 	let width = $state(0);
 	let mainSlot: HTMLElement | undefined = $state();
 	let lastKey: unknown;
@@ -96,60 +92,25 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		return () => viewPanel.release(token);
 	});
 
-	let pushed = false;
-	let previousOpen = false;
+	let followed: string | null = null;
 	$effect(() => {
-		const open = active && stacked && detailOpen && !contentFirst;
-		const retiring = detailHistory.retiring;
-		if (!manageHistory) return;
-		// Leaving a retained destination must remove its invisible Back stop.
-		if (!active && pushed) {
-			pushed = false;
-			if (untrack(() => (page.state as { viewPanelDetail?: string }).viewPanelDetail) === historyKey) {
-				detailHistory.retiring = historyKey;
-				history.back();
+		const place = shellHistory.place;
+		if (!active || !historyType || !manageHistory || place?.type !== historyType) return;
+		const key = detailOpen ? selection ?? null : null;
+		const landing = shellHistory.restored;
+		if (landing && landing.id !== followed && place.panel !== undefined) {
+			if (key !== place.panel) {
+				if (place.panel !== null) restoreSelection?.(place.panel);
+				else untrack(() => onBack?.());
+				return;
 			}
+			followed = landing.id;
 		}
-		if (active && stacked && !detailOpen && previousOpen && pushed) {
-			pushed = false;
-			history.back();
-		}
-		previousOpen = open;
-		if (open && !pushed && !retiring) {
-			let cancelled = false;
-			// Let every retained destination retire first, irrespective of effect order.
-			void tick().then(() => {
-				if (cancelled || detailHistory.retiring) return;
-				try {
-					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
-						ignoreRouterNotReady(pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState));
-					}
-					pushed = true;
-				} catch { /* Routerless tests still have an in-page back. */ }
-			});
-			return () => { cancelled = true; };
-		}
-	});
-	let firstHistory = true;
-	$effect(() => {
-		const entry = (page.state as { viewPanelDetail?: string } | undefined)?.viewPanelDetail;
-		if (detailHistory.retiring && entry !== detailHistory.retiring) detailHistory.retiring = null;
-		if (firstHistory) { firstHistory = false; return; }
-		untrack(() => {
-			if (manageHistory && pushed && entry !== historyKey) {
-				// A pop while wide/off screen still releases our step; it must not block
-				// a fresh claim the next time this selected detail becomes stacked.
-				pushed = false;
-				if (active && stacked) onBack?.();
-			}
-		});
+		if (place.panel !== key) shellHistory.detail(historyType, { panel: key }, place.panel === undefined);
 	});
 	function back() {
-		if (manageHistory && stacked && pushed) {
-			history.back();
-			return;
-		}
-		onBack?.();
+		if (historyType && shellHistory.place?.panel) history.back();
+		else onBack?.();
 	}
 </script>
 
