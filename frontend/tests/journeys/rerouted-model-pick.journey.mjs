@@ -1,7 +1,7 @@
 // A second pick of the original model is still a new choice (#1635).
 import { readFile } from 'node:fs/promises';
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, openFromSidebar } from './lib/app.mjs';
+import { expect, gotoApp, openFromSidebar, waitChat } from './lib/app.mjs';
 
 async function pick(page, label) {
     await page.getByRole('button', { name: /^Model: / }).click();
@@ -32,7 +32,8 @@ await runJourney({
             await send(page, marker);
         },
         async verify({ page, status }) {
-            await page.getByRole('button', { name: 'Send', exact: true }).waitFor();
+            await page.getByText(marker, { exact: true }).last().waitFor();
+            await waitChat(page, { streaming: 'false' });
             const rows = (await readFile(status.fake_ai.request_log, 'utf8')).trim().split('\n').map(s => JSON.parse(s));
             expect(rows.some(r => String(r.prompt).includes(marker) && r.model === 'fake-ai'), 'the provider received the next explicit choice');
         }
