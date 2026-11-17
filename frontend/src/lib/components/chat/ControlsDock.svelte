@@ -228,7 +228,6 @@
 	// carries no model. The user picks the binding when the chat is created —
 	// seeded from whatever they picked last — and may change it mid-session;
 	// every send carries it, and the backend stores it on the session row.
-	const effortValue = $derived($activeSession.effortLevelOverride);
 	// The Standard cap shown in the model picker: the chat's pin, else the
 	// owner's per-model default (synced preferences bump the revision).
 	const contextStandardTokens = $derived.by(() => {
@@ -499,11 +498,14 @@
 	));
 	const effortCapability = $derived(resolveModelEffort(effortModel));
 	const effortLevels = $derived(effortCapability.options);
+	const effortValue = $derived(reconcileModelEffort($activeSession.effortLevelOverride, effortCapability));
 	$effect(() => {
-		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
+		// A fresh compose has no shared row. In an open chat the fit belongs to
+		// this view; an idle tab must not turn a replicated level into a PUT.
+		if (!$activeSession.sessionId && effortValue !== $activeSession.effortLevelOverride) {
+			activeSession.setEffortLevelOverride(effortValue, false);
+		}
 	});
-
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to
 	// 'default' → Ask, never blank).

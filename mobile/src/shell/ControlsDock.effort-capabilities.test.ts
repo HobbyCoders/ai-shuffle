@@ -236,6 +236,25 @@ describe('ControlsDock dynamic effort', () => {
   expect(shown()).toBe('Auto (Medium)');
   expect(screen.getByRole('button', { name: 'Auto' }).getAttribute('aria-pressed')).toBe('true');
  });
+ it('fits a replicated level for this page without picking it for the chat (#1719)', async () => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  activeSession.newChat();
+  activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
+  activeSession.current.sessionId = 'idle-viewer';
+  const pick = vi.spyOn(activeSession, 'setEffortLevelOverride');
+  try {
+   renderDock();
+   activeSession.adoptRowEffort([{id:'idle-viewer', effort:'xhigh', effort_rev:9}]);
+   await tick();
+   expect(screen.getByRole('button', {name:'Effort: High'})).toBeTruthy();
+   expect(pick).not.toHaveBeenCalled();
+   expect(get(activeSession).effortLevelOverride).toBe('xhigh');
+  } finally {
+   pick.mockRestore();
+   activeSession.current.sessionId = null;
+  }
+ });
  it('preserves XHigh on Astra after metadata hydration', async () => {
   activeSession.newChat();
   activeSession.setModelOverride('prov:or:openai/gpt-6-astra');

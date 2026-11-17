@@ -24,6 +24,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
+import { reconcileModelEffort, resolveEffortModel, resolveModelEffort } from '$lib/constants/model-effort';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
@@ -340,7 +341,12 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// are left out: the backend then keeps the row's value (#418).
 		const binding = sendableComposerBinding(_state);
 		if (binding.permissionMode) overrides.permission_mode = binding.permissionMode;
-		if (_state.effortLevelOverride) overrides.effort = _state.effortLevelOverride;
+		if (_state.effortLevelOverride) {
+			const model = _state.mode === 'voice' ? _state.modelOverride : resolveEffortModel(
+				_state.modelOverride, _state.liveModel, _state.liveRequestedModel, _state.liveProvider, _state.liveRerouted);
+			const level = reconcileModelEffort(_state.effortLevelOverride, resolveModelEffort(model));
+			if (level) overrides.effort = level;
+		}
 		if (_state.sessionId) {
 			// The effort revision this client last saw, with or without a level
 			// (Auto names none): the worker saves the level only while that is
