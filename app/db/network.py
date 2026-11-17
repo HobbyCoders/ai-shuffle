@@ -394,6 +394,9 @@ def _ensure_columns(cursor) -> None:
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
                 ("network_session_active", "snoozed_until", "TEXT"),
+                ("network_session_active", "settlement_generation", "TEXT"),
+                ("network_session_active", "projected_generation", "TEXT"),
+                ("network_session_active", "resume_revision", "BIGINT"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
                 ("network_transcript_backfill_state", "stalled_since", "BIGINT"))
     if type(cursor).__module__.startswith("psycopg2"):

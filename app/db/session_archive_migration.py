@@ -32,6 +32,7 @@ def migrate(cursor):
     cursor.execute("SELECT id FROM sessions WHERE status='archived' ORDER BY id FOR UPDATE")
     ids = [row["id"] for row in cursor.fetchall()]
     snooze_shared = bool(ids) and column_exists(cursor, "network_session_active", "snoozed_until")
+    tracks_settles = bool(ids) and column_exists(cursor, "network_session_active", "settlement_generation")
     for sid in ids:
         cursor.execute("""INSERT INTO network_session_active
             (session_id,is_active,updated_at,local_pending,local_revision,local_revision_epoch)
@@ -51,6 +52,11 @@ def migrate(cursor):
         cursor.execute("UPDATE sessions SET status='active',is_active=FALSE,snoozed_until=NULL WHERE id=%s", (sid,))
         if snooze_shared:
             cursor.execute("UPDATE network_session_active SET snoozed_until=NULL WHERE session_id=%s", (sid,))
+        if tracks_settles:
+            generation = str(uuid4())
+            cursor.execute("""UPDATE network_session_active SET settlement_generation=%s, projected_generation=%s,
+                              resume_revision=COALESCE(resume_revision+1,local_revision) WHERE session_id=%s""",
+                           (generation, generation, sid))
         # Old archive queues are evidence, never invitations to resume on boot.
         cursor.execute("""UPDATE turns SET state='aborted',stop_reason='removed_from_queue',ended_at=NOW()
             WHERE session_id=%s AND state='queued' RETURNING id,source""", (sid,))

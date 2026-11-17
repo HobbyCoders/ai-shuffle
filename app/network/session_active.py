@@ -33,14 +33,27 @@ def project(cursor, record: dict) -> None:
     snoozed = None if record["is_active"] else record.get("snoozed_until")
     cursor.execute("SELECT is_active, snoozed_until, status FROM sessions WHERE id=%s", (record["session_id"],))
     before = cursor.fetchone()
-    if not _snooze_transition(before, record["is_active"], snoozed):
+    sidebar_change = not _snooze_transition(before, record["is_active"], snoozed)
+    generation = record.get("settlement_generation")
+    # Keep a monotone local fence rather than comparing only the wire tokens:
+    # a concurrent winner can bring back an earlier token, but must never
+    # re-arm a resume that an intervening settle already cancelled. Legacy
+    # senders still need the old active-to-active fail-safe.
+    cursor.execute("SELECT projected_generation FROM network_session_active WHERE session_id=%s", (record["session_id"],))
+    projected = cursor.fetchone()
+    previous = (projected and projected["projected_generation"]) or "0"
+    resume_change = sidebar_change if generation is None else (
+        generation != previous or (not record["is_active"] and not snoozed))
+    cursor.execute("UPDATE network_session_active SET resume_revision=COALESCE(resume_revision,local_revision)+%s, "
+                   "projected_generation=%s WHERE session_id=%s", (int(resume_change), generation, record["session_id"]))
+    if sidebar_change or resume_change:
         # Local-only fencing counter: advance for every accepted local or mirrored
         # membership write, even with a frozen clock or while publication is held.
         # Scope counters to this local row's lifetime. Receipts travel with history
         # on handoff, and network reset/rejoin can recreate the membership row.
-        cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
+        cursor.execute("UPDATE network_session_active SET local_revision=local_revision+%s, "
                        "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
-                       "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
+                       "WHERE session_id=%s", (int(sidebar_change), str(uuid4()), record["session_id"]))
     cursor.execute("UPDATE sessions SET is_active=%s, snoozed_until=%s, "
                    "status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
                    (record["is_active"], snoozed, record["session_id"]))
@@ -68,7 +81,7 @@ def _snooze_transition(before, active: bool, snoozed) -> bool:
     if before is None or not session_snooze.runs_work(dict(before)):
         return False
     # Active -> active still fences: it can be a peer's settle + reactivate coalesced
-    # while it was held, which must cancel. Follow-up: a replicated settlement generation.
+    # while it was held, which must cancel on legacy senders.
     return bool(snoozed) or (active and bool(before["snoozed_until"]) and not before["is_active"])
 
 
@@ -91,14 +104,17 @@ def _record_active(cursor, session_id: str, active: bool,
     """Write the shared membership row. Settling or activating clears a snooze;
     ``snoozed_until`` (canonical ISO UTC) with ``active=False`` snoozes."""
     snoozed = None if active else snoozed_until
-    record = {"session_id": session_id, "is_active": active,
+    cursor.execute("SELECT settlement_generation FROM network_session_active WHERE session_id=%s", (session_id,))
+    previous = cursor.fetchone()
+    generation = ((previous and previous["settlement_generation"]) or "0") if active or snoozed else str(uuid4())
+    record = {"session_id": session_id, "is_active": active, "settlement_generation": generation,
               "updated_at": datetime.now(timezone.utc).isoformat(), "snoozed_until": snoozed}
     cursor.execute(
-        "INSERT INTO network_session_active (session_id, is_active, updated_at, snoozed_until, local_pending) "
-        "VALUES (%s, %s, %s, %s, TRUE) "
+        "INSERT INTO network_session_active (session_id, is_active, updated_at, snoozed_until, settlement_generation, local_pending) "
+        "VALUES (%s, %s, %s, %s, %s, TRUE) "
         "ON CONFLICT (session_id) DO UPDATE SET is_active=EXCLUDED.is_active, updated_at=EXCLUDED.updated_at, "
-        "snoozed_until=EXCLUDED.snoozed_until, local_pending=TRUE",
-        (session_id, active, record["updated_at"], snoozed),
+        "snoozed_until=EXCLUDED.snoozed_until, settlement_generation=EXCLUDED.settlement_generation, local_pending=TRUE",
+        (session_id, active, record["updated_at"], snoozed, generation),
     )
     project(cursor, record)
     # While publishing is held, the scanner signs this durable row later.

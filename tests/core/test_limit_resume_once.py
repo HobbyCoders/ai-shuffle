@@ -278,11 +278,39 @@ async def test_a_settle_while_snoozed_still_cancels_the_resume(stopped_chat, mon
     submit.assert_not_awaited()
 
 
-async def test_a_second_wake_as_active_to_active_drops_the_resume_fail_safe(stopped_chat, monkeypatch):
+@pytest.mark.parametrize("settled", [False, True])
+async def test_second_wake_retains_resume_unless_peer_settled(stopped_chat, monkeypatch, settled):
+    from app.network import session_active, policy, engine
+    turn, _, _ = stopped_chat
+    await lr.arm("once-chat", turn["id"])
+    [wake] = wakeups.get_session_wakeups("once-chat", lr.LIMIT_RESUME_SOURCE)
+    session_active.write_shared("once-chat", False, _later())
+    session_active.write_shared("once-chat", True)
+    # The generation is part of the row the scanner publishes, even when an
+    # intermediate settle never left the peer. Simulate that peer on a second chat.
+    database.create_session("peer", "once-agent", is_active=True)
+    session_active.write_shared("peer", False, _later())
+    if settled:
+        session_active.write_shared("peer", False)
+    session_active.write_shared("peer", True)
+    coll = policy.collection("session_active")
+    with get_db() as conn:
+        cur = conn.cursor()
+        record = engine.serialize_row(coll, engine._read_row(cur, coll, "peer"), cursor=cur)
+        record["session_id"] = "once-chat"
+        engine.materialize(cur, coll, "once-chat", record)
+        engine._after_mirror(cur, coll, record)
+    fired, submit = await _fires(wake, monkeypatch)
+    if settled:
+        assert fired is None
+        submit.assert_not_awaited()
+    else:
+        assert fired == "resume-turn"
+
+
+async def test_a_legacy_active_to_active_drops_the_resume_fail_safe(stopped_chat, monkeypatch):
     """Fail safe (S9): an active -> active projection may be a held peer's settle +
-    reactivate coalesced into one row, which must cancel. So a second, concurrent
-    wake also drops the resume (the owner can re-arm). Follow-up: a replicated
-    settlement generation would tell the two apart."""
+    reactivate coalesced into one row. Without a generation we cannot tell."""
     from app.network import session_active
     turn, _, _ = stopped_chat
     await lr.arm("once-chat", turn["id"])

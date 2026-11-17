@@ -411,6 +411,8 @@ def _serialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
         # Active is never snoozed. An unsnoozed record omits the late field,
         # exactly as an older build signs it.
         record.pop("snoozed_until", None)
+    if record.get("settlement_generation") is None:
+        record.pop("settlement_generation", None)
     return record
 
 
@@ -425,15 +427,16 @@ def _materialize_session_active(record: Dict[str, Any]) -> Dict[str, Any]:
         record["snoozed_until"] = None
     else:
         record.setdefault("snoozed_until", None)
+    record.setdefault("settlement_generation", None)  # mixed-version peer
     return record
 
 
 _register(Collection(
     name="session_active", table="network_session_active", keys=("session_id",),
-    fields=("session_id", "is_active", "updated_at", "snoozed_until"), resource="sessions", priority=89,
+    fields=("session_id", "is_active", "updated_at", "snoozed_until", "settlement_generation"), resource="sessions", priority=89,
     serialize_hook=_serialize_session_active,
     materialize_hook=_materialize_session_active,
-    late_fields=("snoozed_until",),
+    late_fields=("snoozed_until", "settlement_generation"),
     notes="Active/Settled/Snoozed membership editable on any worker, including while the execution owner is "
           "offline. Last writer wins; projected onto the session catalog without changing execution ownership. "
           "snoozed_until (ISO-8601 UTC, settled rows only) is optional: an older peer's record omits it, "

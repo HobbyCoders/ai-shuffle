@@ -863,7 +863,7 @@ def _once_fence(session_id: str) -> Dict[str, Any]:
     session = database.get_session(session_id) or {}
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("SELECT local_revision, local_revision_epoch FROM network_session_active "
+        cur.execute("SELECT COALESCE(resume_revision,local_revision) AS local_revision, local_revision_epoch FROM network_session_active "
                     "WHERE session_id=%s", (session_id,))
         membership = cur.fetchone()
     return {"instance_id": session.get("instance_id"),
