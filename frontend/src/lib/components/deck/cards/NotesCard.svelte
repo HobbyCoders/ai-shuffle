@@ -51,6 +51,8 @@
 	let notes = $state<Note[]>([]);
 	let tags = $state<NoteTag[]>([]);
 	let loading = $state(true);
+	let listRequest = 0;
+	let listIsComplete = $state(false);
 	let error = $state<string | null>(null);
 
 	// Filter state
@@ -239,6 +241,9 @@
 
 	// Load notes and tags
 	async function loadData(quiet = false) {
+		const request = ++listRequest;
+		const filtered = !!(searchQuery || selectedTag);
+		listIsComplete = false;
 		if (!quiet) loading = true;
 		error = null;
 
@@ -250,12 +255,16 @@
 				}),
 				getNoteTags()
 			]);
+			if (request !== listRequest) return;
 			notes = notesData;
 			tags = tagsData;
+			// GET /notes defaults to 100 rows. A full page or filtered list can't
+			// prove that a historical note has been deleted.
+			listIsComplete = !filtered && notesData.length < 100;
 		} catch (e) {
-			error = e instanceof Error ? e.message : 'Failed to load notes';
+			if (request === listRequest) error = e instanceof Error ? e.message : 'Failed to load notes';
 		} finally {
-			loading = false;
+			if (request === listRequest) loading = false;
 		}
 	}
 
@@ -849,7 +858,7 @@
 	function restoreSelection(key: string, current: () => boolean) {
 		if (key === 'new') { void changeEditor(resetNewNote, current); return; }
 		const note = notes.find(n => n.id === key);
-		if (!note) return loading ? 'pending' : 'missing';
+		if (!note) return listIsComplete ? 'missing' : 'pending';
 		untrack(() => openNote(note, current));
 	}
 </script>
