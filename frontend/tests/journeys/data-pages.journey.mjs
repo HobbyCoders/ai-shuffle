@@ -165,10 +165,11 @@ await runJourney({
    for(const label of ['Agents','Projects']) {
     await mark('measure '+label+' rows');
     await open(label);
-    await page.locator('.view-panel .st-it').filter({visible:true}).first().waitFor();
-    const m=await page.evaluate(() => {
+    // The outgoing panel can still have visible rows while the next one loads.
+    const rows=page.locator('.st-it:not(.value):not(.card):visible');
+    const panel=page.locator(`.view-panel[aria-label="${label}"]:not([aria-busy="true"]):visible`).filter({has:rows});
+    const m=await panel.evaluate(panel => {
      const vis=e=>e.getClientRects().length>0;
-     const panel=[...document.querySelectorAll('.view-panel')].find(vis);
      const body=panel.querySelector('.panel-body');
      const B=e=>{const r=e.getBoundingClientRect();return {l:r.left,r:r.right};};
      const rows=[...panel.querySelectorAll('.st-it:not(.value):not(.card)')].filter(vis).map(row=>{
