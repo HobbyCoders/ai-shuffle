@@ -689,34 +689,46 @@ def _format_cell_traceback(exc: BaseException) -> tuple[str, str, str]:
         message = getattr(te, "_str", "")
         message = " ".join(message.split()) if type(message) is str else ""
         summary = _type_name(exc) + (f": {message}" if message else "")
-        summary = truncate.clip_part(summary, truncate.ERROR_SUMMARY_CAP)
-        if len(full) <= truncate.ERROR_PART_CAP:
-            return full, full, summary
-        _clip_parts(te, set())
-        return render(), full, summary
+        summary = truncate.clip_part(_scrub_host_paths(summary), truncate.ERROR_SUMMARY_CAP)
     except BaseException:
         line = f"{_type_name(exc)}: {_UNREPRESENTABLE}"
         return line + "\n", line + "\n", line
+    if len(full) <= truncate.ERROR_PART_CAP:
+        return full, full, summary
+    try:
+        _clip_parts(te)
+        return render(), full, summary
+    except BaseException:
+        # Clipping is only an improvement: the whole rendering and summary
+        # are already in hand, and the caller's backstop bounds them.
+        return full, full, summary
 
 
-def _clip_parts(te, seen: set) -> None:
-    """Clip every message, note and SyntaxError line in ``te``'s tree in place."""
-    if te is None or id(te) in seen:
-        return
-    seen.add(id(te))
-    for attr in ("_str", "msg", "text"):
-        value = getattr(te, attr, None)
-        if type(value) is str and len(value) > truncate.ERROR_PART_CAP:
-            setattr(te, attr, truncate.clip_part(value))
-    notes = getattr(te, "__notes__", None)
-    if type(notes) is list:
-        te.__notes__ = [
-            truncate.clip_part(n) if type(n) is str else n for n in notes
-        ]
-    _clip_parts(getattr(te, "__cause__", None), seen)
-    _clip_parts(getattr(te, "__context__", None), seen)
-    for child in getattr(te, "exceptions", None) or ():
-        _clip_parts(child, seen)
+def _clip_parts(root) -> None:
+    """Clip every message, note and SyntaxError line in ``root``'s tree in place.
+
+    Iterative: a cell can chain thousands of exceptions, past the recursion
+    limit. ``seen`` stops a cycle.
+    """
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        te = stack.pop()
+        if te is None or id(te) in seen:
+            continue
+        seen.add(id(te))
+        for attr in ("_str", "msg", "text"):
+            value = getattr(te, attr, None)
+            if type(value) is str and len(value) > truncate.ERROR_PART_CAP:
+                setattr(te, attr, truncate.clip_part(value))
+        notes = getattr(te, "__notes__", None)
+        if type(notes) is list:
+            te.__notes__ = [
+                truncate.clip_part(n) if type(n) is str else n for n in notes
+            ]
+        stack.append(getattr(te, "__cause__", None))
+        stack.append(getattr(te, "__context__", None))
+        stack.extend(getattr(te, "exceptions", None) or ())
 
 
 _KERNEL_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1034,7 +1046,8 @@ def _exec_cell(code: str):
         err, full, summary = _format_cell_traceback(exc)
     if err is not None:
         err = truncate.bound_error(err, summary)
-        _FULL_ERROR[:] = [truncate.bounded_full_stdout(full) if err != full else "", summary]
+        _FULL_ERROR[:] = [
+            truncate.bounded_full_stdout(full, what="the error") if err != full else "", summary]
     return value_repr, err
 
 

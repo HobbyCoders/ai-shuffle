@@ -304,3 +304,66 @@ async def test_a_short_traceback_is_unchanged(tmp_path) -> None:
     outcome, ctx = await _run_python(tmp_path, "x = {}\nx['missing']\n")
     assert "KeyError: 'missing'" in outcome.text and "saved to" not in outcome.text
     assert spill.session_stats(ctx) == {}
+
+
+async def test_a_thousand_link_chain_is_bounded_not_lost(tmp_path) -> None:
+    code = (
+        "e = None\n"
+        "for i in range(1200):\n"
+        "    try:\n"
+        "        raise ValueError(f'link {i}') from e\n"
+        "    except ValueError as x:\n"
+        "        e = x\n"
+        "raise RuntimeError('final ' + 'z' * 3000) from e\n"
+    )
+    result = await _run_cell(_registry(), _ctx(tmp_path), code)
+    assert len(result.error) < cm_truncate.ERROR_CAP + 400
+    assert result.error_summary.startswith("RuntimeError: final zzz")
+    assert result.error.startswith("[the cell ended with: RuntimeError: final")
+    assert "unrepresentable" not in result.error
+    assert "ValueError: link 1199" in result.error_full
+    assert len(result.error_full) > 100_000
+
+
+def test_the_summary_scrubs_home_paths_like_the_error(monkeypatch) -> None:
+    # The cell cannot import os, so drive the formatter in-process with a
+    # known home; the kernel runs this same function.
+    from fluid.codemode import _runner
+
+    monkeypatch.setattr(_runner, "_HOME_DIR", "/home/someone")
+    try:
+        raise ValueError("/home/someone/proj/app.py is broken")
+    except ValueError as exc:
+        err, full, summary = _runner._format_cell_traceback(exc)
+    assert err.endswith("ValueError: ~/proj/app.py is broken\n")
+    assert summary == "ValueError: ~/proj/app.py is broken"
+
+
+async def test_a_capped_error_spill_says_only_its_head_and_tail_were_kept(tmp_path) -> None:
+    code = "raise ValueError('h' * 10 + 'x' * 4_400_000 + 't' * 10)\n"
+    outcome, _ = await _run_python(tmp_path, code)
+    half = cm_truncate.FULL_STDOUT_MAX // 2
+    assert f"its first and last {half:,} chars saved to" in outcome.text
+    assert "all " not in outcome.text.split("cell error clipped;")[1][:5]
+    saved = Path(re.search(r"chars saved to (.+?\.txt)", outcome.text).group(1))
+    body = saved.read_text(encoding="utf-8")
+    assert "chars of the error not kept]" in body and "cell stdout" not in body
+    # A normal clipped error keeps the exact wording.
+    outcome, _ = await _run_python(tmp_path, "raise ValueError('y' * 30000)\n")
+    assert re.search(r"\[cell error clipped; all [\d,]+ chars saved to ", outcome.text)
+
+
+def test_a_failed_clip_falls_back_to_the_whole_rendering(monkeypatch) -> None:
+    from fluid.codemode import _runner
+
+    def boom(_te) -> None:
+        raise RecursionError("too deep")
+
+    monkeypatch.setattr(_runner, "_clip_parts", boom)
+    try:
+        raise ValueError("v" * 30000)
+    except ValueError as exc:
+        err, full, summary = _runner._format_cell_traceback(exc)
+    assert err == full and "v" * 30000 in full
+    assert summary.startswith("ValueError: vvv")
+    assert len(cm_truncate.bound_error(err, summary)) < cm_truncate.ERROR_CAP + 400

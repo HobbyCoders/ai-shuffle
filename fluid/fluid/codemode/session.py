@@ -260,8 +260,13 @@ def _spill_cell_error(full: str, ctx: Any) -> str:
     path = spill.write_spill(full, ctx=ctx, tool="run_python")
     if path is None:
         return ""
+    if len(full) > FULL_STDOUT_MAX:
+        # The kernel held the error to FULL_STDOUT_MAX: only its head and tail.
+        saved = f"its first and last {FULL_STDOUT_MAX // 2:,} chars"
+    else:
+        saved = f"all {len(full):,} chars"
     return (
-        f"[cell error clipped; all {len(full):,} chars saved to {path} "
+        f"[cell error clipped; {saved} saved to {path} "
         f"(session scratch) — {spill.READ_HINT}]"
     )
 

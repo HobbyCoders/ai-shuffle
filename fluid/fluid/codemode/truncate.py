@@ -199,13 +199,16 @@ def bound_error(text: str, summary: str, limit: int = ERROR_CAP) -> str:
     )
 
 
-def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX) -> str:
-    """``text`` held to ``limit`` chars for the spill file, head and tail kept."""
+def bounded_full_stdout(text: str, limit: int = FULL_STDOUT_MAX, *, what: str = "cell stdout") -> str:
+    """``text`` held to ``limit`` chars for the spill file, head and tail kept.
+
+    Only a cut result is longer than ``limit`` (the marker pushes it over).
+    """
     if len(text) <= limit:
         return text
     half = limit // 2
     dropped = len(text) - 2 * half
-    return f"{text[:half]}\n…[{dropped:,} chars of cell stdout not kept]…\n{text[-half:]}"
+    return f"{text[:half]}\n…[{dropped:,} chars of {what} not kept]…\n{text[-half:]}"
 
 
 _NAMED_DROPS = 2  # how many of the heaviest drops the notice names
