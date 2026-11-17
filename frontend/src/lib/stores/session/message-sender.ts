@@ -24,11 +24,11 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 // Arbiter of which pending ("not seen yet") bubbles survive.
 import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
-import { reconcileModelEffort, resolveEffortModel, resolveModelEffort } from '$lib/constants/model-effort';
+import { fittedSendEffort } from '$lib/constants/model-effort';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
-import { effortRevToSend, noteEffortSend } from './effort-revision';
+import { effortPickToSend, effortRevToSend, noteEffortSend } from './effort-revision';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
@@ -193,6 +193,7 @@ function uniqueBranchName(branchName: string): string {
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
 export interface MessageSenderDeps {
+	onEffortAnswer?: (answer: Record<string, unknown>) => void;
 	update: (fn: (s: ActiveSessionState) => ActiveSessionState) => void;
 	getState: () => ActiveSessionState;
 	internal: InternalMutableState;
@@ -214,7 +215,7 @@ export interface MessageSenderDeps {
 		loadApiUserSessions: () => void;
 		/** The sidebar's chats: the ones a compose started now cannot create. */
 		current?: {
-			sessions: { id: string; effort?: string | null; effort_rev?: number }[];
+			sessions: { id: string; effort?: string | null; effort_rev?: number; effort_pick?: string | null }[];
 			/** Which shared projects this worker has a checkout of. */
 			clusterProjects?: { project_v2_id: string; local_project_id: string | null }[];
 		};
@@ -342,9 +343,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		const binding = sendableComposerBinding(_state);
 		if (binding.permissionMode) overrides.permission_mode = binding.permissionMode;
 		if (_state.effortLevelOverride) {
-			const model = _state.mode === 'voice' ? _state.modelOverride : resolveEffortModel(
-				_state.modelOverride, _state.liveModel, _state.liveRequestedModel, _state.liveProvider, _state.liveRerouted);
-			const level = reconcileModelEffort(_state.effortLevelOverride, resolveModelEffort(model));
+			const level = fittedSendEffort(_state);
 			if (level) overrides.effort = level;
 		}
 		if (_state.sessionId) {
@@ -354,7 +353,11 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// one (#1609). See effort-revision.ts.
 			const effortRev = effortRevToSend(_state,
 				deps.appData.current?.sessions.find(s => s.id === _state.sessionId));
-			if (effortRev !== undefined) overrides.effort_rev = effortRev;
+			if (effortRev !== undefined) {
+				overrides.effort_rev = effortRev;
+				const pick = effortPickToSend(_state, deps.appData.current?.sessions.find(s => s.id === _state.sessionId));
+				if (pick) overrides.effort_pick = pick;
+			}
 		}
 		// Always an explicit boolean. Omitting the key when fast mode is OFF made
 		// the backend fall back to the session row, which still held the earlier
@@ -541,13 +544,18 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				try {
 					// Race only persistence, not a continuation that sends: after the
 					// deadline this attempt is dead even if the PATCH later succeeds.
-					await Promise.race([
-						persistVoiceContext(_state.sessionId, voiceContextFor(_state,
-							deps.appData.current?.sessions.find(s => s.id === _state.sessionId))),
+					const context = voiceContextFor(_state, deps.appData.current?.sessions.find(s => s.id === _state.sessionId));
+					const command = newLocalPendingId();
+					noteEffortSend(_state.sessionId, command, context.effort_rev, _state.effortPick);
+					const answer = await Promise.race([
+						persistVoiceContext(_state.sessionId, context),
 						new Promise<never>((_, reject) => {
 							contextTimeout = setTimeout(() => reject(new Error('Voice context save timed out')), VOICE_CONTEXT_SAVE_TIMEOUT_MS);
 						})
 					]);
+					if (answer && typeof answer.effort_rev === 'number') deps.onEffortAnswer?.({
+						...answer, type: 'effort_restored', session_id: _state.sessionId, client_message_id: command,
+					});
 				} catch {
 					update(s => s.sessionId === _state.sessionId ? { ...s, error: 'Could not save voice execution settings. Your message has been kept.' } : s);
 					return false;
@@ -841,7 +849,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				const remoteOnly = !_state.project && !!_state.projectV2Id;
-				noteEffortSend(_state.sessionId, clientMessageId, overrides?.effort_rev);
+				noteEffortSend(_state.sessionId, clientMessageId, overrides?.effort_rev, _state.effortPick);
 				const query = {
 					type: 'query',
 					client_message_id: clientMessageId,

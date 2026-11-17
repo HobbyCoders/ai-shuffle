@@ -35,6 +35,7 @@ class VoiceContextPatch(BaseModel):
     # saved only while that is still the row's revision, or, with no revision,
     # only while the row is at revision 0. The run-settings PUT picks a level.
     effort_rev: Optional[int] = Field(None, ge=0)
+    effort_pick: Optional[str] = Field(None, max_length=32)
     permission_mode: Optional[str] = None
     context_window: Optional[int] = Field(None, gt=0)
     fast: Optional[bool] = None
@@ -42,6 +43,8 @@ class VoiceContextPatch(BaseModel):
 
 class VoiceContextResponse(BaseModel):
     session_id: str
+    effort_rev: Optional[int] = None  # only the execution owner acknowledges effort
+    effort_pick: Optional[str] = None
     model: Optional[str] = None
     effort: Optional[str] = None
     permission_mode: Optional[str] = None
@@ -119,6 +122,7 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
     # it; one the model does not offer is ignored (null still clears the pin).
     window = kwargs.pop("context_window") if kwargs.get("context_window") else None
     effort_rev = kwargs.pop("effort_rev", None)
+    effort_pick = kwargs.pop("effort_pick", None)
     if "effort" in kwargs:
         # A snapshot is admitted like a send's level (#1609): a level from a
         # view older than the row's revision, or one without a revision over
@@ -126,7 +130,7 @@ def _persist_patch(session_id: str, body: VoiceContextPatch) -> dict:
         effort = kwargs.pop("effort")
         database.set_session_run_binding(
             session_id, effort=effort, clear_effort=effort is None,
-            effort_rev_base=effort_rev)
+            effort_rev_base=effort_rev, effort_pick_base=effort_pick)
     row = database.get_session(session_id) or {}
     if kwargs:
         if row.get("mode") == "voice":
@@ -174,22 +178,22 @@ async def update_voice_session_context(
     # Other call context is still local. A mirror must not announce its copy
     # as the result of an effort write it never made.
     if "effort" in body.model_fields_set and await run_sync(control.owner_of, session) is not None:
-        body = VoiceContextPatch.model_validate(body.model_dump(exclude_unset=True, exclude={"effort", "effort_rev"}))
+        body = VoiceContextPatch.model_validate(body.model_dump(exclude_unset=True, exclude={"effort", "effort_rev", "effort_pick"}))
     updated = await run_sync(_persist_patch, session_id, body)
     saved_rev = int(updated.get("effort_rev") or 0)
-    sent_effort = (body.effort or "").strip() or None
-    if "effort" in body.model_fields_set and (
-            saved_rev != (body.effort_rev or 0) or updated.get("effort") != sent_effort):
+    if "effort" in body.model_fields_set and saved_rev > (body.effort_rev or 0):
         # The sender's view was outdated (or this changed the level): every
         # open client, the sender included, adopts the saved pair.
         from app.core import turn_manager
 
         await turn_manager.announce_effort(
-            session_id, {"effort": updated.get("effort"), "effort_rev": saved_rev})
+            session_id, {"effort": updated.get("effort"), "effort_rev": saved_rev, "effort_pick": updated.get("effort_pick")})
     return VoiceContextResponse(
         session_id=session_id,
         model=updated.get("model"),
         effort=updated.get("effort"),
+        effort_rev=saved_rev if "effort" in body.model_fields_set else None,
+        effort_pick=updated.get("effort_pick") if "effort" in body.model_fields_set else None,
         permission_mode=updated.get("permission_mode"),
         context_window=updated.get("context_window"),
         fast=updated.get("fast"),

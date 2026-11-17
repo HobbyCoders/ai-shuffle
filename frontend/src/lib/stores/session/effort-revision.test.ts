@@ -11,6 +11,11 @@ it('only resets the sending chat for its still-current request; a later pick win
 	expect(takeEffortRecovery('a', 'second', 1, 7)).toBe(false);
 });
 
+it('cannot use a call answer after another pick reused the held counter', () => {
+	noteEffortSend('a', 'call', 2, 'old');
+	expect(takeEffortRecovery('a', 'call', 1, 2, 'fresh')).toBe(false);
+});
+
 describe('effortRevOf', () => {
 	it('reads a count and nothing else', () => {
 		expect(effortRevOf(0)).toBe(0);

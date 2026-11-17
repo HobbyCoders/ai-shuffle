@@ -844,7 +844,7 @@ async def _start_background_turn(
                 turn_manager.persist_send_binding, session_id, overrides, effort_rev,
                 permission_mode=overrides.get("permission_mode"), effort_seen=effort_seen,
             )
-            if effort_seen and effort_seen["effort_rev"] >= (effort_rev or 0):
+            if effort_seen and effort_seen["effort_rev"] > (effort_rev or 0):
                 await turn_manager.announce_effort(session_id, effort_seen)
             if overrides.get("context_window"):
                 # The picker's check, against the model just saved: a window

@@ -149,6 +149,7 @@ export interface VoiceExecutionContext {
 	effort?: string | null;
 	/** The revision `effort` was last saved at (#1609); see voiceContextFor. */
 	effort_rev?: number;
+	effort_pick?: string | null;
 	permission_mode?: string | null;
 	context_window?: number | null;
 	fast?: boolean | null;

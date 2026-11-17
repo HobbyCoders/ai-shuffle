@@ -430,6 +430,7 @@ class Session(SessionBase):
     # revision it last saw with each message, and adopts a level it is told
     # about only when its revision is newer than the one it holds.
     effort_rev: int = 0
+    effort_pick: Optional[str] = None
     permission_mode: Optional[str] = None
     context_window: Optional[int] = None
     # What this session actually RAN on, as opposed to what was picked.
@@ -666,6 +667,7 @@ class QueryOverrides(BaseModel):
     # The session's effort revision as the caller last saw it (#1609): a level
     # sent with an older one runs on the saved level and is not saved.
     effort_rev: Optional[int] = Field(None, ge=0)
+    effort_pick: Optional[str] = Field(None, max_length=32)
 
 
 class QueryRequest(BaseModel):

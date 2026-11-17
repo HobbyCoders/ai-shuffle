@@ -1940,10 +1940,11 @@ class ChatWebSocketHandler:
                 await self.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
                 return
             if isinstance(submitted, dict) and type(submitted.get("effort_rev")) is int:
-                if submitted["effort_rev"] < (requested_rev or 0):
+                if submitted["effort_rev"] <= (requested_rev or 0):
                     await self.send_json({"type": "effort_restored", "session_id": session_id,
                                           "client_message_id": client_message_id,
-                                          "effort": submitted.get("effort"), "effort_rev": submitted["effort_rev"]})
+                                          "effort": submitted.get("effort"), "effort_rev": submitted["effort_rev"],
+                                          "effort_pick": submitted.get("effort_pick")})
                 else:
                     await turn_manager.announce_effort(session_id, submitted)
             if not client_message_id:
@@ -1972,7 +1973,7 @@ class ChatWebSocketHandler:
             # three places a person-entered row is admitted, for the owner only.
             person_entered=self._person_entry,
         )
-        if seen and seen["effort_rev"] < (requested_rev or 0):
+        if seen and seen["effort_rev"] <= (requested_rev or 0):
             await self.send_json({"type": "effort_restored", "session_id": session_id,
                                   "client_message_id": client_message_id, **seen})
 

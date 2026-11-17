@@ -251,6 +251,7 @@ JSON body, all optional:
 |-------|-------|
 | `model` | A model id, or a provider model selection (`prov:...`) that must exist on that provider |
 | `effort` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` or `ultra` |
+| `effort_pick` | Send the opaque identity observed alongside `effort_rev`. Only the execution owner returns an authoritative revision and identity; a mirror cannot acknowledge a saved effort. Idle composer updates omit all three effort fields. |
 | `effort_rev` | Optional. The chat's effort revision (`effort_rev` on the session) your `effort` was read at. With it, `effort` is saved only while that is still the chat's revision, so a level read before someone else changed it is not written back. Without it, `effort` is saved only while the chat's `effort_rev` is 0, so it never replaces a level picked since. Either way the rest of the PATCH still applies, and the saved level is sent to open clients when it differs from what you sent. To change a chat's level, use `PUT /sessions/{id}/run-settings` |
 | `permission_mode` | `default`, `auto`, `acceptEdits` or `bypassPermissions` |
 | `context_window` | Integer greater than 0 |
