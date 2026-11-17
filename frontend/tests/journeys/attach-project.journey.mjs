@@ -143,7 +143,7 @@ async function twoChatsWithoutProject(ctx) {
 }
 
 /** Press Attach with the answer held, move back to the other chat, then let the answer through. */
-function lateAnswerAfterSwitch(fail) {
+function lateAnswerAfterSwitch(fail, returnFirst = false) {
 	return async ({ page, mark, state, status }) => {
 		await mark('open the sheet and pick a project');
 		await openSheetAndPick(page);
@@ -156,6 +156,15 @@ function lateAnswerAfterSwitch(fail) {
 		await waitChatOpen(page, { messagesAtLeast: 2, hold: 500 });
 		expect(!(await sheet(page).isVisible()), 'the sheet closed when the page moved to the other chat');
 		expect((await pill(page).getAttribute('aria-expanded')) === 'false', 'the other chat\'s pill is not expanded');
+		if (returnFirst) {
+			await page.goForward();
+			await waitChat(page, { session: state.a.tag, loading: 'false' });
+			attach.release();
+			await within(attach.delivered, 60_000, 'A receives the delayed refusal');
+			await page.getByRole('alert').filter({ hasText: 'journey: attach refused late' }).waitFor();
+			expect(!(await sheet(page).isVisible()), 'the old sheet was not reopened');
+			return;
+		}
 		await mark('the attach answer arrives late');
 		attach.release();
 		await within(attach.done, 60_000, 'the late attach answer');
@@ -241,6 +250,12 @@ await runJourney({
 			}
 		},
 		{ name: 'late-success-after-switch', setup: twoChatsWithoutProject, act: lateAnswerAfterSwitch(false) },
+		{
+			name: 'late-error-after-return',
+			setup: twoChatsWithoutProject,
+			act: lateAnswerAfterSwitch(true, true),
+			allow: [{ kind: 'failed_requests', status: 409, url: /\/attach-project$/, reason: 'the held request is refused' }]
+		},
 		{
 			name: 'late-error-after-switch',
 			setup: twoChatsWithoutProject,
