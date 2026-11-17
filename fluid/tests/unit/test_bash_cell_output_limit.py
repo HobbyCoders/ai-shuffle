@@ -25,6 +25,7 @@ import re
 import sys
 from pathlib import Path
 
+from fluid.codemode import truncate as cm_truncate
 from fluid.codemode.bridge import HostBridge
 from fluid.codemode.projection import Projection
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
@@ -160,12 +161,12 @@ class _Loop:
         self.events.append(event)
 
 
-async def _run_python(tmp_path: Path, code: str):
+async def _run_python(tmp_path: Path, code: str, *, skills=None):
     from fluid.codemode.session import CodeModeSession
 
     registry = _registry()
     ctx = _ctx(tmp_path)
-    session = CodeModeSession(registry)
+    session = CodeModeSession(registry, skills=skills)
     try:
         outcome = await session.run_python(
             sid="s1", turn_id="t1", input={"code": code, "timeout": 30},
@@ -176,29 +177,25 @@ async def _run_python(tmp_path: Path, code: str):
     return outcome, ctx
 
 
-async def test_an_exception_carrying_the_bash_value_is_bounded(tmp_path) -> None:
-    from fluid.codemode.session import _CELL_ERROR_CAP
+_BASH_30K = f"from tools.Bash import Bash\nr = Bash(command={_json_command(300)!r})\n"
+# Room for the fence, the spill pointer and the committed-calls manifest.
+_SLACK = 2_000
 
-    code = (
-        "from tools.Bash import Bash\n"
-        f"r = Bash(command={_json_command(300)!r})\n"
-        "raise ValueError(str(r.output) + 'END-OF-MESSAGE')\n"
-    )
-    outcome, _ = await _run_python(tmp_path, code)
+
+async def test_an_exception_carrying_the_bash_value_is_bounded(tmp_path) -> None:
+    code = _BASH_30K + "raise ValueError(str(r.output) + 'END-OF-MESSAGE')\n"
+    outcome, ctx = await _run_python(tmp_path, code)
     assert outcome.is_error
-    assert len(outcome.text) < _CELL_ERROR_CAP + 2_000
-    assert "ValueError: " in outcome.text
-    assert "END-OF-MESSAGE" in outcome.text  # the tail survives
-    saved = Path(re.search(r"full error saved to (.+?\.txt)", outcome.text).group(1))
+    assert len(outcome.text) < cm_truncate.ERROR_CAP + _SLACK
+    assert "ValueError: {" in outcome.text
+    assert "END-OF-MESSAGE" in outcome.text  # the message keeps its tail
+    saved = Path(re.search(r"chars saved to (.+?\.txt)", outcome.text).group(1))
     assert '"n": 150' in saved.read_text(encoding="utf-8")
+    assert spill.session_stats(ctx)["spilled"] == {"run_python": 1}
 
 
 async def test_a_long_note_on_a_chained_exception_keeps_the_final_type(tmp_path) -> None:
-    from fluid.codemode.session import _CELL_ERROR_CAP
-
-    code = (
-        "from tools.Bash import Bash\n"
-        f"r = Bash(command={_json_command(300)!r})\n"
+    code = _BASH_30K + (
         "try:\n"
         "    raise ValueError(str(r.output))\n"
         "except ValueError as e:\n"
@@ -208,18 +205,102 @@ async def test_a_long_note_on_a_chained_exception_keeps_the_final_type(tmp_path)
     )
     outcome, _ = await _run_python(tmp_path, code)
     assert outcome.is_error
-    assert len(outcome.text) < _CELL_ERROR_CAP + 2_000
-    assert "[the cell ended with: RuntimeError: parse step failed]" in outcome.text
-    assert "full error saved to" in outcome.text
+    assert len(outcome.text) < cm_truncate.ERROR_CAP + _SLACK
+    # Each link is clipped on its own, so both frames and both types survive.
+    assert "ValueError: {" in outcome.text
+    assert "RuntimeError: parse step failed" in outcome.text
+    assert outcome.text.count('File "<cell>"') == 2
+    assert "chars saved to" in outcome.text
+
+
+async def test_a_frame_lookalike_in_a_message_does_not_fool_the_summary(tmp_path) -> None:
+    code = (
+        "try:\n"
+        "    raise KeyError('x' * 30000)\n"
+        "except KeyError as e:\n"
+        "    raise RuntimeError('actual error\\n  File \"not-a-frame\", line 1\\n'\n"
+        "                       'misleading detail\\n' + 'y' * 30000) from e\n"
+    )
+    result = await _run_cell(_registry(), _ctx(tmp_path), code)
+    assert len(result.error) < cm_truncate.ERROR_CAP
+    assert "RuntimeError: actual error" in result.error
+    assert result.error_summary.startswith("RuntimeError: actual error")
+    assert "misleading" not in result.error_summary.split("File")[0]
+    outcome, _ = await _run_python(tmp_path, code)
+    assert "RuntimeError: actual error" in outcome.text
+    assert "[the cell ended with: misleading detail]" not in outcome.text
+
+
+async def test_an_exception_group_raised_from_a_long_cause_keeps_its_heading(tmp_path) -> None:
+    code = (
+        "try:\n"
+        "    raise KeyError('k' * 30000)\n"
+        "except KeyError as e:\n"
+        "    raise ExceptionGroup('batch failed', [RuntimeError('child broke')]) from e\n"
+    )
+    result = await _run_cell(_registry(), _ctx(tmp_path), code)
+    assert len(result.error) < cm_truncate.ERROR_CAP
+    assert "ExceptionGroup: batch failed (1 sub-exception)" in result.error
+    assert "RuntimeError: child broke" in result.error
+    assert result.error_summary == "ExceptionGroup: batch failed (1 sub-exception)"
+
+
+async def test_many_clipped_parts_hit_the_backstop_with_a_summary(tmp_path) -> None:
+    code = "raise ExceptionGroup('many', [ValueError('v' * 30000) for _ in range(15)])\n"
+    result = await _run_cell(_registry(), _ctx(tmp_path), code)
+    assert len(result.error) < cm_truncate.ERROR_CAP + 200
+    assert result.error.startswith("[the cell ended with: ExceptionGroup: many (15 sub-exceptions)]")
+    assert len(result.error_full) > 15 * 30_000
+
+
+async def test_the_journal_and_learner_prompt_hold_only_the_summary(tmp_path) -> None:
+    from fluid.codemode.continual import Synthesizer
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    code = _BASH_30K + "raise ValueError(str(r.output))\n"
+    await _run_python(tmp_path, code, skills=store)
+    entries = store.journal_entries()
+    error = entries[-1]["error"]
+    assert error.startswith("ValueError: {") and len(error) <= cm_truncate.ERROR_SUMMARY_CAP
+    prompt = Synthesizer(None, "probe", store, context_window=200_000)._prompt(entries)
+    assert '"n": 150' not in prompt
+
+
+async def test_a_broken_skill_verdict_and_listing_are_bounded(tmp_path) -> None:
+    from fluid.codemode.session import CodeModeSession, register_code_mode_tools
+    from fluid.codemode.skills import SkillStore
+
+    store = SkillStore(tmp_path / "skills")
+    store.save("broken", '"""A probe."""\ndef _selftest():\n'
+               '    raise ValueError("x" * 30000 + "END_ERROR")\n')
+    registry = _registry()
+    ctx = _ctx(tmp_path)
+    session = CodeModeSession(registry, skills=store)
+    register_code_mode_tools(registry, session)
+    try:
+        await session.run_python(
+            sid="s1", turn_id="t1", input={"code": "print(42)", "timeout": 30},
+            loop=_Loop(registry, ctx),
+        )
+        listing = await registry.dispatch("list_tools", {}, ctx)
+    finally:
+        await session.aclose()
+    broken = store.get("broken").broken
+    assert broken.startswith("ValueError: xxx") and len(broken) <= cm_truncate.ERROR_SUMMARY_CAP
+    assert "BROKEN" in listing.text and len(listing.text) < 3_000
 
 
 async def test_a_short_traceback_is_unchanged(tmp_path) -> None:
-    from fluid.codemode.session import _bound_cell_error
-
+    result = await _run_cell(_registry(), _ctx(tmp_path), "x = {}\nx['missing']\n")
+    # Byte-identical to the rendering before errors were bounded.
+    assert result.error == (
+        "Traceback (most recent call last):\n"
+        '  File "<cell>", line 2, in <module>\n'
+        "KeyError: 'missing'\n"
+    )
+    assert result.error_full == ""
+    assert result.error_summary == "KeyError: 'missing'"
     outcome, ctx = await _run_python(tmp_path, "x = {}\nx['missing']\n")
-    assert outcome.is_error
-    assert "KeyError: 'missing'" in outcome.text
-    assert "saved to" not in outcome.text and "the cell ended with" not in outcome.text
-    error = 'Traceback (most recent call last):\n  File "<cell>", line 2\nKeyError: 1\n'
-    assert _bound_cell_error(error, ctx) == error
+    assert "KeyError: 'missing'" in outcome.text and "saved to" not in outcome.text
     assert spill.session_stats(ctx) == {}

@@ -249,50 +249,21 @@ def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
     )
 
 
-# A cell's error text (traceback, exception message, notes, chained causes)
-# is bounded on its own: an exception can carry any value the cell holds
-# (``raise ValueError(diff)``), and it reaches the model outside the stdout
-# cap. The tail keeps the larger share, since the exception type and the last
-# frames come last.
-_CELL_ERROR_CAP = 8_000
-_CELL_ERROR_HEAD_SHARE = 1 / 4
+def _spill_cell_error(full: str, ctx: Any) -> str:
+    """Spill a clipped cell error's whole text; the one-line pointer, or "".
 
-
-def _final_exception_line(error: str) -> str:
-    """The line naming the exception that ended the cell ("Type: message").
-
-    In a traceback it is the first unindented line after the last frame (a
-    frame is a ``  File`` line plus its indented source and caret lines);
-    without frames it is the first line.
+    The kernel already bounded the error the model sees (see
+    ``truncate.ERROR_CAP``); this only says where the rest went.
     """
-    lines = error.splitlines()
-    start = 0
-    for i, line in enumerate(lines):
-        if line.startswith('  File "'):
-            start = i + 1
-    for line in lines[start:]:
-        if line and not line.startswith(" "):
-            return line
-    return ""
-
-
-def _bound_cell_error(error: str, ctx: Any) -> str:
-    """``error`` whole when short; otherwise head + spill marker + tail.
-
-    A cut that hid the final exception line (a long chained message or note
-    pushed it into the middle) leads with that line, shortened, so the type
-    of the failure is always visible.
-    """
-    if len(error) <= _CELL_ERROR_CAP:
-        return error
-    bounded = spill.cut(
-        error, _CELL_ERROR_CAP, ctx=ctx, tool="run_python",
-        head_share=_CELL_ERROR_HEAD_SHARE, saved_as="full error",
+    if not full or ctx is None:
+        return ""
+    path = spill.write_spill(full, ctx=ctx, tool="run_python")
+    if path is None:
+        return ""
+    return (
+        f"[cell error clipped; all {len(full):,} chars saved to {path} "
+        f"(session scratch) — {spill.READ_HINT}]"
     )
-    final = _final_exception_line(error)[:200]
-    if final and final not in bounded:
-        bounded = f"[the cell ended with: {final}]\n{bounded}"
-    return bounded
 
 
 # Journal previews are bounded so journal.jsonl (synthesis input) stays small.
@@ -747,8 +718,10 @@ class CodeModeSession:
             parts.append(f"=> {result.value_repr}")
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
-            error = _bound_cell_error(result.error, getattr(loop, "ctx", None))
-            text = (text + "\n" if parts else "") + f"Error: {error}"
+            text = (text + "\n" if parts else "") + f"Error: {result.error}"
+            error_note = _spill_cell_error(result.error_full, getattr(loop, "ctx", None))
+            if error_note:
+                text = f"{text.rstrip(chr(10))}\n{error_note}"
         # Every cell can print sliced or persisted shell data, even without a
         # host call this time. Frame at the model boundary, not in Python strings.
         text = fence_shell_output(text, "code-mode output (may include shell stdout/stderr)")
@@ -788,12 +761,16 @@ class CodeModeSession:
             return
         try:
             error_lines = (result.error or "").strip().splitlines()
+            # The kernel's one-line summary of the exception; a host-authored
+            # error (timeout, kernel death) has none and is short.
+            error = getattr(result, "error_summary", "") or (
+                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
             self._skills.journal_append({
                 "kind": "cell",
                 "code": _cap_code(code),
                 "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
-                "error": error_lines[-1] if error_lines else None,
+                "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),
                 # Compatible extension: the same calls in the order they ran,
