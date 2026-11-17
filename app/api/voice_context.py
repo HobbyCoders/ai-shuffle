@@ -168,6 +168,13 @@ async def update_voice_session_context(
     _validate_patch(body)
     if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):
         raise HTTPException(400, "Chat conversations use the default permission ceiling.")
+    from app.network import control
+
+    # The call may run on a mirror; only the execution owner admits effort.
+    # Other call context is still local. A mirror must not announce its copy
+    # as the result of an effort write it never made.
+    if "effort" in body.model_fields_set and await run_sync(control.owner_of, session) is not None:
+        body = VoiceContextPatch.model_validate(body.model_dump(exclude_unset=True, exclude={"effort", "effort_rev"}))
     updated = await run_sync(_persist_patch, session_id, body)
     saved_rev = int(updated.get("effort_rev") or 0)
     sent_effort = (body.effort or "").strip() or None

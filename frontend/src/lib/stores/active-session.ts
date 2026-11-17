@@ -47,7 +47,7 @@ import { feedController } from './session/v2/feed-controller';
 import { createMessageSender } from './session/message-sender';
 import { queueHydration } from './session/queue-hydration';
 import { markBindingHydrated, markBindingPicked, type ComposerBindingFlags } from './session/composer-binding';
-import { effortFromRow, effortIsNewer, effortRevOf } from './session/effort-revision';
+import { cancelEffortRecovery, effortFromRow, effortIsNewer, effortRevOf } from './session/effort-revision';
 import { createPermissionHandler } from './session/permission-handler';
 import { createDraftManager } from './session/draft-manager';
 import { hasComposerDraft } from './session/composer-suggestion';
@@ -913,6 +913,7 @@ const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
 async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
+	if (field === 'effort') cancelEffortRecovery(_state.sessionId);
 	const generation = ++runSettingGenerations[field];
 	const ownerEpoch = sessionOwnerEpoch();
 	const sessionId = _state.sessionId;

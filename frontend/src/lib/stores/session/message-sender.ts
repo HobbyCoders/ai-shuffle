@@ -28,7 +28,7 @@ import { reconcileModelEffort, resolveEffortModel, resolveModelEffort } from '$l
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
 import { composerPreferences } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
-import { effortRevToSend } from './effort-revision';
+import { effortRevToSend, noteEffortSend } from './effort-revision';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
@@ -841,6 +841,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				const remoteOnly = !_state.project && !!_state.projectV2Id;
+				noteEffortSend(_state.sessionId, clientMessageId, overrides.effort_rev);
 				const query = {
 					type: 'query',
 					client_message_id: clientMessageId,

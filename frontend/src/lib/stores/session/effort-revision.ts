@@ -10,6 +10,22 @@
  * client was never told is outdated.
  */
 
+// Only this tab's latest send may take an owner revision lower than its own
+// after a database restore. A pick or an intervening effort push cancels it.
+let pending: { chat: string; command: string; base: number } | undefined;
+export function noteEffortSend(chat: string | null, command: string, base: unknown) {
+	pending = chat && typeof base === 'number' ? { chat, command, base } : undefined;
+}
+export function cancelEffortRecovery(chat: string | null) {
+	if (pending?.chat === chat) pending = undefined;
+}
+export function takeEffortRecovery(chat: string | null, command: unknown, rev: number, held: number | undefined) {
+	if (!pending || pending.chat !== chat || pending.command !== command) return false;
+	const { base } = pending;
+	pending = undefined;
+	return base === held && rev < base;
+}
+
 /** A revision as the server sends it, or undefined (a server too old to send one). */
 export function effortRevOf(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;

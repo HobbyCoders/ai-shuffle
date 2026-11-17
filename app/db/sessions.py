@@ -1027,11 +1027,9 @@ def set_session_run_binding(
     one revision always names one level. ``effort_rev_base`` is the revision a
     sending composer last saw: the effort is then written only while it is
     still the row's revision, and a level sent from any other view is dropped
-    (#1609). A base above the row's revision means the row lost its count (a
-    database restored from a backup under an open tab): the row's level
-    stands and its revision moves past the base, so that client adopts it
-    instead of holding a revision no answer can ever exceed. A level with no
-    base (an older client, the API, a connector) is written only on a row
+    (#1609). A base above the row's revision can follow a database restore;
+    it never advances the owner's counter. A level with no base (an older
+    client, the API, a connector) is written only on a row
     whose effort never changed (revision 0): it cannot tell whether it is
     older than the row's. ``effort_explicit`` is a change the person asked
     for (the run-settings endpoint): written whatever the revision. The other fields
@@ -1077,17 +1075,12 @@ def set_session_run_binding(
                 f"effort = CASE WHEN COALESCE(effort_rev, 0) = {_ph} THEN {_ph} ELSE effort END")
             values.extend((base, level))
             updates.append(
-                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
-                f"WHEN COALESCE(effort_rev, 0) = {_ph} AND effort IS DISTINCT FROM {_ph} "
+                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) = {_ph} AND effort IS DISTINCT FROM {_ph} "
                 "THEN COALESCE(effort_rev, 0) + 1 ELSE effort_rev END")
-            values.extend((base, base, base, level))
+            values.extend((base, level))
         else:
-            # A send that names no level (Auto) writes none, and still moves
-            # a row that lost its count past the sender's revision.
-            updates.append(
-                f"effort_rev = CASE WHEN COALESCE(effort_rev, 0) < {_ph} THEN {_ph} + 1 "
-                "ELSE effort_rev END")
-            values.extend((base, base))
+            # Auto sends no level; still return the owner's pair for admission.
+            updates.append("effort_rev = effort_rev")
     clean_permission = (permission_mode or "").strip()
     if clean_permission:
         updates.append(f"permission_mode = {_ph}")

@@ -33,7 +33,7 @@ import { getDefaultModel } from '$lib/constants/models';
 import { markChatUnavailable } from '../unavailable-chat';
 import { dismissSettledSessionPrompts } from './settle-prompts';
 import { sessionEphemeralCache } from '../session-cache';
-import { effortIsNewer, effortRevOf } from './effort-revision';
+import { cancelEffortRecovery, effortIsNewer, effortRevOf, takeEffortRecovery } from './effort-revision';
 import { markBindingHydrated } from './composer-binding';
 import { unmarkQuestionSent } from './sent-questions';
 import { keepStopRecovery } from '$lib/utils/not-sent-hold';
@@ -646,6 +646,7 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					&& (updates.effort === null || typeof updates.effort === 'string')) {
 					const effort = updates.effort as string | null;
 					const rev = effortRevOf(updates.effort_rev);
+					cancelEffortRecovery(updatedSessionId);
 					const adopted = { effortLevelOverride: effort, ...(rev !== undefined ? { effortRev: rev } : {}) };
 					const cached = sessionEphemeralCache.restore(updatedSessionId);
 					if (cached && effortIsNewer(rev, cached.effortRev)) {
@@ -1311,6 +1312,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					'Already sent: the agent read this message before it could be cancelled. Send a follow-up to correct it.',
 					{ category: 'queued-message-already-delivered', session_id: removalSessionId, persist: false }
 				);
+				break;
+			}
+
+			case 'effort_restored': {
+				const sid = getState().sessionId;
+				const rev = effortRevOf(data.effort_rev);
+				if (!sid || data.session_id !== sid || rev === undefined || (data.effort !== null && typeof data.effort !== 'string')) break;
+				if (!takeEffortRecovery(sid, data.client_message_id, rev, getState().effortRev)) break;
+				const adopted = { effortLevelOverride: data.effort as string | null, effortRev: rev };
+				update(s => ({ ...s, ...adopted }));
+				const cached = sessionEphemeralCache.restore(sid);
+				if (cached) sessionEphemeralCache.save(sid, { ...cached, ...adopted });
+				applyRowUpdates(sid, { effort: adopted.effortLevelOverride, effort_rev: rev });
+				onPersistSession();
 				break;
 			}
 

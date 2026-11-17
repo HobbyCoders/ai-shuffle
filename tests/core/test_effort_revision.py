@@ -67,23 +67,14 @@ class TestRevisionCounter:
         assert db.set_session_run_binding("s", effort="high", effort_rev_base=1) == {
             "effort": "high", "effort_rev": 2}
 
-    def test_a_base_above_the_rows_revision_moves_the_row_past_it(self, mock_db):
-        """The row lost its count (a restored backup) while a tab kept its own:
-        the row's level stands and its revision passes the tab's, so the tab
-        adopts it. Without the jump no answer could ever be news to that tab."""
+    def test_a_future_base_never_advances_the_owner_counter(self, mock_db):
         make_profile("agent", {})
         db.create_session("s", profile_id="agent", model="opus", effort="high")
-        db.set_session_run_binding("s", effort="low")                    # (low, 1)
-        assert db.set_session_run_binding("s", effort="max", effort_rev_base=7) == {
-            "effort": "low", "effort_rev": 8}
-        # A send that names no level (Auto) moves it too.
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=12) == {
-            "effort": "low", "effort_rev": 13}
-        # ... and leaves a row alone that is not behind.
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=13) == {
-            "effort": "low", "effort_rev": 13}
-        assert db.set_session_run_binding("s", fast=False, effort_rev_base=4) == {
-            "effort": "low", "effort_rev": 13}
+        db.set_session_run_binding("s", effort="low")
+        for changes in ({"effort": "max"}, {}, {"fast": False}):
+            assert db.set_session_run_binding("s", effort_rev_base=7, **changes) == {
+                "effort": "low", "effort_rev": 1}
+
 
     def test_the_voice_context_write_counts_too(self, mock_db):
         make_profile("agent", {})
@@ -138,11 +129,11 @@ class TestSendGuard:
         db.create_session("s", profile_id="agent", model="opus", effort="high")
         db.set_session_run_binding("s", effort="low")
         ran = _send("s", effort="max", effort_rev=7)
-        assert _pair("s") == ("low", 8)
+        assert _pair("s") == ("low", 1)
         assert ran["effort"] == "low"
-        # The tab adopted (low, 8): its next change is saved.
-        assert _send("s", effort="max", effort_rev=8)["effort"] == "max"
-        assert _pair("s") == ("max", 9)
+        # The tab adopted (low, 1): its next change is saved.
+        assert _send("s", effort="max", effort_rev=1)["effort"] == "max"
+        assert _pair("s") == ("max", 2)
 
     def test_a_matching_send_saves_its_level(self, mock_db):
         make_profile("agent", {})
@@ -223,8 +214,8 @@ class TestAnnouncement:
         ({"effort": "low", "effort_rev": 1}, None),
         # No revision: nothing is announced, as before.
         ({"effort": "max"}, None),
-        # Ahead of the row: the saved level with a revision past the sender's.
-        ({"effort": "max", "effort_rev": 7}, {"effort": "low", "effort_rev": 8}),
+        # Ahead of the row: return the saved pair only to the submitting client.
+        ({"effort": "max", "effort_rev": 7}, {"effort": "low", "effort_rev": 1}),
         # On Auto and behind: no level was sent, the saved one is still told.
         ({"effort_rev": 0}, {"effort": "low", "effort_rev": 1}),
     ])
@@ -236,10 +227,12 @@ class TestAnnouncement:
         with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
             await turn_manager.submit_async(
                 "s", "user", prompt="hi", profile_id="agent",
-                overrides={"model": "opus", **sent}, no_kick=True, effort_seen=seen)
+                overrides=sent, no_kick=True, effort_seen=seen)
         pushes = [c for c in broadcast.await_args_list if "effort" in c.kwargs["updates"]]
         if expected is None:
             assert pushes == [] and seen == {}
+        elif sent.get("effort_rev", 0) > expected["effort_rev"]:
+            assert not pushes and seen == expected
         else:
             assert pushes == [call(session_id="s", updates=expected, source_device_id=None)]
             assert seen == expected
@@ -341,6 +334,22 @@ class TestPathsThatDidNotPickALevel:
         body = ConversationRequest.model_validate(
             {"prompt": "hi", "overrides": {"effort": "high", "effort_rev": 3}})
         assert body.overrides.model_dump(exclude_none=True) == {"effort": "high", "effort_rev": 3}
+
+    async def test_mirrored_voice_snapshot_saves_local_context_but_not_effort(self, mock_db, monkeypatch):
+        from app.api import voice, voice_context
+        from app.network import control
+
+        make_profile("agent", {})
+        db.create_session("s", profile_id="agent", model="opus", effort="high")
+        monkeypatch.setattr(voice, "_load_voice_session", AsyncMock(return_value=db.get_session("s")))
+        monkeypatch.setattr(control, "owner_of", lambda row: "elsewhere")
+        monkeypatch.setattr(voice_context, "check_session_access", lambda request, session: None)
+        with patch.object(sync_engine, "broadcast_session_updated", new=AsyncMock()) as broadcast:
+            await voice_context.update_voice_session_context(None, "s", voice_context.VoiceContextPatch(
+                effort="low", effort_rev=0, fast=True), token="t")
+        assert _pair("s") == ("high", 0)
+        assert db.get_session("s")["fast"]
+        broadcast.assert_not_awaited()
 
     @pytest.mark.parametrize("snapshot_rev, saved", [(0, ("low", 1)), (None, ("low", 1)), (1, ("max", 2))])
     async def test_a_voice_context_snapshot_is_admitted_like_a_send(self, mock_db, monkeypatch, snapshot_rev, saved):

@@ -499,7 +499,8 @@ def _submit_blocking(
         overrides = overrides or None
         payload = {**(payload or {}), WORKER_BOUND: True}
         explicit_permission = False
-    elif source in _BINDING_SOURCES and overrides:
+    elif source in _BINDING_SOURCES and (overrides or effort_rev is not None):
+        overrides = overrides or {}
         try:
             from app.db import database
 
@@ -743,7 +744,8 @@ async def submit_async(
         _kick(session_id)
     if window_pin:
         await _announce_window_pin(session_id, window_pin["context_window"])
-    if effort_seen:
+    _, requested_rev = _split_effort_rev(overrides)
+    if effort_seen and effort_seen["effort_rev"] >= (requested_rev or 0):
         await announce_effort(session_id, effort_seen)
     return turn_id
 
