@@ -804,11 +804,6 @@ async def _create_v2_branch_session(
     from app.core import upload_transfer
     prompt = upload_transfer.rewrite_prompt((body.prompt or "").strip(), migrated_paths)
     if prompt:
-        # The prompt names the migrated copies now.
-        await _persist_and_broadcast_first_message(
-            session_id, prompt, profile_id,
-            list(migrated_paths.values()) + list(body.pending_upload_paths or []))
-
         # Submit a durable ``source=worktree`` turn. NO worktree_id — the spawn
         # path resolves cwd via the origin resolver off sessions.branch +
         # project_v2_id (materializing the same checkout idempotently).
@@ -836,6 +831,15 @@ async def _create_v2_branch_session(
         except Exception as e:  # noqa: BLE001
             logger.exception(f"Failed to submit v2 branch-session turn: {e}")
             query_started = False
+        if query_started:
+            # A refused submit still belongs to the fallback composer, not the
+            # transcript. Once admitted, a history-write error must not resend.
+            try:
+                await _persist_and_broadcast_first_message(
+                    session_id, prompt, profile_id,
+                    list(migrated_paths.values()) + list(body.pending_upload_paths or []))
+            except Exception:
+                logger.exception("Could not mirror the admitted first turn into session history")
 
     # Report the ACTUAL base honestly: a newly-minted branch was forked from
     # ``body.base_branch``; an existing/origin-recovered branch was materialized

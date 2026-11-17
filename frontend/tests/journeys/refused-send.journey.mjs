@@ -138,11 +138,11 @@ const worktreeFallbackRefused = {
 	async setup(ctx) {
 		const { page } = ctx;
 		ctx.hook = await hookChatSocket(page);
-		// The chat is created, but without its turn: no prompt rides the create
-		// request, so the backend answers `query_started: false`.
+		// A staged file is no longer there when Send tries to migrate it.
+		// The real create receives the prompt but cannot admit its turn.
 		// In the page, not page.route: the built app's service worker makes the
 		// requests page.route would see (lib/app.mjs).
-		await page.addInitScript(() => {
+		await page.addInitScript((missing) => {
 			const seen = { prompted: null, commandId: null, created: [] };
 			window.__journeyWorktree = seen;
 			const original = window.fetch.bind(window);
@@ -154,12 +154,12 @@ const worktreeFallbackRefused = {
 				const body = JSON.parse(init.body);
 				seen.prompted = typeof body.prompt === 'string' && body.prompt.length > 0;
 				seen.commandId = body.client_message_id || null;
-				delete body.prompt;
+				body.pending_upload_paths = [missing];
 				const response = await original(input, { ...init, body: JSON.stringify(body) });
 				try { seen.created.push(await response.clone().json()); } catch { seen.created.push(null); }
 				return response;
 			};
-		});
+		}, `${ctx.status.seed.projects['dev-sandbox']}/uploads/expired-${uniq()}.txt`);
 		const hero = await openNewChat(ctx, { project: PROJECT });
 		await pickAccess(page, 'Bypass');
 		await withChatSetup(page, async () => {
@@ -192,6 +192,12 @@ const worktreeFallbackRefused = {
 		expect(!(await stopShown(page)), 'Stop is gone after the refusal');
 		const state = await chatState(page);
 		expect(state?.streaming === 'false', `nothing streams after the refusal: ${JSON.stringify(state)}`);
+		const history = await page.evaluate(async (id) => {
+			const response = await fetch(`/api/v1/sessions/${id}`);
+			if (!response.ok) throw new Error(`session detail: ${response.status}`);
+			return (await response.json()).messages;
+		}, ctx.created[0].session_id);
+		expect(!history.some((m) => m.content === words), 'the saved transcript does not present the refused prompt as sent');
 		log(`refused ${ctx.refusedQuery.client_message_id} on ${ctx.created[0].session_id}; row made with ${ctx.commandId}`);
 		expect((await countUserRows(page, words)) === 0, 'the refused row is gone');
 		expect((await composerText(page)) === words, `the composer has the words back: "${await composerText(page)}"`);
