@@ -1,0 +1,9 @@
+{
+  "description": "#1627 S5: escaped image alt HTML must not pin the streaming split at zero or restart a stable video on every word.",
+  "tps": 4,
+  "steps": [
+    {
+      "text": "Intro ![<b>](/favicon.svg).\n\nhttps://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4\n\nOne\n\nTwo later01 later02 later03 later04 later05 later06 later07 later08 later09 later10 later11 later12 later13 later14 later15 later16 later17 later18 later19 later20 later21 later22 later23 later24 later25 later26 later27 later28 later29 later30 later31 later32 later33 later34 later35 later36 later37 later38 later39 later40 later41 later42 later43 later44 later45 later46 later47 later48 later49 later50 later51 later52 later53 later54 later55 later56 later57 later58 later59 later60 later61 later62 later63 later64"
+    }
+  ]
+}

@@ -512,7 +512,7 @@
 		// the two parses together match the full render (#1619): the last block
 		// (an unclosed fence, <pre> or comment, a list) is never cut at a blank
 		// line inside it.
-		const split = streamingSplit(text);
+		const split = streamingSplit(text, true);
 		const stableContent = text.substring(0, split);
 
 		// When the stable prefix changes, re-parse, sanitize, and cache it once.

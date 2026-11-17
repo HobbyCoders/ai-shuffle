@@ -1,4 +1,4 @@
-import { render, fireEvent } from '@testing-library/svelte';
+import { render, fireEvent, waitFor } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IMAGE_RETRY_DELAYS_MS } from '$lib/utils/media';
 import ThinkingBlock from './ThinkingBlock.svelte';
@@ -39,5 +39,36 @@ describe('ThinkingBlock images (#1850)', () => {
 		img.dispatchEvent(new Event('error'));
 		vi.advanceTimersByTime(IMAGE_RETRY_DELAYS_MS[0]);
 		expect(img.getAttribute('src')).toBe(`${source}?retry=1`);
+	});
+});
+
+describe('ThinkingBlock while it streams (#1627)', () => {
+	// Reduced motion hands each delta through whole, so checks see the full text.
+	afterEach(() => vi.unstubAllGlobals());
+
+	async function stream(deltas: string[]) {
+		vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('reduce'), addEventListener() {}, removeEventListener() {} }));
+		let text = deltas[0];
+		const view = render(ThinkingBlock, { props: { content: text, streaming: true, initialExpanded: true } });
+		for (const delta of deltas.slice(1)) {
+			text += delta;
+			await view.rerender({ content: text, streaming: true, initialExpanded: true });
+		}
+		await waitFor(() => expect(view.container.querySelector('.thinking-content')?.textContent).toContain(deltas.at(-1)!.trim().slice(-6)));
+		return { view, text };
+	}
+
+	it('keeps an image in a fence that is still open as code', async () => {
+		const { view } = await stream(['Plan.\n\n```md\n', 'x\n', '\n', '![plan](/api/generated-images/plan.png) end']);
+		expect(view.container.querySelector('.thinking-content img')).toBeNull();
+		expect(view.container.querySelector('.thinking-content pre')?.textContent).toContain('![plan]');
+	});
+
+	it('streams what the full render shows after an unclosed raw <a>', async () => {
+		const { view, text } = await stream(['Intro <a href="/docs">label', '\n\nhttps://example.com/page']);
+		const streamed = view.container.querySelector('.thinking-content')!.innerHTML;
+		await view.rerender({ content: text, streaming: false, initialExpanded: true });
+		await waitFor(() => expect(view.container.querySelector('.thinking-content')!.innerHTML).toBe(streamed));
+		expect(view.container.querySelector('.thinking-content a[href^="https://example.com"]')).toBeNull();
 	});
 });
