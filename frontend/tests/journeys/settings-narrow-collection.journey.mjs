@@ -411,6 +411,65 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  {
+  name: 'split-scroll-before-resize-observation', viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await page.addInitScript(() => {
+    const Observer = window.ResizeObserver;
+    window.ResizeObserver = class extends Observer {
+     constructor(callback) {
+      super((entries, observer) => {
+       if (window.holdCollectionResize && entries.some(entry => entry.target.matches('.st-coll'))) {
+        window.deliverCollectionResize = () => callback(entries, observer);
+       } else callback(entries, observer);
+      });
+     }
+    };
+   });
+   await stubHooks(page);
+   await openSettings(page, status, 1440);
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await category(page, 'Hooks');
+   await page.locator('.st-lcol [data-settings-item]').filter({ hasText: /^\s*Check hook 9\b/ }).first().click();
+   await page.locator('[data-settings-heading="detail"]').filter({ hasText: 'Check hook 9' }).waitFor();
+  },
+  async act({ page, mark }) {
+   const scroll = (top) => page.evaluate((top) => {
+    document.querySelector('.settings-viewport').scrollTop = top;
+    document.querySelector('.settings-viewport .st-dpane').scrollTop = top;
+   }, top);
+   await mark('scroll the split list and detail');
+   await scroll(60);
+   await page.waitForTimeout(250);
+   const initial = await scrollState(page);
+   expect(initial.page === 60 && initial.pane === 60, `both panes scroll (${JSON.stringify(initial)})`);
+
+   await mark('deliver scroll events after the width changes but before ResizeObserver runs');
+   await page.evaluate(() => { window.holdCollectionResize = true; });
+   await page.setViewportSize({ width: 1408, height: 300 });
+   await page.waitForFunction(() => typeof window.deliverCollectionResize === 'function');
+   await page.evaluate(async () => {
+    const viewport = document.querySelector('.settings-viewport');
+    const scrollers = [viewport, viewport.querySelector('.st-dpane')];
+    await Promise.all(scrollers.map(el => new Promise(resolve => {
+     el.addEventListener('scroll', resolve, { once: true });
+     el.scrollTop = 100;
+    })));
+    window.holdCollectionResize = false;
+    window.deliverCollectionResize();
+   });
+   const visible = await scrollState(page);
+   expect(visible.page === 100 && visible.pane === 100, `both new positions are visible (${JSON.stringify(visible)})`);
+   await mark('narrow to stacked Settings and back to split');
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.locator('.settings-shell[data-stacked][data-view="detail"]').waitFor();
+   await page.waitForTimeout(400);
+   await page.setViewportSize({ width: 1440, height: 300 });
+   await page.locator('.settings-shell:not([data-stacked]) .st-coll:not([data-replace])').waitFor();
+   const restored = await waitScroll(page, { page: 100, pane: 100 });
+   expect(restored.page === 100 && restored.pane === 100, `the resize-time scroll survives (${JSON.stringify(restored)})`);
+  }
+ },
+ {
   // Review of #1607/#1608: an open detail moves between its own pane (split)
   // and the page scroller (stacked, one pane) when the window changes size.
   // It keeps its own place each way, never the list's offset.

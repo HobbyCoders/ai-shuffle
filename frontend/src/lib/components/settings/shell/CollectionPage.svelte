@@ -20,6 +20,7 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import { clampListWidth, readListWidth, showsOnePane } from '$lib/settings/list-width';
+	import { canRecordSplitScroll, isScrollClamped } from '$lib/settings/split-scroll-place';
 	import type { CategoryId } from '$lib/settings/types';
 	import ListDivider from './ListDivider.svelte';
 	import PageTitle from './PageTitle.svelte';
@@ -169,7 +170,7 @@
 	// moves its place across: the detail keeps its own place, never the list's,
 	// measured from its title (what sits above the title differs by layout).
 	// The rule: a saved place is where its scroller is, read on every scroll
-	// while Settings is shown in a settled layout, except a scroller at the end
+	// while Settings is shown and the scroll owner is unchanged, except at the end
 	// of its range short of the saved place: the page got shorter and the
 	// browser clamped it; the reader did not move. place() applies saved places and never writes them
 	// (landing on one reads back the same place); one it cannot apply waits
@@ -194,8 +195,10 @@
 	const detailOffset = () => (detailPlace === null ? 0 : Math.max(0, titleInPane() + detailPlace));
 	/** Records `offset` into the pane's content: at (or above) its top is its top. */
 	const readDetail = (offset: number) => (detailPlace = offset <= 0 ? null : offset - titleInPane());
-	function clamped(node: HTMLElement, saved: number): boolean {
-		return node.scrollTop >= node.scrollHeight - node.clientHeight - 1 && saved > node.scrollTop + 1;
+	function canRecord(placing: boolean): boolean {
+		return split
+			? canRecordSplitScroll(el?.getBoundingClientRect().width ?? 0, lastMode === 'split', placing)
+			: settled();
 	}
 	function place() {
 		const scroller = el && scrollParent(el);
@@ -210,15 +213,15 @@
 		}
 	}
 	function onPaneScroll() {
-		if (split && settled() && !clamped(pane!, detailOffset())) readDetail(pane!.scrollTop);
+		if (split && pane && canRecord(panePending) && !isScrollClamped(pane, detailOffset())) readDetail(pane.scrollTop);
 	}
 	$effect(() => {
 		const scroller = el && scrollParent(el);
 		if (!scroller) return;
 		const onscroll = () => {
-			if (!settled()) return;
+			if (!canRecord(pagePending)) return;
 			const list = split || shownItem === null;
-			if (clamped(scroller, list ? listPlace : paneTop(scroller) + detailOffset())) return;
+			if (isScrollClamped(scroller, list ? listPlace : paneTop(scroller) + detailOffset())) return;
 			if (list) listPlace = scroller.scrollTop;
 			else readDetail(scroller.scrollTop - paneTop(scroller));
 		};
