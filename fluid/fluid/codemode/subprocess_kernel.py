@@ -41,12 +41,16 @@ from typing import Any
 from fluid.codemode.kernel import HostCall, HostReply, KernelResult
 from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
+from fluid.tools.registry import current_call_time_left
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
 _GB = 1024 * 1024 * 1024
 # Child stderr kept for the death diagnostic: this many bytes, of which the
 # last few lines are quoted.
 _STDERR_TAIL_BYTES = 4096
+# Seconds a cell past its deadline gets, once interrupted, to send the done
+# frame that carries what it printed before the kernel is restarted (#1549).
+_INTERRUPT_GRACE_S = 2.0
 _STDERR_TAIL_LINES = 5
 
 # Environment variables the kernel child never receives. Tools run host-side,
@@ -398,9 +402,29 @@ class SubprocessKernel:
         if bound <= 0:
             return await on_host_call(name, kwargs)
         loop = asyncio.get_running_loop()
-        task = asyncio.ensure_future(on_host_call(name, kwargs))
+
+        def spent_waiting() -> float:
+            try:
+                return float(credit() or 0.0) if credit is not None else 0.0
+            except Exception:  # noqa: BLE001 - a clock must never break a call
+                return 0.0
+
         deadline = loop.time() + bound
-        credited = 0.0
+        # ``credit`` counts the whole cell; only this call's human wait extends
+        # this call's deadline.
+        credited = spent_waiting()
+
+        def time_left() -> float:
+            # The clock this call is cancelled by, read when a tool starts:
+            # time already spent on hooks and gates counts, human wait does not.
+            return deadline + max(0.0, spent_waiting() - credited) - loop.time()
+
+        # The task copies the context here, so the tool it runs can see it.
+        token = current_call_time_left.set(time_left)
+        try:
+            task = asyncio.ensure_future(on_host_call(name, kwargs))
+        finally:
+            current_call_time_left.reset(token)
         try:
             while True:
                 wait_for = deadline - loop.time()
@@ -408,10 +432,7 @@ class SubprocessKernel:
                     done, _ = await asyncio.wait({task}, timeout=wait_for)
                     if task in done:
                         return task.result()
-                try:
-                    spent = float(credit() or 0.0) if credit is not None else 0.0
-                except Exception:  # noqa: BLE001 - a clock must never break a call
-                    spent = 0.0
+                spent = spent_waiting()
                 if spent > credited:
                     deadline += spent - credited
                     credited = spent
@@ -453,14 +474,29 @@ class SubprocessKernel:
             try:
                 frame = await asyncio.wait_for(self._read_frame(), remaining)
             except TimeoutError:
+                try:
+                    printed = await self._interrupted_output()
+                except asyncio.CancelledError:
+                    await self._restart_and_restore()
+                    raise
                 note = await self._restart_and_restore()
                 self._restart_note = ""  # said here; not repeated next cell
+                if printed is None:
+                    said = "; any output it printed before the timeout was lost"
+                elif printed.get("stdout"):
+                    said = "; the output above is what it printed before the timeout and may be incomplete"
+                else:
+                    said = ""
+                printed = printed or {}
                 return KernelResult(
+                    stdout=printed.get("stdout") or "",
                     error=(
                         f"execution exceeded {timeout:.1f}s wall clock; "
-                        f"kernel restarted{note}"
+                        f"kernel restarted{note}{said}"
                     ),
                     host_calls=host_calls,
+                    stdout_full=printed.get("stdout_full") or "",
+                    stdout_total=int(printed.get("stdout_total") or 0),
                 )
             except (asyncio.IncompleteReadError, ConnectionError):
                 proc = self._proc
@@ -531,6 +567,39 @@ class SubprocessKernel:
                 return KernelResult(
                     error=f"kernel produced no result{note}", host_calls=host_calls
                 )
+
+    async def _interrupted_output(self) -> dict | None:
+        """Interrupt a cell past its deadline and read its done frame.
+
+        POSIX only: SIGINT raises KeyboardInterrupt in the cell, which the
+        runner turns into an ordinary cell failure whose done frame carries
+        the stdout printed so far, under the usual stdout cap (#1549). The
+        caller discards that frame's error and restarts the kernel either
+        way. Windows has no signal for a pipe-only child, and a cell that
+        swallows the interrupt or is stuck in native code sends nothing in
+        time; then this returns None and the caller says the output was lost.
+        """
+        proc = self._proc
+        if sys.platform == "win32" or proc is None or proc.returncode is not None:
+            return None
+        try:
+            os.kill(proc.pid, signal.SIGINT)
+        except OSError:
+            return None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _INTERRUPT_GRACE_S
+        while (left := deadline - loop.time()) > 0:
+            try:
+                frame = await asyncio.wait_for(self._read_frame(), left)
+            except (TimeoutError, asyncio.IncompleteReadError, ConnectionError, ValueError):
+                return None
+            if not isinstance(frame, dict):
+                return None
+            if frame.get("kind") == "done":
+                return frame
+            # A host call sent just before the interrupt: the cell is already
+            # unwinding out of its wait for the reply, so read on.
+        return None
 
     # ── frame IO ──
     async def _send(self, obj: dict) -> None:
