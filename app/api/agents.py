@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from app.core.models import (
     Profile, ProfileCreate, ProfileUpdate,
-    AgentExport, AgentExportData, AgentImportRequest
+    AgentExport, AgentExportData, AgentImportRequest, PROFILE_ID_MAX_LENGTH
 )
 from app.db import database
 from app.db.async_database import run_sync
@@ -1223,11 +1223,6 @@ async def import_profile(
 
     # Determine profile name
     profile_name = import_request.new_name or agent_data.name
-    if not profile_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Agent name is required"
-        )
 
     # Determine profile ID
     if import_request.new_id:
@@ -1235,7 +1230,7 @@ async def import_profile(
     else:
         # Generate ID from name
         profile_id = re.sub(r'[^a-z0-9-]', '-', profile_name.lower())
-        profile_id = re.sub(r'-+', '-', profile_id).strip('-')
+        profile_id = re.sub(r'-+', '-', profile_id).strip('-')[:PROFILE_ID_MAX_LENGTH].rstrip('-')
         if not profile_id:
             profile_id = "imported-agent"
 
@@ -1253,7 +1248,8 @@ async def import_profile(
         base_id = profile_id
         counter = 1
         while database.get_profile(profile_id):
-            profile_id = f"{base_id}-{counter}"
+            suffix = f"-{counter}"
+            profile_id = base_id[:PROFILE_ID_MAX_LENGTH - len(suffix)].rstrip("-") + suffix
             counter += 1
             if counter > 100:  # Safety limit
                 raise HTTPException(

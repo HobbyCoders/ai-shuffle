@@ -4,7 +4,7 @@ Pydantic models for API requests and responses
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union, Literal
+from typing import Annotated, Optional, List, Dict, Any, Union, Literal
 from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
@@ -183,21 +183,25 @@ class ProfileConfig(BaseModel):
 
 
 
+ProfileName = Annotated[str, Field(min_length=1, max_length=100)]
+PROFILE_ID_MAX_LENGTH = 50
+
+
 class ProfileBase(BaseModel):
     """Base profile fields"""
-    name: str = Field(..., min_length=1, max_length=100)
+    name: ProfileName
     description: Optional[str] = None
     config: ProfileConfig
 
 
 class ProfileCreate(ProfileBase):
     """Profile creation request - id is optional; if omitted, derived from name"""
-    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=PROFILE_ID_MAX_LENGTH)
 
 
 class ProfileUpdate(BaseModel):
     """Profile update request"""
-    name: Optional[str] = None
+    name: Optional[ProfileName] = None
     description: Optional[str] = None
     config: Optional[ProfileConfig] = None
 
@@ -1007,6 +1011,7 @@ class AgentImportData(AgentExportData):
     an old file that carries it imports and the key is ignored like any other
     unknown field.
     """
+    name: ProfileName
     thinking_mode: Optional[str] = None
     system_prompt_type: Optional[str] = None
     system_prompt_preset: Optional[str] = None
@@ -1033,9 +1038,9 @@ class AgentImportRequest(BaseModel):
     agent: AgentImportData
 
     # Optional override for profile ID (otherwise generated from name)
-    new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=PROFILE_ID_MAX_LENGTH)
     # Optional override for profile name
-    new_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    new_name: Optional[ProfileName] = None
 
 
 # ============================================================================
