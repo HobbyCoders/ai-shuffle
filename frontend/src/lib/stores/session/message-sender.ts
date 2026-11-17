@@ -841,7 +841,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				}
 
 				const remoteOnly = !_state.project && !!_state.projectV2Id;
-				noteEffortSend(_state.sessionId, clientMessageId, overrides.effort_rev);
+				noteEffortSend(_state.sessionId, clientMessageId, overrides?.effort_rev);
 				const query = {
 					type: 'query',
 					client_message_id: clientMessageId,
