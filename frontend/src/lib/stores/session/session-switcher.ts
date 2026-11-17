@@ -267,6 +267,7 @@ export interface AttachRowFields {
 	permission_mode?: string | null;
 	/** Another worker runs the session: its legacy id means nothing here. */
 	is_remote?: boolean;
+	device_name?: string | null;
 }
 
 /**
@@ -1020,9 +1021,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Deep links can open before the sidebar row arrives. Restore the
 			// durable project alongside its branch, including remote-only/null IDs.
 			// Do not replace a project selection made while the request was in flight.
+			// An owner that changes with this answer re-resolves even then: the
+			// legacy id must not outlive the owner it was valid for (#1659).
+			const ownerChanges = meta.is_remote !== undefined && getState().isRemote !== undefined
+				&& meta.is_remote !== getState().isRemote;
 			if ((meta.project_id !== undefined || meta.project_v2_id !== undefined)
-				&& getState().project === initialProject
-				&& getState().projectV2Id === initialProjectV2Id) {
+				&& (ownerChanges || (getState().project === initialProject
+					&& getState().projectV2Id === initialProjectV2Id))) {
 				Object.assign(patch, resolveSessionProject({
 					projectId: meta.project_id,
 					projectV2Id: meta.project_v2_id,

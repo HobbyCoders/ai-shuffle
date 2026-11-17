@@ -24,6 +24,27 @@ export const ATTACHMENTS_NEED_RUNS_ON =
 
 export const SELECT_PROJECT_TO_UPLOAD = 'Please select a project first to upload files.';
 
+/** The owner of the open chat stayed unknown (its live state did not answer). */
+export const UPLOAD_OWNER_UNKNOWN =
+	'couldn’t confirm which worker runs this chat yet. Try again in a moment';
+
+/**
+ * Whether an upload must wait until the page knows who runs the open chat
+ * (#1659). A legacy project id names a folder on this worker only for a chat
+ * this worker runs: on another worker's chat it can name an unrelated project
+ * here. Until a row or `/live` says who runs it (a reload, a deep link, a
+ * restored tab, `/live` slow or failing), the project upload would write into
+ * whatever local project carries that id. A session upload needs no wait: the
+ * server routes it by the session's own owner. New chats have no owner yet and
+ * upload to the project picked for them.
+ */
+export function uploadNeedsOwner(
+	state: { sessionId: string | null; project: string | null | undefined; isRemote?: boolean },
+	mode: SessionMode = 'code'
+): boolean {
+	return mode !== 'chat' && !!state.sessionId && !!state.project && state.isRemote === undefined;
+}
+
 /**
  * Why attach/drop is blocked, or null when uploads may proceed.
  *

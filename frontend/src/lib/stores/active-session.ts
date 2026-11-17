@@ -39,6 +39,7 @@ import {
 // Extracted sub-modules
 import type { SendReservation } from './session/send-order';
 import type { Creation } from './session/message-sender';
+import { resolveSessionProject } from './session/session-project';
 import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
@@ -1200,6 +1201,7 @@ export const activeSession = {
 	 * defer to, so `mode` keeps whatever it already holds.
 	 */
 	reconcileSessionMode(sessionsList: ({ id: string } & AttachRowFields)[]): SessionMode | null {
+		activeSession.reconcileOwner(sessionsList);
 		const sessionId = _state.sessionId;
 		const mode = reconciledSessionMode(sessionId, sessionsList);
 		if (!mode) return null;
@@ -1247,6 +1249,59 @@ export const activeSession = {
 		}));
 		persistSession();
 		return true;
+	},
+
+	/**
+	 * Who runs the open chat, from a refreshed row (#1659). A hand-off while
+	 * the page stays open changes it, and a row loaded after a reload or deep
+	 * link can settle it before `/live` does. A legacy project id counts only
+	 * on a chat this worker runs, so the project is re-resolved by the same
+	 * rule as a switch, never by comparing ids. Returns whether it changed.
+	 */
+	reconcileOwner(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
+		const sessionId = _state.sessionId;
+		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
+		if (!row || row.is_remote === undefined || row.is_remote === _state.isRemote) return false;
+		const patch: Partial<ActiveSessionState> = { isRemote: row.is_remote };
+		if (row.device_name !== undefined) patch.ownerDeviceName = row.device_name;
+		if (_state.mode !== 'chat' && (row.project_id !== undefined || row.project_v2_id !== undefined)) {
+			Object.assign(patch, resolveSessionProject({
+				projectId: row.project_id,
+				projectV2Id: row.project_v2_id ?? undefined,
+				ephemeralProject: _state.project,
+				ephemeralProjectV2Id: _state.projectV2Id,
+				isRemote: row.is_remote,
+			}));
+		}
+		_update(s => ({ ...s, ...patch }));
+		persistSession();
+		return true;
+	},
+
+	/**
+	 * Wait until the page knows who runs `sessionId` (a row or `/live` said):
+	 * 'known', 'left' once the page leaves that chat, 'unknown' at `timeoutMs`.
+	 * Uploads into a local project wait on this (#1659).
+	 */
+	waitForOwner(sessionId: string, timeoutMs: number): Promise<'known' | 'left' | 'unknown'> {
+		return new Promise(resolve => {
+			let done = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let unsubscribe: (() => void) | null = null;
+			const finish = (outcome: 'known' | 'left' | 'unknown') => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				unsubscribe?.();
+				resolve(outcome);
+			};
+			unsubscribe = _subscribe(s => {
+				if (s.sessionId !== sessionId) finish('left');
+				else if (s.isRemote !== undefined) finish('known');
+			});
+			if (done) { unsubscribe(); return; }
+			timer = setTimeout(() => finish('unknown'), timeoutMs);
+		});
 	},
 
 	/**

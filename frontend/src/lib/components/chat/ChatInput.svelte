@@ -64,7 +64,7 @@
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify, type NotificationSeverity } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
-	import { attachmentBlockReason } from './attach-disable';
+	import { attachmentBlockReason, uploadNeedsOwner, UPLOAD_OWNER_UNKNOWN } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
 	import { composerShell } from './composer-shell';
@@ -1796,13 +1796,24 @@
 	// pinned to this directory, which is what makes the resulting @ref openable.
 	// Mirrors `CHAT_UPLOADS_DIRNAME` in app/core/session_modes.py.
 	const CHAT_UPLOADS_DIRNAME = 'chat-uploads';
+	/** How long an upload waits for the open chat's owner before refusing. */
+	const OWNER_WAIT_MS = 5000;
 
 	/**
 	 * Upload one composer attachment to whichever endpoint this lane owns.
 	 * Both call sites (the picker and the drop handler) go through here so the
 	 * two can never drift onto different targets.
 	 */
-	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
+	async function uploadComposerFile(file: File): Promise<FileUploadResponse> {
+		// Never write into a local project for a chat whose owner is not known
+		// yet: the id may name an unrelated project here (#1659). Wait for the
+		// row or /live, then pick the target from the settled project.
+		const pendingOwnerOf = $activeSession.sessionId;
+		if (pendingOwnerOf && uploadNeedsOwner($activeSession, projectLane)) {
+			const owner = await activeSession.waitForOwner(pendingOwnerOf, OWNER_WAIT_MS);
+			if (owner === 'left') throw { detail: 'the chat changed before the file was attached' };
+			if (owner !== 'known') throw { detail: UPLOAD_OWNER_UNKNOWN };
+		}
 		if (projectLane !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
 			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
 		}

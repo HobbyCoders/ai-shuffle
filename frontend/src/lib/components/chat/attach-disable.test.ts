@@ -3,6 +3,7 @@ import {
 	ATTACHMENTS_NEED_LOCAL_CHECKOUT,
 	SELECT_PROJECT_TO_UPLOAD,
 	attachmentBlockReason,
+	uploadNeedsOwner,
 	isRemoteOnlyCompose
 } from './attach-disable';
 
@@ -44,5 +45,18 @@ describe('attachmentBlockReason', () => {
 		// passing its lane must not turn that into a blanket bypass.
 		expect(attachmentBlockReason(null, 'pv2-remote', 'code')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
 		expect(attachmentBlockReason('', 'pv2-remote', 'voice')).toBe(ATTACHMENTS_NEED_LOCAL_CHECKOUT);
+	});
+});
+
+describe('uploadNeedsOwner (#1659)', () => {
+	it('holds a local-project upload on an open chat until its owner is known', () => {
+		expect(uploadNeedsOwner({ sessionId: 's', project: 'app' })).toBe(true);
+		expect(uploadNeedsOwner({ sessionId: 's', project: 'app', isRemote: false })).toBe(false);
+		expect(uploadNeedsOwner({ sessionId: 's', project: 'app', isRemote: true })).toBe(false);
+	});
+	it('never holds a session upload, a new chat or the chat lane', () => {
+		expect(uploadNeedsOwner({ sessionId: 's', project: '' })).toBe(false);
+		expect(uploadNeedsOwner({ sessionId: null, project: 'app' })).toBe(false);
+		expect(uploadNeedsOwner({ sessionId: 's', project: 'app' }, 'chat')).toBe(false);
 	});
 });

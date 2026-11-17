@@ -993,15 +993,32 @@ describe('session-switcher · a chat another worker runs holds the shared projec
 		switcher.destroy();
 	});
 
-	it('a deep link with no row takes the local id only until /live says another worker runs it', async () => {
+	it('a deep link with no row leaves the owner unknown, so uploads wait, until /live says another worker runs it', async () => {
 		let resolve!: (value: unknown) => void;
 		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
 		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
 		await switcher.switchSession('session-B', 'app', null, null, 'pv2-theirs');
-		expect(getState()).toMatchObject({ project: 'app', projectV2Id: 'pv2-theirs' });
+		// Owner unknown: the composer holds every project upload on this
+		// (`uploadNeedsOwner`), so the local id cannot receive a file here.
+		expect(getState()).toMatchObject({ project: 'app', projectV2Id: 'pv2-theirs', isRemote: undefined });
 		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true } });
 		await vi.waitFor(() => expect(getState().project).toBe(''));
 		expect(getState()).toMatchObject({ projectV2Id: 'pv2-theirs', isRemote: true });
+		switcher.destroy();
+	});
+
+	it('a /live answer that changes the owner re-resolves the project even after it changed during the fetch', async () => {
+		// A stale row (or a hand-off) said this worker runs it; /live says another does.
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false }];
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', isRemote: false });
+		deps.update(s => ({ ...s, project: 'app2' }));
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: true } });
+		await vi.waitFor(() => expect(getState().isRemote).toBe(true));
+		expect(getState()).toMatchObject({ project: '', projectV2Id: 'pv2-theirs' });
 		switcher.destroy();
 	});
 
