@@ -282,12 +282,30 @@ def refs_footer(refs) -> str:
     )
 
 
-def _bookend_stdout(segments: list[str], cap: int, total: int, refs: Sequence[tuple]) -> str:
+def _bookend_stdout(
+    segments: list[str], cap: int, total: int, refs: Sequence[tuple], shares: dict[int, int]
+) -> str:
     """Shares too small for per-print markers: keep two readable windows instead."""
     def marker(prints: int, chars: int) -> str:
         return f"…[{prints} prints, {chars} chars cut]…\n"
 
-    room = max(0, cap - len(marker(len(segments), total)))
+    marker_size = len(marker(len(segments), total))
+    room = max(0, cap - marker_size)
+    # Preserve short summaries in input order. Each isolated group can split
+    # one gap into two, so charge for that extra marker too. Leave at least
+    # half the room for the first and last prints, even with many summaries.
+    short_budget = room // 2
+    shorts: list[tuple[int, int, str]] = []
+    offset = 0
+    for i, segment in enumerate(segments):
+        if segment and len(segment) == shares[i]:
+            adjacent = shorts and shorts[-1][0] == i - 1
+            cost = len(segment) + (0 if adjacent else marker_size)
+            if cost <= short_budget:
+                shorts.append((i, offset, segment))
+                short_budget -= cost
+                room -= cost
+        offset += len(segment)
 
     def window(indices: range, budget: int, *, tail: bool) -> tuple[str, int]:
         parts = []
@@ -308,8 +326,21 @@ def _bookend_stdout(segments: list[str], cap: int, total: int, refs: Sequence[tu
     head, first = window(range(n), room // 2, tail=False)
     tail, last = window(range(n - 1, -1, -1), room - room // 2, tail=True)
     kept = len(head) + len(tail)
-    cut = marker(n - first - last, total - kept)
-    payload = head + (cut if len(cut) <= cap else "…"[:cap]) + tail
+    parts = [head]
+    cursor, pos = first, len(head)
+    for i, offset, part in shorts:
+        if offset < len(head) or offset + len(part) > total - len(tail):
+            continue  # already in a bookend
+        if pos < offset:
+            parts.append(marker(i - cursor, offset - pos))
+        parts.append(part)
+        kept += len(part)
+        cursor, pos = i + 1, offset + len(part)
+    if pos < total - len(tail):
+        cut = marker(n - last - cursor, total - len(tail) - pos)
+        parts.append(cut if len(cut) <= cap else "…"[:cap])
+    parts.append(tail)
+    payload = "".join(parts)
     return (
         payload.rstrip("\n") + f"\n…[stdout truncated: kept {kept} of {total} chars across "
         f"{n} prints — one cell's stdout budget is {cap:,} chars.{_recovery_clause(refs)}]"
@@ -330,9 +361,9 @@ def fair_share_stdout(
     max-min fair-shares the budget across ``segments`` (one segment ≈ one
     ``print``): every segment shorter than its share survives whole and frees
     its surplus for the greedy ones. If shares are too thin even for markers,
-    keep the first and last prints with one counted gap. Otherwise each cut
+    keep bookends and fitting short prints with counted gaps. Otherwise each cut
     segment carries an inline ``…[-N chars]`` marker. A closing notice names
-    that did the cutting, the heaviest drops, and — when the cell's tool
+    the stdout budget, retained text size, and — when the cell's tool
     results are alive in the kernel — the ``_refs`` handles that hold them
     whole, so the recovery is a slice rather than a re-run.
 
@@ -369,9 +400,14 @@ def fair_share_stdout(
         # Reserve the marker (and the newline that closes the line) out of
         # this segment's own share, so the payload stays inside the cap even
         # when every print is truncated.
-        reserve = len(_drop_marker(len(segment) - budget)) + 1
+        dropped = len(segment) - budget
+        reserve = len(_drop_marker(dropped)) + 1
+        # The marker displaces text too: 99 dropped chars can become 112,
+        # needing a third digit. Size the marker for the final count.
+        while (width := len(_drop_marker(dropped + reserve)) + 1) > reserve:
+            reserve = width
         if budget <= reserve:
-            return _bookend_stdout(segments, cap, total, refs)
+            return _bookend_stdout(segments, cap, total, refs, keep)
         room = budget - reserve
         # A share big enough to split keeps the print's tail too: a printed
         # command result or log ends with its error or summary.

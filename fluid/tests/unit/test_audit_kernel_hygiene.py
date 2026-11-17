@@ -401,6 +401,36 @@ async def test_kernel_stdout_cap_fair_shares_across_prints() -> None:
         await kernel.stop()
 
 
+@pytest.mark.parametrize("case", ["digit-boundary", "middle-summary"])
+async def test_kernel_stdout_payload_and_spill(case: str) -> None:
+    if case == "digit-boundary":
+        code = "for i in range(400): print('R' * 118)"
+        lines = ["R" * 118] * 400
+    else:
+        code = "for i in range(1202): print('OK!' if i == 600 else 'filler' * 7)"
+        lines = ["filler" * 7] * 600 + ["OK!"] + ["filler" * 7] * 601
+    kernel = SubprocessKernel(KernelConfig(stdout_cap=8_000))
+    await kernel.start()
+    try:
+        r = await kernel.exec(code, timeout=20, on_host_call=_big_host)
+    finally:
+        await kernel.stop()
+    assert r.error is None
+    payload, notice = r.stdout.rsplit("\n", 1)
+    assert r.stdout_full == "\n".join(lines) + "\n"
+    assert len(payload) <= 8_000
+    if case == "middle-summary":
+        assert "\nOK!\n" in payload
+        assert payload.startswith(lines[0]) and payload.endswith(lines[-1])
+        before, after = payload.split("\nOK!\n")
+        for half, count in ((before, 600), (after, 601)):
+            missing = count - half.count(lines[0])
+            assert f"…[{missing} prints, {missing * (len(lines[0]) + 1)} chars cut]…" in half
+    else:
+        assert payload.splitlines() == ["RRRRRR…[-113 chars]"] * len(lines)
+    assert "stdout truncated: kept" in notice
+
+
 def test_fair_share_payload_never_exceeds_the_cap() -> None:
     # Thousands of prints with shares below two characters: an ellipsis per
     # print used to push the payload to 2.4x the cap.
