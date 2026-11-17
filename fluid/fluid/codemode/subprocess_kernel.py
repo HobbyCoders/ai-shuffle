@@ -38,7 +38,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from fluid.codemode.kernel import HostCall, HostReply, KernelResult
+from fluid.codemode.kernel import (
+    HostCall,
+    HostCallSalvage,
+    HostReply,
+    KernelResult,
+    current_host_call_salvage,
+)
 from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
 from fluid.tools.registry import current_call_time_left
@@ -392,7 +398,9 @@ class SubprocessKernel:
     ) -> HostReply:
         """Await one host call under ``bound`` seconds of non-human wall clock.
 
-        On expiry the call is cancelled and a ``TimeoutError`` is raised; the
+        On expiry the call is cancelled. If the bridge already filed the
+        tool's finished reply (see ``HostCallSalvage``) that reply is returned;
+        otherwise a ``TimeoutError`` is raised; the
         caller answers the child with an error reply, so the cell aborts with a
         traceback and its committed-call manifest instead of the kernel being
         torn down. Time already spent waiting on a human is credited back as it
@@ -400,7 +408,13 @@ class SubprocessKernel:
         permission prompt from being cancelled as a hang.
         """
         if bound <= 0:
-            return await on_host_call(name, kwargs)
+            # No deadline, so nothing to salvage; a fresh empty context keeps a
+            # bridge inside this call from filing into an enclosing call's slot.
+            salvage_token = current_host_call_salvage.set(None)
+            try:
+                return await on_host_call(name, kwargs)
+            finally:
+                current_host_call_salvage.reset(salvage_token)
         loop = asyncio.get_running_loop()
 
         def spent_waiting() -> float:
@@ -419,11 +433,14 @@ class SubprocessKernel:
             # time already spent on hooks and gates counts, human wait does not.
             return deadline + max(0.0, spent_waiting() - credited) - loop.time()
 
-        # The task copies the context here, so the tool it runs can see it.
+        salvage = HostCallSalvage()
+        # The task copies the context here, so the tool it runs can see both.
         token = current_call_time_left.set(time_left)
+        salvage_token = current_host_call_salvage.set(salvage)
         try:
             task = asyncio.ensure_future(on_host_call(name, kwargs))
         finally:
+            current_host_call_salvage.reset(salvage_token)
             current_call_time_left.reset(token)
         try:
             while True:
@@ -437,6 +454,12 @@ class SubprocessKernel:
                     deadline += spent - credited
                     credited = spent
                     continue
+                # The ceiling expired. A tool that already finished (a Bash
+                # that timed out inside it) keeps its capped reply; only the
+                # post-processing still running is cancelled (#1549). A turn
+                # cancel arrives as CancelledError above and never gets here.
+                if salvage.reply is not None:
+                    return salvage.reply
                 raise TimeoutError
         finally:
             if not task.done():

@@ -427,3 +427,143 @@ async def test_the_native_loop_hands_the_model_what_timed_out_calls_printed(tmp_
     assert "BASH-SAID-THIS" in seen and "cut from 60s" in seen and "cancelled before" not in seen
     seen = _last_tool_result(coded.requests[2])
     assert "CELL-SAID-THIS" in seen and "printed before the timeout and may be incomplete" in seen
+
+
+# ── the ceiling expiring after the tool finished (post-processing) ──────────
+
+
+@needs_bash
+async def test_a_slow_post_tool_hook_does_not_cost_the_cell_bashs_output(tmp_path) -> None:
+    """Ceiling 7s, Bash asks for 60s, a PostToolUse hook awaits 6s: Bash times
+    out at about 1.9s with its capped, spilled output; the ceiling then expires
+    inside the hook. The cell still gets that output, with a note that the
+    hooks did not finish, and the host's result event says the same."""
+    from fluid.hooks.bus import POST_TOOL_USE
+
+    hook_saw: list[str] = []
+
+    async def slow_hook(event: str, payload: dict):
+        hook_saw.append(payload["output"])
+        await asyncio.sleep(6)
+
+    hooks = HookBus()
+    hooks.on(POST_TOOL_USE, slow_hook)
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=7))
+    loop = _Loop(tmp_path, hooks=hooks)
+    command = (
+        "for i in $(seq 1 3000); do echo \"line $i of noise\"; done; "
+        "echo FATAL-BEFORE-HANG; sleep 60"
+    )
+    code = (
+        "from tools.Bash import Bash\n"
+        "try:\n"
+        f"    Bash(command={command!r}, timeout=60)\n"
+        "except Exception as exc:\n"
+        "    print(str(exc))\n"
+    )
+    started = asyncio.get_running_loop().time()
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 2})
+    finally:
+        await session.aclose()
+    assert asyncio.get_running_loop().time() - started < 12
+    assert hook_saw and "FATAL-BEFORE-HANG" in hook_saw[0]
+    assert "FATAL-BEFORE-HANG" in out.text and "PostToolUse hooks did not finish" in out.text
+    assert "did not return within" not in out.text
+    # Still capped and spilled: the cell's 8k stdout cap, the full text on disk.
+    assert len(out.text) < 12_000
+    # Bash spilled its whole run, and the cell's spill keeps Bash's pointer.
+    cell_full = _spill_path(out.text).read_text(encoding="utf-8")
+    bash_file = re.search(r"saved to (\S+?Bash\S*?\.txt)", cell_full)
+    assert bash_file, cell_full
+    assert "line 1500 of noise" in Path(bash_file.group(1)).read_text(encoding="utf-8")
+    events = [e for e in loop.events if isinstance(e, ToolResult) and e.name == "Bash"]
+    assert len(events) == 1 and events[0].is_error
+    assert "FATAL-BEFORE-HANG" in events[0].output and "cancelled before it returned" not in events[0].output
+
+
+async def test_a_filed_reply_survives_the_ceiling_but_not_a_turn_cancel() -> None:
+    from fluid.codemode.kernel import current_host_call_salvage
+
+    kernel = SubprocessKernel(KernelConfig())
+
+    async def files_then_hangs(name: str, kwargs: dict) -> HostReply:
+        current_host_call_salvage.get().reply = HostReply(result="kept")
+        await asyncio.sleep(30)  # post-processing that never ends
+        return HostReply(result="never")
+
+    # The ceiling: the filed reply comes back at once.
+    reply = await asyncio.wait_for(kernel._call_host(files_then_hangs, "x", {}, 0.3, None), 3)
+    assert reply.result == "kept"
+
+    # A turn cancel: stops promptly, nothing is salvaged.
+    loop = asyncio.get_running_loop()
+    task = asyncio.ensure_future(kernel._call_host(files_then_hangs, "x", {}, 30, None))
+    await asyncio.sleep(0.2)
+    started = loop.time()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert loop.time() - started < 1
+
+
+async def test_a_call_with_nothing_filed_still_times_out() -> None:
+    kernel = SubprocessKernel(KernelConfig())
+
+    async def hangs(name: str, kwargs: dict) -> HostReply:
+        await asyncio.sleep(30)
+        return HostReply(result="never")
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(kernel._call_host(hangs, "x", {}, 0.3, None), 3)
+
+
+async def test_an_unbounded_inner_call_cannot_file_into_the_outer_slot() -> None:
+    from fluid.codemode.kernel import current_host_call_salvage
+
+    kernel = SubprocessKernel(KernelConfig())
+    seen: list = []
+
+    async def inner(name: str, kwargs: dict) -> HostReply:
+        seen.append(current_host_call_salvage.get())
+        return HostReply(result="inner")
+
+    async def outer(name: str, kwargs: dict) -> HostReply:
+        seen.append(current_host_call_salvage.get())
+        return await kernel._call_host(inner, "y", {}, 0, None)
+
+    assert (await kernel._call_host(outer, "x", {}, 10, None)).result == "inner"
+    assert seen[0] is not None and seen[1] is None
+
+
+@needs_bash
+async def test_a_slow_result_event_does_not_cost_the_cell_its_reply(tmp_path) -> None:
+    """The last await before the cell gets its reply is the host's ToolResult
+    event. A ceiling that expires there returns the finished reply."""
+
+    class _SlowLoop(_Loop):
+        slowed = False
+
+        async def _emit(self, event) -> None:
+            if isinstance(event, ToolResult) and event.name == "Bash" and not self.slowed:
+                self.slowed = True
+                await asyncio.sleep(30)
+            self.events.append(event)
+
+    registry = ToolRegistry()
+    registry.register_builtin(bash.SPEC, bash.handler)
+    session = CodeModeSession(registry, config=KernelConfig(host_call_timeout=6))
+    loop = _SlowLoop(tmp_path)
+    code = (
+        "from tools.Bash import Bash\n"
+        "print(Bash(command='echo QUICK-RESULT')['output'])\n"
+    )
+    started = asyncio.get_running_loop().time()
+    try:
+        out = await session.run_python(sid="s", turn_id="t", loop=loop, input={"code": code, "timeout": 2})
+    finally:
+        await session.aclose()
+    assert asyncio.get_running_loop().time() - started < 15
+    assert "QUICK-RESULT" in out.text and "did not return within" not in out.text

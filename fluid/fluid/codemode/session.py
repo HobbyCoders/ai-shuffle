@@ -42,7 +42,7 @@ from typing import Any
 
 from fluid.codemode.bridge import HostBridge
 from fluid.codemode.journal import FrictionDetector, append_friction, strip_reminders
-from fluid.codemode.kernel import HostReply
+from fluid.codemode.kernel import HostReply, current_host_call_salvage
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
@@ -645,15 +645,25 @@ class CodeModeSession:
                 # The kernel's per-call ceiling (or the turn's watchdog)
                 # cancelled this call. The ToolUse above already went out;
                 # without a matching ToolResult the transcript would show a
-                # call that never returned.
+                # call that never returned. A tool that had already finished
+                # (its reply filed for the kernel, #1549) is reported as such.
+                filed = getattr(current_host_call_salvage.get(), "reply", None)
+                if filed is not None:
+                    output = filed.result if filed.result is not None else (
+                        filed.error or filed.message or "tool error")
+                    failed = filed.result is None
+                    record["ok"] = not failed
+                    record["shell_exit_code"] = filed.shell_exit_code
+                else:
+                    output = (
+                        f"{name} was cancelled before it returned (per-call "
+                        "ceiling or turn watchdog); the cell stops here."
+                    )
+                    failed = True
                 try:
                     await loop._emit(ToolResult(
                         session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                        name=name, is_error=True,
-                        output=(
-                            f"{name} was cancelled before it returned (per-call "
-                            "ceiling or turn watchdog); the cell stops here."
-                        ),
+                        name=name, is_error=failed, output=output,
                     ))
                 except Exception:  # noqa: BLE001 — the cancel must still land
                     pass
