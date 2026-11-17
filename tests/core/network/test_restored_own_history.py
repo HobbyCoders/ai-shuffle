@@ -155,7 +155,7 @@ async def test_worker_without_support_is_served_as_before(workers, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_compacted_gap_stops_the_replay_without_a_state_copy(workers):
-    """Only the unbroken prefix comes back; nothing past a hole is claimed received."""
+    """The receiver advances only through the prefix; the sender still advertises its full head."""
     a, b = _restored(workers)
     with b.active(), get_db() as conn:
         held = store.own_watermark(conn.cursor(), b.device_id, 1)
@@ -446,7 +446,7 @@ def _observe(worker, clock):
         store.observe_clock(conn.cursor(), clock)
 
 
-def _equal_clock_fork(workers):
+def _equal_clock_fork(workers, *, delete=False):
     """A holds B's first write after its backup, C the second. B restores and
     takes its proof from A, so its next write carries the clock of the version
     only C holds, under the same device id: (clock, origin) ties exactly."""
@@ -462,9 +462,16 @@ def _equal_clock_fork(workers):
     _detect_restore(a, b, 1)
     lost = _theme(c)
     _observe(b, lost[0] - 1)  # no-op unless the proof left B's clock lower
-    set_owner_pref(b, "theme", "new")
+    if delete:
+        from app.core import owner_auth
+        with b.active():
+            assert database.delete_user_preference("admin", owner_auth.preference_identity(), "theme")
+            engine.scan_all()
+    else:
+        set_owner_pref(b, "theme", "new")
     _exchange(b, a)
-    assert _theme(a) == lost and owner_pref(a, "theme") == "new" and owner_pref(c, "theme") == "lost-1"
+    assert _theme(a) == lost and owner_pref(a, "theme") == (None if delete else "new")
+    assert owner_pref(c, "theme") == "lost-1"
     return a, b, c
 
 
@@ -499,8 +506,10 @@ def test_a_state_copy_breaks_the_equal_clock_tie_the_same_way(workers):
         with receiver.active(), get_db() as conn:
             engine.apply_snapshot_items(conn.cursor(), coll, [page], ctx=engine.context())
 
-    # A sender on an older build sends no incarnation: the version held stays.
-    copy(a, c, older_build=True)
+    # A legacy sender cannot order a divergent exact tie. Refuse the page
+    # rather than completing the transfer and adopting its frontier.
+    with pytest.raises(engine.TransientApplyError, match="unresolved legacy"):
+        copy(a, c, older_build=True)
     assert owner_pref(c, "theme") == "lost-1"
     copy(c, a)
     assert owner_pref(a, "theme") == "new"
@@ -536,6 +545,97 @@ async def test_state_copy_exports_the_incarnation_of_a_retained_legacy_op(worker
     assert _lost_themes(c, b.device_id) == ["lost-1"]
 
 
+async def test_legacy_tombstone_and_tied_upsert_in_the_same_log(workers):
+    a, b, c = _equal_clock_fork(workers, delete=True)
+    _exchange(c, a)
+    with a.active(), get_db() as conn:
+        conn.cursor().execute("UPDATE sync_records SET origin_incarnation=NULL WHERE collection='user_preferences' "
+                              "AND record_id LIKE %s", ("%theme",))
+    await _copy_state(a, c)
+    assert owner_pref(c, "theme") is None and _theme_incarnation(c) == 2
+    assert _lost_themes(c, b.device_id) == ["lost-1"]
+    assert _head(c, b.device_id, 2) == _head(b, b.device_id, 2) > 0
+    _converge([a, b, c])
+    assert all(owner_pref(worker, "theme") is None for worker in (a, b, c))
+
+
+def _legacy_titles(workers, *, old_first=True, same_title=False):
+    """Two authentic, tied writes of one owner to its own chat. C saw only the first."""
+    a, b, c = _network(workers, "a", "b", "c")
+    _session(b, "chat", title="v0", events=1)
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    set_owner_pref(b, "theme", "proof")
+    _exchange(b, a)
+    _rename(b, "old title")
+    _exchange(b, c)
+    if old_first:
+        _exchange(b, a)
+    with c.active(), get_db() as conn:
+        old = store.get_record(conn.cursor(), "sessions", "chat")
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    _observe(b, old["clock"] - 1)
+    _rename(b, "old title" if same_title else "new title")
+    _exchange(b, a)
+    if not old_first:
+        _exchange(c, a)
+    with a.active(), get_db() as conn:
+        cursor = conn.cursor()
+        held = store.get_record(cursor, "sessions", "chat")
+        assert held["clock"] == old["clock"] and held["origin_incarnation"] == 2
+        assert {op["origin_incarnation"] for op in store.version_ops(cursor, "sessions", held)} == {1, 2}
+        cursor.execute("UPDATE sync_records SET origin_incarnation=NULL WHERE collection='sessions' AND record_id='chat'")
+    return a, b, c, old
+
+
+def _chat_losses(worker):
+    with worker.active():
+        return [r["losing_record"]["title"] for r in store.list_conflicts()
+                if r["collection"] == "sessions" and r["record_id"] == "chat"]
+
+
+@pytest.mark.parametrize("old_first", [True, False], ids=["old-then-new", "new-then-old"])
+async def test_two_retained_owner_ops_export_the_held_title(workers, old_first):
+    a, b, c, _ = _legacy_titles(workers, old_first=old_first)
+    assert _head(c, b.device_id, 2) == 0
+    await _copy_state(a, c)
+    assert _chat(c)[0] == "new title" and _chat_losses(c) == ["old title"]
+    assert _head(c, b.device_id, 2) == _head(a, b.device_id, 2) > 0
+    _converge([a, b, c])
+    assert all(_chat(worker)[0] == "new title" for worker in (a, b, c))
+
+
+@pytest.mark.parametrize("case", ["two-matches", "no-match", "no-ops", "older-match"])
+async def test_unsafe_legacy_copy_does_not_consume_the_repair_stream(workers, case):
+    a, b, c, old = _legacy_titles(workers, same_title=case == "two-matches")
+    with a.active(), get_db() as conn:
+        cursor = conn.cursor()
+        if case == "no-match":  # only the losing op survived retention
+            cursor.execute("DELETE FROM sync_ops WHERE collection='sessions' AND record_id='chat' AND incarnation=2")
+            assert cursor.rowcount == 1
+        elif case == "no-ops":  # snapshot frontier still proves the origin forked
+            cursor.execute("DELETE FROM sync_ops WHERE collection='sessions' AND record_id='chat'")
+        elif case == "older-match":  # old LWW build kept its first value on the tie
+            cursor.execute("UPDATE sessions SET title='old title' WHERE id='chat'")
+            cursor.execute("UPDATE sync_records SET content_hash=%s WHERE collection='sessions' AND record_id='chat'",
+                           (old["content_hash"],))
+    before = _streams(c, b.device_id)
+    with pytest.raises(transport.PeerError, match="unresolved legacy restore fork"):
+        await _copy_state(a, c)
+    assert _streams(c, b.device_id) == before and _head(c, b.device_id, 2) == 0
+    assert _chat(c)[0] == "old title" and _chat_losses(c) == []
+    _exchange(b, c)  # still eligible to deliver the actual signed winner
+    assert _head(c, b.device_id, 2) == _head(b, b.device_id, 2) > 0
+    assert _chat(c)[0] == _chat(b)[0]
+    if case != "two-matches":
+        assert _chat_losses(c) == ["old title"]
+    _rename(b, "after repair")
+    for peer in (a, c):
+        _exchange(b, peer)
+    assert all(_chat(worker)[0] == "after repair" for worker in (a, b, c))
+
+
 async def test_repeated_state_copy_keeps_one_conflict_per_losing_fork(workers):
     a, b, c = _equal_clock_fork(workers)
     for _ in range(2):
@@ -563,7 +663,8 @@ def test_a_transcript_copy_is_compared_with_the_same_tie_break(workers):
 
         assert newer("s", 1) and not newer("s", 2) and not newer("s", 3)
         assert newer("s", None)  # an older build's copy does not displace a known version
-        assert not newer("t", 1) and not newer("t", None)
+        # With no payload evidence, do not replace the log (or clear its repair token).
+        assert newer("t", 1) and newer("t", None)
 
 
 @pytest.mark.parametrize("delete", [False, True], ids=["edit", "deletion"])
@@ -612,25 +713,44 @@ def test_a_replay_keeps_the_post_restore_write_it_displaces(workers, delete):
     assert owner_pref(a, "theme") == owner_pref(b, "theme") == "lost-29"
 
 
-def test_a_prune_between_the_prefix_check_and_the_fetch_opens_no_hole(workers, monkeypatch):
-    """Retention deleting an op after the prefix was measured: only the part
-    before it is sent, never the ops past the hole."""
+async def test_a_prune_between_the_prefix_check_and_the_fetch_opens_no_hole(workers, monkeypatch):
+    """The sender advertises its logical head, not the last fetchable seq."""
     a, b = _restored(workers)
     _detect_restore(a, b, 1)
-    with b.active(), get_db() as conn:
-        held = store.own_watermark(conn.cursor(), b.device_id, 1)
-    measure = store._unbroken_head
+    held, sender_head = _head(b, b.device_id, 1), _head(a, b.device_id, 1)
+    assert sender_head > held + 2
+    measure, pruned = store._unbroken_head, []
 
     def pruned_meanwhile(cursor, origin, incarnation, after, head):
         unbroken = measure(cursor, origin, incarnation, after, head)
-        cursor.execute("DELETE FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
-                       (origin, incarnation, held + 3))
+        if _ACTIVE.get() is a and origin == b.device_id and incarnation == 1 and not pruned:
+            assert unbroken == sender_head
+            cursor.execute("DELETE FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND seq = %s",
+                           (origin, incarnation, held + 3))
+            assert cursor.rowcount == 1
+            pruned.append(held + 3)
         return unbroken
 
+    batches = []
+
+    class Capture(ServedBy):
+        def handler(self, request):
+            response = super().handler(request)
+            if request.url.path.endswith("/peer/exchange"):
+                body = response.json()
+                batches.append(([op["origin_seq"] for op in body["ops"] if op["origin_device_id"] == b.device_id
+                                 and op["origin_incarnation"] == 1], body["watermarks"][b.device_id]["1"],
+                                body["snapshot_required"]))
+            return response
+
     monkeypatch.setattr(store, "_unbroken_head", pruned_meanwhile)
-    sent = sorted(op["origin_seq"] for op in _offer(a, b)
-                  if op["origin_device_id"] == b.device_id and op["origin_incarnation"] == 1)
-    assert sent == [held + 1, held + 2]
+    served = Capture(a, "https://a.example.com")
+    async with httpx.AsyncClient(transport=served.transport()) as client:
+        for _ in range(2):
+            await _sync(b, a, client, served.base_url)
+    assert pruned == [held + 3]
+    assert batches == [([held + 1, held + 2], sender_head, False), ([], sender_head, False)]
+    assert _head(b, b.device_id, 1) == held + 2 and owner_pref(b, "theme") == "lost-1"
 
 
 def test_another_worker_cannot_replay_owner_fields_into_a_chat(workers):

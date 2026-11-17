@@ -4,13 +4,8 @@ from typing import Any, Mapping
 from app.db.base import row_to_dict, table_exists
 
 
-def normalize_legacy_owner(cursor: Any, row: Mapping[str, Any]) -> bool:
-    """Persist chat mode using the same owner fence for upgrades and peer arrivals.
-
-    Read principals on the caller's transaction, including identities that have
-    just been mirrored. Preserve history and stored permission choices: attaching
-    a project remains the atomic boundary that resets access to Ask.
-    """
+def is_legacy_owner_chat(cursor: Any, row: Mapping[str, Any]) -> bool:
+    """Would the owner-mode migration project this row to chat mode?"""
     from app.core.session_orchestration import is_owner_session
 
     if row.get("mode") not in (None, "code") or any(
@@ -26,7 +21,12 @@ def normalize_legacy_owner(cursor: Any, row: Mapping[str, Any]) -> bool:
             "SELECT * FROM mobile_tool_identity WHERE session_id=%s", (row["id"],),
         )
         principal = row_to_dict(cursor.fetchone())
-    if not is_owner_session(row, principal=principal):
+    return is_owner_session(row, principal=principal)
+
+
+def normalize_legacy_owner(cursor: Any, row: Mapping[str, Any]) -> bool:
+    """Persist chat mode using the same owner fence for upgrades and peer arrivals."""
+    if not is_legacy_owner_chat(cursor, row):
         return False
     cursor.execute(
         "UPDATE sessions SET mode='chat' WHERE id=%s AND (mode IS NULL OR mode='code') "

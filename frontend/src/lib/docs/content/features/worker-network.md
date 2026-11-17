@@ -72,6 +72,8 @@ If two workers change the same setting while they cannot reach each other, the l
 
 ChatGPT and Grok sign-in bundles are an exception: the bundle with the newer refresh timestamp wins, independently of edits to the provider's name, models or enabled switch. Update every worker to get this protection everywhere. An older worker still replaces the whole provider row and can restore a spent token on itself; upgrade the renewing worker first. The network founder renews these logins; if the founder is no longer an active worker, the active worker with the lowest device id takes over. If a renewal has not reached this worker, the login-expired message names the renewing worker. This cannot repair a login whose refresh token has already been invalidated.
 
+After a restore, an upgraded worker may have two signed versions of a chat or setting but no record of which one it kept. If it cannot identify the version it would send, it stops the state copy rather than marking missing changes as received. Bring another worker that still has the signed history online and sync again.
+
 ## Remove a device
 
 Remove a worker, phone or browser from **Settings → Devices**. A removed worker stops receiving your settings. Its chats stay on your other workers as read-only copies, and **Fork here** continues them.

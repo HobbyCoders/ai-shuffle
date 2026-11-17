@@ -221,15 +221,19 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   later version it signed before the restore has a lower clock and loses to
   that version on every replica, as any concurrent write would. Whichever of
   the device's two incarnations loses is kept as a conflict, as another
-  device's would be. Members on an older build still refuse an older
-  incarnation once they have seen a newer one and keep the first version on a
-  tie, so until they update they can disagree in those cases.
+  device's would be. Older builds could keep different sides of a tie. For an
+  upgraded row without its incarnation, compare its content or deletion with
+  the retained signed writes. If no unique write explains a fork, or the row
+  represents a loser while the winner is in its log, that worker refuses the
+  state copy. The recipient can still get the signed history from another peer;
+  it hasn't advanced its watermark on the strength of the refused copy.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement
   that reads it so a compaction running meanwhile cannot open a hole: past an
-  op already compacted out of the log the replay stops, and no state copy stands in for
-  it: a copy is the serving peer's unsigned claim, and a device takes its own
+  op already compacted out of the log the replay stops. The sender still reports
+  its full logical head, but the receiver advances only through the prefix it
+  actually received. No state copy stands in for the missing op: a copy is the serving peer's unsigned claim, and a device takes its own
   chats' turns and owner-only fields only from ops it signed itself. Retention
   compacts transcript ops about an hour after every member has them (daily pass,
   [sync log retention](../internal/sync-log-retention.md)), so a restore made

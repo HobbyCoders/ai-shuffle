@@ -1515,22 +1515,12 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
          origin_incarnation))
 
 
-def version_incarnation(cursor, collection: str, version: Mapping[str, Any]) -> int:
-    """The origin incarnation of a stored record version (0 when not known).
-
-    Versions stored before it was kept (#1568) have none; the op that
-    carried one names it while this worker still holds that op. Two held
-    ops of one (record, origin, clock) are a restore fork stored by an older
-    build, which refused the earlier incarnation's op once it held a later
-    one and kept the version it held on a tie: the version kept is the lowest.
-    """
-    if version.get("origin_incarnation") is not None:
-        return int(version["origin_incarnation"])
-    cursor.execute("SELECT MIN(incarnation) AS incarnation FROM sync_ops WHERE collection = %s AND record_id = %s "
+def version_ops(cursor, collection: str, version: Mapping[str, Any]) -> List[dict]:
+    """Retained signed candidates for a legacy record, not ordered by presumed winner."""
+    cursor.execute("SELECT envelope FROM sync_ops WHERE collection = %s AND record_id = %s "
                    "AND origin_device_id = %s AND clock = %s",
                    (collection, version["record_id"], version["origin_device_id"], int(version["clock"])))
-    row = cursor.fetchone()
-    return int(row["incarnation"]) if row and row["incarnation"] is not None else 0
+    return [_load(row["envelope"], {}) for row in cursor.fetchall()]
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:

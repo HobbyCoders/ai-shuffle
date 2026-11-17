@@ -671,7 +671,14 @@ def _newer_than_snapshot(cursor, session_id: str, coll: policy.Collection, items
         base = (int(copied["clock"]), str(copied["origin_device_id"]), engine._item_incarnation(copied)) \
             if copied else newest
         # The same order every apply path uses, restore-fork tie included (#1568).
-        if base is None or engine._versus_held(cursor, coll.name, *base, held) < 0:
+        if base is None:
+            return True
+        try:
+            if engine._versus_held(cursor, coll.name, *base, held) < 0:
+                return True
+        except engine.TransientApplyError:
+            # Replacing this whole log would discard a row of unproven
+            # provenance. Leave the log intact and its repair token queued.
             return True
     return False
 

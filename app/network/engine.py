@@ -1939,26 +1939,71 @@ def _item_incarnation(item: Mapping[str, Any]) -> int:
     return value if type(value) is int and value >= 1 else 0
 
 
+def _held_incarnation(cursor, collection, held, *, ctx=None, exporting=False, exported_hash=None):
+    """Recover a legacy version only when one retained signed write explains it.
+
+    Legacy owner-ordered and LWW rows need not have kept the same side of
+    a tie. The wire hash covers the entire envelope payload; the held hash
+    instead covers the collection's replicated fields. Compare like to like.
+    """
+    if held.get("origin_incarnation") is not None:
+        return int(held["origin_incarnation"])
+    from app.network.keyring import open_envelope
+
+    ops = store.version_ops(cursor, collection, held)
+    matches, retained = set(), set()
+    coll = policy.collection(collection)
+    for data in ops:
+        env = Envelope.from_dict(data)
+        retained.add(env.origin_incarnation)
+        if (env.op == OP_DELETE) != bool(held["deleted"]):
+            continue
+        if env.op != OP_DELETE:
+            try:
+                plain, _ = open_envelope(ctx or require_context(), env)
+            except envelope_mod.EnvelopeError:
+                # Cannot exclude a second match if a historical key is missing.
+                matches.clear()
+                break
+            if content_hash(coll, plain) != held["content_hash"]:
+                # Old signed owner chats can have mode NULL/code even though
+                # materialization projects them to chat. Do not mutate the row.
+                from app.db.session_mode_migration import is_legacy_owner_chat
+                if not (collection == "sessions" and is_legacy_owner_chat(cursor, plain)
+                        and content_hash(coll, {**plain, "mode": "chat"}) == held["content_hash"]):
+                    continue
+        matches.add(env.origin_incarnation)
+    incarnation = next(iter(matches)) if len(matches) == 1 else 0
+    if exporting:
+        # A copy adopts the publisher's entire frontier. Don't pass a peer
+        # over a retained winner which this old row doesn't represent. Nor
+        # should a pending local edit travel under another write's identity.
+        if (ops and (not incarnation or any(i > incarnation for i in retained)
+                     or exported_hash != held["content_hash"])) or (
+                not ops and store.highest_incarnation(cursor, held["origin_device_id"]) > 1):
+            raise TransientApplyError("Cannot copy unresolved legacy restore fork; sync signed history first")
+    return incarnation
+
+
 def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: int,
                  held: Mapping[str, Any], *, incoming_hash: Optional[str] = None, retaining_op: bool = False) -> int:
     """``envelope.compare`` of a version against the one held, on every path that picks a winner.
 
     The held incarnation is read only for an exact (clock, origin) tie, the
-    one case it decides. A copy re-sending the version held is that tie too:
-    with ``incoming_hash`` equal to the held hash it is the same version, and
-    a row stored before incarnations were kept costs no op lookup.
+    one case it decides. Equal payloads alone do not identify a fork.
     """
     held_clock, held_origin = int(held["clock"]), held["origin_device_id"]
     held_incarnation = 0
     if clock == held_clock and origin == held_origin:
-        if (held.get("origin_incarnation") is None and incoming_hash is not None
-                and incoming_hash == (held["content_hash"] or "")):
-            return 0
-        held_incarnation = store.version_incarnation(cursor, collection, held)
+        held_incarnation = _held_incarnation(cursor, collection, held)
+        if not incarnation or not held_incarnation:
+            if (incoming_hash == held["content_hash"] and max(incarnation, held_incarnation) <= 1
+                    and store.highest_incarnation(cursor, origin) <= 1):
+                return 0  # ordinary legacy repeat with no evidence of a fork
+            raise TransientApplyError("Cannot order an unresolved legacy restore fork; sync signed history first")
         if retaining_op and held.get("origin_incarnation") is None and incarnation < held_incarnation:
             # The losing envelope is about to join the forwarding log. Pin the
-            # winner while its retained op is still unambiguous; a later lookup
-            # would see both incarnations at this clock and return the earlier.
+            # winner now, while the evidence for it is still retained.
             cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s",
                            (held_incarnation, collection, held["record_id"]))
     return envelope_mod.compare(clock, origin, held_clock, held_origin, incarnation, held_incarnation)
@@ -1977,7 +2022,9 @@ def _restore_fork(cursor, ctx: NetworkContext, collection: str, origin: str, inc
         known = ctx.identity.incarnation if origin == ctx.device_id else store.highest_incarnation(cursor, origin)
         if max(incarnation, known) <= 1:
             return False  # one incarnation only: no fork to look up
-    return store.version_incarnation(cursor, collection, held) not in (0, incarnation)
+    # If a fork is known but its held side cannot be identified, preserve
+    # a different displaced value rather than silently losing an edit.
+    return _held_incarnation(cursor, collection, held, ctx=ctx) != incarnation
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
@@ -3096,16 +3143,17 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
             "order_seq": version.get("order_seq"), "record": None}
-    # A pre-upgrade row can still name its incarnation through its retained op.
-    incarnation = store.version_incarnation(cursor, coll.name, version)
-    if incarnation:
-        item["origin_incarnation"] = incarnation
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
         item["record"] = serialize_row(coll, row, cursor=cursor, nested_rekey=nested_rekey) if row is not None else None
         if item["record"] is None:
             item["deleted"] = True
+    exported_hash = (content_hash(coll, item["record"]) if version.get("origin_incarnation") is None
+                     and not item["deleted"] else "")
+    incarnation = _held_incarnation(cursor, coll.name, version, exporting=True, exported_hash=exported_hash)
+    if incarnation:
+        item["origin_incarnation"] = incarnation
     return item
 
 
