@@ -814,7 +814,8 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             )
         except UniqueViolation as exc:
             # Another request can claim the id after the last probe.
-            if exc.diag.constraint_name != "agents_pkey":
+            # The table rename did not rename the primary key on upgraded databases.
+            if exc.diag.constraint_name not in {"agents_pkey", "profiles_pkey"}:
                 raise
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Agent ID already exists") from exc
 

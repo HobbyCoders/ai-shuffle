@@ -231,7 +231,11 @@
 	let stacked = $state(platform.isMobile);
 	let pane = $state<'list' | 'detail'>('list');
 	function showDetail() { pane = 'detail'; }
-	function backToList() { pane = 'list'; }
+	let backCount = 0;
+	function backToList() {
+		backCount += 1;
+		pane = 'list';
+	}
 
 
 	// ── List: search and filters ──────────────────────────────────────────
@@ -409,10 +413,12 @@
 	}
 
 	/** Open an agent, saving the open one's pending edits first. */
-	async function selectProfile(profile: Profile, nextTab?: AgentTab) {
+	async function selectProfile(profile: Profile, nextTab?: AgentTab, mayOpen?: () => boolean) {
+		if (mayOpen && !mayOpen()) return;
 		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
 		if (!alreadyOpen) {
 			await flushPendingPersist();
+			if (mayOpen && !mayOpen()) return;
 			remoteChange = '';
 			saveState = 'idle';
 			if (draftId !== profile.id) draftId = null;
@@ -812,6 +818,10 @@
 	async function duplicateAgent() {
 		const source = editingProfile;
 		if (!source || duplicating) return;
+		const sourceKey = openKey;
+		const sourceBack = backCount;
+		const stillInSource = () => root?.isConnected === true && viewMode === 'form' &&
+			editingProfile?.id === source.id && openKey === sourceKey && backCount === sourceBack;
 		duplicating = true;
 		try {
 			await flushPendingPersist();
@@ -825,8 +835,8 @@
 				config: JSON.parse(JSON.stringify(latest.config ?? {}))
 			});
 			void loadData(true);
-			// An async duplicate must not pull the editor away from a newer selection.
-			if (editingProfile?.id === source.id) await selectProfile(copy, 'profile');
+			// Back or another selection leaves the copy in the list without opening it.
+			await selectProfile(copy, 'profile', stillInSource);
 			notify(`Duplicated as ${name}.`, { severity: 'success' });
 		} catch (e: any) {
 			notify('Duplicate failed: ' + (e.detail || e.message || 'Unknown error'), { severity: 'error' });
@@ -1043,7 +1053,7 @@
 	data-stacked={stacked || undefined}
 	data-view={stacked ? (pane === 'detail' ? 'detail' : 'page') : undefined}
 >
-	<ViewShell label="Agents" inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
+	<ViewShell label="Agents" inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={backToList}>
 		{#snippet panel()}
 		<ViewPanel title="Agents" count={loading && profiles.length === 0 ? undefined : profiles.length}
 			listLabel="Agent list" filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}>

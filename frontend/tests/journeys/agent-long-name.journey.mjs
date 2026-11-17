@@ -11,7 +11,7 @@
 // agents on a throwaway instance but never delete one (owner-only by design,
 // tests/api/test_preview_project_management.py).
 import { runJourney } from './runner.mjs';
-import { api, expect, gotoApp, uniq, waitChat } from './lib/app.mjs';
+import { api, expect, gotoApp, showSidebar, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const NAME_MAX = 100;
@@ -146,6 +146,50 @@ await runJourney({
 		},
 		act: ({ page, mark }) => steps(page, mark),
 		verify: ({ page, log }) => check(page, log)
+	}, {
+		name: 'duplicate-after-back-keeps-phone-list-open',
+		viewports: ['phone'],
+		async setup({ page, status }) { await gotoApp(page, status); },
+		async act({ page, mark }) {
+			const key = uniq().slice(-5);
+			const source = `Source ${key}`;
+			await api(page, 'POST', '/agents', { id: `back-test-${key}`, name: source, config: {} });
+			await showSidebar(page);
+			await workspace(page).getByRole('button', { name: 'Agents', exact: true }).click();
+			await page.locator('[data-settings-item]').filter({ hasText: source }).click();
+			const path = '**/api/v1/agents';
+			const held = Promise.withResolvers();
+			const release = Promise.withResolvers();
+			await page.route(path, async (route) => {
+				if (route.request().method() !== 'POST') return route.fallback();
+				const result = await route.fetch();
+				held.resolve(result.status());
+				await release.promise;
+				await route.fulfill({ response: result });
+			});
+			try {
+				await mark('duplicate through the phone More menu and hold its actual response');
+				await page.locator('summary[aria-label="More"]').filter({ visible: true }).click({ timeout: 5_000 });
+				await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
+				const back = page.getByRole('button', { name: 'Back to Agents', exact: true });
+				await mark('back to the list before letting the copy response reach the editor');
+				await back.click();
+				expect(await held.promise === 201, 'the one real create succeeded');
+				// Wait for the success notification request: selection, if any, precedes it.
+				const completion = page.waitForRequest((request) => request.method() === 'POST' &&
+					new URL(request.url()).pathname === '/api/v1/notifications' &&
+					(request.postData() ?? '').includes(`Duplicated as ${source} copy.`), { timeout: 5_000 });
+				release.resolve();
+				await completion;
+				expect(!(await back.isVisible()), 'a finished duplicate does not reopen detail');
+				const rows = await agentsNamed(page, source);
+				expect(rows.length === 2 && rows.some(({ name }) => name === `${source} copy`), 'source and exactly one copy persisted');
+			} finally {
+				release.resolve();
+				await page.unroute(path);
+			}
+		},
+		verify: () => {}
 	}],
 	allow: [...DEV_INSTANCE_NOISE]
 });

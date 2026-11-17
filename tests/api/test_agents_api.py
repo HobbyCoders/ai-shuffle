@@ -467,14 +467,15 @@ class TestCreateProfileEndpoint:
             assert result["id"] == "test-profile-1"
             assert mock_db.create_profile.call_args.kwargs["profile_id"] == "test-profile-1"
 
-    def test_http_create_profile_id_race_returns_plain_conflict(self, authenticated_client):
+    @pytest.mark.parametrize("constraint_name", ["agents_pkey", "profiles_pkey"])
+    def test_http_create_profile_id_race_returns_plain_conflict(self, authenticated_client, constraint_name):
         from types import SimpleNamespace
         from psycopg2.errors import UniqueViolation
 
         class AgentIdConflict(UniqueViolation):
             @property
             def diag(self):
-                return SimpleNamespace(constraint_name="agents_pkey")
+                return SimpleNamespace(constraint_name=constraint_name)
 
         with patch("app.api.agents.database.create_profile", side_effect=AgentIdConflict("database details")):
             response = authenticated_client.post("/api/v1/agents", json={
