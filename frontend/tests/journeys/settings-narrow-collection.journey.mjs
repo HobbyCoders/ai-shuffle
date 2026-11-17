@@ -627,6 +627,47 @@ await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ c
   }
  },
  {
+  name: 'same-logger-after-stacking-two-details', viewports: ['desktop'], throttles: ['fast'],
+  async setup({ page, status }) {
+   await stub(page);
+   await openSettings(page, status, 1280);
+  },
+  async act({ page, mark }) {
+   await category(page, 'Integrations');
+   const beforeLogs = await entryKey(page);
+   await category(page, 'Logs');
+   const list = await entryKey(page);
+   const row = text => page.locator('.st-lcol [data-settings-item]').filter({ hasText: text }).first();
+   const detail = text => page.locator('.st-dpane').getByText(text, { exact: true }).filter({ visible: true }).first();
+   await mark('open two log entries side by side');
+   await row('Beta is slow').click(); await detail('Beta is slow').waitFor();
+   const first = await entryKey(page);
+   await row('Alpha ready').click(); await detail('Alpha ready').waitFor();
+   const second = await entryKey(page);
+
+   await mark('shrink to the phone stack and show the same logger');
+   await page.setViewportSize({ width: 390, height: 844 });
+   await page.locator('.settings-shell[data-stacked][data-view="detail"]').waitFor();
+   await button(page, 'Same logger').click();
+   await page.waitForFunction(key => navigation.currentEntry.key !== key, second);
+   expect(await entryKey(page) === list, `Same logger returns to the original list, not another detail (${await visibleLogRows(page)} rows visible)`);
+   await row('Alpha ready').waitFor();
+   expect(await listShown(page) && await visibleLogRows(page) === 2, 'only the filtered list is shown');
+   expect(await focusInList(page), 'focus returns to the visible list');
+
+   await mark('Back leaves Logs; Forward retraces the list and both details');
+   await page.goBack();
+   await page.getByRole('heading', { name: 'Integrations', exact: true, level: 1 }).filter({ visible: true }).first().waitFor();
+   expect(await entryKey(page) === beforeLogs, 'one Back reaches the category before Logs');
+   await page.goForward(); await row('Alpha ready').waitFor();
+   expect(await entryKey(page) === list, 'Forward restores the original list');
+   await page.goForward(); await detail('Beta is slow').waitFor();
+   expect(await entryKey(page) === first, 'first detail survives list return');
+   await page.goForward(); await detail('Alpha ready').waitFor();
+   expect(await entryKey(page) === second, 'second detail survives list return');
+  }
+ },
+ {
   name: 'wide-split-unchanged', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page, { users: [user] });
