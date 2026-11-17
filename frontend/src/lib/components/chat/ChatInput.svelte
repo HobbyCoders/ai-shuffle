@@ -37,7 +37,8 @@
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
 	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { appendToChatDraft, sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import type { JSONContent } from '@tiptap/core';
 	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
 	import { trackSend } from '$lib/stores/session/message-sender';
 	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
@@ -64,7 +65,7 @@
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify, type NotificationSeverity } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
-	import { attachmentBlockReason, uploadNeedsOwner, UPLOAD_OWNER_UNKNOWN } from './attach-disable';
+	import { attachmentBlockReason, composerUploadTarget, UPLOAD_CHAT_CHANGED, UPLOAD_OWNER_UNKNOWN } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
 	import { composerShell } from './composer-shell';
@@ -696,23 +697,17 @@
 		if (!attachSupported || !$anyCredential || isUploading) return false;
 		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
 		const file = pastedTextFile(text);
+		// The paste belongs to this chat even if another one is open by the time
+		// the upload settles (#1659).
+		const origin = $activeSession.sessionId;
 		isUploading = true;
 		errorMessage = '';
-		uploadComposerFile(file)
-			.then(result => {
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
-				inputValue = editorRef?.getMessage() ?? '';
-			})
+		uploadComposerFile(file, origin)
+			.then(result => placeUploadedChip(origin, result))
 			.catch((error: unknown) => {
-				// Never lose the paste: fall back to inline.
-				editorRef?.insertPlainText(text);
-				inputValue = editorRef?.getMessage() ?? '';
+				// Never lose the paste: fall back to inline, in the chat it was pasted into.
+				placeInChat(origin, () => editorRef?.insertPlainText(text), restoreMessageDocument(text));
+				if (!ownsComposer() || $activeSession.sessionId !== origin) return;
 				const err = error as { detail?: string };
 				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
 			})
@@ -1804,28 +1799,60 @@
 	 * Both call sites (the picker and the drop handler) go through here so the
 	 * two can never drift onto different targets.
 	 */
-	async function uploadComposerFile(file: File): Promise<FileUploadResponse> {
-		// Never write into a local project for a chat whose owner is not known
-		// yet: the id may name an unrelated project here (#1659). Wait for the
-		// row or /live, then pick the target from the settled project.
-		const pendingOwnerOf = $activeSession.sessionId;
-		if (pendingOwnerOf && uploadNeedsOwner($activeSession, projectLane)) {
-			const owner = await activeSession.waitForOwner(pendingOwnerOf, OWNER_WAIT_MS);
-			if (owner === 'left') throw { detail: 'the chat changed before the file was attached' };
+	async function uploadComposerFile(file: File, origin: string | null): Promise<FileUploadResponse> {
+		// The upload belongs to the chat it started in: never send it to the
+		// target of a chat opened meanwhile.
+		if ($activeSession.sessionId !== origin) throw { detail: UPLOAD_CHAT_CHANGED };
+		// Where it goes follows who runs the chat (#1659): composerUploadTarget
+		// is the one decision. Owner not known yet: wait for the row or /live.
+		let target = composerUploadTarget($activeSession, projectLane);
+		if (target.kind === 'wait' && origin) {
+			const owner = await activeSession.waitForOwner(origin, OWNER_WAIT_MS);
+			if (owner === 'left') throw { detail: UPLOAD_CHAT_CHANGED };
 			if (owner !== 'known') throw { detail: UPLOAD_OWNER_UNKNOWN };
+			target = composerUploadTarget($activeSession, projectLane);
 		}
-		if (projectLane !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
-			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
+		switch (target.kind) {
+			case 'chat':
+				return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+			case 'session':
+				return api.uploadFile(`/sessions/${encodeURIComponent(target.sessionId)}/upload`, file);
+			case 'project':
+				return api.uploadFile(
+					`/projects/${target.project}/upload`,
+					file,
+					$activeSession.sessionId ?? undefined,
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+				);
+			case 'blocked':
+				throw { detail: target.reason };
+			default:
+				throw { detail: UPLOAD_OWNER_UNKNOWN };
 		}
-		if (projectLane === 'chat') {
-			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+	}
+
+	/**
+	 * Put what a composer action produced into the chat it started in: the open
+	 * editor while that chat is still open, otherwise that chat's stored draft,
+	 * never the editor of a chat opened meanwhile (#1659). After a sign-out or
+	 * account change it is dropped with the old account's composer.
+	 */
+	function placeInChat(origin: string | null, intoEditor: () => void, doc: JSONContent) {
+		if (!ownsComposer()) return;
+		if ($activeSession.sessionId === origin) {
+			intoEditor();
+			inputValue = editorRef?.getMessage() ?? '';
+		} else {
+			appendToChatDraft(origin, doc);
 		}
-		return api.uploadFile(
-			`/projects/${$activeSession.project}/upload`,
-			file,
-			$activeSession.sessionId ?? undefined,
-			$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
-		);
+	}
+
+	/** Place one uploaded file as a chip in the chat it was attached in. */
+	function placeUploadedChip(origin: string | null, result: FileUploadResponse) {
+		const chip = { path: result.path, filename: result.filename, fullPath: result.full_path, size: result.size, type: 'file' as const };
+		placeInChat(origin, () => editorRef?.insertFileChip(chip), {
+			type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: chip }] }]
+		});
 	}
 
 	function triggerFileUpload() {
@@ -1850,25 +1877,18 @@
 		// project by construction and must not be turned away for missing it.
 		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return;
 
+		const origin = $activeSession.sessionId;
 		isUploading = true;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(files)) {
-				const result = await uploadComposerFile(file);
+				const result = await uploadComposerFile(file, origin);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
 				}
-				// Insert as inline chip at cursor position
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				// An inline chip at the cursor, in the chat it was attached in.
+				placeUploadedChip(origin, result);
 			}
-			// Update inputValue for state sync
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
@@ -1960,20 +1980,14 @@
 			return;
 		}
 
+		const origin = $activeSession.sessionId;
 		isUploading = true;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
-				const result = await uploadComposerFile(file);
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				const result = await uploadComposerFile(file, origin);
+				placeUploadedChip(origin, result);
 			}
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };

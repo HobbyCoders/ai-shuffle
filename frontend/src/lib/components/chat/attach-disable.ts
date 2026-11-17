@@ -28,21 +28,46 @@ export const SELECT_PROJECT_TO_UPLOAD = 'Please select a project first to upload
 export const UPLOAD_OWNER_UNKNOWN =
 	'couldn’t confirm which worker runs this chat yet. Try again in a moment';
 
+/** Another chat was opened before the upload could start. */
+export const UPLOAD_CHAT_CHANGED = 'the chat changed before the file was attached';
+
+/** Where a composer upload goes, decided by {@link composerUploadTarget}. */
+export type ComposerUploadTarget =
+	| { kind: 'chat' }
+	| { kind: 'session'; sessionId: string }
+	| { kind: 'project'; project: string }
+	| { kind: 'wait' }
+	| { kind: 'blocked'; reason: string };
+
 /**
- * Whether an upload must wait until the page knows who runs the open chat
- * (#1659). A legacy project id names a folder on this worker only for a chat
- * this worker runs: on another worker's chat it can name an unrelated project
- * here. Until a row or `/live` says who runs it (a reload, a deep link, a
- * restored tab, `/live` slow or failing), the project upload would write into
- * whatever local project carries that id. A session upload needs no wait: the
- * server routes it by the session's own owner. New chats have no owner yet and
- * upload to the project picked for them.
+ * The one place that decides where a composer upload goes (#1659), from who
+ * runs the open chat, never from which ids the store happens to hold. A legacy
+ * project id names a folder on this worker only for a chat this worker runs: on
+ * another worker's chat it can name an unrelated project here.
+ *   - owner unknown and a local id held: wait (the id may name an unrelated
+ *     project on this worker until a row or `/live` says who runs the chat)
+ *   - owner remote: the session upload (the server routes it to the owner),
+ *     whatever local id the store still holds
+ *   - owner local: the local project
+ * A shared id with no local id uses the session upload whoever runs the chat.
+ * The one remote case without a session upload is a legacy chat with no shared
+ * id at all: it keeps its local id as before (the accepted rule).
+ * New chats (no session yet) upload to the project picked for them.
  */
-export function uploadNeedsOwner(
-	state: { sessionId: string | null; project: string | null | undefined; isRemote?: boolean },
+export function composerUploadTarget(
+	state: { sessionId: string | null; project: string | null | undefined; projectV2Id?: string | null; isRemote?: boolean },
 	mode: SessionMode = 'code'
-): boolean {
-	return mode !== 'chat' && !!state.sessionId && !!state.project && state.isRemote === undefined;
+): ComposerUploadTarget {
+	if (mode === 'chat') return { kind: 'chat' };
+	const { sessionId, project, projectV2Id, isRemote } = state;
+	if (!sessionId) {
+		if (project) return { kind: 'project', project };
+		return { kind: 'blocked', reason: projectV2Id ? ATTACHMENTS_NEED_LOCAL_CHECKOUT : SELECT_PROJECT_TO_UPLOAD };
+	}
+	if (projectV2Id && (isRemote === true || !project)) return { kind: 'session', sessionId };
+	if (!project) return { kind: 'blocked', reason: SELECT_PROJECT_TO_UPLOAD };
+	if (isRemote === undefined) return { kind: 'wait' };
+	return { kind: 'project', project };
 }
 
 /**

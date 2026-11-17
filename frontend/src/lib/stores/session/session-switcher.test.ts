@@ -1022,6 +1022,24 @@ describe('session-switcher · a chat another worker runs holds the shared projec
 		switcher.destroy();
 	});
 
+	it('a /live answer asked for before a newer owner observation leaves the owner and project alone', async () => {
+		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false }];
+		let resolve!: (value: unknown) => void;
+		vi.mocked(api.get).mockReturnValueOnce(new Promise(done => resolve = done));
+		const { switcher, getState, deps } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));
+		let observed = 0;
+		deps.ownerObservation = () => observed;
+		await switcher.switchSession('session-B');
+		expect(getState()).toMatchObject({ project: 'app', isRemote: false });
+		// A newer sessions refresh reports the hand-off while /live is out.
+		observed++;
+		deps.update(s => ({ ...s, isRemote: true, project: '' }));
+		resolve({ session_meta: { project_id: 'app', project_v2_id: 'pv2-theirs', is_remote: false, device_name: 'This worker', model: 'm' } });
+		await vi.waitFor(() => expect(getState().modelOverride).toBe('m'));
+		expect(getState()).toMatchObject({ isRemote: true, project: '', projectV2Id: 'pv2-theirs' });
+		switcher.destroy();
+	});
+
 	it('keeps a mirrored row\'s local id when the row has no shared id to hold instead', async () => {
 		_mockSessions.current = [{ id: 'session-B', project_id: 'app', project_v2_id: null, is_remote: true }];
 		const { switcher, getState } = makeSwitcher(fullState({ project: 'proj-A', projectV2Id: 'pv2-A' }));

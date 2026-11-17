@@ -503,9 +503,34 @@ const { subscribe: _subscribe, notifySubscribers: _notifySubscribers, createDeri
 		(v) => { _state = v; }
 	);
 
+/**
+ * What the page has learned about who runs the open chat, counted in order
+ * (#1659): every row that names the owner, every change of owner or chat. A
+ * `/live` answer asked for before a newer count must not overwrite it.
+ */
+let ownerObservations = 0;
+
+/**
+ * The accepted rule, held for every writer (#1659): a chat another worker runs
+ * holds its shared project alone. Its legacy id names a folder on that worker;
+ * here it can name an unrelated project. A bound remote chat created from this
+ * composer (the "Runs on" pick keeps the local project it was created from)
+ * and any other path that leaves a local id beside the shared one end here.
+ * A legacy chat with no shared id keeps its id (nothing else names it).
+ */
+function holdSharedProjectForRemote(s: ActiveSessionState): ActiveSessionState {
+	return s.sessionId && s.isRemote === true && s.mode !== 'chat' && s.project && s.projectV2Id
+		? { ...s, project: '' }
+		: s;
+}
+
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 	const prev = untrack(() => _state);
 	let next = fn(prev);
+	if (next !== _state) {
+		next = holdSharedProjectForRemote(next);
+		if (next.sessionId !== prev.sessionId || next.isRemote !== prev.isRemote) ownerObservations++;
+	}
 	if (next === _state) {
 		// Diagnostic: detect skipped streaming→ended transitions
 		if (prev.isStreaming && !next.isStreaming) {
@@ -704,6 +729,7 @@ const wsConn: WsConnection = createWsConnection({
 const switcher = createSessionSwitcher({
 	update: _update,
 	getState: () => _state,
+	ownerObservation: () => ownerObservations,
 	wsSend: (data) => wsConn.send(data),
 	internal,
 	sessionEphemeralCache,
@@ -1261,7 +1287,15 @@ export const activeSession = {
 	reconcileOwner(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
 		const sessionId = _state.sessionId;
 		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
-		if (!row || row.is_remote === undefined || row.is_remote === _state.isRemote) return false;
+		if (!row || row.is_remote === undefined) return false;
+		// A row naming the owner is news even when it repeats it: a `/live`
+		// answer asked for before it is older (#1659).
+		ownerObservations++;
+		// Same owner: nothing to change, unless another worker runs it and a
+		// local id is still held beside the shared one (a chat created here to
+		// run elsewhere keeps the project it was created from).
+		const remoteHoldsLocal = row.is_remote && _state.mode !== 'chat' && !!_state.project && !!row.project_v2_id;
+		if (row.is_remote === _state.isRemote && !remoteHoldsLocal) return false;
 		const patch: Partial<ActiveSessionState> = { isRemote: row.is_remote };
 		if (row.device_name !== undefined) patch.ownerDeviceName = row.device_name;
 		if (_state.mode !== 'chat' && (row.project_id !== undefined || row.project_v2_id !== undefined)) {

@@ -84,6 +84,11 @@ export interface SessionSwitcherDeps {
 
 	// Callbacks
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
+
+	/** Counts what the page learned about who runs the open chat, in order
+	 *  (#1659). A `/live` answer requested before a newer count is stale about
+	 *  the owner. Absent: no other source, every answer is current. */
+	ownerObservation?: () => number;
 }
 
 /** Minimal shape of the one-shot `/live` metadata snapshot used on switch-in. */
@@ -931,8 +936,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			fastMode: getState().fastMode,
 		};
 		let snap: LiveSnapshot | null = null;
+		// Who runs the chat, as of when the answer was asked for (#1659).
+		let ownerAsked = deps.ownerObservation?.() ?? 0;
 		for (let attempt = 0; ; attempt++) {
 			try {
+				ownerAsked = deps.ownerObservation?.() ?? 0;
 				// `include_messages=false`: the SSE feed is the transcript authority, so
 				// the message list this endpoint would otherwise build (megabytes on a
 				// long session) is discarded on arrival. Asking for metadata only keeps
@@ -1007,8 +1015,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
-			if (meta.is_remote !== undefined) patch.isRemote = meta.is_remote;
-			if (meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
+			// The page may have learned who runs the chat after this was asked
+			// (a sessions refresh reporting a hand-off): that newer word stands,
+			// so a late answer neither restores the old owner nor its project.
+			const ownerCurrent = (deps.ownerObservation?.() ?? 0) === ownerAsked;
+			const metaOwner = ownerCurrent ? meta.is_remote : undefined;
+			if (metaOwner !== undefined) patch.isRemote = metaOwner;
+			if (ownerCurrent && meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
 			// Reloads and deep links have no row to tell an archived chat apart.
 			if (meta.status !== undefined) archivedChats.mark(sessionId, meta.status === 'archived');
 			if (meta.is_worker !== undefined) subagentChats.mark(sessionId, meta.is_worker);
@@ -1023,8 +1036,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Do not replace a project selection made while the request was in flight.
 			// An owner that changes with this answer re-resolves even then: the
 			// legacy id must not outlive the owner it was valid for (#1659).
-			const ownerChanges = meta.is_remote !== undefined && getState().isRemote !== undefined
-				&& meta.is_remote !== getState().isRemote;
+			const ownerChanges = metaOwner !== undefined && getState().isRemote !== undefined
+				&& metaOwner !== getState().isRemote;
 			if ((meta.project_id !== undefined || meta.project_v2_id !== undefined)
 				&& (ownerChanges || (getState().project === initialProject
 					&& getState().projectV2Id === initialProjectV2Id))) {
@@ -1035,7 +1048,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 					ephemeralProjectV2Id: initialProjectV2Id,
 					// A reload restores the project from a saved snapshot and a
 					// deep link has no row: this answer is where the owner is known.
-					isRemote: meta.is_remote ?? getState().isRemote,
+					isRemote: metaOwner ?? getState().isRemote,
 				}));
 			}
 			// No sidebar row (hidden child/deep link), or a reload whose saved

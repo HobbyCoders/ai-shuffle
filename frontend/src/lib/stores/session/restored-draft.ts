@@ -25,6 +25,22 @@ export function addRestoredWordsToDraft(sessionId: string, prompt: string, uploa
 }
 
 /**
+ * Content a composer action produced for a chat that is no longer on screen (a
+ * large paste or an attachment whose upload finished after the owner moved to
+ * another chat, #1659). It goes after that chat's stored draft (null: New
+ * chat), never into the editor now open for another chat.
+ */
+export function appendToChatDraft(sessionId: string | null, doc: import('@tiptap/core').JSONContent): string {
+	const key = sessionId ?? '__new_chat__';
+	const existing = sessionEphemeralCache.peekDraft(key) || readDraft(sessionId) || '';
+	const added = JSON.stringify(doc);
+	const draft = hasComposerDraft(existing) ? joinDrafts(existing, added) : added;
+	sessionEphemeralCache.patchDraft(key, draft);
+	writeDraft(sessionId, draft, { preserveNewChat: true });
+	return draft;
+}
+
+/**
  * Restores a page did not live to finish.
  *
  * The server can drop a "Not sent" row while its answer is still on the way. If

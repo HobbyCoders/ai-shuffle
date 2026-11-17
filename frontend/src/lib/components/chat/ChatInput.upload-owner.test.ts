@@ -4,6 +4,9 @@ import ChatInput from './ChatInput.svelte';
 import { activeSession } from '$lib/stores/active-session';
 import { auth } from '$lib/stores/auth.svelte';
 import { api } from '$lib/api/client';
+import { readDraft } from '$lib/stores/session/draft-persistence';
+import { sessionEphemeralCache } from '$lib/stores/session-cache';
+import { LARGE_PASTE_BYTES } from './tiptap/large-paste';
 import '$lib/test-stubs/composer-dom';
 
 // #1659. Until the page knows who runs the open chat (a reload, a deep link,
@@ -32,11 +35,12 @@ const uploaded = { path: 'uploads/a.txt', filename: 'a.txt', full_path: '/x/uplo
 beforeEach(async () => {
 	localStorage.clear();
 	sessionStorage.clear();
+	sessionEphemeralCache.clear();
 	activeSession.newChat();
 	// What a reload restores from a saved snapshot before `/live` answers.
 	Object.assign(activeSession.current, {
 		sessionId: 'owned', project: 'app', projectV2Id: 'pv2-theirs', mode: 'code', profile: 'coding',
-		isRemote: undefined, isStreaming: false, liveTurnId: null, error: null, worktreeError: null, messages: []
+		isRemote: undefined, isStreaming: false, liveTurnId: null, error: null, worktreeError: null, messages: [], draft: ''
 	});
 	await auth.checkAuth();
 });
@@ -95,3 +99,51 @@ describe('a composer upload while the chat\'s owner is unknown (#1659)', () => {
 		expect(upload).not.toHaveBeenCalled();
 	});
 });
+
+// #1659 S5. What a composer action produces belongs to the chat it started in:
+// if another chat is open by the time it settles, it goes into the first
+// chat's stored draft, never into the editor now showing the other chat.
+describe('a paste or attachment that settles after the chat changed (#1659)', () => {
+	function paste(target: HTMLElement, text: string) {
+		const event = new Event('paste', { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
+		event.clipboardData = { getData: (type: string) => (type === 'text/plain' ? text : ''), types: ['text/plain'], files: [], items: [] };
+		target.dispatchEvent(event);
+	}
+	/** Open another chat (a notifying store update, as a switch makes). */
+	function leaveForAnotherChat() {
+		Object.assign(activeSession.current, { sessionId: 'chat-b', project: '', projectV2Id: null, isRemote: false });
+		activeSession.setTitle('chat-b', 'B');
+	}
+	const storedDraft = (id: string) => sessionEphemeralCache.peekDraft(id) || readDraft(id) || '';
+
+	it('a large paste waiting on the owner goes back into its own chat\'s draft when the user leaves', async () => {
+		const upload = vi.spyOn(api, 'uploadFile').mockResolvedValue(uploaded as never);
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		const text = 'p'.repeat(LARGE_PASTE_BYTES);
+		paste(editor, text);
+		await new Promise(r => setTimeout(r, 50));
+		leaveForAnotherChat();
+		await waitFor(() => expect(storedDraft('owned')).toContain('pppp'));
+		expect(upload).not.toHaveBeenCalled();
+		expect(editor.textContent).not.toContain('pppp');
+		expect(storedDraft('chat-b')).not.toContain('pppp');
+	});
+
+	it('an attachment whose upload finishes after the user left lands in its own chat\'s draft', async () => {
+		activeSession.current.isRemote = false;
+		let finish!: (value: unknown) => void;
+		const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finish = done; }) as never);
+		const { container } = render(ChatInput);
+		const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+		await pickFile(container);
+		await waitFor(() => expect(upload).toHaveBeenCalledOnce());
+		expect(upload.mock.calls[0][0]).toBe('/projects/app/upload');
+		leaveForAnotherChat();
+		finish(uploaded);
+		await waitFor(() => expect(storedDraft('owned')).toContain('uploads/a.txt'));
+		expect(editor.innerHTML).not.toContain('uploads/a.txt');
+		expect(storedDraft('chat-b')).not.toContain('uploads/a.txt');
+	});
+});
+
