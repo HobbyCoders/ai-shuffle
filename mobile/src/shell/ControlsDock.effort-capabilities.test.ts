@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { composerPreferences } from '$lib/stores/composer-preferences';
+import { preferenceSync } from '$lib/services/preferences';
 import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { get } from 'svelte/store';
@@ -20,7 +21,9 @@ vi.mock('$lib/api/client', async (importOriginal) => {
  return { ...actual, api: { ...actual.api, get: mocks.get },
   getUsageLimits: vi.fn().mockResolvedValue({ available: false, buckets: {}, provider_buckets: {} }) };
 });
-beforeEach(() => composerPreferences.set('modelEfforts', {}));
+// Clearing a remembered level is an explicit Auto, not a never-picked model.
+// Reset the account adapters so each case starts with no picks at all.
+beforeEach(() => preferenceSync.stop());
 afterEach(() => cleanup());
 import { effortRegistryFixture as payload } from '$lib/test-stubs/effort-registry';
 const renderDock = () => render(ControlsDock, { props: {} });
