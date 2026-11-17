@@ -709,7 +709,7 @@
 			.then(result => placeUploadedChip(origin, result))
 			.catch((error: unknown) => {
 				// Never lose the paste: fall back to inline, in the chat it was pasted into.
-				placeInChat(origin, () => editorRef?.insertPlainText(text), restoreMessageDocument(text), 'The pasted text');
+				placeInChat(origin, () => editorRef?.insertPlainText(text), restoreMessageDocument(text));
 				if (!ownsComposer() || !originIsOpen(origin)) return;
 				const err = error as { detail?: string };
 				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
@@ -1825,13 +1825,15 @@
 	 * it names a chat (from the start, or the New chat took its created id),
 	 * that chat open is that compose open, however it was reached: opened again
 	 * from the list, or left and come back to (both move the navigation count).
-	 * Only a New chat that has not taken an id is matched by its navigation.
+	 * A New chat that has not taken an id is one slot: any New chat open is it,
+	 * as before #1659 (the count also moves on first landing and on pressing New
+	 * chat again, without the user leaving).
 	 */
 	function originIsOpen(origin: ComposeOrigin): boolean {
 		const chat = originChat(origin);
 		return chat !== null
 			? $activeSession.sessionId === chat
-			: $activeSession.sessionId === null && getInitGeneration() === origin.navigation;
+			: $activeSession.sessionId === null;
 	}
 	/** The chat the origin names now: a New chat's created id once it took one. */
 	function originChat(origin: ComposeOrigin): string | null {
@@ -1876,25 +1878,15 @@
 	 * editor while that chat is still open, otherwise that chat's stored draft,
 	 * never the editor of a chat opened meanwhile (#1659). After a sign-out or
 	 * account change it is dropped with the old account's composer.
-	 *
-	 * A New chat left before it took an id keeps it in the New chat slot, unless
-	 * a fresh New chat is open: that editor owns the slot and would write over
-	 * it, and the result is not that compose's. Then nothing is added and the
-	 * user is told (`lost` names what), rather than losing it silently.
 	 */
-	function placeInChat(origin: ComposeOrigin, intoEditor: () => void, doc: JSONContent, lost: string) {
+	function placeInChat(origin: ComposeOrigin, intoEditor: () => void, doc: JSONContent) {
 		if (!ownsComposer()) return;
 		if (originIsOpen(origin)) {
 			intoEditor();
 			inputValue = editorRef?.getMessage() ?? '';
-			return;
+		} else {
+			appendToChatDraft(originChat(origin), doc);
 		}
-		const chat = originChat(origin);
-		if (chat === null && $activeSession.sessionId === null) {
-			errorMessage = `${lost} wasn't added: the New chat it started in was left before it finished. Add it again here if you want it.`;
-			return;
-		}
-		appendToChatDraft(chat, doc);
 	}
 
 	/** Place one uploaded file as a chip in the chat it was attached in. */
@@ -1902,7 +1894,7 @@
 		const chip = { path: result.path, filename: result.filename, fullPath: result.full_path, size: result.size, type: 'file' as const };
 		placeInChat(origin, () => editorRef?.insertFileChip(chip), {
 			type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: chip }] }]
-		}, result.filename || 'The attachment');
+		});
 	}
 
 	function triggerFileUpload() {

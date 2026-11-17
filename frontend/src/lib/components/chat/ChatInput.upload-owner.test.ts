@@ -152,7 +152,7 @@ describe('a paste or attachment that settles after the chat changed (#1659)', ()
 
 // #1659 S7. A New chat whose own send creates its chat takes that id without
 // a navigation: a paste or attachment started before is that chat's, not the
-// New chat slot's. A real navigation (another chat, a fresh New chat) is a leave.
+// New chat slot's. Opening another chat is a leave; any New chat is that one slot.
 describe('a paste or attachment started on a New chat that takes its id (#1659)', () => {
 	function paste(target: HTMLElement, text: string) {
 		const event = new Event('paste', { bubbles: true, cancelable: true }) as Event & { clipboardData: unknown };
@@ -307,18 +307,26 @@ describe('a paste or attachment started on a New chat that takes its id (#1659)'
 			expect(chips(started.editor, path)).toBe(1);
 		});
 
-		it(`${kind}: left for a fresh New chat before it took an id, it is not put in that New chat`, async () => {
-			const started = await startOnNewChat();
-			await begin(started);
-			bumpInitGeneration(); // a fresh New chat: id still none, a new navigation
-			Object.assign(activeSession.current, { sessionId: null });
-			await settle();
-			started.finish(result);
-			await waitFor(() => expect(started.container.textContent).toContain("wasn't added"));
-			expect(chips(started.editor, path)).toBe(0);
-			expect(started.editor.textContent).not.toContain('qqqq');
-			expect(storedDraft(null)).not.toContain(path);
-		});
+		for (const [how, again] of [
+			['the first landing opens the New chat', () => activeSession.newChat({ initialLanding: true })],
+			['New chat is pressed again on the empty New chat', () => activeSession.newChat()],
+		] as const) {
+			it(`${kind}: started on the New chat, then ${how}: it lands in the editor, once`, async () => {
+				Object.assign(activeSession.current, { sessionId: null, isRemote: undefined });
+				let finish!: (value: unknown) => void;
+				const upload = vi.spyOn(api, 'uploadFile').mockImplementation(() => new Promise(done => { finish = done; }) as never);
+				const { container } = render(ChatInput);
+				const editor = container.querySelector('[role="textbox"]') as HTMLElement;
+				await begin({ upload, container, editor, finish: (v: unknown) => finish(v) });
+				again();
+				await settle();
+				expect(activeSession.current.sessionId).toBeNull();
+				finish(result);
+				await waitFor(() => expect(chips(editor, path)).toBe(1));
+				await settle();
+				expect(chips(editor, path)).toBe(1);
+			});
+		}
 	}
 
 	it('an open chat chosen again before its attachment finishes still gets it in the editor', async () => {
