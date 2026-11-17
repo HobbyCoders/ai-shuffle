@@ -43,6 +43,9 @@
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw, LoaderCircle, CloudOff } from 'lucide-svelte';
 	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker, HISTORY_STALL_MESSAGE, initialChatLayout, settledEmptyChat } from './chat-empty-state';
+	import OpeningRecovery from './OpeningRecovery.svelte';
+	import { recoveringOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
+	import { getInitGeneration as openingGeneration } from '$lib/stores/session/session-init';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -514,6 +517,11 @@
 	data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
+	{#if $recoveringOpening && !$activeSession.sessionId && pendingOpening()?.id === $recoveringOpening.note.id
+		&& openingGeneration() === $recoveringOpening.note.generation && (!$recoveringOpening.ready ||
+		($activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))}
+		<OpeningRecovery {...$recoveringOpening} />
+	{:else}
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
@@ -657,6 +665,7 @@
 				</div>
 			</div>
 		</div>
+	{/if}
 	{/if}
 	{/if}
 </div>

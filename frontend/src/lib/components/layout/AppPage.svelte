@@ -29,7 +29,7 @@
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
-	import { admittedOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
+	import { recoveringOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
@@ -217,7 +217,7 @@
 		const deepLinkSessionId = deepLinkSessionIdFrom(window.location.search);
 		const note = pendingOpening();
 		const opening = !deepLinkSessionId && note?.generation === getInitGeneration() ? note : null;
-		const receipt = opening ? admittedOpening(opening) : null;
+		if (!opening) recoveringOpening.set(null);
 		if (deepLinkSessionId) {
 			pendingDeepLink.set(deepLinkSessionId);
 			// Never a permanent spinner: if boot fails before the open, let go.
@@ -368,15 +368,17 @@
 		};
 		window.addEventListener('open-session', openSessionEventHandler);
 
-		if (opening && receipt) void receipt.then(id => {
+		if (opening) {
 			const place = activeSession.current;
-			if (navigationClaimed || pendingOpening()?.id !== opening.id || initGeneration !== getInitGeneration()
-				|| place.sessionId || place.isCreatingWorktree || place.project !== opening.project
-				|| place.projectV2Id !== opening.shared) return;
-			if (id) handleOpenSession(id);
-			else activeSession.setPendingRestorePrompt(opening.prompt, opening.paths);
-			finishOpening(opening.id);
-		});
+			if (!navigationClaimed && pendingOpening()?.id === opening.id && initGeneration === getInitGeneration()
+				&& !place.sessionId && !place.isCreatingWorktree && place.project === opening.project && place.projectV2Id === opening.shared) {
+				if (opening.dispatched) recoveringOpening.set({ note: opening, ready: true });
+				else {
+					activeSession.setPendingRestorePrompt(opening.prompt, opening.paths);
+					finishOpening(opening.id);
+				}
+			} else recoveringOpening.set(null);
+		}
 
 		// Sync from server when window regains focus / the tab becomes visible.
 		// Keeps the sessions board fresh with cross-install mutations (e.g. a
