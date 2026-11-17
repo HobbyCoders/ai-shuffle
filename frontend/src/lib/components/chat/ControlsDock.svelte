@@ -30,7 +30,7 @@
 	 * control: the dock neither shows a toggle nor polls status. Halting it for a
 	 * session is the Stop button's job.
 	 */
-	import { onDestroy, tick, type Snippet } from 'svelte';
+	import { onDestroy, tick, untrack, type Snippet } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { fastChangeWaits } from '$lib/utils/fast-outcome';
 	import { standardContextCap } from '$lib/stores/session/context-window';
@@ -501,19 +501,20 @@
 	const effortLevels = $derived(effortCapability.options);
 	$effect(() => {
 		const reconciled = reconcileModelEffort(effortValue, effortCapability);
-		if (reconciled !== effortValue) activeSession.setEffortLevelOverride(reconciled, false);
+		if (reconciled !== effortValue) {
+			const save = activeSession.setEffortLevelOverride(reconciled, false);
+			untrack(() => observeEffortFit(reconciled, save));
+		}
 	});
 
 	// Observe the result of a pick made here, not background binding or catalog updates.
-	let pendingEffortNotice = $state<{ sessionId: string | null; model: string; from: string; to: string | null } | null>(null);
-	let pendingEffortTimer: ReturnType<typeof setTimeout> | undefined;
+	type EffortNoticePick = {
+		sessionId: string | null; model: string; from: string; to: string | null; save?: Promise<void>;
+	};
+	let pendingEffortNotice: EffortNoticePick | null = null;
 	let effortNoticeId: string | undefined;
-	function clearPendingEffortNotice() {
-		clearTimeout(pendingEffortTimer);
-		pendingEffortNotice = null;
-	}
 	function dismissEffortNotice() {
-		clearPendingEffortNotice();
+		pendingEffortNotice = null;
 		if (effortNoticeId) notify.dismissLive(effortNoticeId);
 		effortNoticeId = undefined;
 	}
@@ -523,12 +524,26 @@
 		const previousModel = effortModel;
 		activeSession.setModelOverride(value);
 		if (!from || voiceLane || effortModel === previousModel) return;
-		// Predict what the existing reconciliation will show, but wait until
-		// the composer actually has that level (the live save can be refused).
 		const to = reconcileModelEffort(effortValue, effortCapability);
 		if (from === to) return;
-		pendingEffortNotice = { sessionId: voiceSessionId, model: effortModel, from, to };
-		pendingEffortTimer = setTimeout(clearPendingEffortNotice, 6000);
+		const pick: EffortNoticePick = { sessionId: voiceSessionId, model: effortModel, from, to };
+		pendingEffortNotice = pick;
+		if (effortValue === to) finishEffortNotice(pick);
+		else void tick().then(() => {
+			// Only the fit caused by this pick can claim it. Once captured, a
+			// slow save stays eligible until it settles or the pick is superseded.
+			if (pendingEffortNotice === pick && !pick.save) pendingEffortNotice = null;
+		});
+	}
+	function observeEffortFit(level: string | null, save: Promise<void>) {
+		const pick = pendingEffortNotice;
+		if (!pick || pick.to !== level || pick.sessionId !== voiceSessionId || pick.model !== effortModel || voiceLane) return;
+		pick.save = save;
+		void save.then(() => {
+			if (pick.save === save) finishEffortNotice(pick);
+		}, () => {
+			if (pendingEffortNotice === pick && pick.save === save) pendingEffortNotice = null;
+		});
 	}
 	function pickEffort(value: string | null) {
 		dismissEffortNotice();
@@ -538,22 +553,17 @@
 		void voiceSessionId;
 		return dismissEffortNotice;
 	});
-	$effect(() => {
-		const pick = pendingEffortNotice;
-		if (!pick) return;
-		if (pick.sessionId !== voiceSessionId || pick.model !== effortModel || voiceLane) {
-			clearPendingEffortNotice();
-			return;
-		}
-		if (effortValue !== pick.to) return;
-		clearPendingEffortNotice();
+	function finishEffortNotice(pick: EffortNoticePick) {
+		if (pendingEffortNotice !== pick) return;
+		pendingEffortNotice = null;
+		if (pick.sessionId !== voiceSessionId || pick.model !== effortModel || effortValue !== pick.to || voiceLane) return;
 		const from = EFFORT_OPTIONS.find(option => option.value === pick.from)?.label ?? pick.from;
 		const to = effortLevels.find(option => option.value === pick.to)?.label;
 		const message = to ? `Reasoning effort changed from ${from} to ${to}.`
 			: effortLevels.length ? `Reasoning effort changed from ${from} to Auto.`
 				: `Reasoning effort was ${from}. It isn't adjustable on this model.`;
 		effortNoticeId = notify.banner(message, { severity: 'info', persist: false, duration_ms: 6000 });
-	});
+	}
 
 	// Effort shows its pinned level when one is set, else "Auto" (the model's
 	// own default); access always names the effective mode (it defaults to

@@ -200,8 +200,8 @@ await runJourney({
 				}
 			}
 		},
-		{
-			name: 'effort-fit-notice',
+		...[0, 7000].map((saveDelay) => ({
+			name: saveDelay ? 'effort-fit-notice-delayed' : 'effort-fit-notice',
 			async setup({ page, status, variant }) {
 				await gotoApp(page, status);
 				await setEnabled(page, true);
@@ -223,8 +223,22 @@ await runJourney({
 				const idle = idleTabs.get(page);
 				const anyNotice = (tab) => tab.getByRole('status').filter({ has: tab.getByText(/Reasoning effort changed/) });
 				try {
+					const isFit = (request) => request.method() === 'PUT' &&
+						new URL(request.url()).pathname.endsWith('/run-settings') && request.postDataJSON()?.effort === 'high';
+					if (saveDelay) {
+						await page.route('**/run-settings', async (route) => {
+							if (isFit(route.request())) await new Promise(resolve => setTimeout(resolve, saveDelay));
+							await route.continue();
+						});
+					}
 					await mark('switch Opus 5.5 XHigh to Opus 4.6');
 					await chooseModel(page, VERSION_LABEL);
+					if (saveDelay) {
+						expect(await anyNotice(page).count() === 0, 'do not announce an unconfirmed fit');
+						const saved = await page.waitForResponse(r => isFit(r.request()));
+						expect(saved.ok(), `delayed run-settings returned ${saved.status()}`);
+						log(`delayed ${saveDelay} ms; run-settings returned HTTP ${saved.status()}`);
+					}
 					const notice = anyNotice(page);
 					await notice.waitFor({ timeout: 3000 });
 					const text = await notice.getByText('Reasoning effort changed from XHigh to High.', { exact: true }).innerText();
@@ -249,7 +263,7 @@ await runJourney({
 					await setEnabled(page, false).catch(() => {});
 				}
 			}
-		}
+		}))
 	],
 	allow: [...DEV_INSTANCE_NOISE]
 });
