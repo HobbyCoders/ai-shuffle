@@ -3501,6 +3501,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         from fluid.messages.content import Text as FluidText
         from fluid.messages.content import ToolResultBlock as FluidToolResult
+        from fluid.messages.content import is_harness_note
 
         from app.core.provider.fluid_transcript import prompt_text
 
@@ -3512,7 +3513,7 @@ class HarnessAdapter(ProviderAdapter):
             if role == "assistant" and prompts:
                 has_pair = True
                 continue
-            if role != "user":
+            if role != "user" or is_harness_note(message):
                 continue
             blocks = []
             for block in getattr(message, "content", None) or []:

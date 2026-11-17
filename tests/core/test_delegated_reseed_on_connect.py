@@ -394,6 +394,22 @@ async def test_a_missed_native_turn_repeating_an_earlier_prompt_is_reseeded(monk
 
 
 @pytest.mark.asyncio
+async def test_pinned_harness_note_is_not_a_missing_cli_prompt(monkeypatch, tmp_path):
+    store = MemoryStore()
+    await _seed(store, PELICAN, handle="cli-handle")
+    note = _node("n3", "n2", "user", "Synthetic pinned context")
+    note.message.provider_meta["harness_note"] = True
+    note.message.pin_context(note.message.text())
+    await store.append(SID, note)
+    entries = _cli_turns("My codename is PELICAN") + [_user(note.message.text(), isMeta=True)]
+    _write_cli_jsonl(tmp_path, "cli-handle", entries)
+    _no_reseed(monkeypatch)
+
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == "cli-handle"
+
+
+@pytest.mark.asyncio
 async def test_repeated_prompts_that_all_ran_on_claude_are_current(monkeypatch, tmp_path):
     store = MemoryStore()
     await _seed(

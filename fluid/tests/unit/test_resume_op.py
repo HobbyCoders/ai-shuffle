@@ -365,6 +365,35 @@ async def test_resume_during_a_running_turn_raises() -> None:
 # ─── (d) resume from a text prompt the first call never answered ─────────────
 
 
+@pytest.mark.parametrize("prompt", ["", "original request"])
+async def test_context_note_is_not_a_prompt_or_session_title(tmp_path, prompt) -> None:
+    from fluid.hooks.bus import TURN_START, HookBus, HookDecision
+
+    store = JsonlStore(tmp_path / "sessions")
+    sid = (await store.create_session()).session_id
+    provider = ScriptedProvider([_bad_request(), _bad_request(), _text("answer")])
+    hooks = HookBus()
+    prompts = []
+
+    async def capture(event, payload):
+        prompts.append(payload["prompt"])
+        return HookDecision(action="allow")
+
+    hooks.on(TURN_START, capture)
+    loop = NativeLoop(provider=provider, store=store, model="test", system="bare",
+                      session_id=sid, hooks=hooks)
+    await _turn(loop, UserTurn(content=prompt))
+    note = "Synthetic restored context"
+    await _turn(loop, Resume(context_note=note))
+    assert prompts == [prompt, prompt]
+    assert note in [m.text() for m in provider.requests[-1].messages]
+    reloaded = JsonlStore(tmp_path / "sessions")
+    assert (await reloaded.session_slice(sid)).title == (prompt or None)
+    await _turn(loop, Resume())
+    assert prompts == [prompt] * 3
+    assert (await store.load_path(sid))[-1].message.text() == "answer"
+
+
 async def test_resume_after_a_first_call_failure_answers_the_prompt() -> None:
     store = MemoryStore()
     sid = (await store.create_session()).session_id

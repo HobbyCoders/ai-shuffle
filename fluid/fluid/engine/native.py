@@ -2750,10 +2750,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     node_id=new_id("node"), parent_id=head.node_id,
                     message=Message(
                         role="user", content=[Text(context_note)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
                     ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
-                prompt = head
             # One request-only tail note is reserved before admission and
             # attached after rendering, so no digest can retire or reorder it.
             # No repair nodes are stored: retries cannot accumulate stale facts.
