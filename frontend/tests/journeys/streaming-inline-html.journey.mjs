@@ -85,6 +85,10 @@ await runJourney({
 				await mark('stream image alt HTML before a real media URL');
 				await typeAndSend(page, scriptTag(variant, 'stream-image-alt-html', { tps: 4 }));
 				await page.locator('[role="article"]:has(video)').filter({ hasText: 'later03' }).waitFor();
+				const routeDeadline = Date.now() + 5000;
+				while (mediaRequests.length === 0 && Date.now() < routeDeadline) {
+					await new Promise((resolve) => setTimeout(resolve, 50));
+				}
 				expect(mediaRequests.length > 0, 'the fixture route served the actual media request (not a service-worker fetch)');
 				await waitForVideo(page);
 				expect(await page.evaluate(() => new URL(document.querySelector('video').currentSrc).origin === location.origin), 'media is same-origin under the built app CSP');
