@@ -393,6 +393,23 @@ async def test_a_missed_native_turn_repeating_an_earlier_prompt_is_reseeded(monk
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("record", ["interrupt", "typed", "reseeded"])
+async def test_interrupt_marker_cannot_substitute_for_a_native_turn(monkeypatch, tmp_path, record):
+    marker = "[Request interrupted by user]"
+    store = MemoryStore()
+    await _seed(store, _turns("first", marker), handle="cli-handle")
+    entry = _user([{"type": "text", "text": marker}])
+    if record == "typed":
+        entry["promptId"] = "typed-prompt"
+    if record == "reseeded":
+        [entry] = fluid_transcript.build_cli_transcript_entries([entry], "cli-handle", str(tmp_path))
+    _write_cli_jsonl(tmp_path, "cli-handle", _cli_turns("first") + [entry])
+    calls = _fake_reseed(monkeypatch, ReseedResult(status="reseeded", cli_session_id="new-uuid"))
+    captured = await _connect(monkeypatch, store, _options(tmp_path))
+    assert captured["cli_session_id"] == ("new-uuid" if record == "interrupt" else "cli-handle")
+    assert len(calls) == int(record == "interrupt")
+
+
 @pytest.mark.asyncio
 async def test_pinned_harness_note_is_not_a_missing_cli_prompt(monkeypatch, tmp_path):
     store = MemoryStore()

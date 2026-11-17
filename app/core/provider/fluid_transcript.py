@@ -1529,7 +1529,15 @@ def cli_transcript_prompt_tail(
             continue
         if entry.get("isMeta"):
             continue
-        text = prompt_text((entry.get("message") or {}).get("content"))
+        content = (entry.get("message") or {}).get("content")
+        text = prompt_text(content)
+        # The CLI can write the interrupt notification as an ordinary-looking
+        # text block with no isMeta flag. Without a submission id that shape
+        # alone cannot attest a turn. String prompts (including materialized
+        # Fluid history) and identified submissions can contain it literally.
+        if (isinstance(content, list) and not entry.get("promptId")
+                and text == "[Request interrupted by user]"):
+            continue
         if text:
             prompts.append(text)
     return prompts, start == 0 and not summarized
