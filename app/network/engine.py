@@ -2418,6 +2418,32 @@ def _scanned_here(ctx: NetworkContext, coll: policy.Collection, record_id: str) 
             and not (coll.name == "presence" and record_id != ctx.device_id))
 
 
+def backfill_quorum_baselines() -> None:
+    """Prove upgrade baselines before this boot changes presence/quorum."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        store.lock_state(cursor)
+        for coll in policy.COLLECTIONS.values():
+            if not coll.map_secrets:
+                continue
+            cursor.execute("SELECT record_id, content_hash FROM sync_records WHERE collection=%s "
+                           "AND deleted=FALSE AND quorum_free_hash IS NULL", (coll.name,))
+            for known in cursor.fetchall():
+                rid = known["record_id"]
+                row = _read_row(cursor, coll, rid)
+                if row is None:
+                    continue
+                try:
+                    plain = serialize_row(coll, row, cursor=cursor)
+                except ApplyError:
+                    continue
+                # If the old quorum or original contents are gone, do not
+                # certify an unscanned edit as a previously signed version.
+                if plain is not None and content_hash(coll, plain) == known["content_hash"]:
+                    cursor.execute("UPDATE sync_records SET quorum_free_hash=%s WHERE collection=%s AND record_id=%s",
+                                   (_without_quorum(coll, plain), coll.name, rid))
+
+
 def _holds_signed_version(cursor, ctx: NetworkContext, coll: policy.Collection, record_id: str,
                           plaintext: Mapping[str, Any], existing: Mapping[str, Any]) -> bool:
     """Whether a nested-secret row still says what its sync record names, the
@@ -2635,7 +2661,55 @@ def _materialize_op(cursor, coll: policy.Collection, record_id: str,
     return row
 
 
-def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked: bool) -> bool:
+class _UnappliedProjection(Exception):
+    """Discard this transaction: its anticipated FK clear never committed."""
+
+
+class _BatchClears:
+    def __init__(self, ignored=()):
+        self.ignored = set(ignored)
+        self.required = set()
+
+    def verify(self, part):
+        if not self.required:
+            return
+        missing = self.required - {(name, rid) for name, rid, op in part.touched if op == OP_DELETE}
+        if missing:
+            raise _UnappliedProjection(self.ignored | missing)
+
+    def prepare(self, cursor, ctx, wanted):
+        # Only when a direct child write precedes its own parent's deletion.
+        # Earlier parent deletes are already handled inside their savepoint.
+        # Record/conflict/row are private to this transaction until verify().
+        prior = set()
+        prior_collections = set()
+        for key, (deleting, _, _) in wanted.items():
+            name, rid = key
+            children = _SET_NULL_CHILDREN.get(name, ())
+            if deleting and key not in self.ignored and any(c in prior_collections for c, _ in children):
+                parent = policy.collection(name)
+                if _read_row(cursor, parent, rid, lock=True):
+                    for child, cid, row, column in _children(cursor, ctx, parent, rid, lock=True):
+                        if not column or (child.name, cid) not in prior:
+                            continue
+                        changed, survivor = _cleared_child_unsigned(cursor, ctx, child, cid, row, column)
+                        if not changed:
+                            continue
+                        losing = serialize_row(child, row, cursor=cursor)
+                        if survivor and record(cursor, child.name, cid, {**row, column: None}, ctx=ctx) is None:
+                            raise TransientApplyError(LOCAL_CHANGE_WAITS + ": " + child.name)
+                        known = store.get_record(cursor, child.name, cid)
+                        store.add_conflict(cursor, collection=child.name, record_id=cid,
+                                           losing_clock=int(known["clock"]), losing_device_id=ctx.device_id,
+                                           losing_record=redact_secrets(losing), winning_clock=int(known["clock"]),
+                                           winning_device_id=known["origin_device_id"])
+                        cursor.execute(f"UPDATE {child.table} SET {column}=NULL WHERE id=%s", (cid,))
+                        self.required.add(key)
+            prior.add(key)
+            prior_collections.add(name)
+
+
+def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked: bool, clears=None) -> bool:
     """Step 1 (see above): sign the unscanned local changes ``items`` would replace.
 
     ``items`` are envelopes or snapshot items (collection, record_id, op or
@@ -2677,6 +2751,8 @@ def _sign_unscanned(cursor, ctx: NetworkContext, items: Iterable[Any], *, locked
         store.lock_state(cursor)
     if getattr(_own_ahead_batch, "found", False):
         return True
+    if clears is not None:
+        clears.prepare(cursor, ctx, wanted)
     # Preserve arrival order: a later direct child edit must not sign a row
     # whose reference an earlier tombstone may clear. The winning delete
     # preserves the child under lock; a duplicate/loser projects nothing.
@@ -2869,7 +2945,7 @@ def _pending_failed(ctx: NetworkContext, origin: str, incarnation: int, seq: int
 
 
 def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
-                         result: ApplyResult, *, _try_append: bool = True) -> bool:
+                         result: ApplyResult, *, _try_append: bool = True, _ignored=()) -> bool:
     """Drain at most APPLY_CHUNK successors; return whether the state lock was taken.
 
     Re-read the committed frontier after locking: another inbound request may
@@ -2893,7 +2969,8 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
             locked = True
             first_seq = next_seq = store.get_watermark(cursor, origin, incarnation) + 1
             window = store.pending_prefix(cursor, origin, incarnation, next_seq, limit=APPLY_CHUNK)
-            _sign_unscanned(cursor, ctx, window, locked=True)  # #1605
+            clears = _BatchClears(_ignored)
+            _sign_unscanned(cursor, ctx, window, locked=True, clears=clears)
             _lock_deleted_session_handoffs(cursor, window)
             _lock_deleted_connectors(cursor, window)
             _lock_mirror_event_counters(cursor, (data.get("record_id") for data in window
@@ -2944,8 +3021,11 @@ def _apply_pending_chunk(origin: str, incarnation: int, ctx: NetworkContext,
                     break
             if failure is None and next_seq - first_seq == APPLY_CHUNK:
                 part._pending_drains.add((origin, incarnation))
+            clears.verify(part)
             if box[0]:
                 store.observe_clock(cursor, box[0])
+    except _UnappliedProjection as missing:
+        return _apply_pending_chunk(origin, incarnation, ctx, result, _try_append=_try_append, _ignored=missing.args[0])
     except _ChunkAbandoned:
         _apply_pending_chunk(origin, incarnation, ctx, result, _try_append=False)
         return locked
@@ -3190,7 +3270,7 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
     return True
 
 
-def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult) -> bool:
+def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result: ApplyResult, *, _ignored=()) -> bool:
     """Bulk-apply fresh appends or buffer gaps; otherwise use per-op savepoints.
 
     A refused envelope rolls back to its savepoint and the rest of the chunk
@@ -3202,12 +3282,9 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
     part = ApplyResult()
     box = [0]
     _deferred_clock.box = box
-    # Observe the chunk's highest clock FIRST. engine.record() locks
-    # network_state before the sync_records row, and so did the old
-    # per-envelope apply; taking the record locks for a whole chunk and
-    # touching network_state only at commit would invert that order and
-    # deadlock against a concurrent scanner publish of the same record.
-    # Observing a higher Lamport clock early is harmless.
+    # Lock network_state first, as the scanner does. Observe peer clocks at
+    # commit: direct and buffered delivery must both sign a pre-existing
+    # local edit at its pre-observation clock.
     seen = 0
     for data in chunk:
         try:
@@ -3219,10 +3296,10 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
             cursor = conn.cursor()
             savepoints = type(cursor).__module__.startswith("psycopg2")
             # Before the chunk's clock: see _sign_unscanned (#1605).
-            locked = _sign_unscanned(cursor, ctx, chunk, locked=False)
-            if seen:
-                store.observe_clock(cursor, seen)
-            elif not locked:
+            clears = _BatchClears(_ignored)
+            original_chunk = chunk
+            locked = _sign_unscanned(cursor, ctx, chunk, locked=False, clears=clears)
+            if not locked:
                 store.lock_state(cursor)
             bulk_pending = os.environ.get("AI_SHUFFLE_PERF_BULK_PENDING", "").strip().lower() not in (
                 "0", "false", "off", "no")
@@ -3272,10 +3349,11 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                     _savepoint(cursor, "RELEASE SAVEPOINT apply_envelope")
                 _count_outcome(part, outcome)
             _deferred_clock.box = None
-            if box[0] > seen:
-                # Only clocks found while draining pending ops exceed the
-                # chunk's own.
-                store.observe_clock(cursor, box[0])
+            clears.verify(part)
+            if seen or box[0]:
+                store.observe_clock(cursor, max(seen, box[0]))
+    except _UnappliedProjection as missing:
+        return _apply_chunk(original_chunk, ctx, result, _ignored=missing.args[0])
     except _ChunkAbandoned:
         return False
     except Exception:  # noqa: BLE001 - e.g. the commit failed; nothing of the chunk landed

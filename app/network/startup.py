@@ -60,6 +60,7 @@ def initialize() -> Optional[engine.NetworkContext]:
             # leave ownership alone so an explicit ``assign(None)`` holds.
             backfill_owner_device_ids(ctx.device_id)
     if ctx is not None:
+        engine.backfill_quorum_baselines()
         try:
             # Workers admitted through the account before their joins carried
             # an instance id have none on their own member row, so lookups by

@@ -1034,6 +1034,32 @@ def test_a_presence_change_without_a_retained_op(workers, own_data_keys, kind, d
             assert read(record_id) == expected
 
 
+@pytest.mark.parametrize("proof", [True, False])
+def test_upgrade_only_certifies_a_provable_snapshot(pg_workers, own_data_keys, proof):
+    a, b, collection, rid, edit, read = _nested_pair(pg_workers, "connector", "a")
+    with b.active(), database.get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM sync_ops WHERE collection=%s AND record_id=%s", (collection, rid))
+        cursor.execute("UPDATE sync_records SET quorum_free_hash=NULL WHERE collection=%s AND record_id=%s",
+                       (collection, rid))
+    with b.active():
+        if not proof:
+            edit(rid, "unsigned on b")
+        engine._QUORUM_FREE.clear()
+        engine.backfill_quorum_baselines()
+        assert bool(b.sql("SELECT quorum_free_hash FROM sync_records WHERE collection=%s AND record_id=%s",
+                          (collection, rid))[0]["quorum_free_hash"]) == proof
+    with a.active():
+        engine.publish_presence(version="9.9.9")
+        edit(rid, "signed on a")
+        engine.scan_all()
+    _busy(b)
+    engine._QUORUM_FREE.clear()
+    assert not exchange(a, b).retry
+    with b.active():
+        assert read(rid) == ("signed on a" if proof else "unsigned on b")
+
+
 def test_the_scanner_still_republishes_for_a_quorum_change(workers, own_data_keys):
     """Re-keying for a changed quorum stays the regular scanner's job: the
     apply signs nothing for it, the next scan republishes the row."""
@@ -1572,8 +1598,48 @@ def test_nonwinning_parent_delete_never_signs_a_cleared_reference(pg_workers, re
 
 
 @pytest.mark.parametrize("pending", [False, True])
-@pytest.mark.parametrize("rename", [False, True])
-def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(pg_workers, rename, pending):
+def test_child_first_projection_is_not_published_if_the_delete_loses(pg_workers, pending):
+    from app.db import profiles, templates
+    from app.network.keyring import open_envelope
+    a, b = _pair(pg_workers)
+    with a.active():
+        database.create_profile("parent", "Old", None, {})
+        templates.create_template("child", "original", "prompt")
+        engine.scan_all()
+    _settle(a, b)
+    with a.active():
+        templates.update_template("child", name="A edit")
+        engine.scan_collection("templates")
+        profiles.delete_profile("parent")
+        engine.scan_all()
+    _advance_clock(b, 20000)
+    with b.active():
+        database.update_profile("parent", name="B wins")
+        engine.scan_collection("agents")
+        templates.update_template("child", profile_id="parent", name="B edit")
+    if pending:
+        ops = [op for op in _own_ops(a) if op["origin_seq"] > _watermark(b, a)]
+        with b.active(), database.get_db() as conn:
+            store.stash_pending_batch(conn.cursor(), ops)
+        result = engine.ApplyResult()
+        with b.active():
+            assert engine._apply_pending_chunk(a.device_id, ops[0]["origin_incarnation"], engine.context(), result)
+    else:
+        result = exchange(a, b)
+    assert not result.retry, result.reasons
+    with b.active():
+        ops = _own_ops(b, "templates")
+        assert len(ops) == 1
+        plain, _ = open_envelope(engine.context(), envelope.Envelope.from_dict(ops[0]))
+        assert plain["name"] == "B edit" and plain["profile_id"] == "parent"
+        assert templates.get_template("child")["profile_id"] == "parent"
+        assert not _kept_assignment(b, "templates", "profile_id")
+
+
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("child_first", [False, True])
+@pytest.mark.parametrize("rename,ahead", [(False, "a"), (True, "b"), (True, "a")])
+def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(pg_workers, rename, ahead, pending, child_first):
     """The delete owns one decision about B's assignment, even when the
     same batch directly edits the template. No signed op names the dead FK."""
     from app.db import profiles, templates
@@ -1585,10 +1651,12 @@ def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(pg_wo
     _settle(a, b)
     with b.active():
         templates.update_template("child", profile_id="parent", name="from-b" if rename else "original")
-    _advance_clock(b if rename else a, 20000)
+    _advance_clock(b if ahead == "b" else a, 20000)
     with a.active():
-        profiles.delete_profile("parent")
         templates.update_template("child", name="from-a")
+        if child_first:
+            engine.scan_collection("templates")
+        profiles.delete_profile("parent")
         engine.scan_all()
     if pending:
         frontier = _watermark(b, a)
@@ -1617,7 +1685,7 @@ def test_an_unscanned_assignment_and_the_peer_edit_of_the_row_in_one_batch(pg_wo
     for worker in (a, b):
         with worker.active():
             row = templates.get_template("child")
-            assert row["name"] == ("from-b" if rename else "from-a") and row["profile_id"] is None
+            assert row["name"] == ("from-b" if rename and ahead == "b" else "from-a") and row["profile_id"] is None
             assert database.get_tag("after")
     assert len(_kept_assignment(b, "templates", "profile_id")) == 1
     _stream_rounds(a, b)
