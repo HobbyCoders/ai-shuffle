@@ -242,24 +242,17 @@ export class SettingsNavigation {
 		this.persist();
 	}
 
-	/**
-	 * Show a collection's list after its open item changed what the list
-	 * holds (Logs "Same logger"). Stacked, that is the Back step. Where the
-	 * open item replaces the list (`onePane`), the item closes so the list
-	 * shows; beside the list it stays open.
-	 */
+	/** Show the changed list without leaving a duplicate list entry behind. */
 	showList(category: CategoryId = this.category): void {
-		if (this.stacked) this.back();
-		else if (this.onePane[category]) {
-			const here = shellHistory.place?.settings;
-			if (here?.category === category && here.listDepth !== undefined) {
-				history.go(here.listDepth - here.depth);
-				return;
-			}
-			// A retained or directly linked detail might not have a list to pop to.
-			this.clearSelection(category);
-			shellHistory.detail('settings', { settings: this.position('page') }, true);
+		if (!this.stacked && !this.onePane[category]) return; // The split already shows the list.
+		const here = shellHistory.place?.settings;
+		if (here?.category === category && here.listDepth !== undefined) {
+			history.go(here.listDepth - here.depth);
+			return;
 		}
+		// A retained or directly linked detail might not have a list to pop to.
+		this.clearSelection(category);
+		shellHistory.detail('settings', { settings: this.position('page') }, true);
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */

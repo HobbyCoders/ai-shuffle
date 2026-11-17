@@ -262,7 +262,11 @@
 		const current = openItem ?? null;
 		const previous = lastOpen;
 		lastOpen = current;
-		if (!untrack(() => replace) || settingsNav.stacked || previous === undefined || previous === current) return;
+		if (previous === undefined || previous === current) return;
+		// Stacked detail openings have their own heading focus. On return to
+		// the list, restore the row just as the one-pane layout does.
+		const stacked = settingsNav.stacked;
+		if (stacked ? current || settingsNav.view !== 'page' : !untrack(() => replace)) return;
 		void tick().then(() => {
 			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
 				(item) => item.dataset.settingsItem === previous
@@ -273,6 +277,7 @@
 			// away). A control the reader moved to meanwhile keeps it.
 			const active = document.activeElement;
 			const lost = !active || active === document.body || !active.isConnected || !!pane?.contains(active);
+			if (stacked && !lost) return;
 			const target = current
 				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
 				: (row?.matches('[data-settings-nav-item]')
