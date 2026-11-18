@@ -328,7 +328,9 @@ it('the phone app: Notes from the drawer adds no entry and waits for nothing, as
  pushOverlay({ mobileDrawer: true });
  const overlay = here();
  shellHistory.destination({ type: 'notes' });
- await settle(); await settle();
+ // Past main's 600 ms drawer wait, which only chat picks start: nothing was pushed.
+ await new Promise(resolve => setTimeout(resolve, 700));
+ await settle();
  expect(router.entries).toHaveLength(2);
  expect(here()).toBe(overlay);
  // The drawer's own Back lands: the entry under it now says Notes. No second stop.
