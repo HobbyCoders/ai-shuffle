@@ -255,7 +255,8 @@
 	let tailQueueSlotPx = $state(0);
 	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
 	let handoffSlotPx = $state(0);
-	let handoffPainted = false, handoffExcessFreed = false;
+	// The held slot's blank above its bubbles that no reserve counts (queueSlotExtent).
+	let handoffPainted = false, heldBlankPx = 0;
 	let presentedTailError: string | null = null;
 	// The banner a failed turn raised steps aside while its own transcript error
 	// row says the same words (#1341); one with an action (Fork here) stays.
@@ -1358,49 +1359,38 @@
 	/**
 	 * The queue's share of the trailing reserve. A queue handoff holds the slot's
 	 * painted height (#1052) until no bubble is docked in it, but only its first
-	 * paint reserves the held blank. After that the reserve, the follow and the
-	 * floor count only the docked bubbles, on every pass that measures them
-	 * (reply growth, resize, the pass after the handoff paints): the reply flows
-	 * up under the slot's empty top instead of being kept a held queue's height
-	 * above its last bubble. Shrinking the slot itself while bubbles show moves
-	 * its top on screen, which a follow scroll in the same paint scores as a big
-	 * shift (#1623); shrinking only the reserve under a followed reader clamps
-	 * the scroll and leaves the slot and its bubbles where they are.
+	 * paint reserves the held blank. After that, each pass that measures the queue
+	 * (reply growth, resize, the pass after the handoff paints) stops counting the
+	 * blank above the docked bubbles, and the followed floor gives up the same
+	 * newly freed space once. The reply flows up under the slot's empty top.
+	 * Shrinking the slot itself while bubbles show moves its top on screen, which a
+	 * follow scroll in the same paint scores as a big shift (#1623); shrinking only
+	 * the reserve under a followed reader clamps the scroll and moves nothing.
 	 */
 	function queueSlotExtent(): number {
 		const box = tailControlsRef?.getBoundingClientRect();
 		if (!box) return 0;
-		if (!handoffSlotPx || !handoffPainted || tailQueueSlotPx !== handoffSlotPx || presentedTailError) return box.height;
-		const firstRow = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
-		if (!firstRow) return box.height;
-		const docked = box.bottom - firstRow.getBoundingClientRect().top;
-		if (!handoffExcessFreed) {
-			// Stop and its not-sent rows keep where they left the reader (#1066); a
-			// reader who scrolled up is not following the edge the clamp moves.
-			if (!shouldAutoScroll || windowShifting || $activeSession.stopRequestedTurnId
-				|| restingOnNotSentRows(notSentHold.messages)) return box.height;
-			handoffExcessFreed = true;
-			// The followed floor holds the same blank as the reserve did.
-			if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - (box.height - docked));
+		const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
+		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
+		// A bubble sent into the hold docks in its blank; an unheld slot has none.
+		if (blank < heldBlankPx) heldBlankPx = blank;
+		// Stop and its not-sent rows keep where they left the reader (#1066); a
+		// reader who scrolled up is not following the edge the clamp moves.
+		if (row && blank > heldBlankPx && handoffSlotPx && handoffPainted && tailQueueSlotPx === handoffSlotPx
+			&& !presentedTailError && shouldAutoScroll && !windowShifting && !$activeSession.stopRequestedTurnId
+			&& !restingOnNotSentRows(notSentHold.messages)) {
+			if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - (blank - heldBlankPx));
+			heldBlankPx = blank;
 			// The browser clamps scrollTop as the reserve shrinks; that is not the reader.
 			markProgrammaticScrollSettling();
 		}
-		return docked;
+		return box.height - (tailQueueSlotPx ? heldBlankPx : 0);
 	}
 
 	function transcriptContentEnd(): number {
 		if (!containerRef || !tailSpacerRef) return 0;
 		return containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top
 			- containerRef.getBoundingClientRect().top + tailControlsExtent();
-	}
-
-	/** The trailing reserve the prompt at anchorTop needs below it. */
-	function anchoredTailReserve(anchorTop: number, removedHeight = 0): number {
-		if (!containerRef) return 0;
-		return Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
-			clientHeight: containerRef.clientHeight,
-			contentAfterAnchor: Math.max(0, transcriptContentEnd() - anchorTop - removedHeight)
-		}) + tailControlsExtent());
 	}
 
 	function renderedFollowEnd(): number {
@@ -1440,8 +1430,17 @@
 			return;
 		}
 
-		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
-		tailReservePx = anchoredTailReserve(anchorTop);
+		const containerBox = containerRef.getBoundingClientRect();
+		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
+		const contentEnd = transcriptContentEnd();
+		const contentAfterAnchor = Math.max(0, contentEnd - anchorTop);
+		tailReservePx = Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
+			clientHeight: containerRef.clientHeight,
+			contentAfterAnchor
+		}) + tailControlsExtent());
+		// Once this anchor has measured, a passive reserve measured before it (a
+		// taller queue, say) has no owner left to shrink it.
+		if (latestTurnTailPx > tailReservePx) latestTurnTailPx = tailReservePx;
 		await tick();
 		if (!containerRef || currentTurnAnchorId !== maintainedTurnId
 			|| maintainedWindowVersion !== windowShiftVersion || windowShifting) return;
@@ -1531,7 +1530,9 @@
 			// the queue grows up over the rows above it.
 			return MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
 		}
-		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+		const containerBox = containerRef.getBoundingClientRect();
+		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
+		const contentEnd = transcriptContentEnd();
 		// A disclosure after this anchor consumes its reserve. Restore that room in
 		// the SAME DOM commit as removal, before native layout can clamp scrollTop.
 		// Earlier-turn removal moves both anchor and content end, so has no delta.
@@ -1541,7 +1542,10 @@
 			removedHeight = pendingRemoval.getBoundingClientRect().height
 				+ (Number.parseFloat(style.marginTop) || 0) + (Number.parseFloat(style.marginBottom) || 0);
 		}
-		return anchoredTailReserve(anchorTop, removedHeight);
+		return Math.max(readingFloorReserve(), resolveAnchoredTailReserve({
+			clientHeight: containerRef.clientHeight,
+			contentAfterAnchor: Math.max(0, contentEnd - anchorTop - removedHeight)
+		}) + tailControlsExtent());
 	}
 
 	function refreshLatestTurnTailReserve() {
@@ -2267,8 +2271,11 @@
 			const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
 			// Queue auto-handoff may clear/enrich the same failure before Stop.
 			// Its already-painted slot belongs to this reading context, not to the
-			// next error string or the queue's now-empty height.
-			tailErrorOffsetPx = pendingHeight > 0 ? pendingHeight + gap : 0;
+			// next error string or the queue's now-empty height. A handoff's blank
+			// the reserve already gave back is not part of it.
+			if (!untrack(() => handoffSlotPx)) heldBlankPx = 0;
+			const docked = pendingHeight - (untrack(() => tailQueueSlotPx) ? heldBlankPx : 0);
+			tailErrorOffsetPx = docked > 0 ? docked + gap : 0;
 			// The queue and error are one already-presented slot. Keep its outer
 			// geometry too: dequeue can coincide with transcript growth/follow,
 			// otherwise the bottom-docked wrapper shrinks in that same paint.
@@ -2279,7 +2286,7 @@
 		// A queued prompt's row can land in the same commit its bubble leaves
 		// (#1052). The row's follow scroll and the slot's shrink in one paint
 		// read as a shift, so hold the painted slot. After that paint the reserve
-		// passes give it back (anchoredTailReserve).
+		// passes give its blank back (queueSlotExtent).
 		const mark = { sessionId: s.sessionId, messages: s.messages.length, queued: s.queuedMessages.length };
 		const handoff = landedFromQueue(handoffMark, mark) && s.isStreaming && !s.stopRequestedTurnId && !presentedTailError;
 		handoffMark = mark;
@@ -2288,7 +2295,8 @@
 			if (pendingHeight > untrack(() => tailQueueSlotPx)) {
 				tailQueueSlotPx = pendingHeight;
 				handoffSlotPx = pendingHeight;
-				handoffPainted = handoffExcessFreed = false;
+				handoffPainted = false;
+				heldBlankPx = 0;
 				requestAnimationFrame(() => requestAnimationFrame(() => {
 					handoffPainted = true;
 					// A turn can end with the handoff; give back what fits now.
@@ -2429,6 +2437,7 @@
 		if (pendingMessages.length || !handoffSlotPx) return;
 		if (!presentedTailError && untrack(() => tailQueueSlotPx) === handoffSlotPx) tailQueueSlotPx = 0;
 		handoffSlotPx = 0;
+		heldBlankPx = 0;
 	});
 
 	// Keep a freshly-sent pending bubble in view. The content effect below tracks

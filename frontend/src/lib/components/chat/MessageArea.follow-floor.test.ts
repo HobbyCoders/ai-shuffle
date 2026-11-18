@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createMessageSender, type MessageSenderDeps } from '$lib/stores/session/message-sender';
 import type { ActiveSessionState } from '$lib/stores/active-session';
 import { pendingQueue } from '$lib/stores/session/pending-queue';
-import { isUserScrollUpGesture, resolveAnchoredTailReserve, MIN_TRANSCRIPT_TAIL_RESERVE } from '$lib/stores/session/auto-scroll';
+import { isUserScrollUpGesture } from '$lib/stores/session/auto-scroll';
 import { createTranscriptWindow } from './transcript-window';
 import { landedFromQueue } from '$lib/utils/queue-handoff';
 import { visibleTurnError } from '$lib/stores/session/turn-error-banner';
@@ -33,9 +33,6 @@ const transaction = between("let layoutBoundary = '';", '// Rendered geometry ha
 const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
-// The queue slot's share of the reserve, the handoff give-back included.
-const tailGeometry = between('function tailControlsExtent(', 'function renderedFollowEnd()')
-	.replace(/(\w|\)): number/g, '$1');
 const handoffRelease = between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view')
 	.replace(': number | null', '');
 
@@ -51,38 +48,30 @@ function probe() {
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
-		frames: [] as (() => void)[], tailBottom: 600, restingRows: false, viewTop: 0,
-		clientHeight: 600, anchorTop: 0,
-		landedFromQueue, visibleTurnError, resolveAnchoredTailReserve, MIN_TRANSCRIPT_TAIL_RESERVE
+		frames: [] as (() => void)[], restingRows: false,
+		landedFromQueue, visibleTurnError
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
 		let followedViewportEnd = 0, followedFloorContext = null;
 		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
-		let handoffPainted = false, handoffExcessFreed = false, tailReservePx = env.MIN_TRANSCRIPT_TAIL_RESERVE;
-		const { resolveAnchoredTailReserve, MIN_TRANSCRIPT_TAIL_RESERVE } = env, tailErrorRef = null;
+		let handoffPainted = false, heldBlankPx = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
 		const clearJumpRevealTimer = () => {};
-		const containerRef = { get clientHeight() { return env.clientHeight; }, get scrollTop() { return env.viewTop; }, getBoundingClientRect: () => ({ top: 0 }) };
+		const containerRef = { clientHeight: 600, scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }) };
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
 		// Painted height: the queue's own height, or the slot holding it open.
 		const painted = () => Math.max(env.pendingHeight, tailQueueSlotPx);
-		// The queue's rows dock at the slot's bottom; above them is the held blank.
-		const firstRow = { getBoundingClientRect: () => ({ top: env.tailBottom - env.pendingHeight }) };
-		const tailControlsRef = {
-			getBoundingClientRect: () => ({ height: painted(), top: env.tailBottom - painted(), bottom: env.tailBottom }),
-			querySelector: () => (env.pendingHeight > 0 ? { firstElementChild: firstRow } : null)
-		}, chatColumnRef = {};
+		const tailControlsRef = { getBoundingClientRect: () => ({ height: painted() }) }, chatColumnRef = {};
 		const getComputedStyle = () => ({ rowGap: String(env.gap) });
 		const activeSession = {}, get = () => env.session;
 		const liveActiveSession = { clearError: () => { env.session = { ...env.session, error: null }; } };
 		const untrack = fn => fn();
 		const tick = () => new Promise(resolve => env.ticks.push(resolve));
 		const requestAnimationFrame = fn => { env.frames.push(fn); return env.frames.length; };
-		// Anchor upkeep's reserve pass (its scroll is the browser's clamp here).
-		const maintainCurrentTurnAnchor = () => { tailReservePx = anchoredTailReserve(env.anchorTop); return env.calls.push('anchor'); };
+		const maintainCurrentTurnAnchor = () => env.calls.push('anchor');
 		const followGrowthNow = () => env.calls.push('follow');
 		const refreshLatestTurnTailReserve = () => env.calls.push('reserve');
 		const markProgrammaticScrollSettling = () => env.calls.push('settle');
@@ -93,7 +82,6 @@ function probe() {
 		const effects = [];
 		const $effect = { pre: fn => { effects.push(fn); } };
 		${reserve}
-		${tailGeometry}
 		${transaction}
 		${beginTurn}
 		${handoffRelease}
@@ -110,23 +98,18 @@ function probe() {
 				cleanup = effects[0]();
 				effects.slice(1).forEach(fn => fn());
 			},
-			// What the MutationObserver runs for any transcript change while following.
-			mutate() { if (shouldAutoScroll) maintainCurrentTurnAnchor(); },
-			// The container ResizeObserver's reserve pass (anchored: its upkeep).
-			resize() { maintainCurrentTurnAnchor(); },
 			shift() { windowShiftVersion++; ${beginShift} },
 			endShift() { windowShifting = false; },
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
 			queueSlot: () => tailQueueSlotPx,
-			tailReserve: () => tailReservePx,
 			handoffSlot: () => handoffSlotPx,
 			errorOffset: () => tailErrorOffsetPx,
 			presentedError: () => presentedTailError,
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; mutate(): void; resize(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; tailReserve(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
 	const settle = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
 	return {
 		env, ...state,
@@ -289,118 +272,27 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 	describe('queue handoff hold', () => {
 		const queued = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `q${i}` })) as unknown as Session['queuedMessages'];
 		const turn = (messages: number, queue: number) => ({ ...session('long', messages), isStreaming: true, queuedMessages: queued(queue) });
-		// The prompt sits at 500 with `reply` px under it; the floor read at the
-		// handoff (0 + 600) stays below what the turn reserves.
-		const LONG = 2000, SHORT = 50;
-		/** What the turn reserves with the queue slot at `slot` px (600px viewport, 18px gap). */
-		const needs = (p: ReturnType<typeof probe>, slot: number) => Math.max(slot + 66, p.env.clientHeight - 16 - (p.env.proseEnd - p.env.anchorTop));
 		/** A queued prompt's row lands in the same commit its bubble leaves, painted at `painted`px. */
-		function handoff(painted: number, queue = 3, reply = LONG) {
+		function handoff(painted: number, queue = 3) {
 			const p = probe();
-			Object.assign(p.env, { scrollTop: 0, anchorTop: 500, proseEnd: 500 + reply });
 			p.env.session = turn(18, queue); p.render();
 			p.env.pendingHeight = painted;
 			p.env.session = turn(19, queue - 1);
 			expect(p.render().style.minHeight).toBe(`${painted}px`);
 			return p;
 		}
-		/** The handoff paints: two frames, then the reserve pass it schedules. */
 		const paint = async (p: ReturnType<typeof probe>) => { await p.frame(); await p.frame(); };
 
-		it('holds the handoff paint, then reserves only the docked bubbles under the held slot', async () => {
-			// Several multiline prompts and a short one: the handoff holds 650px.
-			const p = handoff(650, 4);
-			p.env.pendingHeight = 80; // what the remaining short bubble needs
-			p.mutate(); // the handoff commit's own reserve pass
-			expect(p.render().style.minHeight).toBe('650px');
-			expect(p.tailReserve()).toBe(needs(p, 650));
+		it('holds the slot past the handoff frames until the last bubble leaves, in one commit', async () => {
+			const p = handoff(650, 3);
+			p.env.pendingHeight = 80;
+			p.env.session = turn(20, 1);
 			await paint(p);
-			// The slot stays held, so its bubble and top do not move. The reserve
-			// and the followed floor drop its 570px of blank together; the reply
-			// is followed to just above the bubble.
 			expect(p.render().style.minHeight).toBe('650px');
-			expect(p.tailReserve()).toBe(needs(p, 80));
-			expect(p.floor()).toBe(600 - 570);
-			expect(p.env.calls.filter(c => c === 'settle')).toHaveLength(1);
-			// The last bubble leaves: both pre-render effects run in that commit.
 			p.env.pendingHeight = 0;
-			p.env.session = turn(20, 0);
+			p.env.session = turn(21, 0);
 			expect(p.render().style.minHeight).toBe('0px');
 			expect(p.handoffSlot()).toBe(0);
-		});
-
-		it('gives the blank back under continuous streaming, with a reply update in every frame', async () => {
-			const p = handoff(650, 2);
-			p.env.pendingHeight = 80;
-			const reserves: number[] = [];
-			for (let chunk = 0; chunk < 6; chunk++) {
-				p.env.proseEnd += 40; // a reply chunk, followed in this frame's pass
-				p.mutate();
-				reserves.push(p.tailReserve());
-				await p.frame();
-			}
-			// No frame is quiet. The two handoff frames reserve the held slot; every
-			// reply pass after that reserves only the short bubble.
-			expect(reserves.slice(0, 2)).toEqual([needs(p, 650), needs(p, 650)]);
-			expect(reserves.slice(2)).toEqual(Array(4).fill(needs(p, 80)));
-		});
-
-		it('sizes the reserve for a viewport-only resize from the docked bubbles', async () => {
-			// A short reply: the turn's own room covers the held slot, so nothing
-			// on screen differs when the handoff paints.
-			const p = handoff(300, 2, SHORT);
-			p.env.pendingHeight = 80;
-			await paint(p);
-			expect(p.tailReserve()).toBe(534);
-			// The keyboard opens: no transcript change, only the container resizes.
-			// The room it frees goes, not just down to the held slot's 366px.
-			p.env.clientHeight = 300;
-			p.resize();
-			expect(p.tailReserve()).toBe(234);
-			p.env.clientHeight = 600;
-			p.resize();
-			expect(p.tailReserve()).toBe(534);
-			expect(p.queueSlot()).toBe(300);
-		});
-
-		it('runs a reserve pass on every container resize, whatever the column did', () => {
-			const observer = between('resizeObserver = new ResizeObserver(', 'resizeObserver.observe(containerRef)');
-			expect(observer).toMatch(/if \(currentTurnAnchorId\) \{\s*scheduleCurrentTurnAnchorMaintenance\(\);\s*return;\s*\}\s*scheduleLatestTurnTailRefresh\(\);/);
-			expect(observer.slice(0, observer.indexOf('if (currentTurnAnchorId)'))).not.toContain('return');
-		});
-
-		it('lets only the bubbles take input, not the held blank over the reply', () => {
-			const css = source.slice(source.indexOf('<style>'));
-			expect(css).toMatch(/\.tail-controls \{[^}]*pointer-events: none;/);
-			expect(css).toMatch(/\.tail-controls :global\(\.userrow\) \{\s*pointer-events: auto;/);
-		});
-
-		it.each([
-			['the reader scrolled up', (p: ReturnType<typeof probe>) => { p.env.follows = false; p.run(); }],
-			['Stop is pending', (p: ReturnType<typeof probe>) => { p.env.session = { ...p.env.session, stopRequestedTurnId: 't' } as Session; p.run(); }],
-			['not-sent rows rest under it', (p: ReturnType<typeof probe>) => { p.env.restingRows = true; }]
-		])('keeps reserving the held slot while %s', async (_name, change) => {
-			const p = handoff(650, 2);
-			p.env.pendingHeight = 80;
-			change(p);
-			await paint(p);
-			p.resize();
-			expect(p.queueSlot()).toBe(650);
-			expect(p.handoffSlot()).toBe(650);
-			expect(p.tailReserve()).toBe(needs(p, 650));
-			expect(p.env.calls).not.toContain('settle');
-		});
-
-		it('gives the blank back once a scrolled-up reader follows again', async () => {
-			const p = handoff(650, 2);
-			p.env.pendingHeight = 80;
-			p.env.follows = false; p.run();
-			await paint(p);
-			p.resize(); // a pass while scrolled up sizes for the held slot
-			expect(p.tailReserve()).toBe(needs(p, 650));
-			p.env.follows = true; p.run();
-			p.mutate();
-			expect(p.tailReserve()).toBe(needs(p, 80));
 		});
 
 		it('keeps a live hold through a queued send in the middle of it', async () => {
@@ -574,12 +466,13 @@ function maintenanceAcrossShift() {
 	const env = { top: 5000, writes: [] as number[], ticks: [] as (() => void)[] };
 	const result = new Function('env', 'root', `
 		let containerRef = root, tailSpacerRef = {}, currentTurnAnchorId = 'user';
-		let windowShiftVersion = 0, windowShifting = false, tailReservePx = 0, shouldAutoScroll = true;
+		let windowShiftVersion = 0, windowShifting = false, tailReservePx = 0, latestTurnTailPx = 0, shouldAutoScroll = true;
 		Object.defineProperty(root, 'scrollTop', { get: () => env.top });
 		Object.defineProperty(root, 'clientHeight', { value: 600 });
 		root.getBoundingClientRect = () => ({ top: 52 });
 		root.firstElementChild.getBoundingClientRect = () => ({ top: 5152 - env.top });
-		const turnAnchorId = () => 'maintained-user', anchoredTailReserve = () => 300;
+		const turnAnchorId = () => 'maintained-user', transcriptContentEnd = () => 5300;
+		const readingFloorReserve = () => 0, resolveAnchoredTailReserve = () => 300, tailControlsExtent = () => 0;
 		const tick = () => new Promise(resolve => env.ticks.push(resolve));
 		const resolveCurrentTurnAnchorScrollTop = top => top, resolveAnchoredRevealDelta = () => 0;
 		const setProgrammaticScrollTop = top => { env.top = top; env.writes.push(top); };
