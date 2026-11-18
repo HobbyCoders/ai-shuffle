@@ -147,6 +147,26 @@ await runJourney({
 			expect(await page.evaluate(() => history.length) === before, 'reselection adds no history entry');
 		}
 	}, {
+		name: 'desktop-reselect-default-article',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+		},
+		async act({ page, mark }) {
+			const before = await page.evaluate(() => history.length);
+			await mark('choose Start Here, which the Docs entry already shows');
+			await docsList(page).getByText('Start Here', { exact: true }).click();
+			await waitTitle(page, 'AI Shuffle documentation');
+			expect(await page.evaluate(() => history.length) === before, 'choosing the shown default adds no history entry');
+			await mark('Back leaves Docs');
+			await page.goBack();
+			// Docs stays docked but hidden; the page before it (the new chat) is back.
+			await page.locator('[data-view-shell="Docs"]').waitFor({ state: 'hidden' });
+			await page.getByRole('region', { name: 'New chat' }).waitFor();
+		}
+	}, {
 		name: 'desktop-article-history-and-reload',
 		viewports: ['desktop'],
 		async setup({ page, status }) {

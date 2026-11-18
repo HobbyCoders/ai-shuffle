@@ -420,6 +420,8 @@
 	}
 
 	function restoreSelection(key: string) {
+		// A saved shell is selectable once the list shows it; only a successful load proves it gone.
+		if (key !== 'new' && !tabState.ids.includes(key)) return tabState.loaded && !tabState.error ? 'missing' : 'pending';
 		newTerminal = key === 'new';
 		if (!newTerminal) terminals.select(sessionId, key);
 		detailOpen = true;

@@ -87,6 +87,7 @@ import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
 import { terminals, WORKER_TERMINALS } from '$lib/stores/terminals.svelte';
 import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
+import { shellHistory } from '$lib/services/app-history.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 import type { CommandBlock } from '$lib/terminal/commands';
@@ -605,6 +606,25 @@ describe('Terminal page (no chat)', () => {
 		await waitFor(() => expect(view.getByText('Only the owner can use terminals')).toBeTruthy());
 		expect(view.queryByText('Loading terminals…')).toBeNull();
 		expect(api.create).not.toHaveBeenCalled();
+	});
+
+	it('a reload on a saved non-default shell opens that shell once the held list arrives (S31)', async () => {
+		let answer!: (value: unknown) => void;
+		api.targets.mockResolvedValue(workspace);
+		api.list.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+		// The browser entry saved shell A; the store's default would be the last one listed, B.
+		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
+		try {
+			render(TerminalPage);
+			await tick();
+			answer({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
+			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).loaded).toBe(true));
+			await tick();
+			expect(terminals.tabsFor(WORKER_TERMINALS).active).toBe('a');
+			expect(shellHistory.place?.panel).toBe('a');
+		} finally {
+			shellHistory.stop();
+		}
 	});
 
 	it('closing the shell closes it on the worker', async () => {

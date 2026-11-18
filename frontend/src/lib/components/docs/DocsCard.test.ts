@@ -118,6 +118,22 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   expect(docs()).toHaveLength(2);
  });
 
+ it('choosing the default article on the base entry adds no stop (S32)', async () => {
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  shellHistory.start({}, { type: 'docs' });
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await new Promise((resolve) => setTimeout(resolve));
+  vi.mocked(goto).mockClear();
+  await fireEvent.click(view.getByRole('button', { name: 'Start Here' }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(vi.mocked(goto)).not.toHaveBeenCalled();
+  expect(title(view)).toBe('AI Shuffle documentation');
+  // Another article is still a stop of its own.
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(vi.mocked(goto)).toHaveBeenCalledTimes(1));
+ });
+
  it('marks every search result it opens, also after a document chosen from the list', async () => {
   Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
   const view = render(DocsCard, {});
