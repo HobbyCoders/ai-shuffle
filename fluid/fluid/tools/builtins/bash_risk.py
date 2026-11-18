@@ -36,11 +36,9 @@ Programs with extra rules:
 - ``find``: none of ``-exec``, ``-execdir``, ``-ok``, ``-okdir``, ``-delete``,
   ``-fprint*``, ``-fls``.
 - ``awk``/``gawk``/``mawk``: no ``system(``, ``getline`` or ``|`` in any
-  argument, and the options are parsed (gawk's set; anything else asks):
-  none that read a script file or extension the classifier cannot see
-  (``-f``/``-E``/``-i``/``-l``/``-W``), start the debugger (``-D``) or write a
-  file (``-d``/``-p``/``-o``). The program text itself (the first operand, or
-  the ``-e``/``--source`` values) is lexed: a ``system`` call, ``getline``, a
+  argument, and no option but POSIX ``-F``/``-v`` (value attached or the next
+  word) and ``--``: any other option asks, since awks disagree on them. The
+  program text (the first operand) is lexed: a ``system`` call, ``getline``, a
   pipe or any ``@`` construct (``@include``, ``@load``, indirect ``@f()``)
   outside strings and regex literals asks, and so does a ``/`` the lexer
   cannot place as division or regex. See :func:`_awk_program_ok`.
@@ -65,9 +63,7 @@ and for programs that parse long options with getopt_long (sort, file, sed,
 date, gawk) when abbreviated to a prefix that names it unambiguously
 (``--outp=file``; ``sort --c`` is ambiguous and getopt_long refuses it).
 ripgrep and tree reject abbreviations, so their long options match exactly.
-For sort, whose value-taking options are listed, words after a ``--`` in
-option position are operands (a ``--`` that is an option's value is not);
-elsewhere every word is scanned. See :func:`_no_flags`.
+Every word is scanned, ``--`` and option values included. See :func:`_no_flags`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
@@ -174,66 +170,20 @@ def _sets_flag(
     return False
 
 
-def _takes_next_word(
-    arg: str, takes_value: str, short_flags: str,
-    long_options: tuple[str, ...] | None, value_long: frozenset[str],
-) -> bool | None:
-    """Whether option-position word ``arg`` makes the next word its value.
-
-    None when that cannot be told: an unknown short letter, or a long option
-    that is unknown or an ambiguous abbreviation.
-    """
-    if arg == "-" or not arg.startswith("-"):
-        return False  # an operand
-    if arg.startswith("--"):
-        name, eq, _ = arg.partition("=")
-        if eq:
-            return False
-        option = _resolve_long(name, long_options)
-        if option is None or (long_options is not None and option not in long_options):
-            return None
-        return option in value_long
-    for j, ch in enumerate(arg[1:], 1):
-        if ch in takes_value:
-            return j == len(arg) - 1  # value attached unless it is the last letter
-        if ch not in short_flags:
-            return None
-    return False
-
-
 def _no_flags(
     *banned: str, takes_value: str = "", long_options: tuple[str, ...] | None = None,
-    short_flags: str | None = None, value_long: frozenset[str] | None = None,
 ) -> Check:
     """Check: none of ``banned`` is set, in any spelling :func:`_sets_flag` knows.
 
-    Every word is scanned, option values included, unless the program's
-    value-taking options are known (``short_flags`` and ``value_long``): then
-    a ``--`` in option position ends the options, so ``sort -- -old.txt``
-    reads a file named ``-old.txt``. A ``--`` that is an option's value
-    (``-k --``) does not, and once a word's value-taking cannot be told
-    (an unknown or ambiguous option) the scan runs to the end.
+    Every word is scanned, ``--`` and option values included: which word a
+    program reads as an option's value can differ by dialect (GNU sort's
+    obsolete options take the next word only when it is a number), so an
+    end-of-options early return could stop short of a real option.
     """
-    knows_values = short_flags is not None and value_long is not None
-
     def check(args: list[str]) -> bool:
         if _legacy_banned(args, banned):
             return False
-        honour_dash_dash = knows_values
-        is_value = False  # the current word is the previous option's value
-        for a in args:
-            if a == "--" and honour_dash_dash and not is_value:
-                return True
-            if _sets_flag(a, banned, takes_value, long_options):
-                return False
-            if is_value:
-                is_value = False
-            elif honour_dash_dash:
-                nxt = _takes_next_word(a, takes_value, short_flags, long_options, value_long)
-                if nxt is None:
-                    honour_dash_dash = False
-                is_value = bool(nxt)
-        return True
+        return not any(_sets_flag(a, banned, takes_value, long_options) for a in args)
     return check
 
 
@@ -251,15 +201,6 @@ _SORT_LONG_OPTIONS = (
     "--stable", "--temporary-directory", "--unique", "--version", "--version-sort",
     "--zero-terminated",
 )
-# sort's options that take the next word as their value when not given
-# ``=value`` (``--check`` and ``--debug`` take none or ``=`` only), and its
-# short switches. -k, -o, -S, -t, -T (and the obsolete -y) take a value.
-_SORT_VALUE_LONG = frozenset({
-    "--batch-size", "--buffer-size", "--compress-program", "--field-separator",
-    "--files0-from", "--key", "--output", "--parallel", "--random-source", "--sort",
-    "--temporary-directory",
-})
-_SORT_SHORT_FLAGS = "bcCdfghiMmnRrsuVz"
 _FILE_LONG_OPTIONS = (
     "--apple", "--brief", "--checking-printout", "--compile", "--debug", "--dereference",
     "--exclude", "--exclude-quiet", "--extension", "--files-from", "--help", "--keep-going",
@@ -346,31 +287,12 @@ def _date_ok(args: list[str]) -> bool:
     return len(operands) <= 1 and all(o.startswith("+") for o in operands)
 
 
-# gawk's options (mawk and BusyBox awk take a subset). Banned ones read a
-# script file or extension the classifier never sees (-f, -E, -i, -l, -W),
-# start the debugger (-D) or write a file (-d, -p, -o write awkvars.out /
-# awkprof.out). Unknown options ask: another awk could give one a value and
-# so shift which word is the program.
-_AWK_LONG_OPTIONS = {
-    "--assign": "required", "--bignum": "none", "--characters-as-bytes": "none",
-    "--copyright": "none", "--csv": "none", "--debug": "optional",
-    "--dump-variables": "optional", "--exec": "required", "--field-separator": "required",
-    "--file": "required", "--gen-pot": "none", "--help": "none", "--include": "required",
-    "--lint": "optional", "--lint-old": "none", "--load": "required",
-    "--no-optimize": "none", "--non-decimal-data": "none", "--optimize": "none",
-    "--posix": "none", "--pretty-print": "optional", "--profile": "optional",
-    "--re-interval": "none", "--sandbox": "none", "--source": "required",
-    "--trace": "none", "--traditional": "none", "--use-lc-numeric": "none",
-    "--version": "none",
-}
-_AWK_BANNED_LONG = frozenset({
-    "--debug", "--dump-variables", "--exec", "--file", "--include", "--load",
-    "--pretty-print", "--profile",
-})
-_AWK_BANNED_SHORT = "fEilWdDop"
-_AWK_FLAG_SHORT = "bcCghIkMnNOPrsStVY"
-_AWK_VALUE_SHORT = "FveZ"  # value attached (-F:) or the next word (-F :)
-_AWK_OPTIONAL_SHORT = "L"  # value attached only (-Lfatal)
+# The only options awk may carry: POSIX -F and -v, value attached (-F:) or
+# the next word (-F :), and ``--``. Every other option asks. GNU-only ones
+# are the risk: gawk's -e/--source supply the program, -f/-E/-i/-l/-W read
+# code the classifier never sees, -d/-p/-o write files, and an awk that does
+# not know an option (Apple's One True Awk warns and skips it) would run a
+# different word as its program than the classifier lexed.
 # The exact-token rule awk started from, kept over every word.
 _AWK_FILE_FLAGS = {"-f", "--file", "-i", "--include", "-l", "--load"}
 
@@ -383,7 +305,6 @@ def _awk_ok(args: list[str]) -> bool:
             a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
         ):
             return False
-    sources: list[str] = []
     i = 0
     while i < len(args):
         a = args[i]
@@ -392,45 +313,19 @@ def _awk_ok(args: list[str]) -> bool:
             break
         if a == "-" or not a.startswith("-"):
             break
-        i += 1
-        if a.startswith("--"):
-            parsed = _long_value(a, args, i, _AWK_LONG_OPTIONS)
-            if parsed is None or parsed[0] in _AWK_BANNED_LONG:
-                return False
-            option, value, i = parsed
-            if option == "--source":
-                sources.append(value)
-            continue
-        for j, ch in enumerate(a[1:], 1):
-            if ch in _AWK_BANNED_SHORT:
-                return False
-            if ch in _AWK_FLAG_SHORT:
-                continue
-            if ch in _AWK_OPTIONAL_SHORT:
-                break
-            if ch in _AWK_VALUE_SHORT:
-                value = a[j + 1:]
-                if not value:
-                    if i >= len(args):
-                        return False
-                    value, i = args[i], i + 1
-                if ch == "e":
-                    sources.append(value)
-                break
+        if a[:2] not in ("-F", "-v"):
+            return False
+        i += 2 if len(a) == 2 else 1  # a separate value is the next word
+        if i > len(args):
             return False
     operands = args[i:]
-    if not sources:
-        if not operands:
-            return True  # no program: awk prints its usage
-        sources, operands = [operands[0]], operands[1:]
-    # gawk and mawk stop reading options at the program; an awk that kept
-    # going would read an option-looking word here as an option (``-e …``).
+    if not operands:
+        return True  # no program: awk prints its usage
+    # The first operand is the program. An option-looking operand, the program
+    # included (after ``--``), asks rather than rest on how each awk reads it.
     if any(o.startswith("-") and o != "-" for o in operands):
         return False
-    # Several -e/--source texts: lex them joined both ways, as separate
-    # lines and run together, so a construct split across two values is
-    # seen whichever way the awk at hand joins them.
-    return all(_awk_program_ok(p) for p in {"\n".join(sources), "".join(sources)})
+    return _awk_program_ok(operands[0])
 
 
 _AWK_KEYWORDS = frozenset({
@@ -665,8 +560,10 @@ _SED_LABEL = re.compile(r"[A-Za-z0-9_]*")
 def _sed_regex_end(script: str, i: int, delim: str) -> int | None:
     """Index past the regex closing at ``delim``; None if seds could disagree.
 
-    GNU sed ends it at the first unescaped ``delim``; BSD sed skips bracket
-    expressions (``/[/]/``). Both readings must agree.
+    Both a bracket-aware and a bracket-blind reading must end the regex at
+    the same place. Deliberately conservative: a ``delim`` inside a bracket
+    expression (``s/[/]/x/``) asks rather than rest on which reading each
+    sed and version uses; the prompt is the cheaper mistake.
     """
     end = _awk_literal_end(script, i, delim, brackets=False)
     if end is None or end != _awk_literal_end(script, i, delim, brackets=True):
@@ -817,12 +714,9 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     # getopt, so every word is scanned, ``--`` or not.
     "tree": _no_flags("-o", "-R"),
     "diff": None, "cmp": None,
-    # The one program whose ``--`` ends the scan: its value-taking options
-    # are listed, so an option's value of ``--`` is told apart.
     "sort": _no_flags(
         "-o", "--output", "--compress-program", takes_value="ktSTy",
-        long_options=_SORT_LONG_OPTIONS, short_flags=_SORT_SHORT_FLAGS,
-        value_long=_SORT_VALUE_LONG,
+        long_options=_SORT_LONG_OPTIONS,
     ),
     "uniq": _uniq_ok, "cut": None, "tr": None,
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,

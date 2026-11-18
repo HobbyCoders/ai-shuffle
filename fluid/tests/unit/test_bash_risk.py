@@ -312,7 +312,6 @@ STILL_SAFE = [
     "awk -vline=3 'NR==line' f",
     "awk -v n=1 '{print $n}' f",
     "awk 'NR<5' f",
-    "awk -e '{print}' f",
     "tree -L 2",
     "tree -a -I node_modules",
     "tree -d --noreport",
@@ -337,8 +336,7 @@ STILL_SAFE = [
     "awk '{print ($1+$2)/2}' f",
     "awk '{gsub(/foo/, \"bar\"); print}' f",
     "awk '!seen[$0]++' f",
-    # -- ends options; an ambiguous abbreviation sets nothing.
-    "sort -- -old.txt",
+    # An ambiguous abbreviation sets nothing.
     "sort --c file",  # --check or --compress-program: sort refuses it
     "rg --pr=x foo",  # ripgrep rejects abbreviations, so this is not --pre
     "sed -n '$p' f",
@@ -398,13 +396,55 @@ def test_dash_dash_as_an_option_value_does_not_end_options(command: str) -> None
     assert classify({"command": command}) == "write"
 
 
+# Every sort word is scanned, ``--`` included: which word an option takes as
+# its value can differ (obsolete options take the next word only when it is
+# a number), so no end-of-options marker is trusted.
+_SORT_OBSOLETE_SPELLINGS = ["-y", "-ny"]
+SORT_UNCERTAIN_VALUE = [
+    f"sort {obsolete} {value} -- {banned} f"
+    for obsolete in _SORT_OBSOLETE_SPELLINGS
+    for value in ["-k", "-t", "-S", "-T", "--key"]
+    for banned in _SORT_BANNED_SPELLINGS
+] + ["sort -- -old.txt", "sort -k2 -- -o x f"]
+
+
+@pytest.mark.parametrize("command", SORT_UNCERTAIN_VALUE)
+def test_sort_scans_every_word(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+# awk may carry only POSIX -F/-v (attached or separate) and --. Any other
+# option asks: awks differ on which options exist and on what they do with
+# one they do not know, so the word they run as the program can differ from
+# the one the classifier lexed. Each case is an otherwise harmless program.
+_AWK_NON_POSIX_OPTIONS = [
+    "-e '{print}'", "-e'{print}'", "--source '{print}'", "--source='{print}'",
+    "--exec x", "-b", "-c", "-C", "-P", "-O", "-M", "-S", "-n", "-r", "-t", "-k",
+    "-Lfatal", "-L", "--sandbox", "--csv", "--posix", "--re-interval",
+    "--traditional", "--lint", "--version", "-W version", "-Wv", "-vx=1 -b",
+]
+AWK_NON_POSIX = [f"awk {opt} '{{print $1}}' f" for opt in _AWK_NON_POSIX_OPTIONS] + [
+    "awk -e'{print}' '@f()'",  # a later word that another awk would run
+    "awk -- -W '{print}' f",  # an option-looking program
+    "awk -F, -- -d f",
+]
+
+
+@pytest.mark.parametrize("command", AWK_NON_POSIX)
+def test_awk_asks_on_options_beyond_posix(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
 @pytest.mark.parametrize("command", [
-    "sort -- -old.txt",
-    "sort -k2 -- -old.txt",
-    "sort -t , -- -old.txt",
-    "sort --key 2 -- -old.txt",
+    "awk -F, '{print $1}' f",
+    "awk -F , '{print $1}' f",
+    "awk -v n=2 -F: '{print $n}' f",
+    "awk -vn=2 '{print $n}' f",
+    "awk -- '{print $1}' f",
 ])
-def test_dash_dash_in_option_position_ends_options(command: str) -> None:
+def test_awk_posix_options_stay_safe(command: str) -> None:
     assert is_read_only(command), command
 
 
