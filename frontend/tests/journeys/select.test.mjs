@@ -184,14 +184,16 @@ test('an edited map selects what either copy names and never drops a journey', (
 	assert.equal(selectForCi([mapFile, 'app/a.py'], wider, journeys, edited).all, true);
 });
 
-test('a split journey: its shared cases or either half selects both halves', () => {
+test('a split journey: its shared cases or any part selects all parts', () => {
 	const map = loadMap();
 	const journeys = allJourneys();
 	for (const stem of ['chat-position-stability', 'stop-with-queued-messages', 'sidebar-truth', 'queue-while-busy']) {
-		for (const file of [`${stem}.cases.mjs`, `${stem}.journey.mjs`, `${stem}-2.journey.mjs`]) {
+		const parts = [stem, `${stem}-2`];
+		if (stem === 'chat-position-stability') parts.push(`${stem}-3`);
+		for (const file of [`${stem}.cases.mjs`, ...parts.map((part) => `${part}.journey.mjs`)]) {
 			const picked = selectForCi([`frontend/tests/journeys/${file}`], map, journeys);
 			assert.equal(picked.all, false, file);
-			assert.deepEqual(picked.journeys.map((j) => j.name ?? j).sort(), [stem, `${stem}-2`], file);
+			assert.deepEqual(picked.journeys.map((j) => j.name ?? j).sort(), parts, file);
 		}
 	}
 });
