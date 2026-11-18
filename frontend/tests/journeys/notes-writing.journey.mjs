@@ -153,12 +153,13 @@ function historyCase(name) {
    await mark('open note B'); await open(idB); await landed(idB);
    const length = await page.evaluate(() => history.length);
    if (name === 'select-while-restore-pending') {
-    await mark('reload B with a full first page that does not contain B');
+    await mark('reload B with a full first page that does not contain B: it opens by id');
     firstPage = [notes[0], ...Array.from({ length: 99 }, (_, i) => ({ ...notes[0], id: `other-${i}`, title: `Other ${i}` }))];
     await reloadForHistory(page, mark);
     const row = id => page.locator('[data-settings-item]').filter({ hasText: id });
     await row(idA).waitFor(); await landed(idB);
-    expect(!await heading.isVisible(), 'B is not on the first page');
+    expect(!await row(idB).isVisible(), 'B is not on the first page');
+    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
     // Start a search for B, then clear it to show the first page while its response is in flight.
     const search = page.getByPlaceholder('Search notes', { exact: true });
     await search.fill(idB); await started; await search.fill(''); await row(idA).waitFor();
@@ -179,6 +180,8 @@ function historyCase(name) {
     await mark('reload B while the Notes list is unavailable');
     listUnavailable = true; await reloadForHistory(page, mark);
     await page.getByRole('button', { name: 'Retry', exact: true }).first().waitFor();
+    // The list is down, but B itself can still be fetched by id.
+    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
     await mark('restore the list service and reload without selecting another note');
     listUnavailable = false; await reloadForHistory(page, mark);
     await heading.waitFor({ timeout: 5000 });

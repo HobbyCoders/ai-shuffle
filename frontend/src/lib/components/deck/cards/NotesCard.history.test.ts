@@ -4,7 +4,7 @@ import { page } from '$app/state';
 import NotesCard from './NotesCard.svelte';
 import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
-import { getNote, getNoteAttachments, getNoteTags, getNotes } from '$lib/api/client';
+import { getNote, getNoteAttachments, getNoteTags, getNotes, updateNote } from '$lib/api/client';
 import { platform } from '$lib/stores/platform.svelte';
 
 vi.mock('$lib/api/client', () => ({
@@ -121,6 +121,71 @@ it('Cancel returns to the draft’s entry even when the step it answers is still
 	await waitFor(() => expect(router.index).toBe(3));
 	expect((screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement).value).toBe('keep me');
 	expect(panels()).toEqual([null, 'A', 'B', 'new']);
+});
+
+it('two Backs from a named note whose save then fails: Cancel returns to that note’s entry, not the first step (S19)', async () => {
+	vi.mocked(getNotes).mockResolvedValue([note('A'), note('B'), note('C')]);
+	let failSave!: (error: Error) => void;
+	vi.mocked(updateNote).mockImplementation(() => new Promise((_, reject) => (failSave = reject)));
+	render(NotesCard);
+	for (const id of ['A', 'B', 'C']) await fireEvent.click(await screen.findByRole('button', { name: new RegExp(`Note ${id} content ${id}`) }));
+	await waitFor(() => expect(panels()).toEqual([null, 'A', 'B', 'C']));
+	await fireEvent.input(screen.getByRole('textbox', { name: 'Note title' }), { target: { value: 'edited C' } });
+
+	go(-1); // to B: C's save starts and is held
+	await waitFor(() => expect(updateNote).toHaveBeenCalledOnce());
+	go(-1); // to A, before any answer
+	await new Promise((resolve) => setTimeout(resolve));
+	failSave(new Error('save failed'));
+	await waitFor(() => expect(dialog()).toBeTruthy());
+	await fireEvent.click(within(dialog()!).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+	await waitFor(() => expect(router.index).toBe(3));
+	expect((screen.getByRole('textbox', { name: 'Note title' }) as HTMLTextAreaElement).value).toBe('edited C');
+	expect(panels()).toEqual([null, 'A', 'B', 'C']);
+});
+
+it('a saved note past the list’s first page opens from its own request; a 404 clears it, a failure keeps it (S23)', async () => {
+	const firstPage = [note('A'), ...Array.from({ length: 99 }, (_, i) => note(`other-${i}`))];
+	vi.mocked(getNotes).mockResolvedValue(firstPage);
+	router.entries = [{}, { shell: { id: 'old', place: { type: 'notes', panel: 'old' } } }, { shell: { id: 'gone', place: { type: 'notes', panel: 'gone' } } }];
+	router.index = 1;
+	shellHistory.stop();
+	page.state = router.entries[1];
+	shellHistory.start(router.entries[1] as ShellState, { type: 'notes' });
+	let fail!: (error: unknown) => void;
+	vi.mocked(getNote).mockImplementation((id) => id === 'old' && !fail
+		? new Promise((_, reject) => (fail = reject))
+		: id === 'gone' ? Promise.reject({ status: 404, detail: 'Note not found' }) : Promise.resolve(note(id)));
+	render(NotesCard);
+	await waitFor(() => expect(getNote).toHaveBeenCalledWith('old'));
+	fail({ status: 503, detail: 'unavailable' }); // temporary: the selection stays
+	await new Promise((resolve) => setTimeout(resolve));
+	expect(router.entries[1].shell?.place.panel).toBe('old');
+	// The list reloads (focus): the note is asked for again and opens.
+	window.dispatchEvent(new Event('focus'));
+	expect(await screen.findByDisplayValue('Note old')).toBeTruthy();
+	expect(panels()).toEqual([undefined, 'old', 'gone']);
+
+	go(1); // the deleted note: the server confirms it is gone
+	await waitFor(() => expect(router.entries[2].shell?.place.panel).toBeNull());
+	expect(screen.queryByDisplayValue('Note gone')).toBeNull();
+});
+
+it('phone app: choosing the open note again while its Back waits for a save is a no-op, as on main (S22)', async () => {
+	shellHistory.stop();
+	platform.set('mobile');
+	let finishSave!: () => void;
+	vi.mocked(updateNote).mockImplementation((id, data) => new Promise((resolve) => (finishSave = () => resolve({ ...note(id), ...data }))));
+	const { rerender } = render(NotesCard, { initialItemId: null });
+	await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+	await fireEvent.input(await screen.findByRole('textbox', { name: 'Note title' }), { target: { value: 'edited A' } });
+	await fireEvent.click(screen.getByRole('button', { name: 'Back to Notes' }));
+	await waitFor(() => expect(updateNote).toHaveBeenCalledOnce());
+	await rerender({ initialItemId: 'A' }); // Spotlight reopens the same note
+	await waitFor(() => expect(getNote).toHaveBeenCalledWith('A'));
+	await new Promise((resolve) => setTimeout(resolve));
+	finishSave();
+	await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Note title' })).toBeNull());
 });
 
 it('phone app: an older Notes load that answers while a newer one waits still shows, as on main (S17)', async () => {

@@ -433,3 +433,22 @@ it('narrow desktop: a deferred pick survives a draft note getting its id, and yi
  }
 });
 
+it('narrow desktop: a first send’s chat adopted between a sidebar pick and its frame does not drop the pick (S18)', async () => {
+ startOn(saved('new', { type: 'session', sessionId: null }));
+ layout.openChat(null, 'reconcile');
+ const frames: FrameRequestCallback[] = [];
+ vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback));
+ try {
+  layout.setSidebarOverlay(true); layout.setSidebarCollapsed(false);
+  layout.afterSidebarOverlay(() => layout.openFeaturePage('docs'));
+  // AppPage adopts the created chat (follow-created-chat) as the receipt arrives.
+  layout.openChat('created', 'replace');
+  await settle();
+  for (const callback of frames.splice(0)) callback(0);
+  expect(layout.current.activeView?.type).toBe('docs');
+  await vi.waitFor(() => expect(places()).toEqual(['created', 'docs']));
+ } finally {
+  layout.setSidebarOverlay(false);
+ }
+});
+

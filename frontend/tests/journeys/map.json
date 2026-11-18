@@ -216,7 +216,7 @@
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
-			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, every search result opened marks its phrase, and a phrase match ranks first in the Docs panel and in Spotlight",
+			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, each article opened on desktop adds one Back step (reselecting the open one adds none) and Back/Forward reach adjacent articles, every search result opened marks its phrase, and a phrase match ranks first in the Docs panel and in Spotlight",
 			"journeys": ["docs-viewer"],
 			"globs": ["app/core/docs_content.py", "frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
 		},

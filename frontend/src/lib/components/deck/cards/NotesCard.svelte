@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { layout } from '$lib/stores/layout.svelte';
+	import { platform } from '$lib/stores/platform.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * NotesCard - Global notes for ideas, bugs, planning
@@ -368,13 +369,19 @@
 	// is flushed before moving on; an untitled or failed draft requires consent.
 	async function changeEditor(action: () => void, restoredEntryCurrent?: () => boolean) {
 		const request = ++navigationRequest;
+		// The web UI's shell history only: the phone app keeps main's flow.
+		const desktop = !platform.isMobile;
 		const landing = shellHistory.restored;
 		const current = restoredEntryCurrent ?? (() => !shellHistory.restored || shellHistory.restored === landing);
+		// The first Back or Forward that leaves an editing draft records the
+		// draft's entry now, before any save is awaited; later steps keep it.
+		if (restoredEntryCurrent && draftReturn === null && (saving || hasUnsavedChanges)) draftReturn = shellHistory.returnPoint(landing);
 		cancelAutosave();
 		if (saving || (hasUnsavedChanges && editorTitle.trim())) await saveNote();
-		if (request !== navigationRequest || !current()) return;
+		if (request !== navigationRequest || (desktop && !current())) return;
 		const apply = () => {
-			if (request !== navigationRequest || !current()) return;
+			if (desktop && (request !== navigationRequest || !current())) return;
+			draftReturn = null;
 			cancelAutosave();
 			editorGeneration++;
 			editorSession++;
@@ -388,8 +395,6 @@
 			if (!restoredEntryCurrent) shellHistory.detail('notes', { panel: editingNote?.id ?? (isCreatingNew ? 'new' : null) });
 		};
 		if (hasUnsavedChanges) {
-			// A step taken while an earlier one still waits keeps the draft's entry.
-			if (restoredEntryCurrent && draftReturn === null) draftReturn = shellHistory.returnPoint(landing);
 			pendingConfirm = {
 				title: 'Discard changes',
 				message: 'You have unsaved changes. Discard them?',
@@ -434,7 +439,12 @@
 	// Open a note for editing
 	function openNote(note: Note, current?: () => boolean) {
 		if (editingNote?.id === note.id) {
+			if (platform.isMobile) return;
+			// Web UI: the open note, chosen again or landed on, is the latest
+			// choice. A pending step away from it (and its dialog) is retired.
 			navigationRequest++;
+			draftReturn = null;
+			pendingConfirm = null;
 			if (!current) shellHistory.detail('notes', { panel: note.id });
 			return;
 		}
@@ -510,6 +520,8 @@
 					hasUnsavedChanges = revision !== editRevision;
 					persistDraft();
 				} while (hasUnsavedChanges && editorTitle.trim());
+				// Saved: a Back or Forward that met the draft has nothing left to return to.
+				if (!hasUnsavedChanges) draftReturn = null;
 			} catch (e) {
 				error = e instanceof Error ? e.message : 'Failed to save note';
 			} finally {
@@ -875,11 +887,29 @@
 		}
 	});
 
+	// A saved note the loaded list doesn't show (past its first page, or
+	// filtered out), fetched by id: the note, or null once the server says 404.
+	let savedNote = $state<{ id: string; note: Note | null } | null>(null);
+	let savedFetch: string | null = null;
+
 	function restoreSelection(key: string, current: () => boolean) {
 		if (key === 'new') { void changeEditor(resetNewNote, current); return; }
-		const note = notes.find(n => n.id === key);
-		if (!note) return listIsComplete ? 'missing' : 'pending';
-		untrack(() => openNote(note, current));
+		const fetched = savedNote?.id === key ? savedNote.note : undefined;
+		const note = notes.find(n => n.id === key) ?? fetched;
+		if (note) {
+			untrack(() => { savedNote = null; openNote(note, current); });
+			return;
+		}
+		if (fetched === null || listIsComplete) return 'missing';
+		if (!loading && savedFetch !== key) {
+			savedFetch = key;
+			// Only for the landing that asked; a temporary failure keeps the selection.
+			getNote(key)
+				.then((found) => { if (current()) savedNote = { id: key, note: found }; })
+				.catch((e) => { if (current() && (e as { status?: unknown } | null)?.status === 404) savedNote = { id: key, note: null }; })
+				.finally(() => { if (savedFetch === key) savedFetch = null; });
+		}
+		return 'pending';
 	}
 </script>
 

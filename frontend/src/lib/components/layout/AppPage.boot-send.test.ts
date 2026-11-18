@@ -455,7 +455,8 @@ it('owns boot while the first send waits for the socket and init finishes mid-wa
 	connected = true;
 	expect(await sending).toBe(true);
 	ctx.adopt();
-	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith('created'));
+	// Adoption corrects New Chat's entry; it is not a navigation (S18).
+	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith('created', 'replace'));
 	expect(get(state).sessionId).toBe('created');
 	expect(get(state).messages.map(message => message.content)).toEqual(['first message across connection wait']);
 	expect(ctx.send).toHaveBeenCalledWith(expect.objectContaining({ type: 'query', session_id: null }));

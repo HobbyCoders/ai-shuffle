@@ -107,7 +107,9 @@
 		// authenticated adoption rejects receipts from before the navigation.
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
 		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
-		if (follow) layout.openChat(follow);
+		// Adopting the created chat's id corrects New Chat's entry; it is not a
+		// navigation, so a sidebar pick waiting for its frame still goes ahead.
+		if (follow) layout.openChat(follow, 'replace');
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
 	// link) reopens that chat. The first run is the page's initial state, not a step.
