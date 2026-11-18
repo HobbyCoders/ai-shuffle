@@ -144,10 +144,11 @@ class TurnMapper:
         self.config_options: list[dict[str, Any]] | None = None
         self.usage_update: dict[str, Any] | None = None
         self.commands: list[dict[str, Any]] | None = None
-        # The name of the tool whose result came last, when that result was a
-        # failure (None once a later tool completes): a turn that then ends
-        # with no text ended on it.
-        self.ended_on_failure: str | None = None
+        # What the turn's last step was when it went wrong, as a fixed phrase
+        # and the tool's name (AcpLoop._silent_end words it): a failed tool,
+        # or a refused request (AcpLoop._note_refusal). A completed tool or a
+        # plan clears it; a failure after a refusal keeps the refusal.
+        self.stalled: tuple[str, str] | None = None
 
     def _ev(self, cls: type[Event], **kw: Any) -> Event:
         return cls(session_id=self.session_id, turn_id=self.turn_id, **kw)
@@ -251,7 +252,10 @@ class TurnMapper:
                 text = raw if isinstance(raw, str) else json.dumps(_jsonable(raw))
             if not text:
                 text = "(failed)" if status == "failed" else "(done)"
-            self.ended_on_failure = state.name if status == "failed" else None
+            if status == "failed":
+                self.stalled = self.stalled or ("{} failed", state.name)
+            else:
+                self.stalled = None
             out.extend(self._finish_assistant())
             self._segments.append(("tool_results", [ToolResultBlock(
                 tool_use_id=tool_id, content=[Text(text=text)], is_error=status == "failed",
@@ -285,6 +289,7 @@ class TurnMapper:
                 todos.append({"content": content, "activeForm": content,
                               "status": _PLAN_STATUS.get(str(entry.get("status")), "pending")})
         self.plan_count += 1
+        self.stalled = None
         tool_id = f"acp-plan-{self.turn_id}-{self.plan_count}"
         out = self.close_block()
         data = {"todos": todos}

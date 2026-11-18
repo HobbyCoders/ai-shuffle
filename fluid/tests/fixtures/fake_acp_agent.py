@@ -14,7 +14,7 @@ The prompt text picks the behaviour:
   issue #1751): titled ``Run mcp_fluid_bundled_<Tool>``, kind ``other``, and
   it asks permission. Allowed, it runs the tool. Rejected, agy ends the turn:
   a sibling call of its own (``Read``) fails with no text and the turn ends
-  with no message at all.
+  with no message at all. ``agyquiet`` ends it at once, with no failed calls.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
@@ -309,7 +309,7 @@ class Agent:
                                     "content": {"type": "text", "text": result}}]})
             await self.say(sid, "mcp said: " + result)
             return {"stopReason": "end_turn"}
-        if word == "agymcp":
+        if word in ("agymcp", "agyquiet"):
             _, name, args = text.split(" ", 2)
             call = {"toolCallId": "agy-1", "title": f"Run mcp_fluid_bundled_{name}", "kind": "other",
                     "status": "pending", "rawInput": json.loads(args)}
@@ -324,7 +324,7 @@ class Agent:
             if outcome.get("optionId") != "allow":
                 # agy reads a rejection as the person saying no: every open
                 # call fails without text and the turn ends silently.
-                for tool_id in ("agy-1", "agy-2"):
+                for tool_id in ("agy-1", "agy-2") if word == "agymcp" else ():
                     await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": tool_id,
                                             "status": "failed"})
                 return {"stopReason": "end_turn"}

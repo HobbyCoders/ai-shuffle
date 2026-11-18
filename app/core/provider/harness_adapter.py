@@ -84,7 +84,7 @@ import time
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, NamedTuple, Optional, Tuple, cast
 
 import httpx
 
@@ -2112,7 +2112,11 @@ class HarnessAdapter(ProviderAdapter):
             permissions=None,
             hooks=self._hooks,
             tool_policy=self._delegated_policy_with_saved_rules(
-                _delegated_tool_policy(options, self._build_permissions(options), blocked)
+                _delegated_tool_policy(
+                    options, self._build_permissions(options), blocked,
+                    bridged=lambda tool: self._engine is not None
+                    and tool in self._engine._served_names(),
+                )
             ),
             system_append=instructions,
             # The models the agent offers become the row's model catalog.
@@ -5987,7 +5991,8 @@ class HarnessAdapter(ProviderAdapter):
             )
             builtins_registered = True
 
-        if _registers_bundled_search(options, native=native):
+        if _registers_bundled_search(options, native=native,
+                                     acp=self._provider_kind == _ANTIGRAVITY_KIND):
             from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
 
             for search_tool in (glob_tool, grep_tool):
@@ -6696,12 +6701,16 @@ def _cli_ships_search_tools() -> bool:
     return os.name == "nt"
 
 
-def _registers_bundled_search(options: SessionOptions, *, native: bool) -> bool:
-    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call."""
+def _registers_bundled_search(options: SessionOptions, *, native: bool, acp: bool = False) -> bool:
+    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call.
+
+    ``acp``: the Antigravity leg takes the bundled copies on every OS;
+    ``_cli_ships_search_tools`` speaks for Claude Code only (#1751).
+    """
     return (
         not native
         and _session_mode(options) != "chat"
-        and not _cli_ships_search_tools()
+        and (acp or not _cli_ships_search_tools())
     )
 
 
@@ -6992,6 +7001,7 @@ def _delegated_tool_policy(
     options: SessionOptions,
     permissions: Optional[PermissionEngine],
     blocked: List[str],
+    bridged: Optional[Callable[[str], bool]] = None,
 ):
     """The deny policy the delegated leg's PreToolUse hook applies.
 
@@ -7005,6 +7015,10 @@ def _delegated_tool_policy(
     raised in bypass mode, and because ``--disallowed-tools`` misses a
     tool the CLI tool cache did not know yet. The surface is
     ``_delegated_surface``: the CLI's names for the tools the user ticked.
+
+    ``bridged(registry name)``, the ACP leg only: whether its bridge serves
+    that tool to this session. A call to one it serves is also judged by the
+    bare registry name, as the bridge filter judges it (#1751).
     """
     from app.core.tool_access import matches_any, tool_permitted
     from fluid.permissions.engine import Verdict
@@ -7038,19 +7052,17 @@ def _delegated_tool_policy(
         # A bridged server tool (the ACP leg names it
         # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
         # as the bridge filter does (_bridged_tool_permitted): a deny entry in
-        # either form withholds it. Not a bare name: "WebFetch" on the
-        # blocklist is the CLI's own tool, distinct from the bridged app copy.
+        # either form withholds it. Not a bare name: "WebFetch" on these lists
+        # is the CLI's own tool, distinct from the bridged app copy. Except a
+        # tool the ACP bridge serves (``bridged``), so a Glob it serves because
+        # "Glob" is ticked is not then refused here (#1751).
         served = name.removeprefix(_BUNDLED_CLI_PREFIX)
         spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
+        if served != name and bridged is not None and bridged(served):
+            spellings.add(served)
         if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
-        # The surface check takes every spelling the bridge serves on
-        # (_bridged_tool_permitted), the bare registry name included: the ACP
-        # leg asks this policy about bridged calls too, and a tool the bridge
-        # served because "Glob" is ticked must not then be refused (#1751).
-        # The prefix makes the call the bridged copy, never the agent's own.
-        on_surface = spellings | ({served} if served != name else set())
-        if surface and not any(tool_permitted(s, surface, None) for s in on_surface):
+        if surface and not any(tool_permitted(s, surface, None) for s in spellings):
             return f"Tool '{name}' is not enabled in this profile"
         rule = match_rule(rules, name, tool_input, cwd=session_cwd)
         if rule is not None and rule.decision == "deny":

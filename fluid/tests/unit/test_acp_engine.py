@@ -20,6 +20,7 @@ import pytest
 
 from fluid.engine.acp.antigravity import AntigravitySpec, offered_models, split_model_id
 from fluid.engine.acp.loop import AcpLoop
+from fluid.engine.acp.mapping import TurnMapper
 from fluid.events.model import (
     ErrorEvent,
     Interrupted,
@@ -274,7 +275,7 @@ async def test_a_bridged_call_titled_as_agy_titles_it_runs_as_the_registry_tool(
 
 
 def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp_path: Path) -> None:
-    from fluid.tools.mcp.call_through import CALL_TOOL
+    from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
 
     loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]))
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == "mcp__fluid_bundled__Glob"
@@ -282,10 +283,18 @@ def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp
     # The agent's own shell call whose title names the tool is not that tool.
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "execute"}) is None
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Globber", "kind": "other"}) is None
-    # The proxy check reads the same name.
+    # The whole title, exactly: one verb and the tool, nothing after it.
+    for title in ("Run mcp_fluid_bundled_Glob now", "Run mcp_fluid_bundled_Glob: x", "Run  mcp_fluid_bundled_Glob",
+                  "Run Glob", "Run 2 mcp_fluid_bundled_Glob"):
+        assert loop._bridged_name({"title": title, "kind": "other"}) is None, title
+    # A title alone never earns the proxies: CallTool unwraps to another
+    # tool, LoadTools skips the checks.
     loop.deferred = lambda name: name == "Glob"
-    call = {"title": f"Run mcp_fluid_bundled_{CALL_TOOL}", "kind": "other"}
-    assert loop._is_call_proxy(call)
+    for proxy in (CALL_TOOL, LOAD_TOOL):
+        for title in (f"Run mcp_fluid_bundled_{proxy}", f"Explain {proxy}: what it does"):
+            call = {"title": title, "kind": "other", "rawInput": {"name": "Glob", "input": {}}}
+            assert loop._bridged_name(call) is None, title
+            assert not loop._is_call_proxy(call)
 
 
 async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: Path) -> None:
@@ -294,15 +303,17 @@ async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: 
     (a delegate's parent got an empty report as a finished task, #1751)."""
 
     async def policy(name: str, data: dict) -> str | None:
-        return f"Tool '{name}' is not enabled in this profile"
+        # A host denial can quote the call's input (the checkout lock does).
+        return f"Tool '{name}' may not run {data}"
 
     d = await _driver(tmp_path, registry=_glob_registry([]), ctx=ToolCtx(cwd=str(tmp_path)),
                       tool_policy=policy)
     try:
-        end = await d.turn('agymcp Glob {"pattern": "*.txt"}')
+        end = await d.turn('agymcp Glob {"pattern": "secret-*.txt"}')
         assert isinstance(end, ErrorEvent), end
-        assert end.message == ("The agent ended its turn without a reply after a tool call was refused "
-                               "(Tool 'mcp__fluid_bundled__Glob' is not enabled in this profile).")
+        # A fixed phrase and the resolved name: never the denial's text.
+        assert end.message == ("The agent ended its turn without a reply after mcp__fluid_bundled__Glob "
+                               "was refused by the session's tool rules.")
         assert not [e for e in d.events if isinstance(e, TurnComplete)]
         # The transcript still holds what happened.
         results = [(r.name, r.is_error) for r in d.events if isinstance(r, ToolResult)]
@@ -316,6 +327,14 @@ async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: 
         assert isinstance(end, ErrorEvent), end
         assert end.message == ("The agent ended its turn without a reply after the permission request "
                                "for mcp__fluid_bundled__Glob was refused.")
+        # A refusal is the last step even when no call is marked failed.
+        await d.loop.submit(UserTurn(content='agyquiet Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob was refused.")
         # A refused call the agent then answers about is an ordinary turn.
         await d.loop.submit(UserTurn(content="tool"))
         ask = await d.until(PermissionRequest)
@@ -323,6 +342,43 @@ async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: 
         assert isinstance(await d.until(TERMINAL), TurnComplete)
     finally:
         await d.close()
+
+
+def test_a_turn_ends_silently_on_its_last_step_only(tmp_path: Path) -> None:
+    """The reason is the turn's last step: a later completed tool or plan
+    recovers it, a later failure names that tool, and the calls one refusal
+    fails keep the refusal. Text anywhere, or an interrupt, is no failure."""
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path))
+
+    def turn(*steps: str) -> str | None:
+        mapper = TurnMapper(session_id="s", turn_id="t")
+        for n, step in enumerate(steps):
+            kind, _, status = step.partition(":")
+            if kind == "refuse":
+                loop._note_refusal(mapper, "the permission request for {} was refused", "Read")
+            elif kind == "plan":
+                mapper.map_update({"sessionUpdate": "plan", "entries": [{"content": "x", "status": "pending"}]})
+            elif kind == "text":
+                mapper.map_update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})
+            else:
+                call = {"toolCallId": f"c{n}", "title": "secret title", "kind": kind}
+                mapper.map_update({"sessionUpdate": "tool_call", **call, "status": "pending"})
+                mapper.map_update({"sessionUpdate": "tool_call_update", "toolCallId": f"c{n}", "status": status})
+        return loop._silent_end(mapper)
+
+    said = "The agent ended its turn without a reply after "
+    assert turn("refuse", "read:failed", "execute:failed") == said + "the permission request for Read was refused."
+    assert turn("refuse", "search:completed", "execute:failed") == said + "Bash failed."
+    assert turn("execute:failed", "other:failed") == said + "Bash failed."
+    assert turn("other:failed") == said + "a tool failed."
+    assert turn("refuse", "plan") is None
+    assert turn("refuse", "read:failed", "search:completed") is None
+    assert turn("search:completed") is None
+    assert turn("plan") is None
+    assert turn("text", "execute:failed") is None
+    assert turn("refuse", "text") is None
+    loop._interrupted.set()
+    assert turn("refuse") is None
 
 
 async def test_steer_during_a_turn_and_cancel(tmp_path: Path) -> None:

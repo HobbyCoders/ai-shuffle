@@ -142,6 +142,7 @@ async def _connected(tmp_path, client, monkeypatch, *, defer=True, mode="bypassP
     adapter = ha.HarnessAdapter()
     adapter._options = options
     # connect()'s Antigravity steps, in order.
+    adapter._provider_kind = ha._ANTIGRAVITY_KIND
     adapter._acp_deferred = ha._acp_bridge_deferral(options)
     adapter._registry = await adapter._build_registry(
         options, native=False, host_mcp=adapter._acp_deferred is not None)
@@ -201,6 +202,9 @@ async def test_a_read_only_profile_runs_the_bundled_glob_agy_asks_for(
     from fluid.events.model import ErrorEvent, ToolUse, TurnComplete
 
     (tmp_path / "notes.txt").write_text("x")
+    # As on Windows, where Claude Code ships its own search tools: agy does
+    # not, so the Antigravity leg still serves the bundled copies.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
     adapter = await _connected(tmp_path, client, monkeypatch, tool_allowlist=["Read", "Glob", "Grep"])
     engine = adapter._engine
     try:
@@ -463,3 +467,20 @@ def test_the_policy_reads_a_bridged_server_tool_in_either_spelling(tmp_path):
     assert "not enabled" in allow("mcp__fluid_bundled__mcp__weather__write_note", {})
     # A bare name on the list is the CLI's own tool, not the bridged app copy.
     assert ha._delegated_tool_policy(_options(tmp_path), None, ["WebFetch"])("mcp__fluid_bundled__WebFetch", {}) is None
+
+
+def test_only_a_tool_the_acp_bridge_serves_passes_by_its_bare_name(tmp_path):
+    """#1751: the ACP leg judges a call to a tool its bridge serves by the
+    bare name too, under both lists; the shared Claude Code policy does not,
+    and a prefixed name the bridge does not serve gains nothing."""
+    glob, read = "mcp__fluid_bundled__Glob", "mcp__fluid_bundled__Read"
+    ticked = _options(tmp_path, tool_allowlist=["Read", "Glob"])
+    assert "not enabled" in ha._delegated_tool_policy(ticked, None, [])(glob, {})
+    acp = ha._delegated_tool_policy(ticked, None, [], bridged=lambda tool: tool == "Glob")
+    assert acp(glob, {}) is None
+    assert "not enabled" in acp(read, {})
+    blocked = ha._delegated_tool_policy(_options(tmp_path), None, ["Glob"], bridged=lambda tool: True)
+    assert "disabled" in blocked(glob, {})
+    chat = _options(tmp_path, lane="chat")
+    chat.tool_allowlist.append("Read")
+    assert "not enabled" in ha._delegated_tool_policy(chat, None, [], bridged=lambda tool: False)(read, {})
