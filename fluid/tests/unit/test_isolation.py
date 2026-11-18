@@ -8,7 +8,8 @@ Three groups:
 * enforcement: a confined child tries to break the policy (write outside the
   workspace, read a planted secret, read another process's environ, open a
   socket) and the kernel stops it. These need Landlock, and skip with the
-  probe's reason where the kernel lacks it. The seccomp network test needs
+  probe's reason where the kernel lacks it, except on GitHub Actions Linux,
+  where they fail instead (see require_enforcement). The seccomp network test needs
   only seccomp, so it runs on more machines.
 """
 
@@ -34,7 +35,30 @@ from fluid.store.base import MemoryStore
 
 LINUX = sys.platform.startswith("linux")
 ABI, NO_LANDLOCK = isolation.landlock_abi()
-needs_landlock = pytest.mark.skipif(not ABI, reason=f"isolated profile not enforceable here: {NO_LANDLOCK}")
+# The strictest probe: network off also needs the seccomp filter.
+NOT_ENFORCEABLE = isolation.backend().unavailable_reason(network=False)
+
+
+def require_enforcement(reason: str | None, *, environ=os.environ, platform: str = sys.platform) -> None:
+    """Skip an enforcement test where the profile cannot be enforced, with the
+    probe's reason. On GitHub Actions Linux (an ubuntu VM with Landlock) fail
+    instead: a skip there would only show as a count under ``-q``, and the
+    sandbox would silently go untested."""
+    if reason is None:
+        return
+    message = f"isolated profile not enforceable here: {reason}"
+    if environ.get("GITHUB_ACTIONS") == "true" and platform.startswith("linux"):
+        pytest.fail(f"{message}. GitHub Actions Linux runners must run the enforcement tests.",
+                    pytrace=False)
+    pytest.skip(message)
+
+
+@pytest.fixture
+def _enforceable():
+    require_enforcement(NOT_ENFORCEABLE)
+
+
+needs_landlock = pytest.mark.usefixtures("_enforceable")
 needs_seccomp = pytest.mark.skipif(
     not (LINUX and isolation.machine() and isolation.seccomp_available()),
     reason="seccomp filters (x86_64/aarch64 Linux) unavailable here",
@@ -301,6 +325,20 @@ def test_non_linux_platforms_have_no_backend(tmp_path):
 
 
 # --- enforcement (from inside the child) ------------------------------------------------
+
+
+def test_enforcement_tests_fail_rather_than_skip_on_github_actions_linux():
+    reason = "test: Landlock is not supported by this kernel"
+    ci = {"GITHUB_ACTIONS": "true"}
+    with pytest.raises(pytest.fail.Exception, match="Landlock is not supported") as failed:
+        require_enforcement(reason, environ=ci, platform="linux")
+    assert not isinstance(failed.value, pytest.skip.Exception)
+    # Elsewhere, including GitHub's Windows and macOS runners, the skip stays visible.
+    for environ, platform in ((ci, "win32"), (ci, "darwin"), ({}, "linux"),
+                              ({"GITHUB_ACTIONS": "false"}, "linux")):
+        with pytest.raises(pytest.skip.Exception, match="Landlock is not supported"):
+            require_enforcement(reason, environ=environ, platform=platform)
+    require_enforcement(None, environ=ci, platform="linux")  # enforceable: runs
 
 
 @needs_seccomp
