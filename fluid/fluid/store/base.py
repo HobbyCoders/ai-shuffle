@@ -241,13 +241,41 @@ def check_node_retry(
     the stored node stays and the append only moves the head. Anything else
     raises :class:`NodeConflict` before a byte is written, so a live store can
     never hold a node its own log would not replay. ``ts`` is not compared; the
-    first record's timestamp stands.
+    first record's timestamp stands. "The same message" is
+    :func:`json_values_equal` of the two as JSON values.
     """
-    def canonical(message: Mapping[str, Any]) -> str:
-        return json.dumps(message, sort_keys=True, default=str)
+    def value(message: Mapping[str, Any]) -> Any:
+        return json.loads(json.dumps(message, default=str))
 
-    if stored[0] != incoming[0] or canonical(stored[1]) != canonical(incoming[1]):
+    if stored[0] != incoming[0] or not json_values_equal(
+        value(stored[1]), value(incoming[1])
+    ):
         raise NodeConflict(session_id, node_id)
+
+
+def json_values_equal(a: Any, b: Any) -> bool:
+    """Equality of two parsed JSON values, as PostgreSQL's ``jsonb =`` decides it.
+
+    Every store uses this for a node retry, so one resend is a retry in all of
+    them or in none. Numbers compare by value (``1``, ``1.0`` and ``1e0`` are
+    equal; ``1e20`` equals ``100000000000000000000``), booleans are not
+    numbers (``true`` is not ``1``), object keys are unordered, arrays are
+    ordered, and strings compare code point by code point (escapes already
+    resolved by parsing; no Unicode normalisation, so NFC and NFD differ).
+    Where JSONB keeps more decimal digits than a binary float holds, two
+    numbers it tells apart can compare equal here; ``json.dumps`` writes the
+    shortest text for a float, so a resend of the same Python value never
+    meets that case.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        return a == b
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(json_values_equal(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(map(json_values_equal, a, b))
+    return type(a) is type(b) and a == b
 
 
 def walk_path(
@@ -294,10 +322,6 @@ class SessionMeta:
     # sessions stored before the field existed — recall treats those as
     # "unknown project", never as "some other project".
     project_root: str | None = None
-    # Not stored. False when a write may have landed but the store could not
-    # read the session back, so this object may disagree with disk; callers
-    # holding it must fetch the session again (``get_session``) before use.
-    verified: bool = field(default=True, compare=False, repr=False)
 
 
 @dataclass

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 from fluid.events.model import (
@@ -21,7 +22,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.engine.questions import QuestionLifecycleMixin
-from fluid.store.base import iter_events_of_class
+from fluid.store.base import iter_events_of_class, persist_event
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
 
@@ -94,6 +95,12 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self._background_early: dict[str, BackgroundTaskFinished] = {}
         self._background_completions: dict[str, BackgroundTaskFinished] = {}
         self._background_rehydrated = False
+        # Set when a lifecycle write's outcome is unknown (it raised, or its
+        # caller was cancelled): the next access rebuilds the four maps above
+        # from the store. ``_background_unsettled`` holds the events such
+        # writes published, written at that access unless the store has them.
+        self._background_stale = False
+        self._background_unsettled: list[Event] = []
         self._background_lock = asyncio.Lock()
         self._background_wake_task: asyncio.Task | None = None
         self._background_waiting_on: asyncio.Task | None = None
@@ -108,17 +115,58 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self.ctx.extra["background_spawn_tasks"] = self._background_spawn_tasks
 
     async def _rehydrate_background_lifecycle_unlocked(self) -> None:
-        if self._background_rehydrated:
+        """Bring task state in line with the store before it is used.
+
+        The first access replays the session's lifecycle events; so does any
+        access after a write whose outcome was unknown, once the events that
+        write published are in the store. A rebuild that cannot read or write
+        the store raises and stays due, so callers act on no guessed state.
+        """
+        if self._background_rehydrated and not self._background_stale:
             await self._drain_held_completions_unlocked()
             return
         meta = await self._ensure_session()
+        await self._settle_lifecycle_events_unlocked(meta.session_id)
         try:
             events = [event async for event in iter_events_of_class(
                 self.store, meta.session_id, 0, (SubagentEvent, SessionWoken))]
-        except Exception:  # noqa: BLE001 — stores without replay degrade in memory
+        except Exception:
+            if self._background_stale:
+                raise
+            # Stores without replay degrade in memory on the first access.
             self._background_rehydrated = True
             return
+        self._replay_background_events(events)
+        self._background_rehydrated = True
+        rebuilt, self._background_stale = self._background_stale, False
+        await self._drain_held_completions_unlocked()
+        if rebuilt:
+            # Whoever triggered the rebuild (a reconcile, a receipt), a wake it
+            # finds owed is armed now. The claim waits for this lock and takes
+            # what is owed then; a wake already running or queued is reused.
+            self._kick_background_wake()
 
+        recover_host = self.ctx.extra.get("recover_background")
+        if recover_host is not None:
+            for op in await recover_host(tuple(self._background_pending)):
+                # A non-terminal status would be recorded as "terminal" here
+                # but replay as still pending after the next restart.
+                if (
+                    op.task_id in self._background_pending
+                    and op.status in _TERMINAL_TASK_KINDS
+                ):
+                    await self._finalize_background_task_unlocked(op)
+
+    def _replay_background_events(self, events: list[Event]) -> None:
+        """Rebuild the task maps from replayed events, in place and at once.
+
+        Nothing awaits between clearing and refilling, and callers that hold
+        a map object (``pending_reconcile``) see the rebuilt contents.
+        """
+        self._background_pending.clear()
+        self._background_early.clear()
+        self._background_terminal.clear()
+        self._background_completions.clear()
         for event in events:
             if isinstance(event, SubagentEvent):
                 if event.kind == "started":
@@ -157,19 +205,50 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             elif isinstance(event, SessionWoken):
                 for task_id in event.task_ids:
                     self._background_completions.pop(task_id, None)
-        self._background_rehydrated = True
-        await self._drain_held_completions_unlocked()
 
-        recover_host = self.ctx.extra.get("recover_background")
-        if recover_host is not None:
-            for op in await recover_host(tuple(self._background_pending)):
-                # A non-terminal status would be recorded as "terminal" here
-                # but replay as still pending after the next restart.
-                if (
-                    op.task_id in self._background_pending
-                    and op.status in _TERMINAL_TASK_KINDS
-                ):
-                    await self._finalize_background_task_unlocked(op)
+    async def _settle_lifecycle_events_unlocked(self, sid: str) -> None:
+        """Write each held event the store does not have, keeping its seq.
+
+        Live subscribers already saw it, so it is written as published, not
+        minted again. The store is asked first because the failed write may
+        have landed (a lost acknowledgement, a write that finished after its
+        caller was cancelled); the PostgreSQL store also ignores a second
+        write of a seq. One that fails stays held for the next access.
+        """
+        while self._background_unsettled:
+            event = self._background_unsettled[0]
+            stored = False
+            async for found in iter_events_of_class(
+                self.store, sid, event.seq - 1, (type(event),)
+            ):
+                if found.seq == event.seq:
+                    stored = True
+                    break
+            if not stored:
+                await persist_event(self.store, event)
+            self._background_unsettled.pop(0)
+
+    async def _emit_lifecycle(self, event: Event) -> Event:
+        """Emit a lifecycle event; an unknown outcome marks task state stale.
+
+        ``_emit`` publishes (fixing the seq) before it writes. When the write
+        raises or the caller is cancelled during it, nothing here guesses
+        whether it landed: the published event is held for the next access to
+        write, and that access rebuilds task state from the store.
+        """
+        sid = event.session_id
+        before = self.bus.last_seq(sid)
+        try:
+            return await self._emit(event)
+        except BaseException:
+            self._background_stale = True
+            published = next((
+                e for e in self.bus.log(sid)
+                if e.seq > before and replace(e, seq=event.seq, ts=event.ts) == event
+            ), None)
+            if published is not None:
+                self._background_unsettled.append(published)
+            raise
 
     async def _drain_held_completions_unlocked(self) -> None:
         """Finalize every held completion whose task is recorded as started.
@@ -177,7 +256,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         Runs on every lifecycle access, not only the first replay: a pair
         whose terminal write failed stays held, and the next access (a
         receipt, a completion, a turn's end) tries it again. A failure here
-        is logged, not raised over the caller's own work.
+        is logged, not raised over the caller's own work, and ends the drain:
+        the state it would read next is stale until the next access.
         """
         for task_id in tuple(self._background_early):
             op = self._background_early.get(task_id)
@@ -188,6 +268,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             except Exception as exc:  # noqa: BLE001 — retried on the next access
                 log.warning("background task %s: could not record its completion "
                             "yet: %s", task_id, exc)
+                return
 
     def _park_pending_ids(self) -> tuple[str, ...]:
         """The pending task ids a park is actually WAITING on.
@@ -219,7 +300,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 # State follows the durable record: a failed write leaves the
                 # task unknown, so a retried receipt is not skipped as known.
                 meta = await self._ensure_session()
-                await self._emit(SubagentEvent(
+                await self._emit_lifecycle(SubagentEvent(
                     session_id=meta.session_id,
                     turn_id=self._active_turn_id,
                     task_id=receipt.task_id,
@@ -270,7 +351,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     meta = await self._ensure_session()
                     if op.is_current is not None and not op.is_current():
                         return
-                    await self._emit(SubagentEvent(
+                    await self._emit_lifecycle(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
                         task_id=op.task_id,
@@ -294,15 +375,11 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     ) -> None:
         """Record a task's terminal event, then retire it in memory.
 
-        Every state change waits for the write. A write that raised may still
-        have landed (fsync failed after the bytes went out, a lost commit
-        acknowledgement): the store is asked, and a record it holds is applied
-        now, so live state matches a reopen and the event, already published,
-        is not published again by a resend. Otherwise the task is still
-        pending (and any early completion still held), so the host's
-        resubmission finalizes it and its wake is armed exactly once. If the
-        store cannot answer, the same holds; a resend after a write that did
-        land leaves two identical terminal records, and replay honours one.
+        Every state change waits for the write. One that fails leaves the
+        task pending (and any early completion held) as far as this engine
+        knows, and ``_emit_lifecycle`` has marked that knowledge stale: the
+        next access writes the event live subscribers saw, unless the store
+        has it, and rebuilds from the store, arming the wake if it is owed.
         """
         meta = await self._ensure_session()
         if op.is_current is not None and not op.is_current():
@@ -311,9 +388,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         worker_session_id = op.worker_session_id or (
             receipt.worker_session_id if receipt is not None else None
         )
-        before = self.bus.last_seq(meta.session_id)
-        try:
-            await self._emit(SubagentEvent(
+        await self._emit_lifecycle(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
             task_id=op.task_id,
@@ -327,12 +402,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             # host performs it instead of us.
             wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
             report_path=op.report_path,
-            ))
-        except Exception:
-            if not await self._terminal_recorded(meta.session_id, op.task_id, before):
-                raise
-            log.warning("background task %s: its terminal record landed although "
-                        "the write reported an error; applying it", op.task_id)
+        ))
         self._background_pending.pop(op.task_id, None)
         self._background_early.pop(op.task_id, None)
         self._background_terminal.add(op.task_id)
@@ -346,28 +416,17 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 report_path=op.report_path,
             )
 
-    async def _terminal_recorded(self, sid: str, task_id: str, after_seq: int) -> bool:
-        """Whether the store holds a terminal record for ``task_id`` past ``after_seq``.
-
-        A store that cannot be read answers no: the caller then keeps the
-        task retryable, the safe side.
-        """
-        try:
-            async for event in iter_events_of_class(
-                self.store, sid, after_seq, (SubagentEvent,)
-            ):
-                if event.task_id == task_id and event.kind in _TERMINAL_TASK_KINDS:
-                    return True
-        except Exception as exc:  # noqa: BLE001 — see docstring
-            log.warning("background task %s: could not read back its terminal "
-                        "record: %s", task_id, exc)
-        return False
-
     async def _emit_terminal_with_park(self, event: Event) -> Event:
         if not isinstance(event, _TERMINAL_EVENTS):
             return await self._emit(event)
         async with self._background_lock:
-            await self._rehydrate_background_lifecycle_unlocked()
+            try:
+                await self._rehydrate_background_lifecycle_unlocked()
+            except Exception as exc:  # noqa: BLE001 — the turn still has to end
+                # Park on what this engine last knew; the state stays due for
+                # a rebuild, which the next lifecycle access tries again.
+                log.warning("background task state could not be read back at "
+                            "turn end: %s", exc)
             parked_on = self._park_pending_ids()
             if parked_on:
                 await self._emit(SessionParked(
@@ -395,7 +454,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         if not op.wake_task_ids:
             return
         async with self._background_lock:
-            await self._emit(SessionWoken(
+            await self._emit_lifecycle(SessionWoken(
                 session_id=session_id,
                 node_id=node_id,
                 turn_id=turn_id,
@@ -460,6 +519,16 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
     async def _claim_background_wake(self) -> None:
         async with self._background_lock:
+            if self._background_stale and not self._background_closed:
+                # A SessionWoken whose write failed may already cover these
+                # completions: rebuild before starting a wake on them.
+                try:
+                    await self._rehydrate_background_lifecycle_unlocked()
+                except Exception as exc:  # noqa: BLE001 — counted as a failed wake
+                    log.warning("background wake deferred: task state could not "
+                                "be read back: %s", exc)
+                    self._note_background_wake_failure()
+                    return
             if self._background_closed or not self._background_completions:
                 return
             current = self._turn_task
@@ -493,11 +562,14 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             # user turn shows the engine can run turns again (or a fresh
             # engine picks the completion up from the store).
             if any(task_id in self._background_completions for task_id in task_ids):
-                self._background_wake_failures += 1
-                if self._background_wake_failures >= _BACKGROUND_WAKE_MAX_ATTEMPTS:
-                    self._background_wake_blocked = True
-                else:
-                    self._schedule_background_wake_retry()
+                self._note_background_wake_failure()
+
+    def _note_background_wake_failure(self) -> None:
+        self._background_wake_failures += 1
+        if self._background_wake_failures >= _BACKGROUND_WAKE_MAX_ATTEMPTS:
+            self._background_wake_blocked = True
+        else:
+            self._schedule_background_wake_retry()
 
     @staticmethod
     def _background_wake_content(

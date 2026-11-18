@@ -235,7 +235,6 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
-    StoreError,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -1549,16 +1548,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             registry[definition.name] = definition
 
     async def _ensure_session(self) -> SessionMeta:
-        if self._session is not None and not self._session.verified:
-            # A write may have landed that the store could not read back, so
-            # the head held here may be stale. Read it again or refuse.
-            session = await self.store.get_session(self._session.session_id)
-            if session is None or not session.verified:
-                raise StoreError(
-                    f"session {self._session.session_id} could not be read back "
-                    "after a failed write"
-                )
-            self._session = session
+        if self._session is not None:
+            # Asked of the store every time, never trusted across a write: after
+            # one whose outcome was unknown the store has re-read the session,
+            # or dropped it and reads it now, or raises.
+            fresh = await self.store.get_session(self._session.session_id)
+            if fresh is not None:
+                self._session = fresh
         if self._session is None:
             resumed = False
             if self._session_id is not None:

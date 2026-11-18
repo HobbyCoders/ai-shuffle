@@ -5,8 +5,10 @@ not under the session head, and every append moves the head. A head move made
 mid-turn was therefore overwritten by the turn's next append: the op returned
 success and the fork was gone. The REPL reports the refusal and keeps going.
 
-A head move whose record landed but could not be read back leaves the engine's
-session meta unverified; the engine reads the session again before using it.
+A head move whose record landed but could not be read back leaves the store
+with no copy of the session. Every engine leg asks the store for the session
+each time it needs it, so it reads the log again (or fails) rather than use
+the object it held across the failed write.
 """
 
 from __future__ import annotations
@@ -124,3 +126,56 @@ async def test_a_head_move_that_could_not_be_read_back_is_reread_before_use(
     meta = await loop._ensure_session()
     assert meta.head_node_id == first  # what landed, not the stale copy
     assert (await JsonlStore(tmp_path, lock=False).get_session("ses_unread")).head_node_id == first
+
+
+def _leg(kind: str, store, tmp_path):
+    if kind == "native":
+        return _loop(ScriptedProvider([]), store, _no_dispatch, session_id="ses_leg")
+    if kind == "delegated":
+        from fluid.engine.delegated import DelegatedLoop
+
+        return DelegatedLoop(store=store, model="test-model", session_id="ses_leg",
+                             claude_cmd=["/definitely/missing/claude"])
+    from fluid.engine.acp.loop import AcpLoop
+
+    from tests.unit.test_acp_engine import _spec
+
+    return AcpLoop(store=store, spec=_spec(tmp_path), cwd=str(tmp_path), session_id="ses_leg")
+
+
+@pytest.mark.parametrize("kind", ["native", "delegated", "acp"])
+async def test_every_leg_rereads_a_session_it_held_across_an_unreadable_write(
+    tmp_path, monkeypatch, kind
+) -> None:
+    from fluid.messages import Message
+    from fluid.messages.content import Text
+    from fluid.store.base import SessionNode
+
+    store = JsonlStore(tmp_path / "store")
+    leg = _leg(kind, store, tmp_path)
+    held = await leg._ensure_session()
+    for node_id, parent in (("u1", None), ("a1", "u1")):
+        await store.append("ses_leg", SessionNode(
+            node_id, parent, Message(role="user", content=[Text(node_id)])))
+    assert held.head_node_id == "a1"
+
+    real_write, real_parse = jsonl._write_record, JsonlStore._parse_log
+
+    def landed(path, record, *, fsync):
+        real_write(path, record, fsync=fsync)
+        raise OSError(5, "fsync failed")
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(jsonl, "_write_record", landed)
+    monkeypatch.setattr(JsonlStore, "_parse_log", unreadable)
+    with pytest.raises(OSError):
+        await store.set_head("ses_leg", "u1")
+    monkeypatch.setattr(jsonl, "_write_record", real_write)
+    with pytest.raises(OSError):
+        await leg._ensure_session()  # still unreadable: refused, not guessed
+
+    monkeypatch.setattr(JsonlStore, "_parse_log", real_parse)
+    assert (await leg._ensure_session()).head_node_id == "u1"
+    await leg.aclose()

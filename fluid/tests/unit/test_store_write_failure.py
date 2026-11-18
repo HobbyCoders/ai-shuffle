@@ -348,7 +348,9 @@ async def test_a_retry_is_refused_while_another_process_holds_the_session(tmp_pa
         holder.communicate("", timeout=60)
 
 
-async def test_a_failed_reread_marks_the_held_meta_unverified(tmp_path, monkeypatch) -> None:
+async def test_a_failed_reread_leaves_nothing_cached_until_it_succeeds(
+    tmp_path, monkeypatch
+) -> None:
     store, meta = await _seeded(tmp_path)
     _inject(monkeypatch, "landed")
 
@@ -358,14 +360,79 @@ async def test_a_failed_reread_marks_the_held_meta_unverified(tmp_path, monkeypa
     monkeypatch.setattr(JsonlStore, "_parse_log", unreadable)
     with pytest.raises(OSError):
         await store.set_head(SID, "u1")
-    # The record landed but could not be read back: the engine's copy still
-    # says a1 and must not be trusted until a re-read succeeds.
+    # The record landed but could not be read back: the store keeps no copy
+    # of the session, so every lookup reads the log again or raises.
     assert meta.head_node_id == "a1"
-    assert meta.verified is False
     with pytest.raises(OSError):
         await store.get_session(SID)
-    assert meta.verified is False
 
     _heal(monkeypatch)
     assert await store.get_session(SID) is meta
-    assert meta.verified is True and meta.head_node_id == "u1"
+    assert meta.head_node_id == "u1"
+
+
+# ─── Review round 2 ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+async def test_a_create_retried_by_a_fresh_store_leaves_one_readable_session(
+    tmp_path, monkeypatch, fault
+) -> None:
+    first = JsonlStore(tmp_path)
+    _inject(monkeypatch, fault)
+    with pytest.raises(OSError):
+        await first.create_session(SID)
+    _heal(monkeypatch)
+    first.close()
+
+    retry = JsonlStore(tmp_path)
+    meta = await retry.create_session(SID)
+    await retry.append(SID, SessionNode("u1", None, _msg("user", "hello")))
+    assert all(json.loads(line) for line in (tmp_path / f"{SID}.jsonl").read_bytes().splitlines())
+    fresh = await _reopened(tmp_path).get_session(SID)
+    assert fresh is not None and fresh.head_node_id == "u1"
+    assert fresh.created_at == meta.created_at
+    await _assert_same_tree(retry, tmp_path)
+
+
+async def test_creating_a_session_that_exists_keeps_it(tmp_path) -> None:
+    store, meta = await _seeded(tmp_path)
+    store.close()
+    again = await JsonlStore(tmp_path).create_session(SID)
+    assert again.head_node_id == "a1" and again.created_at == meta.created_at
+    fresh = _reopened(tmp_path)
+    assert (await fresh.get_session(SID)).head_node_id == "a1"
+    assert [n.node_id for n in await fresh.load_path(SID)] == ["u1", "a1"]
+
+
+async def test_a_retry_through_a_store_already_holding_the_session_rereads_it(
+    tmp_path,
+) -> None:
+    store, meta = await _seeded(tmp_path)  # holds the lock, head a1 in memory
+    other = JsonlStore(tmp_path)  # same process: shares the lock
+    await other.append(SID, SessionNode("u2", "a1", _msg("user", "elsewhere")))
+
+    # The resend of a1 is a retry; the durable head is u2, so it must move.
+    await store.append(SID, SessionNode("a1", "u1", _msg("assistant", "hi")))
+    assert meta.head_node_id == "a1"
+    assert (await _reopened(tmp_path).get_session(SID)).head_node_id == "a1"
+    await _assert_same_tree(store, tmp_path)
+
+
+async def test_a_retry_after_a_same_size_replacement_rereads_the_log(tmp_path) -> None:
+    seed = JsonlStore(tmp_path, lock=False)
+    await seed.create_session(SID)
+    await seed.append(SID, SessionNode("x1", None, _msg("user", "hello")))
+    reader = JsonlStore(tmp_path)
+    assert (await reader.get_session(SID)).head_node_id == "x1"  # snapshot, no lock
+
+    log = tmp_path / f"{SID}.jsonl"
+    data = log.read_bytes()
+    log.write_bytes(data.replace(b'"x1"', b'"y1"'))  # same size, other node
+    assert log.stat().st_size == len(data)
+
+    await reader.append(SID, SessionNode("x1", None, _msg("user", "hello")))
+    fresh = _reopened(tmp_path)
+    assert (await fresh.get_session(SID)).head_node_id == "x1"
+    assert await fresh.get_node(SID, "x1") is not None
+    await _assert_same_tree(reader, tmp_path)

@@ -31,9 +31,15 @@ Durability rules:
 * Every record is one write on an append-only handle (``FILE_APPEND_DATA`` on
   Windows, ``O_APPEND`` elsewhere), so two writers cannot tear a line.
 * A session is write-locked per process the first time a store writes to it.
-  A second process gets :class:`SessionLocked`; a second store in the same
-  process shares the lock. Taking the lock re-reads anything parsed before it,
-  so no write decides from a snapshot another process has since changed.
+  A second process gets :class:`SessionLocked`. Taking the lock re-reads
+  anything parsed before it, so no write decides from a snapshot another
+  process has since changed.
+* Two store objects in one process share that lock, so neither excludes the
+  other. Each re-reads the session when it takes the lock and before it
+  decides a retry (a node id it already holds), so those decisions are made
+  from disk; any other read may lag what the other object wrote until this
+  object next re-reads. One writer per session per process is the supported
+  use; a second object is for reading, or for tests that prove a reload.
 * A line that does not parse is skipped with one warning per file. When it is
   the last line of the file it is a torn append (the process died mid-write);
   the store cuts it off before its next write to that file. A last record that
@@ -47,6 +53,9 @@ Durability rules:
   the head; a different node under an id the session holds is refused before
   anything is written. Replay keeps the first record of an id, which is what
   logs written by older versions that allowed both still reopen to.
+* Creating a session whose log already holds one returns that session, as
+  the PostgreSQL store does; a torn header left by a failed create is cut off
+  before the new one is written.
 """
 
 from __future__ import annotations
@@ -180,13 +189,6 @@ def _repair_file(path: Path, offset: int, fragment: bytes, complete: bool, *, fs
         if fsync:
             os.fsync(fh.fileno())
     return True
-
-
-def _size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except FileNotFoundError:
-        return 0
 
 
 # ─── Per-session write locks ─────────────────────────────────────────────────
@@ -327,9 +329,6 @@ class JsonlStore:
         # write to that file: (offset, bytes, whole record that lost only its
         # newline).
         self._torn: dict[Path, tuple[int, bytes, bool]] = {}
-        # Bytes each file had when it was last parsed: a snapshot taken
-        # before this store took the write lock is re-read if it changed.
-        self._parsed_size: dict[Path, int] = {}
         self._finalizer = weakref.finalize(self, _release_store_locks, self._dir, self._held)
 
     # ─── Paths ───────────────────────────────────────────────────────────
@@ -356,22 +355,14 @@ class JsonlStore:
             return
         _acquire_lock(self._lock_path(session_id), session_id)
         self._held.add(session_id)
-        self._refresh(session_id)
-
-    def _refresh(self, session_id: str) -> None:
-        """Re-read what was parsed before this store held the write lock.
-
-        Another process may have written in between; a decision made from
-        the old snapshot (is this append a retry? does the head need to
-        move?) would be wrong. A read that fails here raises, refusing the
-        write that took the lock.
-        """
-        for events, loaded, path in (
-            (False, self._loaded, self._log_path(session_id)),
-            (True, self._events_loaded, self._events_path(session_id)),
-        ):
-            if session_id in loaded and self._parsed_size.get(path) != _size(path):
-                self._reload(session_id, events=events, strict=True)
+        # Another process may have written since this store parsed the
+        # session; a decision made from that snapshot (is this append a
+        # retry? does the head need to move?) would be wrong. A read that
+        # fails here raises, refusing the write that took the lock.
+        if session_id in self._loaded:
+            self._reload(session_id, events=False, strict=True)
+        if session_id in self._events_loaded:
+            self._reload(session_id, events=True, strict=True)
 
     def _writable(self, session_id: str) -> None:
         self.lock_session(session_id)
@@ -423,9 +414,8 @@ class JsonlStore:
         """Forget the session's parsed log (or events) and parse it again now.
 
         A read that fails here leaves the session unloaded, so the next access
-        tries again, and marks the session's held meta unverified until then.
-        It is logged rather than raised over the write's error, unless
-        ``strict``.
+        (``get_session`` included) reads the log again or raises. It is logged
+        rather than raised over the write's error, unless ``strict``.
         """
         if events:
             self._events_loaded.discard(session_id)
@@ -439,9 +429,6 @@ class JsonlStore:
             else:
                 self._ensure_loaded(session_id)
         except Exception as exc:
-            meta = self._sessions.get(session_id)
-            if not events and meta is not None:
-                meta.verified = False
             if strict:
                 raise
             log.warning("session %s: could not re-read after a failed write: %s",
@@ -505,8 +492,6 @@ class JsonlStore:
             self._events_loaded.discard(victim)
             self._nodes.pop(victim, None)
             self._events.pop(victim, None)
-            self._parsed_size.pop(self._log_path(victim), None)
-            self._parsed_size.pop(self._events_path(victim), None)
 
     def _parse_log(
         self, session_id: str, path: Path
@@ -581,7 +566,6 @@ class JsonlStore:
 
     def _note_tail(self, path: Path, data: bytes, torn_at: int | None) -> None:
         """Remember what a parse saw at the end of ``path`` (see ``_torn``)."""
-        self._parsed_size[path] = len(data)
         start = data.rfind(b"\n") + 1
         if torn_at is not None:
             self._torn[path] = (torn_at, data[torn_at:], False)
@@ -636,7 +620,12 @@ class JsonlStore:
             session_id=session_id or new_id("ses"),
             project_root=project_root_for(cwd),
         )
+        # Look at what is on disk under the lock first: a create retried after
+        # one that raised may find the session (return it) or a torn header
+        # (``_commit`` cuts it off before writing).
         self._writable(meta.session_id)
+        if self._ensure_loaded(meta.session_id):
+            return self._sessions[meta.session_id]
         self._commit(
             meta.session_id,
             self._log_path(meta.session_id),
@@ -647,9 +636,7 @@ class JsonlStore:
         )
         self._sessions[meta.session_id] = meta
         self._nodes[meta.session_id] = {}
-        self._events[meta.session_id] = []
         self._loaded.add(meta.session_id)
-        self._events_loaded.add(meta.session_id)
         self._touch(meta.session_id)
         return meta
 
@@ -664,6 +651,11 @@ class JsonlStore:
         # Own the session (re-reading a snapshot taken before) before deciding
         # anything from memory: whether this is a retry, where the head is.
         self._writable(session_id)
+        if node.node_id in self._nodes[session_id]:
+            # A retry is decided from disk, never from memory: another store
+            # object in this process may have written since (see the module
+            # docstring), and an id is rarely sent twice.
+            self._reload(session_id, events=False, strict=True)
         stored = self._nodes[session_id].get(node.node_id)
         if stored is not None:
             # Replay keeps the first record of an id, so live state must too.

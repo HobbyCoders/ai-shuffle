@@ -64,10 +64,10 @@ from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
 from fluid.messages.content import Text
 from fluid.store.base import (
-    NodeConflict,
     RECONSTRUCTIBLE_EVENTS,
     SessionMeta,
     SessionNode,
+    check_node_retry,
     new_id,
     project_root_for,
 )
@@ -474,11 +474,11 @@ def _append_node_sync(
 
     An id the session already holds follows fluid's one duplicate rule: the
     same parent and message is a retry and only moves the head; anything else
-    raises NodeConflict and rolls back. The message is compared as JSONB in
-    SQL, so a resend whose numbers the database normalised (``1e20``) is still
-    the same message. Returns ``(cached bytes, stored)``: ``stored`` is the row
-    the table already held when this was a retry, which callers cache instead
-    of the resend (its ``ts`` differs)."""
+    raises NodeConflict and rolls back. The stored row is compared with
+    fluid's own rule (``check_node_retry``, JSONB equality on parsed values),
+    the one JsonlStore and MemoryStore apply. Returns ``(cached bytes,
+    stored)``: ``stored`` is the row the table already held when this was a
+    retry, which callers cache instead of the resend (its ``ts`` differs)."""
     message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
     if node.message.context_pin is not None:
         # The privacy transforms can change lengths before or inside the
@@ -505,15 +505,17 @@ def _append_node_sync(
         stored = None
         if cur.rowcount == 0:
             cur.execute(
-                "SELECT parent_id, ts, message, "
-                "(parent_id IS NOT DISTINCT FROM %s AND message = %s::jsonb) AS same "
-                "FROM fluid_session_nodes WHERE session_id = %s AND node_id = %s",
-                (node.parent_id, Json(message), session_id, node.node_id),
+                "SELECT parent_id, ts, message FROM fluid_session_nodes "
+                "WHERE session_id = %s AND node_id = %s",
+                (session_id, node.node_id),
             )
             row = cur.fetchone()
             if row is not None:
-                if not row["same"]:
-                    raise NodeConflict(session_id, node.node_id)
+                check_node_retry(
+                    session_id, node.node_id,
+                    (row["parent_id"], _as_dict(row["message"])),
+                    (node.parent_id, message),
+                )
                 stored = SessionNode(
                     node_id=node.node_id, parent_id=row["parent_id"], ts=row["ts"],
                     message=Message.from_dict(_as_dict(row["message"])),

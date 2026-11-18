@@ -244,6 +244,53 @@ async def test_the_same_node_again_only_moves_the_head_like_jsonl(mock_db):
     assert (await reloaded.get_node("ses_retry", "n1")).ts == first.ts
 
 
+# What counts as "the same message again" is fluid's one rule (store/base.py,
+# ``json_values_equal``), stated to agree with PostgreSQL's JSONB equality.
+_RETRY_CASES = [
+    pytest.param({"n": 1}, {"n": 1.0}, True, id="int-vs-float"),
+    pytest.param({"n": 1e20}, {"n": 10**20}, True, id="exponent-vs-integer"),
+    pytest.param({"a": 1, "b": 2}, {"b": 2, "a": 1}, True, id="key-order"),
+    pytest.param({"flag": True}, {"flag": 1}, False, id="bool-vs-number"),
+    pytest.param({"s": "caf\u00e9"}, {"s": "cafe\u0301"}, False, id="nfc-vs-nfd"),
+    pytest.param({"n": 1}, {"n": 2}, False, id="other-number"),
+    pytest.param({"l": [1, 2]}, {"l": [2, 1]}, False, id="list-order"),
+    pytest.param({"n": None}, {}, False, id="null-vs-missing"),
+    pytest.param({"n": "1"}, {"n": 1}, False, id="string-vs-number"),
+]
+
+
+def _tool_node(node_id: str, tool_input: dict) -> SessionNode:
+    from fluid.messages.content import ToolUseBlock
+
+    return SessionNode(
+        node_id=node_id, parent_id=None,
+        message=Message(role="assistant", content=[
+            ToolUseBlock(id="call-1", name="Read", input=tool_input)]),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["memory", "jsonl", "pg"])
+@pytest.mark.parametrize("first, again, retry", _RETRY_CASES)
+async def test_every_store_applies_one_retry_rule(mock_db, tmp_path, kind, first, again, retry):
+    from fluid.store.base import MemoryStore, NodeConflict
+    from fluid.store.jsonl import JsonlStore
+
+    store = {"memory": MemoryStore, "jsonl": lambda: JsonlStore(tmp_path),
+             "pg": PgFluidStore}[kind]()
+    meta = await store.create_session("ses_eq")
+    await store.append("ses_eq", _tool_node("n1", first))
+    await store.append("ses_eq", _node("n2", "n1", "reply"))
+    if retry:
+        await store.append("ses_eq", _tool_node("n1", again))
+        assert meta.head_node_id == "n1"
+    else:
+        with pytest.raises(NodeConflict):
+            await store.append("ses_eq", _tool_node("n1", again))
+        assert meta.head_node_id == "n2"
+    assert (await store.get_node("ses_eq", "n1")).message.content[0].input == first
+
+
 @pytest.mark.asyncio
 async def test_failed_head_and_handle_writes_leave_live_meta_as_stored(mock_db, monkeypatch):
     from app.core.provider import fluid_pg_store as module

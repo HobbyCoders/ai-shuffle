@@ -336,6 +336,13 @@ class AcpLoop:
         return self._acp_session
 
     async def _ensure_session(self) -> SessionMeta:
+        if self._session is not None:
+            # Asked of the store every time, never trusted across a write: after
+            # one whose outcome was unknown the store has re-read the session,
+            # or dropped it and reads it now, or raises.
+            fresh = await self.store.get_session(self._session.session_id)
+            if fresh is not None:
+                self._session = fresh
         if self._session is None:
             if self._session_id is not None:
                 session = await self.store.get_session(self._session_id)
