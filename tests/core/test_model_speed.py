@@ -729,6 +729,33 @@ async def test_sends_to_one_remote_subagent_go_out_in_order_ending_on_the_latest
 
 
 @pytest.mark.asyncio
+async def test_a_send_queued_behind_a_slow_one_is_dropped_once_the_parent_is_deleted(monkeypatch):
+    """Fast is still out to a remote worker when the parent switches to
+    Ultrafast and is then deleted, which keeps the worker as its own chat.
+    The queued Ultrafast send never reaches it."""
+    rows = {"parent": {"tier": "fast"}, "remote": {"model": "m"}}
+    children = {"parent": ["remote"]}
+    _tree(monkeypatch, rows, children)
+    answered, sent = asyncio.Event(), []
+
+    async def slow(owner, action, body):
+        sent.append(_sent_tier(body))
+        await answered.wait()
+        return {"fast": body["fast"]}
+
+    monkeypatch.setattr(api.control, "call", slow)
+    first = asyncio.create_task(api.propagate_fast("parent", True, speed="fast"))
+    await _until(lambda: sent == ["fast"])
+    rows["parent"]["tier"] = "ultrafast"
+    second = asyncio.create_task(api.propagate_fast("parent", True, speed="ultrafast"))
+    await asyncio.sleep(0.02)
+    del children["parent"], rows["parent"]  # deleted; the worker stays
+    answered.set()
+    await asyncio.gather(first, second)
+    assert sent == ["fast"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("pinned", [False, True])
 async def test_a_queued_turn_the_parent_started_runs_on_the_tier_it_has_when_claimed(mock_db, pinned):
     """The parent queued the worker's first turn on Fast, then switched to

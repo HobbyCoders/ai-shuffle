@@ -153,9 +153,20 @@ async def _hand_down_remote_latest(session_id: str, owner: Any, child_id: str, f
     Runs outside the parent's lock, so a silent peer never holds up the
     parent's next hand-down to its local workers. Sends to one subagent run
     one at a time and read the parent's tier just before sending, so they go
-    out in order and the last carries the parent's latest tier.
+    out in order and the last carries the parent's latest tier. A send that
+    waited while the parent was deleted, or the subagent stopped being its
+    direct worker, is dropped: the subagent is no longer the parent's to set.
     """
     async with _propagation_locks.setdefault(("remote", child_id), asyncio.Lock()):
+        try:
+            children = await run_sync(database.list_worker_children, session_id)
+        except Exception:  # noqa: BLE001 — as the fan-out does when it cannot list
+            logger.warning("Could not list the subagents of %s for speed", session_id, exc_info=True)
+            return
+        if not any(child.get("id") == child_id for child in children or ()):
+            logger.info("Subagent %s is no longer a worker of %s; speed not handed down",
+                        child_id, session_id)
+            return
         try:
             tier = await run_sync(_current_tier, session_id)
         except Exception:  # noqa: BLE001 — the tier the fan-out read
