@@ -796,7 +796,7 @@ def _caller_context_window(caller_row: Optional[Mapping[str, Any]]) -> Optional[
     return _positive_window(row.get("context_window"))
 
 
-def _caller_speed(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
+def _caller_speed(caller_row: Optional[Mapping[str, Any]], *, live_only: bool = False) -> Optional[str]:
     """The direct caller's speed tier, for worker inheritance.
 
     Resolved like :func:`_caller_effort`: the running turn's override (a live
@@ -804,6 +804,8 @@ def _caller_speed(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
     session binding (voice reads only its live binding). A turn that names
     only ``fast`` keeps the row's tier when on, as the turn itself runs it
     (``query_options``). ``None`` means the caller never picked one.
+    ``live_only`` skips the latest finished turn: a live switch between turns
+    writes only the binding, so a parent's switch is read from there.
     """
     from app.core.model_speed import normalize_speed, resolve_speed
     from app.db import turns
@@ -813,7 +815,7 @@ def _caller_speed(caller_row: Optional[Mapping[str, Any]]) -> Optional[str]:
         try:
             turn = turns.get_live_turn(str(row["id"]))
             if turn is None:
-                turn = turns.get_latest_turn(str(row["id"])) or {}
+                turn = {} if live_only else (turns.get_latest_turn(str(row["id"])) or {})
                 if turn.get("state") == "queued":
                     turn = {}
             overrides = turn.get("overrides") or {}

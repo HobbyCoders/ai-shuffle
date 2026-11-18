@@ -948,11 +948,11 @@ def test_sender_resolves_fast_for_a_preference_unaware_v4_receiver(
         database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
     resolve = model_effort.resolve_child_speed
 
-    def old_receiver(model, provider, *, parent=None, caller=None, profile_id=None):
+    def old_receiver(model, provider, *, parent=None, caller=None, profile_id=None, fit=True):
         if world.net.device_id == TARGET:
             # Main e9804d721's v4 receiver expression: no saved-pick lookup.
             return provider_agent.worker_speed(parent, provider, model, profile_id)
-        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
+        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id, fit=fit)
 
     monkeypatch.setattr(model_effort, "resolve_child_speed", old_receiver)
     calls = []
@@ -1015,16 +1015,22 @@ def test_receiver_fast_pick_for_the_child_model_beats_the_sender(world, monkeypa
     assert turn["overrides"].get("fast", False) is expected
 
 
-@pytest.mark.parametrize("version,sent_speed,expected", [
+@pytest.mark.parametrize("version,sender_has_it,sent_speed,expected", [
     # A target that reads ``speed`` runs the caller's Ultrafast.
-    (remote_task.SPEED_VERSION, "ultrafast", "ultrafast"),
+    (remote_task.SPEED_VERSION, True, "ultrafast", "ultrafast"),
+    # The target fits it to its own row, even where the caller's copy of the
+    # row does not offer Ultrafast yet.
+    (remote_task.SPEED_VERSION, False, "ultrafast", "ultrafast"),
     # An older target refuses unknown fields: ``fast`` alone, Fast there.
-    (remote_task.FAST_VERSION, None, "fast"),
+    (remote_task.FAST_VERSION, True, None, "fast"),
+    (remote_task.FAST_VERSION, False, None, "fast"),
 ])
-def test_an_ultrafast_caller_hands_its_tier_to_a_remote_child(world, monkeypatch, version, sent_speed, expected):
+def test_an_ultrafast_caller_hands_its_tier_to_a_remote_child(
+        world, monkeypatch, version, sender_has_it, sent_speed, expected):
     from app.core import model_override
     monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
-    monkeypatch.setattr(model_override, "ultrafast_supported", lambda model, provider: True)
+    monkeypatch.setattr(model_override, "ultrafast_supported",
+                        lambda model, provider: sender_has_it or world.net.device_id == TARGET)
     _target_version(monkeypatch, version)
     database.set_session_run_binding("parent", fast=True, speed="ultrafast")
     calls = []

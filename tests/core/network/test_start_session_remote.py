@@ -233,11 +233,11 @@ def _patch_receiver(monkeypatch, receiver_worker, old_receiver):
     from app.core import model_effort, provider_agent
     resolve = model_effort.resolve_child_speed
 
-    def receiver(model, provider, *, parent=None, caller=None, profile_id=None):
+    def receiver(model, provider, *, parent=None, caller=None, profile_id=None, fit=True):
         if old_receiver and engine.context().device_id == receiver_worker.device_id:
             flag = None if parent is None else ("standard" if parent == "standard" else "fast")
             return provider_agent.worker_speed(flag, provider, model, profile_id)
-        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
+        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id, fit=fit)
 
     monkeypatch.setattr(model_effort, "resolve_child_speed", receiver)
 
@@ -255,22 +255,26 @@ def _capture_starts(monkeypatch):
     return sent
 
 
-@pytest.mark.parametrize("old_receiver,eligible,expected", [
-    (False, True, "ultrafast"),
-    # The receiver fits the tier to its own row: Fast where it has none.
-    (False, False, "fast"),
+@pytest.mark.parametrize("old_receiver,sender_eligible,eligible,expected", [
+    (False, True, True, "ultrafast"),
+    # The receiver fits the tier to its own row: Fast where it has none...
+    (False, True, False, "fast"),
+    # ...and Ultrafast where it has it, though the sender's copy has not yet.
+    (False, False, True, "ultrafast"),
     # A receiver older than ``speed`` ignores it and runs Fast.
-    (True, True, "fast"),
+    (True, True, True, "fast"),
 ])
 async def test_remote_start_hands_down_the_callers_ultrafast(
-        workers, monkeypatch, kicks, old_receiver, eligible, expected):
+        workers, monkeypatch, kicks, old_receiver, sender_eligible, eligible, expected):
     from app.core import model_override, preference_identity
     a, b, _ = network(workers, monkeypatch)
     monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
     monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
-    # The sender's row offers Ultrafast; the receiver's per ``eligible``.
+    # Each worker's copy of the row: the sender's per ``sender_eligible``,
+    # the receiver's per ``eligible``.
     monkeypatch.setattr(model_override, "ultrafast_supported",
-                        lambda model, provider: engine.context().device_id == b.device_id or eligible)
+                        lambda model, provider: sender_eligible if engine.context().device_id == b.device_id
+                        else eligible)
     _patch_receiver(monkeypatch, a, old_receiver)
     sent = _capture_starts(monkeypatch)
     with b.active():

@@ -486,9 +486,13 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
     ineligible one Fast, a pinned one keeps its own, a remote one is asked."""
     from app.core.model_override import ultrafast_supported
 
-    children = {"parent": [{"id": "able"}, {"id": "unable"}, {"id": "pinned"}, {"id": "remote"}],
-                "able": [{"id": "grandchild"}]}
+    # A worker's own list holds the workers it dispatched; real rows give it
+    # that (test_a_worker_in_the_middle_finds_the_workers_it_dispatched).
+    children = {"parent": [{"id": "able"}, {"id": "unable"},
+                           {"id": "pinned", "fast": True, "speed": "fast"}, {"id": "remote"}],
+                "able": [{"id": "grandchild"}], "pinned": [{"id": "pinned-child"}]}
     rows = {"able": {"model": "gpt-6.2-sol", "provider_id": "oa"},
+            "pinned-child": {"model": "gpt-6.2-sol", "provider_id": "oa"},
             "grandchild": {"model": "gpt-6.2-sol", "provider_id": "oa"},
             "unable": {"model": "gpt-6-luna", "provider_id": "oa"},
             "pinned": {"model": "gpt-6.2-sol", "provider_id": "oa", "fast_pinned": True},
@@ -522,9 +526,71 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
     monkeypatch.setattr(api.control, "call", call)
     monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
     await api.propagate_fast("parent", True, speed="ultrafast")
-    assert applied == {"able": "ultrafast", "grandchild": "ultrafast", "unable": "fast"}
+    # The pinned one's own workers follow it, not the parent.
+    assert applied == {"able": "ultrafast", "grandchild": "ultrafast", "unable": "fast",
+                       "pinned-child": "fast"}
     assert remote == [("peer", "run-settings", {
         "session_id": "remote", "fast": True, "inherited": True, "speed": "ultrafast"})]
+
+
+def test_a_worker_in_the_middle_finds_the_workers_it_dispatched(mock_db):
+    """A nested worker records the root as its parent; the worker that
+    dispatched it finds it through its own task row, and comes first."""
+    from app.db import background_tasks
+    from app.db.sessions import create_session
+
+    create_session("root", None)
+    for sid in ("nested", "middle"):
+        create_session(sid, None, parent_session_id="root", is_worker=True)
+    for owner, task in (("root", "nested"), ("middle", "nested"), ("root", "middle")):
+        background_tasks.upsert_background_task({
+            "session_id": owner, "task_id": task, "kind": "agent", "tool_use_id": task,
+            "status": "running", "title": task,
+            "started_at": "2026-11-18T00:00:00Z", "updated_at": "2026-11-18T00:00:00Z"})
+    assert [row["id"] for row in db.list_worker_children("middle")] == ["nested"]
+    assert [row["id"] for row in db.list_worker_children("root")] == ["middle", "nested"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch_while_landing", [False, True])
+async def test_two_parent_switches_in_a_row_leave_the_child_on_the_later(monkeypatch, switch_while_landing):
+    """Ultrafast then Fast: the hand-down of Ultrafast lands last, or lands
+    while Fast is picked; the child ends on Fast, as the parent runs."""
+    current = {"parent": "ultrafast" if switch_while_landing else "fast"}
+    applied = []
+
+    async def apply(sid, body, *, inherited, propagate):
+        applied.append(body.speed)
+        current["parent"] = "fast"
+        return {"effort": "high", "fast": body.speed != "standard", "speed": body.speed}
+
+    monkeypatch.setattr(db, "list_worker_children", lambda sid: [{"id": "child"}] if sid == "parent" else [])
+    monkeypatch.setattr(api.control, "owner_of", lambda child: None)
+    monkeypatch.setattr(api, "apply_run_settings", apply)
+    monkeypatch.setattr(api, "_current_tier", lambda sid: current.get(sid))
+    monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
+    await api.propagate_fast("parent", True, speed="ultrafast")
+    assert applied[-1] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_a_handed_down_tier_reaches_the_turns_the_child_has_waiting(live, mock_db, monkeypatch):
+    """The parent queued the child's first turn on Fast and then picked
+    Ultrafast: that turn runs Ultrafast. A pair sent in the child's chat stays."""
+    from app.db import turns as turns_db
+    from app.db.sessions import create_session
+
+    create_session("s", None)
+    pair = {"fast": True, "speed": "fast"}
+    started = turns_db.enqueue_turn("s", "provider_agent", prompt="go", overrides=dict(pair))
+    sent = turns_db.enqueue_turn("s", "user", prompt="mine", overrides=dict(pair))
+    monkeypatch.setattr(api, "_inherited_fast_skip", lambda session: None)
+    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: True)
+    await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True, speed="ultrafast"),
+                                 inherited=True, propagate=False)
+    waiting = {turn["id"]: turn["overrides"] for turn in turns_db.get_queued_turns("s")}
+    assert waiting[started["id"]] == {"fast": True, "speed": "ultrafast"}
+    assert waiting[sent["id"]] == pair
 
 
 @pytest.mark.asyncio

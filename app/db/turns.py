@@ -1161,6 +1161,17 @@ def set_live_turn_overrides(turn_id: str, overrides: Dict[str, Any]) -> bool:
         return cursor.rowcount > 0
 
 
+def set_queued_turn_overrides(turn_id: str, overrides: Dict[str, Any]) -> bool:
+    """Replace a still-``queued`` turn's run binding; a turn that has started is left alone."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE turns SET overrides=%s WHERE id=%s AND state='queued'",
+            (json.dumps(overrides or {}), turn_id),
+        )
+        return cursor.rowcount > 0
+
+
 def record_adhoc_turn(
     session_id: str,
     source: str,

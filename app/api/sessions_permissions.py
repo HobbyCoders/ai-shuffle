@@ -105,6 +105,28 @@ def _inherited_tier(session: dict, tier: str) -> str:
     return tier
 
 
+def _refit_queued_speed(session_id: str, pair: dict) -> None:
+    """Give a subagent's waiting turns the tier it was just handed. Blocking.
+
+    A turn's own pair wins over the session's when it runs (``query_options``).
+    A turn its parent queued, or a message bound to the worker's own turn,
+    carries the tier inherited when it was queued, so it takes the new one. A
+    pair the person sent in the subagent's own chat stays theirs.
+    """
+    from app.core.turn_manager import _BINDING_SOURCES, VOICE_DELEGATION, WORKER_BOUND
+    from app.db import turns as turns_db
+
+    for turn in turns_db.get_queued_turns(session_id):
+        overrides = turn.get("overrides") or {}
+        payload = turn.get("payload") or {}
+        if overrides.get("fast") is None and not overrides.get("speed"):
+            continue
+        if turn.get("source") in _BINDING_SOURCES and not (
+                payload.get(WORKER_BOUND) or payload.get(VOICE_DELEGATION)):
+            continue
+        turns_db.set_queued_turn_overrides(turn["id"], {**overrides, **pair})
+
+
 async def _hand_down_remote(owner: Any, child_id: str, tier: str) -> Any:
     """Hand ``tier`` to a subagent another worker runs.
 
@@ -155,20 +177,64 @@ async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = Non
             continue
         seen.add(child_id)
         try:
-            owner = await run_sync(control.owner_of, child)
-            if owner is not None:
-                await _hand_down_remote(owner, child_id, tier)
-                continue
-            result = await apply_run_settings(
-                child_id, RunSettingsUpdate(fast=tier != "standard", speed=tier),
-                inherited=True, propagate=False)
-            if "skipped" not in result:
-                # Its own subagents take the tier it now runs, as one it
-                # started now would (``provider_agent._caller_speed``).
-                await propagate_fast(child_id, bool(result["fast"]), seen, speed=result.get("speed"))
+            await _hand_down(session_id, child, tier, seen)
         except Exception:  # noqa: BLE001 — one subagent never blocks the rest
             logger.info("Speed was not handed to subagent %s of %s", child_id, session_id,
                         exc_info=True)
+
+
+#: How often one subagent is handed its parent's tier while the parent keeps switching.
+_HAND_DOWN_TRIES = 3
+
+
+def _current_tier(session_id: str) -> Optional[str]:
+    """The tier ``session_id`` runs now: its live turn's, else its binding's. Blocking."""
+    from app.core.provider_agent import _caller_speed
+
+    return _caller_speed(database.get_session(session_id), live_only=True)
+
+
+async def _hand_down(parent_id: str, child: dict, tier: str, seen: set) -> None:
+    """Hand ``parent_id``'s tier to one subagent, then on to that subagent's own.
+
+    The tier is read from the parent when it is handed down, not when the
+    hand-down began (``tier`` is the fallback), and read again once it has
+    landed: two switches in a row handed down at once leave every subagent
+    on the later one, whichever hand-down finishes last.
+    """
+    child_id = child["id"]
+    owner = await run_sync(control.owner_of, child)
+
+    async def parent_tier() -> str:
+        try:
+            return await run_sync(_current_tier, parent_id) or tier
+        except Exception:  # noqa: BLE001 — the tier the hand-down began with
+            logger.debug("Could not read the speed of %s", parent_id, exc_info=True)
+            return tier
+
+    handed, result = await parent_tier(), None
+    for _ in range(_HAND_DOWN_TRIES):
+        if owner is not None:
+            await _hand_down_remote(owner, child_id, handed)
+        else:
+            result = await apply_run_settings(
+                child_id, RunSettingsUpdate(fast=handed != "standard", speed=handed),
+                inherited=True, propagate=False)
+            if "skipped" in result:
+                if result["skipped"] == "pinned":
+                    # The workers it dispatched follow its speed, not this one.
+                    await propagate_fast(child_id, bool(child.get("fast")), seen,
+                                         speed=child.get("speed"))
+                return
+        latest = await parent_tier()
+        if latest == handed:
+            break
+        handed = latest
+    if result is not None:
+        # Its own subagents take the tier it now runs, as one it started now
+        # would (``provider_agent._caller_speed``). A remote one's owner hands
+        # it on there.
+        await propagate_fast(child_id, bool(result["fast"]), seen, speed=result.get("speed"))
 
 
 def _start_propagation(session_id: str, fast: bool, speed: Optional[str] = None) -> None:
@@ -311,6 +377,9 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             turn_overrides = {**(runtime.turn.get("overrides") or {}), **selected}
             runtime.turn["overrides"] = turn_overrides
             await _store_live_overrides(session_id, runtime)
+        if inherited:
+            await run_sync(_refit_queued_speed, session_id,
+                           {"fast": selected["fast"], "speed": selected["speed"]})
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]

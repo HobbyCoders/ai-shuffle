@@ -2297,20 +2297,29 @@ def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
 
 
 def list_worker_children(session_id: str) -> List[Dict[str, Any]]:
-    """The delegated workers (Task/Swarm) whose parent is ``session_id``.
+    """The delegated workers (Task/Swarm) under ``session_id``, for speed inheritance.
 
     Workers only: a fork or a peer chat also records a parent, but it is the
     owner's own chat, not a subagent. Nested workers record the ROOT as their
     parent (``provider_agent.dispatch_worker``), so the root's list is the
-    whole delegation tree.
+    whole delegation tree. The session that dispatched a nested worker keeps a
+    second ``background_tasks`` row for it, so a worker in the middle of the
+    tree finds the workers it dispatched too. In the root's list, workers
+    another worker dispatched come last, so that worker reaches them first.
     """
+    _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT * FROM sessions WHERE parent_session_id = {ph()} AND is_worker = TRUE",
-            (session_id,)
+            f"SELECT s.*, EXISTS (SELECT 1 FROM background_tasks b WHERE b.task_id = s.id "
+            f"AND b.session_id <> {_ph} AND b.session_id <> s.parent_session_id) AS dispatched_elsewhere "
+            f"FROM sessions s WHERE s.is_worker = TRUE AND (s.parent_session_id = {_ph} OR EXISTS "
+            f"(SELECT 1 FROM background_tasks b WHERE b.task_id = s.id AND b.session_id = {_ph}))",
+            (session_id, session_id, session_id),
         )
-        return rows_to_list(cursor.fetchall())
+        rows = rows_to_list(cursor.fetchall())
+    rows.sort(key=lambda row: bool(row.pop("dispatched_elsewhere", False)))
+    return rows
 
 
 def session_has_forks(session_id: str) -> bool:

@@ -453,10 +453,11 @@ async def _dispatch_remote(
 
     # Resolve before sending: v4 peers fit fast to the model but do not read
     # per-model preferences. In particular, an owner's saved off stays off.
-    # The target fits ``speed`` again to its own row.
+    # Unfitted: the target fits it to its own copy of the row, which may
+    # offer Ultrafast where this copy does not.
     speed = await asyncio.to_thread(
         resolve_child_speed, model_id, provider_id, parent=speed,
-        caller=caller_row, profile_id=profile_id)
+        caller=caller_row, profile_id=profile_id, fit=False)
     fast = speed_is_fast(speed)
     if speed is not None and not _accepts_speed(worker):
         # An older target refuses unknown fields; ``fast`` alone runs an

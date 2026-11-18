@@ -342,7 +342,7 @@ def resolve_child_effort(model: str | None, provider_id: str | None, *,
 
 def resolve_child_speed(model: str | None, provider_id: str | None, *, parent: Any = None,
                         caller: Mapping[str, Any] | None = None,
-                        profile_id: str | None = None) -> str | None:
+                        profile_id: str | None = None, fit: bool = True) -> str | None:
     """The owner's last speed pick for the child's model, else the parent's tier.
 
     The pick is the composer's two records: ``modelFast`` (on/off) refined by
@@ -350,7 +350,10 @@ def resolve_child_speed(model: str | None, provider_id: str | None, *, parent: A
     (``standard``/``fast``/``ultrafast``) or None. The result is fitted like
     any inherited tier (:func:`app.core.provider_agent.worker_speed`): never
     above what the child's provider row and model can run. A child with no
-    model of its own uses its agent's.
+    model of its own uses its agent's. ``fit=False`` returns the preference
+    unfitted, for a child another worker runs: that worker fits it to its own
+    copy of the row, which may offer Ultrafast or Fast where this one does
+    not yet. Every receiver since ``fast`` was sent fits it itself.
     """
     import logging
     from app.core.model_speed import FAST, STANDARD, ULTRAFAST, normalize_speed
@@ -378,6 +381,8 @@ def resolve_child_speed(model: str | None, provider_id: str | None, *, parent: A
                     selected = ULTRAFAST if tier == ULTRAFAST else FAST
         except Exception:
             logging.getLogger(__name__).warning("Could not read model speed preference; inheriting caller speed", exc_info=True)
+    if not fit:
+        return selected
     return worker_speed(selected, provider_id, bare, profile_id)
 
 

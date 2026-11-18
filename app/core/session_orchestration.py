@@ -993,10 +993,11 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
     from app.core.model_effort import resolve_child_effort, resolve_child_speed
     # Older peers only fit the transmitted flag to their model; send the
     # owner's resolved pick so a saved off cannot become a paid fast child.
-    # ``speed`` refines it for a peer that reads it (which fits it again to
-    # its own row); an older one ignores it and runs Ultrafast on Fast.
+    # ``speed`` refines it for a peer that reads it; an older one ignores it
+    # and runs Ultrafast on Fast. Unfitted: the receiver fits it to its own
+    # copy of the row, which may offer Ultrafast where this copy does not.
     body["speed"] = resolve_child_speed(body["model"], body["provider_id"], parent=parent_speed,
-                                        caller=sender, profile_id=sender["profile_id"])
+                                        caller=sender, profile_id=sender["profile_id"], fit=False)
     body["fast"] = speed_is_fast(body["speed"])
     body["effort_explicit"] = data.get("effort") is not None
     body["effort"] = resolve_child_effort(body["model"], body["provider_id"], explicit=data.get("effort"),

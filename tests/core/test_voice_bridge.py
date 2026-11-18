@@ -1930,7 +1930,9 @@ def worker_record(monkeypatch):
     latest = {
         "id": "turn-0", "state": "completed", "profile_id": "coder",
         "project_id": None, "worktree_id": None,
-        "overrides": {"provider": "prov-x", "model": "gpt-5", "cwd": "/w"},
+        # It ran on Fast; a tier handed down since must not be undone.
+        "overrides": {"provider": "prov-x", "model": "gpt-5", "cwd": "/w",
+                      "fast": True, "speed": "fast"},
     }
     monkeypatch.setattr(
         task_registry, "get_task",
@@ -1970,7 +1972,8 @@ async def test_message_agent_resumes_a_finished_worker_with_its_binding(
     await _settle(bridge)
 
     # Queued on the WORKER session, as a steerable user-shaped turn, carrying
-    # the exact binding its launch turn ran with.
+    # the exact binding its launch turn ran with, minus its speed: the
+    # worker's own binding, which a parent's switch may have changed since.
     assert len(submitted) == 1
     session_id, source, kw = submitted[0]
     assert session_id == "worker-1" and source == "queue"
