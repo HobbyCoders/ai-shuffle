@@ -342,6 +342,51 @@ async def test_a_live_pick_during_a_send_is_announced_after_it(mock_db, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_voice_context_pick_during_a_live_pick_is_announced_after_it(mock_db, monkeypatch):
+    import asyncio
+    import threading
+
+    from app.api import voice_context
+    from app.core.sync_engine import sync_engine
+    from tests.core.helpers import make_profile
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated",
+                        AsyncMock(side_effect=lambda **kw: sent.append(kw["updates"])))
+    make_profile("agent", {})
+    db.create_session("voiced", profile_id="agent", model="gpt-6.1-sol", fast=True, speed="fast")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    monkeypatch.setattr("app.api.voice._load_voice_session",
+                        AsyncMock(return_value={"id": "voiced", "mode": "chat"}))
+    monkeypatch.setattr(voice_context, "check_session_access", lambda request, session: None)
+    saved, release = threading.Event(), threading.Event()
+    real_save = db.set_session_run_binding
+
+    def held_live_save(*args, **kwargs):
+        real_save(*args, **kwargs)
+        saved.set()
+        release.wait(5)
+
+    monkeypatch.setattr(db, "set_session_run_binding", held_live_save)
+    put = asyncio.create_task(api.apply_run_settings(
+        "voiced", api.RunSettingsUpdate(speed="standard"), announce=True, propagate=False))
+    while not saved.is_set():
+        await asyncio.sleep(0.01)
+    patch = asyncio.create_task(voice_context.update_voice_session_context(
+        None, "voiced", voice_context.VoiceContextPatch(fast=True)))
+    await asyncio.sleep(0.05)
+    assert sent == []  # the voice pick waits for the live pick's announcement
+    release.set()
+    await put
+    await patch
+    pairs = [u for u in sent if "fast" in u]
+    assert pairs == [{"fast": False, "speed": "standard"}, {"fast": True, "speed": "fast"}]
+    assert ms.stored_pair(prior=db.get_session("voiced")) == pairs[-1]
+
+
+@pytest.mark.asyncio
 async def test_a_cancelled_send_holds_the_lock_until_its_save_lands():
     import asyncio
     import threading

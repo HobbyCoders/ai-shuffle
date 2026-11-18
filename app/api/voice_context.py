@@ -154,7 +154,21 @@ async def update_voice_session_context(
     _validate_patch(body)
     if session.get("mode") == "chat" and body.permission_mode not in (None, "default"):
         raise HTTPException(400, "Chat conversations use the default permission ceiling.")
-    updated = await run_sync(_persist_patch, session_id, body)
+    if "fast" in body.model_fields_set:
+        # A speed change is saved and announced under the chat's settings lock,
+        # in order with live picks and sends (sessions_permissions.settings_lock).
+        from app.api.sessions_permissions import _announce_run_settings, settings_lock
+        from app.core.model_speed import stored_pair
+        from app.core.turn_manager import _to_the_end
+
+        async with settings_lock(session_id):
+            before = stored_pair(prior=await run_sync(database.get_session, session_id) or {})
+            updated = await _to_the_end(run_sync(_persist_patch, session_id, body))
+            if stored_pair(prior=updated) != before:
+                await _announce_run_settings(session_id, stored_pair(prior=updated),
+                                             effort_asked=False, speed_asked=True)
+    else:
+        updated = await run_sync(_persist_patch, session_id, body)
     return VoiceContextResponse(
         session_id=session_id,
         model=updated.get("model"),
