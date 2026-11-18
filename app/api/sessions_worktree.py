@@ -16,6 +16,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request
 
+import hashlib
+from pydantic import BaseModel, Field
+from app.core.ttl_cache import TTLCache
+
 from app.db import database, mobile_tool_identity
 from app.core.session_title import derive_session_title
 from app.db.async_database import run_sync
@@ -856,6 +860,31 @@ async def _create_v2_branch_session(
     )
 
 
+# The create response can outlive the tab that submitted it. Keep only the
+# admitted chat id, briefly; a missing receipt never means "send again".
+_opening_receipts = TTLCache(ttl=300, max_entries=1024)
+
+
+class OpeningReceipt(BaseModel):
+    client_message_id: str = Field(max_length=128)
+    project_id: Optional[str] = None
+    project_v2_id: Optional[str] = None
+
+
+def _receipt_key(token, body):
+    return (hashlib.sha256(token.encode()).digest(), body.client_message_id,
+            body.project_id or None, body.project_v2_id or None)
+
+
+@worktree_router.post("/with-worktree/receipt")
+async def opening_receipt(request: Request, body: OpeningReceipt, token: str = Depends(require_auth)):
+    from app.api.sessions_helpers import require_session
+    session_id = _opening_receipts.get(_receipt_key(token, body))
+    if session_id:
+        await require_session(request, session_id)
+    return {"session_id": session_id}
+
+
 @worktree_router.post("/with-worktree", response_model=WorktreeSessionResponse)
 async def create_session_with_worktree(
     request: Request,
@@ -914,7 +943,10 @@ async def create_session_with_worktree(
     creator = await run_sync(request_principal, request)
     from app.api.chat_query import request_person_entry
     entry = await run_sync(request_person_entry, request)
-    return await _create_v2_branch_session(
+    response = await _create_v2_branch_session(
         body, project, api_user_id, access["project_v2"], creator=creator, entry=entry,
         composer=composer,
     )
+    if response.query_started and body.client_message_id:
+        _opening_receipts.set(_receipt_key(token, body), response.session_id)
+    return response
