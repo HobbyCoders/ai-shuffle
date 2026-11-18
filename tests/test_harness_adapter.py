@@ -842,8 +842,9 @@ async def test_permission_round_trip():
     engine = FakeEngine(events)
     adapter = _adapter_with(engine)
 
-    agen = adapter.receive_events()
-    first = await agen.__anext__()
+    # Translated directly: with no approver, receive_events now answers such
+    # a prompt itself (test_assistant_permissions covers that); this pins the mapping.
+    (first,) = adapter._translate(events[0])
     assert isinstance(first, PermissionRequestEvent)
     assert first.tool_use_id == "tu42" and first.request_id == "perm_9"
     assert first.risk == "destructive"
@@ -856,8 +857,6 @@ async def test_permission_round_trip():
     assert op.request_id == "perm_9"
     assert op.decision == "allow_always"  # remember=True -> allow_always
     assert op.remember is True
-
-    await agen.aclose()
 
 
 @pytest.mark.asyncio
@@ -908,8 +907,7 @@ async def test_permission_deny_mapping():
                                    name="Bash", input={}, risk="safe")]
     engine = FakeEngine(events)
     adapter = _adapter_with(engine)
-    async for ev in adapter.receive_events():
-        break  # grab the permission event
+    adapter._translate(events[0])  # as in test_permission_round_trip
     await adapter.respond_to_permission("t1", allow=False)
     assert engine.ops[0].decision == "deny"
     # No reason given -> the engine keeps its own generic deny text.

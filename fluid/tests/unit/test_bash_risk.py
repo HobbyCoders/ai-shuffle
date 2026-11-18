@@ -693,3 +693,17 @@ def test_a_word_bash_could_rewrite_gets_no_session_scope(command: str) -> None:
     from fluid.tools.builtins.bash_risk import session_scope
 
     assert session_scope({"command": command}) is None
+
+
+@pytest.mark.parametrize(("command", "form"), [
+    ("ls foo bar", "ls foo bar"),
+    ("ls foo\tbar", "ls foo bar"),
+    ("ls foo bar", None),  # one argument to Bash: no form
+    ("ls foo bar", None),
+    ("ls foo\x0bbar", None),
+    ("ls foo\x0cbar", None),
+])
+def test_scope_words_split_only_on_ascii_space_and_tab(command: str, form: str | None) -> None:
+    from fluid.tools.builtins.bash_risk import scoped_form
+
+    assert scoped_form(command) == form

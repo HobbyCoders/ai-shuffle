@@ -351,6 +351,8 @@ async def test_remember_profile_persists_an_agent_rule_only_for_the_owner(
 
     rules = database.get_permission_rules(profile_id="default")
     assert bool(rules) is persisted
-    # The API user's answer still applies within its own session.
-    assert bool(perm._check_rules("own", "default", "Bash", {"command": "rm -rf /"})) is True
-    assert bool(perm._check_rules("other-session", "default", "Bash", {"command": "rm"})) is persisted
+    # The API user's answer still applies within its own session. A shell
+    # allow is kept as its exact form ("ls"), whatever pattern was sent.
+    assert bool(perm._check_rules("own", "default", "Bash", {"command": "ls"})) is True
+    assert bool(perm._check_rules("other-session", "default", "Bash", {"command": "ls"})) is persisted
+    assert perm._check_rules("own", "default", "Bash", {"command": "rm -rf /"}) is None

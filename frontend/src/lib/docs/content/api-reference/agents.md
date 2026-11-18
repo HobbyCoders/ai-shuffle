@@ -141,7 +141,7 @@ Legacy built-in restore endpoint. No built-in subagents ship. Ordinary agents, i
 
 ## Saved approvals
 
-Rules saved when the owner answers a permission prompt with `remember: "profile"` ("Always for this agent"). Each one allows or denies a tool for every session on the agent, on every worker. A `tool_pattern` of `null` means the rule covers every call of the tool.
+Rules saved when the owner answers a permission prompt with `remember: "profile"` ("Always for this agent"). Each one allows or denies a tool for every session on the agent, on every worker. A `tool_pattern` of `null` means the rule covers every call of the tool. A new shell (`Bash`, `Monitor`) Allow is saved with the exact command as its `tool_pattern`, and only for a short list of read-only forms; an Allow saved before this version keeps covering what it did until you remove it. No saved Allow answers a call on a credential file such as `.env`; a saved Deny does.
 
 ### GET /api/v1/agents/{agent_id}/permission-rules
 

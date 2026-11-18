@@ -171,15 +171,16 @@ async def test_remember_for_session_skips_the_next_matching_prompt_only(tmp_path
         )
         assert _allowed(await asyncio.wait_for(first, 5))
 
-        # Same tool + matching input: resolved by the remembered rule, no prompt.
-        again = await asyncio.wait_for(cb("Bash", {"command": "ls /tmp"}, _ctx("tu-b")), 5)
+        # The same command: resolved by the remembered rule, no prompt. A shell
+        # allow is kept as the exact form ("ls -la"), whatever pattern was sent.
+        again = await asyncio.wait_for(cb("Bash", {"command": "ls -la"}, _ctx("tu-b")), 5)
         assert _allowed(again)
         assert _prompt_count(broadcast) == 1
 
-        # Non-matching input still asks.
-        other = asyncio.create_task(cb("Bash", {"command": "rm x"}, _ctx("tu-c")))
+        # Any other command still asks, even one the sent pattern matched.
+        other = asyncio.create_task(cb("Bash", {"command": "ls /tmp"}, _ctx("tu-c")))
         prompt2 = await _next_prompt(broadcast, seen=1)
-        assert prompt2["tool_input"] == {"command": "rm x"}
+        assert prompt2["tool_input"] == {"command": "ls /tmp"}
         other.cancel()
         with pytest.raises(asyncio.CancelledError):
             await other

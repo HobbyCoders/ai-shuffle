@@ -2,8 +2,9 @@
 
 * A remembered shell allow covers exactly one allowlisted read-only form
   (fluid's ``bash_risk.scoped_form``); any other command is one-shot.
-* A credential-file call honours saved denies, but only a saved allow that
-  names that exact path answers it (watched, batch-resolved and unattended).
+* A credential-file call honours saved denies, but no saved allow answers
+  it: each gets a fresh decision (watched, batch-resolved and unattended).
+* Shell allows saved before exact forms keep their old breadth (pinned).
 """
 import asyncio
 from unittest.mock import AsyncMock
@@ -68,7 +69,11 @@ async def test_remembering_an_allowlisted_form_covers_only_that_form():
     await task
     assert [r["tool_pattern"] for r in handler.get_session_rules(SID)] == ["git status"]
     assert handler._check_rules(SID, "default", "Bash", {"command": "git status"})
-    for other in ("git status; rm -rf build", "git status --porcelain", "git log", "GIT STATUS"):
+    # The same words in other ASCII spacing are the same exact form.
+    assert handler._check_rules(SID, "default", "Bash", {"command": "git  status"})
+    assert handler._check_rules(SID, "default", "Bash", {"command": "git\tstatus"})
+    for other in ("git status; rm -rf build", "git status --porcelain", "git log", "GIT STATUS",
+                  "git\u00a0status"):
         assert handler._check_rules(SID, "default", "Bash", {"command": other}) is None
     # The match reads the command, never another field.
     assert handler._check_rules(
@@ -117,15 +122,43 @@ async def test_a_remembered_write_does_not_answer_a_credential_write_in_accept_e
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pattern,decision,expected", [
-    ("/repo/.env", "allow", "allow"),
+    ("/repo/.env", "allow", None),
     ("/repo/*", "allow", None),
+    (None, "allow", None),
+    ("/repo/.env", "deny", "deny"),
     (None, "deny", "deny"),
-    ("/repo/*", "deny", "deny"),
 ])
-async def test_credential_calls_take_denies_and_exact_allows_only(pattern, decision, expected):
+async def test_credential_calls_take_saved_denies_only(pattern, decision, expected):
     handler = PermissionHandler()
     handler._add_session_rule_idempotent(SID, "Write", pattern, decision)
     assert await _answered_at_once(handler, "Write", ENV) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_saved_glob_allow_on_the_root_does_not_answer_a_credential_glob():
+    handler = PermissionHandler()
+    handler._add_session_rule_idempotent(SID, "Glob", "/repo", "allow")
+    plain = {"path": "/repo", "pattern": "**/*.md"}
+    assert await _answered_at_once(handler, "Glob", plain) == "allow"
+    env_glob = {"path": "/repo", "pattern": "**/.env"}  # the engine asked about it
+    assert await _answered_at_once(
+        handler, "Glob", env_glob, decision_reason=CREDENTIAL_ASK_REASON,
+    ) is None
+
+
+@pytest.mark.parametrize("rule", [
+    ("Bash", None),        # "always" for this agent before exact forms
+    ("Bash", "git *"),
+    ("*", None),           # a wildcard-tool allow
+])
+def test_shell_allows_saved_before_exact_forms_keep_their_old_breadth(rule):
+    """Deliberate: existing approvals are not invalidated, so automations
+    that rely on them keep running; only new approvals are exact-form."""
+    tool, pattern = rule
+    database.add_permission_rule("default", tool, pattern, "allow")
+    handler = PermissionHandler()
+    decided = handler._check_rules(SID, "default", "Bash", {"command": "git commit -m x"})
+    assert decided is not None and decided.decision.value == "allow"
 
 
 @pytest.mark.asyncio

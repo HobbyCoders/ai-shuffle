@@ -568,15 +568,17 @@ def scoped_form(command: str) -> str | None:
     program name, that classifies ``safe`` (so no redirection, substitution,
     assignment or credential operand) has a form, and only when every word is
     literal as typed, so the words checked are the argv Bash runs
-    (``rg {--pre,x}`` and ``ls $NOTE`` have none); the form is the command's
-    words joined by single spaces."""
-    words = command.split()
+    (``rg {--pre,x}`` and ``ls $NOTE`` have none). Words split on ASCII
+    spaces and tabs only, so any other whitespace or control character
+    (``ls foo\u00a0bar`` is one argument to Bash) leaves no form; the form is
+    those same words joined by single spaces."""
+    words = [w for w in re.split(r"[ \t]+", command) if w]
     if not words or not all(_LITERAL_WORD.fullmatch(w) for w in words):
         return None
     groups = _simple_command_tokens(command)
-    if groups is None or len(groups) != 1 or classify({"command": command}) != SAFE:
+    if groups != [words] or classify({"command": command}) != SAFE:
         return None
-    program, *args = groups[0]
+    program, *args = words
     check = SCOPED_FORMS.get(program)
     if check is None or not check(args):
         return None

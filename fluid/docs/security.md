@@ -109,9 +109,9 @@ model *reads* framing tokens even when they can't structurally escape.
   the PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/
   `Glob` call that touches one, judged in the CLI's own working directory,
   and no earlier "always" covers such a call. In the app a saved Deny still
-  answers such a call, but a saved or remembered Allow does only when its
-  pattern names that exact path: a tool-wide "always" on `Write` does not
-  approve a later `.env` write. Under Bypass nothing asks.
+  answers such a call, but no saved or remembered Allow does, whatever its
+  pattern: each such call gets a fresh decision (a tool-wide "always" on
+  `Write` does not approve a later `.env` write). Under Bypass nothing asks.
 - **Bash is not a credential boundary.** The risk classifier demotes an
   otherwise read-only command to `write` (→ prompts under `on_write`) when an
   argument names a credential file literally (`cat .env`,
@@ -130,12 +130,11 @@ model *reads* framing tokens even when they can't structurally escape.
 - **Agent-owned ACP tools are outside both guarantees.** A tool an ACP agent
   runs itself (Antigravity's own file reads and shell) never passes through
   these rules; the host sees only the permission requests the agent chooses
-  to send. "Always" on such a request reaches the agent as `allow_always`
-  only for the Bash forms listed under allow-always below (and for
-  non-shell tools, as on the native leg); any other shell command, and an
-  `execute` request that carries no command text, is sent back as allow
-  once, or cancelled if the agent offers no allow-once option, since the
-  agent would keep the grant as broadly as it likes.
+  to send. "Always" on a shell request (one with command text, or any
+  `execute` request) acts as once: it is sent back as allow once, or the
+  request is cancelled if the agent offers no allow-once option, since the
+  agent would keep an `allow_always` grant as broadly as it likes. Non-shell
+  tools keep a tool-wide "always", as on the native leg.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. The check reads ripgrep's own path field
@@ -171,7 +170,9 @@ no-ignore options, and `sed -n 5p`/`5,10p`. Everything else (any compound,
 `git commit`/`push`/`checkout`, an unknown or abbreviated option) is allowed
 for that call only and the prompt says so. The AI Shuffle app's remembered
 shell approvals ("this chat", "this agent") use the same allowlist and match
-the command exactly; for any other command the approval is one-shot. On the
+the same words exactly; for any other command the approval is one-shot.
+Shell approvals saved before this version (a tool-wide or `git *` rule) keep
+their old breadth until removed. On the
 delegated Claude CLI leg a grant stays in fluid; the CLI's own broader rule,
 such as `Bash(git:*)`, is not handed back), the
 doom-loop guard, plan mode's exclusion of write tools (from the request

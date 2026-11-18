@@ -740,16 +740,16 @@ async def test_a_model_the_agent_does_not_offer_is_named_in_the_turn(tmp_path: P
 
 
 @pytest.mark.parametrize("data, scoped", [
-    ({"command": "git status"}, True),
+    ({"command": "git status"}, False),  # allowlisted natively, but the agent keeps the grant
     ({"command": "git push --force"}, False),
     ({"command": "timeout 1 rm -rf demo"}, False),
     ({"command": "python tool.py"}, False),
     ({"text": "b"}, True),  # not a shell call: tool-wide, as on the native leg
     (None, True),
 ])
-def test_acp_always_reaches_the_agent_only_for_allowlisted_shell_forms(data, scoped) -> None:
+def test_acp_always_never_reaches_the_agent_for_a_shell_call(data, scoped) -> None:
     """N9: the agent keeps an ``allow_always`` grant itself, as wide as it
-    likes, so "always" on any other shell command goes back as once."""
+    likes, so "always" on any shell command goes back as once."""
     from fluid.engine.acp.loop import AcpLoop
 
     assert AcpLoop._always_is_scoped(data) is scoped
@@ -765,11 +765,13 @@ _ALWAYS = {"optionId": "always-id", "kind": "allow_always"}
     ({"kind": "execute", "rawInput": {}}, [_ALWAYS], "allow_always", None),
     ({"kind": "execute", "rawInput": {}}, [_ALWAYS], "allow", None),
     ({"kind": "execute", "rawInput": {"command": "git push --force"}}, [_ALWAYS], "allow", None),
+    # Round 4 P5: even an allowlisted form goes back as once.
     ({"kind": "execute", "rawInput": {"command": "git status"}}, [_ONCE, _ALWAYS], "allow_always",
-     "always-id"),
+     "once-id"),
+    ({"kind": "execute", "rawInput": {"command": "git status"}}, [_ALWAYS], "allow_always", None),
     ({"kind": "edit", "rawInput": {"text": "b"}}, [_ONCE, _ALWAYS], "allow_always", "always-id"),
 ])
-async def test_acp_returns_allow_always_only_for_a_scopable_call(
+async def test_acp_returns_allow_always_only_for_a_non_shell_call(
         tmp_path: Path, call, offered, answer, chosen) -> None:
     loop = AcpLoop(store=SerializingStore(), spec=_spec(tmp_path), cwd=str(tmp_path), session_id="s-1")
     emitted: list[Any] = []

@@ -1759,25 +1759,26 @@ async def test_api_key_remember_profile_is_kept_to_the_session(ws_env, monkeypat
     own session only, the same as ``"session"``."""
     _api_env(monkeypatch, None)
     sid = _own_session("sess-rp")
-    _pending_permission(sid, "req-rp", tool_input={"command": "npm test"})
+    # A shell allow is kept as its exact allowlisted form, whatever pattern is sent.
+    _pending_permission(sid, "req-rp", tool_input={"command": "git status"})
     async with _connect(ws_env, api_user=API_USER) as conn:
         await conn.roundtrip({
             "type": "permission_response", "session_id": sid, "request_id": "req-rp",
-            "decision": "allow", "remember": "profile", "pattern": "npm *",
+            "decision": "allow", "remember": "profile", "pattern": "git *",
         })
     assert database.get_permission_rules(profile_id="default") == []
-    assert [r["tool_pattern"] for r in permission_handler.get_session_rules(sid)] == ["npm *"]
+    assert [r["tool_pattern"] for r in permission_handler.get_session_rules(sid)] == ["git status"]
 
 
 async def test_owner_remember_profile_persists_an_agent_rule(ws_env):
     sid = _make_session("sess-orp")
-    _pending_permission(sid, "req-orp", tool_input={"command": "npm test"})
+    _pending_permission(sid, "req-orp", tool_input={"command": "git status"})
     async with _connect(ws_env) as conn:
         await conn.roundtrip({
             "type": "permission_response", "session_id": sid, "request_id": "req-orp",
-            "decision": "allow", "remember": "profile", "pattern": "npm *",
+            "decision": "allow", "remember": "profile", "pattern": "git *",
         })
     rules = database.get_permission_rules(profile_id="default")
     assert [(r["tool_name"], r["tool_pattern"], r["decision"]) for r in rules] == [
-        ("Bash", "npm *", "allow")]
+        ("Bash", "git status", "allow")]
     assert permission_handler.get_session_rules(sid) == []

@@ -1134,17 +1134,12 @@ class AcpLoop:
 
         The agent keeps that grant itself, as broadly as it likes (a program
         prefix such as ``git``), and the host never sees the calls it then
-        covers. So a shell command goes back as "always" only when it is on
-        the allowlist the native leg can scope (``bash_risk.session_scope``:
-        ``git status``, ``ls``, ...); any other command, and an ``execute``
-        call whose command text is missing, is allowed once. Other tools keep
-        a tool-wide "always", as on the native leg."""
-        from fluid.tools.builtins.bash_risk import session_scope
-
+        covers. So a shell call (one with command text, or any ``execute``
+        call) always goes back as allow once, even for a form the native leg
+        could scope; "always" on it acts as once. Other tools keep a
+        tool-wide "always", as on the native leg."""
         command = data.get("command") if isinstance(data, Mapping) else None
-        if not isinstance(command, str):
-            return str(kind) != "execute"
-        return session_scope(dict(data)) is not None
+        return not isinstance(command, str) and str(kind) != "execute"
 
     async def _permission(self, params: dict[str, Any]) -> dict[str, Any]:
         call = params.get("toolCall") if isinstance(params.get("toolCall"), Mapping) else {}

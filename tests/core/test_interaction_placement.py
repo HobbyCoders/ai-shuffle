@@ -163,16 +163,17 @@ async def test_v2_permission_remember_profile_auto_resolves_matching(mock_db):
     broadcast = AsyncMock()
     t1 = asyncio.create_task(h.request_permission(
         request_id="r1", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "ls"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "ls"}, broadcast_func=broadcast,
     ))
     await _wait_pending("s1", "r1")
     t2 = asyncio.create_task(h.request_permission(
         request_id="r2", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "pwd"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "pwd"}, broadcast_func=broadcast,
     ))
     await _wait_pending("s1", "r2")
 
-    # Allow-remember-profile on r1 with a Bash:* pattern auto-resolves r2 too.
+    # Allow-remember-profile on r1 with a WebSearch:* pattern auto-resolves r2 too.
+    # (Not Bash: a remembered shell allow covers only its exact allowlisted form.)
     result = await h.respond(
         "r1", "s1", "allow", remember="profile", pattern="*",
         broadcast_func=broadcast, answered_by_device="dev-1",
@@ -291,7 +292,7 @@ async def test_v2_permission_session_remember_propagates_cross_install(mock_db):
 
     task = asyncio.create_task(hA.request_permission(
         request_id="r1", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "ls"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "ls"}, broadcast_func=broadcast,
     ))
     await _wait_pending("s1", "r1")
     assert hA.get_session_rules("s1") == []  # A never saw the rule locally
@@ -312,14 +313,14 @@ async def test_v2_permission_session_remember_propagates_cross_install(mock_db):
     # ...and the executing runner installed the identical local rule.
     rules = hA.get_session_rules("s1")
     assert len(rules) == 1
-    assert rules[0]["tool_name"] == "Bash"
+    assert rules[0]["tool_name"] == "WebSearch"
     assert rules[0]["tool_pattern"] == "*"
     assert rules[0]["decision"] == "allow"
 
     # A second identical request short-circuits with NO new pending row.
     out2 = await asyncio.wait_for(hA.request_permission(
         request_id="r2", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "ls -la"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "ls -la"}, broadcast_func=broadcast,
     ), 12.0)
     assert isinstance(out2, PermissionResultAllow)
     assert not any(
@@ -338,12 +339,12 @@ async def test_v2_resolve_matching_stamps_session_remember(mock_db):
 
     t1 = asyncio.create_task(hA.request_permission(
         request_id="r1", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "ls"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "ls"}, broadcast_func=broadcast,
     ))
     await _wait_pending("s1", "r1")
     t2 = asyncio.create_task(hA.request_permission(
         request_id="r2", session_id="s1", profile_id="default",
-        tool_name="Bash", tool_input={"command": "pwd"}, broadcast_func=broadcast,
+        tool_name="WebSearch", tool_input={"query": "pwd"}, broadcast_func=broadcast,
     ))
     await _wait_pending("s1", "r2")
 

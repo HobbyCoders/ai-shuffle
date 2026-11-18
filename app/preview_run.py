@@ -46,6 +46,7 @@ DEV_ENV_KEYS = frozenset({
 #: legacy name is too generic to mark).
 DEV_ACCESS_FILE = "preview-access.json"
 LEGACY_DEV_ACCESS_FILE = "access.json"
+_ACCESS_FILE_NAMES = (DEV_ACCESS_FILE, LEGACY_DEV_ACCESS_FILE)
 
 
 def free_port(*, exclude: Iterable[int] = ()) -> int:
@@ -128,16 +129,30 @@ def _saved_access() -> dict | None:
         return None
     from app.core import preview_access
 
-    try:
-        saved = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    try:
-        if isinstance(saved, dict) and preview_access.verify(saved.get("token")) is not None:
-            return saved
-    except Exception:  # noqa: BLE001 - unverifiable: mint a fresh link instead
-        logger.debug("Could not verify the saved preview link", exc_info=True)
+    # The named file first, then its sibling under the other known name (a
+    # grant an older launcher saved only as access.json).
+    candidates = [Path(path)] + [
+        Path(path).with_name(name) for name in _ACCESS_FILE_NAMES
+        if Path(path).name in _ACCESS_FILE_NAMES and name != Path(path).name
+    ]
+    for candidate in candidates:
+        try:
+            saved = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        try:
+            if isinstance(saved, dict) and preview_access.verify(saved.get("token")) is not None:
+                return saved
+        except Exception:  # noqa: BLE001 - unverifiable: mint a fresh link instead
+            logger.debug("Could not verify the saved preview link", exc_info=True)
     return None
+
+
+def _save_access(access_file: str, grant: dict) -> None:
+    """Write the grant owner-only under both known names beside ``access_file``,
+    so a launcher or reader of either finds it."""
+    for name in _ACCESS_FILE_NAMES:
+        _write_private_json(Path(access_file).with_name(name), grant)
 
 
 def _write_private_json(path: Path, data: dict) -> None:
@@ -198,6 +213,8 @@ def initialize_preview_access() -> None:
     # session and the signing key both survive in the kept data directory.
     saved = _saved_access()
     if saved is not None:
+        if Path(os.environ["SHUFFLE_DEV_ACCESS_FILE"]).name in _ACCESS_FILE_NAMES:
+            _save_access(os.environ["SHUFFLE_DEV_ACCESS_FILE"], saved)
         print("Branch preview access is still valid after the restart", flush=True)
         return
 
@@ -216,14 +233,11 @@ def initialize_preview_access() -> None:
         print("Branch preview access minted; the dev loop prints the link to open", flush=True)
     else:
         print(f"Branch preview access (open once in the agent browser): {url}", flush=True)
-    if access_file and Path(access_file).name not in (DEV_ACCESS_FILE, LEGACY_DEV_ACCESS_FILE):
+    if access_file and Path(access_file).name not in _ACCESS_FILE_NAMES:
         logger.warning("SHUFFLE_DEV_ACCESS_FILE must be named %s; the grant is not saved", DEV_ACCESS_FILE)
     elif access_file:
-        # Both names, so a launcher or reader of either finds the grant.
-        grant = {"session_id": session_id, "token": token, "url": url,
-                 "expires_at": int(time.time()) + ttl}
-        for name in (DEV_ACCESS_FILE, LEGACY_DEV_ACCESS_FILE):
-            _write_private_json(Path(access_file).with_name(name), grant)
+        _save_access(access_file, {"session_id": session_id, "token": token, "url": url,
+                                   "expires_at": int(time.time()) + ttl})
 
 
 async def seed_dev_instance() -> None:

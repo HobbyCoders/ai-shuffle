@@ -458,6 +458,41 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
     assert json.loads(access.read_text())["token"] != first["token"]
 
 
+@pytest.mark.parametrize("launcher_names", ["access.json", "preview-access.json"])
+def test_a_restart_with_only_the_legacy_grant_backfills_both_names(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launcher_names: str,
+) -> None:
+    """A grant saved only as access.json (by an older launcher) is kept on a
+    restart and written owner-only under both names, whichever the launcher names."""
+    import json
+
+    from app.core import encryption, preview_access
+    from app.core.config import settings
+    from app.db import database
+
+    env = preview_environment(tmp_path, 18880, 18881,
+                              extra={"SHUFFLE_DEV_ACCESS_FILE": str(tmp_path / "access.json")})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(settings, "data_dir", Path(env["DATA_DIR"]))
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    monkeypatch.setattr(encryption, "_credential_status", {})
+    assert encryption.initialize_server_key(database)
+    initialize_preview_access()
+    legacy = json.loads((tmp_path / "access.json").read_text())
+    (tmp_path / "preview-access.json").unlink()  # as an older launcher left it
+
+    monkeypatch.setenv("SHUFFLE_DEV_ACCESS_FILE", str(tmp_path / launcher_names))
+    initialize_preview_access()  # the restart
+    for name in ("access.json", "preview-access.json"):
+        path = tmp_path / name
+        assert json.loads(path.read_text()) == legacy  # kept, not re-minted
+        if os.name == "posix":
+            assert path.stat().st_mode & 0o077 == 0
+
+
 @pytest.mark.parametrize(("name", "saved"), [
     ("preview-access.json", True),
     ("access.json", True),  # the legacy devloop launcher's name (N12)

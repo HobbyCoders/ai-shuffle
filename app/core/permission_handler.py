@@ -144,10 +144,18 @@ class PermissionRule:
         pattern = self.tool_pattern
 
         # Handle different tool types. A shell rule matches the command only
-        # (never another field such as a description), case-sensitively.
+        # (never another field such as a description), case-sensitively. An
+        # Allow saved as an exact form (``git status``) also covers the same
+        # words in other ASCII spacing; a pattern saved before exact forms
+        # (``git *``) keeps matching as it did.
         if _is_shell_tool(self.tool_name):
             command = tool_input.get("command", "")
-            return isinstance(command, str) and fnmatch.fnmatchcase(command, pattern)
+            if not isinstance(command, str):
+                return False
+            if fnmatch.fnmatchcase(command, pattern):
+                return True
+            return (self.decision == PermissionDecision.ALLOW
+                    and _remembered_bash_pattern(tool_input) == pattern)
 
         elif self.tool_name in ("Read", "Write", "Edit", "Glob"):
             file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
@@ -168,27 +176,18 @@ class PermissionRule:
 
         return False
 
-    def targets_exactly(self, tool_input: Dict[str, Any]) -> bool:
-        """Whether the pattern names this call's path exactly (no wildcard)."""
-        pattern = self.tool_pattern
-        if not pattern or any(ch in pattern for ch in "*?["):
-            return False
-        return any(tool_input.get(key) == pattern for key in ("file_path", "notebook_path", "path"))
-
     def decides(
         self, tool_name: str, tool_input: Dict[str, Any], decision_reason: Optional[str] = None,
     ) -> bool:
-        """Whether this rule answers the call. On a credential-file call
-        (``session_modes.is_credential_call``) a Deny still decides, but an
-        Allow does only when its pattern names that path exactly: a tool-wide
-        or wildcard allow does not answer a credential prompt."""
+        """Whether this rule answers the call. A credential-file call
+        (``session_modes.is_credential_call``) is never answered by a saved
+        Allow, only by a saved Deny: each one gets a fresh decision."""
         from app.core.session_modes import is_credential_call
 
         if not self.matches(tool_name, tool_input):
             return False
         return (
             self.decision != PermissionDecision.ALLOW
-            or self.targets_exactly(tool_input)
             or not is_credential_call(tool_input, decision_reason)
         )
 
@@ -1249,7 +1248,7 @@ class PermissionHandler:
     ) -> Optional[PermissionRule]:
         """Check if any saved rule matches this tool use.
 
-        Credential-file calls need an exact saved allow (``PermissionRule.decides``).
+        A credential-file call takes a saved Deny only (``PermissionRule.decides``).
 
         A rule saved under the bridge's spelling of the same tool
         (``mcp__fluid_bundled__<name>``) applies when no rule names it
