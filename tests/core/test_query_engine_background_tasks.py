@@ -364,3 +364,23 @@ async def test_the_main_compaction_card_shows_while_a_sub_agent_runs(tmp_path):
     assert [f for f in frames_of(frames, "system") if f["subtype"] != "model_info"] == [
         {"type": "system", "subtype": "compact_boundary", "data": card},
     ]
+
+
+async def test_the_sanitization_notice_shows_while_a_sub_agent_runs(tmp_path):
+    """The engine sends assistant_text_sanitized once per turn and only for
+    the parent conversation, so a tracked sub-agent must not swallow it."""
+    note = {"content": "quoted"}
+    with ExitStack() as stack:
+        adapter = fresh_adapter([
+            _launch("tu-bg", subagent_type="researcher", description="dig",
+                    prompt="find it", run_in_background=True),
+            _user_result("tu-bg", "Async agent launched successfully. agentId: a1"),
+            SystemMessage(subtype="skill_note", data={"n": 1}),  # still hidden
+            SystemMessage(subtype="assistant_text_sanitized", data=note),
+            _done(),
+        ])
+        b = engine_patches(stack, cwd=str(tmp_path), adapter=adapter)
+        frames = await _run(b)
+    assert [f for f in frames_of(frames, "system") if f["subtype"] != "model_info"] == [
+        {"type": "system", "subtype": "assistant_text_sanitized", "data": note},
+    ]
