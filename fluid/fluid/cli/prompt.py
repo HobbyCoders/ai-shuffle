@@ -709,17 +709,21 @@ def _tools_section(p: PromptProfile) -> str | None:
         # Under code mode one cell carries the calls; there is no reply-level
         # parallelism to ask for. The concurrency claim is the native loop's
         # (NativeLoop._prefetch); under the delegated leg the claude CLI
-        # decides, so it is absent there, and when max_concurrent_tools is 1.
-        reads = bool(t & {"Read", "Grep", "Glob"})
-        how = (
-            "" if p.delegated or not p.concurrent_tools or not reads else
-            " Reads and searches (Read, Grep, Glob) among them may be fetched "
-            "concurrently; results still arrive in call order."
-        )
-        bullets.append(
-            "- Make independent tool calls in the same reply; serialize only when "
-            "one call's input depends on another's result." + how
-        )
+        # decides, so it is absent there, and when max_concurrent_tools is 1
+        # (where the bullet stays word for word as it always was).
+        if p.concurrent_tools and not p.delegated and t & {"Read", "Grep", "Glob"}:
+            bullets.append(
+                "- Make independent tool calls in the same reply; serialize only "
+                "when one call's input depends on another's result. Reads and "
+                "searches (Read, Grep, Glob) among them may be fetched "
+                "concurrently; results still arrive in call order."
+            )
+        else:
+            bullets.append(
+                "- Make independent tool calls in the same reply so they run "
+                "together; serialize only when one call's input depends on "
+                "another's result."
+            )
     if p.delegated and t:
         example = next((n for n in ("Note", "AskUser", "Monitor", "Read") if n in t), None)
         example_text = (

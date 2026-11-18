@@ -61,7 +61,6 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "cwd": ".",
     "max_tokens": None,
     "max_model_calls": 200,
-    "max_concurrent_tools": 1,
     "context_window": None,
     # CLI prompt. ``system`` is your own base prompt: when set it REPLACES the
     # shipped default (fluid.cli.prompt.DEFAULT_BASE_PROMPT). ``base_prompt``

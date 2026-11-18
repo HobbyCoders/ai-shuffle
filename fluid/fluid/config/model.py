@@ -584,7 +584,9 @@ class HarnessConfig:
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "max_model_calls": self.max_model_calls,
-            "max_concurrent_tools": self.max_concurrent_tools,
+            # Only when set: at the default the dict stays exactly as before.
+            **({"max_concurrent_tools": self.max_concurrent_tools}
+               if self.max_concurrent_tools != 1 else {}),
             "context_window": self.context_window,
             "cache_key": self.cache_key,
             "system": self.system,

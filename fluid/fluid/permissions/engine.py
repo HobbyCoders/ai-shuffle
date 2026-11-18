@@ -186,26 +186,29 @@ class PermissionEngine:
         else:
             self._last_key = key
             self._streak = 1
-        if self._streak >= self._threshold_of(name):
+        threshold = self._threshold_of(name)
+        if self._streak >= threshold:
             self._streak = 0
             return True
         return False
 
     def would_guard(
         self, name: str, input: dict[str, Any],
-        *, before: Iterable[tuple[str, dict[str, Any]]] = (),
+        *, before: Iterable[tuple[str, Any]] = (),
     ) -> bool:
-        """Would ``note_execution(name, input)`` return True once the calls in
-        ``before`` have been noted, in order? Same streak and threshold as the
-        gate; changes nothing (the native loop's look-ahead asks it)."""
-        last, streak, tripped = self._last_key, self._streak, False
-        for call_name, call_input in (*before, (name, input)):
-            key = (call_name, _input_hash(call_input))
-            streak, last = (streak + 1 if key == last else 1), key
-            tripped = streak >= self._threshold_of(call_name)
-            if tripped:
-                streak = 0
-        return tripped
+        """Could ``note_execution(name, input)`` force-ask this call, whatever
+        is noted before it? Conservative, and changes nothing (the native loop's
+        look-ahead asks it; no threshold callback runs): True when the call
+        repeats the last call noted or any call in ``before``, or when the base
+        threshold trips on a single call. A call that repeats none of them
+        starts a streak of 1, which only a threshold of 1 trips (an override
+        can only raise the threshold)."""
+        key = (name, _input_hash(input))
+        if key == self._last_key or any(
+            key == (n, _input_hash(i)) for n, i in before
+        ):
+            return True
+        return self._threshold <= 1
 
     def _threshold_of(self, name: str) -> int:
         threshold = self._threshold

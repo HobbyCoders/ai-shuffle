@@ -17,7 +17,6 @@ Three content paths, in order of dispatch:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 from io import BytesIO
 from itertools import islice
@@ -40,6 +39,7 @@ from fluid.tools.registry import (
     ToolOutcome,
     ToolSpec,
     fetch_once,
+    off_loop,
 )
 
 # Media types the Anthropic/OpenAI vision APIs accept as base64 images.
@@ -228,7 +228,7 @@ async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> Any:
     """``_load`` in a worker thread, with no session bookkeeping
     (the registered ``FETCH``): the read and window ledgers, repeat detection and
     the view record are all written by the handler, at the call's own turn."""
-    return await asyncio.to_thread(_load, input, ctx)
+    return await off_loop(_load, input, ctx)
 
 
 FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)

@@ -37,7 +37,7 @@ from fluid.tools.builtins._util import (
 )
 from fluid.tools import view
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once, off_loop
 
 MAX_MATCHES = 200
 MAX_LIMIT = 5000
@@ -134,11 +134,12 @@ def _clamp_limit(raw: Any) -> int:
 
 
 def _search_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[str, Path, Any, bool, int]:
+    pattern = input["pattern"]  # first, so a missing pattern is the error reported
     root = Path(input.get("path") or ctx.cwd)
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
     return (
-        input["pattern"], root, input.get("glob"), bool(input.get("no_ignore")),
+        pattern, root, input.get("glob"), bool(input.get("no_ignore")),
         _clamp_limit(input.get("limit")),
     )
 
@@ -170,8 +171,10 @@ async def _search(
 
     rg = shutil.which("rg")
     if rg:
+        # No await before rg is spawned, so an early fetch's task-entry
+        # interrupt check (NativeLoop._prefetch) still holds when it starts.
         return await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
-    return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
+    return await off_loop(_pure_python_grep, pattern, root, glob, limit, ctx)
 
 
 FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)

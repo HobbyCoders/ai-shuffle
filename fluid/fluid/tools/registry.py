@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
@@ -62,17 +63,56 @@ deferred_writes: ContextVar[list[Callable[[], Any]] | None] = ContextVar(
 )
 
 
-async def early_fetch(fetch: Fetch, input: dict[str, Any], ctx: ToolCtx) -> tuple[Any, list]:
+# Inside an early fetch, says whether to give up before starting worker-thread
+# work (``off_loop``): the turn was interrupted or the fetch cancelled.
+fetch_stopped: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "fluid_fetch_stopped", default=None,
+)
+
+
+class FetchStopped(Exception):
+    """An early fetch's worker job found the fetch stopped before its I/O."""
+
+
+async def off_loop(fn: Callable[..., Any], *args: Any) -> Any:
+    """``asyncio.to_thread(fn, *args)``; inside an early fetch, the job first
+    checks ``fetch_stopped`` in the worker, so one that waited for a free
+    thread past an interrupt or cancel does no file I/O."""
+    stopped = fetch_stopped.get()
+    if stopped is None:
+        return await asyncio.to_thread(fn, *args)
+
+    def job() -> Any:
+        if stopped():
+            raise FetchStopped
+        return fn(*args)
+
+    return await asyncio.to_thread(job)
+
+
+async def early_fetch(
+    fetch: Fetch, input: dict[str, Any], ctx: ToolCtx,
+    *, stop: Callable[[], bool] = lambda: False,
+) -> tuple[Any, list] | None:
     """Run ``fetch`` ahead of its call's turn: its result and the writes it
-    deferred. Nothing is written here, so a fetch that is cancelled or dropped
-    leaves no trace. Cancelling the task does not stop work already in a
-    worker thread (``asyncio.to_thread``); that thread runs to its end, and
-    since its writes are only deferred, it cannot write anything either."""
+    deferred, or None when ``stop`` (or a cancel) came first and its worker
+    job did nothing. Nothing is written here, so a fetch that is cancelled or
+    dropped leaves no trace. Cancelling the task does not stop work already
+    in a worker thread (``asyncio.to_thread``); that thread runs to its end,
+    and since its writes are only deferred, it cannot write anything either."""
     writes: list[Callable[[], Any]] = []
+    cancelled = threading.Event()
     token = deferred_writes.set(writes)
+    stop_token = fetch_stopped.set(lambda: cancelled.is_set() or stop())
     try:
         return await fetch(input, ctx), writes
+    except FetchStopped:
+        return None
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
     finally:
+        fetch_stopped.reset(stop_token)
         deferred_writes.reset(token)
 
 

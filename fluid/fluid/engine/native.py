@@ -4816,14 +4816,16 @@ class NativeLoop(BackgroundLifecycleMixin):
                             tu["arg_error"] = _explain_truncation(
                                 tu["arg_error"], result.stop_reason
                             )
-                        await self._prefetch(result.tool_uses, i)
+                        if self.max_concurrent_tools > 1:  # 1: main's loop, untouched
+                            await self._prefetch(result.tool_uses, i)
                         blocks.append(
                             await self._dispatch_tool_interruptible(sid, turn_id, tu)
                         )
                 finally:
                     # Whatever ended the round, no early fetch outlives it.
-                    early, self._prefetches = self._prefetches, {}
-                    await _cancel_and_join(t for _, t in early.values())
+                    if self._prefetches:
+                        early, self._prefetches = self._prefetches, {}
+                        await _cancel_and_join(t for _, t in early.values())
             answers = await self.pending_question_answers()
             if answers and blocks and not self._interrupted.is_set():
                 blocks[-1] = replace(
@@ -6099,11 +6101,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         (``_gated_call``). Eligible, checked without side effects on the same
         raw input the gate sees: the tool registered a fetch, permissions allow
         the call without asking, no PreToolUse or PostToolUse hook could act on
-        it, the repeat guard would not ask (``PermissionEngine.would_guard``,
-        counting the calls before it), and it cannot see what a spill writes.
+        it, it repeats neither the repeat guard's last call nor any earlier
+        call of the reply, whatever lies between (``PermissionEngine.would_guard``),
+        and it cannot see what a spill writes.
         Fetches of calls the loop has passed are cancelled; once the turn is
         interrupted, all are and none start (checked again after the cleanup
-        await and when a fetch task begins).
+        await, when a fetch task begins and when its worker job starts).
         A cancelled fetch running in a worker thread finishes there unseen.
         """
         rest = tool_uses[at:]
@@ -6123,13 +6126,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         async def start(fetch: Any, input: dict[str, Any]) -> Any:
             if self._interrupted.is_set():
                 return None  # not fetched: the handler fetches, if it runs at all
-            return await early_fetch(fetch, input, self.ctx)
+            return await early_fetch(fetch, input, self.ctx, stop=self._interrupted.is_set)
 
-        noted: list[tuple[str, dict[str, Any]]] = []  # the guard counts these first
-        for tu in rest:
+        for idx in range(at, len(tool_uses)):
             if len(self._prefetches) >= self.max_concurrent_tools:
                 return
+            tu = tool_uses[idx]
             name, tool_use_id, raw = tu["name"], tu["tool_use_id"], tu.get("input")
+            earlier = [(t["name"], t.get("input")) for t in tool_uses[:idx]]
             spec, fetch = self.registry.get(name), self.registry.fetch_of(name)
             if (
                 spec is None or fetch is None or tu.get("arg_error")
@@ -6141,11 +6145,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                 ))
                 or (self.permissions is not None and (
                     self.permissions.decide(spec, raw, cwd=self.ctx.cwd).decision != "allow"
-                    or self.permissions.would_guard(name, raw, before=noted)
+                    or self.permissions.would_guard(name, raw, before=earlier)
                 ))
             ):
                 return
-            noted.append((name, raw))
             if tool_use_id in self._prefetches:
                 continue
             try:
@@ -6560,13 +6563,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             if early is not None and prompted:
                 await _cancel_and_join([early[1]])
                 early = None
-            held = [early] if early is not None else []
-            token = prefetched.set(held or None)
-            try:
+            if early is None:  # main's path (always at max_concurrent_tools 1)
                 outcome = await self.registry.dispatch(name, input, self.ctx)
-            finally:
-                prefetched.reset(token)
-                await _cancel_and_join(task for _, task in held)  # one the handler never took
+            else:
+                held = [early]
+                token = prefetched.set(held)
+                try:
+                    outcome = await self.registry.dispatch(name, input, self.ctx)
+                finally:
+                    prefetched.reset(token)
+                    await _cancel_and_join(task for _, task in held)  # one the handler never took
 
         # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
         # Collect answers via QuestionRequest/RespondQuestion round-trips, then

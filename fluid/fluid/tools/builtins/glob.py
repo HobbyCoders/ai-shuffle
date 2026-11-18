@@ -9,7 +9,6 @@ for it instead of reaching for a repo-wide content search.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import time
@@ -25,7 +24,7 @@ from fluid.tools.builtins._util import (
     truncate,
 )
 from fluid.tools import view
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once, off_loop
 
 MAX_RESULTS = 200
 MAX_LIMIT = 5000
@@ -114,7 +113,7 @@ async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> tuple[tuple, ToolOutcom
     """The listing itself, with the arguments it resolved (the root once): no
     session bookkeeping (the registered ``FETCH``)."""
     root, limit = _list_args(input, ctx)
-    return (root, limit), await asyncio.to_thread(
+    return (root, limit), await off_loop(
         _glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
 
 

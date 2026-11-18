@@ -196,8 +196,8 @@ async def test_exit_mid_reply_discards_early_fetches(how) -> None:
     assert loop._prefetches == {}
 
 
-async def _approving(loop: NativeLoop, sid: str) -> list[str]:
-    """Run the turn, allowing each permission prompt; the prompted call ids."""
+async def _approving(loop: NativeLoop, sid: str, decision: str = "allow") -> list[str]:
+    """Run the turn, answering each permission prompt; the prompted call ids."""
     asked: list[str] = []
 
     async def approve() -> None:
@@ -205,7 +205,7 @@ async def _approving(loop: NativeLoop, sid: str) -> list[str]:
             if isinstance(event, PermissionRequest):
                 asked.append(event.tool_use_id)
                 await loop.submit(RespondPermission(request_id=event.request_id,
-                                                    decision="allow"))
+                                                    decision=decision))
 
     watcher = asyncio.create_task(approve())
     try:
@@ -282,16 +282,22 @@ async def test_guard_streak_from_an_earlier_reply_counts(tmp_path, monkeypatch) 
     assert [r.is_error for r in _results(loop)] == [False, True, False]
 
 
-async def test_would_guard_matches_note_execution() -> None:
-    engine = PermissionEngine("on_write", doom_loop_threshold=3)
-    calls = [("Read", {"p": 1})] * 4 + [("Grep", {"q": 1}), ("Read", {"p": 1})]
+async def test_would_guard_flags_every_repeat_and_changes_nothing() -> None:
+    """Conservative by construction: a call that repeats the guard's last call
+    or any call in ``before`` is flagged, whatever lies between; so is every
+    call at threshold 1. Whenever ``note_execution`` trips, ``would_guard``
+    said so first, and asking never moves the streak."""
+    engine = PermissionEngine("on_write", doom_loop_threshold=2)
+    calls = [("Read", {"p": 1}), ("Grep", {"q": 1}), ("Read", {"p": 1}), ("Read", {"p": 1})]
     for n, (name, input) in enumerate(calls):
-        expected = engine.would_guard(name, input)
-        assert engine.would_guard(name, input) == expected  # asking changes nothing
-        assert engine.note_execution(name, input) == expected, n
-    fresh = PermissionEngine("on_write", doom_loop_threshold=3)
-    assert fresh.would_guard("Read", {"p": 1}, before=calls[:2])
-    assert not fresh.would_guard("Read", {"p": 1}, before=calls[:3])
+        flagged = engine.would_guard(name, input)
+        assert engine.would_guard(name, input) == flagged  # asking changes nothing
+        assert flagged == (n >= 3), n  # only the call right after its twin repeats the last
+        assert engine.note_execution(name, input) <= flagged, n
+    fresh = PermissionEngine("on_write", doom_loop_threshold=2)
+    assert fresh.would_guard("Read", {"p": 1}, before=[("Read", {"p": 1}), ("Grep", {"q": 1})])
+    assert not fresh.would_guard("Read", {"p": 2}, before=[("Read", {"p": 1})])
+    assert PermissionEngine("on_write", doom_loop_threshold=1).would_guard("Read", {"p": 9})
 
 
 async def test_failing_fetch_surfaces_at_its_own_position() -> None:
@@ -696,16 +702,179 @@ async def test_grep_and_glob_resolve_their_root_once(tmp_path, monkeypatch, limi
 
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "f.txt").write_text("needle\n")
-    resolved: list[str] = []
+    from fluid.tools.registry import deferred_writes
+
+    resolved: list[tuple[str, bool]] = []  # (helper, inside an early fetch)
     for module, name in ((grep_tool, "_search_args"), (glob_tool, "_list_args")):
         real = getattr(module, name)
         monkeypatch.setattr(module, name, lambda i, c, real=real, name=name: (
-            resolved.append(name), real(i, c))[1])
+            resolved.append((name, deferred_writes.get() is not None)), real(i, c))[1])
     registry = ToolRegistry()
     register_builtins(registry)
     loop = _loop(_Provider(_reply(("g", "Grep", {"pattern": "needle", "path": "src"}),
                                   ("l", "Glob", {"pattern": "*.txt", "path": "src"}))),
                  registry, limit, tmp_path=tmp_path)
     await _turn(loop)
-    assert sorted(resolved) == ["_list_args", "_search_args"]
+    assert sorted(resolved) == [("_list_args", limit > 1), ("_search_args", limit > 1)]
     assert [r.is_error for r in _results(loop)] == [False, False]
+
+
+async def test_a_repeat_is_not_fetched_early_even_after_a_mode_flip(tmp_path, monkeypatch) -> None:
+    """``Read a, Read b, Read a`` at threshold 2, a rule allowing only a.txt,
+    and the policy switched to always_ask while the first Read is loading: b
+    prompts (denied) and never reaches the guard, so the third Read trips it.
+    It repeats an earlier call of the reply, so it was never fetched early:
+    a.txt is opened once (P1, round 3)."""
+    import threading
+
+    from fluid.permissions.rules import Rule
+
+    for f in "ab":
+        (tmp_path / f"{f}.txt").write_text(f"{f}\n")
+    release, loaded = threading.Event(), []
+    real = read_tool._load
+
+    def slow(i, c):
+        loaded.append(i["file_path"])
+        if loaded.count("a.txt") == 1 and i["file_path"] == "a.txt":
+            release.wait(_HANG)
+        return real(i, c)
+
+    monkeypatch.setattr(read_tool, "_load", slow)
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(_reply(("r0", "Read", {"file_path": "a.txt"}),
+                                  ("r1", "Read", {"file_path": "b.txt"}),
+                                  ("r2", "Read", {"file_path": "a.txt"}))),
+                 registry, 4, policy="on_write", tmp_path=tmp_path, store=store, sid=sid)
+    loop.permissions = PermissionEngine(
+        "on_write", [Rule(tool="Read", decision="allow", input_globs={"file_path": "a.txt"})],
+        doom_loop_threshold=2)
+
+    early_at_flip: list[str] = []
+
+    async def flip() -> None:
+        try:
+            await _until(lambda: "a.txt" in loaded)
+            early_at_flip.extend(loop._prefetches)
+            loop.permissions.approval_policy = "always_ask"
+        finally:
+            release.set()
+
+    flipper = asyncio.create_task(flip())
+    asked = await _approving(loop, sid, decision="deny")
+    await flipper
+    assert "r1" in early_at_flip and "r2" not in early_at_flip  # r0 may be in its gate
+    assert asked == ["r1", "r2"]
+    assert loaded.count("a.txt") == 1
+    assert [r.is_error for r in _results(loop)] == [False, True, True]
+
+
+async def test_a_queued_worker_job_checks_the_interrupt_before_any_io(tmp_path, monkeypatch) -> None:
+    """The only worker thread is held, so the Read fetch's job queues behind
+    it; the interrupt lands (no cancel yet) before the thread frees up. The
+    job checks at its start and opens nothing (P2, round 3)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    (tmp_path / "f.txt").write_text("f\n")
+    loaded = _spy_load(monkeypatch)
+    pool, held, queued = ThreadPoolExecutor(max_workers=1), threading.Event(), []
+    aloop = asyncio.get_running_loop()
+
+    def to_thread(fn, *args):
+        queued.append(fn)
+        return aloop.run_in_executor(pool, fn, *args)
+
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    pool.submit(held.wait, _HANG)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(), registry, 2, tmp_path=tmp_path)
+    try:
+        await loop._prefetch([{"tool_use_id": "r", "name": "Read",
+                               "input": {"file_path": "f.txt"}}], 0)
+        task = loop._prefetches["r"][1]
+        await _until(lambda: queued)  # the job waits for the held thread
+        loop._interrupted.set()
+        held.set()
+        assert await asyncio.wait_for(task, _HANG) is None
+        assert loaded == []
+    finally:
+        held.set()
+        loop._interrupted.clear()
+        await loop._prefetch([], 0)
+        pool.shutdown(wait=True)
+
+
+def test_a_symlinked_stats_file_does_not_hide_its_folder(tmp_path) -> None:
+    """The stats file links outside its folder; the spill writer replaces the
+    link, so a search of the stats folder may see the new count: it is not
+    fetched early, whether the folder is named as written or resolved (P3,
+    round 3)."""
+    from fluid.tools.registry import ToolCtx
+    from fluid.tools.spill import _stats_path, may_see_spills
+
+    ctx = ToolCtx(cwd=str(tmp_path / "work"), session_id="s1")
+    ctx.extra["harness_state_root"] = str(tmp_path / "state")
+    stats = _stats_path(ctx)
+    stats.parent.mkdir(parents=True)
+    (tmp_path / "elsewhere.json").write_text("{}")
+    stats.symlink_to(tmp_path / "elsewhere.json")
+    assert may_see_spills("Grep", {"pattern": "Glob", "path": str(stats.parent)}, ctx)
+    assert may_see_spills("Glob", {"pattern": "*", "path": str(stats.parent.resolve())}, ctx)
+    assert not may_see_spills("Grep", {"pattern": "x", "path": str(tmp_path / "work")}, ctx)
+
+
+async def test_grep_reports_a_missing_pattern_before_a_bad_path() -> None:
+    """Main's error precedence at limit 1: ``{"path": 123}`` without a
+    pattern names the pattern (P4, round 3)."""
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(_reply(("g", "Grep", {"path": 123}))), registry, 1)
+    await _turn(loop)
+    result = _results(loop)[0]
+    assert result.is_error and "pattern" in result.output and "TypeError" not in result.output
+
+
+def test_note_execution_reads_the_streak_after_the_threshold_callback() -> None:
+    """As on main: the threshold callback runs first, then the streak is
+    read; a callback that notes another tool resets the streak, so the second
+    Read does not trip (P5, round 3)."""
+    calls: list[str] = []
+
+    def threshold_for(name: str):
+        calls.append(name)
+        if calls.count("Read") == 2 and name == "Read":
+            engine.note_execution("Other", {})
+        return None
+
+    engine = PermissionEngine("on_write", doom_loop_threshold=2,
+                              doom_loop_threshold_for=threshold_for)
+    assert engine.note_execution("Read", {"p": 1}) is False
+    assert engine.note_execution("Read", {"p": 1}) is False
+
+
+def test_default_settings_keep_main_prompt_and_config(tmp_path) -> None:
+    """At the default (``max_concurrent_tools`` 1) the prompt bullet and the
+    serialized config are main's, byte for byte (round 3, item 7)."""
+    from dataclasses import replace
+
+    from fluid.cli.prompt import compose_base_prompt, profile_for
+    from fluid.config.model import HarnessConfig
+
+    config = HarnessConfig()
+    main_bullet = ("- Make independent tool calls in the same reply so they run together; "
+                   "serialize only when one call's input depends on another's result.")
+    profile = replace(profile_for(config, guidance_home=tmp_path),
+                      tools=frozenset({"Read", "Grep", "Glob", "Bash"}), code_mode=False)
+    assert profile.concurrent_tools is False
+    prompt = compose_base_prompt(profile)
+    assert main_bullet in prompt and "fetched concurrently" not in prompt
+    on = compose_base_prompt(replace(profile, concurrent_tools=True))
+    assert main_bullet not in on and "fetched concurrently" in on
+    assert "max_concurrent_tools" not in config.to_dict()
+    assert HarnessConfig.from_dict({"max_concurrent_tools": 3}).to_dict()[
+        "max_concurrent_tools"] == 3
