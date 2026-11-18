@@ -31,6 +31,7 @@ will pick the turn up). Nothing here imports a caller.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import logging
 import threading
@@ -630,29 +631,39 @@ async def submit_async(
         held = await owner_confirm.on_owner_message(session_id, prompt)
     window_pin: Dict[str, Any] = {}
     reactivated: dict[str, Any] = {}
-    try:
-        turn_id = await asyncio.to_thread(
-            _submit_blocking,
-            session_id,
-            source,
-            prompt=prompt,
-            profile_id=profile_id,
-            project_id=project_id,
-            worktree_id=worktree_id,
-            overrides=overrides,
-            explicit_permission=explicit_permission,
-            payload=payload,
-            command_id=command_id,
-            parent_turn_id=parent_turn_id,
-            instance_id=instance_id,
-            window_pin=window_pin,
-            reactivated=reactivated,
-            caller=caller,
-            person_entered=person_entered,
-        )
-    finally:
-        if reactivated:
-            await _announce_reactivated(session_id, reactivated["user_id"])
+    picks_speed = source in _BINDING_SOURCES and bool(overrides) and (
+        overrides.get("fast") is not None or bool(overrides.get("speed")))
+    from app.api.sessions_permissions import settings_lock
+
+    # A speed pick is saved and announced under the lock live picks use, so
+    # the chat's clients hear the pairs in the order they were saved.
+    async with settings_lock(session_id) if picks_speed else contextlib.nullcontext():
+        try:
+            blocking = asyncio.to_thread(
+                _submit_blocking,
+                session_id,
+                source,
+                prompt=prompt,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                overrides=overrides,
+                explicit_permission=explicit_permission,
+                payload=payload,
+                command_id=command_id,
+                parent_turn_id=parent_turn_id,
+                instance_id=instance_id,
+                window_pin=window_pin,
+                reactivated=reactivated,
+                caller=caller,
+                person_entered=person_entered,
+            )
+            turn_id = await (_to_the_end(blocking) if picks_speed else blocking)
+        finally:
+            if reactivated:
+                await _announce_reactivated(session_id, reactivated["user_id"])
+        if window_pin:
+            await _announce_window_pin(session_id, window_pin)
     if held is not None:
         # The message is durably queued now, so the waiting call's release
         # can hand it to the engine before answering the call "not run yet".
@@ -661,9 +672,21 @@ async def submit_async(
         await owner_confirm.park(session_id, held.get("park") or ())
     if not no_kick:
         _kick(session_id)
-    if window_pin:
-        await _announce_window_pin(session_id, window_pin)
     return turn_id
+
+
+async def _to_the_end(work: Any) -> Any:
+    """Await ``work``; a cancel waits for it to finish first, then propagates.
+
+    The save runs on a thread that a cancel does not stop, so the lock around
+    it is let go only once the pair is written.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task})
+        raise
 
 
 def _reactivate_for_send(

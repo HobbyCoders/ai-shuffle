@@ -17,6 +17,16 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _FAST_WAIT_READ_SECONDS = 1.5
 _locks = WeakValueDictionary()
+
+
+def settings_lock(session_id: str) -> asyncio.Lock:
+    """The chat's lock for saving a setting and announcing what was saved.
+
+    Turn admission takes it too when a send saves a speed pick, so the chat's
+    clients hear speed pairs in the order they were saved. Held weakly: it
+    goes away once nothing holds or waits on it.
+    """
+    return _locks.setdefault(session_id, asyncio.Lock())
 #: Running fast-mode hand-downs (strong references until they finish).
 _fast_propagations: set = set()
 
@@ -117,8 +127,8 @@ def _start_propagation(session_id: str, fast: bool) -> None:
     task.add_done_callback(_fast_propagations.discard)
 
 
-async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
-                             inherited: bool = False, propagate: bool = True) -> dict:
+async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool = False,
+                             propagate: bool = True, announce: bool = False) -> dict:
     """Change a session's live run settings.
 
     A fast-mode change is then handed down to the session's subagents in the
@@ -133,9 +143,11 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     message. It is absent when the setting already holds: nothing is running,
     or the lane switches at its next request (see
     ``HarnessAdapter.set_run_settings``). ``GET /live`` reports the same, so a
-    reload or another device can say so too.
+    reload or another device can say so too. ``announce`` tells this worker's
+    clients of the chat what was saved (:func:`_announce_run_settings`) before
+    the chat's lock is let go.
     """
-    result = await _apply_run_settings(session_id, body, inherited=inherited)
+    result = await _apply_run_settings(session_id, body, inherited=inherited, announce=announce)
     if propagate and ({"fast", "speed"} & body.model_fields_set) and "skipped" not in result:
         _start_propagation(session_id, bool(result["fast"]))
     return result
@@ -150,7 +162,8 @@ def _checked_changes(body: RunSettingsUpdate) -> dict:
     return changes
 
 
-async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool) -> dict:
+async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool,
+                              announce: bool = False) -> dict:
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
     from app.core.model_effort import normalize_effort
@@ -162,8 +175,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
 
     changes = _checked_changes(body)
     picks_speed = "fast" in changes or "speed" in changes
-    lock = _locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
+    asked = {"effort_asked": "effort" in changes, "speed_asked": picks_speed}
+    async with settings_lock(session_id):
         session = await run_sync(control._require_owned, session_id)
         if inherited:
             if set(changes) != {"fast"}:
@@ -186,6 +199,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             if window is None:
                 raise ValueError("This model does not support the selected context window")
             await run_sync(database.set_session_run_binding, session_id, context_window=window)
+            if announce:
+                await _announce_run_settings(session_id, {"context_window": window}, **asked)
             return {"context_window": window}
         state = get_session_pool().peek(session_id)
         runtime = get_live_runtime(session_id)
@@ -246,6 +261,9 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             state.connect_options.aih_fast = selected["fast"]
             state.connect_options.aih_speed = selected["speed"]
         waiting = fast_waiting_turn(session_id)
+        if announce:
+            # Under the lock, so a send admitted meanwhile announces after this.
+            await _announce_run_settings(session_id, selected, **asked)
         return {**selected, "fast_applies_turn": waiting} if waiting else selected
 
 
@@ -337,9 +355,7 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
         raise ValueError("session_id is required")
     result = await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
         {key: value for key, value in body.items() if key not in ("session_id", "inherited")}),
-        inherited=body.get("inherited") is True)
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body,
-                                 speed_asked="fast" in body or "speed" in body)
+        inherited=body.get("inherited") is True, announce=True)
     return result
 
 
@@ -384,12 +400,13 @@ async def update_run_settings(
         if owner is not None:
             result = await _call_owner_run_settings(owner, session_id, _checked_changes(body))
         else:
-            result = await apply_run_settings(session_id, body)
+            return await apply_run_settings(session_id, body, announce=True)
     except (control.ControlRefused, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
+    # Another worker runs the chat and announced it there; tell this one's clients.
     await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set,
                                  speed_asked=bool({"fast", "speed"} & body.model_fields_set))
     return result
@@ -407,8 +424,7 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
     from app.core.session_runtime import get_live_runtime
     from app.core.permission_handler import permission_handler
 
-    lock = _locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
+    async with settings_lock(session_id):
         session = await run_sync(control._require_owned, session_id)
         mode = permission_mode_for_session_mode(mode, session.get("mode"))
         state = get_session_pool().peek(session_id)

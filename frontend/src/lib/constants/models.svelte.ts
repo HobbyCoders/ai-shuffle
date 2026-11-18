@@ -1038,7 +1038,8 @@ function refreshStaleCapabilities(providers: RegistryProviderPayload[]) {
 					capabilityAttempts.delete(id);
 					continue;
 				}
-				if (hydrated && result?.refreshed?.includes(id)) {
+				// Tiers still stale after a refresh (a model added meanwhile): retry under backoff.
+				if (hydrated && result?.refreshed?.includes(id) && current?.speed_tiers_stale !== true) {
 					attempt.done = true;
 					attempt.generation = current?.capability_generation;
 					continue;

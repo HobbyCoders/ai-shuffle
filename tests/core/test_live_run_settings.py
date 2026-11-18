@@ -372,8 +372,14 @@ async def test_effort_pick_and_auto_are_announced_to_open_clients(mock_db, monke
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"effort": None}, source_device_id=None)
 
+    # The owner announces what it saved, under the chat's lock.
     broadcast.reset_mock()
-    monkeypatch.setattr(api, "apply_run_settings", AsyncMock(return_value={"effort": None, "fast": False}))
+    db.create_profile("role", "Role", None, {"model": "fable"})
+    db.create_session(session_id="announce", profile_id="role", model="fable", effort="medium")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda _: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda _: None)
     await api.handle_run_settings({"session_id": "announce", "effort": None}, "peer")
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"effort": None}, source_device_id=None)
@@ -496,10 +502,10 @@ async def test_handed_down_change_skips_a_pinned_or_unsupported_subagent(tree):
 async def test_a_failing_subagent_does_not_stop_the_others(tree, monkeypatch):
     real = api._apply_run_settings
 
-    async def flaky(session_id, body, *, inherited):
+    async def flaky(session_id, body, *, inherited, announce=False):
         if session_id == "w1":
             raise ValueError("The session is still connecting. Try again in a moment.")
-        return await real(session_id, body, inherited=inherited)
+        return await real(session_id, body, inherited=inherited, announce=announce)
 
     monkeypatch.setattr(api, "_apply_run_settings", flaky)
     db.create_session("w3", parent_session_id="p", model="opus", profile_id="agent", hidden=True, is_worker=True)

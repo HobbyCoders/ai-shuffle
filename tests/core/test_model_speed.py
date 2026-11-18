@@ -297,6 +297,79 @@ async def test_a_speed_staged_with_a_send_is_announced_as_saved(mock_db, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_live_pick_during_a_send_is_announced_after_it(mock_db, monkeypatch):
+    import asyncio
+    import threading
+
+    from app.core import turn_manager
+    from app.core.sync_engine import sync_engine
+    from tests.core.helpers import make_profile
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated",
+                        AsyncMock(side_effect=lambda **kw: sent.append(kw["updates"])))
+    make_profile("agent", {})
+    db.create_session("race", profile_id="agent", model="gpt-6.1-sol")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool", lambda: SimpleNamespace(peek=lambda sid: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda sid: None)
+    saved, release = threading.Event(), threading.Event()
+    real_save = db.set_session_run_binding
+
+    def held_send_save(*args, **kwargs):
+        real_save(*args, **kwargs)
+        if not saved.is_set():  # the send's save: hold it while the live pick arrives
+            saved.set()
+            release.wait(5)
+
+    monkeypatch.setattr(db, "set_session_run_binding", held_send_save)
+    send = asyncio.create_task(turn_manager.submit_async(
+        "race", "user", prompt="hi", profile_id="agent",
+        overrides={"model": "gpt-6.1-sol", "fast": True, "speed": "fast"}, no_kick=True))
+    while not saved.is_set():
+        await asyncio.sleep(0.01)
+    put = asyncio.create_task(api.apply_run_settings(
+        "race", api.RunSettingsUpdate(speed="standard"), announce=True, propagate=False))
+    await asyncio.sleep(0.05)
+    assert [u for u in sent if "fast" in u] == []  # the live pick waits for the send
+    release.set()
+    await send
+    await put
+    pairs = [u for u in sent if "fast" in u]
+    # Announced in the order saved: the last one is what the row holds.
+    assert pairs == [{"fast": True, "speed": "fast"}, {"fast": False, "speed": "standard"}]
+    assert ms.stored_pair(prior=db.get_session("race")) == pairs[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_send_holds_the_lock_until_its_save_lands():
+    import asyncio
+    import threading
+
+    from app.core import turn_manager
+
+    release, landed, lock = threading.Event(), [], asyncio.Lock()
+
+    def save():
+        release.wait(5)
+        landed.append(True)
+
+    async def send():
+        async with lock:
+            await turn_manager._to_the_end(asyncio.to_thread(save))
+
+    task = asyncio.create_task(send())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert lock.locked()  # a live pick still waits: the send's save has not landed
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert landed and not lock.locked()
+
+
+@pytest.mark.asyncio
 async def test_a_swapped_model_is_the_one_ultrafast_is_checked_against(monkeypatch):
     adapter = _live_adapter(monkeypatch, {"provider_type": "openai"})
     adapter._options.model = "gpt-6-luna"
