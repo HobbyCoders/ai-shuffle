@@ -16,8 +16,13 @@ const adapter = source.slice(start, end).replace('(event: MouseEvent): boolean',
 const tailStart = source.indexOf('function latestTurnTailNow(');
 const tailEnd = source.indexOf('\n\tfunction refreshLatestTurnTailReserve()', tailStart);
 if (tailStart < 0 || tailEnd < tailStart) throw new Error('Missing passive reserve owner');
+// Its arithmetic is anchoredTailReserve's.
+const reserveStart = source.indexOf('function anchoredTailReserve(');
+const reserveEnd = source.indexOf('\n\tfunction renderedFollowEnd()', reserveStart);
+if (reserveStart < 0 || reserveEnd < reserveStart) throw new Error('Missing anchored reserve');
 const tailOwner = source.slice(tailStart, tailEnd)
- .replace('(pendingRemoval?: HTMLElement): number | null', '(pendingRemoval)');
+ .replace('(pendingRemoval?: HTMLElement): number | null', '(pendingRemoval)')
+ + source.slice(reserveStart, reserveEnd).replace(/(\w|\)): number/g, '$1');
 
 afterEach(() => document.body.replaceChildren());
 
