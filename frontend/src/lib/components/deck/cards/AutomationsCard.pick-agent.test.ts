@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import type { Automation } from '$lib/api/automations';
 // Component tests have no SvelteKit router; exercise the kit's in-page Back fallback.
-vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No router'); } }));
+vi.mock('$app/navigation', () => ({ pushState: () => { throw new Error('No router'); }, goto: vi.fn() }));
 
 const automationsApi = vi.hoisted(() => ({
 	getAutomations: vi.fn(),
@@ -31,6 +31,7 @@ vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/components/settings/ModelPicker.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 
 import AutomationsCard from './AutomationsCard.svelte';
+import { shellHistory } from '$lib/services/app-history.svelte';
 
 // jsdom has no Web Animations API (the card uses svelte transitions).
 const proto = Element.prototype as unknown as { animate?: unknown };
@@ -176,3 +177,19 @@ describe('detail scroll position', () => {
 		}
 	});
 });
+
+describe('a reloaded automation detail (S16)', () => {
+	afterEach(() => shellHistory.stop());
+	it('keeps the saved selection when the first load fails', async () => {
+		vi.stubGlobal('innerWidth', 1280);
+		shellHistory.start({ shell: { id: 'saved', place: { type: 'automations', panel: 'detail:a1' } } }, { type: 'automations' });
+		apiGet.mockImplementationOnce(async () => { throw new Error('503'); });
+		render(AutomationsCard, { props: { mobile: false } });
+		await waitFor(() => expect(automationsApi.getAutomations).toHaveBeenCalled());
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// A failed load is not proof the automation is gone: the entry keeps it.
+		expect(shellHistory.place?.panel).toBe('detail:a1');
+		expect(screen.queryByText('Nightly digest', { selector: 'h1, h2' })).toBeNull();
+	});
+});
+

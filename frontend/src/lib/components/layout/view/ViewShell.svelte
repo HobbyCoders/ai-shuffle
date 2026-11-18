@@ -27,8 +27,16 @@ Keep detailOpen true when an item is selected; Shell owns phone push/pop history
 No host (tests), below the desktop rail (<768px), or the phone shell: inline.
 Panel contexts and tokens travel automatically. Off-screen feature pages never claim.
 -->
+<script lang="ts" module>
+	// Retained destinations share the browser stack: retire the old step before
+	// another destination may push its own. A pop is asynchronous.
+	const detailHistory = $state({ retiring: null as string | null });
+</script>
 <script lang="ts">
-	import { getAllContexts, getContext, onMount, untrack, type Snippet } from 'svelte';
+	import { getAllContexts, getContext, onMount, tick, untrack, type Snippet } from 'svelte';
+	import { page } from '$app/state';
+	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { shellHistory } from '$lib/services/app-history.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
@@ -46,6 +54,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		onBack?: (current?: () => boolean) => void;
 		/** Settings already owns its multi-level history; other pages leave this on. */
 		manageHistory?: boolean;
+		/** The web UI records this page's selection in its shell history (the phone app keeps the entries below). */
 		historyType?: ViewType;
 		selection?: string | null;
 		restoreSelection?: (key: string, current: () => boolean) => void | 'pending' | 'missing';
@@ -67,6 +76,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
 	const token = Symbol('view-panel');
+	const historyKey = $props.id();
 	let width = $state(0);
 	let mainSlot: HTMLElement | undefined = $state();
 	let lastKey: unknown;
@@ -92,6 +102,55 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		return () => viewPanel.release(token);
 	});
 
+	let pushed = false;
+	let previousOpen = false;
+	$effect(() => {
+		const open = active && stacked && detailOpen && !contentFirst;
+		const retiring = detailHistory.retiring;
+		// The phone app's own detail entries; the web UI's shell history records the rest.
+		if (!manageHistory || !platform.isMobile) return;
+		// Leaving a retained destination must remove its invisible Back stop.
+		if (!active && pushed) {
+			pushed = false;
+			if (untrack(() => (page.state as { viewPanelDetail?: string }).viewPanelDetail) === historyKey) {
+				detailHistory.retiring = historyKey;
+				history.back();
+			}
+		}
+		if (active && stacked && !detailOpen && previousOpen && pushed) {
+			pushed = false;
+			history.back();
+		}
+		previousOpen = open;
+		if (open && !pushed && !retiring) {
+			let cancelled = false;
+			// Let every retained destination retire first, irrespective of effect order.
+			void tick().then(() => {
+				if (cancelled || detailHistory.retiring) return;
+				try {
+					if ((page.state as { viewPanelDetail?: string }).viewPanelDetail !== historyKey) {
+						ignoreRouterNotReady(pushState('', { ...page.state, viewPanelDetail: historyKey } as App.PageState));
+					}
+					pushed = true;
+				} catch { /* Routerless tests still have an in-page back. */ }
+			});
+			return () => { cancelled = true; };
+		}
+	});
+	let firstHistory = true;
+	$effect(() => {
+		const entry = (page.state as { viewPanelDetail?: string } | undefined)?.viewPanelDetail;
+		if (detailHistory.retiring && entry !== detailHistory.retiring) detailHistory.retiring = null;
+		if (firstHistory) { firstHistory = false; return; }
+		untrack(() => {
+			if (manageHistory && pushed && entry !== historyKey) {
+				// A pop while wide/off screen still releases our step; it must not block
+				// a fresh claim the next time this selected detail becomes stacked.
+				pushed = false;
+				if (active && stacked) onBack?.();
+			}
+		});
+	});
 	// Track landings separately from visible changes: opening an editor may wait for a save.
 	let followed: typeof shellHistory.restored = null;
 	let previousKey: string | null | undefined;
@@ -126,8 +185,11 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		}
 	});
 	function back() {
-		if (historyType && shellHistory.place?.panel) history.back();
-		else onBack?.();
+		if ((manageHistory && stacked && pushed) || (historyType && shellHistory.place?.panel)) {
+			history.back();
+			return;
+		}
+		onBack?.();
 	}
 </script>
 

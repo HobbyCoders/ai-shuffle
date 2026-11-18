@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { page } from '$app/state';
-import { shellHistory, type ShellState } from './app-history.svelte';
+import { savedPlace, shellHistory, type ShellState } from './app-history.svelte';
 import type { ActiveView } from '$lib/stores/layout.svelte';
 
 // A router that keeps page state the way SvelteKit does: a shallow goto with
@@ -157,41 +157,6 @@ it('keeps boot’s view for Back when writing it to the arrival entry was reject
  expect(shellHistory.place?.sessionId).toBe('b');
 });
 
-it('pushes a chat picked in the phone drawer after the drawer’s own Back lands, and does not take that Back for the user’s', async () => {
- const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
- router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
- shellHistory.start(arrival, null);
- pushOverlay({ mobileDrawer: true });
- // The pick runs as the drawer closes; its history.back() lands a moment later.
- shellHistory.pick('c', 'a');
- shellHistory.destination({ type: 'session', sessionId: 'c' });
- await settle();
- expect(places()).toEqual(['a', 'a']);
- expect(go(-1)).toBe(false);
- expect(shellHistory.place?.sessionId).toBe('c');
- await vi.waitFor(() => expect(places()).toEqual(['a', 'c']));
- expect(router.index).toBe(1);
- expect(router.entries.some(({ state }) => state.mobileDrawer)).toBe(false);
- // Back is the user's again.
- expect(go(-1)).toBe(true);
- expect(shellHistory.place?.sessionId).toBe('a');
-});
-
-it('still pushes a drawer pick when the router never reports the drawer’s Back', async () => {
- vi.useFakeTimers();
- const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
- router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
- shellHistory.start(arrival, null);
- pushOverlay({ mobileDrawer: true });
- shellHistory.pick('c', 'a');
- shellHistory.destination({ type: 'session', sessionId: 'c' });
- await vi.advanceTimersByTimeAsync(500);
- expect(router.entries).toHaveLength(2);
- await vi.advanceTimersByTimeAsync(200);
- expect(places()).toEqual(['a', 'a', 'c']);
- expect(here().mobileDrawer).toBeUndefined();
-});
-
 it('keeps entries in order when a write commits late, with no timer letting a later write pass it', async () => {
  vi.useFakeTimers();
  const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
@@ -322,40 +287,6 @@ it('does not land an entry whose refining replace is still queued (a Settings de
  expect(shellHistory.place?.settings).toMatchObject({ view: 'detail', depth: 2 });
 });
 
-it('the phone app: Notes from the drawer adds no entry and waits for nothing, as on main', async () => {
- phone.app = true;
- startOn(saved('arrival', { type: 'session', sessionId: 'a' }));
- pushOverlay({ mobileDrawer: true });
- const overlay = here();
- shellHistory.destination({ type: 'notes' });
- // Past main's 600 ms drawer wait, which only chat picks start: nothing was pushed.
- await new Promise(resolve => setTimeout(resolve, 700));
- await settle();
- expect(router.entries).toHaveLength(2);
- expect(here()).toBe(overlay);
- // The drawer's own Back lands: the entry under it now says Notes. No second stop.
- expect(go(-1)).toBe(false);
- await vi.waitFor(() => expect(here().shell?.place.type).toBe('notes'));
- expect(router.entries[0].state.shell?.id).toBe('arrival');
- expect(shellHistory.place?.type).toBe('notes');
-});
-
-it('the phone app: a second chat pick restarts the wait for the drawer’s Back, and both picks get an entry in order', async () => {
- vi.useFakeTimers();
- phone.app = true;
- startOn(saved('arrival', { type: 'session', sessionId: 'a' }));
- pushOverlay({ mobileDrawer: true });
- shellHistory.pick('c', 'a');
- shellHistory.destination({ type: 'session', sessionId: 'c' });
- await vi.advanceTimersByTimeAsync(400);
- shellHistory.pick('d', 'c');
- shellHistory.destination({ type: 'session', sessionId: 'd' });
- await vi.advanceTimersByTimeAsync(400);
- expect(router.entries).toHaveLength(2);
- await vi.advanceTimersByTimeAsync(300);
- expect(places()).toEqual(['a', 'a', 'c', 'd']);
-});
-
 it('after a rejected push, selecting the committed place again adds no duplicate entry', async () => {
  startOn(saved('arrival', { type: 'session', sessionId: 'a' }));
  router.outcomes = ['reject'];
@@ -404,7 +335,7 @@ it('a late “chat unavailable” for a chat Back already left touches neither t
 it('a refused landing returns the browser to the entry it left, without a new stop', async () => {
  startOn(saved('a', { type: 'notes', panel: 'a' }), saved('draft', { type: 'notes', panel: 'new' }));
  expect(go(-1)).toBe(true);
- shellHistory.refuse(shellHistory.restored);
+ shellHistory.refuse(shellHistory.restored, shellHistory.returnPoint(shellHistory.restored));
  expect(router.index).toBe(1);
  expect(shellHistory.place?.panel).toBe('new');
  expect(router.entries).toHaveLength(2);
@@ -412,3 +343,54 @@ it('a refused landing returns the browser to the entry it left, without a new st
  expect(go(-1)).toBe(true);
  expect(shellHistory.place?.panel).toBe('a');
 });
+
+it('a refusal kept across further steps returns to the draft’s own entry, and only from the current landing', async () => {
+ startOn(saved('a', { type: 'notes', panel: 'a' }), saved('b', { type: 'notes', panel: 'b' }), saved('draft', { type: 'notes', panel: 'new' }));
+ expect(go(-1)).toBe(true);
+ const draft = shellHistory.returnPoint(shellHistory.restored);
+ const onB = shellHistory.restored;
+ expect(go(-1)).toBe(true);
+ // The landing on B is no longer current: refusing it moves nothing.
+ shellHistory.refuse(onB, draft);
+ expect(router.index).toBe(0);
+ shellHistory.refuse(shellHistory.restored, draft);
+ expect(router.index).toBe(2);
+ expect(shellHistory.place?.panel).toBe('new');
+ expect(router.entries).toHaveLength(3);
+});
+
+it('choosing the committed place drops a refinement held for its entry (S14)', async () => {
+ shellHistory.start({}, { type: 'session', sessionId: 'a' });
+ await settle();
+ router.outcomes = ['reject'];
+ shellHistory.destination({ type: 'session', sessionId: 'b' }, 'reconcile');
+ await settle();
+ // The user settles on A, the place the arrival entry already holds.
+ shellHistory.destination({ type: 'session', sessionId: 'a' });
+ shellHistory.destination({ type: 'settings' });
+ await vi.waitFor(() => expect(places()).toEqual(['a', 'settings']));
+ expect(go(-1)).toBe(true);
+ expect(shellHistory.place?.sessionId).toBe('a');
+ await settle();
+ expect(places()).toEqual(['a', 'settings']);
+});
+
+it('the phone app: shell history reads and writes nothing, so main’s own writers are the only ones', async () => {
+ phone.app = true;
+ const arrival = saved('arrival', { type: 'session', sessionId: 'a' });
+ startOn(arrival);
+ shellHistory.destination({ type: 'session', sessionId: 'b' });
+ shellHistory.destination({ type: 'notes' });
+ shellHistory.detail('notes', { panel: 'one' });
+ shellHistory.shows('c');
+ expect(shellHistory.unavailable('a')).toBe(false);
+ pushOverlay({ mobileDrawer: true });
+ expect(go(-1)).toBe(false);
+ await settle(); await settle();
+ expect(router.entries).toEqual([{ state: arrival, persisted: true }, expect.anything()]);
+ expect(shellHistory.place).toBeUndefined();
+ expect(shellHistory.restored).toBeNull();
+ // A reload on an entry the web UI saved boots the phone app as main does.
+ expect(savedPlace(arrival)).toBeUndefined();
+});
+

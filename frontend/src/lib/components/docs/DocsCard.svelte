@@ -47,7 +47,8 @@
   });
  });
  function selectDoc(category: string, slug: string, query = '') {
-  if (!detailOpen || activeCategory !== category || activeSlug !== slug) shellHistory.detail('docs', { doc: `${category}/${slug}` });
+  // Every explicit pick reaches the history: it skips the entry it is already on.
+  shellHistory.detail('docs', { doc: `${category}/${slug}` });
   // Only an explicit selection opens at the top; Back and Forward keep the pane.
   const key = ++selections;
   selectionKey = key;
@@ -77,7 +78,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" manageHistory={false} {detailOpen} detailKey={selectionKey} onBack={backToList}>
+<ViewShell label="Docs" {detailOpen} detailKey={selectionKey} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}

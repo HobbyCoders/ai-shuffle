@@ -29,9 +29,16 @@ vi.mock('$lib/stores/app-data.svelte', async () => {
  };
 });
 vi.mock('$lib/stores/layout.svelte', async () => {
- const { writable } = await import('svelte/store');
- return { activeView: writable(null), sidebarCollapsed: writable(false), sidebarOverlay: writable(false),
-  layout: { openFeaturePage: mocks.openFeaturePage, openChat: mocks.openChat, setSidebarCollapsed: vi.fn() } };
+ const { get, writable } = await import('svelte/store');
+ const sidebarCollapsed = writable(false), sidebarOverlay = writable(false);
+ const layout = { openFeaturePage: mocks.openFeaturePage, openChat: mocks.openChat, setSidebarCollapsed: vi.fn(),
+  // The real store's rule: navigate now, or a frame after closing an open overlay sidebar.
+  afterSidebarOverlay: (navigate: () => void) => {
+   if (!get(sidebarOverlay) || get(sidebarCollapsed)) return navigate();
+   layout.setSidebarCollapsed(true);
+   requestAnimationFrame(() => navigate());
+  } };
+ return { activeView: writable(null), sidebarCollapsed, sidebarOverlay, layout };
 });
 vi.mock('$lib/stores/sessionMode.svelte', () => ({ appMode: { current: 'code', set: vi.fn() } }));
 vi.mock('$lib/services/session-navigation', () => ({ openSession: mocks.openSession, openSessionFromList: mocks.openSession, followChatHistory: vi.fn() }));

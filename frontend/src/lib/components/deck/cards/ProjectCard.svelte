@@ -296,7 +296,8 @@
 
 	function restoreSelection(key: string) {
 		const row = allRows.find(r => r.key === key);
-		if (!row) return overviewSettled ? 'missing' : 'pending';
+		// Missing only after the overview answered: a failed first load is not the list.
+		if (!row) return overviewSettled && $projectsOverviewSupported !== null ? 'missing' : 'pending';
 		handleRowClick(row);
 	}
 </script>

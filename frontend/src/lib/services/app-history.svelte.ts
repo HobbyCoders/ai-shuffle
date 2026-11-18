@@ -26,9 +26,11 @@ export interface Place {
 interface Entry { id: string; place: Place }
 export type ShellState = App.PageState & { shell?: Entry };
 
-// Ownership: this module reads and writes only entries whose state is its own
-// `shell` and nothing else. A phone overlay (Chat controls, the drawer) pushes
-// its own entry with its own flags, copying the state under it: that entry is
+// Ownership: the web UI only. The phone app keeps main's own history writers
+// (chat picks, Settings, panel details), so there every call does nothing.
+// In the web UI this module reads and writes only entries whose state is its
+// own `shell` and nothing else. An overlay (the narrow window's Chat controls)
+// pushes its own entry with its own flags, copying the state under it: that entry is
 // the overlay's, as on main. Landing on it shows nothing new, and nothing is
 // ever written onto it, so a copy can be stale without ever being read.
 function owned(state: ShellState | undefined): boolean {
@@ -37,7 +39,7 @@ function owned(state: ShellState | undefined): boolean {
 
 /** The place a reload on this entry shows, when the entry is this module's. */
 export function savedPlace(state: ShellState | undefined): Place | undefined {
- return owned(state) ? state?.shell?.place : undefined;
+ return !platform.isMobile && owned(state) ? state?.shell?.place : undefined;
 }
 
 // The place on screen, with the id of the browser entry it belongs to.
@@ -59,31 +61,6 @@ let mounted = false;
 let settling = false;
 // The load started on an entry with no saved place of its own.
 let fresh = false;
-// A chat picked from a list (main's chat-history rule, #953). The phone app
-// adds an entry only for these; its other view changes refine the entry it is on.
-let picked: { to: string; from: string | null } | null = null;
-// A pick from the phone drawer: the drawer's own Back (it pops its entry as it
-// closes) lands after the pick's push is queued. The push waits for it, or that
-// Back would step off the new entry, and that Back is not the user's. Main's
-// rule: chat picks only, and a second pick restarts the give-up.
-let drawerPop: { end: () => void; restart: () => void; landed: Promise<void> } | null = null;
-const DRAWER_BACK_WAIT_MS = 600;
-function drawerPopped(): Promise<void> {
- if (drawerPop) {
-  drawerPop.restart();
-  return drawerPop.landed;
- }
- if (!(page.state as ShellState | undefined)?.mobileDrawer) return Promise.resolve();
- let resolve!: () => void;
- const landed = new Promise<void>(done => { resolve = done; });
- let timer: ReturnType<typeof setTimeout>;
- const end = () => { clearTimeout(timer); if (drawerPop?.landed === landed) drawerPop = null; resolve(); };
- const restart = () => { clearTimeout(timer); timer = setTimeout(end, DRAWER_BACK_WAIT_MS); };
- restart();
- drawerPop = { end, restart, landed };
- return landed;
-}
-
 // Where SvelteKit numbers the browser's entries (main's settings history reads it too).
 function historyIndex(): number | null {
  const meta = (typeof history === 'undefined' ? null : history.state as Record<string, unknown> | null)?.['sveltekit:metadata'];
@@ -94,6 +71,12 @@ function historyIndex(): number | null {
 // the user keeps) can return the browser there without adding a stop.
 let left: { landing: Entry; index: number | null } | null = null;
 let here: number | null = null;
+// The user settled on an entry's committed place: a refinement held for it is dropped.
+function settle(on: Entry) {
+ if (held?.id === on.id) held = null;
+ shown = { ...on };
+ restored = null;
+}
 
 function samePlace(a: Place | undefined, b: Place | undefined): boolean {
  const sorted = (_: string, value: unknown) => value && typeof value === 'object' && !Array.isArray(value)
@@ -110,8 +93,8 @@ export const shellHistory = {
   * while the browser is on it, or once an overlay over it closes.
   */
  start(state: ShellState, view: ActiveView | null) {
+  if (platform.isMobile) return;
   mounted = settling = true;
-  picked = null;
   left = null;
   here = historyIndex();
   if (owned(state) && state.shell) {
@@ -124,9 +107,7 @@ export const shellHistory = {
   shown = { id: randomUUID(), place: viewPlace(view) };
   if (owned(state)) record(shown, 'stamp');
  },
- stop() { mounted = settling = false; entry = restored = shown = held = left = null; picked = null; drawerPop?.end(); },
- /** A chat picked from a list, just before it opens (main's openSessionFromList rule). */
- pick(to: string, from: string | null) { picked = { to, from }; },
+ stop() { mounted = settling = false; entry = restored = shown = held = left = null; },
  /**
   * The chat a fresh load's arrival actually shows (this tab's restored chat
   * may differ from the shared layout snapshot), until the user's first step.
@@ -141,10 +122,6 @@ export const shellHistory = {
   * entry this module is already on, shows nothing new.
   */
  land(state: ShellState) {
-  if (drawerPop && !state.mobileDrawer) {
-   drawerPop.end();
-   return false;
-  }
   if (!mounted || !owned(state) || !state.shell || pending.has(state.shell.id)) return false;
   let at = { ...state.shell };
   const kept = held?.id === at.id && !samePlace(held.place, at.place) ? held : null;
@@ -164,12 +141,18 @@ export const shellHistory = {
   if (kept) record(at, 'replace');
   return true;
  },
- /** The page kept what it showed instead of following this landing: go back to the entry it left. */
- refuse(landing: Entry | null) {
-  if (!landing || landing !== restored || left?.landing !== landing || left.index === null || here === null) return;
-  const delta = left.index - here;
+ /** Where a page that may refuse this landing returns the browser: the entry the landing left. */
+ returnPoint(landing: Entry | null): number | null {
+  return landing && landing === restored && left?.landing === landing ? left.index : null;
+ },
+ /**
+  * The page kept what it showed instead of following `landing`: the browser
+  * goes back to `to` (a returnPoint), while that landing is still the current one.
+  */
+ refuse(landing: Entry | null, to: number | null) {
+  if (!landing || landing !== restored || to === null || here === null) return;
   left = null;
-  if (delta) history.go(delta);
+  if (to !== here) history.go(to - here);
  },
  /**
   * A view change; false when declined. `reconcile` is boot settling the view
@@ -179,15 +162,12 @@ export const shellHistory = {
  destination(view: ActiveView, intent: 'push' | 'reconcile' | 'replace' = 'push') {
   if (!mounted || !shown) return true;
   const next = viewPlace(view);
-  const pick = picked?.to === next.sessionId && next.type === 'session' ? picked : null;
-  picked = null;
   const top = (place?: Place) => !!place && place.type === next.type && (place.sessionId ?? null) === (next.sessionId ?? null);
   if (shown.id === entry?.id && top(shown.place)) return true;
   // The entry the browser is on already holds it: after a rejected push, or
   // over a held-back write. Settle on that entry, without writing again.
   if (entry && top(entry.place)) {
-   shown = { ...entry };
-   restored = null;
+   settle(entry);
    return true;
   }
   if (intent === 'reconcile') {
@@ -198,13 +178,10 @@ export const shellHistory = {
    return true;
   }
   settling = false;
-  // Resolving a new chat into its server id is not another visible step, and
-  // the phone app adds an entry only for a chat picked from a list (as main).
+  // Resolving a new chat into its server id is not another visible step.
   const resolving = next.type === 'session' && shown.place.type === 'session' && !shown.place.sessionId;
-  const phoneRefine = platform.isMobile && !(pick?.from && pick.from !== pick.to);
-  if (phoneRefine) refine(next, entry?.id);
-  else if ((intent === 'replace' || resolving) && shown.id === entry?.id) refine(next);
-  else push(next, !!pick);
+  if ((intent === 'replace' || resolving) && shown.id === entry?.id) refine(next);
+  else push(next);
   return true;
  },
  detail(type: ViewType, patch: Partial<Place>, replace = false) {
@@ -212,12 +189,11 @@ export const shellHistory = {
   const next = { ...shown.place, ...patch };
   if (shown.id === entry?.id && samePlace(next, shown.place)) return;
   if (entry && samePlace(next, entry.place)) {
-   shown = { ...entry };
-   restored = null;
+   settle(entry);
    return;
   }
   if (replace && shown.id === entry?.id) refine(next);
-  else push(next, false);
+  else push(next);
  },
  /**
   * The chat on screen proved unavailable (deleted, or not this viewer's):
@@ -241,25 +217,24 @@ function viewPlace(view: ActiveView | null): Place {
 
 // The same entry, refined: it keeps its id. Written only while the browser is
 // on it; otherwise held back until it is (see land).
-function refine(place: Place, id = shown?.id) {
- if (!shown || !id) return;
+function refine(place: Place) {
+ if (!shown) return;
  restored = null;
- shown = { id, place };
+ shown = { id: shown.id, place };
  if (shown.id === entry?.id) record(shown, 'replace');
 }
 
-function push(place: Place, pick: boolean) {
+function push(place: Place) {
  restored = null;
  shown = { id: randomUUID(), place };
- record(shown, 'push', pick);
+ record(shown, 'push');
 }
 
-function record(next: Entry, mode: 'push' | 'replace' | 'stamp', pick = false) {
+function record(next: Entry, mode: 'push' | 'replace' | 'stamp') {
  const { id } = next;
  const before = entry;
  entry = next;
  pending.set(id, (pending.get(id) ?? 0) + 1);
- const popped = pick ? drawerPopped() : Promise.resolve();
  const replace = mode !== 'push';
  // Not written: the browser stays where it is. Later writes already queued set their own.
  const keep = () => {
@@ -270,7 +245,6 @@ function record(next: Entry, mode: 'push' | 'replace' | 'stamp', pick = false) {
  };
  writes = writes.then(async () => {
   try {
-   await popped;
    const state = page.state as ShellState;
    // A replace refines only our entry the browser is on; the arrival is stamped only while bare.
    if (replace && (!owned(state) || (state.shell?.id ?? (mode === 'stamp' ? id : null)) !== id)) return keep();

@@ -94,6 +94,8 @@
 	let connectorTypes: ConnectorTypeInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	/** The list came back at least once: only then can a saved selection be missing. */
+	let listLoaded = $state(false);
 
 	// A pending delete awaiting confirmation (replaces native confirm()).
 	let pendingDeleteId = $state<string | null>(null);
@@ -220,6 +222,7 @@
 			projects = projectsData;
 			connectors = connectorsData;
 			connectorTypes = connectorTypesData;
+			listLoaded = true;
 		} catch (e: any) {
 			error = e.detail || e.message || 'Failed to load automations';
 		} finally {
@@ -650,7 +653,7 @@
 		else if (view === 'approvals') currentView = 'approvals';
 		else {
 			const row = automations.find(a => a.id === id);
-			if (!row) return loading ? 'pending' : 'missing';
+			if (!row) return loading || !listLoaded ? 'pending' : 'missing';
 			if (view === 'edit') openEdit(row); else void openDetail(row);
 		}
 	}

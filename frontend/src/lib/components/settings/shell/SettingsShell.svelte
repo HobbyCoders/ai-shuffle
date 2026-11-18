@@ -23,11 +23,12 @@
 	 * - Read-only (unapproved device): banner on top, controls disabled.
 	 */
 	import { getContext, onDestroy, tick, untrack } from 'svelte';
+	import { page } from '$app/state';
 	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
-	import { settingsNav, decodeTarget } from '$lib/settings/navigation.svelte';
+	import { settingsNav, decodeTarget, type SettingsHistoryState } from '$lib/settings/navigation.svelte';
 	import { setSettingsAccess, settingsAccess } from '$lib/settings/access.svelte';
 	import type { CategoryId } from '$lib/settings/types';
 	import { saveStatus } from '$lib/settings/save-status.svelte';
@@ -70,6 +71,7 @@
 	let seenFocus = settingsNav.focusRequest?.n ?? 0;
 	onDestroy(() => {
 		settingsNav.mounted -= 1;
+		settingsNav.forgetPlace();
 		saveStatus.reset();
 	});
 
@@ -85,7 +87,29 @@
 		return () => ro.disconnect();
 	});
 
+	let stackStarted = false;
 	$effect(() => {
+		const s = stacked;
+		// The phone app keeps its own Settings entries; the web UI's shell history is below.
+		if (!platform.isMobile) return;
+		untrack(() => {
+			settingsNav.stacked = s;
+			if (s && !stackStarted) {
+				// A pending target builds every Back step from the index; otherwise
+				// the page the reader was on stays open (#1043).
+				stackStarted = true;
+				if (initialItemId) settingsNav.resetStack('index', page.state as SettingsHistoryState);
+				else settingsNav.startStack(page.state as SettingsHistoryState);
+			} else if (!s) {
+				stackStarted = false;
+				settingsNav.depth = 0;
+			}
+		});
+	});
+
+	// The web UI: Settings shows its shell-history entry; a first visit records its place.
+	$effect(() => {
+		if (platform.isMobile) return;
 		const place = shellHistory.place;
 		const narrow = stacked;
 		if (!active || (place && place.type !== 'settings')) return;
@@ -99,16 +123,35 @@
 			}
 		});
 	});
+
+	// The outgoing phone ViewShell pops its detail entry asynchronously. Track
+	// only that marker, so our own Settings pushes do not replay the target.
+	const retiringDetail = $derived((page.state as { viewPanelDetail?: string })?.viewPanelDetail);
 	// Deep links (openSettings / legacy openSettingsTab).
 	$effect(() => {
 		const raw = initialItemId;
-		if (!active || !raw) return;
+		if (!raw || retiringDetail || (!platform.isMobile && !active)) return;
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;
 			if (target) settingsNav.go(target);
 			layout.clearFeatureItemId();
 		});
+	});
+
+	// Android Back / browser Back while stacked.
+	let firstHistory = true;
+	$effect(() => {
+		const state = page.state as SettingsHistoryState;
+		const view = state?.settingsView;
+		const depth = state?.settingsDepth;
+		void view;
+		void depth;
+		if (firstHistory) {
+			firstHistory = false;
+			return;
+		}
+		if (platform.isMobile) untrack(() => settingsNav.followHistory(state, active));
 	});
 
 	// Ctrl+K while Settings is on screen: the app's one Ctrl+K owner

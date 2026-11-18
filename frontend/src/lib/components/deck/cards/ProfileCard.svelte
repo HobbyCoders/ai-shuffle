@@ -111,12 +111,16 @@
 		loadData();
 	});
 
+	/** The agent list came back: only then can a saved selection be missing. */
+	let listLoaded = $state(false);
 	async function loadData(quiet = false) {
 		if (!quiet) loading = true;
+		let agentsFailed = false;
 		try {
 			const [subagentsResult, surfaceResult, templatesResult] = await Promise.all([
 				api.get<RosterAgent[]>('/agents').catch((err) => {
 					console.warn('Failed to load agents:', err);
+					agentsFailed = true;
 					return [];
 				}),
 				fetchToolSurface().catch((err) => {
@@ -130,6 +134,7 @@
 				loadSubagentDefault()
 			]);
 			allSubagents = subagentsResult;
+			listLoaded = !agentsFailed;
 			toolSurface = surfaceResult;
 			templates = templatesResult;
 		} catch (e) {
@@ -1008,7 +1013,7 @@
 	function restoreSelection(key: string, current: () => boolean) {
 		if (key === 'new') { void openNewForm('profile', current); return; }
 		const row = profiles.find(p => p.id === key);
-		if (!row) return loading ? 'pending' : 'missing';
+		if (!row) return loading || !listLoaded ? 'pending' : 'missing';
 		void untrack(() => selectProfile(row, undefined, current));
 	}
 </script>

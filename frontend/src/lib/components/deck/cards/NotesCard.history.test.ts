@@ -77,3 +77,24 @@ it('Cancel on the discard asked by Back keeps the draft and returns the browser 
 	await waitFor(() => expect(dialog()).toBeTruthy());
 	expect(router.index).toBe(1);
 });
+
+it('a second Back while the discard question is open: Cancel still returns to the draft’s own entry (S13)', async () => {
+	render(NotesCard);
+	await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+	await waitFor(() => expect(panels()).toEqual([null, 'A']));
+	await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
+	await waitFor(() => expect(panels()).toEqual([null, 'A', 'B']));
+	await fireEvent.click(screen.getAllByRole('button', { name: 'New note' })[0]);
+	await waitFor(() => expect(panels()).toEqual([null, 'A', 'B', 'new']));
+	await fireEvent.input(screen.getByPlaceholderText(/Write your note/), { target: { value: 'keep me' } });
+
+	go(-1); // to B: asks
+	await waitFor(() => expect(dialog()).toBeTruthy());
+	go(-1); // to A before answering
+	await waitFor(() => expect(router.index).toBe(1));
+	await new Promise((resolve) => setTimeout(resolve));
+	await fireEvent.click(within(dialog()!).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+	await waitFor(() => expect(router.index).toBe(3));
+	expect((screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement).value).toBe('keep me');
+	expect(panels()).toEqual([null, 'A', 'B', 'new']);
+});

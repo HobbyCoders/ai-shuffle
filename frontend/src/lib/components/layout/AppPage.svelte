@@ -32,10 +32,10 @@
 	import { recoveringOpening, keepOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { savedPlace, shellHistory, type ShellState } from '$lib/services/app-history.svelte';
-	import { openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
+	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
-	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
+	import { layout, activeView } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
@@ -109,13 +109,24 @@
 		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
 		if (follow) layout.openChat(follow);
 	});
+	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
+	// link) reopens that chat. The first run is the page's initial state, not a step.
+	let firstChatHistory = true;
+	$effect(() => {
+		const state = page.state;
+		void (state as { chatSession?: string })?.chatSession;
+		if (firstChatHistory) {
+			firstChatHistory = false;
+			return;
+		}
+		untrack(() => followChatHistory(state));
+	});
 	function showEntry() {
 		const place = shellHistory.place;
 		if (!place) return;
 		if (place.type === 'session') {
 			if ($activeView?.type === 'session' && $activeView.sessionId === place.sessionId) return;
-			// A sidebar overlay defers the open a frame: a newer Back or Forward by then wins.
-			if (place.sessionId) handleOpenSession(place.sessionId, undefined, { stillWanted: () => shellHistory.place === place });
+			if (place.sessionId) handleOpenSession(place.sessionId);
 			else handleNewSession();
 		} else if ($activeView?.type !== place.type) layout.openFeaturePage(place.type);
 	}
@@ -154,12 +165,7 @@
 		navigationClaimed = true;
 		activeSession.newChat();
 
-		if ($sidebarOverlay && !$sidebarCollapsed) {
-			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(() => layout.openChat(null));
-		} else {
-			layout.openChat(null);
-		}
+		layout.afterSidebarOverlay(() => layout.openChat(null));
 	}
 
 	/**
@@ -187,14 +193,7 @@
 			return;
 		}
 
-		if ($sidebarOverlay && !$sidebarCollapsed) {
-			layout.setSidebarCollapsed(true);
-			requestAnimationFrame(() => {
-				layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
-			});
-		} else {
-			layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
-		}
+		layout.afterSidebarOverlay(() => layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId));
 	}
 
 

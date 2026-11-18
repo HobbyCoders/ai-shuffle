@@ -1,11 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { tick } from 'svelte';
-import { shellHistory } from '$lib/services/app-history.svelte';
 
 const mocks = vi.hoisted(() => ({ pushState: vi.fn(), supportCaps: vi.fn() }));
 
-vi.mock('$app/navigation', () => ({ goto: (_url: string, options: { state: App.PageState; replace: boolean }) => { if (!options.replace) mocks.pushState('', options.state); } }));
+// The phone app's Settings steps use pushState (main's); the web UI's shell history uses a shallow goto.
+vi.mock('$app/navigation', () => ({ pushState: mocks.pushState, goto: (_url: string, options: { state: App.PageState; replace: boolean }) => { if (!options.replace) mocks.pushState('', options.state); } }));
 vi.mock('$lib/stores/auth.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { auth: { checkAuth: vi.fn() }, isAdmin: writable(true) };
@@ -32,6 +32,7 @@ import { page } from '$app/state';
 import { isAdmin } from '$lib/stores/auth.svelte';
 import { layout } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
+import { shellHistory } from '$lib/services/app-history.svelte';
 import { registerSearchShortcut } from '$lib/services/search-shortcut';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import { settingsNav, encodeTarget } from '$lib/settings/navigation.svelte';
@@ -53,7 +54,6 @@ beforeEach(() => {
 	settingsNav.reset();
 	sessionStorage.clear();
 	mocks.pushState.mockReset();
-	shellHistory.start({}, { type: 'settings' });
 	admin.set(true);
 	page.state = {};
 	supportCaps.reset();
@@ -62,7 +62,6 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
-	shellHistory.stop();
 	platform.set('desktop');
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
@@ -444,25 +443,69 @@ describe('SettingsShell deep links', () => {
 });
 
 describe('SettingsShell stacked mode', () => {
-	it('opens a retained-shell deep link with a list step under the detail; resize adds no entries', async () => {
+	it('waits for the outgoing phone detail to retire before landing a retained-shell deep link', async () => {
 		platform.set('mobile');
 		const view = render(SettingsShell);
 		await tick();
-		const target = encodeTarget({ category: 'providers', item: 'provider:claude' });
+		page.state = { viewPanelDetail: 'automations' } as App.PageState;
+		await tick();
+		const target = encodeTarget({ category: 'providers', item: 'provider:claude', anchor: 'providers.claudeMode' });
 		await view.rerender({ initialItemId: target });
+		await tick();
+		expect(mocks.pushState).not.toHaveBeenCalled();
+		expect(view.container.querySelector('.settings-shell.awaiting-target')).toBeTruthy();
+
+		// The outgoing ViewShell's asynchronous history.back() has now completed.
+		mocks.pushState.mockImplementation((_url, state) => { page.state = state; });
+		page.state = {};
+		await tick();
 		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		expect(mocks.pushState.mock.calls.map(([, state]) => state.settingsView)).toEqual(['page', 'detail']);
+		expect(settingsNav.depth).toBe(2);
+		expect(settingsNav.selectedItem('providers')).toBe('provider:claude');
 		await view.rerender({ initialItemId: undefined });
-		// History writes are queued: wait for both steps to land.
-		const views = () => mocks.pushState.mock.calls.map(([, state]) => state.shell.place.settings.view);
-		await waitFor(() => expect(views()).toEqual(['page', 'detail']));
-		for (const platformName of ['desktop', 'mobile'] as const) { platform.set(platformName); await tick(); }
-		expect(mocks.pushState).toHaveBeenCalledTimes(2);
-		shellHistory.land(mocks.pushState.mock.calls[0][1]);
+
+		page.state = mocks.pushState.mock.calls[0][1];
 		await tick();
 		expect(settingsNav.view).toBe('page');
-		shellHistory.land(mocks.pushState.mock.calls[1][1]);
+		page.state = {};
 		await tick();
-		expect(settingsNav.selectedItem('providers')).toBe('provider:claude');
+		expect(settingsNav.view).toBe('index');
+	});
+
+	describe('every later narrowing goes through the same rule', () => {
+		const provider = encodeTarget({ category: 'providers', item: 'provider:claude' });
+		const settings = () => mocks.pushState.mock.calls.map(([, state]) => state);
+
+		beforeEach(() => {
+			mocks.pushState.mockImplementation((_url, state) => { page.state = state; });
+			platform.set('mobile');
+		});
+
+		it('a deep link that lands before the width is known still gets its Back steps', async () => {
+			platform.set('desktop');
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined });
+			expect(mocks.pushState).not.toHaveBeenCalled();
+
+			platform.set('mobile');
+			await waitFor(() => expect(settingsNav.stacked).toBe(true));
+			await tick();
+
+			expect(settings().map((state) => state.settingsView)).toEqual(['page', 'detail']);
+			expect(settingsNav.depth).toBe(2);
+			expect(settingsNav.view).toBe('detail');
+		});
+
+		it('a chat opened behind a hidden Settings leaves the open page alone', async () => {
+			const view = render(SettingsShell, { initialItemId: provider });
+			await waitFor(() => expect(settingsNav.view).toBe('detail'));
+			await view.rerender({ initialItemId: undefined }); // the app clears a target once it lands
+			settingsNav.followHistory({ ...settings()[1], chatSession: 'chat-b' }, false);
+			expect(settingsNav.view).toBe('detail');
+			expect(settingsNav.depth).toBe(0);
+		});
 	});
 
 	it('shows one pane at a time and pushes a history entry per step', async () => {
@@ -479,11 +522,11 @@ describe('SettingsShell stacked mode', () => {
 		// Page mode hides inner .st-dpane item details, never the shared outer slot.
 		expect(shell.querySelector('.view-main-slot')?.classList.contains('st-dpane')).toBe(false);
 		expect(shell.querySelector('.view-main-slot')?.hasAttribute('hidden')).toBe(false);
-		expect(shellHistory.place?.settings).toMatchObject({ view: 'page', depth: 1 });
+		expect(mocks.pushState).toHaveBeenCalledWith('', expect.objectContaining({ settingsView: 'page', settingsDepth: 1 }));
 
 		await fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
 		expect(back).toHaveBeenCalledOnce();
-		shellHistory.land({ shell: { id: 'base', place: { type: 'settings', settings: settingsNav.position('index', 0) } } });
+		page.state = {};
 		await tick();
 		expect(shell.getAttribute('data-view')).toBe('index');
 	});
@@ -516,7 +559,69 @@ describe('SettingsShell stacked mode', () => {
 		await fireEvent.click(within(nav()).getByRole('button', { name: 'System' }));
 		await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
 		expect(go).toHaveBeenCalledWith(-1);
-		shellHistory.land({ shell: { id: 'base', place: { type: 'settings', settings: settingsNav.position('index', 0) } } });
+		page.state = {};
+		await tick();
+		expect(container.querySelector('.settings-shell')?.getAttribute('data-view')).toBe('index');
+		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));
+	});
+});
+
+// The phone app's Settings history is main's (above, on the mobile platform). In
+// the web UI a narrow window's steps are shell-history entries instead (#1477).
+describe('SettingsShell in a narrow web window: its steps are shell-history entries', () => {
+	const originalWidth = window.innerWidth;
+	const narrow = (width: number) => Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+	beforeEach(() => { narrow(390); shellHistory.start({}, { type: 'settings' }); });
+	afterEach(() => { shellHistory.stop(); narrow(originalWidth); });
+	const base = () => ({ shell: { id: 'base', place: { type: 'settings' as const, settings: settingsNav.position('index', 0) } } });
+
+	it('opens a retained-shell deep link with a list step under the detail; resize adds no entries', async () => {
+		const view = render(SettingsShell);
+		await tick();
+		const target = encodeTarget({ category: 'providers', item: 'provider:claude' });
+		await view.rerender({ initialItemId: target });
+		await waitFor(() => expect(settingsNav.view).toBe('detail'));
+		await view.rerender({ initialItemId: undefined });
+		// History writes are queued: wait for both steps to land.
+		const views = () => mocks.pushState.mock.calls.map(([, state]) => state.shell.place.settings.view);
+		await waitFor(() => expect(views()).toEqual(['page', 'detail']));
+		for (const width of [1440, 390]) { narrow(width); await fireEvent(window, new Event('resize')); await tick(); }
+		expect(mocks.pushState).toHaveBeenCalledTimes(2);
+		shellHistory.land(mocks.pushState.mock.calls[0][1]);
+		await tick();
+		expect(settingsNav.view).toBe('page');
+		shellHistory.land(mocks.pushState.mock.calls[1][1]);
+		await tick();
+		expect(settingsNav.selectedItem('providers')).toBe('provider:claude');
+	});
+
+	it('shows one pane at a time and records an entry per step', async () => {
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const { container } = render(SettingsShell);
+		const shell = container.querySelector('.settings-shell')!;
+		await tick();
+		expect(shell.hasAttribute('data-stacked')).toBe(true);
+		expect(shell.getAttribute('data-view')).toBe('index');
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'Voice' }));
+		expect(shell.getAttribute('data-view')).toBe('page');
+		expect(shellHistory.place?.settings).toMatchObject({ view: 'page', depth: 1 });
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to Settings' }));
+		expect(back).toHaveBeenCalledOnce();
+		shellHistory.land(base());
+		await tick();
+		expect(shell.getAttribute('data-view')).toBe('index');
+	});
+
+	it('Ctrl+K returns to the index before focusing search', async () => {
+		const { reg } = appSearchKey();
+		onTestFinished(() => reg.unregister());
+		const go = vi.spyOn(history, 'go').mockImplementation(() => {});
+		const { container } = render(SettingsShell);
+		await tick();
+		await fireEvent.click(within(nav()).getByRole('button', { name: 'System' }));
+		await fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+		expect(go).toHaveBeenCalledWith(-1);
+		shellHistory.land(base());
 		await tick();
 		expect(container.querySelector('.settings-shell')?.getAttribute('data-view')).toBe('index');
 		await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search settings' })));

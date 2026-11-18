@@ -3,7 +3,8 @@
  * history stack stands in for SvelteKit's pushState/replaceState, and Back or
  * Forward replays an entry's state through followChatHistory, as AppPage does.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
+import { platform } from '$lib/stores/platform.svelte';
 import { writable, get } from 'svelte/store';
 import { page } from '$app/state';
 
@@ -36,13 +37,132 @@ vi.mock('$lib/stores/active-session', async () => {
 	};
 });
 vi.mock('$lib/stores/layout.svelte', () => ({
-	layout: { current: { sidebarOverlay: false, sidebarCollapsed: true }, openChat: vi.fn(), setSidebarCollapsed: vi.fn() }
+	layout: { current: { sidebarOverlay: false, sidebarCollapsed: true }, openChat: vi.fn(), setSidebarCollapsed: vi.fn(), afterSidebarOverlay: (navigate: () => void) => navigate() }
 }));
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } } }));
 
-import { openSession } from './session-navigation';
+import { followChatHistory, openSession, openSessionFromList } from './session-navigation';
 
-// Back/Forward through the real layout and chat store is covered in routes/session-navigation.test.ts.
+function step(delta: number) {
+	h.index += delta;
+	page.state = h.stack[h.index];
+	followChatHistory(page.state);
+}
+const openChat = () => get(active.store).sessionId;
+
+beforeEach(() => {
+	h.stack = [{}];
+	h.index = 0;
+	page.state = {};
+	active.store.set({ sessionId: null });
+});
+afterEach(() => vi.useRealTimers());
+
+
+// Main's own history tests, run as the phone app: there, shell history is inert
+// and these writers are main's, unchanged (#1477 is desktop panels only).
+beforeAll(() => platform.set('mobile'));
+afterAll(() => platform.set('desktop'));
+
+describe('sidebar chat switches and browser history (#953)', () => {
+	it('Back after a sidebar switch A → B opens A in place, Forward opens B again', () => {
+		openSession('chat-a'); // boot / deep-link restore: no entry
+		expect(h.stack).toHaveLength(1);
+		openSessionFromList('chat-b');
+		expect(openChat()).toBe('chat-b');
+		expect(h.stack).toHaveLength(2);
+
+		step(-1);
+		expect(openChat()).toBe('chat-a');
+		step(+1);
+		expect(openChat()).toBe('chat-b');
+	});
+
+	it('picking the open chat or opening one from New chat adds no entry', () => {
+		openSessionFromList('chat-a'); // from New chat
+		expect(h.stack).toHaveLength(1);
+		openSessionFromList('chat-a'); // already open
+		expect(h.stack).toHaveLength(1);
+		expect(openChat()).toBe('chat-a');
+	});
+
+	it('a pick from the phone drawer pushes only after the drawer entry is popped', () => {
+		vi.useFakeTimers();
+		openSession('chat-a');
+		// The drawer opened with its own entry, and its dismissal called history.back().
+		h.stack = [{}, { mobileDrawer: true }];
+		h.index = 1;
+		page.state = h.stack[1];
+		openSessionFromList('chat-b');
+		expect(openChat()).toBe('chat-b');
+		expect(h.stack).toHaveLength(2); // nothing pushed on top of the drawer entry
+
+		// The pending Back lands on the entry under the drawer.
+		step(-1);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }]);
+		expect(openChat()).toBe('chat-b');
+		step(-1);
+		expect(openChat()).toBe('chat-a');
+	});
+
+	it('waits for the router state, not popstate: the drawer marker is never copied onto chat entries', async () => {
+		vi.useFakeTimers();
+		// A chat entry already exists, then the drawer opened on top of it.
+		openSession('chat-a');
+		openSessionFromList('chat-b');
+		h.stack = [...h.stack, { chatSession: 'chat-b', mobileDrawer: true }];
+		h.index = 2;
+		page.state = h.stack[2];
+		openSessionFromList('chat-c');
+
+		// SvelteKit 3: popstate arrives while page.state is still the drawer's entry.
+		h.index = 1;
+		window.dispatchEvent(new PopStateEvent('popstate'));
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(h.stack).toHaveLength(3); // nothing written yet
+
+		// The router then moves page.state to the entry under the drawer.
+		page.state = h.stack[1];
+		followChatHistory(page.state);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }, { chatSession: 'chat-c' }]);
+		expect(openChat()).toBe('chat-c');
+
+		// Nothing is left waiting: the give-up timer writes nothing more.
+		vi.advanceTimersByTime(5000);
+		expect(h.stack).toHaveLength(3);
+		step(-1);
+		expect(openChat()).toBe('chat-b');
+	});
+
+	it('a Back the router never reports still gives the pick an entry, without the drawer marker', () => {
+		vi.useFakeTimers();
+		openSession('chat-a');
+		h.stack = [{}, { mobileDrawer: true }];
+		h.index = 1;
+		page.state = h.stack[1];
+		openSessionFromList('chat-b');
+		vi.advanceTimersByTime(5000);
+		expect(h.stack).toEqual([{}, { chatSession: 'chat-a' }, { chatSession: 'chat-b' }]);
+		// A state change after that is ordinary history again.
+		step(-1);
+		expect(openChat()).toBe('chat-a');
+	});
+
+	it('two picks before the drawer entry is popped each get an entry, in order', () => {
+		vi.useFakeTimers();
+		openSession('chat-a');
+		h.stack = [{}, { mobileDrawer: true }];
+		h.index = 1;
+		page.state = h.stack[1];
+		openSessionFromList('chat-b');
+		openSessionFromList('chat-c');
+		step(-1);
+		expect(h.stack).toEqual([{ chatSession: 'chat-a' }, { chatSession: 'chat-b' }, { chatSession: 'chat-c' }]);
+		expect(openChat()).toBe('chat-c');
+	});
+});
+
 describe('reopening the chat already open (#1350)', () => {
 	it('tells the store it is a reopen; any other open is navigation', () => {
 		active.switches = [];

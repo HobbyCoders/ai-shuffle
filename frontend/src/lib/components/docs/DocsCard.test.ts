@@ -40,6 +40,7 @@ describe('Docs shared navigation', () => {
 });
 
 import { shellHistory } from '$lib/services/app-history.svelte';
+import { goto } from '$app/navigation';
 vi.mock('$app/navigation', () => ({ goto: vi.fn() }));
 
 describe('Docs headings, search marks and reload (#1476, #1478)', () => {
@@ -92,6 +93,29 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   Object.defineProperty(window, 'innerWidth', { value: 390, configurable: true });
   const phone = render(DocsCard, { mobile: true });
   await waitFor(() => expect(title(phone)).toBe('Frequently asked questions'));
+ });
+
+ it('choosing the shown article again retries a rejected step, and a committed one adds none (S15)', async () => {
+  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
+  shellHistory.start({}, { type: 'docs' });
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  const docs = () => vi.mocked(goto).mock.calls.map(([, options]) => (options as { replace?: boolean; state: { shell: { place: { doc?: string } } } }))
+   .filter((options) => !options.replace).map((options) => options.state.shell.place.doc);
+  vi.mocked(goto).mockClear();
+  vi.mocked(goto).mockRejectedValueOnce(new Error('navigation aborted'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(docs()).toHaveLength(1));
+  await new Promise((resolve) => setTimeout(resolve));
+  // FAQ shows but its push failed: choosing it again writes it again.
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(docs()).toHaveLength(2));
+  expect(docs()[0]).toBe(docs()[1]);
+  await new Promise((resolve) => setTimeout(resolve));
+  // Now committed: a third pick adds nothing.
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(docs()).toHaveLength(2);
  });
 
  it('marks every search result it opens, also after a document chosen from the list', async () => {

@@ -232,6 +232,7 @@
 		danger: boolean;
 		action: () => void;
 		cancel?: () => void;
+		draftEntry?: number | null;
 	} | null>(null);
 
 	function runPendingConfirm() {
@@ -379,12 +380,15 @@
 			if (!restoredEntryCurrent) shellHistory.detail('notes', { panel: editingNote?.id ?? (isCreatingNew ? 'new' : null) });
 		};
 		if (hasUnsavedChanges) {
+			// Kept from a Back or Forward: the browser returns to the draft's entry.
+			// A step taken while an earlier one still waits keeps that entry.
+			const draftEntry = restoredEntryCurrent
+				? pendingConfirm?.draftEntry ?? shellHistory.returnPoint(landing) : null;
 			pendingConfirm = {
 				title: 'Discard changes',
 				message: 'You have unsaved changes. Discard them?',
-				confirmLabel: 'Discard', danger: true, action: apply,
-				// Kept from a Back or Forward: the browser returns to the draft's entry.
-				cancel: restoredEntryCurrent ? () => { if (current()) shellHistory.refuse(landing); } : undefined
+				confirmLabel: 'Discard', danger: true, action: apply, draftEntry,
+				cancel: restoredEntryCurrent ? () => { if (current()) shellHistory.refuse(landing, draftEntry); } : undefined
 			};
 			return;
 		}

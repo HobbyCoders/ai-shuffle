@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 
@@ -20,16 +20,21 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 const chatHistory = vi.hoisted(() => ({ entries: [{}] as Record<string, unknown>[], index: 0 }));
 vi.mock('$app/navigation', async (importOriginal) => {
 	const { page } = await import('$app/state');
+	const write = (state: Record<string, unknown>, replace?: boolean) => {
+		if (replace) chatHistory.entries[chatHistory.index] = state;
+		else {
+			chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
+			chatHistory.index++;
+		}
+		page.state = state;
+	};
 	return {
 		...(await importOriginal<object>()),
-		goto: (_url: string, { state, replace }: { state: Record<string, unknown>; replace?: boolean }) => {
-			if (replace) chatHistory.entries[chatHistory.index] = state;
-			else {
-				chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
-				chatHistory.index++;
-			}
-			page.state = state;
-		},
+		// The web UI's shell history.
+		goto: (_url: string, { state, replace }: { state: Record<string, unknown>; replace?: boolean }) => write(state, replace),
+		// The phone app's own writers (main's chat links and drawer picks).
+		pushState: (_url: string, state: Record<string, unknown>) => write(state),
+		replaceState: (_url: string, state: Record<string, unknown>) => write(state, true),
 	};
 });
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
@@ -59,6 +64,8 @@ import { markChatUnavailable } from '$lib/stores/unavailable-chat';
 import { get } from 'svelte/store';
 import { page } from '$app/state';
 import type { ShellState } from '$lib/services/app-history.svelte';
+import { platform } from '$lib/stores/platform.svelte';
+import { openSessionFromList } from '$lib/services/session-navigation';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -400,6 +407,60 @@ describe('chat link history (#859)', () => {
 		expect(layout.current.activeView?.type).toBe('notes');
 		expect(places()).toEqual(['parent', 'notes']);
 		expect(chatHistory.index).toBe(1);
+	});
+
+	it('narrow desktop with the sidebar open: a Forward before the deferred New Chat open wins over the Back it overtook', async () => {
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		activeSession.newChat();
+		layout.openChat(null);
+		layout.openFeaturePage('notes');
+		await waitFor(() => expect(places()).toEqual(['parent', null, 'notes']));
+		layout.setSidebarOverlay(true);
+		layout.setSidebarCollapsed(false);
+		const frames: FrameRequestCallback[] = [];
+		const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });
+		step(-1); // Back to New Chat: its open waits a frame for the sidebar to close.
+		await new Promise((resolve) => setTimeout(resolve));
+		expect(frames.length).toBeGreaterThan(0);
+		step(1); // Forward to Notes before that frame.
+		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
+		raf.mockRestore();
+		for (const frame of frames.splice(0)) frame(0);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(layout.current.activeView?.type).toBe('notes');
+		expect(places()).toEqual(['parent', null, 'notes']);
+		expect(chatHistory.index).toBe(2);
+	});
+
+	it('the phone app keeps main’s history: chat A, drawer pick B, drawer Notes, Back reaches A, Forward reopens B', async () => {
+		platform.set('mobile');
+		onTestFinished(() => platform.set('desktop'));
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The drawer pushes its own entry over the current one; dismissing it is history.back().
+		const openDrawer = () => { chatHistory.entries.splice(chatHistory.index + 1, Infinity, { ...page.state, mobileDrawer: true }); step(1); };
+		openDrawer();
+		openSessionFromList('worker-child');
+		step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		await waitFor(() => expect(chatHistory.entries).toEqual([{ chatSession: 'parent' }, { chatSession: 'worker-child' }]));
+		openDrawer();
+		layout.openFeaturePage('notes');
+		step(-1);
+		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// Notes adds no entry and writes nothing onto B's: main's entries only, no shell.
+		expect(chatHistory.entries.slice(0, 2)).toEqual([{ chatSession: 'parent' }, { chatSession: 'worker-child' }]);
+		expect(chatHistory.index).toBe(1);
+		step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'parent' });
+		step(1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
 	});
 
 	it('writes the chat this tab shows, not the shared layout’s, when the first step comes before boot settles', async () => {

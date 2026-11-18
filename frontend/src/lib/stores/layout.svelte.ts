@@ -165,6 +165,9 @@ function _update(fn: (s: LayoutState) => LayoutState) {
 // Exported Store
 // ============================================
 
+/** The newest afterSidebarOverlay request; an older deferred one is stale. */
+let deferredNavigation = 0;
+
 export const layout = {
 	get current() {
 		return _state;
@@ -180,6 +183,21 @@ export const layout = {
 	/** Set sidebar collapsed state */
 	setSidebarCollapsed(collapsed: boolean) {
 		_update((s) => ({ ...s, sidebarCollapsed: collapsed }));
+	},
+
+	/**
+	 * Navigate now, or after an open sidebar overlay closes (the next frame).
+	 * Any view change in between (Back, Forward, another pick) supersedes it.
+	 */
+	afterSidebarOverlay(navigate: () => void) {
+		const request = ++deferredNavigation;
+		if (!_state.sidebarOverlay || _state.sidebarCollapsed) return navigate();
+		// A landing (Back, Forward) or a selection replaces the shell-history place.
+		const place = shellHistory.place;
+		_update((s) => ({ ...s, sidebarCollapsed: true }));
+		requestAnimationFrame(() => {
+			if (request === deferredNavigation && shellHistory.place === place) navigate();
+		});
 	},
 
 	/**
