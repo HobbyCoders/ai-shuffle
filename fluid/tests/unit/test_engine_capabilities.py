@@ -5,13 +5,13 @@ from contextlib import aclosing
 import pytest
 
 from fluid.events.model import (
-    BlockStop, ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
+    BlockStop, ErrorEvent, Usage, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
     ToolResult, ToolUse, TurnComplete,
 )
 from fluid.events.ops import (
     BackgroundTaskFinished, Fork, Interrupt, RespondPermission, Resume, Rewind, UserTurn,
 )
-from fluid.messages import Message, Text
+from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.permissions.rules import Rule
 from fluid.store.base import SessionNode
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
@@ -355,6 +355,143 @@ async def test_acp_failed_write_of_an_interrupted_turn_is_not_resumable(tmp_path
         end = await driver.until((ErrorEvent, TurnComplete), timeout=10)
         assert isinstance(end, ErrorEvent) and end.message.startswith("Nothing to resume")
         assert len(_received(tmp_path, "session/prompt")) == 1
+    finally:
+        await driver.close()
+
+
+class _FaultStore(SerializingStore):
+    """Raises once, on the write ``fail(index, item)`` picks. ``index``
+    counts the turn's writes from its first reply node (0); None before."""
+
+    def __init__(self, fail):
+        super().__init__()
+        self.fail, self.fired, self.failed, self.index = fail, False, None, None
+        self.marked_at = None  # index of the marked (resumable) node
+
+    def _check(self, item):
+        if self.index is not None:
+            self.index += 1
+        elif _reply_node(item):
+            self.index = 0
+        if isinstance(item, SessionNode) and item.message.provider_meta.get("resume_node_id"):
+            self.marked_at = self.index
+        if not self.fired and self.fail(self.index, item):
+            self.fired, self.failed = True, self.index
+            raise RuntimeError("database went away")
+
+    async def append(self, session_id, node):
+        if _reply_node(node):
+            self._check(node)
+        await super().append(session_id, node)
+
+    async def append_event(self, session_id, event):
+        self._check(event)
+        await super().append_event(session_id, event)
+
+
+async def _interrupt_and_resume(tmp_path, store):
+    """Interrupt ``slowonce tool``, then Resume (no fault armed): (terminal
+    event, roles stored after the prompt, Resume's outcome, prompts sent)."""
+    driver = await _driver(tmp_path, store=store)
+    loop = driver.loop
+    try:
+        await loop.submit(UserTurn(content="slowonce tool"))
+        await driver.until(TextDelta, timeout=10)
+        await loop.submit(Interrupt())
+        end = await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10)
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        stored = [n.message.role for n in await loop.store.load_path(loop.session_id)][1:]
+        store.fail = lambda *_: False
+        await loop.submit(Resume())
+        resumed = await driver.until((ErrorEvent, TurnComplete), timeout=10)
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        return end, stored, resumed, [r["params"]["prompt"] for r in _received(tmp_path, "session/prompt")]
+    finally:
+        await driver.close()
+
+
+@pytest.mark.parametrize("fail", [
+    pytest.param(lambda i, item: isinstance(item, Usage), id="usage"),
+    # Each write from the first reply node on: call, tool result, the marked
+    # reply, then the Interrupted event.
+    *(pytest.param(lambda i, item, k=k: i == k, id=f"write-{k}") for k in range(4)),
+])
+async def test_acp_interrupted_turn_outcome_and_resume_agree_when_a_write_fails(tmp_path, fail):
+    # The marked node is the turn's last write that can fail: whichever write
+    # fails, the turn either ended Interrupted and is resumable, or ended on
+    # an error that Resume agrees with; never an error behind a resumable head.
+    store = _FaultStore(fail)
+    end, stored, resumed, prompts = await _interrupt_and_resume(tmp_path, store)
+    assert store.fired  # the picked write happened
+    if isinstance(end, Interrupted):
+        assert isinstance(resumed, TurnComplete)
+        assert len(prompts) == 2 and prompts[1] == prompts[0]
+    elif stored:
+        # An error behind a stored (unmarked) reply: Resume refuses it.
+        assert isinstance(end, ErrorEvent) and "database went away" in end.message
+        assert isinstance(resumed, ErrorEvent) and resumed.message.startswith("Nothing to resume")
+        assert len(prompts) == 1
+    else:
+        # Nothing of the turn was stored: the prompt is unanswered and
+        # Resume re-sends it, as after any error before a reply (as on main).
+        assert isinstance(end, ErrorEvent) and "database went away" in end.message
+        assert isinstance(resumed, TurnComplete) and len(prompts) == 2
+    # A write after the marked node cannot fail the turn.
+    if store.marked_at is not None and store.failed is not None and store.failed > store.marked_at:
+        assert isinstance(end, Interrupted)
+
+
+async def test_acp_failed_final_write_after_a_tool_result_is_not_resumable(tmp_path):
+    # The interrupted turn's last node (the reply after a tool result) fails
+    # to store: the head is the tool-result node (role "user"), which is no
+    # prompt; Resume refuses instead of sending an empty one.
+    seen = []
+
+    def third_reply_node(_i, item):
+        if isinstance(item, SessionNode):
+            seen.append(item)
+        return len(seen) == 3
+
+    end, _stored, resumed, prompts = await _interrupt_and_resume(tmp_path, _FaultStore(third_reply_node))
+    assert isinstance(end, ErrorEvent)
+    assert isinstance(seen[1].message.content[0], ToolResultBlock)
+    assert isinstance(resumed, ErrorEvent) and resumed.message.startswith("Nothing to resume")
+    assert len(prompts) == 1
+
+
+def _node(node_id, parent_id, role, *content, **meta):
+    return SessionNode(node_id=node_id, parent_id=parent_id,
+                       message=Message(role=role, content=list(content), provider_meta=meta))
+
+
+@pytest.mark.parametrize("case", ["unmarked", "not-an-ancestor", "tool-result", "empty-prompt"])
+async def test_acp_resume_refuses_a_head_that_names_no_valid_prompt(tmp_path, case):
+    marker = {"interrupted": "interrupt"}
+    nodes = {
+        # The pointer without the interrupted marker.
+        "unmarked": [_node("p", None, "user", Text("prompt")),
+                     _node("a", "p", "assistant", Text("partial"), resume_node_id="p")],
+        # A marked head naming a prompt on another branch.
+        "not-an-ancestor": [_node("other", None, "user", Text("other prompt")),
+                            _node("p", None, "user", Text("prompt")),
+                            _node("a", "p", "assistant", Text("partial"), resume_node_id="other", **marker)],
+        # A marked head naming its tool-result node.
+        "tool-result": [_node("p", None, "user", Text("prompt")),
+                        _node("call", "p", "assistant", ToolUseBlock(id="t1", name="Read", input={})),
+                        _node("result", "call", "user", ToolResultBlock(tool_use_id="t1", content=[Text("x")])),
+                        _node("a", "result", "assistant", Text("partial"), resume_node_id="result", **marker)],
+        # An unanswered "prompt" with nothing to send.
+        "empty-prompt": [_node("p", None, "user", Text("  "))],
+    }[case]
+    driver = await _driver(tmp_path)
+    loop = driver.loop
+    try:
+        for node in nodes:
+            await loop.store.append(loop.session_id, node)
+        await loop.submit(Resume())
+        end = await driver.until((ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent) and end.message.startswith("Nothing to resume")
+        assert not _received(tmp_path, "session/prompt")
     finally:
         await driver.close()
 

@@ -75,7 +75,7 @@ from fluid.events.ops import (
     Steer,
     UserTurn,
 )
-from fluid.messages.content import Image, Message, Text
+from fluid.messages.content import Image, Message, Text, ToolResultBlock
 from fluid.store.base import SessionMeta, SessionNode, SessionStore, flush_events, new_id, persist_event
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,12 @@ _ACP_MODES: dict[str, str] = {
 _MODE_RANK: dict[str, int] = {"plan": 0, _ACP_NORMAL_MODE: 1, "accept-edits": 2}
 _MODE_LABELS: dict[str, str] = {"default": "Ask", "acceptEdits": "Accept Edits", "plan": "Plan",
                                 "bypassPermissions": "Bypass", "auto": "Auto"}
+
+
+def _is_prompt(message: Message) -> bool:
+    """A user prompt Resume can re-send: text or an image, no tool result."""
+    return any(isinstance(b, Image) or (isinstance(b, Text) and b.text.strip()) for b in message.content) and not any(
+        isinstance(b, ToolResultBlock) for b in message.content)
 
 
 def _mode_rank(mode_id: str | None) -> int:
@@ -925,16 +931,18 @@ class AcpLoop:
                 # Retry: send the unanswered prompt at the head again.
                 head = await self.store.get_node(sid, meta.head_node_id) if meta.head_node_id else None
                 # A reply cut off by an Interrupt is not an answer: the last
-                # node an interrupted turn stored names its prompt, written
-                # only once every node of the turn is stored.
+                # node an interrupted turn stored is marked and names its
+                # prompt, an ancestor (_drive writes it last).
                 resume_from = (head.message.provider_meta or {}).get("resume_node_id") if head else None
                 if resume_from:
-                    head = await self.store.get_node(sid, resume_from)
+                    head = (await self._interrupted_prompt(sid, head, resume_from)
+                            if (head.message.provider_meta or {}).get("interrupted") else None)
                 elif (head is not None and head.message.role == "assistant" and head.parent_id
                         and (head.message.provider_meta or {}).get("interrupted")):
                     # A reply cut off by an error is not an answer (as in native.py).
                     head = await self.store.get_node(sid, head.parent_id)
-                if head is None or head.message.role != "user":
+                # Tool results (role "user" too) are no prompt to re-send.
+                if head is None or head.message.role != "user" or not _is_prompt(head.message):
                     await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                                 message="Nothing to resume: the last message was answered."))
                     return
@@ -1029,44 +1037,53 @@ class AcpLoop:
             # interrupted, so a host interrupt stays an interruption.
             interrupted = (stop == "cancelled" and not silent) or (
                 self._interrupted.is_set() and stop != "end_turn")
+        usage, cost = self._usage(result, mapper)
+        usage_event = Usage(session_id=sid, turn_id=turn_id,
+                            input_tokens=usage.get("input_tokens", 0),
+                            output_tokens=usage.get("output_tokens", 0),
+                            cache_read_tokens=usage.get("cache_read_tokens", 0),
+                            cache_creation_tokens=usage.get("cache_creation_tokens", 0),
+                            raw={"acp_usage": (result or {}).get("usage") if isinstance(result, Mapping) else None},
+                            ) if usage else None
+        # An interrupted turn's marked node, which makes it resumable, is its
+        # last write that can fail: every other write comes first, so a
+        # failure leaves the head unmarked and ends the turn on an error that
+        # Resume agrees with. After it only the Interrupted event is written,
+        # and its storing cannot fail the turn (_emit_settled).
+        marked = interrupted and bool(segments)
+        if marked and usage_event is not None:
+            await self._emit(usage_event)
         parent = user_node
         for i, (role, blocks) in enumerate(segments):
-            # The last node of an interrupted turn is marked and names the
-            # prompt, so Resume re-sends it. Only that node: if a write fails
-            # first, the head stays unmarked and Resume refuses it.
+            # Only the last node is marked; it names the prompt to re-send.
             meta = ({"interrupted": "interrupt", "resume_node_id": user_node.node_id}
-                    if interrupted and i == len(segments) - 1 else {})
+                    if marked and i == len(segments) - 1 else {})
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
                                message=Message(role="assistant" if role == "assistant" else "user", content=blocks,
                                                provider_meta=meta))
             await self.store.append(sid, node)
             parent = node
-        usage, cost = self._usage(result, mapper)
-        if usage:
-            await self._emit(Usage(session_id=sid, turn_id=turn_id,
-                                   input_tokens=usage.get("input_tokens", 0),
-                                   output_tokens=usage.get("output_tokens", 0),
-                                   cache_read_tokens=usage.get("cache_read_tokens", 0),
-                                   cache_creation_tokens=usage.get("cache_creation_tokens", 0),
-                                   raw={"acp_usage": (result or {}).get("usage") if isinstance(result, Mapping) else None}))
+        if not marked and usage_event is not None:
+            await self._emit(usage_event)
         stopped, self._stop_reason = self._stop_reason, None
         if stopped:
-            await self._stop_process()
+            await self._stop_process()  # no store write; its failures are suppressed
         if stopped and not interrupted:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=stopped,
                                         usage=usage, cost_usd=cost))
             return
         if failure is not None:
             if interrupted:
-                await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id))
+                await self._emit_settled(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id),
+                                         settled=marked)
                 return
             if not conn.alive:
                 await self._stop_process()
             await self._emit(self._failure_event(sid, turn_id, failure, usage=usage, cost_usd=cost))
             return
         if interrupted:
-            await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
-                                         usage=usage, cost_usd=cost))
+            await self._emit_settled(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
+                                                 usage=usage, cost_usd=cost), settled=marked)
             return
         reported = self.spec.turn_failure(mapper.text)
         if reported:
@@ -1085,6 +1102,31 @@ class AcpLoop:
         await self._emit(TurnComplete(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                       stop_reason=stop, num_model_calls=1 if mapper.text or segments else 0,
                                       usage=usage, cost_usd=cost))
+
+    async def _emit_settled(self, event: Event, *, settled: bool) -> None:
+        """Emit a terminal event whose outcome the transcript already holds.
+
+        When ``settled``, a failure to store the event is logged, not raised:
+        the event is already published, and raising would add an error that
+        contradicts the stored (resumable) turn.
+        """
+        if not settled:
+            await self._emit(event)
+            return
+        sequenced = await self.bus.publish(event)
+        try:
+            await persist_event(self.store, sequenced)
+        except Exception:  # the outcome is already stored
+            logger.warning("ACP: could not store the turn's %s event", type(event).__name__, exc_info=True)
+
+    async def _interrupted_prompt(self, sid: str, head: SessionNode, prompt_id: str) -> SessionNode | None:
+        """The node ``prompt_id`` names when it is an ancestor of ``head``."""
+        node = head
+        while node is not None and node.parent_id:
+            node = await self.store.get_node(sid, node.parent_id)
+            if node is not None and node.node_id == prompt_id:
+                return node
+        return None
 
     def _silent_end(self, mapper: TurnMapper) -> str | None:
         """Why a turn that ended with no reply right after a refused or failed

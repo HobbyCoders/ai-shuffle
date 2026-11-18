@@ -351,6 +351,7 @@ class Agent:
                                     "content": {"type": "text", "text": "notes"}}]})
             await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
+        cancelled: dict = {"stopReason": "cancelled"}
         if word == "slowonce":
             # ``slow`` the first time; resent (a Resume), it answers at once,
             # also from a new process (remembered in FAKE_ACP_STATE).
@@ -360,6 +361,8 @@ class Agent:
                 await self.say(sid, "resumed")
                 return {"stopReason": "end_turn"}
             os.close(os.open(seen, os.O_CREAT | os.O_WRONLY))
+            # Interrupted, it reports what the cut-off turn used.
+            cancelled["usage"] = {"inputTokens": 5, "outputTokens": 2, "totalTokens": 7}
             if text == "slowonce tool":
                 await self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": "read-1",
                                         "title": "Read notes.txt", "kind": "read", "status": "completed",
@@ -375,7 +378,7 @@ class Agent:
             for t in pending:
                 t.cancel()
             if cancel in done:
-                return {"stopReason": "cancelled"}
+                return cancelled
             if steer in done:
                 await self.say(sid, " steered:" + steer.result())
             return {"stopReason": "end_turn"}
