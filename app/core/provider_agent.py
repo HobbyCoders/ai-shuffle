@@ -796,14 +796,18 @@ def _caller_context_window(caller_row: Optional[Mapping[str, Any]]) -> Optional[
     return _positive_window(row.get("context_window"))
 
 
-def _caller_fast(caller_row: Optional[Mapping[str, Any]]) -> Optional[bool]:
-    """The direct caller's fast mode, for worker inheritance.
+def _caller_speed(caller_row: Optional[Mapping[str, Any]], *, live_only: bool = False) -> Optional[str]:
+    """The direct caller's speed tier, for worker inheritance.
 
     Resolved like :func:`_caller_effort`: the running turn's override (a live
     toggle writes it there), else the latest configured turn's, else the
-    session binding (voice reads only its live binding). ``None`` means the
-    caller never picked one.
+    session binding (voice reads only its live binding). A turn that names
+    only ``fast`` keeps the row's tier when on, as the turn itself runs it
+    (``query_options``). ``None`` means the caller never picked one.
+    ``live_only`` skips the latest finished turn: a live switch between turns
+    writes only the binding, so a parent's switch is read from there.
     """
+    from app.core.model_speed import normalize_speed, resolve_speed
     from app.db import turns
 
     row = caller_row or {}
@@ -811,16 +815,76 @@ def _caller_fast(caller_row: Optional[Mapping[str, Any]]) -> Optional[bool]:
         try:
             turn = turns.get_live_turn(str(row["id"]))
             if turn is None:
-                turn = turns.get_latest_turn(str(row["id"])) or {}
+                turn = {} if live_only else (turns.get_latest_turn(str(row["id"])) or {})
                 if turn.get("state") == "queued":
                     turn = {}
-            value = (turn.get("overrides") or {}).get("fast")
+            overrides = turn.get("overrides") or {}
+            tier = normalize_speed(overrides.get("speed"))
+            if tier is not None:
+                return tier
+            value = overrides.get("fast")
             if value is not None:
-                return bool(value)
+                return resolve_speed(value, row.get("speed"))
         except Exception:  # noqa: BLE001 — session binding fallback
-            logger.debug("ProviderAgent: caller fast-mode turn read failed", exc_info=True)
+            logger.debug("ProviderAgent: caller speed turn read failed", exc_info=True)
     value = row.get("fast")
-    return None if value is None else bool(value)
+    return None if value is None else resolve_speed(value, row.get("speed"))
+
+
+def _caller_fast(caller_row: Optional[Mapping[str, Any]]) -> Optional[bool]:
+    """The direct caller's fast mode (on for Fast and Ultrafast), or ``None``."""
+    return speed_is_fast(_caller_speed(caller_row))
+
+
+def speed_is_fast(speed: Optional[str]) -> Optional[bool]:
+    """The ``fast`` flag a tier implies; ``None`` stays ``None``."""
+    from app.core.model_speed import STANDARD
+
+    return None if speed is None else speed != STANDARD
+
+
+def worker_speed(
+    speed: Optional[str], provider_id: Optional[str], model_id: Optional[str],
+    profile_id: Optional[str] = None,
+) -> Optional[str]:
+    """The caller's speed tier as the worker should carry it, never above it.
+
+    Standard passes through. Fast and Ultrafast need the worker's model to
+    have Fast (:func:`worker_fast`), else ``None`` (standard speed). Ultrafast
+    stays Ultrafast only where the worker's own row offers it
+    (:func:`app.core.model_override.ultrafast_supported`); anywhere else —
+    another account or provider, the delegated CLI — it runs on Fast.
+    """
+    from app.core.model_speed import FAST, STANDARD, ULTRAFAST, normalize_speed
+
+    tier = normalize_speed(speed)
+    if tier is None or tier == STANDARD:
+        return tier
+    if not worker_fast(True, provider_id, model_id, profile_id):
+        return None
+    if tier != ULTRAFAST:
+        return FAST
+    from app.core.model_override import ultrafast_supported
+
+    model = model_id or _profile_model(profile_id)
+    try:
+        return ULTRAFAST if ultrafast_supported(model, provider_id) else FAST
+    except Exception:  # noqa: BLE001 — inheritance is best-effort
+        logger.debug("ProviderAgent: Ultrafast support check failed", exc_info=True)
+        return FAST
+
+
+def _profile_model(profile_id: Optional[str]) -> Optional[str]:
+    """An agent's saved model, for a worker with no model of its own."""
+    if not profile_id:
+        return None
+    try:
+        from app.db import database
+
+        return ((database.get_profile(profile_id) or {}).get("config") or {}).get("model")
+    except Exception:  # noqa: BLE001 — unknown model
+        logger.debug("ProviderAgent: worker profile read failed", exc_info=True)
+        return None
 
 
 def worker_fast(
@@ -1010,6 +1074,7 @@ def worker_session_fields(
     context_window: Optional[int] = None,
     permission_ceiling: Optional[str] = None,
     fast: Optional[bool] = None,
+    speed: Optional[str] = None,
 ) -> Dict[str, Any]:
     """``database.create_session`` keywords for a Task worker's own row.
 
@@ -1022,8 +1087,9 @@ def worker_session_fields(
     ``context_window`` (the caller's window choice, fitted to this worker by
     :func:`worker_context_window`) is stamped on the row, so every later turn
     of the worker — a message, a restart, a limit-reset resume — runs with
-    the same window as its first. ``fast`` (the caller's fast mode, fitted
-    by :func:`worker_fast`) is stamped the same way when it is set.
+    the same window as its first. ``fast``/``speed`` (the caller's tier,
+    fitted by :func:`worker_speed`) are stamped the same way when set, as the
+    pair :func:`app.core.model_speed.stored_pair` makes.
     """
     fields: Dict[str, Any] = dict(
         session_id=worker_session_id,
@@ -1053,9 +1119,16 @@ def worker_session_fields(
         fields["permission_ceiling"] = permission_ceiling
     if context_window:
         fields["context_window"] = context_window
-    if fast is not None:
-        fields["fast"] = bool(fast)
+    fields.update(_speed_pair(fast, speed))
     return fields
+
+
+def _speed_pair(fast: Optional[bool], speed: Optional[str]) -> Dict[str, Any]:
+    """The stored ``fast``/``speed`` pair for a worker, or nothing when unset."""
+    from app.core.model_speed import stored_pair
+
+    pair = stored_pair(None if fast is None else bool(fast), speed)
+    return pair if pair["fast"] is not None else {}
 
 
 def worker_turn_overrides(
@@ -1071,14 +1144,15 @@ def worker_turn_overrides(
     tool_denylist: Optional[List[str]] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    speed: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The overrides a Task worker's turn is submitted with, local or remote.
 
     ``checkout`` is a :class:`app.core.worker_checkout.WorkerCheckout`; its
     instructions follow ``system_prompt_append``. ``context_window`` is the
     caller's window choice fitted to the worker (see
-    :func:`worker_context_window`). ``fast`` is the caller's fast mode fitted
-    to the worker (see :func:`worker_fast`).
+    :func:`worker_context_window`). ``fast``/``speed`` are the caller's tier
+    fitted to the worker (see :func:`worker_speed`).
     """
     overrides: Dict[str, Any] = {}
     if provider_id:
@@ -1094,8 +1168,7 @@ def worker_turn_overrides(
     overrides["_permission_ceiling"] = permission_mode or "default"
     if context_window:
         overrides["context_window"] = context_window
-    if fast is not None:
-        overrides["fast"] = bool(fast)
+    overrides.update(_speed_pair(fast, speed))
     # A role definition the worker's profile does not carry — today: an agent
     # defined in a ``.fluid/agents`` markdown file or a plugin, dispatched on
     # the caller's profile because it has no ``agents`` row of its own (ruling
@@ -2567,7 +2640,9 @@ async def _dispatch_worker(
     #: The caller's effective mode, inherited as the worker's binding AND its
     #: durable ceiling (``None``: the caller resolved to nothing — Ask).
     dispatch_mode: Optional[str] = None
-    #: The caller's fast mode fitted to this worker (see ``worker_fast``).
+    #: The caller's speed tier fitted to this worker (see ``worker_speed``),
+    #: and the ``fast`` flag it implies.
+    selected_speed: Optional[str] = None
     selected_fast: Optional[bool] = None
 
     def _prepare_worker_blocking() -> Tuple[
@@ -2582,7 +2657,7 @@ async def _dispatch_worker(
         caller can refuse launch before registration or provider submission.
         Nothing here needs a running loop.
         """
-        nonlocal worker_checkout, worker_window, dispatch_mode, selected_fast
+        nonlocal worker_checkout, worker_window, dispatch_mode, selected_fast, selected_speed
         # Inheritance (project/worktree/cwd) reads the DIRECT caller's session;
         # ``parent_session_id`` is the ROUTING parent — for nested Task-tool
         # dispatch it is the ROOT session, whose UI renders the card and answers
@@ -2641,13 +2716,14 @@ async def _dispatch_worker(
             _caller_context_window(parent_row), provider_id, model_id,
         )
         dispatch_mode = _caller_permission_mode(parent_row)
-        # The owner's last fast-mode pick for this worker's model, else the
-        # caller's as it stands now (a worker started after the owner turned it
-        # on runs fast too), on only where the worker's model can.
-        from app.core.model_effort import resolve_child_fast
-        selected_fast = resolve_child_fast(
-            model_id, provider_id, parent=_caller_fast(parent_row), caller=parent_row,
+        # The owner's last speed pick for this worker's model, else the
+        # caller's tier as it stands now (a worker started after the owner
+        # turned on Ultrafast runs it too), fitted to what the worker can run.
+        from app.core.model_effort import resolve_child_speed
+        selected_speed = resolve_child_speed(
+            model_id, provider_id, parent=_caller_speed(parent_row), caller=parent_row,
             profile_id=profile_id)
+        selected_fast = speed_is_fast(selected_speed)
         project_v2_id = (parent_row or {}).get("project_v2_id")
         branch = (parent_row or {}).get("branch")
         target_instance_id = (parent_row or {}).get("instance_id")
@@ -2705,6 +2781,7 @@ async def _dispatch_worker(
                 permission_mode=dispatch_mode or "default",
                 permission_ceiling=dispatch_mode or "default",
                 fast=selected_fast,
+                speed=selected_speed,
             ), mode="chat" if parent_row and runtime_session_mode(parent_row) == "chat" and not (project_id or project_v2_id) else None)
             # The parent's creator reads its worker as it reads the parent,
             # and other account members do not (#1877). Label only: no record.
@@ -2792,6 +2869,7 @@ async def _dispatch_worker(
         tool_denylist=tool_denylist,
         context_window=worker_window,
         fast=selected_fast,
+        speed=selected_speed,
     )
 
     # ONE join key for the whole surface: the worker's session id is the

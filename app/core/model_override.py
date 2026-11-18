@@ -1211,3 +1211,35 @@ def fast_mode_supported(model: Optional[str], provider_id: Optional[str]) -> boo
     if route == "delegated":
         return get_model_family(model) == "opus"
     return False
+
+
+def ultrafast_supported(model: Optional[str], provider_id: Optional[str]) -> bool:
+    """Whether Ultrafast applies to ``model`` on ``provider_id``.
+
+    Only on the OpenAI Responses lane, and only where the bound row offers it
+    (:func:`app.core.model_speed.ultrafast_supported_for_row`). The delegated
+    CLI and every other route have none. Used when a speed is inherited rather
+    than picked, so a subagent that cannot run Ultrafast takes Fast instead.
+    """
+    from app.core.model_speed import ultrafast_supported_for_row
+    from app.core.provider.harness_adapter import _decide_provider_kind
+    from app.core.provider.types import SessionOptions
+    from app.core.query_options import decode_provider_model
+    from app.db.model_providers import resolve_model_provider
+
+    model = (model or "").strip()
+    if not model:
+        return False
+    decoded = decode_provider_model(model)
+    if decoded:
+        provider_id, model = decoded
+    if not provider_id:
+        return False
+    try:
+        route = _decide_provider_kind(SessionOptions(model=model, extra={"provider_id": provider_id}))
+        if route != "openai_responses":
+            return False
+        return ultrafast_supported_for_row(resolve_model_provider(provider_id), model)
+    except Exception:  # noqa: BLE001 — an unresolvable row cannot run Ultrafast
+        logger.debug("ultrafast: could not resolve the row for %s", model, exc_info=True)
+        return False

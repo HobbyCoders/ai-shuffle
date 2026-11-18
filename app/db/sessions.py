@@ -2297,18 +2297,33 @@ def set_session_hidden(session_id: str, hidden: bool) -> Optional[SessionRow]:
 
 
 def list_worker_children(session_id: str) -> List[Dict[str, Any]]:
-    """The delegated workers (Task/Swarm) whose parent is ``session_id``.
+    """The delegated workers (Task/Swarm) ``session_id`` itself dispatched, for speed inheritance.
 
     Workers only: a fork or a peer chat also records a parent, but it is the
-    owner's own chat, not a subagent. Nested workers record the ROOT as their
-    parent (``provider_agent.dispatch_worker``), so the root's list is the
-    whole delegation tree.
+    owner's own chat, not a subagent. A worker's ``parent_session_id`` is its
+    ROUTING parent, the root for a nested dispatch (``provider_agent.dispatch_worker``);
+    the session that dispatched it keeps its own assignment row in
+    ``background_tasks`` (the edge ``agent_messaging._persisted_parents``
+    reads: ``kind='agent'``, ``assignment_owner``, this install). So a worker
+    is its dispatcher's: the session other than its routing parent holding
+    such a row, else its routing parent (a worker with no row at all, from
+    before those rows, included). A ``SendMessage`` to a finished worker
+    leaves a reporting row (``assignment_owner`` false), never an edge.
     """
+    from app.core.config import settings
+
+    _ph = ph()
+    edge = ("SELECT 1 FROM background_tasks b WHERE b.task_id = s.id AND b.kind = 'agent' "
+            f"AND b.assignment_owner = TRUE AND b.instance_id = {_ph}")
+    instance = settings.effective_instance_id
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"SELECT * FROM sessions WHERE parent_session_id = {ph()} AND is_worker = TRUE",
-            (session_id,)
+            f"SELECT s.* FROM sessions s WHERE s.is_worker = TRUE AND ("
+            f"(s.parent_session_id = {_ph} AND NOT EXISTS ({edge} "
+            f"AND b.session_id <> s.parent_session_id AND b.session_id <> s.id)) "
+            f"OR (COALESCE(s.parent_session_id, '') <> {_ph} AND EXISTS ({edge} AND b.session_id = {_ph})))",
+            (session_id, instance, session_id, instance, session_id),
         )
         return rows_to_list(cursor.fetchall())
 

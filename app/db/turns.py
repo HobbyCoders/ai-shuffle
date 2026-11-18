@@ -236,8 +236,21 @@ def _rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 OWNER_NAMED_FOLDER_SOURCES = frozenset({"user", "queue", "api", "worktree", "connector"})
 
 
+#: The session columns :func:`_session_bound_overrides` reads.
+_BOUND_COLUMNS = "context_window, workspace_project_ids, is_worker, fast, speed"
+
+
+def _inherits_speed(source: Optional[str], payload: Dict[str, Any]) -> bool:
+    """Is this turn's speed pair one the person did not pick on this send?"""
+    from app.core.turn_manager import _BINDING_SOURCES, VOICE_DELEGATION, WORKER_BOUND
+
+    return (source not in _BINDING_SOURCES
+            or bool(payload.get(WORKER_BOUND) or payload.get(VOICE_DELEGATION)))
+
+
 def _session_bound_overrides(
     overrides: Dict[str, Any], source: Optional[str], binding: Optional[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """``overrides`` with the session row's run binding applied, where the row
     is authoritative over a value copied from an earlier turn.
@@ -247,12 +260,23 @@ def _session_bound_overrides(
     that names a list gets the chat's stored list, so a folder the owner
     removed after the copied turn started never comes back. A row naming no
     list is left alone (``query_options`` reads the stored list itself).
+    ``fast``/``speed`` on a delegated worker's turn the person did not pick
+    (its dispatch, a wake, a peer message, a message bound to its own turn, a
+    voice hand-off): the worker's saved pair, which its parent's later switch
+    may have changed (``sessions_permissions.propagate_fast``). A pinned
+    worker's saved pair is its own pick.
     """
     if not binding:
         return overrides
     result = overrides
     if binding.get("context_window"):
         result = {**result, "context_window": binding["context_window"]}
+    if (binding.get("is_worker") and binding.get("fast") is not None
+            and (result.get("fast") is not None or result.get("speed"))
+            and _inherits_speed(source, payload or {})):
+        from app.core.model_speed import stored_pair
+
+        result = {**result, **stored_pair(prior=binding)}
     if "workspace_project_ids" in result and source not in OWNER_NAMED_FOLDER_SOURCES:
         from app.core.workspace_folders import normalize_workspace_project_ids
 
@@ -1067,10 +1091,10 @@ def enqueue_turn(
         # Human sends persist explicit choices before enqueueing, so their new
         # binding still wins.
         cursor.execute(
-            "SELECT context_window, workspace_project_ids FROM sessions WHERE id = %s",
+            f"SELECT {_BOUND_COLUMNS} FROM sessions WHERE id = %s",
             (session_id,),
         )
-        overrides = _session_bound_overrides(overrides, source, cursor.fetchone())
+        overrides = _session_bound_overrides(overrides, source, cursor.fetchone(), payload)
         if at_front:
             cursor.execute(
                 "SELECT COALESCE(MIN(CASE WHEN state='queued' THEN position END), 1) - 1 AS pos, "
@@ -1481,11 +1505,11 @@ def start_turn(
                 # Refresh at the claim, in the same transaction, so the turn
                 # and its children run with what the session row holds now.
                 cursor.execute(
-                    "SELECT context_window, workspace_project_ids FROM sessions WHERE id=%s",
+                    f"SELECT {_BOUND_COLUMNS} FROM sessions WHERE id=%s",
                     (row["session_id"],),
                 )
                 refreshed = _session_bound_overrides(
-                    row["overrides"], row.get("source"), cursor.fetchone())
+                    row["overrides"], row.get("source"), cursor.fetchone(), row.get("payload"))
                 if refreshed != row["overrides"]:
                     row["overrides"] = refreshed
                     cursor.execute("UPDATE turns SET overrides=%s WHERE id=%s",

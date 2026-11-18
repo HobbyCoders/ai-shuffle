@@ -742,6 +742,54 @@ class TestDispatchWorker:
         assert dispatch_env.create_kwargs["fast"] is False
         assert dispatch_env.tm.submitted[0]["overrides"]["fast"] is False
 
+    @pytest.mark.parametrize("where", ["row", "live-turn"])
+    @pytest.mark.parametrize("eligible,expected", [(True, "ultrafast"), (False, "fast")])
+    def test_worker_of_an_ultrafast_caller_runs_ultrafast_where_it_can(
+            self, dispatch_env, monkeypatch, where, eligible, expected):
+        from app.core import model_override
+        from app.db import database, turns
+
+        original = database.get_session
+        if where == "row":
+            monkeypatch.setattr(database, "get_session", lambda sid: {
+                **original(sid), "fast": True, "speed": "ultrafast"})
+        else:
+            # The owner switched to Ultrafast mid-turn: the row still says
+            # Fast, the running turn's override says Ultrafast.
+            monkeypatch.setattr(database, "get_session", lambda sid: {
+                **original(sid), "fast": True, "speed": "fast"})
+            real_live = turns.get_live_turn
+            monkeypatch.setattr(turns, "get_live_turn", lambda sid: (
+                {"state": "running", "overrides": {"fast": True, "speed": "ultrafast"}}
+                if sid == "parent-1" else real_live(sid)))
+        monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+        checked = []
+        monkeypatch.setattr(model_override, "ultrafast_supported",
+                            lambda model, provider: checked.append((model, provider)) or eligible)
+        _dispatch()
+        assert checked == [("gpt-5.5", "prov-openai")]
+        overrides = dispatch_env.tm.submitted[0]["overrides"]
+        # The worker's row and first turn carry the pair stored_pair writes.
+        assert dispatch_env.create_kwargs["fast"] is True
+        assert dispatch_env.create_kwargs["speed"] == expected
+        assert overrides["fast"] is True
+        assert overrides["speed"] == expected
+
+    def test_owner_ultrafast_pick_for_the_worker_model_beats_a_fast_caller(self, dispatch_env, monkeypatch):
+        from app.core import model_effort, model_override
+        from app.db import database
+
+        original = database.get_session
+        monkeypatch.setattr(database, "get_session", lambda sid: {**original(sid), "fast": True})
+        monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+        monkeypatch.setattr(model_override, "ultrafast_supported", lambda model, provider: True)
+        saved = {"composer.modelFast.gpt-5.5": True, "composer.modelSpeed.gpt-5.5": "ultrafast"}
+        monkeypatch.setattr(model_effort, "_saved_model_preference",
+                            lambda key, row, *a, **k: (key in saved, saved.get(key)))
+        _dispatch()
+        assert dispatch_env.create_kwargs["speed"] == "ultrafast"
+        assert dispatch_env.tm.submitted[0]["overrides"]["speed"] == "ultrafast"
+
     @pytest.mark.parametrize("caller_kind", ["owner", "admin", "paired", "paired-local", "api_user"])
     @pytest.mark.parametrize("saved", [True, False])
     @pytest.mark.parametrize("model", ["gpt-6.1-sol", "prov:chatgpt-plan:gpt-6.1-sol", "unsupported"])

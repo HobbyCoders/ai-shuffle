@@ -335,6 +335,61 @@ def test_child_fast_reads_the_agent_model_and_keeps_api_users_separate(mock_db, 
     assert resolve_child_fast("opus", None, parent=False, caller={"api_user_id": "key-user"}) is False
 
 
+def _openai_key_row(provider_id="oa"):
+    """A real OpenAI API-key row: Ultrafast on the documented models only."""
+    from app.db import database
+    database.create_model_provider(
+        provider_id=provider_id, name="OpenAI", provider_type="openai",
+        base_url="https://api.openai.com/v1",
+        models=[{"id": "gpt-6.2-sol"}, {"id": "gpt-6-luna"}], enabled=True)
+
+
+@pytest.mark.parametrize("model,parent,expected", [
+    # The parent's Ultrafast carries over where the child's row offers it.
+    ("prov:oa:gpt-6.2-sol", "ultrafast", "ultrafast"),
+    # Never up: a child model without Ultrafast runs Fast.
+    ("prov:oa:gpt-6-luna", "ultrafast", "fast"),
+    ("prov:oa:gpt-6.2-sol", "fast", "fast"),
+    ("prov:oa:gpt-6.2-sol", "standard", "standard"),
+    ("prov:oa:gpt-6.2-sol", None, None),
+    # The delegated CLI has no Ultrafast: Fast on Opus, nothing on Sonnet.
+    ("opus", "ultrafast", "fast"),
+    ("sonnet", "ultrafast", None),
+])
+def test_child_speed_fits_the_parent_tier_to_the_child_row(mock_db, monkeypatch, model, parent, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import resolve_child_fast, resolve_child_speed
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    _openai_key_row()
+    assert resolve_child_speed(model, None, parent=parent) == expected
+    # The fast-only resolver still answers the flag the tier implies.
+    fast = None if parent is None else parent != "standard"
+    assert resolve_child_fast(model, None, parent=fast) is (None if expected is None else expected != "standard")
+
+
+@pytest.mark.parametrize("saved_fast,saved_speed,parent,expected", [
+    # The child model's remembered Ultrafast wins over the parent's Fast.
+    (True, "ultrafast", "fast", "ultrafast"),
+    # Remembered Fast (Ultrafast cleared) wins over the parent's Ultrafast.
+    (True, None, "ultrafast", "fast"),
+    # Remembered off wins; the Ultrafast record only refines an on pick.
+    (False, "ultrafast", "ultrafast", "standard"),
+    # No Fast record: the parent's tier applies.
+    (None, "ultrafast", "fast", "fast"),
+])
+def test_child_speed_prefers_the_owner_pick_for_the_child_model(
+        mock_db, monkeypatch, saved_fast, saved_speed, parent, expected):
+    from app.core import preference_identity
+    from app.core.model_effort import fast_preference_key, resolve_child_speed, speed_preference_key
+    from app.db import database
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    _openai_key_row()
+    if saved_fast is not None:
+        database.set_user_preference("account", "owner", fast_preference_key("gpt-6.2-sol"), saved_fast)
+    database.set_user_preference("account", "owner", speed_preference_key("gpt-6.2-sol"), saved_speed)
+    assert resolve_child_speed("prov:oa:gpt-6.2-sol", None, parent=parent) == expected
+
+
 def test_metadata_beats_official_and_legacy_upgrade():
     old = {"id": "gpt-5.6-sol", "supported_reasoning_levels": ["none", "max"], "default_reasoning_level": "none"}
     from app.db.model_providers import _normalize_model_capabilities
