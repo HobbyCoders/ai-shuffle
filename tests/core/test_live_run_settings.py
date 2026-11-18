@@ -490,7 +490,7 @@ async def test_handed_down_change_skips_a_pinned_or_unsupported_subagent(tree):
     assert await api.handle_run_settings(
         {"session_id": "w-sonnet", "fast": True, "inherited": True}, "parent-worker") == {"skipped": "unsupported"}
     assert _fast("w-pinned") is False and _fast("w-sonnet") is None
-    with pytest.raises(ValueError, match="only fast mode"):
+    with pytest.raises(ValueError, match="only its speed"):
         await api.apply_run_settings("w1", api.RunSettingsUpdate(effort="low"), inherited=True)
     result = await api.handle_run_settings({"session_id": "w1", "fast": True, "inherited": True}, "parent-worker")
     await asyncio.gather(*list(api._fast_propagations))
