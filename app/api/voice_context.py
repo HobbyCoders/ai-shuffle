@@ -158,14 +158,17 @@ async def update_voice_session_context(
         # A speed change is saved and announced under the chat's settings lock,
         # in order with live picks and sends (sessions_permissions.settings_lock).
         from app.api.sessions_permissions import _announce_run_settings, settings_lock
-        from app.core.model_speed import stored_pair
+        from app.core.model_speed import resolve_speed
         from app.core.turn_manager import _to_the_end
 
+        def tier(row: dict) -> str:
+            return resolve_speed(row.get("fast"), row.get("speed"))
+
         async with settings_lock(session_id):
-            before = stored_pair(prior=await run_sync(database.get_session, session_id) or {})
+            before = tier(await run_sync(database.get_session, session_id) or {})
             updated = await _to_the_end(run_sync(_persist_patch, session_id, body))
-            if stored_pair(prior=updated) != before:
-                await _announce_run_settings(session_id, stored_pair(prior=updated),
+            if tier(updated) != before:  # a cleared pair announces Standard
+                await _announce_run_settings(session_id, updated,
                                              effort_asked=False, speed_asked=True)
     else:
         updated = await run_sync(_persist_patch, session_id, body)

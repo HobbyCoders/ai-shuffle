@@ -335,10 +335,13 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
         updates["context_window"] = result["context_window"]
     if effort_asked and "effort" in result:
         updates["effort"] = result["effort"]
-    if speed_asked and isinstance(result.get("fast"), bool):
-        updates["fast"] = result["fast"]
-        # An owner older than ``speed`` answers without it: Fast at most.
-        updates["speed"] = result.get("speed") or ("fast" if result["fast"] else "standard")
+    if speed_asked and ("fast" in result or "speed" in result):
+        # The tier the chat runs on: a cleared pair is Standard, and an owner
+        # older than ``speed`` answers without it (Fast at most).
+        from app.core.model_speed import STANDARD, resolve_speed
+
+        updates["speed"] = resolve_speed(result.get("fast"), result.get("speed"))
+        updates["fast"] = updates["speed"] != STANDARD
     if not updates:
         return
     try:

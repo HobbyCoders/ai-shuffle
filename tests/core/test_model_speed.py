@@ -342,6 +342,35 @@ async def test_a_live_pick_during_a_send_is_announced_after_it(mock_db, monkeypa
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode, start, fast, stored, announced", [
+    # An attached chat keeps its Ultrafast on a fast-only save; nothing changed.
+    ("chat", "ultrafast", True, {"fast": True, "speed": "ultrafast"}, []),
+    # A dedicated voice row runs Fast at most.
+    ("voice", "ultrafast", True, {"fast": True, "speed": "fast"}, [{"fast": True, "speed": "fast"}]),
+    # Clearing keeps the stored nulls and announces the Standard they run on.
+    ("chat", "fast", None, {"fast": None, "speed": None}, [{"fast": False, "speed": "standard"}]),
+])
+async def test_a_voice_context_speed_save(mock_db, monkeypatch, mode, start, fast, stored, announced):
+    from app.api import voice_context
+    from app.core.sync_engine import sync_engine
+    from tests.core.helpers import make_profile
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated",
+                        AsyncMock(side_effect=lambda **kw: sent.append(kw["updates"])))
+    make_profile("agent", {})
+    db.create_session("voiced", profile_id="agent", model="gpt-6.1-sol", speed=start, mode=mode)
+    monkeypatch.setattr("app.api.voice._load_voice_session",
+                        AsyncMock(return_value={"id": "voiced", "mode": mode}))
+    monkeypatch.setattr(voice_context, "check_session_access", lambda request, session: None)
+    await voice_context.update_voice_session_context(
+        None, "voiced", voice_context.VoiceContextPatch(fast=fast))
+    row = db.get_session("voiced")
+    assert {"fast": row["fast"], "speed": row["speed"]} == stored
+    assert sent == announced
+
+
+@pytest.mark.asyncio
 async def test_a_voice_context_pick_during_a_live_pick_is_announced_after_it(mock_db, monkeypatch):
     import asyncio
     import threading

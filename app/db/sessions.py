@@ -1122,14 +1122,18 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
         raise ValueError("Unsupported voice context field")
     if not changes:
         return
-    if "fast" in changes:
-        # A voice worker context runs Fast at most, never Ultrafast; the
-        # pair stays agreeing (model_speed.stored_pair).
+    kept = []
+    if changes.get("fast") is True:
+        # The fast-only rule (model_speed.stored_pair), read in the UPDATE: an
+        # attached chat keeps a stored Ultrafast; a voice row runs Fast at most.
+        kept = ["speed = CASE WHEN COALESCE(mode, '') <> 'voice' AND fast "
+                "AND speed = 'ultrafast' THEN 'ultrafast' ELSE 'fast' END"]
+    elif "fast" in changes:
         from app.core.model_speed import stored_pair
 
         changes = {**changes, **stored_pair(changes["fast"])}
     placeholder = ph()
-    assignments = ", ".join(f"{field} = {placeholder}" for field in changes)
+    assignments = ", ".join([f"{field} = {placeholder}" for field in changes] + kept)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
