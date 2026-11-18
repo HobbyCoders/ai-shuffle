@@ -318,6 +318,52 @@ async def test_a_fresh_read_while_listings_are_rate_limited_asks_fal_and_never_u
     assert rates.cached(["a"], "key") == {"a": old}  # the listing cache is unchanged
 
 
+async def _queued_behind(rates, call, page_one):
+    """Start ``call`` so it passes the cooldown check and waits on the lock
+    while ``page_one`` (a listing read) runs under it."""
+    import asyncio
+    async with rates._lock:
+        queued = asyncio.ensure_future(call)
+        loop = asyncio.get_running_loop()
+        for _ in range(3):  # asyncio.sleep is patched out by ``transport``
+            tick = loop.create_future()
+            loop.call_soon(tick.set_result, None)
+            await tick
+        assert not queued.done()
+        await page_one()
+    return queued
+
+
+async def test_a_listing_page_queued_behind_a_rate_limit_or_a_fill_does_not_ask_fal(transport, monkeypatch):
+    row = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    rates = fal_pricing.FalRates()
+    scope = rates._scope("key")
+    # Page 1 gets a 429 with a 42 s Retry-After while page 2 waits on the lock.
+    t = transport((429, {}, {"retry-after": "42"}), (200, {"prices": [row]}))
+
+    async def limited():
+        with pytest.raises(fal_pricing.PricingRequestFailed):
+            await rates._fetch(["x"], "key", scope, cache=True)
+    queued = await _queued_behind(rates, rates.rows(["b"], "key"), limited)
+    with pytest.raises(fal_pricing.PricingRequestFailed, match="rate limited"):
+        await queued
+    assert len(t.requests) == 1  # page 2 never asked fal inside the window
+    # The window is on the monotonic clock: a wall-clock jump does not end it.
+    monkeypatch.setattr(fal_pricing.time, "time", lambda: 10 ** 12)
+    with pytest.raises(fal_pricing.PricingRequestFailed):
+        await rates.rows(["b"], "key")
+    assert len(t.requests) == 1
+    # Page 2 waits while page 1 caches "a": it answers from the cache.
+    monkeypatch.setattr(fal_pricing.time, "time", __import__("time").time)
+    rates.clear()
+    t = transport((200, {"prices": [row]}), (200, {"prices": [row]}))
+
+    async def fill():
+        await rates._fetch(["a"], "key", scope, cache=True)
+    queued = await _queued_behind(rates, rates.rows(["a"], "key"), fill)
+    assert await queued == {"a": row} and len(t.requests) == 1
+
+
 async def test_a_fresh_read_fits_the_save_deadline_and_is_bounded_on_its_own(transport, monkeypatch):
     import asyncio
 

@@ -94,17 +94,18 @@ class Sources:
         return None
 
     async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None,
-                      operation=None, listing_prices=True):
+                      operation=None, listing_prices=True, fal=True):
         """``operation`` (``generation_operations``) picks the fal models that
         fit the call; None is the kind's text operation. A named model keeps
         any category. ``listing_prices=False`` resolves a candidate that is
         priced fresh next (prepare): no listing rate is read, so no cache or
-        its lock."""
+        its lock. ``fal=False`` skips this worker's fal rows (the provider
+        list counts fal itself)."""
         here = self.local_worker()
         entries = []
         if worker in (None, here):
             entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
-                                               operation=operation, listing_prices=listing_prices)
+                                               operation=operation, listing_prices=listing_prices, fal=fal)
         # A request pinned to this worker never waits on peers.
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
@@ -118,6 +119,17 @@ class Sources:
                    json.dumps(entry.options, sort_keys=True, separators=(",", ":")))
             unique.setdefault(key, entry)
         return list(unique.values())
+
+    async def fal_serves(self, kind) -> bool:
+        """Whether this worker generates ``kind`` with fal: it holds a key and,
+        for images, the ChatGPT-plan rule (#1796) does not take fal out."""
+        if not await self.fal_key():
+            return False
+        if kind == "image":
+            from app.core.provider import subscription_images as sub
+            if await run_sync(sub.plan_images_configured):
+                return False
+        return True
 
     async def fal_models(self, kind, *, operation=None, query=None):
         """This worker's fal catalog rows that perform ``operation``."""
@@ -136,17 +148,15 @@ class Sources:
         schema carries fal's raw rate; the card quotes the picked model.
 
         Returns ``(candidates, total, details)``; details hold display names.
+        None means this worker does not serve fal for ``kind`` (an empty page
+        is ``([], 0, {})``).
         """
         from app.services import fal_pricing
         from app.services.fal_schema import schema_service
 
         worker = self.local_worker()
-        if not await self.fal_key():
-            return [], 0, {}
-        if kind == "image":
-            from app.core.provider import subscription_images as sub
-            if await run_sync(sub.plan_images_configured):
-                return [], 0, {}
+        if not await self.fal_serves(kind):
+            return None
         models = await self.fal_models(kind, operation=operation, query=query)
         page = models[offset:offset + limit]
         ids, key = [m.endpoint_id for m in page], await self.fal_key()
@@ -173,7 +183,7 @@ class Sources:
         return entries, len(models), details
 
     async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None,
-                            operation=None, listing_prices=True):
+                            operation=None, listing_prices=True, fal=True):
         from app.core import generation_operations
         from app.core import native_generation_settings as native
         from app.db import model_providers
@@ -183,7 +193,7 @@ class Sources:
         entries = []
         worker = self.local_worker()
         op = generation_operations.resolve(kind, operation)
-        if source in (None, "fal", "fal.ai", "fal-ai") and await self.fal_key():
+        if fal and source in (None, "fal", "fal.ai", "fal-ai") and await self.fal_key():
             if model:
                 # An exactly named model (runFalModel, a picked card row) keeps any category.
                 if catalog_service.is_stale:

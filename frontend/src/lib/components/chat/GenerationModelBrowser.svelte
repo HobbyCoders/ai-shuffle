@@ -49,8 +49,15 @@
 	let hasMore = $state(false);
 	let loading = $state(false);
 	let listError = $state('');
+	let notice = $state('');
+	// The provider and search the shown rows belong to. Rows and "Show more"
+	// act only while that matches what is asked and no page is on its way.
+	let shownFor = $state('');
+	// The worker that served the first fal page; later pages come from it.
+	let pageWorker: string | null = null;
 	let seq = 0;
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
+	const ready = $derived(!loading && shownFor === `${active}\n${query}`);
 
 	const here = $derived(generationChoices.worker);
 	const current = $derived(providers?.find((p) => providerKey(p) === active));
@@ -79,24 +86,46 @@
 		}
 	}
 
+	function cancelSearch() {
+		if (searchTimer) clearTimeout(searchTimer);
+		searchTimer = null;
+	}
+
 	function choose(key: string) {
 		if (key === active) return;
+		cancelSearch();
 		active = key;
 		query = '';
+		rows = [];
+		total = 0;
+		hasMore = false;
+		shownFor = '';
+		notice = '';
+		pageWorker = null;
 		void loadPage(0);
 	}
 
 	async function loadPage(offset: number) {
 		if (!active) return;
+		const key = `${active}\n${query}`;
+		// "Show more" pages only the list on screen, never a newer search.
+		if (offset && shownFor !== key) return;
 		const mine = ++seq;
 		loading = true;
 		listError = '';
 		try {
-			const page = await generationChoices.models(kind, { source: active, operation, query, offset, limit: PAGE });
+			const page = await generationChoices.models(kind, {
+				source: active, operation, query, offset, limit: PAGE, worker: offset ? pageWorker : null
+			});
 			if (mine !== seq) return;
 			rows = offset ? [...rows, ...page.models] : page.models;
 			total = page.total;
 			hasMore = page.has_more;
+			if (!offset) {
+				pageWorker = page.worker ?? null;
+				notice = page.notice ?? '';
+			}
+			shownFor = key;
 		} catch (e) {
 			if (mine === seq) listError = getErrorMessage(e, 'Could not list the models.');
 		} finally {
@@ -106,8 +135,14 @@
 
 	function onSearch(value: string) {
 		query = value;
-		if (searchTimer) clearTimeout(searchTimer);
-		searchTimer = setTimeout(() => void loadPage(0), SEARCH_DEBOUNCE_MS);
+		cancelSearch();
+		// A page for the earlier search no longer lands; rows wait for this one.
+		seq++;
+		loading = true;
+		searchTimer = setTimeout(() => {
+			searchTimer = null;
+			void loadPage(0);
+		}, SEARCH_DEBOUNCE_MS);
 	}
 
 	function onProviderKey(event: KeyboardEvent, index: number) {
@@ -121,9 +156,7 @@
 	}
 
 	onMount(() => void loadProviders());
-	onDestroy(() => {
-		if (searchTimer) clearTimeout(searchTimer);
-	});
+	onDestroy(cancelSearch);
 </script>
 
 <div class="gmb" data-testid="generation-model-browser">
@@ -179,9 +212,12 @@
 				/>
 			</label>
 		{/if}
+		{#if notice}<p class="gmb-msg" role="note">{notice}</p>{/if}
 		{#if listError}
 			<p class="gmb-msg" role="alert">{listError}</p>
-		{:else if !rows.length && !loading}
+		{:else if !rows.length && loading}
+			<div class="gmb-skeleton" aria-busy="true" aria-label="Loading models"><span></span><span></span></div>
+		{:else if !rows.length}
 			<p class="gmb-msg">{query ? `No model matches “${query}”.` : 'This provider has no models for this.'}</p>
 		{:else}
 			<ul class="gmb-list" aria-label="Models" aria-busy={loading}>
@@ -195,9 +231,9 @@
 							class="gmb-row"
 							class:selected={row.model === selectedModel}
 							aria-pressed={row.model === selectedModel}
-							disabled={!row.available}
+							disabled={!row.available || !ready}
 							title={row.available ? (unpriced && view.detail) || row.description || row.model : row.reason || 'Unavailable'}
-							onclick={() => onpick(row)}
+							onclick={() => ready && onpick(row)}
 						>
 							<span class="gmb-row-main">
 								<span class="gmb-row-title">{title}</span>
@@ -218,7 +254,7 @@
 			<div class="gmb-foot">
 				<span class="gmb-shown">{rows.length} of {total}</span>
 				{#if hasMore}
-					<button type="button" class="gmb-more" disabled={loading} onclick={() => loadPage(rows.length)}>
+					<button type="button" class="gmb-more" disabled={!ready} onclick={() => loadPage(rows.length)}>
 						{loading ? 'Loading' : 'Show more'}
 					</button>
 				{/if}

@@ -154,11 +154,26 @@ class FalRates:
                     return await self._fetch(wanted, api_key, scope, cache=False)
             except TimeoutError:
                 raise PricingRequestFailed(f"fal pricing did not answer within {FRESH_READ_SECONDS} s.") from None
-        if self._blocked.get(scope, 0) > now:
+        self._raise_if_blocked(scope)
+        async with self._lock:
+            # A page queued behind one that hit fal's limit, or filled the
+            # cache, sees that now rather than asking fal again.
+            self._raise_if_blocked(scope)
+            now, missing = time.time(), []
+            for endpoint in wanted:
+                cached = self._cache.get((scope, endpoint))
+                if cached and cached[0] > now:
+                    found[endpoint] = cached[1]
+                else:
+                    missing.append(endpoint)
+            if not missing:
+                return found
+            return {**found, **await self._fetch(missing, api_key, scope, cache=True)}
+
+    def _raise_if_blocked(self, scope: str) -> None:
+        if self._blocked.get(scope, 0) > time.monotonic():
             # Listing only: callers keep the rows they already know (cached()).
             raise PricingRequestFailed("fal pricing is rate limited for now.")
-        async with self._lock:
-            return {**found, **await self._fetch(wanted, api_key, scope, cache=True)}
 
     async def _fetch(self, wanted, api_key, scope, *, cache: bool) -> dict[str, dict | None]:
         """Read ``wanted`` from fal. Only listing reads (under the lock) write
@@ -179,7 +194,7 @@ class FalRates:
                     rows = {}
                 elif response.status_code == 429:
                     if cache:
-                        self._blocked[scope] = time.time() + _retry_after(response)
+                        self._blocked[scope] = time.monotonic() + _retry_after(response)
                     raise PricingRequestFailed("fal pricing is rate limited for now.")
                 elif response.status_code != 200:
                     raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")

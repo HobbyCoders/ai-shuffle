@@ -166,10 +166,11 @@ class GenerationChoices {
 	/** One page of one provider's models, searched server-side. Rows from fal may be unpriced until picked. */
 	async models(
 		kind: GenerationKind,
-		params: { source: string; operation?: string; query?: string; offset?: number; limit?: number }
+		params: { source: string; operation?: string; query?: string; offset?: number; limit?: number; worker?: string | null }
 	): Promise<ModelPage> {
 		const q = new URLSearchParams({ source: params.source, offset: String(params.offset ?? 0), limit: String(params.limit ?? 20) });
 		if (params.operation) q.set('operation', params.operation);
+		if (params.worker) q.set('worker', params.worker);
 		if (params.query?.trim()) q.set('query', params.query.trim());
 		const page = await api.get<ModelPage>(`/generation/models/${encodeURIComponent(kind)}?${q}`);
 		return {
@@ -178,26 +179,33 @@ class GenerationChoices {
 		};
 	}
 
-	/** One named model with its declared options and default-options price, from the worker holding it. */
-	async model(kind: GenerationKind, source: string, model: string, operation?: string): Promise<CatalogEntry | null> {
+	/**
+	 * One named model with its declared options and default-options price.
+	 * With `worker`, only that worker is asked and only its entry is taken.
+	 */
+	async model(kind: GenerationKind, source: string, model: string, operation?: string, worker?: string | null): Promise<CatalogEntry | null> {
 		const params = new URLSearchParams({ kind, source, model, limit: '1' });
 		if (operation) params.set('operation', operation);
+		if (worker) params.set('worker', worker);
 		const data = await api.get<CatalogResponse>(`/generation/catalog?${params}`);
-		const entries = (data.entries ?? []).filter((e) => e.model === model);
+		const entries = (data.entries ?? []).filter((e) => e.model === model && (!worker || e.worker === worker));
 		const entry = entries.find((e) => e.available !== false) ?? entries[0];
 		return entry ? { ...entry, kind, options: entry.options ?? {}, available: entry.available !== false } : null;
 	}
 
 	/**
 	 * A browsed model row as a pickable option. A fal row is listed without
-	 * its schema, so its declared options and default price are read first.
-	 * Throws with the reason when it cannot be picked.
+	 * its schema, so its declared options and default price are read from the
+	 * worker that listed it, for the same account and model; another worker's
+	 * copy is never substituted. Throws with the reason when it cannot be picked.
 	 */
 	async optionFor(kind: GenerationKind, row: ModelRow, operation?: string): Promise<GenerationOption> {
 		let option: GenerationOption = row;
 		if (row.source === 'fal') {
-			const full = await this.model(kind, 'fal', row.model, operation);
-			if (!full) throw new Error('This model is no longer listed.');
+			const full = await this.model(kind, 'fal', row.model, operation, row.worker);
+			if (!full || full.source !== row.source || full.account !== row.account) {
+				throw new Error(row.worker ? 'The worker that listed this model no longer offers it.' : 'This model is no longer listed.');
+			}
 			option = full;
 		}
 		if (!option.available) throw new Error(option.reason || 'This model is not available right now.');

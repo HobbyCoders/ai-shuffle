@@ -42,4 +42,31 @@ describe('automation generation picker',() => {
   await fireEvent.click(screen.getByRole('button',{name:'Pin to this job'}));
   expect(onpick).toHaveBeenCalledWith(expect.objectContaining({model:'fal-ai/kling/v3',options:{shape:'wide'}}));
  });
+ it('never lets a late quote for one browsed model price the model browsed after it',async () => {
+  const onpick=vi.fn(async () => {});
+  const unknown={currency:'USD',unit:'item',amount:null,total:null,status:'unknown',reason:'unsupported_unit',rate:{amount:'0.05',unit:'video segments'}};
+  const kling={...option,model:'fal-ai/kling/v3'};
+  const odd={...option,model:'fal-ai/odd',price:unknown};
+  let release:(v:unknown)=>void=() => {};
+  mocks.quote.mockImplementation(async (_k:string,choice:{model:string;options:Record<string,unknown>}) => {
+   if (choice.model==='fal-ai/odd') return {ok:true,price:unknown};
+   if (choice.options.shape==='wide') return new Promise(resolve => release=resolve);
+   return {ok:true,price:option.price};
+  });
+  mocks.providers.mockResolvedValue({kind:'image',operation:'text-to-image',operation_label:'Text to image',providers:[{source:'fal',account:'test-account',workers:['worker-a'],available:true,reason:null,native:false,model_count:2}]});
+  mocks.models.mockResolvedValue({models:[{...kling,status:'available',name:'Kling v3'},{...odd,status:'unpriced',name:'Odd Model'}],total:2,offset:0,limit:20,has_more:false});
+  mocks.optionFor.mockImplementation(async (_k:string,row:{model:string}) => row.model==='fal-ai/odd'?odd:kling);
+  render(AutomationGenerationPicker,{kind:'image',options:[option],onpick});
+  await fireEvent.click(screen.getByRole('button',{name:'All models'}));
+  await fireEvent.click(await screen.findByRole('button',{name:/Kling v3/}));
+  await waitFor(() => expect((screen.getByRole('button',{name:'Pin to this job'}) as HTMLButtonElement).disabled).toBe(false));
+  await fireEvent.click(screen.getByRole('button',{name:'Advanced'}));
+  await fireEvent.change(screen.getByRole('combobox',{name:'Shape'}),{target:{value:'wide'}});
+  await waitFor(() => expect(mocks.quote).toHaveBeenCalledWith('image',expect.objectContaining({options:expect.objectContaining({shape:'wide'})}),''));
+  await fireEvent.click(screen.getByRole('button',{name:/Odd Model/}));
+  await waitFor(() => expect(mocks.quote).toHaveBeenCalledWith('image',expect.objectContaining({model:'fal-ai/odd'}),''));
+  release({ok:true,price:{...option.price,amount:'0.08',total:'0.08'}});
+  await new Promise(r => setTimeout(r,20));
+  expect((screen.getByRole('button',{name:/Pin to this job|Checking price/}) as HTMLButtonElement).disabled).toBe(true);
+ });
 });

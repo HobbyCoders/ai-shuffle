@@ -605,4 +605,169 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(fal.textContent).toContain('image size landscape_16_9');
 		expect(fal.textContent).not.toContain('image size square');
 	});
+
+	// ── Round-1 review: quotes belong to a model and its exact options ──
+
+	const ODD = {
+		...RECRAFT, model: 'fal-ai/odd', name: 'Odd Model',
+		price: { ...UNKNOWN_PRICE_FIXTURE, reason: 'unsupported_unit', detail: 'fal bills this per video segment.', rate: { amount: '0.05', unit: 'video segments' } }
+	};
+	const odd = { ...UNKNOWN_PRICE_FIXTURE, reason: 'unsupported_unit', detail: 'fal bills this per video segment.', rate: { amount: '0.05', unit: 'video segments' } };
+	function withModels(models: unknown[], catalog: (model: string, url: string) => unknown) {
+		const listing = mocks.get.getMockImplementation()!;
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.startsWith('/generation/models/image')) return { models, total: models.length, offset: 0, limit: 20, has_more: false };
+			if (url.startsWith('/generation/catalog')) {
+				const model = new URLSearchParams(url.split('?')[1]).get('model')!;
+				return { entries: [catalog(model, url)], favourites: {}, kinds: ['image'], limit: 1 };
+			}
+			return listing(url);
+		});
+	}
+	const useButton = () => screen.getByRole('button', { name: /^Use / }) as HTMLButtonElement;
+
+	it('never lets a late quote for one browsed model price the model picked after it', async () => {
+		withModels([row('fal-ai/recraft/v3', 'Recraft V3'), row('fal-ai/odd', 'Odd Model', { price: odd })],
+			(model) => ({ ...(model === 'fal-ai/odd' ? ODD : RECRAFT), status: 'available' }));
+		let release: (v: unknown) => void = () => {};
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { model: string; options: Record<string, unknown> } }) => {
+			if (body.choice.model === 'fal-ai/odd') return { ok: true, priced: false, price: odd };
+			if (body.choice.options.style === 'vector') return new Promise((resolve) => (release = resolve));
+			return { ok: true, priced: true, price: { ...PRICE, amount: '0.04', total: '0.04' } };
+		});
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		await fireEvent.change(await screen.findByLabelText('Style'), { target: { value: 'vector' } });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/generation/quote', expect.objectContaining({ choice: expect.objectContaining({ options: { style: 'vector' } }) })));
+		await fireEvent.click(screen.getByRole('button', { name: /Odd Model/ }));
+		await waitFor(() => expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/odd/i));
+		release({ ok: true, priced: true, price: { ...PRICE, amount: '0.08', total: '0.08' } });
+		await new Promise((r) => setTimeout(r, 20));
+		expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/Unknown/);
+		expect(useButton().disabled).toBe(true);
+	});
+
+	it('keeps a failed quote when the option is selected again, until the options change', async () => {
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { options: Record<string, unknown> } }) =>
+			body.choice.options.image_size === 'landscape_16_9'
+				? { ok: false, error: 'This size is not allowed here.' }
+				: { ok: true, priced: true, price: PRICE });
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /Advanced/ }));
+		await fireEvent.change(await screen.findByLabelText('Image size'), { target: { value: 'landscape_16_9' } });
+		expect((await screen.findByRole('alert')).textContent).toContain('This size is not allowed here.');
+		await fireEvent.click(screen.getByRole('radio', { name: /SuperGrok/ }));
+		await fireEvent.click(screen.getByRole('radio', { name: /flux/i }));
+		expect(screen.getByRole('alert').textContent).toContain('This size is not allowed here.');
+		expect(useButton().disabled).toBe(true);
+		// Reset returns to the suggested options and their price; a late answer for the edit changes nothing.
+		await fireEvent.click(screen.getByRole('button', { name: "Reset to the model's defaults" }));
+		await waitFor(() => expect(useButton().disabled).toBe(false));
+		expect(screen.queryByRole('alert')).toBeNull();
+	});
+
+	it('quotes a browsed model with this prompt before it can be used, even with no options to edit', async () => {
+		const NEEDS = { ...UNKNOWN_PRICE_FIXTURE, reason: 'needs_prompt', detail: 'fal bills this per character of the prompt.', rate: { amount: '0.0001', unit: 'characters' } };
+		const TTS = { ...RECRAFT, model: 'fal-ai/tts', options: {}, quick_settings: {}, price: NEEDS, schema: { fields: [{ name: 'text', type: 'string', is_primary_text: true }] } };
+		withModels([row('fal-ai/tts', 'Speech', { price: NEEDS })], () => ({ ...TTS, status: 'unpriced' }));
+		let release: (v: unknown) => void = () => {};
+		mocks.post.mockImplementation(() => new Promise((resolve) => (release = resolve)));
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Speech/ }));
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledTimes(1));
+		expect(mocks.post).toHaveBeenCalledWith('/generation/quote', expect.objectContaining({
+			prompt: 'a lighthouse at dusk', choice: expect.objectContaining({ model: 'fal-ai/tts', worker: 'worker-a' })
+		}));
+		expect(useButton().disabled).toBe(true);
+		release({ ok: true, priced: true, price: { ...PRICE, amount: '0.002', total: '0.002' } });
+		await waitFor(() => expect(useButton().disabled).toBe(false));
+		expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toContain('$0.002');
+		expect(mocks.post).toHaveBeenCalledTimes(1);
+	});
+
+	it('loads a browsed model only from the worker that listed it, never another worker', async () => {
+		withModels([row('fal-ai/recraft/v3', 'Recraft V3')], () => ({ ...RECRAFT, worker: 'worker-c', status: 'available' }));
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		expect(await screen.findByText('The worker that listed this model no longer offers it.')).toBeTruthy();
+		expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/\/generation\/catalog\?.*worker=worker-a/));
+		expect(screen.queryByRole('radio', { name: /Picked/ })).toBeNull();
+	});
+
+	it('keeps rows and paging from acting for a provider or search that is no longer asked', async () => {
+		const listing = mocks.get.getMockImplementation()!;
+		let slow: (v: unknown) => void = () => {};
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.startsWith('/generation/providers/image')) {
+				return {
+					kind: 'image', operation: 'text-to-image', operation_label: 'Text to image',
+					providers: [
+						{ source: 'fal', account: 'fal-ai', workers: ['worker-a'], available: true, reason: null, native: false, model_count: 3 },
+						{ source: 'supergrok', account: 'grok-1', workers: ['worker-a'], available: true, reason: null, native: true }
+					]
+				};
+			}
+			if (url.includes('source=grok-1')) return new Promise((resolve) => (slow = resolve));
+			return listing(url);
+		});
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await screen.findByRole('button', { name: /Recraft V3/ });
+		// Typed, and "Show more" before the search's page arrives: nothing pages the old list.
+		await fireEvent.input(screen.getByPlaceholderText('Search 3 models'), { target: { value: 'flux' } });
+		expect((screen.getByRole('button', { name: /^(Show more|Loading)$/ }) as HTMLButtonElement).disabled).toBe(true);
+		expect((screen.getByRole('button', { name: /Recraft V3/ }) as HTMLButtonElement).disabled).toBe(true);
+		await waitFor(() => expect(mocks.get).toHaveBeenCalledWith(expect.stringContaining('query=flux')));
+		expect(mocks.get).not.toHaveBeenCalledWith(expect.stringMatching(/offset=2.*query=flux|query=flux.*offset=2/));
+		await waitFor(() => expect((screen.getByRole('button', { name: /Recraft V3/ }) as HTMLButtonElement).disabled).toBe(false));
+		// Switching provider on a slow link: the old provider's rows are gone, not clickable under the new tab.
+		await fireEvent.click(within(screen.getByRole('radiogroup', { name: 'Provider' })).getByRole('radio', { name: /SuperGrok/ }));
+		expect(screen.queryByRole('button', { name: /Recraft V3/ })).toBeNull();
+		slow({ models: [{ ...GROK, name: 'Grok Imagine', status: 'available' }], total: 1, offset: 0, limit: 20, has_more: false });
+		expect(await screen.findByRole('button', { name: /Grok Imagine/ })).toBeTruthy();
+	});
+
+	it('runs a native provider’s model picked from All models with its exact account, worker and model', async () => {
+		const listing = mocks.get.getMockImplementation()!;
+		const PRO = { ...GROK, model: 'grok-imagine-image-pro', options: { size: '1k' }, name: 'Grok Imagine Pro', status: 'available' };
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.startsWith('/generation/providers/image')) {
+				return {
+					kind: 'image', operation: 'text-to-image', operation_label: 'Text to image',
+					providers: [
+						{ source: 'fal', account: 'fal-ai', workers: ['worker-a'], available: true, reason: null, native: false, model_count: 3 },
+						{ source: 'supergrok', account: 'grok-1', workers: ['worker-b'], available: true, reason: null, native: true }
+					]
+				};
+			}
+			if (url.includes('source=grok-1')) return { models: [PRO], total: 1, offset: 0, limit: 20, has_more: false };
+			return listing(url);
+		});
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { options: Record<string, unknown> } }) => ({
+			ok: true, priced: true, options: body.choice.options, price: GROK.price
+		}));
+		card({ options: [FAL] });
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(within(await screen.findByRole('radiogroup', { name: 'Provider' })).getByRole('radio', { name: /SuperGrok/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Grok Imagine Pro/ }));
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/generation/quote', expect.objectContaining({
+			choice: expect.objectContaining({ source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-image-pro' }),
+			prompt: 'a lighthouse at dusk'
+		})));
+		// A native row needs no detail read: it is listed with its options.
+		expect(mocks.get).not.toHaveBeenCalledWith(expect.stringContaining('/generation/catalog'));
+		const use = screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement;
+		await waitFor(() => expect(use.disabled).toBe(false));
+		await fireEvent.click(use);
+		await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+		expect(mocks.put.mock.calls[0][1]).toMatchObject({
+			choice: { source: 'supergrok', account: 'grok-1', worker: 'worker-b', model: 'grok-imagine-image-pro', options: { size: '1k' } }
+		});
+		expect(mocks.send.mock.calls[0][0]).toContain(
+			`Call generateImage again with the same prompt and ${JSON.stringify({ source: 'grok-1', model: 'grok-imagine-image-pro', worker: 'worker-b', options: { size: '1k' } })}.`
+		);
+	});
 });

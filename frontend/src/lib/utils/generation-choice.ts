@@ -140,6 +140,10 @@ export interface ModelPage {
 	offset: number;
 	limit: number;
 	has_more: boolean;
+	/** The worker that served this fal page; pass it back for the next page. */
+	worker?: string | null;
+	/** Workers that need an update before their fal models can be browsed here. */
+	notice?: string | null;
 }
 
 /** The account a provider row filters `/models` by: fal, or one subscription account. */
@@ -483,6 +487,30 @@ export function optionChips(option: Pick<GenerationOption, 'quick_settings' | 'o
 
 export function choiceOf(option: GenerationOption, options: Record<string, unknown> = option.options): GenerationChoice {
 	return { source: option.source, account: option.account, worker: option.worker, model: option.model, options };
+}
+
+/** Options in a stable order, so the same options always give the same key. */
+export function optionsKey(options: Record<string, unknown> | undefined): string {
+	const v = options ?? {};
+	return JSON.stringify(Object.keys(v).sort().map((k) => [k, v[k]]));
+}
+
+/** Which model a quote is for: source, account, holding worker, model and operation. */
+export function modelIdentity(option: Pick<GenerationOption, 'source' | 'account' | 'worker' | 'model'>, operation?: string): string {
+	return JSON.stringify([option.source, option.account, option.worker ?? null, option.model, operation ?? null]);
+}
+
+/**
+ * The key a quote is kept under: the model and its exact options. A quote
+ * answers only for its key, so a late answer for another model, or for
+ * options since changed, never prices what is on screen.
+ */
+export function quoteKey(
+	option: Pick<GenerationOption, 'source' | 'account' | 'worker' | 'model'>,
+	options: Record<string, unknown> | undefined,
+	operation?: string
+): string {
+	return modelIdentity(option, operation) + optionsKey(options);
 }
 
 export function sameChoice(a: Partial<GenerationChoice> | null | undefined, b: Partial<GenerationChoice> | null | undefined): boolean {

@@ -23,18 +23,24 @@ class Operation:
     categories: tuple[str, ...]
     tools: tuple[str, ...] = ()
     # fal files reference and extend endpoints under broad categories;
-    # these words in the endpoint ID pick them out.
+    # these words in the endpoint ID pick them out ...
     id_hints: tuple[str, ...] = ()
-    # Subscription accounts generate from a prompt only.
+    # ... and keep them out of the single-input operation sharing the category.
+    exclude_hints: tuple[str, ...] = ()
+    # Subscription accounts generate from a prompt only. A text operation
+    # takes every prompt-only (``text-to-*``) category of its kind, as fal
+    # adds them (text-to-music, text-to-speech, ...); ``categories`` names
+    # the known ones.
     native: bool = False
 
 
 OPERATIONS: dict[str, Operation] = {op.id: op for op in (
     Operation("text-to-image", "image", "Text to image", ("text-to-image",), ("generateImage",), native=True),
-    Operation("edit-image", "image", "Edit image", ("image-to-image",), ("editImage",)),
+    Operation("edit-image", "image", "Edit image", ("image-to-image",), ("editImage",), exclude_hints=("reference",)),
     Operation("reference-to-image", "image", "Image from references", ("image-to-image",), ("generateWithReference",)),
     Operation("text-to-video", "video", "Text to video", ("text-to-video",), ("generateVideo",), native=True),
-    Operation("image-to-video", "video", "Image to video", ("image-to-video",), ("imageToVideo",)),
+    Operation("image-to-video", "video", "Image to video", ("image-to-video",), ("imageToVideo",),
+              exclude_hints=("reference",)),
     Operation("reference-to-video", "video", "Video from references", ("image-to-video", "video-to-video"),
               id_hints=("reference",)),
     Operation("extend-video", "video", "Extend video", ("video-to-video",), ("extendVideo",), id_hints=("extend",)),
@@ -66,6 +72,16 @@ def for_tool(tool_name: str) -> Operation | None:
 
 
 def fits(op: Operation, category: str | None, endpoint_id: str) -> bool:
-    if category not in op.categories:
+    """Whether a fal endpoint performs ``op``. Callers have already kept only
+    models of ``op.kind``; an uncategorized endpoint fits nothing."""
+    if not category:
         return False
-    return not op.id_hints or any(hint in endpoint_id.casefold() for hint in op.id_hints)
+    if op.native:
+        if not category.startswith("text-to-"):
+            return False
+    elif category not in op.categories:
+        return False
+    endpoint = endpoint_id.casefold()
+    if any(hint in endpoint for hint in op.exclude_hints):
+        return False
+    return not op.id_hints or any(hint in endpoint for hint in op.id_hints)

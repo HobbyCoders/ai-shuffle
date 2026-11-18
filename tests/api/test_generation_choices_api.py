@@ -131,6 +131,8 @@ def test_job_writer_binds_real_session_to_unattended_tool(
     entry = candidate()
     pick = entry.choice()
     route = f"/api/v1/generation/jobs/{job_id}/choices/image"
+    backend = FakeBackend([entry])  # the pin is written only after it is quoted
+    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
     response = client.put(route, json=pick)
     assert response.status_code == 200 and response.json()["choice"] == pick
     assert client.get(f"/api/v1/generation/jobs/{job_id}/choices").json()["choices"] == {
@@ -143,8 +145,6 @@ def test_job_writer_binds_real_session_to_unattended_tool(
     context = query_options._generation_context({"image_generation": True}, row, None,
                                                 session_id="run", unattended=True)
     assert context.job_choices == {"image": pick}
-    backend = FakeBackend([entry])
-    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
     tool = next(
         t for t in ai_tools_sdk._create_unified_tools(None, context) if t.name == "generateImage"
     )

@@ -157,7 +157,9 @@ unknown amounts are null, never zero. Native account-disabled routes remain
 visible with their verified combination and price but `available: false`.
 Ordinary API users see only their own permitted sources, not owner accounts.
 Catalog lookup submits no generation; a quote/admission must still recheck cost.
-An optional `operation` (it needs `kind`) limits fal entries to that operation.
+An optional `operation` (it needs `kind`) limits fal entries to that operation,
+and `worker` asks only that worker (the picker reads a browsed row's options from
+the worker that listed it).
 
 ### Provider and model listing
 
@@ -174,20 +176,26 @@ or one of another kind, is a `422`.
 available. Accounts are merged across your workers. Unavailable ones stay listed
 with their reason: fal without a key, fal while images use the ChatGPT plan, or a
 worker that needs an update. Plan accounts only generate from a prompt, so they are
-not offered for edit, reference, extend or image-to operations.
+not offered for edit, reference, extend or image-to operations. fal is available
+when a worker holds a key and fal lists models for the operation; one model's
+missing schema never hides it.
 
 `GET /api/v1/generation/models/{kind}` returns one page of one provider's models.
 Parameters are `source` (default `fal`, or an account), `operation`, `query`
 (server-side search on the model ID, name and description), `offset` and `limit`
-(1–50, default 20). The response has `models`, `total`, `offset`, `limit` and
-`has_more`. Rows are catalog entries plus fal's `name`, `category` and
+(1–50, default 20). The response has `models`, `total`, `offset`, `limit`,
+`has_more`, `worker` and `notice`. Rows are catalog entries plus fal's `name`, `category` and
 `description`, and a `status`. A page reads fal's rates in one batch and no
 schemas, so a fal row is `unpriced` with `price.reason: "not_quoted"` and the raw
 `price.rate` until its schema is cached; then it carries a real price. A model fal
 has no rate for keeps its own reason (for example `no_pricing_row`). When fal's
 pricing service is rate limited, the page keeps rates it already knows and marks
 the rest `pricing_request_failed`. Unknown totals are null, never zero. On the
-owner's worker without a local fal key, fal pages come from a worker that has one.
+owner's worker without a local fal key, fal pages come from one worker that has
+one, named in `worker`: pass it back as `worker` for the next page, so pages never
+mix two catalogs. A worker without fal never hides one that has it. A worker
+running older code that cannot page or filter by operation is named in `notice`
+for an update; its catalog is not shown in part.
 
 `PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
 (`source` or `account`, `model`, optional `worker`, `options`).
@@ -199,8 +207,10 @@ For scheduled automation jobs, owner-only
 `GET /api/v1/generation/jobs/{automation_id}/choices` returns `job_id` and a
 per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
 it must pin `account`, `worker` and `model` (and may include `source`, `options`).
-Its response adds the same save-time `price`, `priced`, `quote_error`,
-`unattended_skip_reason` and `warning` as a remembered pick (below).
+Like remembering, it is stored only after a server-side quote priced it, with
+nothing submitted: a pick that is unavailable or has no verified price is a `409`
+saying why, and the job keeps the choice it had. The response adds the save-time
+`price`, `priced`, `quote_error`, `unattended_skip_reason` and `warning`.
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
 protection as preferences. Job choices are account-scoped preferences, separate
 from favourites and remembered picks. A run session's stored `automation_id`

@@ -214,9 +214,15 @@ async def test_holding_worker_serves_pages_for_an_operation(monkeypatch):
     body = {"version": peer.WIRE_VERSION, "operation": "catalog", "kind": "video", "source": "fal",
             "media_operation": "image-to-video", "page": {"offset": 20, "limit": 20}, "query": "kling"}
     output = await peer.handle(body, "origin-worker")
-    assert output["page"] == {"total": 9, "offset": 20, "details": {"fal-ai/i2v": {"name": "I2V"}}}
+    assert output["page"] == {"total": 9, "offset": 20, "details": {"fal-ai/i2v": {"name": "I2V"}}, "serves": True}
     assert output["media_operation"] == "image-to-video"
     assert page.await_args.kwargs == {"operation": "image-to-video", "query": "kling", "offset": 20, "limit": 20}
+    # A worker without fal for this kind says so instead of sending an empty page.
+    page.return_value = None
+    output = await peer.handle(body, "origin-worker")
+    assert output["page"] == {"total": 0, "offset": 20, "details": {}, "serves": False} and output["candidates"] == []
+    page.return_value = ([], 0, {})
+    assert (await peer.handle(body, "origin-worker"))["page"]["serves"] is True
     with pytest.raises(ValueError, match="Unknown generation operation"):
         await peer.handle({**body, "media_operation": "rm -rf"}, "origin-worker")
     with pytest.raises(ValueError, match="page"):

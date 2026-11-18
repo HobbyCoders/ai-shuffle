@@ -24,6 +24,10 @@ FAL = [
     ("fal-ai/flux", "text-to-image", "image"), ("fal-ai/flux/edit", "image-to-image", "image"),
     ("fal-ai/stems", "audio-to-audio", "audio"), ("fal-ai/tts", "text-to-speech", "audio"),
     ("fal-ai/meshy/image-to-3d", "image-to-3d", "3d"),
+    # A prompt-only category fal may add, a reference endpoint filed under
+    # image-to-image, and an endpoint without a category.
+    ("fal-ai/music", "text-to-music", "audio"), ("fal-ai/vidu/reference-to-image", "image-to-image", "image"),
+    ("fal-ai/mystery-video", "", "video"),
 ]
 ROW = {"unit_price": 0.1, "unit": "second", "currency": "USD"}
 
@@ -69,11 +73,14 @@ def client(mock_db, monkeypatch):
 
 @pytest.mark.parametrize("kind,operation,expected", [
     ("video", None, ["fal-ai/t2v-a", "fal-ai/t2v-b", "fal-ai/t2v-c"]),
-    ("video", "image-to-video", ["fal-ai/i2v-a", "kling/v4/reference-to-video"]),
+    # Reference endpoints share fal's image-to-video category but are not single-image.
+    ("video", "image-to-video", ["fal-ai/i2v-a"]),
     ("video", "reference-to-video", ["kling/v4/reference-to-video"]),
     ("video", "extend-video", ["fal-ai/pixverse/extend"]),
     ("image", "edit-image", ["fal-ai/flux/edit"]),
-    ("audio", None, ["fal-ai/tts"]),
+    ("image", "reference-to-image", ["fal-ai/flux/edit", "fal-ai/vidu/reference-to-image"]),
+    # Every prompt-only audio category, as the text-to-* rule always took.
+    ("audio", None, ["fal-ai/tts", "fal-ai/music"]),
     ("audio", "audio-to-audio", ["fal-ai/stems"]),
     ("3d", "image-to-3d", ["fal-ai/meshy/image-to-3d"]),
 ])
@@ -155,7 +162,7 @@ def test_providers_list_fal_and_accounts_with_unavailable_reasons(client, monkey
     monkeypatch.setattr(generation, "catalog", AsyncMock(return_value=[]))
     data = client.get("/api/v1/generation/providers/video?operation=image-to-video").json()
     assert [p["source"] for p in data["providers"]] == ["fal"]
-    assert data["providers"][0]["model_count"] == 2
+    assert data["providers"][0]["model_count"] == 1
 
 
 def test_fal_without_a_key_is_listed_unavailable_with_a_reason(client, monkeypatch):
@@ -182,28 +189,90 @@ def test_native_account_models_and_plan_image_rule(client, monkeypatch):
     assert client.get("/api/v1/generation/models/image").json()["models"] == []
 
 
-def test_remote_fal_pages_and_older_peers(client, monkeypatch):
+def _peers(monkeypatch, replies):
+    """Online peers answering ``catalog`` with ``replies[device]``; returns the request log."""
     from app.core import fal_credential
     from app.network import generation, runners
-    monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
-    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "worker-b", "online": True}])
-    remote = candidate(source="fal", account="fal-ai", model="fal-ai/i2v-a")
-    remote = replace(remote, worker="worker-b", kind="video")
-    from dataclasses import asdict
-    replies = {}
+    monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)  # the caller holds no key
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": d, "online": True} for d in replies])
+    asked = []
 
     async def request(worker, operation, **body):
-        replies["body"] = body
-        return replies["reply"]
+        asked.append((worker, body))
+        return replies[worker]
     monkeypatch.setattr(generation, "request", request)
-    # A current peer pages and filters by operation itself.
-    replies["reply"] = {"version": 2, "candidates": [asdict(remote)], "media_operation": "image-to-video",
-                        "page": {"total": 7, "offset": 0, "details": {"fal-ai/i2v-a": {"name": "I2V"}}}}
+    return asked
+
+
+def _page(device, models, total, *, serves=True, operation="text-to-video", **extra):
+    from dataclasses import asdict
+    rows = [asdict(replace(candidate(source="fal", account="fal-ai", model=m), worker=device, kind="video"))
+            for m in models]
+    page = {"total": total, "offset": 0, "details": {m: {"name": m.upper()} for m in models}}
+    if serves is not None:
+        page["serves"] = serves
+    return {"version": 2, "candidates": rows, "media_operation": operation, "page": page, **extra}
+
+
+def test_remote_fal_pages_come_from_one_serving_peer(client, monkeypatch):
+    asked = _peers(monkeypatch, {"worker-b": _page("worker-b", ["fal-ai/i2v-a"], 7, operation="image-to-video")})
     data = client.get("/api/v1/generation/models/video?operation=image-to-video").json()
-    assert data["total"] == 7 and data["models"][0]["name"] == "I2V" and data["models"][0]["worker"] == "worker-b"
-    assert replies["body"]["media_operation"] == "image-to-video" and replies["body"]["page"]["limit"] == 20
-    # An older peer ignores paging and lists text-to-* only: not used for other operations.
-    replies["reply"] = {"version": 2, "candidates": [asdict(remote)]}
-    assert client.get("/api/v1/generation/models/video?operation=image-to-video").json()["models"] == []
-    text = client.get("/api/v1/generation/models/video").json()
-    assert text["total"] == 1 and client.get("/api/v1/generation/models/video?offset=20").json()["models"] == []
+    assert data["total"] == 7 and data["models"][0]["name"] == "FAL-AI/I2V-A" and data["worker"] == "worker-b"
+    assert data["models"][0]["worker"] == "worker-b" and data["notice"] is None
+    assert asked[0][1]["media_operation"] == "image-to-video" and asked[0][1]["page"] == {"offset": 0, "limit": 20}
+
+
+def test_a_peer_without_fal_never_hides_the_one_that_has_it(client, monkeypatch):
+    replies = {"worker-a": _page("worker-a", [], 0, serves=False), "worker-b": _page("worker-b", ["fal-ai/t2v-a"], 3)}
+    _peers(monkeypatch, replies)
+    data = client.get("/api/v1/generation/models/video").json()
+    assert (data["worker"], data["total"], [m["model"] for m in data["models"]]) == ("worker-b", 3, ["fal-ai/t2v-a"])
+    providers = client.get("/api/v1/generation/providers/video").json()["providers"]
+    fal = next(p for p in providers if p["source"] == "fal")
+    assert fal["available"] and fal["workers"] == ["worker-b"] and fal["model_count"] == 3
+    # A peer that serves fal but has no match for this search loses to one that does.
+    replies["worker-a"] = _page("worker-a", [], 0)
+    assert client.get("/api/v1/generation/models/video?query=t2v").json()["worker"] == "worker-b"
+    # A peer from before ``serves`` that sends an empty page is treated as having no fal.
+    replies["worker-a"] = _page("worker-a", [], 0, serves=None)
+    assert client.get("/api/v1/generation/models/video").json()["worker"] == "worker-b"
+
+
+def test_later_pages_stay_on_the_worker_that_served_the_first(client, monkeypatch):
+    replies = {"worker-b": _page("worker-b", ["fal-ai/t2v-a"], 30), "worker-c": _page("worker-c", ["fal-ai/t2v-b"], 90)}
+    asked = _peers(monkeypatch, replies)
+    first = client.get("/api/v1/generation/models/video").json()
+    assert first["worker"] == "worker-b"  # by device ID, never a mix of catalogs
+    asked.clear()
+    data = client.get("/api/v1/generation/models/video?offset=20&worker=worker-c").json()
+    assert [w for w, _ in asked] == ["worker-c"] and data["worker"] == "worker-c" and data["total"] == 90
+    asked.clear()
+    # Pinned to a worker that no longer serves fal: nothing from another worker.
+    replies["worker-c"] = _page("worker-c", [], 0, serves=False)
+    data = client.get("/api/v1/generation/models/video?offset=20&worker=worker-c").json()
+    assert data["models"] == [] and data["worker"] is None and [w for w, _ in asked] == ["worker-c"]
+
+
+def test_older_peers_are_named_for_an_update_not_shown_as_a_whole_catalog(client, monkeypatch):
+    from dataclasses import asdict
+    remote = asdict(replace(candidate(source="fal", account="fal-ai", model="fal-ai/t2v-a"), worker="worker-b",
+                            kind="video"))
+    replies = {"worker-b": {"version": 2, "candidates": [remote]}}  # older code: no page, no echo
+    _peers(monkeypatch, replies)
+    for operation in ("", "?operation=image-to-video"):
+        data = client.get(f"/api/v1/generation/models/video{operation}").json()
+        assert data["models"] == [] and data["total"] == 0 and "Update worker-b" in data["notice"]
+    fal = next(p for p in client.get("/api/v1/generation/providers/video").json()["providers"] if p["source"] == "fal")
+    assert fal["available"] is False and "Update worker-b" in fal["reason"]
+    # A paged reply for another operation (no matching echo) is not used either.
+    replies["worker-b"] = _page("worker-b", ["fal-ai/t2v-a"], 3, operation=None)
+    data = client.get("/api/v1/generation/models/video").json()
+    assert data["models"] == [] and "Update worker-b" in data["notice"]
+
+
+def test_fal_availability_does_not_hang_on_one_models_schema(client):
+    # The first text-to-video endpoint has no schema; fal stays selectable.
+    client.schema_reads.return_value = None
+    fal = next(p for p in client.get("/api/v1/generation/providers/video").json()["providers"] if p["source"] == "fal")
+    assert fal["available"] is True and fal["model_count"] == 3 and fal["reason"] is None
+    client.schema_reads.assert_not_called()

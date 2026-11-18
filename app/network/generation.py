@@ -89,39 +89,66 @@ async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt
     return [c for found in await asyncio.gather(*(one(p) for p in peers)) for c in found]
 
 
-async def catalog_page(kind, *, operation=None, query=None, offset=0, limit=20):
-    """One page of fal models from the first online peer that holds fal.
+async def fal_pages(kind, *, operation, query=None, offset=0, limit=20, worker=None):
+    """Ask online peers (or only ``worker``) in parallel for one page of fal models.
 
-    Returns ``(candidates, total, details, worker)``; ``total`` None means no
-    peer served a page. A peer without paging (older code) is asked for the
-    first page through its plain catalog only: ``offset`` beyond 0 returns
-    nothing from it, and its text-to-* rows count only for a text operation.
+    Returns ``(served, stale)``. ``served`` holds ``(candidates, total,
+    details, worker)`` from each peer that serves fal for ``kind``; its total
+    may be 0 (nothing matches there). A peer without fal is left out, so it
+    never hides one that has it. ``stale`` names peers whose older code lists
+    fal but cannot page or filter by operation: they need an update.
     """
-    from app.core import generation_operations
-    text_only = generation_operations.resolve(kind, operation).native
-    peers = [p for p in await run_sync(runners.other_workers) if p.get("online")]
+    peers = [p for p in await run_sync(runners.other_workers)
+             if p.get("online") and (worker is None or p.get("device_id") == worker)]
 
     async def one(peer):
+        device = peer["device_id"]
         try:
-            response = await request(peer["device_id"], "catalog", kind=kind, source="fal", query=query,
+            response = await request(device, "catalog", kind=kind, source="fal", query=query,
                                      limit=max(1, min(limit, 50)), media_operation=operation,
                                      page={"offset": offset, "limit": limit})
             found = [Candidate.from_wire(item) for item in response.get("candidates", [])]
         except (ValueError, TypeError, AttributeError):
             return None
-        found = [c for c in found if c.source == "fal" and c.kind == kind and c.worker == peer["device_id"]]
         page = response.get("page")
-        if isinstance(page, dict) and type(page.get("total")) is int:
-            details = page.get("details") if isinstance(page.get("details"), dict) else {}
-            return found, page["total"], details, peer["device_id"]
-        if not found or offset or not text_only:
+        if not isinstance(page, dict):
+            # Older code answered with its plain catalog: one unfiltered first page.
+            return "stale" if any(c.source == "fal" for c in found) else None
+        if response.get("media_operation") != operation or type(page.get("total")) is not int:
+            return "stale"
+        # A peer before ``serves`` sent total 0 when it had no fal.
+        if page.get("serves") is False or (page.get("serves") is not True and page["total"] == 0):
             return None
-        return found, len(found), {}, peer["device_id"]
+        if any(c.source != "fal" or c.kind != kind or c.worker != device for c in found):
+            return None
+        details = page.get("details") if isinstance(page.get("details"), dict) else {}
+        return found, page["total"], details, device
 
-    for served in await asyncio.gather(*(one(p) for p in peers)):
-        if served is not None:
-            return served
-    return [], None, {}, None
+    served, stale = [], []
+    for peer, answer in zip(peers, await asyncio.gather(*(one(p) for p in peers))):
+        if answer == "stale":
+            stale.append(peer.get("device_name") or peer["device_id"])
+        elif answer is not None:
+            served.append(answer)
+    return served, stale
+
+
+async def catalog_page(kind, *, operation, query=None, offset=0, limit=20, worker=None):
+    """One page of fal models from one peer that serves fal for ``kind``.
+
+    ``worker`` pins the page to the worker that served the first one, so
+    "Show more" never mixes two catalogs. Unpinned, the first peer (by device
+    ID) with matches answers, else one with an empty page. Returns
+    ``(candidates, total, details, worker, notice)``; ``total`` None means no
+    peer serves fal, and ``notice`` says which workers need an update.
+    """
+    served, stale = await fal_pages(kind, operation=operation, query=query, offset=offset, limit=limit, worker=worker)
+    notice = (f"Update {', '.join(stale)} to browse {'its' if len(stale) == 1 else 'their'} fal.ai models here."
+              if stale else None)
+    if not served:
+        return [], None, {}, None, notice
+    found, total, details, device = min(served, key=lambda s: (s[1] == 0, s[3]))
+    return found, total, details, device, notice
 
 
 async def prepare(candidate, options, prompt, context):
@@ -213,10 +240,12 @@ async def handle(body, from_device):
         offset, size = page.get("offset", 0), page.get("limit", 20)
         if type(offset) is not int or type(size) is not int or offset < 0 or not 1 <= size <= 50:
             raise ValueError("Invalid generation catalog page.")
-        found, total, details = await backend.fal_page(kind, operation=media_operation, query=body.get("query"),
-                                                       offset=offset, limit=size)
-        return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in found],
-                "media_operation": media_operation, "page": {"total": total, "offset": offset, "details": details}}
+        served = await backend.fal_page(kind, operation=media_operation, query=body.get("query"),
+                                        offset=offset, limit=size)
+        found, total, details = served or ([], 0, {})
+        # ``serves`` tells a worker without fal for this kind from an empty page.
+        return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in found], "media_operation": media_operation,
+                "page": {"total": total, "offset": offset, "details": details, "serves": served is not None}}
     # prepare/execute price the one candidate fresh, so they skip listing rates.
     listing_prices = operation == "catalog" and body.get("listing_prices") is not False
     candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"),

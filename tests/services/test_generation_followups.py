@@ -332,15 +332,16 @@ def test_job_choice_save_reports_the_same_save_time_quote(
     assert priced["choice"] == entry.choice() and priced["priced"] is True
     assert priced["price"]["total"] == "0.05" and priced["warning"] is None
     assert priced["unattended_skip_reason"] is None
-    quote_backend.entries = [replace(entry, price=dict(UNKNOWN_PRICE))]
-    unpriced = client.put(route, json=entry.choice()).json()
-    assert unpriced["priced"] is False
-    assert unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
-    assert "Unattended runs will skip" in unpriced["warning"]
+    # A pick the server cannot price now is never pinned: 409 says why and
+    # the job keeps the priced pin it had.
+    other = replace(entry, model="unpriced-model", price=dict(UNKNOWN_PRICE))
+    quote_backend.entries = [entry, other]
+    unpriced = client.put(route, json=other.choice())
+    assert unpriced.status_code == 409 and "no verified price" in unpriced.json()["detail"]
+    assert "not pinned" in unpriced.json()["detail"]
     quote_backend.entries = []
-    gone = client.put(route, json=entry.choice()).json()
-    assert gone["unattended_skip_reason"] == "stored_choice_unavailable"
-    assert gone["quote_error"] in gone["warning"]
+    gone = client.put(route, json=other.choice())
+    assert gone.status_code == 409 and "not pinned" in gone.json()["detail"]
     assert generation_choices.load_job(IDENTITY, "auto-12345678") == {"image": entry.choice()}
     assert client.get("/api/v1/generation/choices").json()["remembered"] == {}
     assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)

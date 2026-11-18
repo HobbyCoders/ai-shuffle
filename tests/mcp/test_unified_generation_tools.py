@@ -230,6 +230,37 @@ async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(
     legacy.assert_not_awaited()
 
 
+async def test_a_native_model_picked_from_all_models_reaches_the_resolver_exactly(monkeypatch):
+    # The card's reply for a SuperGrok model browsed under "All models"
+    # (GenerationChoiceCard.test.ts pins the same JSON): the guard runs that
+    # account, worker and model with those options, not a neighbour.
+    from app.core.generation_resolver import INCLUDED_PRICE
+    def native(account, model, worker):
+        return replace(candidate(source="supergrok", account=account, model=model),
+                       worker=worker, price=dict(INCLUDED_PRICE))
+    entries = [
+        native("grok-1", "grok-imagine-image", "worker-b"),
+        native("grok-1", "grok-imagine-image-pro", "worker-b"),
+        native("grok-2", "grok-imagine-image-pro", "worker-c"),
+        candidate(model="fal-ai/flux/dev"),
+    ]
+    tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE)
+    seen = []
+    prepare = backend.prepare
+
+    async def recording(c, options, prompt):
+        seen.append((c.source, c.account, c.worker, c.model, options))
+        return await prepare(c, options, prompt)
+
+    backend.prepare = recording
+    reply = {"source": "grok-1", "model": "grok-imagine-image-pro", "worker": "worker-b", "options": {"size": "1k"}}
+    output = payload(await tools["generateImage"].handler({"prompt": "a lighthouse at dusk", **reply}))
+    assert output["status"] == "completed"
+    assert seen == [("supergrok", "grok-1", "worker-b", "grok-imagine-image-pro", {"size": "1k"})]
+    assert output["choice"]["model"] == "grok-imagine-image-pro" and output["choice"]["worker"] == "worker-b"
+    legacy.assert_not_awaited()
+
+
 async def test_server_wires_chatgpt_plan_lane_without_fal(monkeypatch):
     from app.core import fal_credential
     from app.core.provider import subscription_images as sub

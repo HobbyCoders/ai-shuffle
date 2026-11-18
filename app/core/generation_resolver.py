@@ -366,10 +366,12 @@ class Resolver:
         self._confirmations: dict[str, str] = {}
         self.confirmations = getattr(backend, "confirmations", None)
 
-    async def catalog(self, kind, source=None, model=None, query=None, limit=15, operation=None):
+    async def catalog(self, kind, source=None, model=None, query=None, limit=15, operation=None, worker=None):
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
         extra = {"operation": operation} if operation else {}
+        if worker:
+            extra["worker"] = worker
         entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit,
                                              **extra)
         return result("catalog", price=entries[0].price if len(entries) == 1 else None,
