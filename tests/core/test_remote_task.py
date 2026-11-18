@@ -905,8 +905,9 @@ def test_the_child_runs_fast_when_the_caller_does(world, monkeypatch, supported)
     result = dispatch({})
     assert result["ok"] is True, result
     [(_, _, body)] = calls
-    assert body.get("fast") is (True if supported else None)
-    # Both sender and target fit fast to the model the child really runs on.
+    # Sent as picked: the target fits fast to the model the child really runs
+    # on, with its own copy of the row, as every target since ``fast`` does.
+    assert body.get("fast") is True
     assert "sonnet" in checked
     row = database.get_session(result["worker_session_id"])
     [turn] = child_turns(result["worker_session_id"])
