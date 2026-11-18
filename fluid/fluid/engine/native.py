@@ -1958,6 +1958,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
+        elif isinstance(op, Fork | Rewind) and self.turn_running:
+            # The running turn appends to the head it started from, which
+            # would silently undo the move.
+            raise RuntimeError(
+                f"{type(op).__name__} refused: a turn is running; wait for it to end or Interrupt it first"
+            )
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays
@@ -2007,10 +2013,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=0,
         )
         parts: list[str] = []
+        error: str | None = None
         async for chunk in self.provider.stream(request):
             if chunk.kind == "text_delta":
                 parts.append(chunk.payload["text"])
-        content = "".join(parts).strip() or "(handoff document generation failed)"
+            elif chunk.kind == "error" and error is None:
+                error = str(chunk.payload.get("message") or "provider error")
+        content = "".join(parts).strip()
+        if error is not None or not content:
+            # A cut-off or empty document is no handoff: no session is made.
+            raise RuntimeError(
+                "handoff not created: the handoff document could not be generated"
+                + (f" ({error})" if error else " (empty reply)")
+            )
 
         new_meta = await self.store.create_session(cwd=self.ctx.cwd)
         first = SessionNode(

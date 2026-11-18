@@ -2,6 +2,8 @@
 
 from collections.abc import AsyncIterator
 
+import pytest
+
 from fluid.context.compaction import CompactionConfig, Compactor
 from fluid.context.trim import (
     USER_IMAGE_KEY, ToolResultTrimmer, TrimConfig, block_chars,
@@ -391,6 +393,37 @@ async def test_handoff_creates_seeded_session_and_event() -> None:
     assert handoff_req.session_id == sid
     assert "finish the migration" in handoff_req.messages[0].content[0].text
     assert "do the thing" in handoff_req.messages[0].content[0].text
+
+
+class FailingHandoffProvider(HandoffProvider):
+    """Answers the turn; the handoff call streams some text, then errors."""
+
+    async def stream(self, request: ProviderRequest) -> AsyncIterator[StreamChunk]:
+        if "handoff document" not in request.messages[0].content[0].text:
+            async for chunk in super().stream(request):
+                yield chunk
+            return
+        self.requests.append(request)
+        yield StreamChunk("message_start", {"usage": {"input_tokens": 1}})
+        yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+        yield StreamChunk("text_delta", {"index": 0, "text": "Goal: half a doc"})
+        yield StreamChunk("error", {"message": "upstream overloaded", "status": 529})
+
+
+async def test_handoff_aborts_when_document_generation_fails() -> None:
+    provider = FailingHandoffProvider()
+    store = MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(provider=provider, store=store, model="m", session_id=sid)
+
+    await loop.submit(UserTurn(content="do the thing"))
+    await loop.wait_turn()
+    with pytest.raises(RuntimeError, match="handoff not created.*upstream overloaded"):
+        await loop.submit(Handoff(goal="finish the migration"))
+
+    assert len(provider.requests) == 2  # the handoff call was made
+    assert list(store._sessions) == [sid]  # and no session was created
+    assert not [e for e in loop.bus.log(sid) if isinstance(e, HandoffCreated)]
 
 
 def test_trim_placeholder_keeps_a_head_excerpt() -> None:
