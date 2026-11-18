@@ -32,6 +32,11 @@ def setup(mock_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         preference_identity, "account_identity", lambda account: ("account", "origin#" + account)
     )
+    from app.api import generation_choices as api
+
+    async def priced(kind: str, choice: dict, context: Any) -> dict:
+        return {"price": {}, "priced": True, "quote_error": None, "unattended_skip_reason": None, "warning": None}
+    monkeypatch.setattr(api, "save_time_quote", priced)
 
 
 async def call(args: dict, *, admin: bool = True, writable: bool = True) -> dict:
@@ -393,3 +398,28 @@ async def test_native_alias_reads_the_current_pick_each_call(monkeypatch: pytest
     assert (await next_turn())["choice"]["account"] == "plan-a"
     assert (await call({"action": "forget", "kind": "image", "confirm": True}))["success"]
     assert (await next_turn())["status"] == "choose"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("quoted,said", [
+    ({"price": {**gr.UNKNOWN_PRICE, "reason": "billed_by_usage", "detail": "fal bills this model by what each run uses."},
+      "priced": False, "quote_error": None, "unattended_skip_reason": "stored_choice_unpriced"},
+     "no verified price (billed_by_usage: fal bills this model by what each run uses)."),
+    ({"price": dict(gr.UNKNOWN_PRICE), "priced": False, "quote_error": "This account or model is not available right now.",
+      "unattended_skip_reason": "stored_choice_unavailable"}, "This account or model is not available right now."),
+])
+async def test_an_unpriced_pick_is_not_remembered_and_the_default_stays(monkeypatch, quoted, said) -> None:
+    from app.api import generation_choices as api
+    assert (await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True}))["success"]
+    asked = []
+
+    async def unpriced(kind: str, choice: dict, context: Any) -> dict:
+        asked.append((kind, choice["model"], context.unattended))
+        return {**quoted, "warning": "x"}
+    monkeypatch.setattr(api, "save_time_quote", unpriced)
+    other = {**PICK, "model": "unpriced-model"}
+    result = await call({"action": "remember", "kind": "image", "choice": other, "confirm": True})
+    assert result["success"] is False and result["remembered"] is False
+    assert result["error"].startswith("Not remembered.") and said in result["error"]
+    assert asked == [("image", "unpriced-model", False)]
+    assert choices.load(OWNER, run_migration=False)["remembered"]["image"]["model"] == PICK["model"]

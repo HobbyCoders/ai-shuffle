@@ -91,6 +91,40 @@ _INPUT_UNITS = re.compile(r"(?:\d+ )?(?:frames?|input seconds?|processed seconds
 # Short side in pixels for the resolution labels fal video models declare.
 _FOLLOWS_INPUT = re.compile(r"\bmatch(?:es|ing)?\b[^.]{0,30}\b(?:input|source)\b")
 _RESOLUTION_LINES = re.compile(r"(\d{3,4})p")
+# A duration's unit, only where the text states the field's own unit:
+# a range of its values ("4 to 30 seconds", "4-30s", "(0.5-22)s"), or a
+# sentence whose subject is the field ("Clip length (seconds)", "Duration of
+# the video in seconds", "How long the audio is, in seconds", "Number of
+# seconds ...", "Seconds of video"). Sentences about how long the work takes
+# are dropped first (``_value_sentences``), so no form or range ever reads them.
+_DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?|hrs?|s"
+_RANGE = re.compile(
+    rf"(?<![\d.])(\d+(?:\.\d+)?)\s*({_DURATION_WORDS})?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*\)?\s*({_DURATION_WORDS})\b", re.I)
+_SUBJECT = r"(?:[\w'-]+\s+){0,4}?(?:duration|length)"
+_SUBJECT_UNIT = [
+    re.compile(rf"^{_SUBJECT}\s*\(\s*(?:in\s+)?({_DURATION_WORDS})\s*\)", re.I),
+    re.compile(rf"^(?:{_SUBJECT}\b|how\s+long\b)[^.;!?]{{0,60}}?\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+    re.compile(rf"^(?:the\s+)?(?:number\s+of\s+({_DURATION_WORDS})\b|({_DURATION_WORDS})\s+(?:of|for)\b)", re.I),
+    # The noun and its unit side by side: "... audio length in seconds".
+    re.compile(rf"\b(?:duration|length)\s+in\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+]
+# A sentence with any of these is about how long the work takes, not the value.
+_WORK_TIME = re.compile(r"\b(?:render\w*|process\w*|complet\w*|finish\w*|takes?|took|taking|wait\w*|retr(?:y|ies|ied|ying)"
+                        r"|time\s*outs?|timeouts?|queue\w*|latency|runtime)\b", re.I)
+
+
+def _value_sentences(text: str | None) -> list[str]:
+    """The sentences of ``text`` that are not about work time."""
+    return [s for s in re.split(r"(?<=[.;!?])\s+", (text or "").strip()) if s and not _WORK_TIME.search(s)]
+
+
+def _unit_of(word: str) -> str:
+    word = word.casefold()
+    if word == "ms" or word.startswith("mil"):
+        return "ms"
+    return "h" if word.startswith("h") else "min" if word.startswith("m") else "s"
+
+
 # The widest aspect ratio any fal video model declares; used when the model
 # chooses ("auto") and declares no list to bound it.
 _WIDEST_RATIO = Decimal(21) / Decimal(9)
@@ -293,11 +327,8 @@ class ModelSchema:
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         raise PricingUnknown("unsupported_unit", f"Pricing unit \"{unit}\" is not supported yet.")
 
-    def _bound(self, field: "ParamField", value):
-        """A declared number, or the field's own largest value when the model
-        chooses (``auto``/unset). None when nothing declared bounds it."""
-        if value not in (None, "", "auto", "adaptive", "default"):
-            return value, False
+    def _declared_max(self, field: "ParamField") -> Decimal | None:
+        """The field's largest value from its structure: enum, maximum."""
         candidates = []
         for item in field.enum or []:
             try:
@@ -310,13 +341,74 @@ class ModelSchema:
                 candidates.append(Decimal(str(variant["maximum"])))
         if field.maximum is not None:
             candidates.append(Decimal(str(field.maximum)))
-        if not candidates:
-            # A range stated only in prose, e.g. "Duration in seconds (0.5-30)".
-            span = re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", field.description or "")
-            if span:
-                candidates.append(Decimal(span[2]))
         candidates = [c for c in candidates if c.is_finite() and c > 0]
-        return (max(candidates), True) if candidates else (None, True)
+        return max(candidates) if candidates else None
+
+    @staticmethod
+    def _prose_range(field: "ParamField"):
+        """A range stated in prose: unit-bearing ("4 to 30s") or a bare
+        parenthesised one ("Duration in seconds (0.5-30)")."""
+        text = " ".join(_value_sentences(field.description))
+        return _RANGE.search(text) or re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text)
+
+    def _bound(self, field: "ParamField", value):
+        """A declared number, or the field's own largest value when the model
+        chooses (``auto``/unset). None when nothing declared bounds it."""
+        if value not in (None, "", "auto", "adaptive", "default"):
+            return value, False
+        top = self._declared_max(field)
+        if top is None and (span := self._prose_range(field)):
+            top = Decimal(span[3] if span.re is _RANGE else span[2])
+            top = top if top.is_finite() and top > 0 else None
+        return top, True
+
+    @staticmethod
+    def _enum_suffix(field: "ParamField") -> str | None:
+        """The unit every numeric enum value carries (``"5s"``, ``"10s"``)."""
+        units = {m[1] for item in field.enum or []
+                 if (m := re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*(s|sec|seconds?|m|min|minutes?)", str(item)))}
+        values = [i for i in field.enum or [] if str(i) not in ("auto", "adaptive", "default")]
+        return units.pop() if len(units) == 1 and values and all(
+            re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*[a-z]+", str(i)) for i in values) else None
+
+    def _value_units(self, field: "ParamField", name: str) -> set:
+        """Units declared for this field's own value, from structure only:
+        (a) the field's name; (b) a unit every enum value carries; (c) a range
+        of values with its unit that is the field's bound or agrees with its
+        declared maximum; (d) a sentence whose subject is the field and that
+        names its unit (``_SUBJECT_UNIT``). Any other unit word is ignored."""
+        units = set()
+        if name in ("duration_seconds", "duration_sec", "seconds"):
+            units.add("s")
+        elif name == "duration_minutes":
+            units.add("min")
+        elif name.endswith("_ms"):
+            units.add("ms")
+        if suffix := self._enum_suffix(field):
+            units.add(_unit_of(suffix))
+        units.update(self._prose_units(field)[0])
+        return units
+
+    def _prose_units(self, field: "ParamField") -> tuple[set, list]:
+        """Units the field's title/description declare (forms (c) and (d)
+        above) and which form matched, for the catalog audit."""
+        units, forms = set(), []
+        top = self._declared_max(field)
+        description = " ".join(_value_sentences(field.description))
+        first = _RANGE.search(description)
+        for m in _RANGE.finditer(description):
+            # The range agrees with the declared maximum or, with none, is the
+            # bound itself (the one ``_bound`` reads).
+            if (Decimal(m[3]) == top) if top is not None else m.start() == first.start():
+                units.update(_unit_of(u) for u in (m[2], m[4]) if u)
+                forms.append(("range", m[0]))
+        for sentence in _value_sentences(field.title) + _value_sentences(field.description):
+            for index, form in enumerate(_SUBJECT_UNIT):
+                if m := form.search(sentence):
+                    units.add(_unit_of(next(g for g in reversed(m.groups()) if g)))
+                    forms.append((("subject (unit)", "subject … in unit", "number of unit / unit of",
+                                   "noun in unit")[index], m[0]))
+        return units, forms
 
     def _seconds(self, options: dict, notes: list) -> Decimal:
         fields = {f.name: f for f in self.fields}
@@ -336,31 +428,15 @@ class ModelSchema:
             match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", str(value))
             if not match:
                 continue
-            suffix = match[2]
-            if name.endswith("_ms") and not suffix:
-                # Named in milliseconds by the model itself.
-                seconds = Decimal(match[1]) / 1000
-                if seconds.is_finite() and seconds > 0:
-                    if bounded:
-                        notes.append(f"length up to {seconds.normalize():f} s (the model picks it)")
-                    durations.append(seconds)
+            units = self._value_units(field, name)
+            if match[2]:
+                units.add(_unit_of(match[2]))
+            # Exactly one unit, tied to this field's value; milliseconds only
+            # where the model names the field so, never hours.
+            scale = {"s": Decimal(1), "min": Decimal(60), "ms": Decimal("0.001")}
+            if len(units) != 1 or (unit := units.pop()) not in scale or (unit == "ms" and not name.endswith("_ms")):
                 continue
-            if suffix:
-                in_minutes = suffix.startswith("m")
-            elif "millisecond" in declaration:
-                continue
-            elif "minute" in declaration:
-                in_minutes = True
-            elif "second" in declaration or (
-                    name in ("duration", "duration_seconds", "duration_sec", "seconds")
-                    and (field.description or field.minimum is not None or field.maximum is not None)):
-                # fal states lengths in seconds; a described or bounded plain
-                # "duration" naming no unit is seconds too (minutes and
-                # milliseconds say so). A bare undeclared field is not guessed.
-                in_minutes = False
-            else:
-                continue
-            seconds = Decimal(match[1]) * (60 if in_minutes else 1)
+            seconds = Decimal(match[1]) * scale[unit]
             if not seconds.is_finite() or seconds <= 0:
                 continue
             if bounded:
@@ -414,16 +490,15 @@ class ModelSchema:
         fields = {f.name: f for f in self.fields}
         if "resolution" not in fields or not any(n in fields for n in ("duration", "duration_seconds")):
             raise PricingUnknown("unsupported_unit", "Token pricing is only understood for video with a declared resolution and length.")
-        if self._has_media_input(options, "video") or str(options.get("task", "")).casefold() in ("editing", "extension"):
-            raise PricingUnknown("depends_on_input", "Input video length is billed too and is not known in advance.")
         resolution = options.get("resolution") or fields["resolution"].default
         label = str(resolution or "").strip().casefold()
         lines = _RESOLUTION_LINES.fullmatch(label)
         lines = Decimal(lines[1]) if lines else {"2k": Decimal(1440), "4k": Decimal(2160)}.get(label)
-        if lines is None:
-            raise PricingUnknown("needs_option", f"No token price is listed for resolution {resolution}.")
-        if lines > _TOKEN_MAX_LINES:
+        # Whether the rate applies is settled before anything about the input.
+        if lines is None or lines > _TOKEN_MAX_LINES:
             raise PricingUnknown("rate_not_listed", f"fal lists no token rate for {resolution}.")
+        if self._has_media_input(options, "video") or str(options.get("task", "")).casefold() in ("editing", "extension"):
+            raise PricingUnknown("depends_on_input", "Input video length is billed too and is not known in advance.")
         ratio = None
         aspect = options.get("aspect_ratio")
         parsed = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", str(aspect or ""))

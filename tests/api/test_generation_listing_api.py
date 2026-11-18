@@ -123,7 +123,8 @@ def test_a_rate_limited_page_keeps_known_rates(client, monkeypatch):
 def test_cached_schema_rows_carry_a_real_price(client):
     from app.services.fal_schema import schema_service
     schema = ModelSchema("fal-ai/t2v-a", [ParamField("prompt", is_primary_text=True, required=True),
-                                          ParamField("duration", type="integer", default=5, minimum=1, maximum=10)],
+                                          ParamField("duration", type="integer", default=5, minimum=1, maximum=10,
+                                                     description="Duration of the video in seconds.")],
                          "prompt")
     schema_service._cache["fal-ai/t2v-a"] = (time.time(), schema)
     row = client.get("/api/v1/generation/models/video?limit=1").json()["models"][0]

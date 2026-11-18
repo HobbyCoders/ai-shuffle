@@ -340,7 +340,12 @@ export interface PriceView {
 	detail?: string;
 	/** Unknown price with fal's raw rate, e.g. `$0.30 per second`. */
 	rate?: string;
+	/** Unknown quantity at a rate that applies: the owner may approve one run. */
+	approvable?: boolean;
 }
+
+/** generation_resolver.UNPRICED_APPROVABLE_REASONS: the rate applies, only the quantity is unknown. */
+const APPROVABLE_REASONS = new Set(['billed_by_usage', 'depends_on_input', 'needs_option', 'length_not_declared']);
 
 /** fal's raw rate in words: `$0.30 per second`, `$0.0214 per 1000 tokens`. */
 export function rateText(rate: GenerationPrice['rate']): string | undefined {
@@ -364,7 +369,8 @@ export function priceView(price: GenerationPrice | null | undefined, kind: Gener
 			asksFirst: false,
 			total: null,
 			...(price.detail ? { detail: price.detail } : {}),
-			...(rate ? { rate } : {})
+			...(rate ? { rate } : {}),
+			...(rate && APPROVABLE_REASONS.has(price.reason ?? '') ? { approvable: true } : {})
 		};
 	}
 	const count = amount > 0 ? Math.round(total / amount) : 1;
@@ -499,7 +505,7 @@ export function pickMessage(tool: string, kind: GenerationKind, option: Generati
 	const label = `${sourceLabel(option.source)} · ${modelLabel(option.model)}`;
 	const cost = price.priced
 		? price.figure === 'Included' ? ', included in my plan' : ` (${price.figure})`
-		: price.rate ? ` (no bounded price, ${price.rate}; ask me to approve it)` : '';
+		: price.approvable ? ` (no bounded price, ${price.rate}; ask me to approve it)` : '';
 	const args = JSON.stringify({ source: option.account, model: option.model, worker: option.worker, options });
 	const memory = remember ? ` I saved it as my choice for ${KIND_LABEL[kind].plural}.` : '';
 	return `Use ${label} for this ${KIND_LABEL[kind].noun}${cost}.${memory}\nCall ${tool} again with the same prompt and ${args}.`;

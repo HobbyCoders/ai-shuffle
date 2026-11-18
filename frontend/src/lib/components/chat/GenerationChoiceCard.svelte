@@ -382,7 +382,7 @@
 	// the owner approves that one run on the permission prompt, shown fal's raw
 	// rate (generation_resolver.INTERACTIVE_UNPRICED_APPROVAL).
 	const approvable = $derived(
-		variant === 'chat' && !handoff && !!current && current.source === 'fal' && !currentPrice.priced && !!currentPrice.rate && !elsewhere(current)
+		variant === 'chat' && !handoff && !!current && current.source === 'fal' && !currentPrice.priced && !!currentPrice.approvable && !elsewhere(current)
 	);
 	const canUse = $derived(
 		!!current?.available && (currentPrice.priced || approvable) && !quoting && !quoteError && !saving && !collapsed
@@ -408,15 +408,17 @@
 					? await onpick(choiceOf(option, chosen))
 					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
 			if (variant === 'chat' && !canAct(sourceSessionId)) return;
+			// The server remembers a pick only once its own quote priced it.
+			const kept = keep && !(result && 'remembered' in result && result.remembered === false);
 			// Shown before the chat reply goes out, so a failed send still says what was saved.
 			const view = saveOutcome(result || null, kind);
-			if (view) outcome = { index, verb: savedVerb(keep), view };
+			if (view) outcome = { index, verb: savedVerb(kept), view };
 			if (variant === 'chat') {
-				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), keep), turn ? { turn } : undefined);
+				const sent = await activeSession.sendMessage(pickMessage(tool, kind, option, chosen, priceView(quotes[index], kind), kept), turn ? { turn } : undefined);
 				if (!canAct(sourceSessionId)) return;
 				if (sent === false) throw new Error('Your pick was saved, but the reply could not be sent. Reply in the chat instead.');
 			}
-			picked = { index, remembered: keep };
+			picked = { index, remembered: kept };
 			// A consequential warning keeps the chat card open.
 			reopened = !!view?.warning;
 			onsaved?.(option);
@@ -430,7 +432,7 @@
 
 	function savedVerb(keep: boolean): string {
 		if (handoff) return 'Pinned to this job';
-		if (variant === 'settings') return 'Remembered';
+		if (variant === 'settings') return keep ? 'Remembered' : 'Not remembered';
 		return keep ? 'Saved and remembered' : 'Saved as your last choice';
 	}
 

@@ -94,20 +94,22 @@ class Sources:
         return None
 
     async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None,
-                      operation=None):
+                      operation=None, listing_prices=True):
         """``operation`` (``generation_operations``) picks the fal models that
         fit the call; None is the kind's text operation. A named model keeps
-        any category."""
+        any category. ``listing_prices=False`` resolves a candidate that is
+        priced fresh next (prepare): no listing rate is read, so no cache or
+        its lock."""
         here = self.local_worker()
         entries = []
         if worker in (None, here):
             entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
-                                               operation=operation)
+                                               operation=operation, listing_prices=listing_prices)
         # A request pinned to this worker never waits on peers.
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
             entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
-                                         worker=worker, operation=operation))
+                                         worker=worker, operation=operation, listing_prices=listing_prices))
         # Workers are execution holders, not distinct owner choices. Keep
         # different accounts/options separate, and prefer a usable local holder.
         unique = {}
@@ -170,7 +172,8 @@ class Sources:
                                       "description": (m.description or "")[:240]}
         return entries, len(models), details
 
-    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, operation=None):
+    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None,
+                            operation=None, listing_prices=True):
         from app.core import generation_operations
         from app.core import native_generation_settings as native
         from app.db import model_providers
@@ -190,15 +193,21 @@ class Sources:
                 models = await self.fal_models(kind, operation=op.id, query=query)
             models = models[:max(1, min(limit, 50))]
             from app.services import fal_pricing
-            try:
-                # One pricing request for the page; fal rate-limits per-model reads.
-                rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
-            except fal_pricing.PricingRequestFailed:
-                rows = None
+            rows = None
+            if listing_prices:
+                try:
+                    # One pricing request for the page; fal rate-limits per-model reads.
+                    rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
+                except fal_pricing.PricingRequestFailed:
+                    rows = None
             for m in models:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-                price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
+                if listing_prices:
+                    price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
+                else:
+                    # Not quoted here: prepare prices it from fal's current rate.
+                    price = dict(UNKNOWN_PRICE) if schema else fal_pricing.unknown("schema_unavailable")
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))
@@ -249,17 +258,18 @@ class Sources:
                                          available=False, reason=capability.get("reason") or "No verified media schema is available for this account."))
         return entries
 
-    async def fal_price(self, model, options, *, prompt=None, rows=None):
+    async def fal_price(self, model, options, *, prompt=None, rows=None, fresh=False):
         """Read declared provider rates and resolve quantities with its schema.
 
         ``rows`` is an already fetched ``{endpoint: row}`` batch (a catalog
-        page); otherwise this endpoint's row is read through the shared cache.
+        page); otherwise this endpoint's row is read through the shared cache,
+        or from fal itself when ``fresh`` (admission: a failed read is unknown).
         """
         from app.services import fal_pricing
         from app.services.fal_schema import schema_service
         try:
-            if rows is None or model not in rows:
-                rows = await fal_pricing.rates.rows([model], await self.fal_key())
+            if fresh or rows is None or model not in rows:
+                rows = await fal_pricing.rates.rows([model], await self.fal_key(), fresh=fresh)
             schema = await schema_service.get_schema(model, await self.fal_key())
             return fal_pricing.price_from_row(rows.get(model), schema, options, prompt)
         except fal_pricing.PricingRequestFailed as exc:
@@ -283,7 +293,10 @@ class Sources:
                             and not chat_mode_read_permitted("Read", {"file_path": value})):
                         raise ValueError("Chat generation may read local media only from chat uploads.")
             values.pop(schema.primary_text_field)
-            return replace(candidate, options=values, price=await self.fal_price(candidate.model, values, prompt=prompt))
+            # Prepared prices admit runs (cap, confirmation, the peer's
+            # price-equality check), so they come from fal's current rate.
+            return replace(candidate, options=values,
+                           price=await self.fal_price(candidate.model, values, prompt=prompt, fresh=True))
         from app.core import native_generation_settings as native
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")

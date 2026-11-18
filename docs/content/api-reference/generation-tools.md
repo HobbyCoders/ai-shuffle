@@ -43,6 +43,11 @@ in `price.detail` and, when fal lists one, its raw `price.rate`
 video length), `needs_option` (pick a size or length), `length_not_declared`,
 `needs_prompt`, `rate_not_listed` and `invalid_options`.
 
+Catalog and search listings may reuse fal rates read in the last few hours.
+Admitting a run (the quote behind the cap, the confirmation and a peer's
+submit check) reads fal's current rate; if that read fails the price is
+`pricing_request_failed` and nothing is submitted.
+
 `searchModels` returns compact schemas by default: declared field names, types,
 required flags, enums, defaults and numeric bounds, without descriptions or the
 raw OpenAPI document. Each schema is limited to 32 fields and 4 KiB, with individual
@@ -57,12 +62,16 @@ Every call to the four generation tools or `runFalModel`, including subscription
 images priced **Included**, goes through the guard below: a known price,
 confirmation above the threshold and the daily cap. Nothing unpriced is
 submitted unattended. One interactive exception: in a chat turn with a
-permission prompt, a local fal model with no bounded price but a listed fal
-rate may run once if the user approves it on that prompt. The prompt shows
-fal's rate and says the total is not bounded; one billing unit is reserved
-against the daily cap first, and a full cap refuses it. Remote workers,
-unattended runs and clients without a prompt keep refusing. The choice card
-never remembers an unpriced pick.
+permission prompt, a local fal model whose listed rate applies but whose
+quantity is unknown (`billed_by_usage`, `depends_on_input`, `needs_option`,
+`length_not_declared`) may run once if the user approves it on that prompt.
+A missing, failed or inapplicable rate (`rate_not_listed`, for example
+Seedance at 4k) never qualifies. The prompt shows fal's rate and says the
+total is not bounded; one billing unit is reserved against the daily cap
+first, and a full cap refuses it. Remote workers, unattended runs and clients
+without a prompt keep refusing. If fal's price differs after any approval,
+the call returns `reason: "price_changed"` with the new price and submits
+nothing. The choice card never remembers an unpriced pick.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -217,7 +226,10 @@ Owner sessions with the app-config tools enabled can call
 `get` returns remembered picks (optionally filtered by `kind`) without migrating
 legacy settings. Writes require a kind and `confirm: true` after the user's
 acknowledgment; `remember` also requires a `choice` using discovered source/account,
-model, worker and declared options. No caller-supplied preference identity is used.
+model, worker and declared options. Like the card, `remember` first takes a fresh
+quote: a pick without a verified price is not remembered, the current default stays,
+and the result is `success: false` with the price `reason`. No caller-supplied
+preference identity is used.
 Only interactive owner turns can write: unattended runs (including automation,
 background, delegated, hidden and voice sessions) cannot save their own choices,
 even with `confirm: true`. Discovery callers default to read-only.
@@ -328,12 +340,14 @@ preferences:
   copied. A remembered choice is never overwritten by the migration.
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
-saves a pick (`remember: false` records only the last choice). The save response
-includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
+saves a pick (`remember: false` records only the last choice). A pick is
+remembered only when the server-side quote priced it; otherwise it is saved as
+the last choice only, with `remembered: false` and a warning saying so. The save
+response includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
 choice cannot run unattended. An unpriced model reports `stored_choice_unpriced`.
 An unavailable account/model or failed quote reports `stored_choice_unavailable`,
 with the quote's error in `quote_error` and the warning. The optional quote has a
-two-second timeout; a failed quote does not lose the saved pick. No price is inferred
+two-second timeout; a failed quote keeps the pick as the last choice. No price is inferred
 for an unpriced model, and saving never reserves or submits a generation. Frontend
 clients must display this warning after saving or remembering a pick: the chat
 choice card, Settings, Default models and the automation editor show the fresh
@@ -428,7 +442,12 @@ can use the largest allowed preset only when every enum option has known
 dimensions. Fractional billing units round up for each output. A catalog-only
 character price has unknown total until text is supplied. Unsupported units
 (including tokens and compute time), unbounded dimensions or ambiguous
-duration/count parameters refuse submission rather than guess. Conditional
+duration/count parameters refuse submission rather than guess. A duration's unit
+counts only when it belongs to the field's own value: its name (`duration_seconds`),
+units on its enum values (`"5s"`), a range of its values with a unit ("4 to 30s")
+that bounds it, or a sentence about the field that names its unit ("Duration of
+the video in seconds", "Clip length (seconds)"). Other mentions of seconds, such
+as how long rendering takes, do not count. Conditional
 pricing formulas are not inferred from arbitrary resolution names.
 
 OpenAI/xAI API-key images run only with the exact reviewed record above, priced

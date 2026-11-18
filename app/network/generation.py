@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import asdict
 from uuid import uuid4
 
-from app.core.generation_resolver import Candidate, RunContext, price_total
+from app.core.generation_resolver import Candidate, RunContext, price_total, same_price
 from app.db.async_database import run_sync
 from app.network import control, engine, runners
 
@@ -45,7 +45,8 @@ async def request(worker, operation, **body):
     return response
 
 
-async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None, operation=None):
+async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None, operation=None,
+                  listing_prices=True):
     """Ask online peers (or only ``worker``) in parallel, each with a short timeout.
 
     ``operation`` travels as ``media_operation``; an older peer ignores it and
@@ -54,11 +55,13 @@ async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt
     """
     from app.core import generation_operations
     text_only = generation_operations.resolve(kind, operation).native
+    # Sent only when off; a peer that ignores it just lists cached prices.
+    extra = {} if listing_prices else {"listing_prices": False}
 
     async def one(peer):
         try:
             response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query,
-                                     limit=limit, prompt=prompt, media_operation=operation)
+                                     limit=limit, prompt=prompt, media_operation=operation, **extra)
         except ValueError as exc:
             # Surface old/unreachable workers rather than silently treating their
             # accounts as absent. No account identities are advertised in presence.
@@ -214,8 +217,11 @@ async def handle(body, from_device):
                                                        offset=offset, limit=size)
         return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in found],
                 "media_operation": media_operation, "page": {"total": total, "offset": offset, "details": details}}
-    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit, prompt=body.get("prompt"),
-                                             operation=media_operation)
+    # prepare/execute price the one candidate fresh, so they skip listing rates.
+    listing_prices = operation == "catalog" and body.get("listing_prices") is not False
+    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"),
+                                             limit=limit, prompt=body.get("prompt"), operation=media_operation,
+                                             listing_prices=listing_prices)
     if kind == "image":
         # The holding worker applies its own ChatGPT-plan image rule (#1796):
         # it never spends on a fal image its own generateImage would refuse.
@@ -238,7 +244,7 @@ async def handle(body, from_device):
     candidate = await backend.prepare(candidate, options, prompt)
     if operation == "prepare":
         return {"version": WIRE_VERSION, "candidate": asdict(candidate)}
-    if price_total(candidate.price) is None or candidate.price != body.get("price"):
+    if price_total(candidate.price) is None or not same_price(candidate.price, body.get("price")):
         raise ValueError("The generation price changed or is unavailable. Request a new quote before submitting.")
     if not await run_sync(claim, body.get("command_id")):
         raise ValueError("This generation command was already submitted; its outcome may be unknown. No retry was made.")
