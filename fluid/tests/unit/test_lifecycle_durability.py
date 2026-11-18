@@ -1,20 +1,23 @@
 """Lifecycle writes that fail must stay retryable without being written twice
-(issue #1769 case 1), a failed replay read must not count as rehydrated, and a
-handoff's model call is billed, interruptible, admitted one at a time and sees
-which tools the session used without their arguments or output."""
+(issue #1769 case 1), a failed replay read must not count as rehydrated, the
+JSONL event log fails closed, and a handoff's model call is billed,
+interruptible, admitted one at a time, bounded at close and sees which tools
+the session used without their arguments or output."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import threading
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
-import pytest
-
 import fluid.engine.background as background_mod
 import fluid.engine.native as native_mod
+import fluid.store.jsonl as jsonl_mod
+import pytest
 from fluid.engine.native import NativeLoop, _clip, _handoff_transcript
 from fluid.events import (
     BackgroundTaskFinished,
@@ -207,7 +210,8 @@ async def test_a_stored_terminal_from_another_write_is_not_taken_for_this_one() 
 
 class _RefusingJsonl(JsonlStore):
     """Fails the first terminal event's line: before writing any of it
-    (``refuse``) or after writing half of it (``torn``)."""
+    (``refuse``), after writing half of it (``torn``) or after writing all of
+    it (``landed``, as when only the fsync fails)."""
 
     def __init__(self, directory, mode: str) -> None:
         super().__init__(directory)
@@ -222,6 +226,8 @@ class _RefusingJsonl(JsonlStore):
                 line = (json.dumps(record) + "\n").encode()
                 with open(path, "ab") as fh:
                     fh.write(line[: len(line) // 2])
+            if self.mode == "landed":
+                super()._append_line(path, record)
             raise OSError("disk full")
         super()._append_line(path, record)
 
@@ -642,3 +648,349 @@ async def test_close_after_the_document_arrived_waits_for_the_handoff_report() -
 
     created = [e for e in seen if isinstance(e, HandoffCreated)]
     assert len(created) == 1 and created[0].new_session_id in store._sessions
+
+
+# ─── retries reconcile by write id only ─────────────────────────────────────
+
+
+async def test_an_identical_terminal_from_another_write_is_not_taken_for_this_one() -> None:
+    store = FailOnce(_is_terminal("t"))
+    await store.create_session(SID)
+    loop = _loop(store)
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
+    done = BackgroundTaskFinished(task_id="t", status="finished", wake=False)
+    with pytest.raises(OSError):
+        await loop.submit(done)
+    # A terminal with the very same payload lands from some other write.
+    foreign = replace(_sub("t", "finished", wake=False, write_id="f" * 32),
+                      seq=loop.bus.last_seq(SID) + 1)
+    loop.bus.seed(SID, foreign.seq)
+    await MemoryStore.append_event(store, SID, foreign)
+
+    await loop.submit(done)
+    terminals = [e for e in await _stored(store) if _is_terminal("t")(e)]
+    assert len(terminals) == 2 and terminals[1].write_id not in (None, foreign.write_id)
+    await loop.aclose()
+
+
+async def test_a_stored_attempt_its_host_superseded_does_not_stand_in_for_the_current_one() -> None:
+    store = FailOnce(lambda e: isinstance(e, SubagentEvent) and e.kind == "completion_pending",
+                     mode="commit_then_raise")
+    await store.create_session(SID)
+    loop = _loop(store, provider=ScriptedProvider([_text("picked it up")]))
+    live = {"old": True}
+    old = BackgroundTaskFinished(task_id="t", status="failed", worker_session_id="w",
+                                 wake=False, is_current=lambda: live["old"])
+    new = BackgroundTaskFinished(task_id="t", status="finished", worker_session_id="w",
+                                 summary="the new one", wake=True)
+    with pytest.raises(OSError):
+        await loop.submit(old)  # stored, then the acknowledgement was lost
+    live["old"] = False  # a replacement worker took over the task id
+    await loop.submit(new)
+    assert loop._background_early["t"] is new
+
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t", worker_session_id="w"))
+    await loop.wait_turn()
+    stored = await _stored(store)
+    assert [e.status for e in _subagent(stored, "t", "completion_pending")] == ["failed", "finished"]
+    assert [e.summary for e in _subagent(stored, "t", "finished")] == ["the new one"]
+    assert _subagent(stored, "t", "failed") == []
+    assert await _woken(store) == [("t",)]
+    await loop.aclose()
+
+
+async def test_the_same_op_retried_keeps_its_write_id() -> None:
+    store = FailOnce(_is_terminal("t"))
+    await store.create_session(SID)
+    loop = _loop(store)
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
+    done = BackgroundTaskFinished(task_id="t", status="failed", wake=False)
+    with pytest.raises(OSError):
+        await loop.submit(done)
+    (_, attempts), = loop._background_uncertain.values()
+    first_id = attempts[0][0]
+    await loop.submit(done)
+    (terminal,) = [e for e in await _stored(store) if _is_terminal("t")(e)]
+    assert terminal.write_id == first_id
+    assert loop._background_uncertain == {}
+    await loop.aclose()
+
+
+def test_uncertain_attempts_are_bounded() -> None:
+    loop = _loop(MemoryStore())
+    for i in range(50):
+        loop._remember_uncertain(("t", "terminal"), 5, f"id{i}", object())
+    (since, attempts), = loop._background_uncertain.values()
+    assert since == 5 and len(attempts) == background_mod._UNCERTAIN_ATTEMPTS_PER_STEP
+    assert attempts[-1][0] == "id49"
+    for i in range(background_mod._UNCERTAIN_STEPS + 20):
+        loop._remember_uncertain((f"task{i}", "terminal"), 1, "x", None)
+    assert len(loop._background_uncertain) == background_mod._UNCERTAIN_STEPS
+    assert ("t", "terminal") not in loop._background_uncertain  # the oldest went first
+
+
+# ─── host recovery never overrides a live completion ────────────────────────
+
+
+async def test_a_live_completion_wins_over_a_refused_recovery_inference() -> None:
+    store = FailOnce(lambda e: isinstance(e, SubagentEvent) and e.kind == "failed")
+    await _store_with(_sub("t", "started"), store=store)
+
+    async def recover(pending):
+        return [BackgroundTaskFinished(task_id="t", status="failed", wake=False)]
+
+    loop = _loop(store, recover_background=recover)
+    with pytest.raises(OSError):
+        await _rehydrate(loop)  # the inferred "failed" is refused and kept
+    assert "t" in loop._background_host_recovery
+
+    await loop.submit(BackgroundTaskFinished(task_id="t", status="finished", wake=False))
+    stored = await _stored(store)
+    assert len(_subagent(stored, "t", "finished")) == 1
+    assert _subagent(stored, "t", "failed") == []
+    assert loop._background_recovered and loop._background_host_recovery == {}
+    await loop.aclose()
+
+
+async def test_recovery_leaves_the_live_task_to_its_completion_on_the_first_call() -> None:
+    store = await _store_with(_sub("t", "started"), _sub("u", "started"))
+
+    async def recover(pending):
+        return [BackgroundTaskFinished(task_id=t, status="failed", wake=False) for t in pending]
+
+    loop = _loop(store, recover_background=recover)
+    await loop.submit(BackgroundTaskFinished(task_id="t", status="finished", wake=False))
+    stored = await _stored(store)
+    assert [e.kind for e in stored if isinstance(e, SubagentEvent) and e.task_id == "t"] == [
+        "started", "finished"]
+    assert len(_subagent(stored, "u", "failed")) == 1  # the other task is still recovered
+    await loop.aclose()
+
+
+async def test_a_cached_recovery_op_its_host_superseded_is_not_committed() -> None:
+    store = FailOnce(lambda e: isinstance(e, SubagentEvent) and e.kind == "failed")
+    await _store_with(_sub("t", "started"), store=store)
+    live = {"op": True}
+
+    async def recover(pending):
+        return [BackgroundTaskFinished(task_id="t", status="failed", wake=False,
+                                       is_current=lambda: live["op"])]
+
+    loop = _loop(store, recover_background=recover)
+    with pytest.raises(OSError):
+        await _rehydrate(loop)
+    live["op"] = False
+    await _rehydrate(loop)  # a later lifecycle call, about something else
+    assert loop._background_recovered and "t" in loop._background_pending
+    assert _subagent(await _stored(store), "t", "failed") == []
+    await loop.aclose()
+
+
+# ─── JSONL: fail closed, never retract a complete line ──────────────────────
+
+
+def _event(task_id: str, seq: int) -> SubagentEvent:
+    return replace(_sub(task_id, "started"), seq=seq)
+
+
+def _fresh_tasks(tmp_path) -> list[str]:
+    fresh = JsonlStore(tmp_path, lock=False)
+    return [e.task_id for e in asyncio.run(fresh.events_since(SID, 0))]
+
+
+def test_two_stores_in_one_process_never_erase_each_others_events(tmp_path, monkeypatch) -> None:
+    a = JsonlStore(tmp_path, fsync=True)
+    asyncio.run(a.create_session(SID))
+    b = JsonlStore(tmp_path, fsync=True)
+    real_fsync = jsonl_mod.os.fsync
+    entered, release = threading.Event(), threading.Event()
+
+    def fsync(fd):
+        if threading.current_thread().name == "writer-a" and not entered.is_set():
+            entered.set()  # A's whole line is written; its fsync stalls, then fails
+            release.wait(5)
+            raise OSError("fsync failed")
+        real_fsync(fd)
+
+    monkeypatch.setattr(jsonl_mod.os, "fsync", fsync)
+    outcome: dict[str, object] = {}
+
+    def run(name, store, event):
+        try:
+            asyncio.run(store.append_event(SID, event))
+            outcome[name] = "ok"
+        except OSError as exc:
+            outcome[name] = exc
+
+    writer_a = threading.Thread(target=run, name="writer-a", args=("a", a, _event("A", 1)))
+    writer_a.start()
+    assert entered.wait(5)
+    writer_b = threading.Thread(target=run, name="writer-b", args=("b", b, _event("B", 2)))
+    writer_b.start()
+    time.sleep(0.2)
+    assert writer_b.is_alive()  # waits for A's append to settle
+    release.set()
+    writer_a.join(5)
+    writer_b.join(5)
+
+    assert isinstance(outcome["a"], OSError) and outcome["b"] == "ok"
+    assert _fresh_tasks(tmp_path) == ["A", "B"]
+    # A's line stayed and is cached, so a retry through A finds it.
+    assert [e.task_id for e in asyncio.run(a.events_since(SID, 0))] == ["A"]
+    a.close()
+    b.close()
+
+
+async def test_a_jsonl_terminal_whose_line_landed_is_kept_and_not_written_again(tmp_path) -> None:
+    store = _RefusingJsonl(tmp_path, "landed")
+    await store.create_session(SID)
+    loop = _loop(store, provider=ScriptedProvider([_text("picked it up")]))
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
+    done = BackgroundTaskFinished(task_id="t", status="finished", summary="42", wake=True)
+
+    with pytest.raises(OSError):
+        await loop.submit(done)
+    # Raised, yet the line is on disk: the writer and a fresh reader agree.
+    assert len(_subagent(await _stored(store), "t", "finished")) == 1
+    assert len(_subagent(await _stored(JsonlStore(tmp_path, lock=False)), "t", "finished")) == 1
+
+    await loop.submit(done)
+    await loop.wait_turn()
+    await loop.aclose()
+    store.close()
+    fresh = JsonlStore(tmp_path, lock=False)
+    assert len(_subagent(await _stored(fresh), "t", "finished")) == 1
+    assert await _woken(fresh) == [("t",)]
+
+
+def test_a_refused_rollback_refuses_appends_until_it_is_repaired(tmp_path, monkeypatch) -> None:
+    store = _RefusingJsonl(tmp_path, "torn")
+    asyncio.run(store.create_session(SID))
+    asyncio.run(store.append_event(SID, _event("before", 1)))
+    path = tmp_path / f"{SID}.events.jsonl"
+    real_open = type(path).open
+    blocked = {"on": True}
+
+    def open_(self, mode="r", *args, **kwargs):
+        if blocked["on"] and self == path and mode == "r+b":
+            raise PermissionError("rollback refused")
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), "open", open_)
+    torn = replace(_sub("t", "finished"), seq=2)
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(store.append_event(SID, torn))
+    fragment = path.read_bytes()
+    # Nothing joins the fragment: not this store, and not another one.
+    with pytest.raises(OSError):
+        asyncio.run(store.append_event(SID, _event("after", 3)))
+    other = JsonlStore(tmp_path)
+    with pytest.raises(OSError, match="torn last line|partial line"):
+        asyncio.run(other.append_event(SID, _event("other", 3)))
+    assert path.read_bytes() == fragment
+    assert _fresh_tasks(tmp_path) == ["before"]
+
+    blocked["on"] = False  # the repair can run now
+    asyncio.run(store.append_event(SID, _event("after", 3)))
+    assert _fresh_tasks(tmp_path) == ["before", "after"]
+    assert all(json.loads(line) for line in path.read_text().splitlines())
+    store.close()
+    other.close()
+
+
+async def test_a_whole_record_missing_its_newline_is_kept(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    await store.create_session(SID)
+    await store.append_event(SID, _event("a", 1))
+    store.close()
+    path = tmp_path / f"{SID}.events.jsonl"
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))  # a crash before the newline
+
+    reopened = JsonlStore(tmp_path)
+    await reopened.append_event(SID, _event("b", 2))
+    reopened.close()
+    assert await asyncio.to_thread(_fresh_tasks, tmp_path) == ["a", "b"]
+
+
+# ─── handoff: bounded close, abandoned after the deadline ───────────────────
+
+
+async def test_close_is_bounded_while_a_cancelled_document_call_books_its_usage(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(native_mod, "_HANDOFF_CLOSE_WAIT_S", 0.2)
+    store = MemoryStore()
+    sid = await _tool_heavy_session(store)
+    provider = _HandoffProvider(hang=True)
+    loop = NativeLoop(provider=provider, store=store, model="m", session_id=sid)
+
+    async def stalled_booking(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    loop._record_side_call_usage = stalled_booking
+    handoff = asyncio.create_task(loop.submit(Handoff()))
+    await asyncio.wait_for(provider.started.wait(), 5)
+    started = time.monotonic()
+    await asyncio.wait_for(loop.aclose(), 5)
+    assert time.monotonic() - started < 2
+    with pytest.raises(RuntimeError, match="handoff not created"):
+        await asyncio.wait_for(handoff, 5)
+
+
+class _StubbornCreate(_SlowCreate):
+    """A ``create_session`` that ignores cancellation until released."""
+
+    async def create_session(self, session_id=None, *, cwd=None):
+        if self.hold:
+            self.creating.set()
+            while not self.release.is_set():
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    continue
+        return await MemoryStore.create_session(self, session_id, cwd=cwd)
+
+
+async def test_close_abandons_a_handoff_whose_creation_outlives_the_deadline(monkeypatch) -> None:
+    monkeypatch.setattr(native_mod, "_HANDOFF_CLOSE_WAIT_S", 0.2)
+    store = _StubbornCreate()
+    sid = await _tool_heavy_session(store)
+    store.hold = True
+    loop = NativeLoop(provider=_HandoffProvider(), store=store, model="m", session_id=sid)
+
+    handoff = asyncio.create_task(loop.submit(Handoff()))
+    await asyncio.wait_for(store.creating.wait(), 5)
+    await asyncio.wait_for(loop.aclose(), 5)  # gives up at the deadline
+    store.release.set()  # the store finishes after close
+    with pytest.raises(RuntimeError, match="engine closed before it was reported"):
+        await asyncio.wait_for(handoff, 5)
+    # Never reported: not durable, and not published behind the closed bus.
+    assert not [e for e in await store.events_since(sid, 0) if isinstance(e, HandoffCreated)]
+    assert not [e for e in loop.bus.log(sid) if isinstance(e, HandoffCreated)]
+
+
+async def test_a_handoff_on_a_closed_loop_creates_no_session() -> None:
+    store = MemoryStore()
+    loop = NativeLoop(provider=_HandoffProvider(), store=store, model="m")
+    await loop.aclose()
+    with pytest.raises(RuntimeError, match="the engine is closing"):
+        await loop.submit(Handoff())
+    assert store._sessions == {}
+
+
+async def test_handoff_usage_is_booked_against_the_model_it_ran_on() -> None:
+    store = MemoryStore()
+    sid = await _tool_heavy_session(store)
+
+    class _SwitchMidStream(_HandoffProvider):
+        async def stream(self, request):
+            async for chunk in super().stream(request):
+                loop.model = "replacement"  # a model switch while it streams
+                yield chunk
+
+    loop = NativeLoop(provider=_SwitchMidStream(), store=store, model="original",
+                      session_id=sid)
+    await loop.submit(Handoff())
+    usage = [e for e in await store.events_since(sid, 0) if isinstance(e, Usage)]
+    assert [u.raw.get("model") for u in usage] == ["original"]
+    await loop.aclose()

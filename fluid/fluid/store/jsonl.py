@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import weakref
 from itertools import chain
@@ -134,9 +135,13 @@ else:
         return os.open(path, flags, 0o644)
 
 
+def _encode_record(record: dict) -> bytes:
+    return (json.dumps(record) + "\n").encode("utf-8")
+
+
 def _write_record(path: Path, record: dict, *, fsync: bool) -> None:
     """One record, one write, newline included."""
-    data = (json.dumps(record) + "\n").encode("utf-8")
+    data = _encode_record(record)
     fd = _open_append(path)
     try:
         written = os.write(fd, data)
@@ -232,6 +237,51 @@ def _release_store_locks(directory: Path, held: set[str]) -> None:
     held.clear()
 
 
+# ─── Per-file append locks ───────────────────────────────────────────────────
+#
+# The OS lock keeps other processes out, but every store in this process shares
+# it. An event append, and the settling of one that failed, also hold this lock
+# for the file, so while a failed append is unsettled no other store here
+# appends after it: whatever lies past its start offset is its own.
+
+_APPEND_LOCKS: dict[str, threading.RLock] = {}
+_APPEND_LOCKS_GUARD = threading.Lock()
+
+
+def _append_lock(path: Path) -> threading.RLock:
+    key = _lock_key(path)
+    with _APPEND_LOCKS_GUARD:
+        lock = _APPEND_LOCKS.get(key)
+        if lock is None:
+            lock = _APPEND_LOCKS[key] = threading.RLock()
+        return lock
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def _partial_last_line(path: Path) -> bytes | None:
+    """The bytes after the file's last newline; None when it ends on one."""
+    try:
+        with path.open("rb") as fh:
+            end = fh.seek(0, os.SEEK_END)
+            if end == 0:
+                return None
+            fh.seek(end - 1)
+            if fh.read(1) == b"\n":
+                return None
+            # Rare (a crash mid-append): read back to the last newline.
+            fh.seek(0)
+            data = fh.read()
+    except FileNotFoundError:
+        return None
+    return data[data.rfind(b"\n") + 1:]
+
+
 # ─── Log parsing ─────────────────────────────────────────────────────────────
 
 
@@ -284,6 +334,9 @@ class JsonlStore:
         self._recent: list[str] = []
         # Torn trailing lines seen while parsing, cut off at the next write.
         self._torn: dict[Path, tuple[int, bytes]] = {}
+        # An event append that raised, by file, until its outcome is settled:
+        # start offset, the bytes it meant to write, and its session and event.
+        self._unsettled: dict[Path, tuple[int, bytes, str, Event]] = {}
         self._finalizer = weakref.finalize(self, _release_store_locks, self._dir, self._held)
 
     # ─── Paths ───────────────────────────────────────────────────────────
@@ -316,22 +369,31 @@ class JsonlStore:
         self._repair_tail(self._log_path(session_id))
         self._repair_tail(self._events_path(session_id))
 
-    def _repair_tail(self, path: Path) -> None:
-        """Cut a torn trailing line off, if the file still ends with it."""
-        torn = self._torn.pop(path, None)
+    def _repair_tail(self, path: Path) -> bool:
+        """Cut a torn trailing line off, if the file still ends with it.
+
+        False when the cut failed; it stays due, for the next write to retry.
+        """
+        torn = self._torn.get(path)
         if torn is None:
-            return
+            return True
         offset, fragment = torn
-        try:
-            with path.open("r+b") as fh:
-                fh.seek(offset)
-                if fh.read() != fragment:
-                    return  # someone else wrote since we looked; leave it
-                fh.truncate(offset)
-        except OSError as exc:
-            log.warning("%s: could not cut off the torn last line: %s", path.name, exc)
-            return
-        log.warning("%s: cut off a torn last line (%d bytes)", path.name, len(fragment))
+        with _append_lock(path):
+            try:
+                with path.open("r+b") as fh:
+                    fh.seek(offset)
+                    # If someone else wrote since we looked, leave it.
+                    if fh.read() == fragment:
+                        fh.truncate(offset)
+                        log.warning("%s: cut off a torn last line (%d bytes)",
+                                    path.name, len(fragment))
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                log.warning("%s: could not cut off the torn last line: %s", path.name, exc)
+                return False
+            self._torn.pop(path, None)
+        return True
 
     def _append_line(self, path: Path, record: dict) -> None:
         _write_record(path, record, fsync=self._fsync)
@@ -470,10 +532,13 @@ class JsonlStore:
         )
 
     def _ensure_events_loaded(self, session_id: str) -> None:
+        path = self._events_path(session_id)
+        # Settled before any read: a read must neither miss a line a failed
+        # append did write nor find one it did not. Raises while it cannot.
+        self._settle_failed_append(path)
         if session_id in self._events_loaded:
             return
         events: list[Event] = []
-        path = self._events_path(session_id)
         if path.exists():
             data = path.read_bytes()
             bad: list[int] = []
@@ -575,43 +640,93 @@ class JsonlStore:
         )
 
     async def append_event(self, session_id: str, event: Event) -> None:
-        """Cached only once its line is written: a read through this store
-        must never find an event that is not on disk. A write that fails
-        takes back any part of the line it left, so a later read, by this
-        store or a fresh one, sees the file as it was before the write."""
-        self._ensure_events_loaded(session_id)
-        self._writable(session_id)
-        path = self._events_path(session_id)
-        try:
-            size = path.stat().st_size
-        except FileNotFoundError:
-            size = 0
-        try:
-            self._append_line(path, event_to_dict(event))
-        except Exception:
-            self._cut_back(path, size)
-            raise
-        self._events[session_id].append(event)
+        """Cached once its line is on disk, never before.
 
-    def _cut_back(self, path: Path, size: int) -> None:
-        """Truncate what a failed append left past ``size``.
-
-        If the truncate itself fails, the fragment is cut off before the next
-        write instead, the way a torn line found at load is.
+        A write that raises is settled under the file's append lock, at once
+        if it can be and otherwise before the next read or append through
+        this store. If the whole line landed (only the fsync failed, say), it
+        stays and is cached: a reader may have seen it already, and the caller's
+        retry must find it rather than write it twice. The append still raises,
+        since the write may not be durable. A fragment of the line is cut off;
+        nobody can have appended after it. Until the settling succeeds, and
+        whenever the file does not end on a whole line, appends are refused
+        rather than joined onto broken bytes.
         """
-        fragment = b""
-        try:
-            with path.open("r+b") as fh:
-                fh.seek(size)
-                fragment = fh.read()
-                if fragment:
-                    fh.truncate(size)
-        except FileNotFoundError:
+        self._ensure_events_loaded(session_id)
+        self.lock_session(session_id)
+        self._repair_tail(self._log_path(session_id))
+        path = self._events_path(session_id)
+        record = event_to_dict(event)
+        with _append_lock(path):
+            self._settle_events_file(path)
+            size = _file_size(path)
+            try:
+                self._append_line(path, record)
+            except Exception:
+                self._unsettled[path] = (size, _encode_record(record), session_id, event)
+                try:
+                    self._settle_failed_append(path)
+                except OSError as exc:
+                    log.warning("%s: could not settle a failed append yet: %s",
+                                path.name, exc)
+                raise
+            self._events[session_id].append(event)
+
+    def _settle_events_file(self, path: Path) -> None:
+        """Leave the events file ending on a whole line, or raise."""
+        self._settle_failed_append(path)
+        if not self._repair_tail(path):
+            raise OSError(f"{path.name}: a torn last line could not be cut off")
+        partial = _partial_last_line(path)
+        if partial is None:
             return
-        except OSError as exc:
-            if fragment:
-                self._torn[path] = (size, fragment)
-            log.warning("%s: could not take back a failed append: %s", path.name, exc)
+        try:
+            _load_json_line(partial)
+        except (ValueError, TypeError):
+            raise OSError(
+                f"{path.name} ends with a partial line; refusing to append onto it"
+            ) from None
+        # A whole record missing only its newline already reads as an event:
+        # end its line rather than lose it.
+        self._write_tail(path, b"\n")
+
+    def _settle_failed_append(self, path: Path) -> None:
+        """Decide what a failed append left; raises (still due) if it cannot."""
+        unsettled = self._unsettled.get(path)
+        if unsettled is None:
+            return
+        offset, data, session_id, event = unsettled
+        with _append_lock(path):
+            try:
+                with path.open("rb") as fh:
+                    fh.seek(offset)
+                    tail = fh.read()
+            except FileNotFoundError:
+                tail = b""
+            committed = tail.startswith(data)
+            if not committed and tail == data[:-1]:
+                self._write_tail(path, b"\n")
+                committed = True
+            elif not committed and data.startswith(tail):
+                if tail:
+                    with path.open("r+b") as fh:
+                        fh.truncate(offset)
+                        if self._fsync:
+                            os.fsync(fh.fileno())
+            elif not committed:
+                raise OSError(f"{path.name}: unexpected bytes after a failed append")
+            del self._unsettled[path]
+        if committed and session_id in self._events_loaded:
+            self._events[session_id].append(event)
+
+    def _write_tail(self, path: Path, data: bytes) -> None:
+        fd = _open_append(path)
+        try:
+            os.write(fd, data)
+            if self._fsync:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
 
     async def events_since(self, session_id: str, seq: int) -> list[Event]:
         self._ensure_events_loaded(session_id)

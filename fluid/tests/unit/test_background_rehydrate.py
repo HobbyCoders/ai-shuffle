@@ -300,9 +300,9 @@ async def test_host_completion_guard_rechecks_at_mutation(monkeypatch, pending, 
             else "_ensure_session")
     original = getattr(loop, name)
 
-    async def restart_during_await():
+    async def restart_during_await(**kwargs):
         nonlocal valid
-        result = await original()
+        result = await original(**kwargs)
         valid = False
         return result
 
