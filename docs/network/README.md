@@ -232,35 +232,20 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   store less than was signed (a chat whose project it lacks loses it), so a
   copy carries none and sets none, and it orders exactly as before the
   upgrade. A version a copy installs, like one stored before the upgrade, has
-  no incarnation, so a signed op meeting it is taken as the same stream, as
-  before the upgrade (an owner-ordered row takes it; any other row keeps the
-  version held on a tie), unless the op comes from an incarnation older than
-  the newest seen, which only a restore leaves: then it replaces the device's
-  version only with a later clock, owner-ordered rows included. A state
-  copy's watermarks are adopted only after its last page, and not at all if
-  it stops, while the pages it committed stand. So each version a state copy
-  installs keeps, beside it, the newest incarnation of its device that the
-  copy names, and this check counts it as seen for that row alone. It stays
-  there through a stopped or resumed copy, until a signed or local write
-  replaces the version, and covers no row the copy did not install. It is
-  the serving member's claim, not a label: it reaches no watermark,
-  revocation cutoff, retention or advertised head. At the op's own clock one
-  clock can name a write on either side of the restore, so the version held
-  stays, even on the device itself and even when the version is a copy of
-  that very op's write: nothing proves which it is (a log that no longer
-  holds the later write proves nothing, as retention prunes it). So a copy
-  of a lost write that left out the owner's own fields, such as a chat's
-  permission mode, keeps them out until the record next changes (#1792).
-  So two replicas can keep different values, until
-  the record next changes, when all of these hold: the device signed two
-  versions of the record at one clock on either side of a restore; one
-  replica holds the later incarnation's version and another holds the earlier
-  one's, either of them from a copy; and the other version reaches a replica
-  only by a state copy (whose watermarks then stop the signed op being sent),
-  or reaches it as a signed op after that replica installed its version from
-  a copy. Origin proofs in copies would close this (#1792). Nor is a
-  version replaced across a restore kept as a conflict when it has no
-  incarnation: nothing says which side of the restore it came from.
+  no incarnation, and every row with none orders exactly as before the
+  upgrade: a signed op meeting it is taken as the same stream (an
+  owner-ordered row takes it; any other row keeps the version held on a
+  tie), and one from an incarnation older than the newest this worker has
+  seen, which a worker on an older build refuses as stale, leaves it as it
+  stands. Only versions that both carry an incarnation order across a
+  restore. So where a copy is involved the outcome is the same as before the
+  upgrade until copies carry origin proofs (#1792): a restore fork reached
+  through a copy is not seen, an exact tie across it may keep either side,
+  a copy of a lost write that left out the owner's own fields (a chat's
+  permission mode) keeps them out until the record next changes, a row a
+  copy installed keeps its version against the device's older stream
+  whatever its clock, and a version replaced across a restore is not kept as
+  a conflict when it has no incarnation.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement

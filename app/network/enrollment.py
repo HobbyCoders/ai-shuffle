@@ -501,7 +501,7 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                     while True:
                         chunk = client.get(base + "/api/v1/network/peer/snapshot", headers=headers,
                                            params={"collection": collection, "offset": offset}).json()
-                        engine.apply_snapshot_chunk(chunk, ctx=ctx, watermarks=manifest.get("watermarks"))
+                        engine.apply_snapshot_chunk(chunk, ctx=ctx)
                         if not chunk.get("more"):
                             break
                         count = int(chunk.get("count") or 0)

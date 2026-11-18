@@ -588,9 +588,7 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
             while index < end:
                 chunk = _read_page(directory, index, pages[index])
                 page_touched = []
-                # Each row keeps what the copy names, its frontier waiting for the last page.
-                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched,
-                                                       watermarks=manifest["watermarks"])
+                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
                 # Provider rows by id, upserts too: a disable or new key that
                 # arrives here ends the row's running agents (an edit that
                 # changes nothing an agent holds keeps them).

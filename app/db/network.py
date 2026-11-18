@@ -190,7 +190,6 @@ def create_schema(cursor) -> None:
             order_seq BIGINT,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
             origin_incarnation INTEGER,
-            copy_incarnation INTEGER,
             PRIMARY KEY (collection, record_id)
         )
     """)
@@ -402,11 +401,7 @@ def _ensure_columns(cursor) -> None:
                 ("network_transcript_backfill_state", "stalled_since", "BIGINT"),
                 # Breaks an exact (clock, origin) tie across a restore fork (#1568).
                 # NULL on a version stored before it was kept: unknown.
-                ("sync_records", "origin_incarnation", "INTEGER"),
-                # The newest incarnation of a version's origin that the state
-                # copy installing it named: the publisher's claim, never a
-                # label. NULL once a signed or local write stores the record.
-                ("sync_records", "copy_incarnation", "INTEGER"))
+                ("sync_records", "origin_incarnation", "INTEGER"))
     if type(cursor).__module__.startswith("psycopg2"):
         for table, column, kind in additive:
             # Even a no-op ALTER takes an exclusive lock: on a busy table
@@ -1432,12 +1427,11 @@ def _insert_rows(cursor, table: str, columns, values: List, conflict: str = "", 
 
 
 def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List[tuple], *,
-                           batch: int = 500, named: Optional[Dict[str, int]] = None) -> set:
+                           batch: int = 500) -> set:
     """Transcript rows from a state copy, with their sync records, in multi-row INSERTs.
 
     ``versions`` holds ``(record_id, clock, origin_device_id, content_hash,
-    order_seq)`` per row; ``fields`` must include ``id``; ``named`` maps an
-    origin to the incarnation the copy names (``copy_incarnation``). The caller
+    order_seq)`` per row; ``fields`` must include ``id``. The caller
     checked that neither the rows nor the records existed. A row a local
     writer inserted since then is left alone (``ON CONFLICT DO NOTHING``) and
     gets no record here; the ids of the rows inserted come back, and the
@@ -1445,7 +1439,6 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     ``sync_ops``: a copy carries records, not operations.
     """
     now = _now()
-    named = named or {}
     inserted: set = set()
     step = max(1, batch)
     for start in range(0, len(rows), step):
@@ -1457,8 +1450,8 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     position = list(fields).index("id")
     ids = [row[position] for row in rows]
     _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
-                                          "deleted", "order_seq", "updated_at", "copy_incarnation"),
-                 [("session_events", record_id, clock, origin, digest, False, order_seq, now, named.get(origin))
+                                          "deleted", "order_seq", "updated_at"),
+                 [("session_events", record_id, clock, origin, digest, False, order_seq, now)
                   for event_id, (record_id, clock, origin, digest, order_seq) in zip(ids, versions)
                   if event_id in inserted], "ON CONFLICT (collection, record_id) DO NOTHING", batch=batch)
     return inserted
@@ -1511,22 +1504,19 @@ def get_record(cursor, collection: str, record_id: str) -> Optional[dict]:
 
 
 def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_device_id: str, content_hash: str,
-               deleted: bool, order_seq: Optional[int] = None, origin_incarnation: Optional[int] = None,
-               copy_incarnation: Optional[int] = None) -> None:
-    """Store a record's version. ``origin_incarnation`` None means not known;
-    ``copy_incarnation`` is set only for a version a state copy installs."""
+               deleted: bool, order_seq: Optional[int] = None, origin_incarnation: Optional[int] = None) -> None:
+    """Store a record's version. ``origin_incarnation`` None means not known."""
     cursor.execute(
         """INSERT INTO sync_records (collection, record_id, clock, origin_device_id, content_hash, deleted, order_seq,
-                                     updated_at, origin_incarnation, copy_incarnation)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                     updated_at, origin_incarnation)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
            ON CONFLICT (collection, record_id) DO UPDATE SET
                clock = EXCLUDED.clock, origin_device_id = EXCLUDED.origin_device_id,
                content_hash = EXCLUDED.content_hash, deleted = EXCLUDED.deleted,
                order_seq = EXCLUDED.order_seq, updated_at = EXCLUDED.updated_at,
-               origin_incarnation = EXCLUDED.origin_incarnation,
-               copy_incarnation = EXCLUDED.copy_incarnation""",
+               origin_incarnation = EXCLUDED.origin_incarnation""",
         (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now(),
-         origin_incarnation, copy_incarnation))
+         origin_incarnation))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:

@@ -1124,8 +1124,7 @@ def keep_local_rewrite(cursor, collection: str, record_id: str, before_row: Mapp
     store.put_record(cursor, collection, record_id, clock=int(existing["clock"]),
                      origin_device_id=existing["origin_device_id"], content_hash=content_hash(coll, after),
                      deleted=False, order_seq=existing.get("order_seq"),
-                     origin_incarnation=existing.get("origin_incarnation"),
-                     copy_incarnation=existing.get("copy_incarnation"))
+                     origin_incarnation=existing.get("origin_incarnation"))
     return True
 
 
@@ -1951,16 +1950,14 @@ def _displaced_local(cursor, coll: policy.Collection, env: Envelope,
     return redact_secrets(local_plain)
 
 
-def _older_stream(cursor, ctx: NetworkContext, env: Envelope, held: Mapping[str, Any]) -> bool:
+def _older_stream(cursor, ctx: NetworkContext, env: Envelope) -> bool:
     """Whether ``env`` comes from an incarnation older than its origin's newest
-    seen: only a restore leaves one behind (#1568). A version a state copy
-    installed counts the newest its copy named too (``copy_incarnation``):
-    the copy's frontier is adopted only after its last page, and not at all
-    if it stops, while its rows already stand (S24, S25)."""
+    in this device's stream state: what main refuses outright as a stale
+    incarnation (#1568). Read from the same watermarks main's gate reads, so
+    it holds exactly where main would have refused the op."""
     if env.origin_device_id == ctx.device_id:
         return env.origin_incarnation < ctx.identity.incarnation
-    newest = max(int(held.get("copy_incarnation") or 0), store.highest_incarnation(cursor, env.origin_device_id))
-    return env.origin_incarnation < newest
+    return env.origin_incarnation < store.highest_incarnation(cursor, env.origin_device_id)
 
 
 def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> bool:
@@ -1974,11 +1971,10 @@ def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> boo
     nothing about the origin) and never inferred. A version with no label
     (stored before labels were kept, or from a copy) is taken as the same
     stream, so everything else orders exactly as before labels existed. A
-    fork reached only through a copy is therefore not seen (#1792), with one
-    exception in ``_apply_in_order``: an owner-ordered op from an incarnation
-    older than its origin's newest seen (``_older_stream``) no longer has
-    stream order behind it, so it replaces a held version of its origin only
-    with a later clock.
+    fork reached only through a copy is therefore not seen (#1792). Main
+    refuses an op from an incarnation older than its origin's newest seen;
+    here such an op (``_older_stream``) competes only with labelled versions:
+    an unlabelled one stays, as main keeps it (#1792).
     """
     held_incarnation = held.get("origin_incarnation")
     return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
@@ -2048,7 +2044,14 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     existing = store.get_record(cursor, env.collection, env.record_id)
     replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
     fork = existing is not None and _restore_fork(env.origin_device_id, env.origin_incarnation, existing)
-    if fork:
+    if existing is not None and existing.get("origin_incarnation") is None and _older_stream(cursor, ctx, env):
+        # Main refuses this op as a stale incarnation and keeps the version
+        # held. One with no label (from a state copy, or stored before labels
+        # were kept) proves nothing about which side of the restore it is
+        # from, so it stays, as on main: same as main until copies carry
+        # origin proofs (#1792).
+        wins = False
+    elif fork:
         # Across a restore the stream order is gone: every replica picks the
         # same winner from (clock, origin, incarnation) instead (#1568).
         wins = envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]),
@@ -2056,17 +2059,8 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                     int(existing["origin_incarnation"])) > 0
     elif coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
-        same = existing is not None and env.origin_device_id == existing["origin_device_id"]
-        if same and _older_stream(cursor, ctx, env, existing):
-            # From an incarnation older than the newest seen, across a restore,
-            # where that order is gone: only a later clock replaces its
-            # origin's version. One clock can name a write on either side of
-            # the restore and nothing proves which a copy holds, so a tie keeps
-            # the version held, a copy of this very write included (#1792).
-            wins = env.clock > int(existing["clock"])
-        else:
-            wins = existing is None or same or envelope_mod.compare(
-                env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+        wins = existing is None or env.origin_device_id == existing["origin_device_id"] or \
+            envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     else:
         wins = existing is None or envelope_mod.compare(
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
@@ -3216,14 +3210,12 @@ def open_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext) -> dic
 def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None = None,
                          _conn=None, validated_membership: bool = False,
                          body: Optional[Mapping[str, Any]] = None,
-                         _touched: Optional[list] = None,
-                         watermarks: Optional[Mapping[str, Mapping[str, int]]] = None) -> int:
+                         _touched: Optional[list] = None) -> int:
     """Apply a chunk: records newer than what we hold replace ours (LWW by clock).
 
     A page for a collection this build does not know (retired here, or added
     by a newer peer) is verified and skipped: it applies nothing. ``body`` is
     the chunk already opened by ``open_snapshot_chunk`` (it is not opened twice).
-    ``watermarks``: the frontier of the copy the chunk belongs to (``copy_named``).
     """
     ctx = ctx or require_context()
     if body is None:
@@ -3233,8 +3225,7 @@ def apply_snapshot_chunk(chunk: Mapping[str, Any], *, ctx: NetworkContext | None
     coll = policy.collection(body["collection"])
     with nullcontext(_conn) if _conn is not None else get_db() as conn:
         applied, touched = apply_snapshot_items(conn.cursor(), coll, body["items"], ctx=ctx,
-                                                validated_membership=validated_membership,
-                                                named=copy_named(watermarks))
+                                                validated_membership=validated_membership)
     if _touched is not None:
         _touched.extend(touched)
     if touched and _conn is None:
@@ -3250,7 +3241,7 @@ SNAPSHOT_SQL_BATCH = 500
 
 def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]], *,
                          ctx: NetworkContext, validated_membership: bool = False,
-                         existed: Iterable[str] = (), named: Optional[Mapping[str, int]] = None,
+                         existed: Iterable[str] = ()
                          ) -> Tuple[int, List[Tuple[str, str, str]]]:
     """Apply one page of opened snapshot items in the caller's transaction.
 
@@ -3261,10 +3252,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     has never held are inserted in bulk; everything else goes through the
     per-record path (last writer wins, conflicts, hooks). ``existed`` names
     sessions whose rows the caller read in this transaction (#1222).
-    ``named``: the newest incarnation of each origin the copy names
-    (``copy_named``), kept with each version it installs.
     """
-    named = named or {}
     items = list(items)
     touched: List[Tuple[str, str, str]] = []
     if not items:
@@ -3288,7 +3276,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
     applied = 0
     bulk: set = set()
     if coll.name == "session_events" and known is not None:
-        bulk = _insert_fresh_events(cursor, coll, items, known, touched, named)
+        bulk = _insert_fresh_events(cursor, coll, items, known, touched)
         applied += len(bulk)
     for index, item in enumerate(items):
         if index in bulk:
@@ -3363,8 +3351,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                                      origin_device_id=item["origin_device_id"], content_hash="", deleted=False,
-                                     order_seq=item.get("order_seq"),
-                                     copy_incarnation=named.get(item["origin_device_id"]))
+                                     order_seq=item.get("order_seq"))
                 continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,
@@ -3385,8 +3372,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"),
-                         copy_incarnation=named.get(item["origin_device_id"]))
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
         if not item["deleted"] and refresh_billing:
@@ -3402,8 +3388,7 @@ def _records_by_id(cursor, collection: str, record_ids: Sequence[str]) -> Dict[s
 
 
 def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mapping[str, Any]],
-                         known: Mapping[str, dict], touched: List[Tuple[str, str, str]],
-                         named: Mapping[str, int]) -> set:
+                         known: Mapping[str, dict], touched: List[Tuple[str, str, str]]) -> set:
     """Insert, in bulk, the transcript events of a page this worker holds no trace of.
 
     Only an event with no sync record and no journal row (by ``(session_id,
@@ -3464,8 +3449,7 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
     rows = [[_column_value(coll, name, candidates[index].get(name), ()) for name in coll.fields] for index in order]
     versions = [(items[index]["record_id"], int(items[index]["clock"]), items[index]["origin_device_id"],
                  content_hash(coll, candidates[index]), items[index].get("order_seq")) for index in order]
-    inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH,
-                                            named=named)
+    inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH)
     # A row a local writer added meanwhile takes the per-record path instead.
     order = [index for index in order if candidates[index]["id"] in inserted]
     newest: Dict[str, Mapping[str, Any]] = {}
@@ -3479,21 +3463,6 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
         catalog.after_event_mirrored(cursor, dict(record))
     touched.extend((coll.name, items[index]["record_id"], OP_UPSERT) for index in order)
     return set(order)
-
-
-def copy_named(watermarks: Optional[Mapping[str, Mapping[str, int]]]) -> Dict[str, int]:
-    """The newest incarnation of each origin a copy's frontier names (a zero head names none).
-
-    Kept with each version the copy installs, read only by ``_older_stream``:
-    the publisher's claim, so it reaches no watermark, revocation cutoff,
-    retention or advertised head, and covers no row the copy did not install.
-    """
-    named: Dict[str, int] = {}
-    for origin, streams in (watermarks or {}).items():
-        live = [int(incarnation) for incarnation, seq in (streams or {}).items() if int(seq) > 0]
-        if live:
-            named[origin] = max(live)
-    return named
 
 
 def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext | None = None, _conn=None) -> None:

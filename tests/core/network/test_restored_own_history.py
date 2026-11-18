@@ -827,89 +827,38 @@ def test_a_signed_chat_update_repairs_an_earlier_projected_copy(workers):
 
 
 
+# ---------------------------------------------------------------------------
+# A row a copy installed ends as on main (owner decision on #1568; S15,
+# S18, S23, S25, S29, S30): main refuses an op from an incarnation older than
+# the newest in its watermarks, and here such an op never replaces a version
+# with no label. Same as main until copies carry origin proofs (#1792).
+# ---------------------------------------------------------------------------
+
 class _Aborted(Exception):
     pass
 
 
-def _copy_overtaken_by_a_relay(workers, monkeypatch, *, restore=True, tie=False, moment="after"):
-    """A holds B's first rename after its backup, D the first two. B restores
-    and writes "new" past the first, at the clock of the second (``tie``) or
-    past both, and A takes it. C applies A's state copy, one page per commit,
-    and D relays B's second rename, which A never had: after the copy, between
-    its pages, or after the copy stopped past the chat page, before C resumes
-    it from the pages it saved (``moment``). Without ``restore`` B writes
-    nothing more: the rename is its next op. Checks that the copy's claims
-    reach no stream state of C while it runs, nor after it stopped (S26)."""
+def _relay(sender, receiver):
+    """What ``sender`` hands ``receiver`` for third-party streams, on main and here alike."""
+    with receiver.active():
+        marks = store.local_watermarks()
+    with sender.active():
+        ops, _, snapshot = store.exchange_batch(marks, exclude_origin=receiver.device_id)
+    assert not snapshot
+    with receiver.active():
+        engine.apply_batch(ops)
+
+
+def _download(publisher, receiver, name):
     from app.network import peer_snapshot
-    a, b, c, d = _network(workers, "a", "b", "c", "d")
-    _session(b, "chat", title="t", events=0)
-    _converge([a, b, c, d])
-    backup = b.raw.serialize()
-    _rename(b, "lost-0")
-    _exchange(b, a)
-    _rename(b, "lost-1")
-    _exchange(b, d)
-    expected = "lost-0"
-    if restore:
-        _restore(b, backup)
-        _detect_restore(a, b, 1)
-        lost = _chat_clock(d)
-        _observe(b, lost - 1 if tie else lost)
-        _rename(b, "new")
-        _exchange(b, a)
-        assert set(_streams(a, b.device_id)) == {"1", "2"}
-        assert (_chat_clock(a) == lost) == tie
-        expected = "new"
-    assert _sweep_value(a, "sessions") == expected
-    before = dict(_streams(c, b.device_id))
-    with a.active():
-        manifest = peer_snapshot.capture(c.device_id)
-        raw = [peer_snapshot.page(c.device_id, manifest["transfer"], i) for i in range(len(manifest["pages"]))]
-    directory = c.data_dir / "copy"
+    with publisher.active():
+        manifest = peer_snapshot.capture(receiver.device_id)
+        raw = [peer_snapshot.page(receiver.device_id, manifest["transfer"], i) for i in range(len(manifest["pages"]))]
+    directory = receiver.data_dir / name
     directory.mkdir()
     for index, page in enumerate(raw):
         (directory / f"{index}.json").write_bytes(page)
-    sessions = max(i for i, page in enumerate(manifest["pages"]) if page["collection"] == "sessions")
-    assert sessions + 1 < len(manifest["pages"])
-    monkeypatch.setattr(peer_snapshot, "APPLY_BATCH_ITEMS", 1)  # commit after every page
-    save = peer_snapshot._save_applied
-    relayed = []
-
-    def committed(directory, manifest, pages):
-        save(directory, manifest, pages)
-        if moment != "after" and not relayed and sessions < pages < len(manifest["pages"]):
-            # The chat page is in, the frontier is not.
-            assert _sweep_value(c, "sessions") == expected
-            assert _streams(c, b.device_id) == before and _cutoff(c, b) == _cutoff_of(before)
-            relayed.append(True)
-            if moment == "aborted":
-                raise _Aborted
-            _exchange(d, c)
-
-    monkeypatch.setattr(peer_snapshot, "_save_applied", committed)
-    with c.active():
-        if moment == "aborted":
-            with pytest.raises(_Aborted):
-                peer_snapshot.apply(manifest, directory, a.device_id)
-        else:
-            peer_snapshot.apply(manifest, directory, a.device_id)
-    assert bool(relayed) == (moment != "after")
-    if moment == "aborted":
-        # Nothing the copy claimed reaches C's streams of B; its rows stand.
-        assert _streams(c, b.device_id) == before and _cutoff(c, b) == _cutoff_of(before)
-        assert _sweep_value(c, "sessions") == expected
-        _exchange(d, c)  # the rename, relayed while the copy is stopped
-        assert _streams(c, b.device_id)["1"] == _streams(d, b.device_id)["1"]
-        with c.active():  # resumed: past the saved pages, then the frontier
-            peer_snapshot.apply(manifest, directory, a.device_id)
-    if restore:
-        assert _streams(c, b.device_id)["2"] == _streams(a, b.device_id)["2"]
-    if moment == "after":
-        # D still has the second rename for C: it is the next op, not a duplicate.
-        assert int(_streams(d, b.device_id)["1"]) == int(_streams(c, b.device_id)["1"]) + 1
-        _exchange(d, c)
-    assert _streams(c, b.device_id)["1"] == _streams(d, b.device_id)["1"]
-    return a, b, c, d
+    return manifest, directory
 
 
 def _chat_clock(worker):
@@ -917,48 +866,134 @@ def _chat_clock(worker):
                           "AND record_id = 'chat'")[0]["clock"])
 
 
-def _cutoff_of(streams):
-    """The stream position a revocation of the device would sign, from these streams."""
-    incarnation = max((int(i) for i in streams), default=0)
-    return incarnation, int(streams.get(str(incarnation), 0))
+COPY_KINDS = ["no-restore", "copy-later", "tie", "op-later", "claim", "zero-claim"]
+COPY_MOMENTS = ["after", "between", "stopped", "re-served"]
 
 
-def _cutoff(worker, device):
-    """What ``worker`` would sign today as ``device``'s revocation cutoff."""
-    with worker.active(), get_db() as conn:
-        cursor = conn.cursor()
-        incarnation = store.highest_incarnation(cursor, device.device_id)
-        return incarnation, store.get_watermark(cursor, device.device_id, incarnation) if incarnation else 0
+def _copied_row_outcome(workers, monkeypatch, kind, moment):
+    """B renames its chat "lost-0", which A takes, then "lost-1", which only D
+    takes. After a restore (``kind`` copy-later, tie, op-later) B writes
+    "new", at a later clock than "lost-1", the same, or an earlier one, and
+    A takes it. Without one, A may claim a stream B never signed (``claim``
+    with ops, ``zero-claim`` without). C applies A's state copy one page per
+    commit, and D relays "lost-1" after the copy, between its pages, or while
+    it is stopped past the chat page, before C resumes it; ``re-served``: E
+    takes a copy from C while C's is stopped, and both get "lost-1". Returns
+    the chat's title on C and E. Uses only what main has too."""
+    from app.network import peer_snapshot
+    a, b, c, d, e = _network(workers, "a", "b", "c", "d", "e")
+    _session(b, "chat", title="t", events=0)
+    for sender in (a, b, c, d, e):
+        for receiver in (a, b, c, d, e):
+            if sender is not receiver:
+                _relay(sender, receiver)
+    backup = b.raw.serialize()
+    _rename(b, "lost-0")
+    _relay(b, a)
+    if kind == "op-later":
+        _observe(b, _chat_clock(b) + 10)
+    _rename(b, "lost-1")
+    _relay(b, d)
+    if kind in ("copy-later", "tie", "op-later"):
+        _restore(b, backup)
+        _detect_restore(a, b, 1)
+        lost = _chat_clock(d)
+        if kind != "op-later":
+            _observe(b, lost - 1 if kind == "tie" else lost)
+        _rename(b, "new")
+        _relay(b, a)
+        assert {"tie": 0, "copy-later": 1, "op-later": -1}[kind] == (_chat_clock(a) > lost) - (_chat_clock(a) < lost)
+    elif kind in ("claim", "zero-claim"):
+        a.sql("INSERT INTO sync_watermarks (origin_device_id, incarnation, last_seq) VALUES (?, 2, ?)",
+              (b.device_id, 5 if kind == "claim" else 0))
+    manifest, directory = _download(a, c, "copy")
+    sessions = max(i for i, page in enumerate(manifest["pages"]) if page["collection"] == "sessions")
+    assert sessions + 1 < len(manifest["pages"])
+    monkeypatch.setattr(peer_snapshot, "APPLY_BATCH_ITEMS", 1)  # commit after every page
+    save = peer_snapshot._save_applied
+    stopped = []
+
+    def committed(directory, manifest, pages):
+        save(directory, manifest, pages)
+        if moment != "after" and not stopped and sessions < pages < len(manifest["pages"]):
+            stopped.append(True)  # the chat page is in, the frontier is not
+            if moment == "between":
+                _relay(d, c)
+            else:
+                raise _Aborted
+
+    monkeypatch.setattr(peer_snapshot, "_save_applied", committed)
+    with c.active():
+        try:
+            peer_snapshot.apply(manifest, directory, a.device_id)
+        except _Aborted:
+            pass
+    assert bool(stopped) == (moment != "after")
+    monkeypatch.setattr(peer_snapshot, "_save_applied", save)
+    if moment == "re-served":
+        manifest_e, directory_e = _download(c, e, "copy")
+        with e.active():
+            peer_snapshot.apply(manifest_e, directory_e, c.device_id)
+        _relay(d, e)
+    if moment != "between":
+        _relay(d, c)
+    if moment in ("stopped", "re-served"):
+        with c.active():  # resumed past its saved pages; then the frontier
+            peer_snapshot.apply(manifest, directory, a.device_id)
+    with c.active():
+        title_c = database.get_session("chat")["title"]
+    title_e = None
+    if moment == "re-served":
+        with e.active():
+            title_e = database.get_session("chat")["title"]
+    return [title_c, title_e]
 
 
-@pytest.mark.parametrize("moment", ["after", "between", "aborted"])
-@pytest.mark.parametrize("restore,tie", [(False, False), (True, False), (True, True)],
-                         ids=["no-restore", "later-clock", "same-clock"])
-def test_an_older_incarnation_op_never_replaces_a_copied_write_it_cannot_be_matched_to(
-        workers, monkeypatch, restore, tie, moment):
-    """Reviews S22b, S24, S25, S26 and S28 together: the copy's lifecycle.
-    C takes A's copy of B's chat and D relays B's pre-restore rename A never
-    had: after the copy, between its pages, or while it is stopped past the
-    chat page, before C resumes it and adopts its frontier. Without a restore
-    the rename is B's next op and applies, as on main. After one, C holds B's
-    post-restore "new" from the copy with no label, and the rename has a lower
-    clock or the same one: the row keeps the incarnation its copy named, so
-    the rename never replaces it, before the frontier, after it, or across
-    the stop and the resume that skips the chat page. Nothing the copy claims
-    reaches C's streams, so a revocation C signs names only what C received."""
-    a, b, c, d = _copy_overtaken_by_a_relay(workers, monkeypatch, restore=restore, tie=tie, moment=moment)
-    assert _sweep_value(c, "sessions") == ("new" if restore else "lost-1")
-    _converge([a, b, c, d])
-    assert {_sweep_value(w, "sessions") for w in (a, b, c, d)} == {"new" if restore else "lost-1"}
-    assert all(int(seq) > 0 for seq in _streams(c, b.device_id).values())
+# Recorded by running _copied_row_outcome on origin/main's app code
+# (6e61683dc): [title on C, title on E]. The ops main refuses as a stale
+# incarnation leave the copied row as it stood.
+MAIN_OUTCOMES = {
+    "no-restore/after": ["lost-1", None],
+    "no-restore/between": ["lost-1", None],
+    "no-restore/stopped": ["lost-1", None],
+    "no-restore/re-served": ["lost-1", "lost-1"],
+    "copy-later/after": ["new", None],
+    "copy-later/between": ["lost-1", None],
+    "copy-later/stopped": ["lost-1", None],
+    "copy-later/re-served": ["lost-1", "lost-1"],
+    "tie/after": ["new", None],
+    "tie/between": ["lost-1", None],
+    "tie/stopped": ["lost-1", None],
+    "tie/re-served": ["lost-1", "lost-1"],
+    "op-later/after": ["new", None],
+    "op-later/between": ["lost-1", None],
+    "op-later/stopped": ["lost-1", None],
+    "op-later/re-served": ["lost-1", "lost-1"],
+    "claim/after": ["lost-0", None],
+    "claim/between": ["lost-1", None],
+    "claim/stopped": ["lost-1", None],
+    "claim/re-served": ["lost-1", "lost-1"],
+    "zero-claim/after": ["lost-1", None],
+    "zero-claim/between": ["lost-1", None],
+    "zero-claim/stopped": ["lost-1", None],
+    "zero-claim/re-served": ["lost-1", "lost-1"],
+}
 
 
-def test_a_copy_orders_only_the_rows_it_installed(workers, monkeypatch):
+@pytest.mark.parametrize("moment", COPY_MOMENTS)
+@pytest.mark.parametrize("kind", COPY_KINDS)
+def test_a_copied_row_ends_as_on_main(workers, monkeypatch, kind, moment):
+    """Owner decision on #1568, reviews S25, S29, S30: a row a state copy
+    installed, and every op that later meets it, end as on main."""
+    assert _copied_row_outcome(workers, monkeypatch, kind, moment) == MAIN_OUTCOMES[f"{kind}/{moment}"]
+
+
+def test_a_link_relayed_while_a_copy_is_verified_applies_as_on_main(workers, monkeypatch):
     """Review S28: C holds a copy of B's chat that has no project (A lacks P)
     and was installed without a frontier, so B's signed link to P is still
     owed. B restores and writes something else, so A's next copy names B's
     incarnation 2. D relays the link while C verifies that copy, before any
-    page is in: no row the copy installed is involved, so the link applies,
+    page is in: C has seen nothing of incarnation 2 yet, so the link applies,
     as on main, and the copy's own version of the chat, a tie, leaves it."""
     from app.network import peer_snapshot
     a, b, c, d = _network(workers, "a", "b", "c", "d")
@@ -1009,8 +1044,9 @@ def test_a_restored_worker_keeps_its_own_unlabelled_write_at_the_replayed_clock(
     """Reviews S25 and S27 on the restored worker itself: B restored before it
     had this build, so its write "new" after the restore has no label, and it
     took the clock of a rename it lost. The replayed rename is from B's older
-    incarnation and only ties it, so B keeps "new", as every replica does,
-    also once retention dropped the signed op of "new" from B's log."""
+    incarnation and meets a version with no label, so B keeps "new", as main
+    does and every replica does, also once retention dropped the signed op of
+    "new" from B's log."""
     a, b, d = _network(workers, "a", "b", "d")
     _session(b, "chat", title="t", events=0)
     _converge([a, b, d])
