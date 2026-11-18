@@ -193,11 +193,12 @@ and combines that with the approval policy:
 
 `Bash` is statically a `write` tool, but a command the classifier can prove is
 read-only (`git status`, `ls`, `grep ... | head`, `git log --oneline -5`, and
-similar: no redirection, no substitution, no program outside the allowlist) is
+similar: no redirection, no substitution or `$` expansion, no program outside
+the allowlist, programs named bare rather than by path) is
 treated as `safe` and runs without a prompt under `on_write`. The allowlist is
 in `fluid/tools/builtins/bash_risk.py`. A read-only command still asks when it
 names a credential file or a process's environment (`cat .env`,
-`cat /proc/$PPID/environ`), or when it searches or compares a whole tree
+`cat /proc/1/environ`, or a link to either), or when it searches or compares a whole tree
 (`grep -r`, `rg`, `diff`, `git diff a b`), since that would print any `.env`
 inside it. Use the Grep tool for tree-wide searches: it withholds credential
 files.

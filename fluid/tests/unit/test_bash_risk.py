@@ -40,8 +40,6 @@ SAFE_COMMANDS = [
     "cat file.txt",
     'cat "a b.txt"',
     r"cat C:\Users\dev\notes.txt",  # Windows path as an argument
-    r'"C:\Program Files\Git\bin\git.exe" status',  # quoted Windows program path
-    "/usr/bin/grep -n pattern src/app.py",
     "git status --short",
     "git status",
     "git log --oneline -10",
@@ -538,6 +536,9 @@ TREE_READS = [
     "git diff ../empty .",  # outside the work tree: an implicit --no-index
     "git diff main feature",
     "git diff -- a b",
+    "git diff -- -a -b",  # after -- every word is a path, dashes or not
+    "git diff -- a -b",
+    "git diff d*",  # one word, two directories once the shell expands it
     "git show HEAD:.env",  # <rev>:<path> names a credential file
 ]
 
@@ -580,6 +581,18 @@ HIDDEN_EXPANSIONS = [
     "echo $@",
     "echo $$",
     "echo $BASH_COMMAND",
+    # Any parameter outside single quotes: its value is unseen (an option,
+    # a path, several words).
+    "echo $HOME",
+    "echo ${HOME}",
+    'ls "$HOME"',
+    "echo $PWD",
+    'cat "$F"',
+    "grep -n x $DIR",
+    "$CMD",
+    '"$GREP" x f',
+    'echo "a${X}b"',
+    "echo hi | grep $P",
 ]
 
 
@@ -606,19 +619,19 @@ STILL_SAFE_AFTER_SECRET_CHECKS = [
     "cat /proc/cpuinfo",
     "cat /proc/self/status",
     "head -c 200 /proc/self/maps",
-    "ls /proc/self/fd",
     "grep environ notes.txt",  # a pattern, not a /proc path
     "cat environ",  # a file in the working directory
     "awk '{print ($1+$2)/2}' f",
     "awk '{gsub(/foo/, \"bar\"); print}' f",
-    "echo $HOME",
-    "echo ${HOME}",
-    'ls "$HOME"',
-    "echo $PWD",
     "echo {}",
     "echo a,b",
     "sed -n '$p' f",
     "grep 'foo$' f",
+    'grep "foo$" f',  # $ before the closing quote is literal
+    "echo 'cost: $HOME'",
+    "git diff -- app/main.py",
+    'echo "progress/mem"',  # echo prints its words; it opens nothing
+    "printf '%s\\n' progress/mem /proc/1/fd/3",
     "file -b x",
     "cat .env.example",
 ]
@@ -627,6 +640,117 @@ STILL_SAFE_AFTER_SECRET_CHECKS = [
 @pytest.mark.parametrize("command", STILL_SAFE_AFTER_SECRET_CHECKS)
 def test_everyday_reads_stay_safe_after_secret_checks(command: str) -> None:
     assert classify({"command": command}) == "safe"
+
+
+# A program named by a path is whatever file is there, whatever its basename.
+@pytest.mark.parametrize("command", [
+    "/usr/bin/grep -n pattern src/app.py",
+    "./cat f",
+    "bin/ls",
+    r'"C:\Program Files\Git\bin\git.exe" status',
+    r"C:\Windows\cat x",
+])
+def test_programs_named_by_a_path_ask(command: str) -> None:
+    assert classify({"command": command}) == "write"
+
+
+# Descriptor and per-process directory links point wherever the reading
+# process has them; they ask rather than get resolved.
+@pytest.mark.parametrize("command", [
+    "cat /proc/self/fd/3",
+    "cat /proc/1/task/2/fd/0",
+    "cat /dev/fd/3",
+    "ls /dev/fd/",
+    "ls /proc/self/fd",
+    "cat /proc/1/cwd/notes.txt",
+    "cat /proc/self/root/home/u/notes.txt",
+    "cat /proc/1/fdinfo/3",
+    "cat /proc/1/map_files/7f-80",
+    "cat /proc/*/cwd/x",
+    "cat /proc/1/cwd/../x",
+])
+def test_descriptor_and_process_directory_paths_ask(command: str) -> None:
+    assert classify({"command": command}) == "write"
+
+
+def test_descriptor_paths_relative_to_cwd_ask() -> None:
+    assert classify({"command": "cat fd/3", "cwd": "/proc/1"}) == "write"
+    assert classify({"command": "cat cwd/x", "cwd": "/proc/self"}) == "write"
+
+
+@pytest.fixture
+def linked_tree(tmp_path):
+    """A working directory with harmless-looking links to credential files."""
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".env").write_text("TOKEN=x\n")
+    (work / "readme.txt").write_text("hi\n")
+    (work / "notes.txt").symlink_to(".env")
+    (tmp_path / "keys").mkdir()
+    (tmp_path / "keys" / ".credential-keys").mkdir()
+    (work / "keydir").symlink_to(tmp_path / "keys" / ".credential-keys")
+    return work
+
+
+@pytest.mark.parametrize("command", [
+    "cat notes.txt",
+    "head -n 3 ./notes.txt",
+    "cat no*",
+    "cat n?tes.txt",
+    "ls keydir",
+    "cat keydir/../../work/notes.txt",
+    "grep -f notes.txt readme.txt",
+    "sort --random-source=notes.txt readme.txt",
+])
+def test_links_to_credential_files_ask(linked_tree, command: str) -> None:
+    assert classify({"command": command, "cwd": str(linked_tree)}) == "write"
+    # The session cwd counts when the call has none.
+    assert BASH_SPEC.effective_risk({"command": command}, cwd=str(linked_tree)) == "write"
+    assert PermissionEngine("on_write").decide(
+        BASH_SPEC, {"command": command}, cwd=str(linked_tree)
+    ).decision == "ask"
+
+
+def test_links_resolve_from_a_relative_call_cwd(linked_tree) -> None:
+    risk = BASH_SPEC.effective_risk(
+        {"command": "cat notes.txt", "cwd": linked_tree.name}, cwd=str(linked_tree.parent)
+    )
+    assert risk == "write"
+
+
+def test_files_that_are_not_links_to_secrets_stay_safe(linked_tree) -> None:
+    for command in ("cat readme.txt", "cat r*", "ls", "wc -l readme.txt"):
+        assert classify({"command": command, "cwd": str(linked_tree)}) == "safe", command
+        assert BASH_SPEC.effective_risk({"command": command}, cwd=str(linked_tree)) == "safe"
+
+
+def test_the_model_cannot_supply_the_session_cwd(linked_tree, tmp_path, monkeypatch) -> None:
+    from fluid.tools.registry import SESSION_CWD_KEY
+
+    monkeypatch.chdir(tmp_path)
+    # A model-supplied key is dropped: an empty dir gives no link to resolve,
+    # so the call is judged from the host's cwd, and the real cwd still wins.
+    spoof = {"command": "cat notes.txt", SESSION_CWD_KEY: str(tmp_path / "empty")}
+    assert BASH_SPEC.effective_risk(spoof, cwd=str(linked_tree)) == "write"
+    seen: list[dict] = []
+    probe = type(BASH_SPEC)(
+        name="Probe", description="", input_schema={}, risk="write",
+        classify_risk=lambda i: seen.append(i) or "safe",
+    )
+    probe.effective_risk({"command": "x", SESSION_CWD_KEY: "/attacker"})
+    assert SESSION_CWD_KEY not in seen[-1]
+
+
+@pytest.mark.parametrize("command", [
+    "echo .env",  # printed text still gets the credential-name check
+    "printf x .env*",
+    "echo /proc/1/environ",
+    "cat x\\;echo .env",  # one word to the shell: cat reads .env
+    "echo hi; cat /proc/1/mem",
+    "echo hi\ncat /proc/1/mem",
+])
+def test_text_only_programs_do_not_shield_other_words(command: str) -> None:
+    assert classify({"command": command}) == "write"
 
 
 def test_classify_without_command_is_write() -> None:

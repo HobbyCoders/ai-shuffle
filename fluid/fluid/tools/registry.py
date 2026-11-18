@@ -29,6 +29,10 @@ from fluid.tools.mcp.manager import McpManager
 
 log = logging.getLogger(__name__)
 
+# The input key ``ToolSpec.effective_risk`` hands the session cwd to a
+# ``classify_risk`` hook under (Bash checks relative paths against it).
+SESSION_CWD_KEY = "__fluid_session_cwd"
+
 # The id of the tool call being dispatched, for handlers that take no ctx.
 # In-process server tools (``register_inproc``) are called with their
 # arguments only, so a host tool that needs its own tool_use_id (to join its
@@ -198,12 +202,20 @@ class ToolSpec:
         except Exception:
             return None
 
-    def effective_risk(self, input: dict[str, Any]) -> str:
-        """Risk of one concrete call: the hook's answer, capped at ``risk``."""
+    def effective_risk(self, input: dict[str, Any], *, cwd: str | None = None) -> str:
+        """Risk of one concrete call: the hook's answer, capped at ``risk``.
+
+        ``cwd`` is the session directory a call without its own ``cwd`` runs
+        in. The hook sees it under :data:`SESSION_CWD_KEY`, which is always
+        replaced here, so a value the model put in its input never reaches it.
+        """
         if self.classify_risk is None:
             return self.risk
+        classified = {k: v for k, v in input.items() if k != SESSION_CWD_KEY}
+        if cwd:
+            classified[SESSION_CWD_KEY] = cwd
         try:
-            risk = self.classify_risk(input)
+            risk = self.classify_risk(classified)
         except Exception:  # a broken classifier must never lower the guard
             return self.risk
         if risk not in _RISK_ORDER:

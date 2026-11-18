@@ -83,18 +83,32 @@ model *reads* framing tokens even when they can't structurally escape.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
   file or a process's `environ`/`cmdline`/`mem` — `cat .env` and
-  `cat /proc/$PPID/environ` do not sail under the read-only fast path. This
+  `cat /proc/1/environ` do not sail under the read-only fast path. This
   includes a value attached to an option (`--file=.env`), a `<rev>:<path>`
-  (`git show HEAD:.env`), any `/proc` spelling (`self`, `$PPID`, globs, `..`,
-  `/dev/fd/..`) and a relative name under the call's `cwd`. Shell searches
-  that walk a tree prompt too, because they print credential files that the
-  Grep tool would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`,
-  `--recursive`), `rg` (it is recursive by default and reads options such as
-  `--pre` from `RIPGREP_CONFIG_PATH`), `diff` (two directories compare every
-  file in them) and `git diff` with `--no-index` or two operands (outside a
-  repository it compares plain directories; `git diff A..B` stays read-only).
-  A word the shell builds from something the classifier cannot see prompts
-  as well: `$'…'` quoting, `${X:-…}`, `$_`, `$1` and brace expansion.
+  (`git show HEAD:.env`), `self`/`thread-self`/task paths, globs and `..` in
+  a `/proc` path, and a relative name under the directory the command runs
+  in (the call's `cwd`, else the session's). An operand that exists on disk
+  is also checked by its real path, so `cat notes.txt` asks when `notes.txt`
+  links to `.env`, and an unquoted glob is checked by what it matches now.
+  A path through a descriptor or another process's directory
+  (`/proc/<pid>/fd`, `/proc/<pid>/cwd`, `/proc/<pid>/root`, `/dev/fd`) asks
+  without being resolved. This is a preflight, not a boundary: a file can
+  change between the check and the command, so do not rely on it against a
+  process that rewrites links while the agent works. Shell searches that walk
+  a tree prompt too, because they print credential files that the Grep tool
+  would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`, `--recursive`),
+  `rg` (it is recursive by default and reads options such as `--pre` from
+  `RIPGREP_CONFIG_PATH`), `diff` (two directories compare every file in them)
+  and `git diff` with `--no-index` or two operands (outside a repository it
+  compares two plain directories; every word after `--` counts, and a glob
+  operand asks; `git diff A..B` stays read-only). `GREP_OPTIONS` never
+  reaches a Bash or Monitor child, inherited or from settings `env`, since it
+  would add options the classifier never saw. Any parameter expansion
+  outside single quotes (`$HOME`, `"$F"`, `${X:-…}`, `$1`), `$'…'` quoting
+  and brace expansion prompt, because the classifier judges the words as
+  written; single-quoted awk and sed scripts are literal and stay read-only.
+  A program named by a path (`/usr/bin/grep`, `./cat`) prompts: only a bare
+  name runs the program the allowlist means.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,

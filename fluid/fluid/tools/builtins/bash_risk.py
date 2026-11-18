@@ -21,11 +21,13 @@ only when:
   no subshell parentheses, and no program outside the table (so ``sudo``,
   ``xargs``, ``env cmd``, ``python`` and friends are all ``write``);
 - the shell builds no word the lexer cannot see (:func:`_hidden_expansion`):
-  no ANSI-C or locale quoting (``$'-exec'``, ``$"x"``), no ``${…}`` beyond a
-  plain ``${NAME}``, no special parameter (``$_`` is the previous command's
-  last word, ``$1``, ``$?`` ...), no ``$BASH*`` and no
-  brace expansion (``{-exec,rm}``). Each of these turns into an option or a
-  file name the checks below never saw;
+  outside single quotes no parameter expansion at all (``$NAME``,
+  ``"$NAME"``, ``${…}``, ``$1``, ``$_``, ``$?`` ...), no ANSI-C or locale
+  quoting (``$'-exec'``, ``$"x"``) and no brace expansion (``{-exec,rm}``).
+  Each of these turns into an option, a file name or extra words the checks
+  below never saw; single-quoted awk and sed scripts are literal;
+- every program is named bare: ``/usr/bin/grep`` or ``./cat`` is whatever
+  file sits at that path, so it is ``write``;
 - any leading ``VAR=value`` assignment names a variable in
   :data:`INERT_ENV_VARS`. Locale and colour variables cannot change what a
   program does; almost anything else can (``LD_PRELOAD``, ``GIT_EXTERNAL_DIFF``,
@@ -39,7 +41,13 @@ the parent is the host, whose environment holds the provider keys) is still
 counts when any file it could expand to is a credential file (``cat .env*``,
 ``cat ?env``, ``cat ~/.ssh/*``). A value attached to an option counts too
 (``date --file=.env``), and relative arguments are also read against the
-call's ``cwd`` (``cat environ`` with ``cwd=/proc/1``).
+directory the command runs in (the call's ``cwd``, else the session's:
+``cat environ`` in ``/proc/1``). Operands that exist are checked by their
+real path too (``notes.txt`` linking to ``.env``), globs by what they match
+now, and a path through ``/proc/<pid>/fd``, ``cwd``, ``root`` or ``/dev/fd``
+asks unresolved. That is a preflight: the files can change before the
+command runs. ``echo``, ``printf`` and friends open nothing, so their words
+get only the credential-name check.
 
 A search or comparison across a directory tree prints whatever credential
 file sits in it, so it is ``write``: recursive ``grep`` (any word with a
@@ -90,18 +98,18 @@ Every word is scanned, ``--`` and option values included. See :func:`_no_flags`.
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
   external program); any ``--output*`` argument is rejected. ``git diff``
-  asks with ``--no-index`` or two or more non-option words: given two paths
-  outside the work tree (or run outside a repository) it compares them as
-  plain directories, like ``diff -rN``.
+  asks with ``--no-index`` or two or more operands (every word after ``--``
+  is one) or a glob operand: given two paths outside the work tree (or run
+  outside a repository) it compares them as plain directories, like
+  ``diff -rN``.
 - ``uv``/``pip``/``npm``/``pnpm``/``yarn``/``cargo``: only the informational
   subcommands in :data:`PACKAGE_MANAGER_READ_ONLY` (``uv pip list`` is handled
   by skipping the ``pip`` word).
 - ``go``: only ``go version``. ``node``: only ``--version``/``-v``.
 
 Everything is table-driven so the allowlist can grow without touching the
-parser. Program names are matched on the basename (``/usr/bin/git``,
-``C:\\Program Files\\Git\\bin\\git.exe`` both count as ``git``), case-insensitive,
-with a trailing ``.exe`` stripped.
+parser. Program names are matched case-insensitively, with a trailing
+``.exe`` stripped.
 """
 
 from __future__ import annotations
@@ -790,18 +798,27 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
 }
 
 def _git_diff_ok(args: list[str]) -> bool:
-    """Not the plain-directory form: ``--no-index``, or two non-option words.
+    """Not the plain-directory form: ``--no-index``, or two operands.
 
     git compares two paths as ``diff -rN`` would when one lies outside the
     work tree or the command runs outside a repository, which the text does
-    not show; both need exactly two operands. Option values count as
-    words here (``-S foo a``), which can only add a prompt.
+    not show; both need exactly two operands. Every word after ``--`` is an
+    operand, dashes or not, and a glob may expand to several, so one asks.
+    Option values count as operands here (``-S foo a``), which can only add
+    a prompt.
     """
     for a in args:
         name = a.split("=", 1)[0]
         if len(name) >= 5 and "--no-index".startswith(name):
             return False
-    return sum(1 for a in args if not a.startswith("-")) < 2
+    if "--" in args:
+        cut = args.index("--")
+        operands = [a for a in args[:cut] if not a.startswith("-")] + args[cut + 1:]
+    else:
+        operands = [a for a in args if not a.startswith("-")]
+    if any(ch in a for a in operands for ch in "*?["):
+        return False
+    return len(operands) < 2
 
 
 # git subcommand → check over the subcommand's own arguments.
@@ -879,19 +896,7 @@ def _lex(line: str) -> list[str] | None:
         return None
 
 
-_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WORD_END = frozenset(" \t\r\n;&|<>()")
-
-
-def _plain_parameter(name: str) -> bool:
-    """A variable the command line cannot set: its value is ambient.
-
-    ``$_`` is the last word of the previous command (``echo -exec; find .
-    $_ …``) and ``$BASH_COMMAND`` and friends echo the command line, so
-    those are not. ``$PWD`` is the call's ``cwd``, which the command cannot
-    change without ``cd`` (not in the table).
-    """
-    return name != "_" and not name.startswith("BASH")
 
 
 def _brace_expands(command: str, i: int) -> bool:
@@ -922,13 +927,14 @@ def _brace_expands(command: str, i: int) -> bool:
 def _hidden_expansion(command: str) -> bool:
     """True when the shell would build a word the classifier cannot see.
 
-    shlex keeps ``$'-exec'``, ``${X:--exec}`` and ``{-exec,rm}`` as words
-    that look like operands, but bash turns each into ``-exec``: ``find .
-    ${X:--exec} rm {} +`` runs ``rm``. So outside single quotes this refuses
-    ANSI-C and locale quoting, any ``${…}`` other than a plain ``${NAME}``,
-    special parameters (``$1``, ``$@``, ``$?``, ``$$``, ``$-``, ``$[…]``), the
-    variables in :func:`_plain_parameter`, and unquoted brace expansion.
-    A plain ``$NAME`` stays: no part of a read-only command can set one.
+    The per-program checks read the words as written, but the shell expands
+    ``$X`` / ``"$X"`` / ``${X:--exec}`` to whatever the variable holds (an
+    option, a path, several words), ``$'-exec'`` to ``-exec``, and
+    ``{-exec,rm}`` to two words: ``find . ${X:--exec} rm {} +`` runs ``rm``.
+    So outside single quotes any parameter expansion (``$NAME``, ``${…}``,
+    ``$1``, ``$@``, ``$?``, ``$$``, ``$[…]``), ANSI-C or locale quoting, and an
+    unquoted brace expansion refuse the fast path. Single-quoted text is
+    literal, so awk and sed scripts keep their ``$1``.
     """
     quote = ""
     i, n = 0, len(command)
@@ -950,15 +956,7 @@ def _hidden_expansion(command: str) -> bool:
             if nxt in ("'", '"'):
                 if not quote:
                     return True  # $'…' / $"…"; inside "…" the $ is literal
-            elif nxt == "{":
-                end = command.find("}", i + 2)
-                name = command[i + 2:end] if end >= 0 else ""
-                if not (_SHELL_NAME.fullmatch(name) and _plain_parameter(name)):
-                    return True
-            elif m := _SHELL_NAME.match(command, i + 1):
-                if not _plain_parameter(m.group()):
-                    return True
-            elif nxt and (nxt.isdigit() or nxt in "@*#?-$![("):
+            elif nxt and (nxt == "_" or nxt.isalnum() or nxt in "{@*#?-$![("):
                 return True
         i += 1
     return False
@@ -972,6 +970,10 @@ def _simple_command_ok(tokens: list[str]) -> bool:
             return False
         tokens = tokens[1:]
     if not tokens:
+        return False
+    # Only a bare name runs the program the table means: ``./grep`` or
+    # ``/tmp/x/cat`` is whatever file sits there, whatever its basename.
+    if "/" in tokens[0] or "\\" in tokens[0]:
         return False
     program = _program_name(tokens[0])
     if program not in READ_ONLY_PROGRAMS:
@@ -1276,7 +1278,99 @@ def _could_name_process_secret(path: str) -> bool:
     )
 
 
-def _touches_sensitive_path(command: str, cwd: str | None = None) -> bool:
+# Programs that never open their operands: ``echo "progress/mem"`` prints
+# text. Their words get only the credential-name check (as before the /proc
+# and on-disk checks existed), not those.
+_NO_FILE_OPERANDS = frozenset({"echo", "printf", "true", "false", "basename", "dirname"})
+# Paths that reach a file through another process's descriptor or directory
+# (``/proc/1/fd/3``, ``/proc/1/cwd/x``, ``/dev/fd/3``). Where they point
+# depends on the process reading them, so they ask instead of resolving.
+_INDIRECTION_GLOBS = tuple(
+    f"*/proc/*/{d}/*" for d in ("fd", "fdinfo", "cwd", "root", "map_files")
+) + ("*/dev/fd/*",)
+# More matches than this from one glob operand ask rather than get resolved.
+_GLOB_RESOLVE_LIMIT = 512
+
+
+def _through_indirection(path: str) -> bool:
+    lowered = "/" + path.replace("\\", "/").lower().rstrip("/") + "/"
+    return any(fnmatchcase(lowered, g) for g in _INDIRECTION_GLOBS)
+
+
+def _names_secret(path: str) -> bool:
+    from fluid.tools.hardening import is_sensitive_path
+
+    return (
+        is_sensitive_path(path)
+        or _could_name_process_secret(path)
+        or _through_indirection(path)
+    )
+
+
+def _resolved_targets(path: str, roots: list[str], glob: bool) -> list[str] | None:
+    """What ``path`` names on disk now: each existing match and its real path.
+
+    Relative paths are taken from each of ``roots``; a glob is expanded the
+    way the shell will. None when a glob matches too much, or the lookup
+    fails, so the caller asks. A preflight only: the files can change between
+    this check and the command.
+    """
+    import glob as globmod
+    from itertools import islice
+
+    if not path:
+        return []
+    spelled = os.path.expanduser(path) if path.startswith("~") else path
+    if os.path.isabs(spelled):
+        candidates = [spelled]
+    else:
+        candidates = [os.path.join(root, spelled) for root in roots]
+    out: list[str] = []
+    try:
+        for candidate in candidates:
+            if glob:
+                matches = list(islice(globmod.iglob(candidate), _GLOB_RESOLVE_LIMIT + 1))
+                if len(matches) > _GLOB_RESOLVE_LIMIT:
+                    return None
+            else:
+                matches = [candidate] if os.path.lexists(candidate) else []
+            for match in matches:
+                out += [match, os.path.realpath(match)]
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return out
+
+
+def _skipped_tokens(raw: list[str], line: str) -> set[int]:
+    """Indexes of words a :data:`_NO_FILE_OPERANDS` program gets.
+
+    Only when the quote-keeping split lines up word for word with the
+    shell-style one :func:`is_read_only` judged (``x\\;echo .env`` is one
+    word to the shell); otherwise nothing is skipped.
+    """
+    words = _lex(line)
+    if words is None or len(words) != len(raw):
+        return set()
+    separator = [bool(w) and all(ch in "();<>|&" for ch in w) for w in raw]
+    if separator != [bool(w) and all(ch in "();<>|&" for ch in w) for w in words]:
+        return set()
+    skipped: set[int] = set()
+    i = 0
+    while i < len(words):
+        while i < len(words) and _ENV_ASSIGNMENT.match(words[i]):
+            i += 1
+        start = i
+        while i < len(words) and not separator[i]:
+            i += 1
+        if start < i and _program_name(words[start]) in _NO_FILE_OPERANDS:
+            skipped.update(range(start + 1, i))
+        i += 1
+    return skipped
+
+
+def _touches_sensitive_path(
+    command: str, bases: list[str] | None = None, roots: list[str] | None = None
+) -> bool:
     """True when any argument names a credential file (``cat .env`` etc.).
 
     A read-only command is still an exfiltration read when its target is a
@@ -1292,51 +1386,93 @@ def _touches_sensitive_path(command: str, cwd: str | None = None) -> bool:
     An option word is checked at every suffix, since its value may be
     attached (``--file=.env``, ``-f.env``), and asks outright with an unquoted
     glob (the shell expands that value too). The part after a ``:`` is
-    checked as a path too (``git show HEAD:.env``). With a ``cwd``, every
-    candidate is also checked joined to it (``cat environ`` run in
-    ``/proc/1``).
+    checked as a path too (``git show HEAD:.env``). Every candidate is also
+    checked joined to each of ``bases`` (``cat environ`` run in ``/proc/1``)
+    and resolved on disk from each of ``roots``: a symlink ``notes.txt`` to
+    ``.env`` asks. A path through a descriptor or another process's directory
+    asks without resolving. Words given to :data:`_NO_FILE_OPERANDS` programs
+    are text, not paths: they get the credential-name check alone.
     """
-    from fluid.tools.hardening import is_sensitive_path
-
-    lex = shlex.shlex(command, posix=False)
-    lex.whitespace_split = True
-    try:
-        raw_tokens = list(lex)
-    except ValueError:
-        return False
-    base = cwd.replace("\\", "/") if cwd else ""
-    for raw in raw_tokens[1:]:
+    bases = [b.replace("\\", "/") for b in bases or []]
+    roots = roots or []
+    for line in command.splitlines():
+        lex = shlex.shlex(line, posix=False, punctuation_chars=True)
+        lex.whitespace_split = True
         try:
-            literal = " ".join(shlex.split(raw))
+            raw_tokens = list(lex)
         except ValueError:
             return True
-        glob = _has_unquoted_glob(raw)
-        if literal.startswith("-"):
-            if glob:
+        skipped = _skipped_tokens(raw_tokens, line)
+        for index, raw in enumerate(raw_tokens):
+            if raw and all(ch in "();<>|&" for ch in raw):
+                continue
+            try:
+                literal = " ".join(shlex.split(raw))
+            except ValueError:
                 return True
-            paths = [literal[k:] for k in range(len(literal))]
-        else:
-            paths = [literal]
-        # git's <rev>:<path> (``git show HEAD:.env``) names a file too.
-        paths += [p.split(":", 1)[1] for p in paths if ":" in p]
-        if base:
-            paths += [posixpath.join(base, p) for p in paths]
-        for path in paths:
-            if is_sensitive_path(path) or _could_name_process_secret(path):
-                return True
-            if glob and _glob_could_name_sensitive_path(path):
+            if _word_names_secret(raw, literal, bases, roots, text=index in skipped):
                 return True
     return False
 
 
+def _word_names_secret(
+    raw: str, literal: str, bases: list[str], roots: list[str], *, text: bool = False
+) -> bool:
+    """True when one word could name a secret; ``text`` for a word printed, not opened."""
+    from fluid.tools.hardening import is_sensitive_path
+
+    glob = _has_unquoted_glob(raw)
+    if literal.startswith("-"):
+        if glob:
+            return True
+        paths = [literal[k:] for k in range(len(literal))]
+    else:
+        paths = [literal]
+    # git's <rev>:<path> (``git show HEAD:.env``) names a file too.
+    paths += [p.split(":", 1)[1] for p in paths if ":" in p]
+    spelled = list(paths)
+    paths += [posixpath.join(base, p) for base in bases for p in spelled]
+    paths += [posixpath.normpath(p) for p in list(paths) if p]
+    for path in paths:
+        if is_sensitive_path(path) if text else _names_secret(path):
+            return True
+        if glob and _glob_could_name_sensitive_path(path):
+            return True
+    if text:
+        return False
+    for path in spelled:
+        targets = _resolved_targets(path, roots, glob)
+        if targets is None or any(_names_secret(t) for t in targets):
+            return True
+    return False
+
+
 def classify(input: dict[str, Any]) -> str:
-    """Effective risk of one Bash tool input: ``safe`` or ``write``."""
+    """Effective risk of one Bash tool input: ``safe`` or ``write``.
+
+    The Bash tool runs in the call's ``cwd``, else the session's, which
+    :meth:`ToolSpec.effective_risk` passes under ``SESSION_CWD_KEY``, else
+    the host process's; relative paths are checked from there.
+    """
+    from fluid.tools.registry import SESSION_CWD_KEY
+
     command = input.get("command")
     if not isinstance(command, str):
         return WRITE
     if not is_read_only(command):
         return WRITE
-    cwd = input.get("cwd")
+    call = input.get("cwd")
+    call = call if isinstance(call, str) and call else None
+    session = input.get(SESSION_CWD_KEY)
+    session = session if isinstance(session, str) and session else None
+    bases = [b for b in (call or session,) if b]
+    if call and session:
+        bases.append(posixpath.join(session.replace("\\", "/"), call.replace("\\", "/")))
+    try:
+        roots = [os.path.abspath(call or session or os.getcwd())]
+        if call and session:
+            roots.append(os.path.abspath(os.path.join(session, call)))
+    except OSError:  # the host's own cwd is gone
+        return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
-    sensitive = _touches_sensitive_path(command, cwd if isinstance(cwd, str) else None)
-    return WRITE if sensitive else SAFE
+    return WRITE if _touches_sensitive_path(command, bases, roots) else SAFE

@@ -318,11 +318,13 @@ def layered_env(extra: dict[str, str] | None, base: dict[str, str] | None = None
     """``base`` (default: a copy of ``os.environ``) with ``extra`` layered on top.
 
     A plain copy — the process environment is never mutated, so one session's
-    settings can't leak into another's subprocesses.
+    settings can't leak into another's subprocesses. Option-injecting
+    variables (``GREP_OPTIONS``) are dropped even when a settings layer sets
+    them: the Bash classifier cannot see them.
     """
     env = dict(os.environ if base is None else base)
     if extra:
         env.update({str(k): str(v) for k, v in extra.items()})
-    from fluid.tools.child_env import scrub_claude_auth_env
+    from fluid.tools.child_env import drop_option_injection, scrub_claude_auth_env
 
-    return scrub_claude_auth_env(env)
+    return drop_option_injection(scrub_claude_auth_env(env))

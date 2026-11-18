@@ -24,6 +24,18 @@ from collections.abc import Mapping
 
 PYTHON_ENV_NAMES = frozenset({"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"})
 
+# Variables a tool reads as extra command-line options. The Bash classifier
+# judges a command by the options in its text, so an inherited or settings
+# ``GREP_OPTIONS=-r`` would turn ``grep -n TODO src`` (judged read-only) into
+# a tree-wide search. No child gets them, from inheritance or a settings
+# overlay. ``RIPGREP_CONFIG_PATH`` stays: ``rg`` always asks.
+OPTION_INJECTION_ENV_NAMES = frozenset({"GREP_OPTIONS"})
+
+
+def drop_option_injection(environ: Mapping[str, str]) -> dict[str, str]:
+    """``environ`` without :data:`OPTION_INJECTION_ENV_NAMES`, as a new dict."""
+    return {k: v for k, v in environ.items() if k.upper() not in OPTION_INJECTION_ENV_NAMES}
+
 PASSTHROUGH_ENV = "FLUID_CHILD_ENV_PASSTHROUGH"
 # Set by a caller in the environment it hands over (never in the host's own):
 # comma-separated names to drop from what the child INHERITS, for a variable
@@ -136,6 +148,7 @@ def scrub_child_env(environ: Mapping[str, str] | None = None, *,
     return {k: v for k, v in scrub_claude_auth_env(source).items()
             if k.upper() not in {PASSTHROUGH_ENV, UNSET_ENV}
             and (preserve_python_env or k.upper() not in PYTHON_ENV_NAMES)
+            and k.upper() not in OPTION_INJECTION_ENV_NAMES
             and not is_host_secret(k, keep)}
 
 
