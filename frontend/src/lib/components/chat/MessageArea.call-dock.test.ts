@@ -56,7 +56,7 @@ function followEnd(room: number, bottoms: (number | undefined)[], proseEnd = 500
 		const box = bottom => ({ getBoundingClientRect: () => ({ height: 60, bottom }) });
 		const tailControlsRef = env.bottoms[0] === undefined ? null : box(env.bottoms[0]);
 		const tailErrorRef = env.bottoms[1] === undefined ? null : box(env.bottoms[1]);
-		const chatColumnRef = {};
+		const chatColumnRef = {}, tailQueueSlotPx = 0, handoffSlotPx = 0;
 		const getComputedStyle = () => ({ getPropertyValue: key => key === '--call-dock-reserve' ? env.room + 'px' : key === '--call-dock-lift' ? env.lift + 'px' : '' });
 		const tailErrorOffsetPx = env.errorOffset, MIN_TRANSCRIPT_TAIL_RESERVE = 24;
 		const transcriptContentEnd = () => 1000 + env.proseEnd;

@@ -9,7 +9,9 @@ import {
 	SLOW_REPLY,
 	api,
 	chatIdByToken,
+	ERROR_ROW_PROBE,
 	countUserRows,
+	errorRow,
 	expect,
 	holdBootLoad,
 	openFromSidebar,
@@ -241,6 +243,344 @@ export const journey = {
 					&& !document.querySelector('.pending-messages [role="article"]'), needles, { timeout: 120_000 });
 				await waitChat(page, { streaming: 'false' }, { timeout: 90_000 });
 				expectEachOnce(await done(), needles, log);
+			}
+		},
+		...[
+			// A queued prompt's error takes over the slot its handoff was holding
+			// (#1623). Three ways in, each sampled on every painted frame:
+			//   queued-error-row-leaves-no-blank  a queued prompt really fails
+			//     (HTTP 500); the banner steps aside for its inline Error row
+			//     (#1341) and the last bubble leaves under it.
+			//   queued-banner-at-handoff  a banner arrives the moment a queued
+			//     prompt lands, before the hold has given its blank back.
+			//   queued-banner-after-give-back  a banner arrives once the reply has
+			//     streamed past the handoff; on a phone the column then narrows,
+			//     so the long docked bubble wraps taller under the banner.
+			// The banner cases inject one turn-less server error frame (as an
+			// unreachable worker sends) into the real chat socket: no turn's
+			// Error row repeats it, so the banner stays and its placement shows.
+			// Whenever a banner shows it is on screen and clear of every docked
+			// bubble; once the queue is empty no blank is left under the reply.
+			{ name: 'queued-error-row-leaves-no-blank', failing: true },
+			{ name: 'queued-banner-at-handoff', inject: 0 },
+			{ name: 'queued-banner-after-give-back', inject: 1500, narrow: true }
+		].map(({ name, failing = false, inject = null, narrow = false }) => ({
+			name,
+			async setup(ctx) {
+				// Pass the chat socket through untouched, keeping a handle to speak as the server.
+				ctx.chat = { socket: null };
+				await ctx.page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => { ws.connectToServer(); ctx.chat.socket = ws; });
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act(ctx) {
+				const { page, mark, variant, log } = ctx;
+				const BANNER = `Worker unreachable ${uniq()}`;
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
+				await page.evaluate(([landing, long]) => {
+					const p = (window.__tailProbe = { started: performance.now(), frames: [], landed: null, running: true });
+					// Read each frame as painted: after rAF, layout and resize observers ran.
+					const afterPaint = new MessageChannel();
+					const rect = (el) => el?.getBoundingClientRect().toJSON();
+					const next = () => requestAnimationFrame(() => { p.width = innerWidth; afterPaint.port2.postMessage(0); });
+					const sample = () => {
+						if (!p.running) return;
+						// A resize that landed after this frame's rAF is not painted yet:
+						// reading now forces a layout its resize observers never saw.
+						if (innerWidth !== p.width) return next();
+						const t = Math.round(performance.now() - p.started);
+						const banner = rect(document.querySelector('.tail-error'));
+						if (p.landed === null && [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(landing))) p.landed = t;
+						p.frames.push({ t, viewport: rect(document.querySelector('.msg-scroll')), banner: banner?.height > 0 ? banner : null,
+							column: document.querySelector('.chat-column')?.getBoundingClientRect().width ?? 0,
+							long: [...document.querySelectorAll('.tail-controls .userrow')].find((el) => el.textContent.includes(long))?.getBoundingClientRect().height ?? 0,
+							rows: [...document.querySelectorAll('.tail-controls .userrow')].map(rect) });
+						next();
+					};
+					afterPaint.port1.onmessage = sample;
+					next();
+				}, [needles[0], needles[1]]);
+				await mark('queue three prompts, the second long enough to wrap');
+				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, failing ? 'error-500' : 'slow', failing ? { latency_ms: 0 } : { tps: 8 })}`);
+				await quickSend(page, `queued ${needles[1]} a longer prompt that wraps across several lines in the docked queue bubble `
+					+ `so that narrowing the column makes it taller by at least one more line in every variant ${scriptTag(variant, 'slow', { tps: 8 })}`);
+				await quickSend(page, `queued ${needles[2]} ${scriptTag(variant, 'long', { tps: 2000 })}`);
+				let narrowed = false;
+				if (failing) {
+					await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 120_000 });
+				} else {
+					await page.waitForFunction((n) => [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(n)),
+						needles[0], { timeout: 120_000, polling: 'raf' });
+					if (inject) await page.waitForTimeout(inject);
+					await mark('a turn-less error arrives from the server');
+					ctx.chat.socket.send(JSON.stringify({ type: 'error', message: BANNER }));
+					await page.locator('.tail-error').filter({ hasText: BANNER }).waitFor({ timeout: 10_000 });
+				}
+				if (narrow && variant.viewport === 'phone'
+					&& await page.locator('.pending-messages [role="article"]').filter({ hasText: needles[1] }).count()) {
+					await mark('narrow the column while the long bubble is docked');
+					await page.setViewportSize({ width: 330, height: page.viewportSize().height });
+					narrowed = true;
+				}
+				await page.waitForFunction((needles) => needles.every((n) =>
+					[...document.querySelectorAll('[data-user-turn-id]')].some((el) => (el.textContent || '').includes(n)))
+					&& !document.querySelector('.pending-messages [role="article"]'), needles, { timeout: 180_000 });
+				await waitTurnSettled(page, { hold: 1500, timeout: 120_000 });
+				const probe = await page.evaluate(() => { const p = window.__tailProbe; p.running = false; return p; });
+				const shown = probe.frames.filter((f) => f.banner);
+				const docked = shown.filter((f) => f.rows.length);
+				log(`${name}: ${JSON.stringify({ frames: probe.frames.length, landed: probe.landed, bannerFrames: shown.length,
+					bannerWithBubbles: docked.length, narrowed, firstBanner: shown[0], lastWithBubbles: docked.at(-1) })}`);
+				if (!failing) expect(docked.length > 0, 'the banner was sampled above docked bubbles');
+				if (narrow && variant.viewport === 'phone') {
+					// The resize case only means something if the column really narrowed
+					// under the banner and the long docked bubble really wrapped taller.
+					expect(narrowed, 'the column was narrowed while the long bubble was docked');
+					const wide = Math.max(0, ...probe.frames.map((f) => f.column));
+					const wideLong = probe.frames.filter((f) => f.long > 0 && f.column >= wide - 1).at(-1)?.long ?? 0;
+					const narrowLong = Math.max(0, ...docked.filter((f) => f.column > 0 && f.column < wide - 1).map((f) => f.long));
+					log(`resize: ${JSON.stringify({ wide, narrow: Math.min(...probe.frames.map((f) => f.column || wide)), wideLong, narrowLong })}`);
+					expect(wideLong > 0 && narrowLong > 0, `the long bubble was sampled docked at ${wide}px and, under the banner, in a narrower column`);
+					expect(narrowLong > wideLong + 1, `the long docked bubble grew when the column narrowed (${wideLong}px -> ${narrowLong}px)`);
+				}
+				for (const f of shown) {
+					expect(f.banner.top >= f.viewport.top - 1 && f.banner.bottom <= f.viewport.bottom + 1,
+						`the banner is on screen at ${f.t}ms (${JSON.stringify({ banner: f.banner, viewport: f.viewport })})`);
+					for (const row of f.rows) expect(f.banner.bottom <= row.top + 1 || f.banner.top >= row.bottom - 1,
+						`the banner clears every docked bubble at ${f.t}ms (${JSON.stringify({ banner: f.banner, row })})`);
+				}
+				// The long reply fills the view: its tail is the 24px reserve plus any banner.
+				const end = await page.evaluate((probe) => {
+					const pane = document.querySelector('.msg-scroll');
+					const column = pane.querySelector('.chat-column');
+					const tailError = document.querySelector('.tail-error');
+					const banner = tailError?.getBoundingClientRect().height ?? 0;
+					return { padding: parseFloat(getComputedStyle(column).paddingBottom), gap: parseFloat(getComputedStyle(column).rowGap) || 0, banner,
+						offset: banner ? parseFloat(getComputedStyle(tailError).getPropertyValue('--error-tail-offset')) || 0 : 0,
+						errorRows: [...document.querySelectorAll(probe.rows)].filter((d) =>
+							[...d.querySelectorAll(':scope > summary > span')].some((s) => s.textContent.trim() === probe.title)).length,
+						gapBelowReply: pane.getBoundingClientRect().bottom - document.querySelector('.transcript-tail-spacer').getBoundingClientRect().top };
+				}, ERROR_ROW_PROBE);
+				log(`settled tail: ${JSON.stringify(end)}`);
+				if (failing) expect(end.errorRows === 1, 'the failed prompt keeps its inline Error row as the record');
+				// A banner still shown keeps the place it stood (as on main) until it
+				// is dismissed or the next send: above the bubbles that were docked,
+				// never above a handoff hold's blank.
+				const stack = Math.max(0, ...docked.map((f) => f.rows.at(-1).bottom - f.rows[0].top));
+				if (end.banner) expect(end.offset <= stack + end.gap + 1, `the banner stands above the docked bubbles only (${JSON.stringify({ stack, ...end })})`);
+				// Under a banner the reply ends a tail and a gap above it; the controls sit 24px up.
+				const room = 24 + (end.banner ? 24 + end.offset + end.banner + end.gap : 0);
+				expect(end.padding <= room + 1 && end.gapBelowReply <= room + 1,
+					`no stale blank is left under the reply once the last bubble left (${JSON.stringify(end)})`);
+			}
+		})),
+		// Only a phone's composer grows enough, when the long prompt comes back to
+		// it, to move the layout above it; on desktop that step designs no move.
+		...((base) => [
+			{ ...base, viewports: ['phone'],
+				expectShift: [{ step: 'unsend the docked bubble', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.06,
+					reason: 'unsend puts the prompt back in the phone composer, which wraps it taller (the layer above it moves with it); the DOM click is not a recorded input' }] },
+			{ ...base, viewports: ['desktop'] }
+		])({
+			// #1623: a reader who scrolled away from a queue under an inline Error row
+			// is not moved by it. A queued prompt fails (HTTP 500) and the next one
+			// starts: the failure keeps the queue's slot (a queued start does not clear
+			// it), and the next reply is long and held open, so the reserve under the
+			// reader is the slot's bubble and gaps, with the last prompt docked in it.
+			// On a phone the reader scrolls far up and the column narrows (the long
+			// bubble wraps taller) and widens back: no blank above the bubbles is left
+			// over from the narrow stack. Then, with the bottom further below them than
+			// the bubble is tall but nearer than the reserve it frees, they unsend it:
+			// no painted frame moves their scroll position.
+			name: 'detached-reader-keeps-place-under-error-row',
+			async setup(ctx) {
+				await openStopChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
+				const docked = () => page.locator('.pending-messages [role="article"]').filter({ hasText: needles[2] });
+				const frame = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+				// The pane's scroll position, how far its bottom is, the reserve, and the
+				// blank between the reply's end and the first bubble.
+				const geometry = () => page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const slot = document.querySelector('.tail-controls');
+					const bubble = document.querySelector('.pending-messages [role="article"]');
+					const spacer = document.querySelector('.transcript-tail-spacer');
+					const column = spacer?.closest('.chat-column');
+					return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+						// The column's padding under the prose's end.
+						reserve: column && spacer ? column.getBoundingClientRect().bottom - spacer.getBoundingClientRect().top : 0,
+						// The docked bubbles and their action row: the slot keeps its held height around them.
+						docked: bubble && slot ? slot.getBoundingClientRect().bottom - bubble.getBoundingClientRect().top : 0,
+						blank: bubble && spacer ? bubble.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null,
+						stack: [...document.querySelectorAll('.pending-messages [role="article"]')].reduce((sum, el) => sum + el.getBoundingClientRect().height, 0),
+						width: column?.getBoundingClientRect().width ?? 0 };
+				});
+				/** Wheel the transcript until its bottom is between min and max px below the view. */
+				const scrollAway = async (min, max) => {
+					await page.locator('.msg-scroll').hover();
+					const target = (min + max) / 2;
+					for (let i = 0; i < 30; i++) {
+						const { below } = await geometry();
+						if (below >= min && below <= max) break;
+						await page.mouse.wheel(0, Math.max(-600, Math.min(600, below - target)));
+						await page.waitForTimeout(120);
+					}
+					await page.waitForTimeout(400);
+					const g = await geometry();
+					expect(g.below >= min && g.below <= max, `the reader scrolled ${min}-${max}px above the bottom (${JSON.stringify(g)})`);
+					return g;
+				};
+
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				await mark('queue a failing prompt, a long one and one more');
+				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, 'error-500', { latency_ms: 0 })}`);
+				await quickSend(page, `queued ${needles[1]} ${scriptTag(variant, 'long', { tps: 400, hold_open: true })}`);
+				await quickSend(page, `queued ${needles[2]} a longer prompt that wraps across several lines in the docked queue bubble `
+					+ `so that narrowing the column makes it taller by at least one more line in every variant`);
+				await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 120_000 });
+				await page.getByText('That is the end of the long reply.', { exact: false }).first().waitFor({ timeout: 120_000 });
+				await page.waitForTimeout(1000);
+				const settled = await geometry();
+				log(`settled under the error: ${JSON.stringify(settled)}`);
+				expect(await docked().count() === 1, 'the last prompt is still docked under the Error row');
+				// The long reply fills the view, so the reserve is the slot's: its bubble,
+				// the breathing room under it and above it, and the column's row gap.
+				expect(settled.reserve > settled.docked + 40, `the docked bubble and its gaps make the reserve (${settled.reserve}px over ${settled.docked}px docked)`);
+
+				if (variant.viewport === 'phone') {
+					await mark('scroll far up, narrow the column and widen it back');
+					const away = await scrollAway(500, 4000);
+					const { width, height } = page.viewportSize();
+					await page.setViewportSize({ width: 330, height });
+					await frame(); await page.waitForTimeout(400);
+					const narrow = await geometry();
+					await page.setViewportSize({ width, height });
+					await frame(); await page.waitForTimeout(400);
+					const wide = await geometry();
+					log(`detached resize: ${JSON.stringify({ away, narrow, wide })}`);
+					expect(narrow.width < away.width - 1 && narrow.stack > away.stack + 1, `the column narrowed and the stack grew (${away.stack}px -> ${narrow.stack}px)`);
+					expect(narrow.reserve > away.reserve + 1, `the narrow stack grew the reserve (${away.reserve}px -> ${narrow.reserve}px)`);
+					expect(Math.abs(wide.stack - away.stack) <= 1, 'the stack is back to its wide height');
+					expect(wide.reserve <= away.reserve + 1 && wide.blank <= away.blank + 1,
+						`no reserve or blank above the bubbles is left from the narrow stack (${away.reserve}px -> ${wide.reserve}px, blank ${away.blank}px -> ${wide.blank}px)`);
+				}
+
+				// The last bubble frees itself, the gap above it and the breathing room
+				// under it: room between the bubble and all of that is where a hold sized
+				// to the bubble alone clamps the reader.
+				const before = await geometry();
+				const near = await scrollAway(before.docked + 8, before.reserve - 24 - 8);
+				await page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const p = (window.__scrollProbe = { tops: [], running: true });
+					const next = () => requestAnimationFrame(() => { if (!p.running) return; p.tops.push(pane.scrollTop); next(); });
+					next();
+				});
+				await mark('unsend the docked bubble');
+				// A DOM click, as a withdrawal from elsewhere would land: the last bubble's
+				// unsend button sits below a view scrolled this far up, and Playwright's own
+				// click (or hover) would scroll it into view first.
+				await docked().getByRole('button', { name: 'Unsend message and edit it' }).evaluate((b) => b.click());
+				await docked().waitFor({ state: 'detached', timeout: 5000 });
+				await page.waitForTimeout(1500);
+				const tops = await page.evaluate(() => { const p = window.__scrollProbe; p.running = false; return p.tops; });
+				const moved = tops.filter((t) => Math.abs(t - near.top) > 1);
+				const after = await geometry();
+				log(`detached withdraw: ${JSON.stringify({ near, frames: tops.length, moved: moved.slice(0, 5), after })}`);
+				expect(tops.length > 10, 'frames were sampled through the withdrawal');
+				expect(after.reserve < near.reserve - 1, `the withdrawal gave reserve back (${near.reserve}px -> ${after.reserve}px)`);
+				expect(moved.length === 0, `no painted frame moved the reader (${near.top} -> ${JSON.stringify(moved.slice(0, 5))})`);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+			}
+		}),
+		{
+			// #1623: leaving the bottom by keyboard (or by the scrollbar) emits only
+			// scroll events, never the wheel/touch that release following. A banner
+			// stands over a queued prompt under a long reply. Still following, the
+			// reader unsends the prompt: the banner goes with it, and the follower
+			// keeps the view end they were reading (the followed floor), a blank
+			// under the reply. They press PageUp, then End: back at the bottom,
+			// following again re-measures, so no blank of the banner is left.
+			name: 'keyboard-return-leaves-no-banner-blank',
+			async setup(ctx) {
+				// Pass the chat socket through untouched, keeping a handle to speak as the server.
+				ctx.chat = { socket: null };
+				await ctx.page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => { ws.connectToServer(); ctx.chat.socket = ws; });
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act(ctx) {
+				const { page, mark, variant, log } = ctx;
+				const BANNER = `Worker unreachable ${uniq()}`;
+				const needle = `tok-${uniq()}`;
+				const docked = page.locator('.pending-messages [role="article"]').filter({ hasText: needle });
+				// The reader's place, the room below it, and the reserve: the column's padding under the reply's end.
+				const tail = () => page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const spacer = document.querySelector('.transcript-tail-spacer');
+					return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+						reserve: spacer.closest('.chat-column').getBoundingClientRect().bottom - spacer.getBoundingClientRect().top,
+						banner: document.querySelector('.tail-error')?.getBoundingClientRect().height ?? 0,
+						focused: document.activeElement === pane };
+				});
+				await mark('send a long reply, held open');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'long', { tps: 400, hold_open: true })}`);
+				await page.getByText('That is the end of the long reply.', { exact: false }).first().waitFor({ timeout: 120_000 });
+				await mark('queue a prompt, then a turn-less error arrives');
+				await quickSend(page, `queued ${needle}`);
+				await docked.waitFor({ timeout: 10_000 });
+				ctx.chat.socket.send(JSON.stringify({ type: 'error', message: BANNER }));
+				const banner = page.locator('.tail-error').filter({ hasText: BANNER });
+				await banner.waitFor({ timeout: 10_000 });
+				await page.waitForTimeout(1000);
+				await mark('unsend the queued prompt while following');
+				await docked.getByRole('button', { name: 'Unsend message and edit it' }).click();
+				await docked.waitFor({ state: 'detached', timeout: 5000 });
+				await page.waitForTimeout(1000);
+				const followed = await tail();
+				// The case means something only while that floor holds a blank under the
+				// follower. On a phone the composer grows with the returned prompt, which
+				// leaves the view a little above the bottom, inside following's 64px.
+				expect(followed.below < 64 && followed.reserve > 24 + 40,
+					`the follower keeps the banner's view end, a blank under the reply (${JSON.stringify(followed)})`);
+				await mark('page up by keyboard');
+				await page.locator('.msg-scroll').focus();
+				await page.keyboard.press('PageUp');
+				await page.waitForTimeout(800);
+				const away = await tail();
+				expect(away.focused, 'the keys went to the transcript');
+				expect(away.below > 100, `PageUp left the bottom (${JSON.stringify(away)})`);
+				if (await banner.count()) {
+					await mark('dismiss the banner');
+					// A DOM click: the banner is below the view, and Playwright's own click
+					// would scroll it into view first. el.click() leaves focus on the transcript.
+					await page.getByRole('button', { name: 'Dismiss error' }).evaluate((b) => b.click());
+					await banner.waitFor({ state: 'detached', timeout: 5000 });
+					await page.waitForTimeout(800);
+				}
+				await mark('End back to the bottom by keyboard');
+				await page.keyboard.press('End');
+				await page.waitForTimeout(1500);
+				const back = await tail();
+				log(`keyboard round trip: ${JSON.stringify({ followed, away, back })}`);
+				expect(back.below < 64, `End brought the reader back to following (${JSON.stringify(back)})`);
+				expect(back.reserve <= 24 + 1,
+					`no blank of the banner is left under the reply (${followed.reserve}px while following -> ${back.reserve}px)`);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
 			}
 		},
 		{
