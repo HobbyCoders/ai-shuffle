@@ -1910,9 +1910,15 @@
 				const leftBottom = shouldAutoScroll && !resolvedNext;
 				shouldAutoScroll = resolvedNext;
 				lastScrollMetrics = currentMetrics;
-				// #865: the capture queued by this scroll ran while still following
-				// the bottom; take the reading row now that the reader has left it.
-				if (leftBottom) scheduleReadingAnchorCapture();
+				if (leftBottom) {
+					// The followed floor holds the live edge the reader just left. As for
+					// wheel/touch (disengageAutoScroll), they own their place now, and a
+					// later return to the bottom re-measures rather than restore it.
+					followedViewportEnd = 0;
+					// #865: the capture queued by this scroll ran while still following
+					// the bottom; take the reading row now that the reader has left it.
+					scheduleReadingAnchorCapture();
+				}
 				// Scrollbar, keyboard, and accessibility scrolling do not emit our
 				// wheel/touch intent hooks. Release the controlled prompt anchor as
 				// soon as ordinary scroll geometry says the reader left the live edge.

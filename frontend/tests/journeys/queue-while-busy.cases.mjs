@@ -506,6 +506,84 @@ export const journey = {
 			}
 		}),
 		{
+			// #1623: leaving the bottom by keyboard (or by the scrollbar) emits only
+			// scroll events, never the wheel/touch that release following. A banner
+			// stands over a queued prompt under a long reply. Still following, the
+			// reader unsends the prompt: the banner goes with it, and the follower
+			// keeps the view end they were reading (the followed floor), a blank
+			// under the reply. They press PageUp, then End: back at the bottom,
+			// following again re-measures, so no blank of the banner is left.
+			name: 'keyboard-return-leaves-no-banner-blank',
+			async setup(ctx) {
+				// Pass the chat socket through untouched, keeping a handle to speak as the server.
+				ctx.chat = { socket: null };
+				await ctx.page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => { ws.connectToServer(); ctx.chat.socket = ws; });
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act(ctx) {
+				const { page, mark, variant, log } = ctx;
+				const BANNER = `Worker unreachable ${uniq()}`;
+				const needle = `tok-${uniq()}`;
+				const docked = page.locator('.pending-messages [role="article"]').filter({ hasText: needle });
+				// The reader's place, the room below it, and the reserve: the column's padding under the reply's end.
+				const tail = () => page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const spacer = document.querySelector('.transcript-tail-spacer');
+					return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+						reserve: spacer.closest('.chat-column').getBoundingClientRect().bottom - spacer.getBoundingClientRect().top,
+						banner: document.querySelector('.tail-error')?.getBoundingClientRect().height ?? 0,
+						focused: document.activeElement === pane };
+				});
+				await mark('send a long reply, held open');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'long', { tps: 400, hold_open: true })}`);
+				await page.getByText('That is the end of the long reply.', { exact: false }).first().waitFor({ timeout: 120_000 });
+				await mark('queue a prompt, then a turn-less error arrives');
+				await quickSend(page, `queued ${needle}`);
+				await docked.waitFor({ timeout: 10_000 });
+				ctx.chat.socket.send(JSON.stringify({ type: 'error', message: BANNER }));
+				const banner = page.locator('.tail-error').filter({ hasText: BANNER });
+				await banner.waitFor({ timeout: 10_000 });
+				await page.waitForTimeout(1000);
+				await mark('unsend the queued prompt while following');
+				await docked.getByRole('button', { name: 'Unsend message and edit it' }).click();
+				await docked.waitFor({ state: 'detached', timeout: 5000 });
+				await page.waitForTimeout(1000);
+				const followed = await tail();
+				// The case means something only while that floor holds a blank under the
+				// follower. On a phone the composer grows with the returned prompt, which
+				// leaves the view a little above the bottom, inside following's 64px.
+				expect(followed.below < 64 && followed.reserve > 24 + 40,
+					`the follower keeps the banner's view end, a blank under the reply (${JSON.stringify(followed)})`);
+				await mark('page up by keyboard');
+				await page.locator('.msg-scroll').focus();
+				await page.keyboard.press('PageUp');
+				await page.waitForTimeout(800);
+				const away = await tail();
+				expect(away.focused, 'the keys went to the transcript');
+				expect(away.below > 100, `PageUp left the bottom (${JSON.stringify(away)})`);
+				if (await banner.count()) {
+					await mark('dismiss the banner');
+					// A DOM click: the banner is below the view, and Playwright's own click
+					// would scroll it into view first. el.click() leaves focus on the transcript.
+					await page.getByRole('button', { name: 'Dismiss error' }).evaluate((b) => b.click());
+					await banner.waitFor({ state: 'detached', timeout: 5000 });
+					await page.waitForTimeout(800);
+				}
+				await mark('End back to the bottom by keyboard');
+				await page.keyboard.press('End');
+				await page.waitForTimeout(1500);
+				const back = await tail();
+				log(`keyboard round trip: ${JSON.stringify({ followed, away, back })}`);
+				expect(back.below < 64, `End brought the reader back to following (${JSON.stringify(back)})`);
+				expect(back.reserve <= 24 + 1,
+					`no blank of the banner is left under the reply (${followed.reserve}px while following -> ${back.reserve}px)`);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+			}
+		},
+		{
 			// #1052 "rapid start": the second message goes out the moment the first
 			// shows as streaming, before any reply prose (the turn is still starting).
 			name: 'rapid-start-each-shows-once',

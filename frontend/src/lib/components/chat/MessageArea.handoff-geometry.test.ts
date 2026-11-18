@@ -28,6 +28,7 @@ const code = transformSync([
 	between('\tfunction tailControlsExtent(', '\t/**\n\t * Where a stopped turn'),
 	between("\tlet layoutBoundary = '';", '\t// Rendered geometry has one lifecycle'),
 	between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view'),
+	between('\tfunction handleScroll() {', '\t/**\n\t * Release stick-to-bottom'),
 	`const onMutation = () => {${observer.slice(observerStart.length, observer.lastIndexOf('});'))}};`,
 	`const onResize = (entries) => {${resize.slice(resizeStart.length, resize.lastIndexOf('});'))}};`,
 	`const onFollow = () => {${follow.slice('$effect(() => {'.length, follow.lastIndexOf('});'))}};`
@@ -47,6 +48,10 @@ function view(layout: Layout, anchored: boolean) {
 	const store: Record<string, unknown> = {
 		...autoScroll, landedFromQueue, layout, anchored,
 		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, tailErrorBaselinePx: 0, tailErrorWidthPx: 0, tailErrorDockedPx: 0, tailErrorPaintedDockedPx: 0, tailErrorDockedAt: '', handoffExcessFreed: false, transcriptChangedSinceFrame: false,
+		// handleScroll's surroundings: a fully mounted window, no rail jump or selection.
+		scrollRafPending: false, lastScrollMetrics: null, anchorRounding: null, manualNavigationReleaseUntil: 0,
+		mountedStart: 0, mountedEnd: 0, displayItems: [], pinnedTranscriptRange: () => null, STREAM_DEBUG: false,
+		scrollPositionCache: new Map(), scrollTopPersist: { schedule: () => {} },
 		document: { getElementById: () => (layout.unmounted ? null : anchorEl) },
 		liveActiveSession: { clearError: () => {} },
 		getComputedStyle: () => ({ rowGap: String(ROW_GAP), marginTop: '0', marginBottom: '0', getPropertyValue: () => '0' }),
@@ -113,6 +118,7 @@ function view(layout: Layout, anchored: boolean) {
 		} };
 		// The column's padding is the tail reserve, and it ends the scroll content.
 		const chatColumnRef = { getBoundingClientRect: () => ({ bottom: layout.proseEnd + padding - layout.scrollTop }) };
+		const readScrollMetrics = () => ({ scrollTop: layout.scrollTop, scrollHeight: containerRef.scrollHeight, clientHeight: layout.clientHeight });
 		function setProgrammaticScrollTop(top) {
 			containerRef.scrollTop = Math.max(0, top);
 			lastKnownScrollTop = containerRef.scrollTop;
@@ -161,6 +167,18 @@ function view(layout: Layout, anchored: boolean) {
 				layout.scrollTop += px; clamp(); lastKnownScrollTop = layout.scrollTop; shouldAutoScroll = px >= 0;
 				if (!was && shouldAutoScroll) onFollow();
 			},
+			/** A scrollbar drag or keyboard scroll (PageUp, Home, End): only a scroll
+			 * event, no wheel/touch intent, so handleScroll alone decides following.
+			 * The browser reported the geometry before it (layout changes emit their own). */
+			async drag(px) {
+				const was = shouldAutoScroll;
+				lastScrollMetrics = readScrollMetrics();
+				layout.scrollTop += px; clamp();
+				handleScroll();
+				frames.splice(0).forEach(fn => fn());
+				for (let i = 0; i < 8; i++) await Promise.resolve();
+				if (!was && shouldAutoScroll) onFollow();
+			},
 			/** The banner's dismiss button. */
 			dismiss() { dismissTailError(); },
 			start(id) { startCurrentTurnAnchor(id, true); },
@@ -168,7 +186,8 @@ function view(layout: Layout, anchored: boolean) {
 			read: () => ({
 				padding, reserve: tailReservePx, scrollTop: layout.scrollTop, slotTop: slotBottom() - slotHeight(),
 				bubblesTop: slotBottom() - docked(), slotBottom: slotBottom(), replyEnd: layout.proseEnd - layout.scrollTop,
-				banner: tailErrorRef.getBoundingClientRect(), errorOffset: tailErrorOffsetPx, minHeight
+				banner: tailErrorRef.getBoundingClientRect(), errorOffset: tailErrorOffsetPx, minHeight,
+				following: shouldAutoScroll, floor: followedViewportEnd
 			})
 		};
 	}`)(scope) as {
@@ -177,11 +196,13 @@ function view(layout: Layout, anchored: boolean) {
 		frame(): Promise<void>;
 		resize(height: number): Promise<void>;
 		scroll(px: number): void;
+		drag(px: number): Promise<void>;
 		dismiss(): void;
 		start(id: string): void;
 		place(): Promise<void>;
 		read(): { padding: number; reserve: number; scrollTop: number; slotTop: number; bubblesTop: number; slotBottom: number;
-			replyEnd: number; banner: { top: number; bottom: number; height: number }; errorOffset: number; minHeight: number };
+			replyEnd: number; banner: { top: number; bottom: number; height: number }; errorOffset: number; minHeight: number;
+			following: boolean; floor: number };
 	};
 }
 
@@ -426,9 +447,10 @@ describe('queue handoff hold geometry', () => {
 				await v.frame(); await v.grow(0);
 				// Nothing the reader asked for: no clamp, and the banner stays where it was read.
 				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, errorOffset: lifted.errorOffset, padding: away.padding });
-				// Back at the bottom: the next pass gives the excess back with its reserve.
+				// Back at the bottom: the pass following again queues gives the excess
+				// back with its reserve (its own frame, no reply growth to force one).
 				v.scroll(48);
-				await v.grow(0);
+				await v.frame();
 				const followed = v.read();
 				expect(followed.errorOffset).toBeLessThan(lifted.errorOffset);
 				expect(followed.padding).toBe(bannerReserve(followed.errorOffset));
@@ -595,6 +617,35 @@ describe('queue handoff hold geometry', () => {
 				const followed = v.read();
 				expect(followed.padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
 				expect(followed.scrollTop).toBe(layout.proseEnd + followed.padding - layout.clientHeight);
+			});
+
+			// Scrollbar and keyboard scrolling reach only handleScroll, not the
+			// wheel/touch release: leaving the bottom there must drop the floor a
+			// followed boundary captured, or following again restores its blank.
+			it('gives back a dismissed banner\'s reserve after a scrollbar or keyboard round trip, whatever floor following captured (S24)', async () => {
+				const { layout, v } = await settledError(false, 60, [80]);
+				// Withdrawn while following: that boundary captures the banner-padded viewport end.
+				await withdraw(v, layout, []);
+				for (let i = 0; i < 3; i++) await v.frame();
+				const followed = v.read();
+				expect(followed.following).toBe(true);
+				expect(followed.floor).toBe(followed.scrollTop + layout.clientHeight);
+				expect(followed.floor - layout.proseEnd).toBeGreaterThan(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+				await v.drag(-100);
+				const away = v.read();
+				expect(away).toMatchObject({ following: false, scrollTop: followed.scrollTop - 100 });
+				v.dismiss();
+				await v.update(turn(4, 0));
+				for (let i = 0; i < 3; i++) await v.frame();
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd });
+				// Up a little more, then down to the physical bottom: following again re-measures.
+				await v.drag(-30);
+				await v.drag(layout.proseEnd);
+				for (let i = 0; i < 3; i++) await v.frame();
+				const back = v.read();
+				expect(back.following).toBe(true);
+				expect(back.padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+				expect(back.scrollTop).toBe(layout.proseEnd + back.padding - layout.clientHeight);
 			});
 
 			it('keeps the detached reserve through zero geometry, and drops it on a session switch (S18)', async () => {
