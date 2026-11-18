@@ -152,7 +152,10 @@ async def test_native_hot_swap_sends_the_policy_and_installs_no_edit_allows():
     await adapter.set_permission_mode("acceptEdits")
     assert adapter.permission_mode == "acceptEdits"
     assert perms.approval_policy == "on_write"
-    assert perms.rules == []
+    # Only fluid's credential-file asks (and their .env.example exceptions):
+    # no mode rule that allows an edit.
+    from fluid.config.loader import _sensitive_file_rules
+    assert perms.rules == _sensitive_file_rules()
     assert perms.evaluate(_write_spec("Edit"), {"file_path": "/x"}) == "ask"
 
     await adapter.set_permission_mode("bypassPermissions")

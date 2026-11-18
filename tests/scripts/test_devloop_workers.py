@@ -13,6 +13,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from app.preview_run import DEV_ACCESS_FILE
 from scripts.devloop import __main__ as devloop
 from scripts.devloop import guardian, seed, workers
 
@@ -263,7 +264,7 @@ def test_two_worker_lease_tears_everything_down_on_ttl_or_failure(tmp_path, monk
         index = 0 if "worker-a" in env["DATA_DIR"] else 1
         leases.append(kwargs)
         home = Path(env["DATA_DIR"]).parent
-        (home / "access.json").write_text(json.dumps({"url": "http://127.0.0.1/link",
+        (home / DEV_ACCESS_FILE).write_text(json.dumps({"url": "http://127.0.0.1/link",
                                                       "session_id": "access", "token": "test-token"}))
         (home / "seed.json").write_text(json.dumps({"ok": True, "seed": env["SHUFFLE_DEV_SEED"]}))
         kwargs["on_start"](SimpleNamespace(pid=999201 + index, poll=lambda: None))

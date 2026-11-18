@@ -426,8 +426,9 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
     from app.core import encryption, preview_access
     from app.core.config import settings
     from app.db import database
+    from app.preview_run import DEV_ACCESS_FILE
 
-    access = tmp_path / "access.json"
+    access = tmp_path / DEV_ACCESS_FILE
     env = preview_environment(tmp_path, 18880, 18881,
                               extra={"SHUFFLE_DEV_ACCESS_FILE": str(access)})
     for key, value in env.items():
@@ -455,6 +456,36 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
     out = capsys.readouterr().out
     assert "still valid" not in out and "open once in the agent browser" in out
     assert json.loads(access.read_text())["token"] != first["token"]
+
+
+def test_access_grant_is_saved_only_under_its_credential_name(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The saved grant holds a live token. Agents' file tools treat only
+    DEV_ACCESS_FILE's name as a credential file, so another name is refused."""
+    from fluid.tools.hardening import is_sensitive_path
+
+    from app.core import encryption, preview_access
+    from app.core.config import settings
+    from app.db import database
+    from app.preview_run import DEV_ACCESS_FILE
+
+    assert is_sensitive_path(str(tmp_path / DEV_ACCESS_FILE))
+    access = tmp_path / "access.json"
+    assert not is_sensitive_path(str(access))
+    env = preview_environment(tmp_path, 18880, 18881,
+                              extra={"SHUFFLE_DEV_ACCESS_FILE": str(access)})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(settings, "data_dir", Path(env["DATA_DIR"]))
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    monkeypatch.setattr(encryption, "_credential_status", {})
+    assert encryption.initialize_server_key(database)
+
+    initialize_preview_access()
+    assert not access.exists()
 
 
 @pytest.mark.parametrize("has_nofollow", [True, False])

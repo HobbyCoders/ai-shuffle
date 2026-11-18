@@ -261,12 +261,20 @@ _CREDENTIAL_PATHS = [
     "~/.azure/accesstokens.json", "~/.azure/msal_token_cache.json",
     "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gem/credentials",
     "~/.terraform.d/credentials.tfrc.json", "~/.pgpass",
+    # AWS SSO tokens and cached CLI credentials; Yarn Berry registry tokens.
+    "~/.aws/sso/cache/0a1b2c3d.json", "~/.aws/cli/cache/0a1b2c3d.json",
+    ".yarnrc.yml", "web/.yarnrc.yml",
+    # AI Shuffle: the retained database password, the event listener's
+    # connection handoff and the dev loop's saved preview grant.
+    "/data/postgres/password", "/tmp/event-listener-ab12cd/request",
+    "/tmp/devloop/preview-access.json",
     # Already covered before; kept so the list stays complete.
     "~/.aws/credentials", "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.git-credentials",
 ]
 _ORDINARY_PATHS = [
     "/proc/cpuinfo", "/proc/meminfo", "/proc/1/status", "/proc/self/cgroup",
     "docker-compose.yml", "k8s/config.yaml", "environment.md", "src/env.py",
+    "yarn.lock", "/tmp/build/request", "~/.aws/sso/notes.md",
 ]
 
 

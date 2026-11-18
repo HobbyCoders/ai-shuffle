@@ -75,6 +75,8 @@ The permission mode decides when the agent asks you before using a tool. Pick it
 | Accept Edits | File edits run without asking. Everything else asks, as in Ask |
 | Bypass | Nothing asks. Use with care |
 
+In Ask and Accept Edits, reading, searching or editing a file that holds a credential always asks first, even though reads and edits otherwise run straight away. That covers a project's `.env`, SSH keys, other tools' sign-ins such as `~/.docker/config.json`, `~/.kube/config` or `~/.aws/credentials`, and the app's own key files. A shell command that reads one asks too, and choosing **Always** on it allows that one call only.
+
 A session without a project offers the same modes, Accept Edits included, and they mean the same thing there. Attaching a project puts the session back on Ask.
 
 Subagents, Swarm tasks and chats an agent starts begin in the starting chat's current mode, so a chat in Bypass starts them in Bypass. Paid generation, spending limits and new private access still ask in every mode.

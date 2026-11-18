@@ -3233,16 +3233,38 @@ async def _answer_bash_bridge(loop: DelegatedLoop, command: str) -> dict:
 async def test_delegated_always_on_a_dangerous_command_is_not_echoed_to_the_cli() -> None:
     """``allow_always`` on ``git push --force`` allows that call only: fluid
     records no grant and the CLI's own "always" rule is not echoed back, so
-    neither side skips the prompt next time. A scoped grant still echoes."""
+    neither side skips the prompt next time."""
     loop = _builtin_loop()
     forced = await _answer_bash_bridge(loop, "git push --force origin main")
     assert forced["behavior"] == "allow"
     assert "updatedPermissions" not in forced
     assert not loop._session_allows("Bash", {"command": "git push --force origin main"})
 
-    commit = await _answer_bash_bridge(loop, "git commit -m x")
-    assert commit["updatedPermissions"]
-    assert loop._session_allows("Bash", {"command": "git commit -m y"})
+
+async def test_delegated_scoped_grant_keeps_a_later_forced_push_asking() -> None:
+    """A scoped Bash grant stays inside fluid: the CLI's broader suggestion
+    (``Bash(git:*)``) is not echoed, so a later ``git push --force`` still
+    reaches fluid's prompt instead of being allowed by the CLI's own rule."""
+    loop = _builtin_loop()
+    push = await _answer_bash_bridge(loop, "git push origin main")
+    assert push["behavior"] == "allow"
+    assert "updatedPermissions" not in push
+    assert loop._session_allows("Bash", {"command": "git push origin feature"})
+    assert not loop._session_allows("Bash", {"command": "git push --force origin main"})
+    # The forced push is asked about again (the helper waits for the prompt).
+    again = await _answer_bash_bridge(loop, "git push --force origin main")
+    assert "updatedPermissions" not in again
+
+
+async def test_delegated_relative_script_grant_is_one_shot() -> None:
+    """The CLI's shell keeps its own working directory, so ``python tool.py``
+    names no knowable script: "always" allows that call only."""
+    loop = _builtin_loop()
+    await _answer_bash_bridge(loop, "python tool.py")
+    assert not loop._session_allows("Bash", {"command": "python tool.py"})
+    await _answer_bash_bridge(loop, "python /repo/tool.py")
+    assert loop._session_allows("Bash", {"command": "python /repo/tool.py --flag"})
+    assert not loop._session_allows("Bash", {"command": "python /other/tool.py"})
 
 
 # ─── stream-json edge cases (delegated_proto) ────────────────────────────────

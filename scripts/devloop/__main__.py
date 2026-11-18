@@ -424,8 +424,9 @@ class Instance:
 
     def _announce(self, seconds: float) -> None:
         from app.core import preview_access
+        from app.preview_run import DEV_ACCESS_FILE
 
-        access = read_status(self.directory / "access.json") or {}
+        access = read_status(self.directory / DEV_ACCESS_FILE) or {}
         seed = read_status(self.directory / "seed.json")
         link = access.get("url")
         if link and self.vite_port:
@@ -581,7 +582,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
         return up_workers(args)
     from app.core.temp_scratch import scratch_directory
-    from app.preview_run import free_port, supervise
+    from app.preview_run import DEV_ACCESS_FILE, free_port, supervise
     from docker import container_runtime as runtime
     from docker.container_runtime import stop_group
     from scripts.devloop.fake_ai import DEV_MODELS, FakeAI
@@ -627,7 +628,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             extra = {"SHUFFLE_DEV_FAKE_AI_URL": fake.url,
                      "SHUFFLE_DEV_FAKE_VOICE_URL": fake_voice.url,
                      "SHUFFLE_DEV_VOICE_ENGINE": args.voice_engine,
-                     "SHUFFLE_DEV_ACCESS_FILE": str(directory / "access.json"),
+                     "SHUFFLE_DEV_ACCESS_FILE": str(directory / DEV_ACCESS_FILE),
                      "SHUFFLE_DEV_SEED_FILE": str(directory / "seed.json")}
             if args.seed != "none":
                 extra["SHUFFLE_DEV_SEED"] = args.seed

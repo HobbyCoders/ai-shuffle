@@ -38,6 +38,11 @@ DEV_ENV_KEYS = frozenset({
     "SHUFFLE_DEV_ACCESS_FILE", "SHUFFLE_DEV_FAKE_AI_URL", "SHUFFLE_DEV_FAKE_VOICE_URL",
     "SHUFFLE_DEV_SEED", "SHUFFLE_DEV_SEED_FILE", "SHUFFLE_DEV_UI", "SHUFFLE_DEV_VOICE_ENGINE",
 })
+#: The name of the dev loop's saved preview grant (``SHUFFLE_DEV_ACCESS_FILE``).
+#: It holds a live access token, so agents' file tools treat the name as a
+#: credential file (``fluid.tools.hardening.SENSITIVE_BASENAME_GLOBS``); a
+#: grant is only ever written under this name.
+DEV_ACCESS_FILE = "preview-access.json"
 
 
 def free_port(*, exclude: Iterable[int] = ()) -> int:
@@ -208,7 +213,9 @@ def initialize_preview_access() -> None:
         print("Branch preview access minted; the dev loop prints the link to open", flush=True)
     else:
         print(f"Branch preview access (open once in the agent browser): {url}", flush=True)
-    if access_file:
+    if access_file and Path(access_file).name != DEV_ACCESS_FILE:
+        logger.warning("SHUFFLE_DEV_ACCESS_FILE must be named %s; the grant is not saved", DEV_ACCESS_FILE)
+    elif access_file:
         _write_private_json(Path(access_file), {
             "session_id": session_id, "token": token, "url": url,
             "expires_at": int(time.time()) + ttl,

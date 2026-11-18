@@ -80,7 +80,7 @@ class WorkerStatus:
 def worker_environment(args: argparse.Namespace, directory: Path, index: int,
                        fake: Any, fake_voice: Any, *, used_ports: set[int]) -> tuple[dict, int | None]:
     """One private home/data/workspace and one explicit peer endpoint per worker."""
-    from app.preview_run import free_port
+    from app.preview_run import DEV_ACCESS_FILE, free_port
 
     def port(requested: int | None = None) -> int:
         value = requested or free_port(exclude=used_ports)
@@ -98,7 +98,7 @@ def worker_environment(args: argparse.Namespace, directory: Path, index: int,
     vite = None if args.no_vite else port(pinned(args.vite_port))
     extra = {"SHUFFLE_DEV_FAKE_AI_URL": fake.url, "SHUFFLE_DEV_FAKE_VOICE_URL": fake_voice.url,
              "SHUFFLE_DEV_VOICE_ENGINE": args.voice_engine,
-             "SHUFFLE_DEV_ACCESS_FILE": str(directory / "access.json"),
+             "SHUFFLE_DEV_ACCESS_FILE": str(directory / DEV_ACCESS_FILE),
              "SHUFFLE_DEV_SEED_FILE": str(directory / "seed.json"),
              "SHUFFLE_DEV_SEED": "default" if index == 0 else "empty"}
     if vite:

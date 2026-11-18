@@ -20,13 +20,13 @@ def wait(label, fn, timeout=120):
 
 class Worker:
     def __init__(self, name, directory, controller, stack):
-        from app.preview_run import preview_environment, free_port
+        from app.preview_run import DEV_ACCESS_FILE, preview_environment, free_port
         from docker import container_runtime as runtime
         import psycopg2, psycopg2.extras
         self.name,self.directory,self.controller=name,directory,controller
         directory.mkdir(mode=0o700)
         self.env=preview_environment(directory,free_port(),free_port(),host='127.0.0.1',browser_host='127.0.0.1',ttl_seconds=2400,
-            extra={'SHUFFLE_DEV_UI':'vite','SHUFFLE_DEV_ACCESS_FILE':str(directory/'access.json')})
+            extra={'SHUFFLE_DEV_UI':'vite','SHUFFLE_DEV_ACCESS_FILE':str(directory/DEV_ACCESS_FILE)})
         self.env['SHUFFLE_DESKTOP_LISTENER_TOKEN']=uuid.uuid4().hex+uuid.uuid4().hex
         self.env['CLUSTER_ADVERTISE_URL']='http://127.0.0.1:'+self.env['SHUFFLE_PROTECTED_PORT']
         class ThrowawayDatabase(runtime.Database):

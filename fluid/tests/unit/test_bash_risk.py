@@ -629,3 +629,183 @@ def test_describe_session_scope_names_the_grant() -> None:
         "for the session: git commit, npm test"
     )
     assert "this call only" in describe_session_scope({"command": "git push --force"})
+
+
+# ─── review round 1: sensitive reads, options before the verb, script paths ──
+
+
+def test_a_sensitive_read_is_never_covered_by_a_session_grant() -> None:
+    """S6: a ``cat`` grant (from ``cat README.md`` under a policy that asked)
+    must not silence a later ``cat`` of a credential file, and answering
+    "always" to a credential read offers no scope, which the native loop
+    applies to that call only."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+    from fluid.tools.builtins.bash_risk import describe_session_scope
+
+    engine = PermissionEngine("always_ask")
+    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": "cat README.md"}))
+    assert engine.decide(bash_spec, {"command": "cat NOTES.md"}).source == "session"
+    for secret in ("cat /proc/1/environ", "cat .env", "cat ~/.docker/config.json"):
+        assert bash_spec.scope_of({"command": secret}) is None, secret
+        assert engine.decide(bash_spec, {"command": secret}).decision == "ask", secret
+    assert describe_session_scope({"command": "cat .env"}) == (
+        "this call only (it reads a credential file, which always asks)"
+    )
+
+
+@pytest.mark.parametrize("granted, later", [
+    ("git commit -m x", "git commit --amend --no-edit"),
+    ("docker compose -p dev up", "docker compose -p dev down -v"),
+    ("docker compose -p dev up", "docker compose down --volumes"),
+    ("git push origin main", "git -c remote.origin.mirror=true push origin"),
+    ("git push origin main", "git push --force-if-includes --force-with-lease"),
+    ("docker ps", "docker rm -f web"),
+    ("podman ps", "podman rmi img"),
+])
+def test_options_before_the_verb_never_reuse_an_ordinary_grant(granted: str, later: str) -> None:
+    """S3: options before the verb are parsed; destructive forms and forms
+    that cannot be parsed confidently get no scope."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(later) is None, later
+    engine = PermissionEngine("on_write")
+    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": granted}))
+    assert engine.decide(bash_spec, {"command": granted}).source == "session"
+    assert engine.decide(bash_spec, {"command": later}).decision == "ask"
+
+
+@pytest.mark.parametrize("command, label", [
+    ("docker compose -p dev up -d", "docker compose up"),
+    ("docker --context prod ps", "docker ps"),
+    ("git -C repo --no-pager log", "git log"),
+    ("kubectl -n web get pods", "kubectl get"),
+])
+def test_known_options_before_the_verb_are_skipped(command: str, label: str) -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(command) == frozenset({label})
+
+
+@pytest.mark.parametrize("command", [
+    "git -c remote.origin.mirror=true push origin",  # config can change the verb's meaning
+    "git --frobnicate push",  # unknown option: which token is the verb?
+    "docker --unknown x ps",
+    "git --version",  # options only: no verb to scope
+])
+def test_unparseable_prefixes_get_no_scope(command: str) -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(command) is None
+
+
+def test_a_relative_script_grant_is_scoped_to_its_directory(tmp_path) -> None:
+    """S4: ``python tool.py`` granted in one directory does not cover the same
+    spelling in another (the native leg passes the call's cwd)."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    first, second = tmp_path / "a", tmp_path / "b"
+    call = {"command": "python tool.py --flag"}
+    engine = PermissionEngine("on_write")
+    assert engine.decide(bash_spec, call, cwd=str(first)).decision == "ask"
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(call))
+    assert engine.decide(bash_spec, call, cwd=str(first)).source == "session"
+    assert engine.decide(bash_spec, {"command": "python tool.py"}, cwd=str(first)).source == "session"
+    assert engine.decide(bash_spec, call, cwd=str(second)).decision == "ask"
+    # The call's own cwd field is where it runs.
+    moved = {"command": "python tool.py", "cwd": str(second)}
+    assert engine.decide(bash_spec, moved, cwd=str(first)).decision == "ask"
+
+
+def test_a_relative_script_answered_from_two_directories_stays_one_shot(tmp_path) -> None:
+    """Two pending asks with the same spelling but different directories: the
+    engine cannot tell which one the answer is for, so it grants nothing."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins.bash import SPEC as bash_spec
+
+    call = {"command": "python tool.py"}
+    engine = PermissionEngine("on_write")
+    engine.decide(bash_spec, call, cwd=str(tmp_path / "a"))
+    engine.decide(bash_spec, call, cwd=str(tmp_path / "b"))
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(call))
+    assert engine.decide(bash_spec, call, cwd=str(tmp_path / "a")).decision == "ask"
+    assert engine.decide(bash_spec, call, cwd=str(tmp_path / "b")).decision == "ask"
+
+
+def test_script_labels_resolve_against_the_cwd(tmp_path) -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    here = scope_labels("python tool.py", str(tmp_path / "a"))
+    there = scope_labels("python tool.py", str(tmp_path / "b"))
+    assert here and there and here != there
+    assert scope_labels("python ../a/tool.py", str(tmp_path / "b")) == here
+    assert scope_labels("python -m pytest", str(tmp_path / "a")) != scope_labels(
+        "python -m pytest", str(tmp_path / "b")
+    )
+
+
+@pytest.mark.parametrize("command, label", [
+    ("python -I tool.py", "python tool.py"),
+    ("python -IB tool.py", "python tool.py"),
+    ("python -X dev tool.py", "python tool.py"),
+    ("python -Wignore tool.py", "python tool.py"),
+    ("node --inspect build.js", "node build.js"),
+])
+def test_interpreter_flags_are_parsed(command: str, label: str) -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(command) == frozenset({label})
+
+
+@pytest.mark.parametrize("command", [
+    "deno eval 1", "deno eval 2", "deno repl", "python -Ic 1", "python -I -", "node -pe 1",
+    "python --frobnicate tool.py",  # unknown option: which token is the script?
+])
+def test_inline_and_unknown_interpreter_forms_are_never_scoped(command: str) -> None:
+    from fluid.tools.builtins.bash_risk import scope_labels
+
+    assert scope_labels(command) is None
+
+
+@pytest.mark.parametrize("command", [
+    "cat ~/.kube/./config",
+    "cat ~/.kube/../.kube/config",
+    "cat ~/.config/gcloud/*.db",
+    "grep -r pattern /proc/../proc",
+    "grep -r pattern /proc/./",
+    "cat ~/.aws/sso/cache/0a1b2c.json",
+    "cat ~/.aws/sso/cache/*",
+    "cat .yarnrc.yml",
+    "cat project/.yarnrc.yml",
+])
+def test_ordinary_spellings_of_a_credential_path_are_write(command: str) -> None:
+    """S5/S8: paths are normalised before matching; globs are matched against
+    the credential rules."""
+    assert classify({"command": command}) == "write", command
+
+
+def test_paths_are_normalised_against_the_calls_cwd(tmp_path) -> None:
+    import os
+
+    assert classify({"command": "grep -r pattern ."}, cwd="/proc") == "write"
+    assert classify({"command": "grep -r pattern .", "cwd": "/proc"}) == "write"
+    assert classify({"command": "cat 1/environ"}, cwd="/proc") == "write"
+    assert classify({"command": "cat config"}, cwd=os.path.expanduser("~/.kube")) == "write"
+    assert classify({"command": "grep -rn TODO src"}, cwd=str(tmp_path)) == "safe"
+
+
+def test_a_symlink_alias_of_a_credential_file_is_write(tmp_path) -> None:
+    secret = tmp_path / "proj" / ".env"
+    secret.parent.mkdir()
+    secret.write_text("TOKEN=x\n")
+    alias = tmp_path / "notes.txt"
+    try:
+        alias.symlink_to(secret)
+    except OSError:
+        pytest.skip("symlinks are not available here")
+    assert classify({"command": f"cat '{alias}'"}) == "write"
+    assert classify({"command": "cat notes.txt"}, cwd=str(tmp_path)) == "write"
+    assert classify({"command": "cat other.txt"}, cwd=str(tmp_path)) == "safe"

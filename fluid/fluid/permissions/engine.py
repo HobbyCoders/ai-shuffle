@@ -15,15 +15,61 @@ calls in a row force one ``ask`` checkpoint (then reset), breaking the
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from fluid.permissions.rules import Rule, match_rule
-from fluid.tools.registry import ToolSpec
+from fluid.tools.registry import _RISK_ORDER, ToolSpec
 
 _WRITE_RISKS = {"write", "destructive"}
+# Calls asked about whose scope differs once their working directory is known,
+# kept until the answer arrives (see PermissionEngine.allow_always).
+_PENDING_SCOPE_LIMIT = 256
+_UNSCOPED = object()
+
+
+def _takes_cwd(fn: Callable[..., Any]) -> bool:
+    try:
+        return "cwd" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def effective_risk(spec: ToolSpec, input: dict[str, Any], cwd: str | None = None) -> str:
+    """``spec.effective_risk``, raised (never lowered) by a classifier that
+    also reads the working directory (Bash: ``grep -r x .`` run in ``/proc``)."""
+    risk = spec.effective_risk(input)
+    hook = spec.classify_risk
+    if cwd is None or hook is None or not _takes_cwd(hook):
+        return risk
+    try:
+        seen = hook(input, cwd=cwd)
+    except Exception:  # noqa: BLE001 - a broken classifier must never lower the guard
+        return spec.risk
+    if seen not in _RISK_ORDER or _RISK_ORDER[seen] <= _RISK_ORDER.get(risk, 0):
+        return risk if seen in _RISK_ORDER else spec.risk
+    return seen if _RISK_ORDER[seen] <= _RISK_ORDER[spec.risk] else spec.risk
+
+
+def session_scope(
+    spec: ToolSpec, input: dict[str, Any], cwd: str | None = None,
+) -> frozenset[str] | None:
+    """The labels an ``allow_always`` for this call covers, resolved against
+    ``cwd`` when the tool's scope hook reads it (Bash: ``python tool.py`` is
+    the script in that directory). None = the tool cannot scope this call (or
+    has no scope hook: then a grant covers every call)."""
+    hook = spec.session_scope
+    if hook is None:
+        return None
+    if cwd is None or not _takes_cwd(hook):
+        return spec.scope_of(input)
+    try:
+        return hook(input, cwd=cwd)
+    except Exception:  # noqa: BLE001 - an unscopable call is a one-shot allow
+        return None
 
 
 def _input_hash(input: dict[str, Any]) -> str:
@@ -96,6 +142,9 @@ class PermissionEngine:
         # Session-scoped "allow always" responses (see allow_always()).
         # tool name → labels allowed (None = every call to the tool).
         self._always_allowed: dict[str, set[str] | None] = {}
+        # (tool, scope without a cwd) → scope where the call runs, for calls
+        # awaiting an answer: the host passes allow_always() the former.
+        self._pending_scopes: dict[tuple[str, frozenset[str]], Any] = {}
         # The rules the current permission mode installed (see set_mode_rules()),
         # kept by identity so a mode switch lifts exactly these and no
         # configured rule that happens to look the same.
@@ -128,15 +177,37 @@ class PermissionEngine:
         The policy axis keys off the call's *effective* risk — the tool's
         ``classify_risk`` hook when it has one (Bash reports read-only
         commands as safe), its static ``risk`` otherwise. ``cwd`` lets path
-        rules see the resolved spelling of a relative path.
+        rules see the resolved spelling of a relative path, and lets the
+        tool's hooks resolve paths and scripts the way the call will.
         """
-        risk = spec.effective_risk(input)
+        risk = effective_risk(spec, input, cwd)
         rule = match_rule(self.rules, spec.name, input, cwd=cwd)
         if rule is not None:
-            return Verdict(rule.decision, "rule", risk, rule)
-        if self._session_allows(spec, input):
+            verdict = Verdict(rule.decision, "rule", risk, rule)
+        elif self._session_allows(spec, input, cwd):
             return Verdict("allow", "session", risk)
-        return Verdict(self._policy_decision(risk), "policy", risk)
+        else:
+            verdict = Verdict(self._policy_decision(risk), "policy", risk)
+        if verdict.decision == "ask" and cwd is not None:
+            self._note_pending_scope(spec, input, cwd)
+        return verdict
+
+    def _note_pending_scope(self, spec: ToolSpec, input: dict[str, Any], cwd: str) -> None:
+        if spec.session_scope is None:
+            return
+        bare = spec.scope_of(input)
+        if bare is None:
+            return
+        resolved = session_scope(spec, input, cwd)
+        key = (spec.name, frozenset(bare))
+        value = _UNSCOPED if resolved is None else resolved
+        previous = self._pending_scopes.pop(key, value)
+        # Two asks that read alike but resolve apart (``python t.py`` with
+        # different ``cwd`` fields): the answer cannot say which was meant,
+        # so neither is recorded beyond its own call.
+        self._pending_scopes[key] = value if previous == value else _UNSCOPED
+        while len(self._pending_scopes) > _PENDING_SCOPE_LIMIT:
+            self._pending_scopes.pop(next(iter(self._pending_scopes)))
 
     def _policy_decision(self, risk: str) -> str:
         if self.approval_policy == "never_ask":
@@ -159,7 +230,19 @@ class PermissionEngine:
         later ``git commit`` calls but not ``git push`` or ``rm``. A later call
         is covered only when every label it carries was allowed, and a call the
         tool cannot label (Bash's dangerous forms such as ``git push --force``
-        or ``rm -rf``) is never covered. None covers every call."""
+        or ``rm -rf``, and reads of credential files) is never covered. None
+        covers every call.
+
+        Hosts compute ``scope`` from the input alone. When :meth:`decide`
+        asked about that call with a working directory, the scope recorded is
+        the one resolved there (``python /repo/tool.py``), and a call that
+        cannot be scoped where it runs records nothing (one-shot)."""
+        if scope is not None:
+            resolved = self._pending_scopes.pop((name, frozenset(scope)), None)
+            if resolved is _UNSCOPED:
+                return
+            if resolved is not None:
+                scope = resolved
         if scope is None:
             self._always_allowed[name] = None
             return
@@ -169,13 +252,15 @@ class PermissionEngine:
         current.update(scope)
         self._always_allowed[name] = current
 
-    def _session_allows(self, spec: ToolSpec, input: dict[str, Any]) -> bool:
+    def _session_allows(
+        self, spec: ToolSpec, input: dict[str, Any], cwd: str | None = None,
+    ) -> bool:
         if spec.name not in self._always_allowed:
             return False
         allowed = self._always_allowed[spec.name]
         if allowed is None:
             return True
-        scope = spec.scope_of(input)
+        scope = session_scope(spec, input, cwd)
         return scope is not None and scope <= allowed
 
     def note_execution(self, name: str, input: dict[str, Any]) -> bool:

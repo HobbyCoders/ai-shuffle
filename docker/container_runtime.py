@@ -55,6 +55,11 @@ STACK_DUMP_SETTLE = 1.0
 APP_USER = "ai_shuffle"
 APP_DB = "ai_shuffle"
 ADMIN = "shuffle_admin"
+# The app's database credentials: the connection descriptor in DATA_DIR and
+# the retained password under DATA_DIR/postgres. Agents' file tools treat both
+# names as credential files (``fluid.tools.hardening``).
+DESCRIPTOR_FILE = "managed-postgres.json"
+PASSWORD_FILE = "password"
 
 
 class StopFlag:
@@ -944,8 +949,8 @@ class Database:
         # PostgreSQL must reject a live PID or perform its own crash recovery.
         # Manually starting PostgreSQL outside our lock is unsupported.
         try:
-            check_owned(self.pg / "password")
-            self.password = (self.pg / "password").read_text()
+            check_owned(self.pg / PASSWORD_FILE)
+            self.password = (self.pg / PASSWORD_FILE).read_text()
         except (OSError, RuntimeFailure):
             raise RuntimeFailure("retained password missing or unsafe; credentials are never reset") from None
         if not re.fullmatch(r"[0-9a-f]{96}", self.password):
@@ -959,7 +964,7 @@ class Database:
         self.url = f"postgresql://{APP_USER}:{self.password}@127.0.0.1:{self.port}/{APP_DB}"
 
     def publish_descriptor(self):
-        path = self.root / "managed-postgres.json"
+        path = self.root / DESCRIPTOR_FILE
         if path.exists() or path.is_symlink():
             check_owned(path)
         write_private(path, json.dumps({"version": 1, "host": "127.0.0.1",
@@ -971,7 +976,7 @@ class Database:
             raise RuntimeFailure("managed PostgreSQL initdb major must be 16")
         write_private(self.pg / "initializing", "initialization in progress\n")
         self.password = secrets.token_hex(48)
-        write_private(self.pg / "password", self.password)
+        write_private(self.pg / PASSWORD_FILE, self.password)
         # initdb itself starts a temporary server: setting mmap only at start()
         # is too late on a full /dev/shm. Persist it in this disposable cluster.
         self.command(["initdb", "-D", str(self.data), "--username=" + ADMIN,
@@ -1059,7 +1064,7 @@ class Database:
             if self.process is not None:
                 if not self._stop_server():
                     raise RuntimeFailure("PostgreSQL fast shutdown deadline exceeded; operator inspection required")
-                for endpoint in (self.pg / "runtime.json", self.root / "managed-postgres.json"):
+                for endpoint in (self.pg / "runtime.json", self.root / DESCRIPTOR_FILE):
                     if endpoint.exists():
                         endpoint.unlink()
         finally:

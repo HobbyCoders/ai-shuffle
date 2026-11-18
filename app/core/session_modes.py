@@ -583,7 +583,9 @@ def turn_permission_mode(overrides: Optional[Mapping[str, Any]], session: Option
     return permission_mode_for_session_mode(mode, session.get("mode"))
 
 
-def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
+def mode_approves_without_prompt(
+    permission_mode: Any, tool_name: str, tool_input: Any = None,
+) -> bool:
     """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
 
     The rule for a call the runtime asked about: Ask (``default``, the retired
@@ -596,14 +598,30 @@ def mode_approves_without_prompt(permission_mode: Any, tool_name: str) -> bool:
     (``HarnessAdapter.receive_events`` / ``_answer_without_approver``) decide
     through this, so a run with nobody watching allows exactly what a watched
     one would.
+
+    Accept Edits never approves an edit of a credential file (``tool_input``
+    naming one; see ``fluid.tools.hardening.is_sensitive_path``): that asks
+    as it does in a fluid session, where the sensitive-file ask outranks the
+    mode's allow.
     """
     if permission_mode == "bypassPermissions":
         return True
     if permission_mode in (None, "", "default", "plan"):
         return False
     if permission_mode == "acceptEdits":
-        return tool_name in ACCEPT_EDITS_TOOLS
+        return tool_name in ACCEPT_EDITS_TOOLS and not _edits_credential_file(tool_input)
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
+
+
+def _edits_credential_file(tool_input: Any) -> bool:
+    from fluid.tools.hardening import is_sensitive_path
+
+    if not isinstance(tool_input, dict):
+        return False
+    return any(
+        isinstance(tool_input.get(key), str) and is_sensitive_path(tool_input[key])
+        for key in ("file_path", "notebook_path", "path")
+    )
 
 
 #: Claude Code ``decision_reason_type`` values that can carry one of its

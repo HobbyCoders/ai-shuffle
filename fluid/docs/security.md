@@ -76,26 +76,42 @@ model *reads* framing tokens even when they can't structurally escape.
   ask-before-touching rules cover credential files for `Read`/`Edit`/`Write`/
   `Grep`/`Glob`: `.env` and variants, SSH keys, `*.pem`/`*.p12`/`*.pfx`,
   `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, `.git-credentials`; other tools'
-  sign-ins (`~/.aws/credentials`, the GitHub CLI's `hosts.yml`, the Claude
-  CLI's `.credentials.json` in any config folder, `~/.codex/auth.json`,
-  `~/.gemini/oauth_creds.json`, `~/.docker/config.json`, `~/.kube/config`,
-  gcloud and Azure token files, Cargo, RubyGems and Terraform credentials);
-  Fluid's own Codex tokens (`~/.config/fluid/codex_auth.json`); the AI
-  Shuffle data folder's key files (`.credential-keys/`, `.managed-connection/`,
-  `claude-logins/`, `preview-access.key`, `managed-postgres.json`); and a
+  sign-ins (`~/.aws/credentials`, the AWS SSO and CLI token caches under
+  `~/.aws/sso/cache/` and `~/.aws/cli/cache/`, the GitHub CLI's `hosts.yml`,
+  the Claude CLI's `.credentials.json` in any config folder,
+  `~/.codex/auth.json`, `~/.gemini/oauth_creds.json`, `~/.docker/config.json`,
+  `~/.kube/config`, gcloud and Azure token files, Cargo, RubyGems and
+  Terraform credentials, Yarn's `.yarnrc.yml`); Fluid's own Codex tokens
+  (`~/.config/fluid/codex_auth.json`); the AI Shuffle data folder's key files
+  (`.credential-keys/`, `.managed-connection/`, `claude-logins/`,
+  `preview-access.key`, `managed-postgres.json`, `postgres/password`), its dev
+  loop's saved preview grant (`preview-access.json`) and the database event
+  listener's connection handoff (`<tmp>/event-listener-*/request`); and a
   process's environment or memory (`/proc/<pid>/environ`, including `self`
   and `thread-self`, and `/proc/<pid>/mem`). The list lives in
-  `fluid/tools/hardening.py`. They are prepended before user rules, so one
-  `[[permission.rules]]` allow overrides them; `.env.example`-style templates
-  are exempt. `permission.protect_sensitive_files = false` disables the set.
+  `fluid/tools/hardening.py`. A path is matched in every spelling the
+  file-tool rules check: as written, normalised (`~/.kube/./config`), made
+  absolute against the working directory, and with symlinks resolved. They
+  are prepended before user rules, so one `[[permission.rules]]` allow
+  overrides them; `.env.example`-style templates are exempt.
+  `permission.protect_sensitive_files = false` disables the set. The AI
+  Shuffle app installs the same asks in its own sessions (native and code
+  mode), ahead of its own rules; on the delegated Claude CLI leg the
+  PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/`Glob`
+  or Bash call that touches one, and no earlier "always" covers such a call.
+  Under Bypass nothing asks.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
   file — `cat .env` and `cat /proc/1/environ` do not sail under the
-  read-only fast path — and when a recursive search (`grep -r`, `rg`) starts
-  at `/`, `/proc` or a process directory, since it would read a process's
-  environment without naming it. This is a best-effort text check, not an
-  isolation boundary: a recursive search started from inside `/proc`, or a
-  path built at run time, is not seen.
+  read-only fast path — when a glob could expand to one (`cat ~/.config/gcloud/*.db`,
+  matched against the same rules and against what it expands to on disk),
+  and when a recursive search (`grep -r`, `rg`) starts at `/`, `/proc` or a
+  process directory, since it would read a process's environment without
+  naming it. Paths and search roots are resolved against the directory the
+  call runs in (`grep -r x .` from `/proc`, `/proc/../proc`). This is a
+  best-effort text check, not an isolation boundary: a path built while the
+  command runs (`cat $(echo ~/.kube)/config`, a variable, a script that opens
+  the file) is not seen.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,
@@ -118,12 +134,22 @@ model *reads* framing tokens even when they can't structurally escape.
 permission engine (policy + last-match-wins rules + scoped allow-always; an
 MCP tool's own `readOnlyHint` counts only for a server with
 `trust_annotations = true`, and a Bash allow-always covers the program plus
-its subcommand (`git commit`, `npm run build`, `gh pr view`), an interpreter
-plus its script (`python tool.py`), and what a wrapper such as `sudo` ran, not
-the wrapper or program alone; dangerous forms such as `git push --force`,
-`git reset --hard`, `git clean -f`, `git checkout -- .`, `git restore`,
-`rm -r`, `kubectl delete` or `npm publish`, and inline code such as
-`python -c`, are never covered and ask every time), the
+its subcommand (`git commit`, `npm run build`, `gh pr view`, with known
+options before the subcommand skipped: `git -C repo log`, `docker compose -p
+dev up`), an interpreter plus its script resolved against the directory the
+call runs in (`python /work/tool.py`, so the same spelling elsewhere asks
+again), and what a wrapper such as `sudo` ran, not the wrapper or program
+alone; dangerous forms such as `git push --force`, `git reset --hard`,
+`git clean -f`, `git checkout -- .`, `git restore`, `git commit --amend`,
+`rm -r`, `docker rm`, `docker compose down -v`, `kubectl delete` or
+`npm publish`, a command that reads a credential file, inline code such as
+`python -c` or `deno eval`, and any form whose subcommand cannot be found
+with confidence (an unknown option before it, `git -c key=value`) are never
+covered and ask every time; the prompt says "this call only" for them. On
+the delegated Claude CLI leg a grant stays in fluid (the CLI's own broader
+rule, such as `Bash(git:*)`, is not handed back), and a relative script is
+granted for that call only, since the CLI's shell keeps its own working
+directory), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

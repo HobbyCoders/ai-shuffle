@@ -425,3 +425,87 @@ async def test_the_child_server_hands_the_marker_to_the_cli() -> None:
     assert tools["Rare"]["_meta"] == {ALWAYS_LOAD_META_KEY: False}
     assert "_meta" not in tools["Core"]
     assert "ran" in str(called.content)
+
+
+# ─── Credential files ask on the delegated leg too ───────────────────────────
+
+
+async def _pre_tool_use_decision(loop: DelegatedLoop, tool: str, tool_input: dict) -> dict:
+    await loop._ensure_session()
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    await loop._answer_hook_request(HookCallbackRequest(
+        cli_request_id="cli_hook_c", callback_id="fluid_PreToolUse",
+        input={"hook_event_name": "PreToolUse", "tool_name": tool,
+               "tool_input": tool_input, "tool_use_id": "tc"},
+        tool_use_id="tc",
+    ))
+    (frame,) = written
+    return frame["response"]["response"].get("hookSpecificOutput") or {}
+
+
+@pytest.mark.parametrize("tool, tool_input", [
+    ("Read", {"file_path": ".env"}),
+    ("Read", {"file_path": "~/.docker/config.json"}),
+    ("Edit", {"file_path": "deploy/.env", "old_string": "a", "new_string": "b"}),
+    ("Write", {"file_path": "~/.aws/sso/cache/x.json", "content": "{}"}),
+    ("Grep", {"pattern": "TOKEN", "path": ".env"}),
+    ("Bash", {"command": "cat ~/.kube/config"}),
+    ("Bash", {"command": "grep -r PATH /proc/1/environ"}),
+])
+async def test_a_credential_call_asks_on_the_delegated_leg(tmp_path, tool, tool_input) -> None:
+    """The CLI reads its working directory freely; the PreToolUse hook turns a
+    credential call into an ask, which reaches fluid's permission bridge."""
+    loop = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)))
+    output = await _pre_tool_use_decision(loop, tool, tool_input)
+    assert output.get("permissionDecision") == "ask", (tool, tool_input, output)
+    assert output.get("permissionDecisionReason")
+
+
+@pytest.mark.parametrize("tool, tool_input", [
+    ("Read", {"file_path": "README.md"}),
+    ("Read", {"file_path": ".env.example"}),
+    ("Bash", {"command": "git status"}),
+])
+async def test_an_ordinary_call_gets_no_ask_on_the_delegated_leg(tmp_path, tool, tool_input) -> None:
+    loop = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)))
+    output = await _pre_tool_use_decision(loop, tool, tool_input)
+    assert output.get("permissionDecision") is None, output
+
+
+async def test_bypass_and_allow_rules_skip_the_credential_ask(tmp_path) -> None:
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.permissions.rules import Rule
+
+    bypass = DelegatedLoop(
+        store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)),
+        permission_mode="bypassPermissions",
+    )
+    assert (await _pre_tool_use_decision(bypass, "Read", {"file_path": ".env"})).get(
+        "permissionDecision"
+    ) is None
+    allowed = DelegatedLoop(
+        store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)),
+        permissions=PermissionEngine(
+            "on_write", rules=[Rule(tool="Read", decision="allow", input_globs={"file_path": "*.env"})],
+        ),
+    )
+    assert (await _pre_tool_use_decision(allowed, "Read", {"file_path": ".env"})).get(
+        "permissionDecision"
+    ) is None
+
+
+def test_an_earlier_always_never_covers_a_credential_call(tmp_path) -> None:
+    """A tool-wide "always" for Read does not answer the prompt a credential
+    Read raises, and "always" on that prompt records nothing."""
+    loop = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)))
+    assert loop._remember_allow("Read", {"file_path": "README.md"})
+    assert loop._session_allows("Read", {"file_path": "docs/guide.md"})
+    assert not loop._session_allows("Read", {"file_path": ".env"})
+    fresh = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)))
+    assert not fresh._remember_allow("Read", {"file_path": ".env"})
+    assert "Read" not in fresh._always_allowed

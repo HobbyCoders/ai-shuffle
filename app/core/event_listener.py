@@ -26,6 +26,12 @@ _HEADER_BYTES = 40  # Published sequence, heartbeats, Windows runtime PID/admiss
 _SIZE = _HEADER_BYTES + _SLOTS * _SLOT_BYTES
 _CHILD = Path(__file__).resolve()
 _HEARTBEAT_SECONDS = 10.0
+# The child's request (database credentials) lives at
+# <tmp>/<REQUEST_DIR_PREFIX>*/<REQUEST_FILE> while the listener runs; agents'
+# file tools treat that path as a credential file
+# (``fluid.tools.hardening.SENSITIVE_PATH_GLOBS``).
+REQUEST_DIR_PREFIX = "event-listener-"
+REQUEST_FILE = "request"
 
 
 def _number(memory, offset):
@@ -50,7 +56,7 @@ class NotificationListener:
         from app.db.backend_probe import _interpreter
         import psycopg2
 
-        self._directory = tempfile.TemporaryDirectory(prefix="event-listener-")
+        self._directory = tempfile.TemporaryDirectory(prefix=REQUEST_DIR_PREFIX)
         self._memory = None
         self._child = None
         self._jobs = []
@@ -59,7 +65,7 @@ class NotificationListener:
         self._started = time.monotonic()
         directory = Path(self._directory.name)
         try:
-            request = directory / "request"
+            request = directory / REQUEST_FILE
             with request.open("x", encoding="utf-8") as stream:
                 os.chmod(request, 0o600)
                 json.dump({"path": [str(Path(psycopg2.__file__).parents[1])],

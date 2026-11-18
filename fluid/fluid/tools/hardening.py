@@ -147,9 +147,12 @@ SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
     "id_rsa", "id_rsa.*", "id_ed25519", "id_ed25519.*", "id_ecdsa", "id_ecdsa.*",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
     ".pgpass",
-    # AI Shuffle's managed-Postgres descriptor (host, port, password) and the
-    # key that signs its preview-access links.
-    "managed-postgres.json", "preview-access.key",
+    # Yarn Berry's config, which holds registry tokens (npmAuthToken).
+    ".yarnrc.yml",
+    # AI Shuffle's managed-Postgres descriptor (host, port, password), the key
+    # that signs its preview-access links (preview-access.key) and the dev
+    # loop's saved preview grant (preview-access.json).
+    "managed-postgres.json", "preview-access.*",
     # The Claude CLI's OAuth tokens, in any config folder (CLAUDE_CONFIG_DIR).
     ".credentials.json",
     # A process's environment (/proc/<pid>/environ, also reached as
@@ -172,11 +175,19 @@ SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
     "/.azure/accesstokens.json", "/.azure/msal_token_cache.json",
     "/.cargo/credentials", "/.cargo/credentials.toml", "/.gem/credentials",
     "/.terraform.d/credentials.tfrc.json",
+    # AI Shuffle's retained database password (DATA_DIR/postgres/password).
+    "/postgres/password",
 )
-# Full-path globs (fnmatch, ``*`` crosses ``/``) for files that expose another
-# process's memory, and with it the environment ``environ`` would show.
+# Full-path globs (fnmatch, ``*`` crosses ``/``): files that expose another
+# process's memory, and with it the environment ``environ`` would show, and
+# token caches whose file names vary.
 SENSITIVE_PATH_GLOBS: tuple[str, ...] = (
     "/proc/*/mem",
+    # The AWS CLI's SSO access tokens and its cached temporary credentials.
+    "/.aws/sso/cache/*", "/.aws/cli/cache/*",
+    # AI Shuffle's database event listener hands its child the connection
+    # credentials in this temporary file.
+    "/event-listener-*/request",
 )
 # Directories whose every file is a secret: AI Shuffle's credential wrapping
 # keys and device identity (.credential-keys), its installation key

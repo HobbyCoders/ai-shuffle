@@ -3241,6 +3241,7 @@ class HarnessAdapter(ProviderAdapter):
                     and mode_approves_without_prompt(
                         self.permission_mode,
                         self._permission_tool_name(translated.name),
+                        translated.input,
                     )
                 ):
                     # Native leg, no approver: the modes that approve on their
@@ -3981,7 +3982,7 @@ class HarnessAdapter(ProviderAdapter):
                     allow = True
         if allow is None:
             allow = mode_approves_without_prompt(
-                self.permission_mode, self._permission_tool_name(ev.name),
+                self.permission_mode, self._permission_tool_name(ev.name), ev.input,
             )
             if not allow:
                 message = _NO_APPROVER_DENIAL
@@ -6171,14 +6172,15 @@ class HarnessAdapter(ProviderAdapter):
         """
         mode = options.permission_mode or "default"
         policy = _PERMISSION_POLICY.get(mode, "on_write")
+        rules = _native_permission_rules(options)
         scope = _assistant_scope(options)
         if scope is not None:
             return _AssistantPermissionEngine(
-                scope, approval_policy=policy, rules=_chat_mode_rules(options),
+                scope, approval_policy=policy, rules=rules,
                 doom_loop_threshold_for=_screen_tool_repeat_threshold,
             )
         return PermissionEngine(
-            approval_policy=policy, rules=_chat_mode_rules(options),
+            approval_policy=policy, rules=rules,
             doom_loop_threshold_for=_screen_tool_repeat_threshold,
         )
 
@@ -7148,6 +7150,24 @@ class _AssistantPermissionEngine(PermissionEngine):
         if needs_owner(spec.name, input, self.assistant_scope, spec_risk=verdict.risk, permission_mode=mode):
             return Verdict("ask", "policy", verdict.risk, verdict.rule)
         return verdict
+
+
+def _native_permission_rules(options: SessionOptions) -> list:
+    """The native leg's rules: fluid's sensitive-file asks, then the chat lane's.
+
+    The asks are the ones a standalone fluid session installs
+    (``fluid.config.loader._sensitive_file_rules``): a Read, Grep, Glob, Edit
+    or Write naming a credential file (``.env``, ``~/.docker/config.json``,
+    the app's own key files) asks even though reads are otherwise silent. They
+    go first, so every later rule keeps its precedence (last match wins).
+    They stay installed in every mode, since the mode can change mid-session
+    without rebuilding the engine: under Bypass the app's approver allows the
+    ask on its own (``mode_approves_without_prompt``), so nothing prompts.
+    """
+    chat = _chat_mode_rules(options)
+    from fluid.config.loader import _sensitive_file_rules
+
+    return [*_sensitive_file_rules(), *(chat or [])]
 
 
 def _chat_mode_rules(options: SessionOptions) -> Optional[list]:

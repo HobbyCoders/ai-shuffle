@@ -1105,7 +1105,9 @@ class PermissionHandler:
                 state.callback_refs.get("permission_mode"),
                 delegated=getattr(state.adapter, "_is_delegated", False),
             )
-            if not mode_approves_without_prompt(mode, payload.get("tool_name", "")):
+            if not mode_approves_without_prompt(
+                mode, payload.get("tool_name", ""), payload.get("tool_input"),
+            ):
                 continue
             if payload.get("safety_check"):
                 # A safety check only a person may pass is never released by

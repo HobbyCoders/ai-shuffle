@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.preview_run import DEV_ACCESS_FILE
 from scripts.devloop import __main__ as devloop
 from scripts.devloop import seed as seed_module
 
@@ -53,7 +54,7 @@ def test_link_and_seed_are_announced_when_the_first_start_crashed(tmp_path, monk
     current: list[_Process] = []
     monkeypatch.setattr(devloop, "answers_http",
                         lambda *a, **k: bool(current) and current[-1].pid in healthy)
-    (tmp_path / "access.json").write_text(json.dumps({"url": "http://10.0.0.30:18880/link"}))
+    (tmp_path / DEV_ACCESS_FILE).write_text(json.dumps({"url": "http://10.0.0.30:18880/link"}))
     (tmp_path / "seed.json").write_text(json.dumps({"ok": True, "seed": "default"}))
     restart = threading.Event()
     gate = devloop.RestartGate(restart)
@@ -457,7 +458,7 @@ def _ci_instance(tmp_path, seed):
     instance = _instance(tmp_path)
     instance.args.ci, instance.args.seed = True, "default"
     instance.stopped = threading.Event()
-    (tmp_path / "access.json").write_text(json.dumps({"url": "http://127.0.0.1:18880/link"}))
+    (tmp_path / DEV_ACCESS_FILE).write_text(json.dumps({"url": "http://127.0.0.1:18880/link"}))
     if seed is not None:
         (tmp_path / "seed.json").write_text(json.dumps(seed))
     return instance
