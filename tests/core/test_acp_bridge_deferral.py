@@ -24,6 +24,7 @@ from app.core.provider.fluid_tool_bridge import ACP_LOADED_TOOLS, BRIDGE_DEFER_E
 from app.core.provider.types import SessionOptions
 from tests.core.test_antigravity_provider import _create, client, fake_agy  # noqa: F401
 from tests.core.test_delegated_bridge_tiers import _isolated, _servers  # noqa: F401
+from tests.core.test_delegated_leg import SEARCH_SURFACES, assert_search_guidance_matches
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE_MCP = str(ROOT / "fluid" / "tests" / "fixtures" / "fake_mcp_server.py")
@@ -572,3 +573,29 @@ def test_only_a_tool_the_acp_bridge_serves_passes_by_its_bare_name(tmp_path):
     chat.tool_allowlist.append("Read")
     chat_policy = ha._delegated_tool_policy(chat, None, [], bridged=lambda tool: False)
     assert "not enabled" in chat_policy(read, {}, unmapped_kind=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defer", [True, False])
+@pytest.mark.parametrize("surface", SEARCH_SURFACES)
+async def test_search_guidance_names_only_what_the_acp_bridge_serves(
+        tmp_path, client, monkeypatch, surface, defer):  # noqa: F811
+    """The Antigravity leg registers the bundled Glob and Grep on every OS, and
+    its bridge filter applies the CLI-shaped deny list, so a surface ticking
+    ``mcp__fluid_bundled__Glob`` gets no search tool and one ticking ``Glob``
+    gets Glob alone. The append must not promise more."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    adapter = await _connected(tmp_path, client, monkeypatch, defer=defer,
+                               tool_allowlist=list(surface))
+    engine = adapter._engine
+    try:
+        listed = set(engine.bridged_tools()) | set(engine.deferred_tools() or ())
+        served = {tool for tool in ("Glob", "Grep") if tool in listed}
+        assert served == ({"Glob"} if "Glob" in surface else set())
+        assert_search_guidance_matches(engine.system_append, served)
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+        cli_tool_surface.reset_cli_tools()

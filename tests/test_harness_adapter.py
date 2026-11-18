@@ -2224,7 +2224,7 @@ async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_l
 # ─── Delegated tool-use guidance (Bash-first behaviour, session 42595afe) ────
 
 
-def test_delegated_code_session_carries_the_tool_use_block():
+def test_delegated_code_session_carries_the_tool_use_block(cli_ships_search):
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
         _delegated_tool_blocks,
@@ -2232,15 +2232,16 @@ def test_delegated_code_session_carries_the_tool_use_block():
 
     unrestricted = SessionOptions(model="opus")
     assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(unrestricted, None))
-    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
+    picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep", "Glob"])
     assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(picked, None))
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK
 
 
-def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
+def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob(cli_ships_search):
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
         DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
+        DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH,
         _delegated_tool_blocks,
     )
 
@@ -2252,11 +2253,20 @@ def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
     assert DELEGATED_TOOL_USE_BLOCK_NO_SEARCH in blocks
     assert "grep" not in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
-    globbed = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Glob"])
-    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(globbed, None))
+    # One search tool: the rule names it alone and leaves the other kind of
+    # search to Bash (the CLI's deny list walls the unticked one).
+    for tool, shell, kept in (("Glob", "find", "grep"), ("Grep", "grep", "find")):
+        one = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", tool])
+        blocks = "\n\n".join(_delegated_tool_blocks(one, None))
+        rule = DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH[tool]
+        assert rule in blocks and DELEGATED_TOOL_USE_BLOCK not in blocks
+        dedicated, _, rest = rule.partition("Keep Bash")
+        assert tool in dedicated and ({"Glob", "Grep"} - {tool}).pop() not in rule
+        assert f" {shell}," in rest and f" {kept}," not in rest
+        assert "While bypass permissions mode is active" in rule
 
 
-def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
+def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools(cli_ships_search):
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
         _delegated_tool_blocks,
@@ -2271,7 +2281,7 @@ def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
     # Without Edit the block would forbid the only permitted way to edit.
     read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
     assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(read_only, None))
-    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
+    shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep", "Glob"])
     assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(shell_and_files, None))
     blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
     assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(blocked, None))
@@ -2284,8 +2294,14 @@ async def test_delegated_append_with_the_tool_use_block_is_byte_identical(cli_sh
         _delegated_append_text,
     )
 
+    import app.core.provider.harness_adapter as ha
+
     options = SessionOptions(model="opus")
-    registry = await HarnessAdapter()._build_registry(options, native=False)
+    # The append is the Antigravity leg's: its registry carries the bundled
+    # Glob and Grep on every OS (agy has no search tools of those names).
+    adapter = HarnessAdapter()
+    adapter._provider_kind = ha._ANTIGRAVITY_KIND
+    registry = await adapter._build_registry(options, native=False)
     first = _delegated_append_text("APPEND", options, registry)
     second = _delegated_append_text("APPEND", options, registry)
     assert first == second

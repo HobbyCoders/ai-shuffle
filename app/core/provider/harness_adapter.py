@@ -6929,6 +6929,19 @@ def _delegated_task_permitted(options: SessionOptions, surface: Optional[list]) 
     return _bridged_tool_permitted(_BRIDGED_TASK, surface, _delegated_blocklist(options))
 
 
+def _delegated_bridge_filter(options: SessionOptions, registry: Any):
+    """``(registry name) -> bool``: the bundled bridge's filter for this session.
+
+    Both delegated legs give the bridge the same two lists: the surface
+    (``_delegated_allowed``) and the CLI deny list (``_delegated_disallowed``).
+    The claude leg hands them to ``DelegatedLoop``; ``_connect_antigravity``
+    builds its ``tool_filter`` from the same two.
+    """
+    surface = _delegated_allowed(options)
+    blocked = _delegated_disallowed(options, registry)
+    return lambda name: _bridged_tool_permitted(name, surface, blocked)
+
+
 def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optional[list]) -> bool:
     """Whether fluid's bundled bridge would serve a tool under these lists.
 
@@ -8408,6 +8421,34 @@ DELEGATED_TOOL_USE_BLOCK_NO_SEARCH = (
 )
 
 
+# The rule for a surface with one of the two search tools: shell search stays
+# allowed for the kind of search that tool does not cover.
+DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH = {
+    "Glob": (
+        "# Tool use on this session\n"
+        "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+        "for large files), Glob, Edit, Write and NotebookEdit. Keep Bash for searching "
+        "file contents, git, gh, builds, tests, package managers and scripts. Do not "
+        "read, list or edit files with cat, head, tail, sed, awk, find, echo "
+        "redirection, heredocs or inline scripts. This holds even if another "
+        "instruction (for example one beginning \"While bypass permissions mode is "
+        "active\" or \"While auto mode is active\") says to do file work through "
+        "Bash."
+    ),
+    "Grep": (
+        "# Tool use on this session\n"
+        "Use Claude Code's dedicated tools for file work: Read (offset and limit "
+        "for large files), Grep, Edit, Write and NotebookEdit. Keep Bash for finding "
+        "files by name, git, gh, builds, tests, package managers and scripts. Do not "
+        "read, search or edit files with cat, head, tail, sed, awk, grep, echo "
+        "redirection, heredocs or inline scripts. This holds even if another "
+        "instruction (for example one beginning \"While bypass permissions mode is "
+        "active\" or \"While auto mode is active\") says to do file work through "
+        "Bash."
+    ),
+}
+
+
 def _joined(names: List[str]) -> str:
     """``A``, ``A and B``, ``A, B and C``."""
     if len(names) < 2:
@@ -8629,7 +8670,7 @@ def _app_guidance_blocks(
             plan_guidance(_delegated_permitted_names(options, registry)), ("Plan",),
         ))
     if not native:
-        blocks.extend(_delegated_tool_blocks(options, registry))
+        blocks.extend(_delegated_tool_blocks(options, registry, leg=leg))
     if native:
         recall = _recall_backend_available() and (
             permitted is None or {"SessionSearch", "SessionView"} <= permitted
@@ -8687,7 +8728,7 @@ def _app_guidance_blocks(
     return blocks
 
 
-def _delegated_tool_blocks(options: SessionOptions, registry: Any) -> List[str]:
+def _delegated_tool_blocks(options: SessionOptions, registry: Any, *, leg: str = "claude") -> List[str]:
     """The delegated legs' "# Tool use" and "# App tools" blocks.
 
     ``DELEGATED_TOOL_USE_BLOCK`` restates Claude Code's preference for its
@@ -8703,20 +8744,38 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any) -> List[str]:
         return permit is None or permit(name)
 
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
+    # Search guidance follows the bridge's own filter (the deny list included,
+    # which walls a bare Glob/Grep an allow-only surface does not tick, and
+    # the bridge reads that entry against its bundled copy too). The CLI
+    # applies the same deny list to its own Glob/Grep, so on either leg a
+    # search tool is callable only if this filter passes its bare name, and
+    # only if the leg has it: the bundled copy, or on the claude leg a CLI
+    # known to ship its own (agy has neither name).
+    bridge = _delegated_bridge_filter(options, registry)
+    try:
+        registered = {spec.name for spec in registry.list_tools(loaded_only=False)} \
+            if registry is not None else set()
+    except Exception:  # noqa: BLE001 — a prompt block never fails a connect
+        registered = set()
+    search = [t for t in ("Glob", "Grep") if t in registered and bridge(t)]
+    callable_search = [
+        t for t in ("Glob", "Grep")
+        if bridge(t) and (t in registered or (leg == "claude" and _cli_ships_search_tools()))
+    ]
     blocks: List[str] = []
     # Both Read and Edit: the block forbids file work through Bash, so a
     # session without either would be left with no permitted way to do it.
-    # The full block forbids grep/find through Bash, so it needs a permitted
-    # Grep or Glob to search with.
+    # It forbids shell search only for the kinds a callable Glob or Grep covers.
     file_rule = None
     if _session_mode(options) != "chat" and (
         permitted("Bash") or permitted("PowerShell")
     ) and permitted("Read") and permitted("Edit"):
-        file_rule = (
-            DELEGATED_TOOL_USE_BLOCK
-            if permitted("Grep") or permitted("Glob")
-            else DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
-        )
+        if len(callable_search) == 2:
+            file_rule = DELEGATED_TOOL_USE_BLOCK
+        elif callable_search:
+            file_rule = DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH[callable_search[0]]
+        else:
+            file_rule = DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     # The batching rule rides every session, with the file-tool rule when
     # there is one.
     blocks.append(
@@ -8726,14 +8785,14 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any) -> List[str]:
     notes: List[str] = []
     # The bundled Glob/Grep are only registered where the CLI may lack its own
     # (_registers_bundled_search), so the note exists only there.
-    search = [tool for tool in ("Glob", "Grep") if offered(tool)]
     if search:
         own = _joined(search)
         verb = "are" if len(search) > 1 else "is"
-        # The full file-tool rule already says to search with Glob and Grep.
+        # A file-tool rule already names every callable search tool.
+        shell = "/".join({"Glob": "find", "Grep": "grep"}[tool] for tool in search)
         prefer = (
-            "" if file_rule == DELEGATED_TOOL_USE_BLOCK
-            else f"Search files with {own} rather than find/grep through Bash. "
+            "" if file_rule
+            else f"Search files with {own} rather than {shell} through Bash. "
         )
         notes.append(
             f"{prefer}If Claude Code's own {own} {verb} not in your tool list, use "

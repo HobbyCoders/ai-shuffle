@@ -161,7 +161,9 @@ def test_delegated_prompt_drops_guidance_for_tools_off_the_surface(tmp_path):
     assert blocks == [STEERING, ha.SAFETY_BLOCK, ha.CONTEXT_BLOCK_NO_RECALL, batching]
 
 
-def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path):
+def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path, monkeypatch):
+    # A CLI known to carry its own Glob and Grep, which this surface leaves on.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
     options = _preset_options(tmp_path)
     blocks = ha._delegated_tool_blocks(options, _memory_registry())
     assert blocks[0] == f"{ha.DELEGATED_TOOL_USE_BLOCK}\n{ha.DELEGATED_BATCHING_RULE}"
@@ -890,3 +892,66 @@ def test_a_pinned_window_mismatch_is_shown_on_the_session():
     assert adapter._translate(diagnostic(
         "compaction_restoration", complete=False, sections=[],
     )) == []
+
+
+# ─── Search guidance follows what the leg can actually call ─────────────────
+
+# Allow-only surfaces with Bash, Read and Edit (so the file-tool rule is
+# written) and one search tool, under the bundled spelling or the bare one.
+SEARCH_SURFACES = [
+    ["Bash", "Read", "Edit", "mcp__fluid_bundled__Glob"],
+    ["Bash", "Read", "Edit", "Glob"],
+]
+
+
+def assert_search_guidance_matches(prompt: str, served: set) -> None:
+    """The "# Tool use" rule names exactly the search tools ``served`` holds,
+    forbids shell search only where one of them covers it, and the prompt
+    names no bundled search tool the bridge withholds."""
+    import re
+
+    rule = prompt.split("# Tool use on this session\n", 1)[1].split("\n# ", 1)[0]
+    dedicated, _, rest = rule.partition("Keep Bash")
+    named = {tool for tool in ("Glob", "Grep") if re.search(rf"\b{tool}\b", dedicated)}
+    assert named == served, rule
+    forbidden = rest.split("Do not", 1)[1].split("This holds", 1)[0]
+    assert bool(re.search(r"\bfind\b", forbidden)) == ("Glob" in served), rule
+    assert bool(re.search(r"\bgrep\b", forbidden)) == ("Grep" in served), rule
+    for tool in {"Glob", "Grep"} - served:
+        assert f"mcp__fluid_bundled__{tool}" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", SEARCH_SURFACES)
+async def test_search_guidance_names_only_what_the_claude_leg_can_call(
+    monkeypatch, tmp_path, surface,
+):
+    """The CLI's deny list walls the bare names an allow-only surface does not
+    tick, and the bridge reads that list against its own Glob and Grep, so
+    ticking ``mcp__fluid_bundled__Glob`` serves no search tool at all and
+    ticking ``Glob`` serves Glob alone. The prompt says the same."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    # A CLI that may lack its own search: the bundled copies register.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: False)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    options = SessionOptions(
+        model="fable", system_prompt="CUSTOM AGENT PROMPT", cwd=str(tmp_path),
+        tool_allowlist=list(surface), extra={"session_mode": "code"},
+    )
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        engine = adapter.engine
+        assert {"Glob", "Grep"} <= {s.name for s in engine.registry.list_tools(loaded_only=False)}
+        served = {tool for tool in ("Glob", "Grep") if engine._bridge_tool_permitted(tool)}
+        # Neither the CLI's own copy nor the bundled one is callable unless
+        # its bare name is ticked: the deny list walls both.
+        cli_denied = {tool for tool in ("Glob", "Grep") if tool in engine.disallowed_tools}
+        assert served == {"Glob", "Grep"} - cli_denied
+        assert served == ({"Glob"} if "Glob" in surface else set())
+        assert_search_guidance_matches(engine.system, served)
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
