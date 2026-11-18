@@ -119,7 +119,10 @@
 	}
 	$effect(() => {
 		const state = page.state as ShellState;
-		untrack(() => { if (shellHistory.land(state)) showEntry(); });
+		// Show it after this effect run, as a click would: a view torn down by a
+		// change made inside an effect run reads its props' new values in its
+		// teardown (Forward from a chat to Notes: ChatAccess read a null chat).
+		untrack(() => { if (shellHistory.land(state)) queueMicrotask(showEntry); });
 	});
 	// A fresh load's landing names the chat this tab shows (loading or not):
 	// its own restored chat may not be the one in the layout snapshot other
