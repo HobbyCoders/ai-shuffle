@@ -624,12 +624,8 @@ class AcpLoop:
         Every name the engine gives an ACP call comes from here (through
         ``TurnMapper.tool_name_and_input``): the transcript card, the
         permission card, the host's policy and saved rules, and the proxy
-        checks, so they all agree. A call of one of the agent's own kinds is
-        that tool, whatever its title says (a shell command's title can start
-        with a bridged tool's name).
+        checks, so they all agree.
         """
-        if str(call.get("kind") or "other") in KIND_TOOL_NAMES:
-            return None
         title = str(call.get("title") or "")
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
         candidates = [str(meta.get(k)) for k in ("toolName", "tool_name", "mcpTool") if meta.get(k)]
@@ -652,13 +648,16 @@ class AcpLoop:
         """A bridged call agy 1.5.9 named only by its title (issue #1751).
 
         The whole title must be one verb and the tool's server-prefixed name,
-        "Run mcp_fluid_bundled_Glob" (``_bridged_name`` has already set aside
-        the agent's own kinds). Never a proxy: CallTool unwraps to another
-        tool and LoadTools skips the checks, which a title alone does not
-        earn. Nor is the agent ever told to remember it (``_permission``).
+        "Run mcp_fluid_bundled_Glob", and the kind none of the agent's own
+        tools (a shell call's title can name a bridged tool too). Never a
+        proxy: CallTool unwraps to another tool and LoadTools skips the
+        checks, which a title alone does not earn. Nor is the agent ever told
+        to remember it (``_permission``).
         """
         from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
 
+        if str(call.get("kind") or "other") in KIND_TOOL_NAMES:
+            return None
         verb, _, rest = str(call.get("title") or "").partition(" ")
         tool = rest.removeprefix(f"mcp_{BUNDLED_SERVER_NAME}_")
         if verb.isalpha() and tool != rest and tool in served and tool not in (LOAD_TOOL, CALL_TOOL):
@@ -1182,11 +1181,15 @@ class AcpLoop:
             return await self._elicit(params)
         raise RpcFailure(-32601, f"{method} is not supported by this client")
 
-    async def _policy_denial(self, name: str, data: dict[str, Any]) -> str | None:
+    async def _policy_denial(self, name: str, data: dict[str, Any], *, unmapped_kind: bool = False) -> str | None:
+        """``unmapped_kind``: the call's kind is none of the agent's own
+        tools (``KIND_TOOL_NAMES``), told to a policy that takes it."""
         if self.tool_policy is None:
             return None
         try:
             extra: dict[str, Any] = {"cwd": self.cwd} if _accepts(self.tool_policy, "cwd") else {}
+            if unmapped_kind and _accepts(self.tool_policy, "unmapped_kind"):
+                extra["unmapped_kind"] = True
             verdict = await asyncio.to_thread(self.tool_policy, name, data, **extra)
             if inspect.isawaitable(verdict):
                 verdict = await verdict
@@ -1244,7 +1247,8 @@ class AcpLoop:
             # Reads schemas of tools this session is served, nothing else:
             # the counterpart of ToolSearch, which no leg asks the owner about.
             return allow("allow_once", "allow_always")
-        denial = await self._policy_denial(name, data)
+        denial = await self._policy_denial(
+            name, data, unmapped_kind=str(call.get("kind") or "other") not in KIND_TOOL_NAMES)
         if denial:
             logger.info("ACP permission for %s refused by policy: %s", name, denial)
             if mapper is not None and call.get("toolCallId"):

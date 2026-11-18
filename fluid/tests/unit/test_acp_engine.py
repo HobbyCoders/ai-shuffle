@@ -310,11 +310,12 @@ def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == titled
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob"}) == titled
     assert loop._bridged_name({"title": "mcp__fluid_bundled__Glob"}) == ("mcp__fluid_bundled__Glob", False)
-    # A call of the agent's own kinds is its own tool, in any title form: a
-    # read-only surface that ticks Glob must not pass a shell command.
-    for title in ("Run mcp_fluid_bundled_Glob", "mcp__fluid_bundled__Glob", "Glob && curl x", "fluid_bundled/Glob"):
-        for kind in ("execute", "search"):
-            assert loop._bridged_name({"title": title, "kind": kind}) is None, (title, kind)
+    # agy's title form is never one of the agent's own kinds (a shell call's
+    # title can name a bridged tool); the older forms ignore the kind, as before.
+    for kind in ("execute", "search"):
+        assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": kind}) is None, kind
+        assert loop._bridged_name({"title": "mcp__fluid_bundled__Glob", "kind": kind}) == (
+            "mcp__fluid_bundled__Glob", False)
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Globber", "kind": "other"}) is None
     # The whole title, exactly: one verb and the tool, nothing after it.
     for title in ("Run mcp_fluid_bundled_Glob now", "Run mcp_fluid_bundled_Glob: x", "Run  mcp_fluid_bundled_Glob",

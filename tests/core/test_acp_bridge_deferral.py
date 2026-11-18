@@ -209,7 +209,21 @@ async def test_a_read_only_profile_runs_the_bundled_glob_agy_asks_for(
     engine = adapter._engine
     try:
         assert "Glob" in engine.bridged_tools()
-        assert await engine._policy_denial("mcp__fluid_bundled__Glob", {"pattern": "*.txt"}) is None
+        assert await engine._policy_denial("mcp__fluid_bundled__Glob", {"pattern": "*.txt"},
+                                           unmapped_kind=True) is None
+        offered = [{"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
+                   {"optionId": "no", "kind": "reject_once"}]
+
+        async def answer(title, kind):
+            call = {"toolCallId": "c", "title": title, "kind": kind, "rawInput": {"pattern": "*"}}
+            return (await engine._permission({"toolCall": call, "options": offered}))["outcome"]["optionId"]
+
+        # The observed call is allowed, once.
+        assert await answer("Run mcp_fluid_bundled_Glob", "other") == "once"
+        # A shell call whose title names Glob is the shell, which this surface
+        # does not tick: refused, as before #1751.
+        for title in ("Glob && curl x", "mcp__fluid_bundled__Glob"):
+            assert await answer(title, "execute") == "no", title
         text, events = await _run_turn(engine, 'agymcp Glob {"pattern": "*.txt"}')
         assert not [e for e in events if isinstance(e, ErrorEvent)], text
         assert isinstance(events[-1], TurnComplete)
@@ -218,6 +232,43 @@ async def test_a_read_only_profile_runs_the_bundled_glob_agy_asks_for(
         # Off the surface, the same call is still refused, by name.
         assert "not enabled" in await engine._policy_denial("mcp__fluid_bundled__HistorySearch", {})
     finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_call_tool_call_of_any_kind_is_judged_as_the_real_tool(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    """Whatever kind the agent gives a CallTool request, it is unwrapped and
+    judged as the real tool: its saved Deny holds, and an allow is once."""
+    from app.core.permission_handler import (
+        PermissionDecision,
+        PermissionRule,
+        permission_handler,
+    )
+
+    monkeypatch.setattr(ha.DelegatedLoop, "supports_async_tool_policy", True, raising=False)
+    permission_handler._session_rules.setdefault("s-acp", []).append(PermissionRule(
+        id="rule-acp-deny", session_id="s-acp", profile_id=None, tool_name="mcp__weather__write_note",
+        tool_pattern=None, decision=PermissionDecision("deny")))
+    adapter = await _connected(
+        tmp_path, client, monkeypatch, mode="auto",
+        tool_allowlist=["ToolSearch", "mcp__weather__get_weather", "mcp__weather__write_note"])
+    engine = adapter._engine
+    # The loop answers without an owner card; the host still reads saved rules.
+    engine.permission_mode = "bypassPermissions"
+    offered = [{"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"},
+               {"optionId": "no", "kind": "reject_once"}]
+    try:
+        for kind in ("other", "fetch", "execute"):
+            for tool, args, want in (("mcp__weather__get_weather", {"city": "Oslo"}, "once"),
+                                     ("mcp__weather__write_note", {"text": "x"}, "no")):
+                call = {"toolCallId": "c", "title": "mcp__fluid_bundled__CallTool", "kind": kind,
+                        "rawInput": {"name": tool, "input": args}}
+                answer = await engine._permission({"toolCall": call, "options": offered})
+                assert answer["outcome"]["optionId"] == want, (kind, tool)
+    finally:
+        permission_handler.clear_session_rules("s-acp")
         await engine.aclose()
         await adapter._registry.aclose()
 
@@ -477,10 +528,14 @@ def test_only_a_tool_the_acp_bridge_serves_passes_by_its_bare_name(tmp_path):
     ticked = _options(tmp_path, tool_allowlist=["Read", "Glob"])
     assert "not enabled" in ha._delegated_tool_policy(ticked, None, [])(glob, {})
     acp = ha._delegated_tool_policy(ticked, None, [], bridged=lambda tool: tool == "Glob")
-    assert acp(glob, {}) is None
-    assert "not enabled" in acp(read, {})
+    assert acp(glob, {}, unmapped_kind=True) is None
+    # Not for a call of one of the agent's own kinds, nor a caller that does
+    # not say (the default is the strict reading).
+    assert "not enabled" in acp(glob, {})
+    assert "not enabled" in acp(read, {}, unmapped_kind=True)
     blocked = ha._delegated_tool_policy(_options(tmp_path), None, ["Glob"], bridged=lambda tool: True)
-    assert "disabled" in blocked(glob, {})
+    assert "disabled" in blocked(glob, {}, unmapped_kind=True)
     chat = _options(tmp_path, lane="chat")
     chat.tool_allowlist.append("Read")
-    assert "not enabled" in ha._delegated_tool_policy(chat, None, [], bridged=lambda tool: False)(read, {})
+    chat_policy = ha._delegated_tool_policy(chat, None, [], bridged=lambda tool: False)
+    assert "not enabled" in chat_policy(read, {}, unmapped_kind=True)

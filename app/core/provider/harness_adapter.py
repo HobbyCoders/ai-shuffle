@@ -3458,19 +3458,21 @@ class HarnessAdapter(ProviderAdapter):
         if not getattr(DelegatedLoop, "supports_async_tool_policy", False):
             return inner
 
-        inner_cwd = inner is not None and _policy_accepts_cwd(inner)
+        inner_cwd = inner is not None and _policy_accepts(inner, "cwd")
+        inner_kind = inner is not None and _policy_accepts(inner, "unmapped_kind")
 
         async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
-                         agent_id: Optional[str] = None) -> Optional[str]:
+                         agent_id: Optional[str] = None, unmapped_kind: bool = False) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
             if inner is None:
                 denial = None
-            elif inner_cwd:
-                denial = await run_sync(inner, name, tool_input, cwd=cwd)
             else:
-                denial = await run_sync(inner, name, tool_input)
+                extra: Dict[str, Any] = {"cwd": cwd} if inner_cwd else {}
+                if inner_kind and unmapped_kind:
+                    extra["unmapped_kind"] = True
+                denial = await run_sync(inner, name, tool_input, **extra)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:
@@ -6988,13 +6990,14 @@ def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optiona
     return any(tool_permitted(s, surface, None) for s in spellings)
 
 
-def _policy_accepts_cwd(policy: Any) -> bool:
-    """Whether a PreToolUse policy takes the CLI's ``cwd`` keyword."""
+def _policy_accepts(policy: Any, keyword: str) -> bool:
+    """Whether a PreToolUse policy takes ``keyword`` (the CLI's ``cwd``, the
+    ACP loop's ``unmapped_kind``)."""
     try:
         params = inspect.signature(policy).parameters
     except (TypeError, ValueError):
         return False
-    return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return keyword in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _delegated_tool_policy(
@@ -7018,7 +7021,10 @@ def _delegated_tool_policy(
 
     ``bridged(registry name)``, the ACP leg only: whether its bridge serves
     that tool to this session. A call to one it serves is also judged by the
-    bare registry name, as the bridge filter judges it (#1751).
+    bare registry name, as the bridge filter judges it (#1751), but only
+    when the loop says the call's kind is none of the agent's own tools
+    (``unmapped_kind``): a shell call whose title starts with "Glob" is not
+    the Glob the owner ticked.
     """
     from app.core.tool_access import matches_any, tool_permitted
     from fluid.permissions.engine import Verdict
@@ -7028,7 +7034,8 @@ def _delegated_tool_policy(
     rules = list(getattr(permissions, "rules", None) or ())
     session_cwd = options.cwd
 
-    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+               unmapped_kind: bool = False) -> Optional[str]:
         """``cwd`` is the CLI's shell directory for this call when fluid
         passes it (its Bash keeps a ``cd`` between calls)."""
         from app.core.checkout_lock import tool_denial
@@ -7054,11 +7061,12 @@ def _delegated_tool_policy(
         # as the bridge filter does (_bridged_tool_permitted): a deny entry in
         # either form withholds it. Not a bare name: "WebFetch" on these lists
         # is the CLI's own tool, distinct from the bridged app copy. Except a
-        # tool the ACP bridge serves (``bridged``), so a Glob it serves because
-        # "Glob" is ticked is not then refused here (#1751).
+        # tool the ACP bridge serves (``bridged``) on a call of no kind of the
+        # agent's own, so a Glob it serves because "Glob" is ticked is not
+        # then refused here (#1751).
         served = name.removeprefix(_BUNDLED_CLI_PREFIX)
         spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
-        if served != name and bridged is not None and bridged(served):
+        if unmapped_kind and served != name and bridged is not None and bridged(served):
             spellings.add(served)
         if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
