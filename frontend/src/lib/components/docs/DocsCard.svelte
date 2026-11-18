@@ -64,7 +64,7 @@
  type DocsState = App.PageState & { docsArticle?: string; docsBase?: string; viewPanelDetail?: string };
  const CARRIED = ['settingsView', 'settingsDepth', 'settingsCategory', 'settingsItem', 'settingsStaleBelow'] as const;
  const STOPS = ['viewPanelDetail', 'mobileDrawer', 'mobileControls', 'mobileControlsPage'] as const;
- const onStop = (state: Record<string, unknown>) => STOPS.some(key => state[key]);
+ const onStop = (state: object) => STOPS.some(key => (state as Record<string, unknown>)[key]);
  const entryArticle = () => (page.state as DocsState | undefined)?.docsArticle;
  const shownDoc = () => detailOpen && activeSlug ? `${activeCategory}/${activeSlug}` : '';
  const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);

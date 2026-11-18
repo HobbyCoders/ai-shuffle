@@ -7,12 +7,20 @@
 // another word; and a page holding the query's words together ranks first in
 // the Docs panel and in Spotlight, whose rows read as text, not Markdown.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
+import { SEEDED, expect, gotoApp, openFromSidebar, seededChatId, settleServiceWorker, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const workspace = (page) => page.getByRole('navigation', { name: 'Workspace', exact: true });
 const docsList = (page) => page.getByRole('navigation', { name: 'Documentation', exact: true });
 const docTitle = (page) => page.locator('.docs-content h1').first();
+/** The article pane: drawn when Docs is on screen (its h1 is not; the shell's header shows the title). */
+const docsPane = (page) => page.locator('.docs-content').first();
+/** Each Docs article on the page: its title, whether it is drawn, and the open chat, for a failure message. */
+const docsOnScreen = (page) => page.evaluate(() => JSON.stringify({
+	docs: [...document.querySelectorAll('.docs-content')].map((h) => ({ title: h.querySelector('h1')?.textContent?.trim(), drawn: h.checkVisibility?.({ checkOpacity: true, checkVisibilityCSS: true }) ?? null, shell: h.closest('[data-view-shell]')?.getAttribute('data-view-shell') ?? null })),
+	chat: document.querySelector('[data-ui-state="chat"]')?.getAttribute('data-ui-surface') ?? null,
+	entry: String(history.state?.['sveltekit:metadata']?.state ?? '')
+}));
 
 async function openDestination(page, label) {
 	if (!await workspace(page).isVisible()) await page.getByRole('button', { name: /^Chats(?: \(|$)|Show sidebar/ }).first().click();
@@ -276,6 +284,168 @@ await runJourney({
 			await page.locator('[data-view-shell="Docs"][data-pane="panel"]').waitFor({ timeout: 5000 });
 			await page.goForward(); await waitTitle(page, 'Changelog');
 			expect(!(await marker()), 'no Notes marker on the Docs entry');
+		}
+	}, {
+		// A pick made while Notes' narrow detail stop is still being retired
+		// (ViewShell's history.back() has not landed) shows in place: Docs pushes
+		// nothing for that pending Back to pop.
+		name: 'pick-while-a-panel-stop-retires',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await page.setViewportSize({ width: 500, height: 900 });
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await docsList(page).waitFor();
+			await openDestination(page, 'Notes');
+			await page.getByRole('button', { name: 'New note', exact: true }).first().click();
+			await page.locator('[data-view-shell="Notes"][data-pane="detail"]').waitFor();
+			await page.waitForFunction(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'));
+			// Widen so the sidebar docks: Notes keeps its stop until it is left.
+			await page.setViewportSize({ width: 1200, height: 900 });
+			await workspace(page).waitFor();
+			await page.waitForTimeout(300);
+			expect(String(await page.evaluate(() => history.state?.['sveltekit:metadata']?.state ?? '')).includes('viewPanelDetail'), 'Notes’ stop is still on top');
+		},
+		async act({ page, mark }) {
+			await mark('leave the note for Docs and pick Updates before Notes’ Back lands');
+			const direct = workspace(page).getByRole('button', { name: 'Docs', exact: true });
+			let trigger = direct;
+			if (!await direct.count()) {
+				await workspace(page).getByRole('button', { name: 'More', exact: true }).click();
+				trigger = page.getByRole('menuitem', { name: 'Docs', exact: true });
+			}
+			// One task: open Docs, let Svelte flush (its effects call history.back()),
+			// then pick, all before the browser can deliver that Back's popstate.
+			const race = await trigger.evaluate(async (el) => {
+				const onStop = () => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail');
+				el.click();
+				for (let i = 0; i < 10; i++) await Promise.resolve();
+				const item = [...document.querySelectorAll('nav[aria-label="Documentation"] *')]
+					.find((node) => !node.children.length && node.textContent?.trim() === 'Updates');
+				const stopAtPick = onStop();
+				item?.click();
+				return { found: !!item, stopAtPick };
+			});
+			expect(race.found && race.stopAtPick, `the pick came while Notes’ stop was still on top (${JSON.stringify(race)})`);
+			await waitTitle(page, 'Updates');
+			await mark('once Notes’ Back has landed, Docs still shows Updates');
+			await page.waitForFunction(() => !String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'));
+			await page.waitForTimeout(800);
+			await waitTitle(page, 'Updates', 1000);
+			expect(await docsPane(page).isVisible(), `Docs is on screen (${await docsOnScreen(page)})`);
+		}
+	}, {
+		// Back taken while Docs is hidden lands on an earlier article entry; Docs
+		// shows that article when it is opened again, not the one it last drew.
+		name: 'back-while-docs-is-hidden',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+		},
+		async act({ page, mark }) {
+			const entry = () => page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? ''));
+			await mark('FAQ, then the Changelog, then Notes');
+			await docsList(page).getByText('FAQ', { exact: true }).click();
+			await waitTitle(page, 'Frequently asked questions');
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			await waitTitle(page, 'Changelog');
+			await openDestination(page, 'Notes');
+			await page.locator('[data-view-shell="Notes"]').waitFor();
+			await mark('Back while Notes is on screen reaches the FAQ entry; Notes stays');
+			await page.goBack();
+			await page.waitForFunction(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('getting-started/faq'));
+			await page.waitForTimeout(500);
+			expect(await page.locator('[data-view-shell="Notes"]').isVisible(), 'Notes is still on screen');
+			await mark('reopen Docs: it shows the FAQ');
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'Frequently asked questions');
+			expect((await entry()).includes('getting-started/faq'), 'opening Docs added no entry');
+			await mark('Forward with Docs on screen shows the Changelog');
+			await page.goForward(); await waitTitle(page, 'Changelog');
+		}
+	}, {
+		// Docs entries carry no chat marker: after a reload, Back onto an article
+		// never reads a copied chatSession as a chat step and opens it over Docs.
+		name: 'docs-entries-after-a-chat-step-and-reload',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await settleServiceWorker(page, status);
+			await openFromSidebar(page, SEEDED.long);
+			await waitChatOpen(page, { messagesAtLeast: 50, hold: 300 });
+			// A sidebar pick from an open chat is a chat step: its entry names the pick.
+			await openFromSidebar(page, SEEDED.no_project);
+			const picked = seededChatId(status, 'no_project');
+			await page.waitForFunction((id) => String(history.state?.['sveltekit:metadata']?.state ?? '').includes(id), picked);
+			await waitChatOpen(page, { hold: 300 });
+			// Spotlight opens a chat with no step, so the entry still names the sidebar pick.
+			await page.getByRole('complementary', { name: 'Chats', exact: true }).getByRole('button', { name: /^Search\b/ }).click();
+			await page.getByRole('textbox', { name: 'Search everything', exact: true }).fill('Long transcript');
+			await page.getByRole('dialog', { name: 'Search everything' }).getByRole('button').filter({ hasText: SEEDED.long }).first().click();
+			await waitChatOpen(page, { messagesAtLeast: 50, hold: 300 });
+		},
+		async act({ page, mark, status }) {
+			const entry = () => page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? ''));
+			const landed = (article) => page.waitForFunction((want) => String(history.state?.['sveltekit:metadata']?.state ?? '').includes(want), article);
+			expect((await entry()).includes(seededChatId(status, 'no_project')), 'the current entry names the sidebar pick, not the open chat');
+			await mark('open Docs and pick two articles: neither entry copies the chat marker');
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+			await docsList(page).getByText('FAQ', { exact: true }).click();
+			await waitTitle(page, 'Frequently asked questions');
+			await landed('getting-started/faq');
+			const faq = await entry();
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			await waitTitle(page, 'Changelog');
+			await landed('getting-started/changelog');
+			const changelog = await entry();
+			expect(!faq.includes('chatSession') && !changelog.includes('chatSession'), `no Docs entry carries chatSession (${faq} | ${changelog})`);
+			await mark('reload on the Changelog');
+			await page.reload({ waitUntil: 'domcontentloaded' });
+			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+			await mark('the reloaded page reopens the Changelog');
+			await waitTitle(page, 'Changelog', 30_000);
+			await mark('Back shows the FAQ in Docs, and no chat opens over it');
+			await page.goBack(); await waitTitle(page, 'Frequently asked questions');
+			await page.waitForTimeout(1500);
+			expect(await docsPane(page).isVisible(), `Docs is still on screen (${await docsOnScreen(page)})`);
+			await waitTitle(page, 'Frequently asked questions', 1000);
+		}
+	}, {
+		// An article opened from elsewhere (Settings > Cloud) shows in place with
+		// no step, and a reload on that entry reopens it, not the article the
+		// entry names.
+		name: 'link-from-elsewhere-then-reload',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await gotoApp(page, status);
+			await settleServiceWorker(page, status);
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'AI Shuffle documentation');
+			await docsList(page).getByText('FAQ', { exact: true }).click();
+			await waitTitle(page, 'Frequently asked questions');
+		},
+		async act({ page, mark }) {
+			await mark('Settings > Cloud');
+			await openDestination(page, 'Settings');
+			const settingsNav = page.getByRole('navigation', { name: 'Settings', exact: true });
+			await settingsNav.getByRole('button', { name: 'Cloud', exact: true }).filter({ visible: true }).first().click();
+			const link = page.getByRole('button', { name: 'How Cloud works' });
+			await link.waitFor();
+			const length = await page.evaluate(() => history.length);
+			await mark('How Cloud works opens the Cloud article in Docs with no step');
+			await link.click();
+			await waitTitle(page, 'AI Shuffle Cloud');
+			expect(await docsPane(page).isVisible(), `Docs is on screen (${await docsOnScreen(page)})`);
+			expect(await page.evaluate(() => history.length) === length, 'the link from Settings adds no entry');
+			await mark('reload on that entry');
+			await page.reload({ waitUntil: 'domcontentloaded' });
+			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+			await mark('the reloaded page reopens the Cloud article');
+			await waitTitle(page, 'AI Shuffle Cloud', 30_000);
+			expect(await page.evaluate(() => history.length) === length, 'the reload adds no entry');
 		}
 	}, {
 		name: 'desktop-repeated-search',
