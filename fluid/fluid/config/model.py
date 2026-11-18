@@ -476,7 +476,7 @@ class HarnessConfig:
     # provider as the sole authority on when a turn has to stop.
     max_model_calls: int = 200
     # Read-only tool calls of one model reply that may execute at once on the
-    # native loop (Read, Grep, Glob, WebSearch, read-only Bash). 1 = strictly
+    # native loop (Read, Grep, Glob, WebSearch; never Bash). 1 = strictly
     # one call at a time, in order.
     max_concurrent_tools: int = 8
     # Model context window, when the host app knows it. Feeds

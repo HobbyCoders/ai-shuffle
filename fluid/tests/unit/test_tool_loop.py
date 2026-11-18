@@ -1300,8 +1300,11 @@ async def test_interrupt_during_model_call_reports_partial_model_calls() -> None
     assert not any(isinstance(e, TurnComplete) for e in events)
     # The call itself was marked interrupted, so the loop stopped before
     # dispatching the tool it asked for — a different emission point from the
-    # interrupt-during-dispatch test above.
-    assert not any(isinstance(e, ToolResult) for e in events)
+    # interrupt-during-dispatch test above. The announced call still gets its
+    # one result: a made-up cancellation, not the tool's output.
+    results = [e for e in events if isinstance(e, ToolResult)]
+    assert [(r.tool_use_id, r.is_error) for r in results] == [("t1", True)]
+    assert "interrupted" in results[0].output
     ev = next(e for e in events if isinstance(e, Interrupted))
     assert ev.num_model_calls == 1
 

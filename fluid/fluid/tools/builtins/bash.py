@@ -194,9 +194,6 @@ SPEC = ToolSpec(
     # call so the on_write policy does not prompt for them. See bash_risk.py.
     classify_risk=classify_bash_risk,
     session_scope=bash_session_scope,
-    # Runs alongside other read-only calls of a reply only when the command
-    # classifies as safe; a write-class command always runs in order.
-    concurrent=True,
 )
 
 

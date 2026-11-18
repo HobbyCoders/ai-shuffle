@@ -262,7 +262,9 @@ class ToolSpec:
     # Opt-in: the handler may run alongside other calls from the same model
     # reply. The native loop runs a call concurrently only when this is set AND
     # the call's effective risk is "safe" AND permissions allow it without a
-    # prompt; anything else waits its turn. Set it only on a handler that keeps
+    # prompt; anything else waits its turn. Set it only on a handler that
+    # cannot write anything, whatever its input (a risk classifier is a
+    # permission heuristic, not that guarantee: Bash stays off), that keeps
     # no per-call state outside the ctx it is given (concurrent calls each get
     # a shallow copy; see ``call_ctx``), holds no module-level mutable state,
     # does its blocking I/O off the event loop, and updates the shared ctx

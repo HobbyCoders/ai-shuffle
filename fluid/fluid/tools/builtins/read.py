@@ -239,9 +239,15 @@ def _load(path: Path, input: dict[str, Any]) -> ToolOutcome | _Page:
     )
 
 
+def _resolve_and_load(input: dict[str, Any], ctx: ToolCtx) -> tuple[Path, ToolOutcome | _Page]:
+    # Resolving the path touches the filesystem too (symlinks), so it runs on
+    # the worker thread with the rest.
+    path = resolve(input["file_path"], ctx)
+    return path, _load(path, input)
+
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    path: Path = resolve(input["file_path"], ctx)
-    loaded = await asyncio.to_thread(_load, path, input)
+    path, loaded = await asyncio.to_thread(_resolve_and_load, input, ctx)
     # The session's record of what the model has seen is updated in call order
     # when Reads of one reply run together (see in_call_order).
     async with in_call_order(ctx):

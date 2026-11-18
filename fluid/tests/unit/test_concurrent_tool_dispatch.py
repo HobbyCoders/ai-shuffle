@@ -11,8 +11,6 @@ calls finish in, after its call's interrupt race has a winner.
 import asyncio
 import base64
 import json
-import os
-import re
 import threading
 import time
 from collections.abc import AsyncIterator
@@ -22,16 +20,18 @@ from typing import Any
 import pytest
 from fluid.engine.native import NativeLoop
 from fluid.events import (
+    ErrorEvent,
     Interrupt,
     PermissionRequest,
     RespondPermission,
     SteerDelivered,
     ToolResult,
+    ToolUse,
     TurnComplete,
     UserTurn,
 )
 from fluid.events.ops import Steer
-from fluid.hooks.bus import PRE_TOOL_USE, HookBus, HookDecision
+from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus, HookDecision
 from fluid.messages import ToolResultBlock
 from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.rules import Rule
@@ -103,10 +103,18 @@ class Timeline:
         self.active = 0
         self.max_active = 0
         self.started: dict[str, asyncio.Event] = {}
+        self.ended: dict[str, asyncio.Event] = {}
+        self.released: dict[str, asyncio.Event] = {}
         self.ids_seen: dict[str, Any] = {}
 
     def started_event(self, call: str) -> asyncio.Event:
         return self.started.setdefault(call, asyncio.Event())
+
+    def ended_event(self, call: str) -> asyncio.Event:
+        return self.ended.setdefault(call, asyncio.Event())
+
+    def release(self, call: str) -> None:
+        self.released.setdefault(call, asyncio.Event()).set()
 
     def index(self, kind: str, call: str) -> int:
         return self.events.index((kind, call))
@@ -118,9 +126,16 @@ class Timeline:
         return not self.ran_before(a, b) and not self.ran_before(b, a)
 
 
+# Long enough to tell a hang from a loaded runner; a passing test never waits it.
+_HANG = 10
+
+
 def _registry(timeline: Timeline, delays: dict[str, float]) -> ToolRegistry:
     """``Probe`` (concurrent, safe), ``Touch`` (risk write) and ``Serial``
-    (safe but never opted in). Each sleeps ``delays[id]`` seconds."""
+    (safe but never opted in). Each sleeps ``delays[id]`` seconds. Input
+    ``meet`` names calls this one waits to see started (a rendezvous: it only
+    completes when they run at the same time), ``after`` calls it waits to see
+    finished, and ``hold`` keeps it running until ``timeline.release(id)``."""
 
     def make(label: str):
         async def handler(input: dict, ctx: ToolCtx) -> ToolOutcome:
@@ -130,6 +145,12 @@ def _registry(timeline: Timeline, delays: dict[str, float]) -> ToolRegistry:
             timeline.max_active = max(timeline.max_active, timeline.active)
             timeline.started_event(call).set()
             try:
+                waits = [timeline.started_event(o).wait() for o in input.get("meet", ())]
+                waits += [timeline.ended_event(o).wait() for o in input.get("after", ())]
+                if input.get("hold"):
+                    waits.append(timeline.released.setdefault(call, asyncio.Event()).wait())
+                if waits:
+                    await asyncio.wait_for(asyncio.gather(*waits), timeout=_HANG)
                 await asyncio.sleep(delays.get(call, 0.0))
                 # The call's own id must still be on its ctx after siblings ran.
                 timeline.ids_seen[call] = ctx.extra.get("tool_use_id")
@@ -139,6 +160,7 @@ def _registry(timeline: Timeline, delays: dict[str, float]) -> ToolRegistry:
             finally:
                 timeline.active -= 1
                 timeline.events.append(("end", call))
+                timeline.ended_event(call).set()
         return handler
 
     registry = ToolRegistry()
@@ -179,22 +201,21 @@ def _results(loop: NativeLoop) -> list[ToolResult]:
     return [e for e in loop.bus.log(loop.session_id) if isinstance(e, ToolResult)]
 
 
-async def test_two_slow_reads_take_about_the_time_of_one() -> None:
+async def test_two_reads_run_at_the_same_time() -> None:
+    """A rendezvous: each call waits to see the other started, and a waits for
+    b to finish, so they finish out of call order. One at a time would hang."""
     timeline = Timeline()
-    # The first call is the slower one, so they finish out of call order.
-    registry = _registry(timeline, {"a": 0.4, "b": 0.2})
+    registry = _registry(timeline, {})
     provider = ScriptedProvider([
-        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"})),
+        _calls(("a", "Probe", {"id": "a", "meet": ["b"], "after": ["b"]}),
+               ("b", "Probe", {"id": "b", "meet": ["a"]})),
         _text("done"),
     ])
     loop = _loop(provider, registry)
-    began = time.monotonic()
     await loop.submit(UserTurn(content="go"))
-    await asyncio.wait_for(loop.wait_turn(), timeout=10)
-    elapsed = time.monotonic() - began
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG * 2)
 
     assert timeline.max_active == 2
-    assert elapsed < 0.55  # one-at-a-time would be at least 0.6s
     # b finished first, yet results are published in call order.
     assert timeline.index("end", "b") < timeline.index("end", "a")
     assert [r.tool_use_id for r in _results(loop)] == ["a", "b"]
@@ -466,10 +487,9 @@ async def test_doom_loop_guard_counts_every_call_of_a_run() -> None:
 
 async def test_steer_rides_exactly_one_result_of_a_run() -> None:
     timeline = Timeline()
-    registry = _registry(timeline, {"a": 0.3, "b": 0.3, "c": 0.3})
+    registry = _registry(timeline, {})
     provider = ScriptedProvider([
-        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"}),
-               ("c", "Probe", {"id": "c"})),
+        _calls(*[(c, "Probe", {"id": c, "hold": True}) for c in ("a", "b", "c")]),
         _text("done"),
     ])
     loop = _loop(provider, registry)
@@ -477,6 +497,8 @@ async def test_steer_rides_exactly_one_result_of_a_run() -> None:
     for call in ("a", "b", "c"):
         await asyncio.wait_for(timeline.started_event(call).wait(), timeout=5)
     await loop.submit(Steer(text="also check the tests", id="s1"))
+    for call in ("c", "b", "a"):
+        timeline.release(call)
     await asyncio.wait_for(loop.wait_turn(), timeout=10)
 
     message = provider.requests[1].messages[-1]
@@ -485,20 +507,6 @@ async def test_steer_rides_exactly_one_result_of_a_run() -> None:
     assert len(carrying) == 1
     assert [d.id for d in carrying[0].delivered_steers] == ["s1"]
     assert "also check the tests" in carrying[0].content[0].text
-
-
-@pytest.mark.parametrize("command, concurrent", [
-    ("git status", True),
-    ("rm -rf build", False),
-])
-async def test_bash_joins_a_run_only_when_read_only(command: str, concurrent: bool) -> None:
-    from fluid.tools.builtins import bash
-
-    registry = ToolRegistry()
-    registry.register_builtin(bash.SPEC, bash.handler)
-    loop = _loop(ScriptedProvider([_text("x")]), registry)
-    tu = {"tool_use_id": "t", "name": "Bash", "input": {"command": command}}
-    assert loop._runs_concurrently(tu) is concurrent
 
 
 async def test_an_inherited_run_slot_is_ignored_by_other_loops_and_calls() -> None:
@@ -573,13 +581,23 @@ async def test_real_reads_overlap_their_file_io(tmp_path, monkeypatch) -> None:
 
     for name in ("one.txt", "two.txt"):
         (tmp_path / name).write_text(f"{name}\n", encoding="utf-8")
-    original = read._read_text
+    original, original_resolve = read._read_text, read.resolve
+    # Each read blocks until the other has started reading: they finish only
+    # if their I/O runs at the same time, each on a worker thread.
+    meet = threading.Barrier(2, timeout=_HANG)
+    loop_thread = threading.get_ident()
+    resolved_on: list[int] = []
 
-    def slow_read_text(*args):
-        time.sleep(0.4)  # a blocking read on a slow mount
+    def blocking_read_text(*args):
+        meet.wait()
         return original(*args)
 
-    monkeypatch.setattr(read, "_read_text", slow_read_text)
+    def resolve(*args):
+        resolved_on.append(threading.get_ident())
+        return original_resolve(*args)
+
+    monkeypatch.setattr(read, "_read_text", blocking_read_text)
+    monkeypatch.setattr(read, "resolve", resolve)
     store = MemoryStore()
     sid = await _session(store, tmp_path)
     provider = ScriptedProvider([
@@ -588,11 +606,10 @@ async def test_real_reads_overlap_their_file_io(tmp_path, monkeypatch) -> None:
         _text("done"),
     ])
     loop = _real_loop(provider, _builtins(read), store, sid, tmp_path)
-    began = time.monotonic()
     await loop.submit(UserTurn(content="go"))
-    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG * 2)
 
-    assert time.monotonic() - began < 0.75  # one at a time is at least 0.8s
+    assert len(resolved_on) == 2 and loop_thread not in resolved_on  # path resolution too
     blocks = provider.requests[1].messages[-1].content
     assert "one.txt" in blocks[0].content[0].text and "two.txt" in blocks[1].content[0].text
     assert {str(tmp_path / "one.txt"), str(tmp_path / "two.txt")} <= loop.ctx.read_files
@@ -787,16 +804,15 @@ async def test_opposing_steers_settle_in_call_order(tmp_path) -> None:
     store = MemoryStore()
     sid = await _session(store, tmp_path)
     provider = ScriptedProvider([
-        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"})),
+        _calls(("a", "Probe", {"id": "a", "hold": True}), ("b", "Probe", {"id": "b"})),
         _text("done"),
     ])
-    loop = _loop(provider, _registry(timeline, {"a": 0.6, "b": 0.05}), store=store, sid=sid)
+    loop = _loop(provider, _registry(timeline, {}), store=store, sid=sid)
     await loop.submit(UserTurn(content="go"))
-    while ("end", "b") not in timeline.events:
-        await asyncio.sleep(0.01)
+    await asyncio.wait_for(timeline.ended_event("b").wait(), timeout=5)
     await loop.submit(Steer(text="use staging", id="s1"))
-    await asyncio.sleep(0.05)
     await loop.submit(Steer(text="correction: use local", id="s2"))
+    timeline.release("a")
     await asyncio.wait_for(loop.wait_turn(), timeout=10)
 
     blocks = {b.tool_use_id: b for b in provider.requests[1].messages[-1].content}
@@ -811,49 +827,277 @@ async def test_opposing_steers_settle_in_call_order(tmp_path) -> None:
     assert resumed_user_text(await store.load_path(sid), {}) == "correction: use local"
 
 
-async def test_read_only_bash_commands_run_together_and_spill_apart(tmp_path) -> None:
-    """Two read-only commands, each blocked until the other has started: they
-    only finish if they run at the same time. Each large output lands in its
-    own spill file."""
-    from fluid.tools.builtins import bash
+async def test_bash_waits_for_the_steers_of_the_calls_before_it(tmp_path, monkeypatch) -> None:
+    """Bash never joins a run, even read-only: it starts once the calls before
+    it are over and their results published, steers included. Here the user
+    asks for the command while the Read before it runs; the file guard sees
+    that request, exactly as one at a time."""
+    from fluid.tools import bash_file_guard
+    from fluid.tools.builtins import bash, read
 
-    fifo_a, fifo_b = tmp_path / "a.fifo", tmp_path / "b.fifo"
-    os.mkfifo(fifo_a)
-    os.mkfifo(fifo_b)
-    payload = {fifo_a: "alpha line\n" * 20_000, fifo_b: "bravo line\n" * 20_000}
+    (tmp_path / "notes.txt").write_text("the notes\n", encoding="utf-8")
+    command = "cat notes.txt"
+    assert bash_file_guard.refusal(command, {"Read"}, "")  # refused without the request
+    reading, release = threading.Event(), threading.Event()
+    original = read._read_text
 
-    def feed() -> None:
-        # b's reader must be open before a is fed: one-at-a-time dispatch
-        # would sit in ``cat a.fifo`` forever.
-        for fifo in (fifo_b, fifo_a):
-            with open(fifo, "w", encoding="utf-8") as fh:
-                fh.write(payload[fifo])
+    def held_read_text(*args):
+        reading.set()
+        assert release.wait(_HANG)
+        return original(*args)
 
-    feeder = threading.Thread(target=feed, daemon=True)
-    feeder.start()
+    monkeypatch.setattr(read, "_read_text", held_read_text)
     store = MemoryStore()
     sid = await _session(store, tmp_path)
     provider = ScriptedProvider([
-        _calls(("toolu_a", "Bash", {"command": f"cat {fifo_a}"}),
-               ("toolu_b", "Bash", {"command": f"cat {fifo_b}"})),
+        _calls(("toolu_r", "Read", {"file_path": str(tmp_path / "notes.txt")}),
+               ("toolu_b", "Bash", {"command": command})),
         _text("done"),
     ])
-    loop = _real_loop(provider, _builtins(bash), store, sid, tmp_path)
-    assert all(loop._runs_concurrently(
-        {"tool_use_id": "t", "name": "Bash", "input": {"command": f"cat {f}"}}
-    ) for f in (fifo_a, fifo_b))
+    loop = _real_loop(provider, _builtins(read, bash), store, sid, tmp_path)
+    await loop.submit(UserTurn(content="go"))
+    assert await asyncio.to_thread(reading.wait, 5)
+    await loop.submit(Steer(text=f"please run `{command}` yourself", id="s1"))
+    release.set()
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG * 2)
+
+    blocks = {b.tool_use_id: b for b in provider.requests[1].messages[-1].content}
+    assert [d.id for d in blocks["toolu_r"].delivered_steers] == ["s1"]
+    output = blocks["toolu_b"].content[0].text
+    assert "the notes" in output and "Use Read" not in output
+    assert not loop._runs_concurrently(
+        {"tool_use_id": "t", "name": "Bash", "input": {"command": command}}
+    )
+
+
+async def test_post_tool_hooks_apply_in_call_order() -> None:
+    """Both calls' PostToolUse hooks stop the turn with their own reason. b
+    finishes first and a's hook is slow, yet the hooks run a then b and b's
+    reason is the one the turn ends with, as one at a time."""
+    timeline = Timeline()
+    hooks = HookBus()
+    ran: list[str] = []
+
+    async def post(_event: str, payload: dict) -> HookDecision:
+        call = payload["tool_use_id"]
+        if call == "a":
+            await asyncio.wait_for(timeline.ended_event("b").wait(), timeout=_HANG)
+        ran.append(call)
+        return HookDecision(stop=True, note=f"stop from {call}")
+
+    hooks.on(POST_TOOL_USE, post)
+    provider = ScriptedProvider([
+        _calls(("a", "Probe", {"id": "a", "meet": ["b"]}), ("b", "Probe", {"id": "b", "meet": ["a"]})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {}), hooks=hooks)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG * 2)
+
+    assert timeline.max_active == 2
+    assert ran == ["a", "b"]
+    errors = [e for e in loop.bus.log(loop.session_id) if isinstance(e, ErrorEvent)]
+    assert errors[-1].message == "stopped by hook: stop from b"
+    assert provider.calls == 1
+
+
+# ── one finalizer per reply: every announced call ends with one result ─────
+
+class RefusingStore(MemoryStore):
+    """Refuses the ToolResult events of ``calls`` (the bus has them already)
+    and, with ``nodes``, the result node."""
+
+    def __init__(self, calls: set[str], exc: BaseException, *, nodes: bool = False) -> None:
+        super().__init__()
+        self.calls, self.exc, self.nodes = calls, exc, nodes
+
+    async def append_event(self, session_id, event):
+        if isinstance(event, ToolResult) and event.tool_use_id in self.calls:
+            raise self.exc
+        await super().append_event(session_id, event)
+
+    async def append(self, session_id, node):
+        if self.nodes and any(isinstance(b, ToolResultBlock) for b in node.message.content):
+            raise self.exc
+        await super().append(session_id, node)
+
+
+@pytest.mark.parametrize("refused, exc, nodes", [
+    ({"p2"}, RuntimeError("store down"), False),
+    ({"p2"}, asyncio.CancelledError(), False),
+    ({"p2", "p3", "p4"}, RuntimeError("store down"), False),  # keeps refusing
+    ({"p2", "p3", "p4"}, RuntimeError("store down"), True),  # the node too
+], ids=["error", "cancelled", "keeps-refusing", "refuses-node"])
+async def test_store_refusing_a_result_still_answers_every_call(
+    tmp_path, refused: set[str], exc: BaseException, nodes: bool,
+) -> None:
+    """The write of result 2 of 4 raises. Result 2 is on the bus and is not
+    published again; 3 (finished) keeps its result, 4 (still running) is
+    cancelled and joined; all four are stored on one node unless the store
+    refuses that too, in which case the turn fails with the store's error."""
+    timeline = Timeline()
+    store = RefusingStore(set(refused), exc, nodes=nodes)
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("p1", "Probe", {"id": "p1"}), ("p2", "Probe", {"id": "p2"}),
+               ("p3", "Probe", {"id": "p3"}), ("p4", "Probe", {"id": "p4", "hold": True})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {}), store=store, sid=sid)
     await loop.submit(UserTurn(content="go"))
     try:
-        await asyncio.wait_for(loop.wait_turn(), timeout=15)
-    finally:
-        await loop.submit(Interrupt())
+        await asyncio.wait_for(loop.wait_turn(), timeout=_HANG)
+    except asyncio.CancelledError:
+        # A CancelledError out of the store ends the turn as a cancellation.
+        assert isinstance(exc, asyncio.CancelledError)
 
-    blocks = {b.tool_use_id: b.content[0].text for b in provider.requests[1].messages[-1].content}
-    spilled = {}
-    for call, word in (("toolu_a", "alpha"), ("toolu_b", "bravo")):
-        match = re.search(r"\S*tool-output\S*Bash-[0-9a-f]{12}\.txt", blocks[call])
-        assert match, blocks[call][-400:]
-        spilled[call] = Path(match.group(0).strip("`'\"()"))
-        assert word in blocks[call]
-        assert spilled[call].read_text(encoding="utf-8").count(f"{word} line") == 20_000
-    assert spilled["toolu_a"] != spilled["toolu_b"]
+    published = _one_result_each(loop.bus.log(sid))
+    assert list(published) == ["p1", "p2", "p3", "p4"]
+    assert published["p3"].output == "probe:p3"
+    assert published["p4"].is_error and "cancelled" in published["p4"].output
+    assert timeline.active == 0 and ("end", "p4") in timeline.events  # joined, not left running
+    assert loop._reply is None
+    stored = await _stored_results(store, sid)
+    if nodes:
+        # A reopen finds the calls unanswered in history; the next request
+        # repairs them as lost results (repair_dangling_tool_calls).
+        assert stored == {}
+    else:
+        assert list(stored) == ["p1", "p2", "p3", "p4"]
+        for call in stored:
+            assert stored[call].content[0].text == published[call].output
+    assert provider.calls == 1
+
+
+async def test_close_while_a_capped_result_is_written_answers_every_call(tmp_path) -> None:
+    """At the model-call cap nothing runs and every call gets the cap result.
+    Close lands while the first of them is being written: the second is still
+    published and both are stored."""
+    entered = asyncio.Event()
+
+    class SlowStore(MemoryStore):
+        async def append_event(self, session_id, event):
+            if isinstance(event, ToolResult) and event.tool_use_id == "c1":
+                entered.set()
+                await asyncio.sleep(0.2)
+            await super().append_event(session_id, event)
+
+    timeline = Timeline()
+    store = SlowStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("c1", "Probe", {"id": "c1"}), ("c2", "Probe", {"id": "c2"})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {}), store=store, sid=sid,
+                 max_model_calls_per_turn=1)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    await asyncio.wait_for(loop.aclose(), timeout=_HANG)
+
+    events = await store.events_since(sid, 0)
+    published = _one_result_each(events)
+    assert list(published) == ["c1", "c2"]
+    assert all("maximum number of model calls" in r.output for r in published.values())
+    assert timeline.events == []
+    stored = await _stored_results(store, sid)
+    assert list(stored) == ["c1", "c2"]
+
+
+async def test_close_while_waiting_for_question_answers_stores_the_results(tmp_path) -> None:
+    """Every result is on the bus and the loop is collecting answered questions
+    to attach when close lands: the results are still stored."""
+    timeline = Timeline()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {}), store=store, sid=sid)
+    waiting = asyncio.Event()
+    original = loop.pending_question_answers
+
+    async def slow_answers():
+        if _results(loop):
+            waiting.set()
+            await asyncio.sleep(_HANG * 3)
+        return await original()
+
+    loop.pending_question_answers = slow_answers  # type: ignore[method-assign]
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(waiting.wait(), timeout=5)
+    await asyncio.wait_for(loop.aclose(), timeout=_HANG)
+
+    published = _one_result_each(await store.events_since(sid, 0))
+    assert list(published) == ["a", "b"]
+    stored = await _stored_results(store, sid)
+    assert list(stored) == ["a", "b"]
+    assert stored["a"].content[0].text == "probe:a"
+
+
+async def test_interrupt_before_the_stream_ends_answers_the_announced_call(tmp_path) -> None:
+    """The stream announced a call (ToolUse) and is interrupted before the
+    reply ends. The call never runs and still gets one result, stored."""
+
+    class StalledProvider(ScriptedProvider):
+        async def stream(self, request):
+            self.requests.append(request)
+            self.calls += 1
+            for chunk in _calls(("a", "Probe", {"id": "a"}))[:-2]:
+                yield chunk
+            await asyncio.sleep(_HANG * 3)
+
+    timeline = Timeline()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    loop = _loop(StalledProvider([]), _registry(timeline, {}), store=store, sid=sid)
+    await loop.submit(UserTurn(content="go"))
+    for _ in range(500):
+        if any(isinstance(e, ToolUse) for e in loop.bus.log(sid)):
+            break
+        await asyncio.sleep(0.01)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG)
+
+    published = _one_result_each(loop.bus.log(sid))
+    assert list(published) == ["a"] and "interrupted" in published["a"].output
+    assert timeline.events == []
+    stored = await _stored_results(store, sid)
+    assert stored["a"].content[0].text == published["a"].output
+
+
+async def test_engine_error_mid_reply_answers_and_stores_every_call(tmp_path) -> None:
+    """Engine code (not the tool, whose errors stay in context) raises while
+    the second call settles. The turn fails with that error, yet the call
+    after it, a barrier that never ran, still gets one result, and all three
+    are stored on one node."""
+    timeline = Timeline()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"}),
+               ("w", "Touch", {"id": "w"})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {}), store=store, sid=sid)
+    original = loop._after_tool
+
+    async def after_tool(sid_, turn_id, name, tool_use_id, outcome, *, input):
+        if tool_use_id == "b":
+            raise RuntimeError("engine bug")
+        return await original(sid_, turn_id, name, tool_use_id, outcome, input=input)
+
+    loop._after_tool = after_tool  # type: ignore[method-assign]
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=_HANG)
+
+    published = _one_result_each(loop.bus.log(sid))
+    assert list(published) == ["a", "b", "w"]
+    assert published["a"].output == "probe:a"
+    assert published["b"].is_error and published["w"].is_error
+    assert ("start", "w") not in timeline.events
+    stored = await _stored_results(store, sid)
+    assert list(stored) == ["a", "b", "w"]
+    assert any(isinstance(e, ErrorEvent) and "engine bug" in e.message
+               for e in loop.bus.log(sid))
