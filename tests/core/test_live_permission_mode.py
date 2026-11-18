@@ -272,3 +272,25 @@ async def test_a_switch_to_bypass_never_releases_a_safety_check(live):
          patch.object(permission_handler, "respond", new_callable=AsyncMock) as respond:
         await permission_handler.resolve_mode_permissions(SID, state)
         respond.assert_not_awaited()
+
+
+async def test_a_switch_to_auto_never_releases_a_credential_card(live):
+    """Auto approves an ordinary pending card on its own, never a credential one."""
+    from app.core.session_modes import CREDENTIAL_ASK_REASON
+    state, _ = live
+    state.adapter._is_delegated = True
+    state.callback_refs["permission_mode"] = "auto"
+    rows = [
+        {"payload": {"request_id": "hooked", "tool_name": "Read", "mode_managed": True,
+                     "tool_input": {"file_path": "/repo/notes.md"},
+                     "decision_reason": CREDENTIAL_ASK_REASON}},
+        {"payload": {"request_id": "env", "tool_name": "Read", "mode_managed": True,
+                     "tool_input": {"file_path": "/repo/.env"}}},
+        {"payload": {"request_id": "plain", "tool_name": "Read", "mode_managed": True,
+                     "tool_input": {"file_path": "/repo/notes.md"}}},
+    ]
+    with patch.object(permission_handler, "_v2_pending_permissions", return_value=rows), \
+         patch.object(permission_handler, "saved_rule", return_value=None), \
+         patch.object(permission_handler, "respond", new_callable=AsyncMock) as respond:
+        await permission_handler.resolve_mode_permissions(SID, state)
+    assert [c.kwargs["request_id"] for c in respond.await_args_list] == ["plain"]

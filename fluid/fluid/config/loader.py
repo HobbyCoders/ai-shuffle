@@ -579,18 +579,40 @@ def _sensitive_file_rules():
     credential operands is best effort, and Bash is not a credential boundary.
     """
     from fluid.permissions.rules import CredentialRule, Rule
-    from fluid.tools.hardening import PROTECTED_WRITE_PREFIXES, SENSITIVE_EXCEPTIONS
+    from fluid.tools.hardening import (
+        PROTECTED_WRITE_PREFIXES,
+        SENSITIVE_BASENAME_GLOBS,
+        SENSITIVE_DIR_NAMES,
+        SENSITIVE_EXCEPTIONS,
+        SENSITIVE_PATH_SUFFIXES,
+    )
 
+    # Main's glob asks, kept as they were: the floor the check below only adds
+    # to. "*" prefixes make basename globs match directory-qualified inputs
+    # too ("src/.env"); fnmatch "*" crosses "/" so this is a suffix match
+    # (``*.env`` also asks about ``production.env``).
+    globs = [
+        pattern if pattern.startswith("*") else f"*{pattern}"
+        for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
+    ]
+    for name in SENSITIVE_DIR_NAMES:
+        globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
     field_by_tool = {
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
     }
-    # One rule per tool tests every spelling of the path (case-insensitive,
-    # symlinks followed) against the shared policy, and a Glob's pattern too.
     asks: list[Rule] = [
+        Rule(tool=tool, decision="ask", input_globs={field: glob})
+        for tool, field in field_by_tool.items()
+        for glob in globs
+    ]
+    # Then one rule per tool that tests every spelling of the path
+    # (case-insensitive, symlinks followed) against the shared policy, and a
+    # Glob's pattern too.
+    asks.extend(
         CredentialRule(tool=tool, decision="ask", input_globs={field: "*"})
         for tool, field in field_by_tool.items()
-    ]
+    )
     asks.extend(
         Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
         for tool in ("Edit", "Write")

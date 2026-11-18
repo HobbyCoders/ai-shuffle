@@ -165,6 +165,18 @@ def test_default_permission_rules_gate_credential_reads() -> None:
     assert verdict.decision == "allow"
 
 
+@pytest.mark.parametrize("path", ["/repo/production.env", "config/staging.env"])
+def test_mains_suffix_asks_still_hold(path: str) -> None:
+    """Main generated ``*.env`` (and friends) as file-tool asks; the shared
+    credential check is added on top of them, never in their place."""
+    engine = _build_permissions(_config())
+    for tool, field in (("Read", "file_path"), ("Edit", "file_path"), ("Grep", "path")):
+        spec = ToolSpec(name=tool, description="", input_schema={}, risk="safe")
+        assert engine.decide(spec, {field: path}).decision == "ask", tool
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    assert engine.decide(read_spec, {"file_path": "/repo/.env.example"}).decision == "allow"
+
+
 def test_user_rule_overrides_default_sensitive_rule() -> None:
     config = _config(permission={
         "rules": [{"tool": "Read", "decision": "allow",
@@ -350,6 +362,23 @@ async def test_grep_filters_on_the_structured_path_not_the_line_text(tmp_path) -
     )
     assert "hunter2" not in outcome.text
     assert "notes.txt" in outcome.text
+
+
+async def test_grep_keeps_mains_text_filter_underneath(tmp_path) -> None:
+    """Main withheld a hit whose printed line starts like a credential path
+    (``…/.env:1:``); the structured path check only adds to that."""
+    from fluid.tools.builtins import grep as grep_mod
+
+    odd_dir = tmp_path / ".env:1:mock"
+    try:
+        odd_dir.mkdir()
+    except OSError:
+        pytest.skip("this filesystem refuses ':' in names")
+    (odd_dir / "notes.txt").write_text("TOKEN=hunter2\n")
+    outcome = await grep_mod.handler(
+        {"pattern": "TOKEN", "path": str(tmp_path), "no_ignore": True}, ToolCtx(cwd=str(tmp_path)),
+    )
+    assert "hunter2" not in outcome.text
 
 
 @pytest.mark.parametrize("pattern, root, decision", [

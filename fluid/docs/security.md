@@ -89,7 +89,9 @@ model *reads* framing tokens even when they can't structurally escape.
   listener's connection handoff (`<tmp>/event-listener-*/request`); and a
   process's environment or memory (`/proc/<pid>/environ`, including `self`
   and `thread-self`, and `/proc/<pid>/mem`). The list lives in
-  `fluid/tools/hardening.py`. A path is matched in every spelling the
+  `fluid/tools/hardening.py`. The generated suffix globs (`*.env`, so
+  `production.env` asks too) stay installed underneath this check. A path is
+  matched in every spelling the
   file-tool rules check: as written, normalised (`~/.kube/./config`), made
   absolute against the working directory, and with symlinks resolved; names
   match in any case (`.ENV`). Odd path forms (a link whose name ends in a
@@ -103,8 +105,8 @@ model *reads* framing tokens even when they can't structurally escape.
   credential edit on its own; `.env.example`-style templates are exempt.
   `permission.protect_sensitive_files = false` disables the set. The AI
   Shuffle app installs the same asks in its own sessions (native and code
-  mode), ahead of its own rules, and its Accept Edits mode never approves an
-  edit they asked about. A run with nobody to answer (an automation, an API
+  mode), ahead of its own rules, and neither its Accept Edits nor its Auto
+  mode approves a call they asked about (only Bypass does). A run with nobody to answer (an automation, an API
   turn) is denied at once with the reason. On the delegated Claude CLI leg
   the PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/
   `Glob` call that touches one, judged in the CLI's own working directory,

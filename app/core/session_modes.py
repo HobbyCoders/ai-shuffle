@@ -607,21 +607,21 @@ def mode_approves_without_prompt(
     through this, so a run with nobody watching allows exactly what a watched
     one would.
 
-    Accept Edits never approves an edit of a credential file: one the
-    engine's credential rule asked about (``decision_reason`` is
-    :data:`CREDENTIAL_ASK_REASON`, which follows symlinks and the working
-    directory) or one ``tool_input`` names literally. That asks as it does in
-    a fluid session, where the sensitive-file ask outranks the mode's allow.
+    No mode short of Bypass (Accept Edits, Auto) approves a call on a
+    credential file: one the engine's credential rule or the delegated hook
+    asked about (``decision_reason`` is :data:`CREDENTIAL_ASK_REASON`, which
+    follows symlinks and the working directory) or one ``tool_input`` names
+    literally. That asks as it does in a fluid session, where the
+    sensitive-file ask outranks the mode's allow.
     """
     if permission_mode == "bypassPermissions":
         return True
     if permission_mode in (None, "", "default", "plan"):
         return False
+    if is_credential_call(tool_input, decision_reason):
+        return False
     if permission_mode == "acceptEdits":
-        return (
-            tool_name in ACCEPT_EDITS_TOOLS
-            and not is_credential_call(tool_input, decision_reason)
-        )
+        return tool_name in ACCEPT_EDITS_TOOLS
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 

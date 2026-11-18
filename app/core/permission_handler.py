@@ -119,8 +119,9 @@ class PermissionRule:
     tool_pattern: Optional[str]  # Optional pattern for tool input matching
     decision: PermissionDecision
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    #: A shell Allow saved as an exact form: it also covers the same words in
-    #: other ASCII spacing. Unmarked rules keep the plain pattern match.
+    #: A shell Allow saved as an exact form: besides main's match it also
+    #: covers the same words in other ASCII spacing. Unmarked rules keep
+    #: main's match only.
     exact_form: bool = False
 
     def matches(self, tool_name: str, tool_input: Dict[str, Any]) -> bool:
@@ -149,22 +150,27 @@ class PermissionRule:
         return self._match_pattern(tool_input)
 
     def _match_pattern(self, tool_input: Dict[str, Any]) -> bool:
-        """Match pattern against tool input"""
+        """Match pattern against tool input.
+
+        Main's matcher below runs for every rule, unchanged. An Allow saved as
+        an exact shell form (``exact_form``) also covers the same allowlisted
+        words in other ASCII spacing, read from the command only.
+        """
+        if self._match_pattern_main(tool_input):
+            return True
+        return (self.exact_form
+                and self.decision == PermissionDecision.ALLOW
+                and _is_shell_tool(self.tool_name)
+                and _remembered_bash_pattern(tool_input) == self.tool_pattern)
+
+    def _match_pattern_main(self, tool_input: Dict[str, Any]) -> bool:
+        """Main's matcher, kept as it was."""
         pattern = self.tool_pattern
 
-        # Handle different tool types. A shell rule matches the command only
-        # (never another field such as a description), case-sensitively. An
-        # Allow marked as an exact form (``git status``) also covers the same
-        # words in other ASCII spacing; any other rule, including every one
-        # saved before exact forms, keeps the plain pattern match.
-        if _is_shell_tool(self.tool_name):
+        # Handle different tool types
+        if self.tool_name == "Bash":
             command = tool_input.get("command", "")
-            if not isinstance(command, str):
-                return False
-            if fnmatch.fnmatchcase(command, pattern):
-                return True
-            return (self.exact_form and self.decision == PermissionDecision.ALLOW
-                    and _remembered_bash_pattern(tool_input) == pattern)
+            return fnmatch.fnmatch(command, pattern)
 
         elif self.tool_name in ("Read", "Write", "Edit", "Glob"):
             file_path = tool_input.get("file_path", "") or tool_input.get("path", "")

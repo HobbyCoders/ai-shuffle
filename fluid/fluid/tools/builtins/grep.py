@@ -358,7 +358,10 @@ async def _ripgrep(
                     line = _absolutize_line(
                         f"{hit}:{rest.decode(errors='replace')}", run_dir, target,
                     )
-                    sensitive = is_sensitive_path(str(run_dir / hit))
+                    # Main's text check still applies underneath: the
+                    # structured path only adds what it would miss.
+                    sensitive = (is_sensitive_path(str(run_dir / hit))
+                                 or _is_sensitive_match(line, is_sensitive_path))
                 else:  # no path field (a single-file target): the older text check
                     line = _absolutize_line(raw.decode(errors="replace"), run_dir, target)
                     sensitive = (_is_sensitive_match(line, is_sensitive_path)

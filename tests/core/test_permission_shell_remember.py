@@ -7,7 +7,7 @@
 * Shell allows saved before exact forms keep their old breadth (pinned).
 """
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -93,6 +93,34 @@ def test_only_rules_saved_as_exact_forms_cover_other_spacing(respacing):
     assert handler._check_rules(SID, "default", "Bash", {"command": respacing}) is None
     database.add_permission_rule("default", "Bash", "git status", "allow", exact_form=True)
     assert handler._check_rules(SID, "default", "Bash", {"command": respacing})
+
+
+def test_rules_saved_before_exact_forms_keep_mains_matcher(monkeypatch):
+    """Unmarked rules match exactly as on main: a Monitor rule reads every
+    string field (its ``cwd`` too), and fnmatch normalizes case on Windows."""
+    import fnmatch
+    import ntpath
+
+    handler = PermissionHandler()
+    handler._add_session_rule_idempotent(SID, "Monitor", "/repo/restricted", "deny")
+    handler._add_session_rule_idempotent(SID, "Monitor", "/srv/*", "allow")
+    denied = handler._check_rules(
+        SID, "default", "Monitor", {"command": "tail -f log", "cwd": "/repo/restricted"})
+    assert denied is not None and denied.decision.value == "deny"
+    allowed = handler._check_rules(SID, "default", "Monitor", {"command": "make", "cwd": "/srv/app"})
+    assert allowed is not None and allowed.decision.value == "allow"
+
+    handler._add_session_rule_idempotent(SID, "Bash", "Git Status", "allow")
+    monkeypatch.setattr(fnmatch.os.path, "normcase", ntpath.normcase)  # as on Windows
+    assert handler._check_rules(SID, "default", "Bash", {"command": "git status"})
+
+
+def test_a_marked_allow_adds_the_spacing_match_to_mains():
+    handler = PermissionHandler()
+    handler._add_session_rule_idempotent(SID, "Monitor", "git status", "allow", exact_form=True)
+    assert handler._check_rules(SID, "default", "Monitor", {"command": "git  status"})
+    assert handler._check_rules(SID, "default", "Monitor", {"command": "git status", "cwd": "/r"})
+    assert handler._check_rules(SID, "default", "Monitor", {"command": "git log"}) is None
 
 
 @pytest.mark.asyncio
@@ -228,3 +256,63 @@ async def test_unattended_credential_write_ignores_a_tool_wide_saved_allow(mock_
         assert answers == [("env", False), ("notes", True)]
     finally:
         permission_handler.clear_session_rules(SID)
+
+
+# ─── Auto never approves a credential call on its own ──────────────────────
+
+HOOK_ENV_READ = ("Read", {"file_path": "/repo/.env"})
+
+
+async def test_auto_puts_a_hooked_credential_read_to_the_watching_owner(tmp_path):
+    from app.core import query_engine as qe
+    from tests.core.test_query_engine_permission_flows import SID as QSID
+    from tests.core.test_query_engine_permission_flows import (
+        _allowed,
+        _callback,
+        _ctx,
+        _next_prompt,
+        _prompt_count,
+    )
+
+    cb, broadcast, bounds = await _callback(tmp_path, overrides={"permission_mode": "auto"})
+    with patch.object(qe, "sync_engine", new=bounds.sync_engine):
+        # An ordinary read the CLI asked about: Auto approves it, as on main.
+        assert _allowed(await cb("Read", {"file_path": "/repo/notes.md"}, _ctx()))
+        assert _prompt_count(broadcast) == 0
+        tool, tool_input = HOOK_ENV_READ
+        call = asyncio.create_task(
+            cb(tool, tool_input, _ctx("tu-env", decision_reason=CREDENTIAL_ASK_REASON)))
+        prompt = await _next_prompt(broadcast)
+        await handler_respond(prompt["request_id"], QSID, "deny")
+        assert not _allowed(await asyncio.wait_for(call, 5))
+
+
+async def handler_respond(request_id, session_id, decision):
+    from app.core.permission_handler import permission_handler
+
+    await permission_handler.respond(request_id, session_id, decision)
+
+
+@pytest.mark.asyncio
+async def test_auto_denies_a_hooked_credential_read_when_unattended(mock_db):
+    import app.core.provider.harness_adapter as ha
+    from app.core.provider.types import PermissionRequestEvent, SessionOptions
+
+    adapter = ha.HarnessAdapter()
+    adapter._options = SessionOptions(
+        model="opus", permission_mode="auto",
+        extra={"app_session_id": SID, "profile_id": "p-none"},
+    )
+    adapter._is_delegated = True
+    answers = []
+
+    async def respond(tool_use_id, allow, *, message=None, **_kw):
+        answers.append((tool_use_id, allow))
+
+    adapter.respond_to_permission = respond
+    tool, tool_input = HOOK_ENV_READ
+    await adapter._answer_without_approver(PermissionRequestEvent(
+        tool_use_id="env", name=tool, input=tool_input, reason=CREDENTIAL_ASK_REASON))
+    await adapter._answer_without_approver(PermissionRequestEvent(
+        tool_use_id="notes", name="Read", input={"file_path": "/repo/notes.md"}))
+    assert answers == [("env", False), ("notes", True)]
