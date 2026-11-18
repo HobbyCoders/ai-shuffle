@@ -224,18 +224,23 @@
 		return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
 	}
 
-	// Stacked, every category shares the one scroller (.settings-viewport), so a
+	// Settings categories share the one scroller (.settings-viewport), so a
 	// category opens at its top, not where the previous one was left. Reopening
 	// the same category from the index counts as opening it; its own list and
 	// detail steps keep the offset CollectionPage gives them.
 	// Turning the phone (stacked to split and back) is not opening anything.
 	const shownCategory = $derived(settingsNav.view === 'index' ? null : category);
+	let indexSelection = $state(0);
+	let lastIndexSelection = 0;
 	let lastShown: CategoryId | null | undefined;
 	$effect(() => {
 		const current = shownCategory;
-		const previous = lastShown;
+		const selection = indexSelection;
+		const changedCategory = lastShown !== undefined && current !== lastShown;
+		const selectedFromIndex = selection !== lastIndexSelection;
 		lastShown = current;
-		if (previous === undefined || previous === current || current === null || !untrack(() => stacked)) return;
+		lastIndexSelection = selection;
+		if (current === null || (!changedCategory && !selectedFromIndex)) return;
 		root?.querySelector<HTMLElement>('.settings-viewport')?.scrollTo?.({ top: 0 });
 	});
 
@@ -259,7 +264,7 @@
 >
 	<ViewShell label="Settings" inheritScope nestedPanes bind:stacked detailOpen={settingsNav.view !== 'index'}
 		manageHistory={false} onBack={() => settingsNav.back()}>
-		{#snippet panel()}<SettingsIndex {onkeydown} />{/snippet}
+		{#snippet panel()}<SettingsIndex {onkeydown} onCategorySelected={() => indexSelection++} />{/snippet}
 		{#snippet main()}
 	<div class="st-content">
 		{#if settingsAccess.readOnly}<ApprovalBanner />{/if}
