@@ -3112,12 +3112,13 @@ def _builtin_loop() -> DelegatedLoop:
 
 
 def test_delegated_allow_always_is_scoped_to_the_programs_the_command_runs() -> None:
-    """``allow_always`` on ``git status`` auto-allows later ``git`` calls but
-    still prompts for ``rm``; the bundled-bridge spelling of a tool name is
-    scoped by the same registry spec."""
+    """``allow_always`` on ``git status`` auto-allows later ``git status``
+    calls but still prompts for ``git push`` and ``rm``; the bundled-bridge
+    spelling of a tool name is scoped by the same registry spec."""
     loop = _builtin_loop()
     loop._remember_allow("Bash", {"command": "git status"})
-    assert loop._session_allows("Bash", {"command": "git log --oneline"})
+    assert loop._session_allows("Bash", {"command": "git status --short"})
+    assert not loop._session_allows("Bash", {"command": "git push --force"})
     assert not loop._session_allows("Bash", {"command": "rm -rf build"})
     assert not loop._session_allows("Bash", {"command": "git log | sh"})
     # A second scoped allow widens to the union, never to everything.
@@ -3146,7 +3147,7 @@ def test_delegated_allow_always_on_an_unscopable_command_stays_one_shot() -> Non
     # An existing scoped allow is kept, not widened, by the unscopable one.
     loop._remember_allow("Bash", {"command": "git status"})
     loop._remember_allow("Bash", {"command": "echo $(id)"})
-    assert loop._session_allows("Bash", {"command": "git diff"})
+    assert loop._session_allows("Bash", {"command": "git status -s"})
     assert not loop._session_allows("Bash", {"command": "curl x | sh"})
 
 
@@ -3197,6 +3198,51 @@ async def test_delegated_permission_answer_carries_the_rewritten_input_only_on_a
     # A one-shot allow never echoes the CLI's "always" rules or sticks.
     assert "updatedPermissions" not in allowed
     assert not loop._session_allows("AskUserQuestion", {})
+
+
+async def _answer_bash_bridge(loop: DelegatedLoop, command: str) -> dict:
+    """An ``allow_always`` answer to a Bash ``can_use_tool`` bridge carrying
+    the CLI's suggestions; returns the control_response payload."""
+    from fluid.engine.delegated_proto import PermissionBridge
+
+    written: list[dict] = []
+
+    async def capture(frame: dict) -> None:
+        written.append(frame)
+
+    loop._write_frame = capture  # type: ignore[method-assign]
+    bridge = PermissionBridge(
+        cli_request_id="cli_b", fluid_request_id="perm_b", tool_name="Bash",
+        tool_use_id="tu_b", input={"command": command},
+        suggestions=({"type": "addRules", "rules": [
+            {"toolName": "Bash", "ruleContent": command.split()[0] + ":*"}]},),
+    )
+    task = asyncio.create_task(loop._handle_permission(bridge))
+    for _ in range(50):
+        if "perm_b" in loop._pending_permissions:
+            break
+        await asyncio.sleep(0)
+    loop._pending_permissions["perm_b"].set_result(
+        RespondPermission(request_id="perm_b", decision="allow_always")
+    )
+    await asyncio.wait_for(task, 5)
+    (frame,) = written
+    return frame["response"]["response"]
+
+
+async def test_delegated_always_on_a_dangerous_command_is_not_echoed_to_the_cli() -> None:
+    """``allow_always`` on ``git push --force`` allows that call only: fluid
+    records no grant and the CLI's own "always" rule is not echoed back, so
+    neither side skips the prompt next time. A scoped grant still echoes."""
+    loop = _builtin_loop()
+    forced = await _answer_bash_bridge(loop, "git push --force origin main")
+    assert forced["behavior"] == "allow"
+    assert "updatedPermissions" not in forced
+    assert not loop._session_allows("Bash", {"command": "git push --force origin main"})
+
+    commit = await _answer_bash_bridge(loop, "git commit -m x")
+    assert commit["updatedPermissions"]
+    assert loop._session_allows("Bash", {"command": "git commit -m y"})
 
 
 # ─── stream-json edge cases (delegated_proto) ────────────────────────────────

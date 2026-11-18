@@ -584,6 +584,7 @@ def _sensitive_file_rules():
         SENSITIVE_BASENAME_GLOBS,
         SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
+        SENSITIVE_PATH_GLOBS,
         SENSITIVE_PATH_SUFFIXES,
     )
 
@@ -593,6 +594,7 @@ def _sensitive_file_rules():
         pattern if pattern.startswith("*") else f"*{pattern}"
         for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
     ]
+    globs.extend(f"*{pattern}" for pattern in SENSITIVE_PATH_GLOBS)
     for name in SENSITIVE_DIR_NAMES:
         globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
     field_by_tool = {

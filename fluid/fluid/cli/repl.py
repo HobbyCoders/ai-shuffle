@@ -445,9 +445,17 @@ def format_skills(skills) -> str:
 async def ask_permission(
     event: PermissionRequest, read_line: Callable[[str], Awaitable[str]]
 ) -> str:
-    """Interactive responder: y = allow once, a = allow this tool (and, for
-    Bash, these programs) for the rest of the session, anything else = deny."""
-    answer = (await read_line(f"  allow {event.name}? [y/N/a=always] ")).strip().lower()
+    """Interactive responder: y = allow once, a = allow for the rest of the
+    session, anything else = deny. For Bash and Monitor the prompt names what
+    "always" covers (program plus subcommand, interpreter plus script), or
+    says it covers this call only when the command cannot be allowed for the
+    session (a dangerous form such as ``git push --force``)."""
+    always = "a=always"
+    if event.name in ("Bash", "Monitor") and isinstance(event.input, dict):
+        from fluid.tools.builtins.bash_risk import describe_session_scope
+
+        always = f"a=always, {describe_session_scope(event.input)}"
+    answer = (await read_line(f"  allow {event.name}? [y/N/{always}] ")).strip().lower()
     if answer in ("a", "always"):
         return "allow_always"
     return "allow" if answer in ("y", "yes") else "deny"

@@ -154,8 +154,12 @@ class PermissionEngine:
         never an explicit configured rule — those keep last-match-wins.
 
         ``scope`` narrows the allow to labels the tool derives from the call
-        (Bash: the programs it runs), so allowing ``git status`` once covers
-        later ``git`` commands but not ``rm``. None covers every call."""
+        (Bash: program plus subcommand, or interpreter plus script; see
+        ``bash_risk.scope_labels``), so allowing ``git commit`` once covers
+        later ``git commit`` calls but not ``git push`` or ``rm``. A later call
+        is covered only when every label it carries was allowed, and a call the
+        tool cannot label (Bash's dangerous forms such as ``git push --force``
+        or ``rm -rf``) is never covered. None covers every call."""
         if scope is None:
             self._always_allowed[name] = None
             return

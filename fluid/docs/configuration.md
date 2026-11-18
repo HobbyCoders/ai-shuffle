@@ -607,7 +607,9 @@ What the child CLI is given, and what it is not:
   native provider, named with `continual_provider`.
 - An `allow_always` answer to a permission prompt is remembered for the
   session (scoped the way the native engine scopes it), and the CLI's own
-  `permission_suggestions` are echoed back so it stops asking too.
+  `permission_suggestions` are echoed back so it stops asking too. A call the
+  tool cannot scope (a Bash dangerous form such as `git push --force`) is
+  allowed once and its suggestions are not echoed, so both sides ask again.
 - The system prompt text rides a file (`--append-system-prompt-file`, or
   `--system-prompt-file` for a replacing prompt) in the session's temp
   directory, not the command line, which Windows caps at 32,767 characters.

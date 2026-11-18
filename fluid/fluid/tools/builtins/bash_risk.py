@@ -29,7 +29,10 @@ only when:
 A read-only command whose argument names a credential file (``cat .env``) is
 still ``write``; see :func:`_touches_sensitive_path`. An unquoted glob argument
 counts when any file it could expand to is a credential file (``cat .env*``,
-``cat ?env``, ``cat ~/.ssh/*``).
+``cat ?env``, ``cat ~/.ssh/*``). A process's environment
+(``/proc/<pid>/environ``) is one of those files, and a recursive search
+(``grep -r``, ``rg``) rooted at ``/``, ``/proc`` or a process directory is
+``write`` too, since it reads that file without naming it.
 
 Programs with extra rules:
 
@@ -352,22 +355,165 @@ WRAPPER_PROGRAMS = frozenset((
 ))
 # Programs whose first argument selects what they do. ``npm run`` and
 # ``npm install`` are different programs for approval purposes, as are
-# ``make build`` and ``make clean``.
+# ``make build`` and ``make clean`` and ``git commit`` and ``git push``.
 SUBCOMMAND_PROGRAMS = frozenset((
-    "npm", "npx", "pnpm", "yarn", "bun", "bunx", "uv", "uvx", "pip", "pip3",
+    "git", "npm", "npx", "pnpm", "yarn", "bun", "bunx", "uv", "uvx", "pip", "pip3",
     "pipx", "poetry", "cargo", "go", "make", "docker", "podman", "kubectl",
-    "gh", "gcloud", "aws", "az", "terraform", "helm",
+    "gh", "gcloud", "aws", "az", "terraform", "helm", "apt", "apt-get", "brew",
+    "dnf", "yum", "systemctl", "conda", "dotnet",
 ))
+# Subcommands that take a second verb: ``git stash list`` and ``git stash
+# drop``, ``gh pr view`` and ``gh pr merge`` are different approvals. ``*``
+# means every subcommand of the program does. ``run`` names a script (``npm run
+# build``, ``uv run tool.py``), so it carries that too.
+NESTED_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "git": frozenset(("stash", "remote", "worktree", "submodule", "reflog", "notes", "lfs")),
+    "docker": frozenset((
+        "compose", "container", "image", "volume", "network", "system", "buildx",
+        "builder", "context", "swarm", "stack", "service",
+    )),
+    "kubectl": frozenset(("config", "rollout")),
+    "gh": frozenset("*"), "aws": frozenset("*"), "gcloud": frozenset("*"), "az": frozenset("*"),
+    **{pm: frozenset(("run",)) for pm in ("npm", "pnpm", "yarn", "bun", "uv", "poetry")},
+}
+NESTED_SUBCOMMANDS["podman"] = NESTED_SUBCOMMANDS["docker"]
+# Global options that take a separate value before the subcommand
+# (``git -C repo commit``, ``kubectl -n ns delete``).
+_GLOBAL_VALUE_OPTIONS = frozenset((
+    "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+    "--context", "-H", "--host", "--config", "-l", "--log-level",
+    "-n", "--kubeconfig", "--cluster", "--user", "-s", "--server",
+    "--prefix", "--dir", "-w", "--workspace", "--filter", "-f", "--file",
+    "-R", "--repo", "--project", "--profile", "--region", "-j",
+))
+# Interpreters: an approval covers the script or module they run, not every
+# script. Inline code (``python -c``, ``node -e``, ``bash -c``) is not
+# labelled at all, so approving it is one call only.
+INTERPRETERS = frozenset((
+    "python", "python3", "py", "pypy", "pypy3", "node", "deno", "ruby", "perl", "php",
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "powershell",
+))
+_PYTHON_VERSIONED = re.compile(r"^python\d+(?:\.\d+)*$")
+_INLINE_CODE_FLAGS = frozenset((
+    "-c", "-e", "-p", "-r", "--eval", "--print", "-command", "-encodedcommand", "-ec",
+))
+_INTERPRETER_VALUE_OPTIONS = frozenset(("-W", "-X", "-I", "--require", "-file", "-f"))
+
+# Forms no session approval covers: each keeps asking every time, even after
+# "always" for the same program and subcommand. Kept to operations that
+# destroy work or history, or publish, and cannot be taken back.
+_DESTRUCTIVE_VERBS = frozenset((
+    "delete", "destroy", "prune", "uninstall", "unpublish", "yank", "publish",
+))
+_ALWAYS_DESTRUCTIVE_PROGRAMS = frozenset(("shred", "wipefs", "mkfs"))
+
+
+def _short_flags(args: list[str]) -> str:
+    """Every single-dash short option letter in ``args`` (``-rf`` → ``rf``)."""
+    return "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+
+
+def _is_destructive(program: str, words: list[str], args: list[str]) -> bool:
+    """True for a dangerous form of ``program`` (``words``: its subcommands).
+
+    ``args`` is everything after the program, global options included.
+    """
+    if program in _ALWAYS_DESTRUCTIVE_PROGRAMS or program.startswith("mkfs."):
+        return True
+    if program == "dd":
+        return any(a.startswith("of=") for a in args)
+    if program in ("rm", "rmdir"):
+        flags = _short_flags(args)
+        return "r" in flags or "R" in flags or any(
+            a in ("--recursive", "--no-preserve-root") for a in args
+        )
+    if program == "find":
+        return "-delete" in args or any(
+            a in ("-exec", "-execdir", "-ok", "-okdir") and _program_name(args[i + 1]) in ("rm", "shred")
+            for i, a in enumerate(args[:-1])
+        )
+    if any(w in _DESTRUCTIVE_VERBS for w in words):
+        return True
+    if program != "git" or not words:
+        return False
+    sub, flags = words[0], _short_flags(args)
+    if sub == "push":
+        return (
+            "f" in flags or "d" in flags
+            or any(a.split("=", 1)[0] in ("--force", "--force-with-lease", "--force-if-includes",
+                                          "--mirror", "--delete", "--prune") for a in args)
+            or any(a.startswith(("+", ":")) for a in args)
+        )
+    if sub == "reset":
+        return any(a in ("--hard", "--merge", "--keep") for a in args)
+    if sub == "clean":
+        return "f" in flags or "--force" in args
+    if sub == "checkout":
+        return "f" in flags or any(a in ("--", ".", "--force") for a in args)
+    if sub == "switch":
+        return "f" in flags or any(a in ("--force", "--discard-changes") for a in args)
+    if sub == "branch":
+        return "D" in flags or ("--delete" in args and ("--force" in args or "f" in flags))
+    if sub in ("restore", "filter-branch", "filter-repo"):
+        return True
+    if sub == "stash":
+        return words[1:2] in (["drop"], ["clear"])
+    if sub == "reflog":
+        return words[1:2] in (["expire"], ["delete"])
+    if sub == "update-ref":
+        return "d" in flags
+    return False
+
+
+def _subcommand_words(program: str, rest: list[str]) -> tuple[list[str], list[str]]:
+    """``(subcommand words, tokens after them)`` for a subcommand program."""
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 2 if rest[i] in _GLOBAL_VALUE_OPTIONS else 1
+    if i >= len(rest):
+        return [], []
+    words = [rest[i].lower()]
+    nested = NESTED_SUBCOMMANDS.get(program, frozenset())
+    if ("*" in nested or words[0] in nested) and i + 1 < len(rest) and not rest[i + 1].startswith("-"):
+        words.append(rest[i + 1] if words[0] == "run" else rest[i + 1].lower())
+    return words, rest[i + len(words):]
+
+
+def _interpreter_label(program: str, rest: list[str]) -> str | None:
+    """``python x.py`` → ``python x.py``; inline code or stdin → None."""
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        lowered = arg.lower()
+        if lowered in _INLINE_CODE_FLAGS or (
+            arg.startswith("-") and not arg.startswith("--") and len(arg) > 2
+            and program in ("bash", "sh", "zsh", "dash", "ksh") and "c" in arg[1:]
+        ):
+            return None
+        if arg == "-m" and i + 1 < len(rest):
+            return f"{program} -m {rest[i + 1]}"
+        if arg == "--" or not arg.startswith("-"):
+            target = rest[i + 1] if arg == "--" and i + 1 < len(rest) else arg
+            if arg == "--" and i + 1 >= len(rest):
+                return None
+            if program == "deno" and target == "run":
+                return _interpreter_label(program, rest[i + 1:])
+            return f"{program} {target}"
+        i += 2 if lowered in _INTERPRETER_VALUE_OPTIONS or arg in _INTERPRETER_VALUE_OPTIONS else 1
+    # No script: the interpreter reads its program from stdin (``curl … | sh``).
+    return None
 
 
 def _scope_label(tokens: list[str]) -> str | None:
     """The approval label for one simple command's tokens.
 
     A wrapper labels as ``wrapper <label of the wrapped command>``; a
-    subcommand program as ``program subcommand``; anything else as the
-    program alone. None when a wrapper carries options (``sudo -u root``):
-    which token is the wrapped program is then not knowable from the text,
-    and a guess would scope the approval wrongly.
+    subcommand program as ``program subcommand`` (two verbs for the
+    :data:`NESTED_SUBCOMMANDS`); an interpreter as ``interpreter script``;
+    anything else as the program alone. None when no approval may cover the
+    command beyond this one call: a wrapper with options (``sudo -u root``,
+    where the wrapped program is not knowable from the text), inline
+    interpreter code, or a dangerous form (:func:`_is_destructive`).
     """
     while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
         tokens = tokens[1:]
@@ -382,10 +528,15 @@ def _scope_label(tokens: list[str]) -> str | None:
             return None
         inner = _scope_label(rest)
         return None if inner is None else f"{program} {inner}"
+    words: list[str] = []
     if program in SUBCOMMAND_PROGRAMS:
-        if rest and not rest[0].startswith("-"):
-            return f"{program} {rest[0].lower()}"
-        return program
+        words, _after = _subcommand_words(program, rest)
+    if _is_destructive(program, words, rest):
+        return None
+    if words:
+        return " ".join((program, *words))
+    if program in INTERPRETERS or _PYTHON_VERSIONED.match(program):
+        return _interpreter_label(program, rest)
     return program
 
 
@@ -436,9 +587,11 @@ def program_names(command: str) -> frozenset[str] | None:
 def scope_labels(command: str) -> frozenset[str] | None:
     """The ``allow_always`` labels of a command: one per simple command.
 
-    Plain programs label as themselves (``git``); wrappers and subcommand
-    programs carry what they run (``sudo apt``, ``npm run``). None when any
-    part cannot be labelled, so the approval is one-shot rather than wide.
+    Plain programs label as themselves (``ls``); wrappers, subcommand
+    programs and interpreters carry what they run (``sudo apt``, ``git
+    commit``, ``npm run build``, ``python tool.py``). None when any part
+    cannot be labelled or is a dangerous form, so the approval is one-shot
+    rather than wide.
     """
     groups = _simple_command_tokens(command)
     if groups is None:
@@ -458,6 +611,14 @@ def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
     return scope_labels(command) if isinstance(command, str) else None
 
 
+def describe_session_scope(input: dict[str, Any]) -> str:
+    """What answering "always" to this Bash call allows, in plain words."""
+    labels = session_scope(input)
+    if labels is None:
+        return "this call only (this command cannot be allowed for the session)"
+    return "for the session: " + ", ".join(sorted(labels))
+
+
 # Concrete names the sensitive-file globs in fluid.tools.hardening cover, so an
 # argument glob can be tested against them: ``?env`` matches ``.env``,
 # ``~/.ssh/*`` matches ``.ssh/config``.
@@ -465,7 +626,8 @@ _SENSITIVE_EXAMPLE_NAMES = (
     ".env", ".env.local", "x.pem", "x.p12", "x.pfx",
     "id_rsa", "id_rsa.pub", "id_ed25519", "id_ed25519.pub", "id_ecdsa", "id_ecdsa.pub",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
-    "managed-postgres.json",
+    "managed-postgres.json", "preview-access.key", ".credentials.json", ".pgpass",
+    "environ",
 )
 _SENSITIVE_EXAMPLE_PATHS = (
     ".aws/credentials", ".ssh/config",
@@ -573,6 +735,48 @@ def _touches_sensitive_path(command: str) -> bool:
     return False
 
 
+# Searchers that walk a directory tree. Every file a recursive search under a
+# process directory (or above one) reads includes that process's ``environ``,
+# which no argument names, so the search root itself counts.
+_TREE_SEARCHERS = frozenset(("rg", "ag", "ack"))
+_RECURSIVE_GREPS = frozenset(("grep", "egrep", "fgrep", "zgrep"))
+_PROCESS_TREE_RE = re.compile(r"^(?:/|/proc|/proc/(?:\d+|self|thread-self)(?:/task/\d+)?)$")
+
+
+def _greps_recursively(args: list[str]) -> bool:
+    for i, arg in enumerate(args):
+        if arg == "--":
+            return False
+        if arg in ("--recursive", "--dereference-recursive", "--directories=recurse"):
+            return True
+        if arg in ("-d", "--directories") and args[i + 1:i + 2] == ["recurse"]:
+            return True
+        if arg.startswith("-") and not arg.startswith("--") and ("r" in arg or "R" in arg):
+            return True
+    return False
+
+
+def _searches_process_tree(command: str) -> bool:
+    """True when a recursive search starts at ``/``, ``/proc`` or a process dir."""
+    for tokens in _simple_command_tokens(command) or ():
+        while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+            tokens = tokens[1:]
+        if not tokens:
+            continue
+        program, args = _program_name(tokens[0]), tokens[1:]
+        if program not in _TREE_SEARCHERS and not (
+            program in _RECURSIVE_GREPS and _greps_recursively(args)
+        ):
+            continue
+        for arg in args:
+            if arg.startswith("-"):
+                continue
+            path = arg.replace("\\", "/").rstrip("/") or "/"
+            if _PROCESS_TREE_RE.match(path):
+                return True
+    return False
+
+
 def classify(input: dict[str, Any]) -> str:
     """Effective risk of one Bash tool input: ``safe`` or ``write``."""
     command = input.get("command")
@@ -581,4 +785,6 @@ def classify(input: dict[str, Any]) -> str:
     if not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
-    return WRITE if _touches_sensitive_path(command) else SAFE
+    if _touches_sensitive_path(command) or _searches_process_tree(command):
+        return WRITE
+    return SAFE

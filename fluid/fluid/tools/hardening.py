@@ -146,19 +146,47 @@ SENSITIVE_BASENAME_GLOBS: tuple[str, ...] = (
     ".env", ".env.*", "*.pem", "*.p12", "*.pfx",
     "id_rsa", "id_rsa.*", "id_ed25519", "id_ed25519.*", "id_ecdsa", "id_ecdsa.*",
     ".netrc", "_netrc", ".npmrc", ".pypirc", ".htpasswd", ".git-credentials",
-    # AI Shuffle's managed-Postgres descriptor (host, port, password).
-    "managed-postgres.json",
+    ".pgpass",
+    # AI Shuffle's managed-Postgres descriptor (host, port, password) and the
+    # key that signs its preview-access links.
+    "managed-postgres.json", "preview-access.key",
+    # The Claude CLI's OAuth tokens, in any config folder (CLAUDE_CONFIG_DIR).
+    ".credentials.json",
+    # A process's environment (/proc/<pid>/environ, also reached as
+    # /proc/self/... or relative to a /proc directory): in a container PID 1
+    # is the app, holding everything child_env strips from child processes.
+    "environ",
 )
 SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
     "/.aws/credentials", "/.ssh/config",
-    # Claude CLI OAuth tokens and the GitHub CLI token.
-    "/.claude/.credentials.json", "/.config/gh/hosts.yml",
+    # The GitHub CLI token.
+    "/.config/gh/hosts.yml",
+    # Fluid's own Codex OAuth tokens (providers/openai_responses/codex_oauth.py).
+    "/.config/fluid/codex_auth.json",
+    # Other CLIs' sign-ins: Codex, Gemini, Docker registries, Kubernetes,
+    # Google Cloud, Azure, Cargo, RubyGems, Terraform.
+    "/.codex/auth.json", "/.gemini/oauth_creds.json",
+    "/.docker/config.json", "/.kube/config",
+    "/.config/gcloud/application_default_credentials.json",
+    "/.config/gcloud/credentials.db", "/.config/gcloud/access_tokens.db",
+    "/.azure/accesstokens.json", "/.azure/msal_token_cache.json",
+    "/.cargo/credentials", "/.cargo/credentials.toml", "/.gem/credentials",
+    "/.terraform.d/credentials.tfrc.json",
+)
+# Full-path globs (fnmatch, ``*`` crosses ``/``) for files that expose another
+# process's memory, and with it the environment ``environ`` would show.
+SENSITIVE_PATH_GLOBS: tuple[str, ...] = (
+    "/proc/*/mem",
 )
 # Directories whose every file is a secret: AI Shuffle's credential wrapping
-# keys and the agent browser's persisted profile (cookies, logged-in sessions).
-# Matched as a path component anywhere in the path.
+# keys and device identity (.credential-keys), its installation key
+# (.managed-connection), the extra Claude sign-ins' config folders
+# (claude-logins), gcloud's legacy credentials, and the agent browser's
+# persisted profile (cookies, logged-in sessions). Matched as a path
+# component anywhere in the path.
 SENSITIVE_DIR_NAMES: tuple[str, ...] = (
-    ".credential-keys", "chrome-profile",
+    ".credential-keys", ".managed-connection", "claude-logins",
+    "legacy_credentials", "chrome-profile",
 )
 # The running AI Shuffle code inside its container. Reading it is fine; an
 # agent editing it gains persistence across restarts, so writes always ask.
@@ -185,6 +213,11 @@ def is_sensitive_path(path: str) -> bool:
     if any(
         lowered.endswith(suffix) or lowered == suffix.lstrip("/")
         for suffix in SENSITIVE_PATH_SUFFIXES
+    ):
+        return True
+    if any(
+        fnmatch(lowered, pattern) or fnmatch(lowered, "*" + pattern)
+        for pattern in SENSITIVE_PATH_GLOBS
     ):
         return True
     components = lowered.split("/")

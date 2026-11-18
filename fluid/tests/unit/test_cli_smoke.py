@@ -283,3 +283,24 @@ def test_model_override_beats_provider_model_line(tmp_path) -> None:
     env = load_config(cwd=tmp_path, include_user=False, include_system=False,
                       env={"FLUID_MODEL": "p/q"})
     assert env.model_for("openrouter") == "p/q"
+
+
+async def test_ask_permission_says_what_always_grants() -> None:
+    from fluid.cli.repl import ask_permission
+    from fluid.events.model import PermissionRequest
+
+    async def prompt_for(name: str, command: str) -> str:
+        seen: list[str] = []
+
+        async def _read(prompt: str) -> str:
+            seen.append(prompt)
+            return "a"
+
+        event = PermissionRequest(session_id="s", request_id="r", tool_use_id="t",
+                                  name=name, input={"command": command}, risk="write")
+        assert await ask_permission(event, _read) == "allow_always"
+        return seen[0]
+
+    assert "for the session: git commit" in await prompt_for("Bash", "git commit -m x")
+    assert "this call only" in await prompt_for("Bash", "git push --force")
+    assert "for the session: npm test" in await prompt_for("Monitor", "npm test")

@@ -190,7 +190,7 @@ When a prompt appears it looks like
 | Answer | Effect |
 |---|---|
 | `y`, `yes` | Allow this one call. |
-| `a`, `always` | Allow this tool for the rest of the session. For `Bash` the allow is scoped to the programs the command runs: answering `a` to `uv run pytest` covers later `uv` commands, not `rm`. A configured `[[permission.rules]]` entry still wins over a session allow. |
+| `a`, `always` | Allow this tool for the rest of the session. For `Bash` the allow is scoped to what the command runs, and the prompt names it: program plus subcommand (`a` to `git commit -m x` covers later `git commit` calls, not `git push` or `rm`), an interpreter plus its script (`python tool.py`, not every script). Dangerous forms (`git push --force`, `git reset --hard`, `rm -rf`, …) and inline code (`python -c`) are allowed for that call only and ask again next time. A configured `[[permission.rules]]` entry still wins over a session allow. |
 | anything else, or Enter | Deny. The model is told the user denied it at the prompt and should not retry the same action through another tool. |
 
 A prompt nobody answers within 15 minutes is denied, on both engine legs, so a

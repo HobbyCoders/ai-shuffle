@@ -4326,8 +4326,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         if allow and resp.updated_input is not None:
             input = resp.updated_input
         suggestions: tuple[dict[str, Any], ...] = ()
-        if resp.decision == "allow_always":
-            self._remember_allow(bridge.tool_name, input)
+        if resp.decision == "allow_always" and self._remember_allow(bridge.tool_name, input):
+            # Only a grant that took is echoed to the CLI: a call the tool
+            # could not scope (Bash's ``git push --force``, ``rm -rf``) stays
+            # one-shot there too, so the CLI asks again next time.
             suggestions = bridge.suggestions
         message = resp.message
         carried = [] if allow else self._deny_boundary(bridge.tool_use_id, mapper, message)
@@ -4424,9 +4426,12 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         base = tool_name[len(_BUNDLED_PREFIX):] if tool_name.startswith(_BUNDLED_PREFIX) else tool_name
         return self.registry.get(base)
 
-    def _remember_allow(self, tool_name: str, input: dict[str, Any]) -> None:
+    def _remember_allow(self, tool_name: str, input: dict[str, Any]) -> bool:
         """Record an ``allow_always`` answer for the rest of the session,
-        scoped by the tool's own labels when the registry knows the tool."""
+        scoped by the tool's own labels when the registry knows the tool.
+
+        False when the answer covers this call only (the tool scopes its
+        allows but could not label this one)."""
         spec = self._registry_spec(tool_name)
         scope = spec.scope_of(input) if spec is not None else None
         if scope is None:
@@ -4439,14 +4444,15 @@ class DelegatedLoop(BackgroundLifecycleMixin):
                     "allow_always for %s applied to this call only: the "
                     "command could not be scoped", tool_name,
                 )
-                return
+                return False
             self._always_allowed[tool_name] = None
-            return
+            return True
         current = self._always_allowed.get(tool_name, set())
         if current is None:
-            return
+            return True
         current.update(scope)
         self._always_allowed[tool_name] = current
+        return True
 
     def _session_allows(self, tool_name: str, input: dict[str, Any]) -> bool:
         if tool_name not in self._always_allowed:

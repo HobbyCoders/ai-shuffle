@@ -73,15 +73,29 @@ model *reads* framing tokens even when they can't structurally escape.
   there would persist indefinitely. The synthesizer is told to store *where*
   the secret lives instead.
 - **Sensitive-file rules**: under any policy except `never_ask`, default
-  ask-before-touching rules cover credential files (`.env` and variants, SSH
-  keys, `*.pem`/`*.p12`/`*.pfx`, `.netrc`, `.npmrc`, `.pypirc`,
-  `.git-credentials`, `~/.aws/credentials`) for `Read`/`Edit`/`Write`/
-  `Grep`/`Glob`. They are prepended before user rules, so one
+  ask-before-touching rules cover credential files for `Read`/`Edit`/`Write`/
+  `Grep`/`Glob`: `.env` and variants, SSH keys, `*.pem`/`*.p12`/`*.pfx`,
+  `.netrc`, `.npmrc`, `.pypirc`, `.pgpass`, `.git-credentials`; other tools'
+  sign-ins (`~/.aws/credentials`, the GitHub CLI's `hosts.yml`, the Claude
+  CLI's `.credentials.json` in any config folder, `~/.codex/auth.json`,
+  `~/.gemini/oauth_creds.json`, `~/.docker/config.json`, `~/.kube/config`,
+  gcloud and Azure token files, Cargo, RubyGems and Terraform credentials);
+  Fluid's own Codex tokens (`~/.config/fluid/codex_auth.json`); the AI
+  Shuffle data folder's key files (`.credential-keys/`, `.managed-connection/`,
+  `claude-logins/`, `preview-access.key`, `managed-postgres.json`); and a
+  process's environment or memory (`/proc/<pid>/environ`, including `self`
+  and `thread-self`, and `/proc/<pid>/mem`). The list lives in
+  `fluid/tools/hardening.py`. They are prepended before user rules, so one
   `[[permission.rules]]` allow overrides them; `.env.example`-style templates
   are exempt. `permission.protect_sensitive_files = false` disables the set.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
-  file — `cat .env` does not sail under the read-only fast path.
+  file — `cat .env` and `cat /proc/1/environ` do not sail under the
+  read-only fast path — and when a recursive search (`grep -r`, `rg`) starts
+  at `/`, `/proc` or a process directory, since it would read a process's
+  environment without naming it. This is a best-effort text check, not an
+  isolation boundary: a recursive search started from inside `/proc`, or a
+  path built at run time, is not seen.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,
@@ -103,8 +117,13 @@ model *reads* framing tokens even when they can't structurally escape.
 **8. Structural gates** (pre-existing, part of the same story). The
 permission engine (policy + last-match-wins rules + scoped allow-always; an
 MCP tool's own `readOnlyHint` counts only for a server with
-`trust_annotations = true`, and a Bash allow-always names what a wrapper such
-as `sudo` or `npm` ran, not the wrapper alone), the
+`trust_annotations = true`, and a Bash allow-always covers the program plus
+its subcommand (`git commit`, `npm run build`, `gh pr view`), an interpreter
+plus its script (`python tool.py`), and what a wrapper such as `sudo` ran, not
+the wrapper or program alone; dangerous forms such as `git push --force`,
+`git reset --hard`, `git clean -f`, `git checkout -- .`, `git restore`,
+`rm -r`, `kubectl delete` or `npm publish`, and inline code such as
+`python -c`, are never covered and ask every time), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

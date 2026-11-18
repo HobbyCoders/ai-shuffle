@@ -240,3 +240,85 @@ def test_default_sensitive_rules_see_absolute_paths_via_cwd(tmp_path) -> None:
     target = str(tmp_path / "cfg" / ".." / ".env")
     assert engine.decide(read_spec, {"file_path": target}, cwd=str(tmp_path)).decision == "ask"
     assert engine.decide(read_spec, {"file_path": "README.md"}, cwd=str(tmp_path)).decision == "allow"
+
+
+# ─── credential files Fluid, AI Shuffle and common CLIs write ───────────────
+
+_CREDENTIAL_PATHS = [
+    # A process's environment and memory: PID 1 is the app in a container.
+    "/proc/1/environ", "/proc/self/environ", "/proc/thread-self/environ",
+    "/proc/1/task/1/environ", "/proc/self/root/proc/1/environ", "/proc/1/mem",
+    # AI Shuffle data folder.
+    "/data/.managed-connection/installation.key", "/data/preview-access.key",
+    "/data/claude-logins/acct-1/.credentials.json", "/data/claude-logins/acct-1/settings.json",
+    "/home/u/.config/claude-alt/.credentials.json",
+    # Other CLIs' sign-ins.
+    "/home/u/.codex/auth.json", "/home/u/.gemini/oauth_creds.json",
+    "~/.docker/config.json", "~/.kube/config",
+    "~/.config/gcloud/application_default_credentials.json",
+    "~/.config/gcloud/credentials.db", "~/.config/gcloud/access_tokens.db",
+    "~/.config/gcloud/legacy_credentials/me@example.com/adc.json",
+    "~/.azure/accesstokens.json", "~/.azure/msal_token_cache.json",
+    "~/.cargo/credentials.toml", "~/.cargo/credentials", "~/.gem/credentials",
+    "~/.terraform.d/credentials.tfrc.json", "~/.pgpass",
+    # Already covered before; kept so the list stays complete.
+    "~/.aws/credentials", "~/.netrc", "~/.npmrc", "~/.pypirc", "~/.git-credentials",
+]
+_ORDINARY_PATHS = [
+    "/proc/cpuinfo", "/proc/meminfo", "/proc/1/status", "/proc/self/cgroup",
+    "docker-compose.yml", "k8s/config.yaml", "environment.md", "src/env.py",
+]
+
+
+@pytest.mark.parametrize("path", _CREDENTIAL_PATHS)
+def test_credential_paths_are_sensitive_on_every_tool(path: str) -> None:
+    """One list drives Bash, Read, Grep and Glob: each must ask for every path."""
+    assert is_sensitive_path(path)
+    assert classify({"command": f"cat {path}"}) == "write"
+    engine = _build_permissions(_config())
+    for tool, field in (("Read", "file_path"), ("Grep", "path"), ("Glob", "path")):
+        spec = ToolSpec(name=tool, description="", input_schema={}, risk="safe")
+        assert engine.decide(spec, {field: path}).decision == "ask", (tool, path)
+
+
+@pytest.mark.parametrize("path", _ORDINARY_PATHS)
+def test_ordinary_paths_stay_unprompted(path: str) -> None:
+    assert not is_sensitive_path(path)
+    assert classify({"command": f"cat {path}"}) == "safe"
+    engine = _build_permissions(_config())
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    assert engine.decide(read_spec, {"file_path": path}).decision == "allow"
+
+
+def test_fluid_codex_token_file_is_sensitive() -> None:
+    """Derived from the constant Fluid writes its Codex OAuth tokens to, so a
+    move of that file cannot leave it unprotected."""
+    from fluid.providers.openai_responses.codex_oauth import DEFAULT_TOKEN_PATH
+
+    assert is_sensitive_path(str(DEFAULT_TOKEN_PATH))
+    assert classify({"command": f"cat {DEFAULT_TOKEN_PATH}"}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "cat /proc/1/environ", "strings /proc/self/environ", "xxd /proc/thread-self/environ",
+    "cat /proc/1/*", "head /proc/*/environ", "grep -a DATABASE_URL /proc/1/environ",
+    "grep -r TOKEN /proc/1", "grep -rn TOKEN /proc/self/", "grep -R x /proc",
+    "rg TOKEN /proc/self", "grep -r DATABASE_URL /", "grep --recursive x /proc/1/task/7",
+])
+def test_bash_reads_of_a_process_environment_prompt(command: str) -> None:
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "grep -rn foo src/", "rg foo", "rg -n --type py foo fluid/", "grep foo /proc/cpuinfo",
+    "ls /proc", "cat /proc/1/status",
+])
+def test_ordinary_searches_stay_read_only(command: str) -> None:
+    assert classify({"command": command}) == "safe"
+
+
+def test_grep_withholds_process_environment_matches() -> None:
+    kept, dropped = _drop_sensitive_matches([
+        "/proc/1/environ:1:DATABASE_URL=postgres://x", "/proc/1/status:1:Name: python",
+    ])
+    assert kept == ["/proc/1/status:1:Name: python"] and dropped == 1
