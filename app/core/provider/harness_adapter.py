@@ -43,8 +43,11 @@ Native legs:
     JSON tool calls; the prompt describes what actually started.
 
 Delegated leg:
-  * a preset profile keeps Claude Code's prompt plus ``_delegated_append_text``.
-    A plain-string prompt replaces it and is compiled if ``prompt_full_replace``.
+  * every profile shape replaces Claude Code's prompt with the fluid-compiled
+    one (``--system-prompt``): the profile's prompt as the base (none for a
+    preset, whose append rides as a block), then the same app blocks as the
+    native leg (``_app_guidance_blocks``). Only ``prompt_full_replace=False``
+    sends a plain-string prompt uncompiled. One-shot generations send none.
   * external MCP servers go to ``--mcp-config``; ``add_dirs``, ``env``, ``fast``
     (``--settings``) and partial messages pass through. In-proc app tools reach
     the CLI through fluid's bundled bridge (``mcp__fluid_bundled__``).
@@ -485,9 +488,10 @@ class HarnessAdapter(ProviderAdapter):
         # ``session_runtime_lines``) follow them, so they reach every prompt
         # shape the Worker line does.
         self._worker_identity: Optional[str] = None
-        # A delegated leg whose plain-string prompt replaces Claude Code's
-        # preset, and with it the CLI's own date and git facts: the adapter's
-        # per-turn note (``_env_note``) puts the date and branch back.
+        # A claude session whose prompt replaces Claude Code's (every one but
+        # a one-shot generation), and with it the CLI's own date and git
+        # facts: the adapter's per-turn note (``_env_note``) puts the date and
+        # branch back, and fluid's environment section carries the time rule.
         self._delegated_replaces_preset: bool = False
         # Everything a prompt recompile needs (the Task roster refresh, see
         # ``_refresh_task_roster``) — captured at connect, never rebuilt.
@@ -682,21 +686,23 @@ class HarnessAdapter(ProviderAdapter):
         # A one-shot generation sends the caller's prompt alone: no system
         # prompt, no app text, no per-turn notes (see _turn_context_note).
         one_shot = bool((options.extra or {}).get("one_shot"))
-        self._delegated_replaces_preset = (
-            self._is_delegated and system is not None and not one_shot
-        )
+        # Every non-one-shot claude session replaces Claude Code's prompt,
+        # environment block included, whatever the profile's shape.
+        self._delegated_replaces_preset = self._is_delegated and not one_shot
 
         if kind == _ANTIGRAVITY_KIND:
             await self._connect_antigravity(
-                options, store, fluid_session_id, system, append_system, one_shot
+                options, store, fluid_session_id, system, append_system, one_shot,
+                commit_attribution=attribution_enabled,
             )
         elif self._is_delegated:
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
-            # A preset profile keeps Claude Code's own system prompt; the app's
-            # text (profile append, agents index, fluid instruction files and
-            # skills, guidance: see _delegated_append_text) is appended. A
-            # plain-string profile prompt replaces the preset, compiled when
-            # PROMPT_FULL_REPLACE is on.
+            # The app's compiled prompt replaces Claude Code's (--system-prompt)
+            # for every profile shape: the profile's prompt is the base (a
+            # preset profile has none; its append rides as a block, as on the
+            # native leg), then fluid's gathering and the app's blocks.
+            # PROMPT_FULL_REPLACE=0 alone sends a plain-string prompt
+            # uncompiled.
             from app.core.config import settings
 
             # The "# Workspace facts" card, as on the native leg: it carries
@@ -709,22 +715,14 @@ class HarnessAdapter(ProviderAdapter):
                 # DelegatedLoop(one_shot=True) passes an empty --system-prompt.
                 delegated_system = None
                 delegated_append = None
-            elif system is None:
-                # discover_agents walks .fluid/agents, .agents/agents and
-                # plugin dirs (rglob): disk IO, so it runs in a worker thread.
-                delegated_system = None
-                delegated_append = await run_sync(
-                    _delegated_append_text, append_system, options, self._registry,
-                    worker=self._worker_identity,
-                    workspace_card=self._workspace_card,
-                )
-            elif settings.prompt_full_replace:
+            elif system is None or settings.prompt_full_replace:
                 # The compiled prompt already carries the merged agents index
                 # (``_compile_prompt_sections`` slots it in), so nothing is
                 # added here — that is what keeps the block un-doubled.
+                # Discovery walks disk, so it runs in a worker thread.
                 delegated_system = await run_sync(
                     self._compile_prompt, system, append_system, options,
-                    self._worker_identity, self._workspace_card,
+                    self._worker_identity, self._workspace_card, self._registry,
                 )
                 delegated_append = None
             else:
@@ -2006,6 +2004,7 @@ class HarnessAdapter(ProviderAdapter):
     async def _connect_antigravity(
         self, options: SessionOptions, store: Any, fluid_session_id: Optional[str],
         system: Optional[str], append_system: Optional[str], one_shot: bool,
+        *, commit_attribution: bool = True,
     ) -> None:
         """Build the ACP engine for a Google Antigravity row.
 
@@ -2053,8 +2052,11 @@ class HarnessAdapter(ProviderAdapter):
             append = await run_sync(
                 _delegated_append_text, append_system, options, self._registry,
                 worker=self._worker_identity, workspace_card=self._workspace_card,
+                commit_attribution=commit_attribution,
             )
-            # The agent keeps its own system prompt; ours can only be appended.
+            # ``agy acp`` takes only an append (no replacement in its ACP
+            # capabilities), so the agent keeps its own system prompt and
+            # ours, with the same app blocks as the other legs, follows it.
             instructions = "\n\n".join(part for part in (system, append) if part) or None
         blocked = _delegated_disallowed(options, self._registry)
         _install_bridge_tool_filter(options)
@@ -2896,8 +2898,8 @@ class HarnessAdapter(ProviderAdapter):
     def _env_note(self) -> Optional[str]:
         """Fresh owner-local time and checkout facts for either delegated leg.
 
-        The CLI preset has no owner timezone or gap. Native turns get these
-        through ``NativeLoop._environment_reminder`` instead.
+        The replaced CLI prompt carried no owner timezone or gap. Native turns
+        get these through ``NativeLoop._environment_reminder`` instead.
         """
         if not self._is_delegated:
             return None
@@ -5570,10 +5572,10 @@ class HarnessAdapter(ProviderAdapter):
         tool documentation the model would otherwise never see, since a
         code-mode schema carries four tools instead of forty.
 
-        ``native`` says whether this compilation feeds a native leg. It gates
-        the steering/guidance/recall extras: under ``prompt_full_replace``
-        this same compiler also builds a plain-string profile's prompt on
-        the DELEGATED leg, which gets none of them.
+        ``native`` says whether this compilation feeds a native leg; False
+        builds the delegated claude CLI's ``--system-prompt``. Both get the
+        same app guidance blocks (:func:`_app_guidance_blocks`), gated on what
+        the leg offers and spelled the way its model sees the tools.
 
         The ``# Memory`` snapshot is not part of this prompt; it rides each
         user message (:meth:`_memory_snapshot`) so a store any session can
@@ -5589,9 +5591,23 @@ class HarnessAdapter(ProviderAdapter):
             # index when ``Skill`` is missing from it and its agents index when
             # ``Task`` is. None is fluid's own "no filter" value, so an
             # unrestricted agent compiles exactly as it did before.
-            permitted = _permitted_tool_names(options, registry)
+            # The delegated registry holds the bridge's names (mcp__builtins__Task),
+            # not fluid's, so its compile filters by fluid's own names as before;
+            # what the bridge serves decides the app's blocks (see below).
+            permitted = _permitted_tool_names(options, registry if native else None)
             if wired is not None:
                 permitted = _wired_tool_names(registry, permitted, wired)
+            if native or registry is None:
+                workflow_blocks = _workflow_prompt_blocks(options, permitted)
+                task_offered = permitted is None or "Task" in permitted
+            else:
+                offered = _delegated_offered(options, registry)
+                task_offered = offered("Task")
+                workflow_blocks = _workflow_prompt_blocks(
+                    options, _delegated_permitted_names(options, registry),
+                    swarm_available=offered("Swarm"), task_available=task_offered,
+                    monitor_available=offered("Monitor"),
+                )
             # ``memories_dir=None``, always: the continual learner's
             # ``# Memory`` snapshot no longer belongs to the system prompt.
             # The store is INSTALL-GLOBAL, so any session's Remember rewrote
@@ -5605,7 +5621,7 @@ class HarnessAdapter(ProviderAdapter):
                 PromptInputs(
                     base=system,
                     extra_blocks=([append_system] if append_system else [])
-                    + _workflow_prompt_blocks(options, permitted),
+                    + workflow_blocks,
                     cwd=options.cwd or ".",
                     include_env=True,
                     worker=worker,
@@ -5622,7 +5638,7 @@ class HarnessAdapter(ProviderAdapter):
             if wired is not None:
                 permit = _permit_within(permit, permitted)
             index, _ = _agent_context(options, code_mode=code_mode)
-            if index and permitted is not None and "Task" not in permitted:
+            if index and not task_offered:
                 # The app's merged agents index is the app's own section (see
                 # the docstring), so fluid's ``tools`` filter cannot reach it —
                 # gate it here on the same rule.
@@ -5676,115 +5692,14 @@ class HarnessAdapter(ProviderAdapter):
                     insert_at, PromptSection(kind="environment", text=workspace_card)
                 )
             sections.append(PromptSection(kind="extra", text=PEER_MESSAGE_BLOCK))
-            if native:
-                from fluid.context.attribution import prompt_block
-
-                # Claude's CLI renders attribution from --settings instead:
-                # don't duplicate its instruction in delegated prompt shapes.
-                sections.append(PromptSection(
-                    kind="extra", text=prompt_block(commit_attribution)
-                ))
-            if native:
-                # Mid-turn steering, native leg only. A steer arrives INSIDE a
-                # tool result — the one channel the base prompt teaches the
-                # model to distrust — so fluid pairs the marker with a prompt
-                # block that grants that exact marker user authority. fluid
-                # carries the block in its own composed base prompt, which the
-                # app replaces wholesale with the agent's configured prompt,
-                # so without this the marker would read as
-                # suspected injection and be ignored.
-                #
-                # The delegated leg does not get this block: its user steers
-                # ride a PostToolUse hook's additionalContext, which Claude
-                # Code's own prompt already tells the model to treat as coming
-                # from the user (custom-prompt delegated profiles lack that
-                # line; see #1786), or, without hooks, a real stdin frame.
-                from fluid.context.steering import PROMPT_BLOCK as STEERING_BLOCK
-
-                sections.append(
-                    PromptSection(kind="extra", text=STEERING_BLOCK)
-                )
-                # fluid's tool-result, denial, destructive-git and
-                # irreversible-action rules live in its composed base prompt,
-                # which the app replaces with the profile's prompt. Every
-                # native session gets them back here, whatever the model.
-                # Fixed text, so the prefix stays cache-stable.
-                sections.append(PromptSection(kind="extra", text=SAFETY_BLOCK))
-                # fluid's "## Context" note (placeholders, digests, recall,
-                # who outranks a digest) also lives only in its composed base
-                # prompt. Fixed text per tool surface, so cache-stable.
-                sections.append(
-                    PromptSection(kind="extra", text=_context_section(permitted))
-                )
-                # fluid's model-family guidance ("Act, don't narrate",
-                # "## Execution discipline"). fluid only ever emits these from
-                # its own ``compose_base_prompt``, which the app replaces with
-                # the profile's prompt, so without this they
-                # reach no session at all. Claude-family models get none; the
-                # text is fixed per model, so the prefix stays cache-stable.
-                for block in _model_guidance_blocks(options.model):
-                    sections.append(PromptSection(kind="extra", text=block))
-                # Learned guidance, appended AFTER the shipped
-                # blocks in fluid's own order. The shipped blocks are factory
-                # defaults in code; these are the evolvable half — the files
-                # the commit gate writes when a proposal survives it. Reading
-                # them here is what lets a committed proposal reach a session;
-                # snapshotting the same files is what lets the synthesizer
-                # amend them (see app/core/guidance_surface.py).
-                for block in _learned_guidance_blocks(options.model):
-                    sections.append(PromptSection(kind="extra", text=block))
-            if native:
-                # MCP server instructions (the browser server's operating rules,
-                # any external server's). The delegated CLI renders them from
-                # the handshake itself; on this leg nothing else carries them.
-                mcp_block = _mcp_instructions_block(registry, permitted)
-                if mcp_block:
-                    sections.append(PromptSection(kind="extra", text=mcp_block))
-            if native and (permitted is None or "Plan" in permitted) and (registry is None or registry.get("Plan") is not None):
-                from fluid.tools.builtins.plan import guidance
-                sections.append(PromptSection(kind="extra", text="# Session planning\n" + guidance(permitted)))
-            if native and _recall_backend_available() and (
-                permitted is None
-                or {"SessionSearch", "SessionView"} <= permitted
+            # The app's guidance, one composition for every leg (see
+            # _app_guidance_blocks for the blocks that differ and why).
+            for block in _app_guidance_blocks(
+                options, leg="native" if native else "claude",
+                permitted=permitted, registry=registry,
+                commit_attribution=commit_attribution,
             ):
-                # Harness-owned "when to recall" guidance (see RECALL_BLOCK).
-                # Gated the same way the tools themselves are: a DB-less build
-                # has no recall backend, and a restricted surface without the
-                # tools must not be told to call them.
-                sections.append(
-                    PromptSection(kind="extra", text=RECALL_BLOCK)
-                )
-                if permitted is None or {"Remember", "Recall"} <= permitted:
-                    # ... and WHEN to save/recall a fact (see MEMORY_BLOCK),
-                    # gated on the memory builtins the same way.
-                    sections.append(
-                        PromptSection(kind="extra", text=MEMORY_BLOCK)
-                    )
-            if (options.extra or {}).get("github_connected") and (
-                permitted is None or "Bash" in permitted
-            ):
-                # The install's gh CLI is signed in, so say so once instead of
-                # letting the model rebuild PR/CI state from git plumbing or ask
-                # the user. Gated on Bash for the same reason the agents index is
-                # gated on Task: a block about a command-line tool is
-                # a description of something a Bash-less agent cannot call.
-                # Before the code-mode section, which stays last.
-                sections.append(
-                    PromptSection(kind="extra", text=GITHUB_BLOCK)
-                )
-            _lane = (options.extra or {}).get("session_mode") or "code"
-            if native and _lane == "code" and (
-                permitted is None or bool({"Edit", "Write"} & permitted)
-            ):
-                # What "verified" has to mean (see VERIFICATION_BLOCK). Code
-                # lane only: the chat lane cannot change anything the user
-                # sees, and the voice lane never reaches this compilation.
-                # Gated on a write tool for the same reason as the blocks above:
-                # an agent that cannot edit is never the one reporting a change
-                # as shipped.
-                sections.append(
-                    PromptSection(kind="extra", text=_verification_section(permitted))
-                )
+                sections.append(PromptSection(kind="extra", text=block))
             if code_mode:
                 # LAST, after env and the app's extra blocks: it is the
                 # operating rule for every "use the X tool" line above it.
@@ -5831,25 +5746,27 @@ class HarnessAdapter(ProviderAdapter):
         options: SessionOptions,
         worker: Optional[str] = None,
         workspace_card: Optional[str] = None,
+        registry: Any = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
         ``system`` (a custom/plain-string profile prompt) is the base — the
-        agent's configured prompt. ``append_system`` (the preset
-        shape's security+instructions text) rides as an extra block. The
-        compiler adds fluid's own gathering: instruction files, skills index,
-        environment. ``workspace_card`` is slotted as on the native leg.
-        Never raises — a compiler failure falls back to the
-        pre-compiler string so a session can always start.
+        agent's configured prompt; a preset profile has none. ``append_system``
+        (the preset shape's security+instructions text) rides as an extra
+        block, as on the native leg. The compiler adds fluid's own gathering:
+        instruction files, skills index, environment. ``workspace_card`` is
+        slotted as on the native leg. ``registry`` is the session's, whose
+        bridged tools decide the app's blocks. Never raises — a compiler
+        failure falls back to the pre-compiler string so a session can
+        always start.
 
-        This is the DELEGATED full-replace path for a plain-string profile
-        prompt (the native leg calls ``_compile_prompt_sections`` directly for
-        the labeled sections), hence ``native=False``. A preset profile never
-        comes here: it keeps Claude Code's prompt (``_delegated_append_text``).
+        This builds the DELEGATED claude CLI's ``--system-prompt`` for every
+        profile shape (the native leg calls ``_compile_prompt_sections``
+        directly for the labeled sections), hence ``native=False``.
         """
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False, worker=worker,
-            workspace_card=workspace_card,
+            workspace_card=workspace_card, registry=registry,
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -6312,10 +6229,9 @@ def _system_parts(system_prompt: Any) -> tuple[Optional[str], Optional[str]]:
     """Split the SDK system-prompt shape into ``(system, append)``.
 
     The app's preset profiles send ``{"type": "preset", "preset":
-    "claude_code", "append": <security + profile instructions>}`` — that
-    append must ride the CLI's ``--append-system-prompt`` (keeping Claude
-    Code's own prompt), NOT be flattened away. Plain strings are a full
-    replacement (``--system-prompt``), matching legacy SDK semantics.
+    "claude_code", "append": <security + profile instructions>}``: no base
+    prompt, and the append rides the compiled prompt as an extra block on
+    every leg (Antigravity: its append). Plain strings are the base prompt.
     """
     if system_prompt is None:
         return None, None
@@ -8343,9 +8259,8 @@ def _with_agents_index(
     ``DelegatedLoop`` spends exactly ONE of the two on argv —
     ``--append-system-prompt`` when it has append text, else
     ``--system-prompt`` — so the block must ride the part the CLI will actually
-    read: the append text when there is one (a preset profile, the common
-    shape), else a plain-string full replacement, else a bare append that
-    leaves the CLI's own preset intact.
+    read: the append text when there is one, else the plain-string prompt
+    (the uncompiled ``prompt_full_replace=False`` path), else a bare append.
 
     Idempotent by header check: a part that already advertises agents is
     returned untouched, so neither a reconnect nor a profile prompt that
@@ -8424,12 +8339,38 @@ def _joined(names: List[str]) -> str:
     return ", ".join(names[:-1]) + " and " + names[-1]
 
 
+# Fluid tools the bridge serves under their own registry name; every other
+# app builtin is registered as ``mcp__builtins__<name>``.
+_BARE_BUNDLED_TOOLS = ("Glob", "Grep", "Plan", "HistoryExpand", "HistorySearch")
+
+
+def _bundled_registry_name(tool: str) -> str:
+    """The registry name of a bridged app tool (``Plan``, ``mcp__builtins__Recall``)."""
+    return tool if tool in _BARE_BUNDLED_TOOLS else f"mcp__builtins__{tool}"
+
+
+def _bundled_cli_name(tool: str) -> str:
+    """How a delegated agent sees a bridged app tool: ``mcp__fluid_bundled__`` + registry name."""
+    return _BUNDLED_CLI_PREFIX + _bundled_registry_name(tool)
+
+
+def _spell_bundled(text: str, tools: Any) -> str:
+    """``text`` with each bare tool name in ``tools`` in its bridged spelling.
+
+    Whole words only: ``Recall`` is rewritten, ``Recalled`` is not, and a
+    name already inside a longer ``mcp__…`` name is left alone.
+    """
+    for tool in tools:
+        text = re.sub(rf"(?<!\w){re.escape(tool)}\b", _bundled_cli_name(tool), text)
+    return text
+
+
 def _delegated_offered(options: SessionOptions, registry: Any):
     """``(bare app builtin) -> bool``: whether the bridge serves it here.
 
-    True when ``mcp__builtins__<tool>`` is on the registry and on the
-    delegated surface (``_delegated_tool_predicate``), which is exactly what
-    the bundled bridge will list to the CLI.
+    True when the tool's registry name (``_bundled_registry_name``) is on
+    the registry and on the delegated surface (``_delegated_tool_predicate``),
+    which is exactly what the bundled bridge will list to the agent.
     """
     try:
         names = (
@@ -8442,29 +8383,184 @@ def _delegated_offered(options: SessionOptions, registry: Any):
     permit = _delegated_tool_predicate(options)
 
     def offered(tool: str) -> bool:
-        name = tool if tool in ("Glob", "Grep", "Plan") else f"mcp__builtins__{tool}"
+        name = _bundled_registry_name(tool)
         return name in names and (permit is None or permit(name))
 
     return offered
 
 
-def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[str]:
-    """App guidance for the delegated leg that Claude Code's prompt lacks.
+_VERIFICATION_BROWSER_TOOLS = (
+    "browser_navigate", "browser_snapshot", "browser_eval", "browser_act",
+    "browser_screenshot", "browser_resize",
+)
 
-    Claude Code's own prompt covers tone, task management, git and its skill
-    listing, so none of that is repeated. What it cannot know is the app's
-    memory store, its session recall, which app tools replace CLI tools that
-    are banned here, and that ``gh`` is signed in, so those blocks ride here,
-    each gated the way the native leg gates it: on the tools actually being
-    on this session's surface.
 
-    Tool policy is the one exception: ``DELEGATED_TOOL_USE_BLOCK`` restates
-    Claude Code's preference for its dedicated file tools on code sessions
-    that have Bash, Read and Edit, because Opus kept doing file work through
-    Bash with the CLI's bash-first steer switched off (session 42595afe).
+def _delegated_browser_offered(options: SessionOptions) -> bool:
+    """Whether a delegated agent gets the browser server's verification tools.
 
-    The text depends only on connect-time inputs, so it is identical on
-    every turn of the session.
+    The CLI connects the session's external ``browser`` server itself, so its
+    tools are never on the app's registry; the surface decides instead.
+    """
+    if "browser" not in _external_mcp_servers(options.mcp_servers):
+        return False
+    permit = _delegated_tool_predicate(options)
+    return permit is None or all(
+        permit(f"mcp__browser__{tool}") for tool in _VERIFICATION_BROWSER_TOOLS
+    )
+
+
+def _app_guidance_blocks(
+    options: SessionOptions,
+    *,
+    leg: str,
+    permitted: Optional[frozenset] = None,
+    registry: Any = None,
+    commit_attribution: bool = True,
+) -> List[str]:
+    """The app's guidance blocks, one composition for every leg.
+
+    ``leg`` is ``"native"``, ``"claude"`` (the delegated CLI, which runs the
+    compiled prompt as ``--system-prompt``) or ``"antigravity"`` (whose
+    agent keeps its own prompt; these ride its append). The profile's prompt
+    replaces fluid's composed base on every leg, so the rules fluid keeps
+    there come back here. Each block is gated on what the leg actually
+    offers: ``permitted`` (the compile's permitted names) on the native leg,
+    the bundled bridge's surface (``_delegated_offered``) on the other two.
+    Tool names are written as the leg's model sees them: bare on the native
+    leg, ``mcp__fluid_bundled__…`` for a bridged app tool elsewhere.
+
+    The blocks that differ per leg, and why:
+
+    * Attribution (native only): the claude CLI renders it from
+      ``--settings`` into a reminder on the first message, under a replaced
+      prompt too. Antigravity has no other channel, so it gets the block.
+    * MCP server instructions (native only): the claude CLI renders them
+      from each server's handshake under a replaced prompt; Antigravity's
+      agent does the same for the servers it connects, and
+      ``_connect_antigravity`` appends the ones connected host-side.
+    * Memory: the native copy also covers fluid's Note and Ledger, which
+      only that leg has; the delegated copy adds ``DELEGATED_PREFERENCE_RULE``
+      because Remember's description, which carries it natively, is
+      deferred there.
+    * "# Tool use on this session" and "# App tools on this session"
+      (delegated legs only): the CLI's dedicated file tools and batching,
+      and which app tools stand in for the CLI tools banned there.
+    * Context window: HistoryExpand and HistorySearch join the claude leg's
+      registry only when the CLI spawns with the mod, after this prompt is
+      fixed, so there the block names them only if already registered.
+    * Verification: the claude leg names the browser server's tools as the
+      CLI lists them (``mcp__browser__…``); Antigravity's agent names MCP
+      tools its own way, so it keeps the leaf names.
+
+    Fixed at connect (no per-turn input), so the prefix stays byte-stable.
+    """
+    native = leg == "native"
+    blocks: List[str] = []
+    if leg != "claude":
+        from fluid.context.attribution import prompt_block
+
+        blocks.append(prompt_block(commit_attribution))
+    # A steer arrives INSIDE a tool result (on the claude leg as a PostToolUse
+    # hook's additionalContext, in the same marker) — the one channel the
+    # safety rules teach the model to distrust — so this block grants that
+    # exact marker user authority. It also marks harness notices, which every
+    # leg delivers.
+    from fluid.context.steering import PROMPT_BLOCK as STEERING_BLOCK
+
+    blocks.append(STEERING_BLOCK)
+    # fluid's tool-result, denial, destructive-git and irreversible-action
+    # rules live in its composed base prompt, which the profile replaces.
+    blocks.append(SAFETY_BLOCK)
+    if native:
+        blocks.append(_context_section(permitted))
+        offered = None
+    else:
+        offered = _delegated_offered(options, registry)
+        history = ("HistoryExpand", "HistorySearch")
+        blocks.append(
+            _spell_bundled(CONTEXT_BLOCK, history) if all(offered(t) for t in history)
+            else CONTEXT_BLOCK_NO_RECALL
+        )
+    # Model-family and learned guidance follow the model, whatever the leg.
+    blocks.extend(_model_guidance_blocks(options.model))
+    blocks.extend(_learned_guidance_blocks(options.model))
+    if native:
+        mcp_block = _mcp_instructions_block(registry, permitted)
+        if mcp_block:
+            blocks.append(mcp_block)
+    from fluid.tools.builtins.plan import guidance as plan_guidance
+
+    if native:
+        if (permitted is None or "Plan" in permitted) and (
+            registry is None or registry.get("Plan") is not None
+        ):
+            blocks.append("# Session planning\n" + plan_guidance(permitted))
+    elif offered("Plan"):
+        # Plan stays deferred on the claude leg (behind the CLI's ToolSearch)
+        # and the CLI's own planners are banned, so this is what names it.
+        blocks.append("# Session planning\n" + _spell_bundled(
+            plan_guidance(_delegated_permitted_names(options, registry)), ("Plan",),
+        ))
+    if not native:
+        blocks.extend(_delegated_tool_blocks(options, registry))
+    if native:
+        recall = _recall_backend_available() and (
+            permitted is None or {"SessionSearch", "SessionView"} <= permitted
+        )
+        memory = recall and (permitted is None or {"Remember", "Recall"} <= permitted)
+    else:
+        recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
+        memory = all(offered(t) for t in ("Remember", "Recall"))
+    spell = (lambda text, tools: text) if native else _spell_bundled
+    if recall:
+        blocks.append(spell(RECALL_BLOCK, _DELEGATED_RECALL_TOOLS))
+    if memory:
+        blocks.append(
+            MEMORY_BLOCK if native else _spell_bundled(
+                f"{_MEMORY_BLOCK_CORE}\n\n{DELEGATED_PREFERENCE_RULE}", _DELEGATED_MEMORY_TOOLS,
+            )
+        )
+    if native:
+        def permits(name: str) -> bool:
+            return permitted is None or name in permitted
+    else:
+        delegated_permit = _delegated_tool_predicate(options)
+
+        def permits(name: str) -> bool:
+            return delegated_permit is None or delegated_permit(name)
+    if (options.extra or {}).get("github_connected") and permits("Bash"):
+        # The install's gh CLI is signed in. Gated on Bash: a block about a
+        # command-line tool would describe something a Bash-less agent
+        # cannot call.
+        blocks.append(GITHUB_BLOCK)
+    lane = (options.extra or {}).get("session_mode") or "code"
+    if lane == "code" and (permits("Edit") or permits("Write")):
+        # What "verified" has to mean (see VERIFICATION_BLOCK). Code lane only,
+        # and only for an agent that can edit.
+        if native:
+            blocks.append(_verification_section(permitted))
+        else:
+            text = _verification_section(
+                None if _delegated_browser_offered(options) else frozenset()
+            )
+            text = _spell_bundled(text, ("GetAppLogs", "GetAppErrors"))
+            if leg == "claude":
+                text = re.sub(
+                    r"(?<!\w)(" + "|".join(_VERIFICATION_BROWSER_TOOLS) + r")\b",
+                    r"mcp__browser__\1", text,
+                )
+            blocks.append(text)
+    return blocks
+
+
+def _delegated_tool_blocks(options: SessionOptions, registry: Any) -> List[str]:
+    """The delegated legs' "# Tool use" and "# App tools" blocks.
+
+    ``DELEGATED_TOOL_USE_BLOCK`` restates Claude Code's preference for its
+    dedicated file tools on code sessions that have Bash, Read and Edit,
+    because Opus kept doing file work through Bash with the CLI's bash-first
+    steer switched off (session 42595afe). The notes say which app tools
+    stand in for the CLI tools banned on this leg. Fixed at connect.
     """
     offered = _delegated_offered(options, registry)
     permit = _delegated_tool_predicate(options)
@@ -8472,8 +8568,6 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
     def permitted(name: str) -> bool:
         return permit is None or permit(name)
 
-    recall = all(offered(t) for t in _DELEGATED_RECALL_TOOLS)
-    memory = all(offered(t) for t in ("Remember", "Recall"))
     tasks = [t for t in _DELEGATED_TASK_TOOLS if offered(t)]
     blocks: List[str] = []
     # Both Read and Edit: the block forbids file work through Bash, so a
@@ -8509,18 +8603,7 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
         )
         notes.append(
             f"{prefer}If Claude Code's own {own} {verb} not in your tool list, use "
-            + _joined([f"{_BUNDLED_CLI_PREFIX}{tool}" for tool in search]) + "."
-        )
-    if recall or memory:
-        shown = [
-            t for t in (*_DELEGATED_MEMORY_TOOLS, *_DELEGATED_RECALL_TOOLS)
-            if offered(t)
-        ]
-        suffixes = ", ".join(f"__{t}" for t in shown)
-        notes.append(
-            "The app's memory and recall tools reach you as MCP tools whose "
-            f"names end in {suffixes}. The sections below call them by those "
-            "short names."
+            + _joined([_bundled_cli_name(tool) for tool in search]) + "."
         )
     if tasks:
         suffixes = ", ".join(f"__{t}" for t in tasks)
@@ -8541,13 +8624,6 @@ def _delegated_guidance_blocks(options: SessionOptions, registry: Any) -> List[s
             )
     if notes:
         blocks.append("# App tools on this session\n" + "\n".join(notes))
-    if recall:
-        blocks.append(RECALL_BLOCK)
-    if memory:
-        blocks.append(_MEMORY_BLOCK_CORE)
-        blocks.append(DELEGATED_PREFERENCE_RULE)
-    if (options.extra or {}).get("github_connected") and permitted("Bash"):
-        blocks.append(GITHUB_BLOCK)
     return blocks
 
 
@@ -8571,9 +8647,9 @@ def _delegated_fluid_context(options: SessionOptions) -> List[str]:
     Claude Code reads CLAUDE.md and .claude/skills, never fluid's
     AGENTS.md family (``~/.fluid/AGENTS.md``, project ``AGENTS.md``,
     ``.fluid/AGENTS.md``, ``.agents/AGENTS.md``) or the skills under
-    ``.fluid/skills``, ``.agents/skills`` and ``~/.fluid/skills``. Under
-    full replace the compiled prompt carried them; with Claude Code's preset
-    kept they ride the appended text instead, gated by the profile's
+    ``.fluid/skills``, ``.agents/skills`` and ``~/.fluid/skills``. On the
+    claude leg the compiled prompt carries them; Antigravity's appended text
+    (:func:`_delegated_append_text`) carries them here, gated by the profile's
     ``setting_sources`` the way the compiler gates them. Never raises.
     """
     sources = _fluid_setting_sources(options)
@@ -8693,31 +8769,27 @@ def _delegated_append_text(
     *,
     worker: Optional[str] = None,
     workspace_card: Optional[str] = None,
+    commit_attribution: bool = True,
 ) -> Optional[str]:
-    """``--append-system-prompt`` for a preset profile on the delegated leg.
+    """The app's text appended to the Antigravity agent's own system prompt.
 
-    Claude Code keeps its own preset prompt and this text is appended to
-    it. In order: the profile's append (security and media
-    rules, the profile's instructions, app-config text), the merged agents
-    index, fluid's AGENTS.md-family files and skills
-    (:func:`_delegated_fluid_context`), the model's learned guidance, then
-    :func:`_delegated_guidance_blocks`. Every input is fixed at connect, so
-    the text is byte-identical across the session's turns and the CLI's
-    prompt cache keeps hitting.
-
-    ``VERIFICATION_BLOCK`` stays native-only: it names the native leg's
-    browser tools. ``workspace_card`` (the session's "# Workspace facts"
-    card, with its preview link for an owner session) follows the worker
-    block.
+    ``agy acp`` offers only an append (``_meta.antigravity.systemPrompt.append``),
+    so the agent keeps its prompt and this follows it. In order: the
+    profile's append (security and media rules, the profile's instructions,
+    app-config text) with the merged agents index, the ``# Worker`` block,
+    the workspace card, the peer-message block, the workflow blocks, fluid's
+    AGENTS.md-family files and skills (:func:`_delegated_fluid_context`),
+    then the same app guidance blocks every leg gets
+    (:func:`_app_guidance_blocks`). Every input is fixed at connect, so the
+    text is byte-identical across the session's turns.
 
     Only tools this leg offers are described: the agents index and the Task,
     Swarm and Monitor routing need the bridged ``mcp__builtins__Task`` /
-    ``Swarm`` / ``Monitor`` (``_delegated_offered``). With Swarm offered, the
-    delegation block carries the same Swarm routing as the native leg's.
+    ``Swarm`` / ``Monitor`` (``_delegated_offered``).
 
-    ``worker`` (the app's ``Worker:`` text, rendered at connect) follows the
-    profile's append as a ``# Worker`` block: Claude Code's own environment
-    block has no idea which of the owner's machines it runs on.
+    ``worker`` (the app's ``Worker:`` text, rendered at connect) rides as a
+    ``# Worker`` block: the agent's own environment block has no idea which
+    of the owner's machines it runs on.
     """
     offered = _delegated_offered(options, registry)
     task_offered = offered("Task")
@@ -8735,17 +8807,17 @@ def _delegated_append_text(
         swarm_available=offered("Swarm"), task_available=task_offered,
         monitor_available=offered("Monitor"),
     ))
-    if offered("Plan"):
-        from fluid.tools.builtins.plan import guidance
-        parts.append("# Session planning\n" + guidance(_delegated_permitted_names(options, registry)).replace("use Plan", "use mcp__fluid_bundled__Plan"))
     parts.extend(_delegated_fluid_context(options))
-    parts.extend(_learned_guidance_blocks(options.model))
-    parts.extend(_delegated_guidance_blocks(options, registry))
+    parts.extend(_app_guidance_blocks(
+        options, leg="antigravity", registry=registry,
+        commit_attribution=commit_attribution,
+    ))
     return "\n\n".join(parts) or None
 
 
-#: Header of the worker block on a delegated preset leg, whose environment
-#: section is Claude Code's own (fluid's renderer carries the lines inline).
+#: Header of the worker block in Antigravity's appended text, whose
+#: environment section is the agent's own (fluid's renderer carries the lines
+#: inline everywhere else).
 WORKER_BLOCK_HEADER = "# Worker"
 
 

@@ -177,6 +177,39 @@ async def test_external_servers_connect_host_side_and_run_through_call_tool(
         await adapter._registry.aclose()
 
 
+def _headings(blocks):
+    return [block.splitlines()[0] for block in blocks]
+
+
+@pytest.mark.asyncio
+async def test_the_append_carries_the_same_app_blocks_as_the_claude_leg(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    """``agy acp`` takes only an append, so the app's guidance rides it: the
+    same blocks the claude leg's --system-prompt gets, each once, plus the
+    attribution block the claude CLI renders from --settings instead."""
+    from fluid.context.steering import PROMPT_BLOCK as STEERING
+
+    adapter = await _connected(tmp_path, client, monkeypatch)
+    engine = adapter._engine
+    try:
+        append = engine.system_append
+        registry = adapter._registry
+        options = adapter._options
+        ours = ha._app_guidance_blocks(options, leg="antigravity", registry=registry)
+        claude = ha._app_guidance_blocks(options, leg="claude", registry=registry)
+        assert _headings(ours) == ["# Attribution", *_headings(claude)]
+        for block in ours:
+            assert append.count(block) == 1, block.splitlines()[0]
+        for block in (STEERING, ha.SAFETY_BLOCK):
+            assert append.count(block) == 1
+        assert append.count("Be brief.") == 1
+        headings = [line for line in append.splitlines() if line.startswith("# ")]
+        assert len(headings) == len(set(headings)), headings
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
 @pytest.mark.asyncio
 async def test_kill_switch_restores_the_eager_bridge_and_agent_side_servers(
         tmp_path, client, monkeypatch):  # noqa: F811

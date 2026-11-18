@@ -2097,7 +2097,7 @@ async def test_delegated_leg_skips_bundled_search_where_the_cli_ships_its_own(cl
     """On Windows the CLI announces its own Glob and Grep: no duplicates, and
     no note steering the model to the bundled copies."""
     from app.core.provider.harness_adapter import (
-        _delegated_guidance_blocks,
+        _delegated_tool_blocks,
         _delegated_permission_grants,
     )
 
@@ -2105,7 +2105,7 @@ async def test_delegated_leg_skips_bundled_search_where_the_cli_ships_its_own(cl
     options = SessionOptions(model="fable")
     registry = await adapter._build_registry(options, native=False)
     assert registry is None or not ({"Glob", "Grep"} & _names(registry))
-    text = "\n".join(_delegated_guidance_blocks(options, registry))
+    text = "\n".join(_delegated_tool_blocks(options, registry))
     assert "mcp__fluid_bundled__Glob" not in text
     assert "mcp__fluid_bundled__Grep" not in text
     grants = _delegated_permission_grants(options)
@@ -2192,13 +2192,13 @@ async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_l
     from app.core.provider.harness_adapter import (
         DELEGATED_BATCHING_RULE,
         DELEGATED_TOOL_USE_HEADER,
-        _delegated_guidance_blocks,
+        _delegated_tool_blocks,
     )
 
     adapter = HarnessAdapter()
     options = SessionOptions(model="fable")
     registry = await adapter._build_registry(options, native=False)
-    text = "\n".join(_delegated_guidance_blocks(options, registry))
+    text = "\n".join(_delegated_tool_blocks(options, registry))
     # The file-tool rule already says to search with Glob and Grep, so the
     # note only names the bundled fallbacks.
     assert (
@@ -2208,7 +2208,7 @@ async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_l
     assert "rather than find/grep through Bash" not in text
     options.tool_allowlist = ["Read"]
     # Only the batching rule, which names no tool, is left.
-    assert _delegated_guidance_blocks(options, registry) == [
+    assert _delegated_tool_blocks(options, registry) == [
         DELEGATED_TOOL_USE_HEADER + DELEGATED_BATCHING_RULE
     ]
 
@@ -2219,13 +2219,13 @@ async def test_delegated_search_guidance_names_only_permitted_bridge_tools(cli_l
 def test_delegated_code_session_carries_the_tool_use_block():
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
-        _delegated_guidance_blocks,
+        _delegated_tool_blocks,
     )
 
     unrestricted = SessionOptions(model="opus")
-    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(unrestricted, None))
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(unrestricted, None))
     picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
-    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(picked, None))
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(picked, None))
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK
 
 
@@ -2233,40 +2233,40 @@ def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob():
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
         DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
-        _delegated_guidance_blocks,
+        _delegated_tool_blocks,
     )
 
     # Bash is the only permitted way to search here, so the block must not
     # forbid grep and find through it.
     picked = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit"])
-    blocks = "\n\n".join(_delegated_guidance_blocks(picked, None))
+    blocks = "\n\n".join(_delegated_tool_blocks(picked, None))
     assert DELEGATED_TOOL_USE_BLOCK not in blocks
     assert DELEGATED_TOOL_USE_BLOCK_NO_SEARCH in blocks
     assert "grep" not in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     assert "While bypass permissions mode is active" in DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
     globbed = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Glob"])
-    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(globbed, None))
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(globbed, None))
 
 
 def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools():
     from app.core.provider.harness_adapter import (
         DELEGATED_TOOL_USE_BLOCK,
-        _delegated_guidance_blocks,
+        _delegated_tool_blocks,
     )
 
     chat = SessionOptions(model="opus", extra={"session_mode": "chat"})
-    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(chat, None))
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(chat, None))
     no_file_tools = SessionOptions(model="opus", tool_allowlist=["Bash", "Grep", "Glob"])
-    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(no_file_tools, None))
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(no_file_tools, None))
     no_shell = SessionOptions(model="opus", tool_allowlist=["Read", "Edit"])
-    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(no_shell, None))
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(no_shell, None))
     # Without Edit the block would forbid the only permitted way to edit.
     read_only = SessionOptions(model="opus", tool_allowlist=["Bash", "Read"])
-    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(read_only, None))
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(read_only, None))
     shell_and_files = SessionOptions(model="opus", tool_allowlist=["Bash", "Read", "Edit", "Grep"])
-    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_guidance_blocks(shell_and_files, None))
+    assert DELEGATED_TOOL_USE_BLOCK in "\n\n".join(_delegated_tool_blocks(shell_and_files, None))
     blocked = SessionOptions(model="opus", disallowed_tools=["Bash", "PowerShell"])
-    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_guidance_blocks(blocked, None))
+    assert DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(_delegated_tool_blocks(blocked, None))
 
 
 @pytest.mark.asyncio
@@ -3489,90 +3489,102 @@ async def test_set_model_canonicalizes_on_the_anthropic_leg(monkeypatch, tmp_pat
     assert adapter.engine.model == "claude-sonnet-5"
 
 
-@pytest.mark.asyncio
-async def test_delegated_append_mode_bypasses_compiler(monkeypatch, tmp_path):
-    """A preset profile's delegated system/append are NOT compiled, whatever
-    PROMPT_FULL_REPLACE says — the CLI gathers its own env and instruction
-    files (decision D6).
+def _plan_registry(with_plan: bool):
+    from fluid.tools.registry import ToolOutcome, ToolRegistry, ToolSpec
 
-    The one thing the app does add here is the agents index (the CLI cannot
-    know about DB agents), so the assertion is "the app's text, then at most
-    that block" rather than byte-identity — see
-    test_delegated_append_mode_advertises_agents.
-    """
+    async def handler(input, ctx):
+        return ToolOutcome(text="ok")
+
+    registry = ToolRegistry()
+    if with_plan:
+        registry.register_builtin(
+            ToolSpec(name="Plan", description="Plan", input_schema={}), handler,
+        )
+    return registry
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("full_replace", [True, False])
+@pytest.mark.parametrize("with_plan", [True, False])
+async def test_delegated_preset_profile_replaces_claude_code_prompt(
+    monkeypatch, tmp_path, full_replace, with_plan
+):
+    """Owner decision (uniform app blocks): a preset profile no longer keeps
+    Claude Code's own prompt. Whatever PROMPT_FULL_REPLACE says, it goes out
+    as the compiled --system-prompt with no base, its append riding as a
+    block, and the same app blocks as the native leg. The Plan hint names the
+    bridged tool when Plan is offered and is absent when it is not."""
     import app.core.provider.harness_adapter as ha
     from app.core.config import settings
-    from fluid.tools.registry import ToolRegistry
+    from fluid.context.steering import PROMPT_BLOCK as STEERING
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", False)
-
-    await ha.HarnessAdapter().connect(
-        SessionOptions(
-            model="fable",
-            system_prompt={"type": "preset", "append": "APPEND TEXT"},
-            cwd=str(tmp_path),
-            extra={"fluid_registry": ToolRegistry()},
-        )
-    )
-    assert _CapturingLoop.captured["system"] is None
-    append = _CapturingLoop.captured["append_system_prompt"]
-    assert append.startswith("APPEND TEXT")
-    # Compiler markers: none of fluid's gathering may appear on this leg.
-    assert "# Environment" not in append
-    assert "# Skills" not in append
-
-
-@pytest.mark.asyncio
-async def test_delegated_preset_profile_keeps_claude_code_prompt(monkeypatch, tmp_path):
-    """Decision D6, under the shipped default settings: a preset profile keeps
-    Claude Code's own system prompt (no --system-prompt) and the app's text
-    rides --append-system-prompt, uncompiled. This replaced the full-replace
-    behaviour (ruling A3) that sent the compiled prompt instead."""
-    import app.core.provider.harness_adapter as ha
-    from fluid.tools.registry import ToolRegistry
-
-    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
 
     await ha.HarnessAdapter().connect(
         SessionOptions(
             model="fable",
             system_prompt={"type": "preset", "preset": "claude_code", "append": "APPEND TEXT"},
             cwd=str(tmp_path),
-            extra={"fluid_registry": ToolRegistry()},
+            extra={"fluid_registry": _plan_registry(with_plan)},
         )
     )
-    assert _CapturingLoop.captured["system"] is None
-    append = _CapturingLoop.captured["append_system_prompt"]
-    assert append.startswith("APPEND TEXT")
-    # Claude Code gathers these itself; compiling them in would restate it.
-    assert "# Environment" not in append
-    assert "# Skills" not in append
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    system = _CapturingLoop.captured["system"]
+    # No base: fluid's compiled sections lead, the CLI's preset is gone.
+    assert system.count("# Environment") == 1
+    assert system.index("# Environment") < system.index("APPEND TEXT")
+    assert system.count("APPEND TEXT") == 1
+    for block in (STEERING, ha.SAFETY_BLOCK):
+        assert system.count(block) == 1
+    assert system.count("# Context window") == 1
+    # The CLI renders attribution from --settings; no second copy here.
+    assert "# Attribution" not in system
+    hint = "For ~5+ real steps or multi-turn use mcp__fluid_bundled__Plan; else skip."
+    assert ("# Session planning\n" + hint in system) is with_plan
+    assert "use Plan;" not in system
+    _assert_unique_headings(system)
+
+
+def _assert_unique_headings(system):
+    headings = [line for line in system.splitlines() if line.startswith("# ")]
+    assert len(headings) == len(set(headings)), headings
+
+
+async def _delegated_system(monkeypatch, tmp_path, system_prompt):
+    import app.core.provider.harness_adapter as ha
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable", system_prompt=system_prompt, cwd=str(tmp_path),
+            extra={"fluid_registry": _plan_registry(True)},
+        )
+    )
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    return _CapturingLoop.captured["system"]
 
 
 @pytest.mark.asyncio
 async def test_delegated_plain_prompt_full_replace_compiles(monkeypatch, tmp_path):
     """A plain-string profile chose its own prompt, so it still replaces the
-    preset; PROMPT_FULL_REPLACE compiles it."""
-    import app.core.provider.harness_adapter as ha
+    preset; PROMPT_FULL_REPLACE compiles it with the same app blocks a
+    preset-shape profile gets, in the same order, each once."""
     from app.core.config import settings
-    from fluid.tools.registry import ToolRegistry
 
-    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
     monkeypatch.setattr(settings, "prompt_full_replace", True)
-
-    await ha.HarnessAdapter().connect(
-        SessionOptions(
-            model="fable",
-            system_prompt="BASE PROMPT",
-            cwd=str(tmp_path),
-            extra={"fluid_registry": ToolRegistry()},
-        )
+    custom = await _delegated_system(monkeypatch, tmp_path, "BASE PROMPT")
+    preset = await _delegated_system(
+        monkeypatch, tmp_path, {"type": "preset", "preset": "claude_code", "append": "BASE PROMPT"},
     )
-    system = _CapturingLoop.captured["system"]
-    assert _CapturingLoop.captured["append_system_prompt"] is None
-    assert system.startswith("BASE PROMPT")
-    assert "# Environment" in system
+    assert custom.startswith("BASE PROMPT")
+    assert "# Environment" in custom
+    _assert_unique_headings(custom)
+    # Same blocks: the shapes differ only in where the profile text sits
+    # (base vs. extra block after fluid's sections).
+    tail = custom.split("# Messages from other agents", 1)[1]
+    assert tail == preset.split("# Messages from other agents", 1)[1]
+    assert "# Session planning\nFor ~5+ real steps or multi-turn use mcp__fluid_bundled__Plan" in tail
 
 
 @pytest.mark.asyncio
@@ -6604,7 +6616,7 @@ async def test_native_file_agents_reach_dispatch_but_plugins_stay_inert(monkeypa
 def _registry_with_bridged_task(*, swarm=False):
     """A delegated registry carrying the app's bridged Task, as production has.
 
-    The delegated append advertises agents only when the bridge serves
+    The delegated prompt advertises agents only when the bridge serves
     ``mcp__builtins__Task``; ``swarm`` adds the bridged ``mcp__builtins__Swarm``.
     """
     from fluid.tools.registry import ToolRegistry, ToolSpec
@@ -6636,40 +6648,44 @@ def _delegated_agents_options(cwd, declared=None):
 
 
 @pytest.mark.asyncio
-async def test_delegated_append_mode_advertises_agents(monkeypatch, agent_workspace):
-    """Append mode (opt-out) advertises native file and database agents."""
+@pytest.mark.parametrize("full_replace", [True, False])
+async def test_delegated_preset_profile_advertises_agents(monkeypatch, agent_workspace, full_replace):
+    """A preset profile's compiled --system-prompt advertises native file and
+    database agents exactly once, whatever PROMPT_FULL_REPLACE says."""
     import app.core.provider.harness_adapter as ha
     from app.core.config import settings
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", False)
+    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
 
     await ha.HarnessAdapter().connect(
         _delegated_agents_options(
             agent_workspace, declared=[{"name": "Helper", "description": "Helps out"}]
         )
     )
-    append = _CapturingLoop.captured["append_system_prompt"]
+    system = _CapturingLoop.captured["system"]
     # The CLI reads --append-system-prompt OR --system-prompt, never both.
-    assert _CapturingLoop.captured["system"] is None
-    assert append.startswith("APPEND TEXT")
-    assert append.count("# Available agent types") == 1
-    assert "- researcher: Reads the codebase" in append      # file agent
-    assert "myplug:reviewer" not in append                    # legacy plugin is inert
-    assert "- Helper: Helps out" in append                    # DB agent
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    assert system.count("APPEND TEXT") == 1
+    assert system.count("# Available agent types") == 1
+    assert "- researcher: Reads the codebase" in system      # file agent
+    assert "myplug:reviewer" not in system                    # legacy plugin is inert
+    assert "- Helper: Helps out" in system                    # DB agent
     # Index-only, exactly like the native leg: no definition bodies.
-    assert "PLUGIN AGENT PROMPT" not in append
-    assert "BODY" not in append
+    assert "PLUGIN AGENT PROMPT" not in system
+    assert "BODY" not in system
     # The CLI owns its own tool surface — code mode never reaches this leg, so
     # neither do its prompt rewrites.
-    assert "# Code mode" not in append
-    assert "These agent types can be delegated to with the Task tool." in append
+    assert "# Code mode" not in system
+    assert "These agent types can be delegated to with the Task tool." in system
 
 
 @pytest.mark.asyncio
-async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_workspace):
+@pytest.mark.parametrize("bridged_task", [True, False])
+async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_workspace, bridged_task):
     """A full-replacement (plain string) profile prompt is the part the CLI
-    reads, so the index has to ride THAT one instead."""
+    reads, so the index rides THAT one, once — and only when the bridge
+    serves the app's Task, the tool the index is for."""
     import app.core.provider.harness_adapter as ha
     from fluid.tools.registry import ToolRegistry
 
@@ -6681,7 +6697,7 @@ async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_works
             system_prompt="BASE PROMPT",
             cwd=str(agent_workspace),
             extra={
-                "fluid_registry": ToolRegistry(),
+                "fluid_registry": _registry_with_bridged_task() if bridged_task else ToolRegistry(),
                 "declared_agents": [{"name": "Helper", "description": "Helps out"}],
             },
         )
@@ -6689,31 +6705,8 @@ async def test_delegated_plain_prompt_carries_the_index(monkeypatch, agent_works
     system = _CapturingLoop.captured["system"]
     assert _CapturingLoop.captured["append_system_prompt"] is None
     assert system.startswith("BASE PROMPT")
-    assert system.count("# Available agent types") == 1
-    assert "- Helper: Helps out" in system
-
-
-@pytest.mark.asyncio
-async def test_delegated_full_replace_does_not_double_the_index(
-    monkeypatch, agent_workspace
-):
-    """PROMPT_FULL_REPLACE no longer compiles a preset profile's prompt: the
-    index rides the appended text exactly once."""
-    import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
-
-    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", True)
-
-    await ha.HarnessAdapter().connect(
-        _delegated_agents_options(
-            agent_workspace, declared=[{"name": "Helper", "description": "Helps out"}]
-        )
-    )
-    append = _CapturingLoop.captured["append_system_prompt"]
-    assert _CapturingLoop.captured["system"] is None
-    assert append.count("# Available agent types") == 1
-    assert "- Helper: Helps out" in append
+    assert system.count("# Available agent types") == int(bridged_task)
+    assert ("- Helper: Helps out" in system) is bridged_task
 
 
 def test_with_agents_index_is_idempotent():

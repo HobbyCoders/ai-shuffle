@@ -177,11 +177,13 @@ def test_warm_cache_does_not_wall_the_cli_spellings_of_picked_tools(tmp_path):
 async def test_guidance_describes_the_picked_app_tools(tmp_path, builtins_server):
     options = _options(tmp_path, {"builtins": builtins_server}, surface=PICKED)
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
-    blocks = ha._delegated_guidance_blocks(options, registry)
+    blocks = ha._app_guidance_blocks(options, leg="claude", registry=registry)
     [app_tools] = [b for b in blocks if b.startswith("# App tools on this session")]
     assert "Task" in app_tools and "Monitor" in app_tools
-    assert "__Remember" in app_tools and "__Recall" in app_tools
-    assert ha._MEMORY_BLOCK_CORE in blocks
+    # The memory block calls the picked tools by the names the CLI lists.
+    [memory] = [b for b in blocks if b.startswith("# Durable memory")]
+    assert "mcp__fluid_bundled__mcp__builtins__Remember" in memory
+    assert "mcp__fluid_bundled__mcp__builtins__Recall" in memory
     # PICKED has no Edit: the block would forbid the only permitted way to edit.
     assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(blocks)
 
@@ -295,7 +297,7 @@ async def test_app_tools_note_names_the_stand_ins(tmp_path, builtins_server):
     options = _options(tmp_path, {"builtins": builtins_server})
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
     [app_tools] = [
-        b for b in ha._delegated_guidance_blocks(options, registry)
+        b for b in ha._delegated_tool_blocks(options, registry)
         if b.startswith("# App tools on this session")
     ]
     assert "__RemoteTrigger and __NotifyDevices" in app_tools
@@ -385,7 +387,7 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
     assert not permit("mcp__builtins__Remember")
     assert permit("mcp__builtins__Recall")
     # No permitted shell is left, so the Bash-vs-dedicated-tools block is moot.
-    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(ha._delegated_guidance_blocks(options, None))
+    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(ha._delegated_tool_blocks(options, None))
 
     loop = _loop(options)
     assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
@@ -401,19 +403,19 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
 async def test_blocked_bridged_tool_is_absent_from_prompt(tmp_path, builtins_server, blocked):
     options = _options(tmp_path, {"builtins": builtins_server})
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
-    original = ha._delegated_append_text("APPEND", options, registry) or ""
+    original = ha.HarnessAdapter._compile_prompt(None, "APPEND", options, registry=registry) or ""
     assert "__Remember" in original
-    assert ha._MEMORY_BLOCK_CORE in original
+    assert "# Durable memory" in original
     options.disallowed_tools = [blocked]
     loop = _loop(options, registry)
     try:
         assert registry.get("mcp__builtins__Remember") is not None
         assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
         assert loop._bridge_tool_permitted("mcp__builtins__Recall")
-        text = ha._delegated_append_text("APPEND", options, registry) or ""
+        text = ha.HarnessAdapter._compile_prompt(None, "APPEND", options, registry=registry) or ""
         assert "__Remember" not in text
         assert "__ListAgents" in text  # unrelated app tools remain advertised
-        assert ha._MEMORY_BLOCK_CORE not in text
+        assert "# Durable memory" not in text
     finally:
         await loop.aclose()
 

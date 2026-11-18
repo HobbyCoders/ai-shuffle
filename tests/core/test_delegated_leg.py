@@ -1,5 +1,5 @@
-"""The delegated Claude leg: Claude Code's preset prompt with the app's text
-appended (decision D6)."""
+"""The delegated Claude leg: the app's compiled prompt replaces Claude Code's
+for every profile shape, with the same app blocks as the native leg."""
 
 from __future__ import annotations
 
@@ -103,26 +103,31 @@ async def _run_turn(adapter, text: str) -> ResultMessage:
     raise AssertionError("turn ended without a result")
 
 
-def test_delegated_append_carries_the_app_guidance(tmp_path):
-    """Memory, recall and the gh note ride the appended text, named the way
+def _claude_prompt(options, registry) -> str:
+    """The claude CLI's --system-prompt, from the real compile path."""
+    system, append = ha._system_parts(options.system_prompt)
+    return ha.HarnessAdapter._compile_prompt(system, append, options, registry=registry)
+
+
+def test_delegated_prompt_carries_the_app_guidance(tmp_path):
+    """Memory, recall and the gh note ride the compiled prompt, named the way
     the CLI sees the bridged tools; fluid's Note/Ledger sentence does not,
     because the delegated leg has neither tool."""
-    text = ha._delegated_append_text(
-        "APPEND TEXT",
-        _preset_options(tmp_path, github_connected=True),
-        _memory_registry(),
+    text = _claude_prompt(
+        _preset_options(tmp_path, github_connected=True), _memory_registry(),
     )
-    assert text.startswith("APPEND TEXT")
-    assert "# App tools on this session" in text
-    for tool in _BRIDGED:
-        assert f"__{tool}" in text
-    assert ha.RECALL_BLOCK in text
-    assert ha._MEMORY_BLOCK_CORE in text
+    assert "APPEND TEXT" in text
+    # Forget is named by the per-turn memory reminder, not the prompt (same
+    # as the native leg).
+    for tool in ("Remember", "Recall", "SessionSearch", "SessionView"):
+        assert f"mcp__fluid_bundled__mcp__builtins__{tool}" in text
+    assert ha._spell_bundled(ha.RECALL_BLOCK, ha._DELEGATED_RECALL_TOOLS) in text
+    assert ha._spell_bundled(ha._MEMORY_BLOCK_CORE, ha._DELEGATED_MEMORY_TOOLS) in text
     assert "Note and Ledger" not in text
     assert ha.GITHUB_BLOCK in text
 
 
-def test_delegated_append_names_the_apps_task_and_background_tools(tmp_path):
+def test_delegated_prompt_names_the_apps_task_and_background_tools(tmp_path):
     """The prompt's Task and Monitor are the app's bridged tools on this leg;
     the CLI's own tools of those names are banned there."""
 
@@ -135,41 +140,42 @@ def test_delegated_append_names_the_apps_task_and_background_tools(tmp_path):
             ToolSpec(name=f"mcp__builtins__{tool}", description=tool, input_schema={}),
             handler,
         )
-    text = ha._delegated_append_text("APPEND TEXT", _preset_options(tmp_path), registry)
+    text = _claude_prompt(_preset_options(tmp_path), registry)
     assert "# App tools on this session" in text
     assert "__Task, __Monitor, __TaskStop" in text
     assert "__TaskOutput" not in text  # not registered, so not named
     assert all(name in ha.DELEGATED_BANNED_TOOLS for name in ("Task", "Monitor", "TaskStop"))
 
 
-def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
+def test_delegated_prompt_drops_guidance_for_tools_off_the_surface(tmp_path):
     """Ruling T9 on this leg too: no block describes a tool the session
     cannot call."""
+    from fluid.context.steering import PROMPT_BLOCK as STEERING
+
     options = _preset_options(tmp_path, github_connected=True)
     options.tool_allowlist = ["Read"]
-    text = ha._delegated_append_text("APPEND TEXT", options, _memory_registry())
-    # Incoming peer work is independent of the receiver's outgoing tool surface.
-    from fluid.context.peer import PROMPT_BLOCK
-    # The batching rule names no tool, so it rides every surface.
+    blocks = ha._app_guidance_blocks(options, leg="claude", registry=_memory_registry())
+    # The batching rule names no tool, so it rides every surface; steering,
+    # safety and the context rules name no tool the session lacks.
     batching = ha.DELEGATED_TOOL_USE_HEADER + ha.DELEGATED_BATCHING_RULE
-    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK + "\n\n" + batching
+    assert blocks == [STEERING, ha.SAFETY_BLOCK, ha.CONTEXT_BLOCK_NO_RECALL, batching]
 
 
 def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path):
     options = _preset_options(tmp_path)
-    blocks = ha._delegated_guidance_blocks(options, _memory_registry())
+    blocks = ha._delegated_tool_blocks(options, _memory_registry())
     assert blocks[0] == f"{ha.DELEGATED_TOOL_USE_BLOCK}\n{ha.DELEGATED_BATCHING_RULE}"
     # The file-tool rule already says to search with Glob and Grep.
     assert "rather than find/grep through Bash" not in "\n".join(blocks)
 
 
 @pytest.mark.asyncio
-async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_path):
-    """The appended prompt is part of the CLI's cached prefix, so it must not
-    change between turns. Two turns, with a CLI restart between them so the
-    second one builds its argv again, must send the same bytes. The text
-    rides a file (``--append-system-prompt-file``), so each spawn's file
-    contents are what must match."""
+async def test_delegated_prompt_is_byte_identical_across_turns(monkeypatch, tmp_path):
+    """The compiled prompt is the CLI's cached prefix, so it must not change
+    between turns. Two turns, with a CLI restart between them so the second
+    one builds its argv again, must send the same bytes. The text rides a
+    file (``--system-prompt-file``), so each spawn's file contents are what
+    must match. A preset profile no longer appends to Claude Code's prompt."""
     import fluid.engine.delegated as delegated_mod
 
     class _FileLoop(_ArgvLoop):
@@ -179,7 +185,7 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
 
         def _build_argv(self):
             argv = super()._build_argv()
-            path = _flag(argv, "--append-system-prompt-file")
+            path = _flag(argv, "--system-prompt-file")
             type(self).prompt_bytes.append(Path(path).read_bytes() if path else None)
             return argv
 
@@ -205,12 +211,14 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
 
     assert not first.is_error and not second.is_error
     assert len(_ArgvLoop.argvs) == 2
-    assert all(_flag(argv, "--append-system-prompt") is None for argv in _ArgvLoop.argvs)
+    assert all(_flag(argv, "--system-prompt") is None for argv in _ArgvLoop.argvs)
     appends = _FileLoop.prompt_bytes
     assert len(appends) == 2 and appends[0]
     assert appends[0] == appends[1]
+    assert b"APPEND TEXT" in appends[0]
     assert all(
-        _flag(argv, "--system-prompt") is None and _flag(argv, "--system-prompt-file") is None
+        _flag(argv, "--append-system-prompt") is None
+        and _flag(argv, "--append-system-prompt-file") is None
         for argv in _ArgvLoop.argvs
     )
     # The second spawn resumed the same CLI conversation.
@@ -223,7 +231,7 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
         _preset_options(tmp_path, registry=_memory_registry(), github_connected=True)
     )
     try:
-        rebuilt = again.engine.append_system_prompt
+        rebuilt = again.engine.system
     finally:
         await again.disconnect()
     assert rebuilt.encode("utf-8") == appends[0]

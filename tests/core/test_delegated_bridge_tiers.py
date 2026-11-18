@@ -178,10 +178,11 @@ async def test_tools_the_prompt_names_are_on_the_bridge(tmp_path):
     from app.mcp.chat_access_sdk import GUIDANCE
 
     _options, registry, tools = await _bridge(tmp_path)
-    blocks = "\n".join(ha._delegated_guidance_blocks(_options, registry))
+    blocks = "\n".join(ha._app_guidance_blocks(_options, leg="claude", registry=registry))
     listed = {t["name"].rsplit("__", 1)[-1] for t in tools}
     loaded = {t["name"].rsplit("__", 1)[-1] for t in tools if not _is_deferred(t)}
-    # The app-tools note calls each bridged tool by its ``__<name>`` suffix.
+    # The blocks name each bridged tool in full (mcp__fluid_bundled__…) or,
+    # in the app-tools note, by its ``__<name>`` suffix.
     # Loaded or deferred, each is on the bridge: the CLI lists a deferred one
     # by name and its ToolSearch loads the schema when the model asks.
     named = set(re.findall(r"__([A-Z]\w+)", blocks))
