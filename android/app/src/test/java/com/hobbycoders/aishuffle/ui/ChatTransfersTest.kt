@@ -316,6 +316,39 @@ class ChatTransfersTest {
         assertEquals(listOf(true), replies("a1"))
     }
 
+    /** Parsed messages whose `id` is absent, null, not a string, empty, too long or has other characters. */
+    private fun invalidIds(type: String, rest: String) = listOf("", "\"id\":null,", "\"id\":1,", "\"id\":true,", "\"id\":[\"1\"],",
+        "\"id\":{\"id\":\"1\"},", "\"id\":\"\",", "\"id\":\"1 \",", "\"id\":\"" + "1".repeat(81) + "\",").map { "{$it\"type\":\"$type\"$rest}" } +
+        // A valid-looking `id` after `type` cannot stand in for the parsed, invalid one.
+        "{\"type\":\"$type\",\"id\":1$rest}"
+
+    @Test fun parsedRequestsWithAnInvalidIdGetNoAnswerAndStartNothing() {
+        for (raw in invalidIds("url", ",\"url\":\"$base/api/files/by-path?path=big.zip\"") +
+            invalidIds("begin", ",\"size\":1") + invalidIds("finish", ",\"sequence\":0")) send(raw)
+        assertTrue(replies.isEmpty())
+        assertEquals(0, picks)
+        // Nothing is waiting: a valid request starts normally.
+        send(url("a1"))
+        assertEquals(1, picks)
+    }
+
+    @Test fun parsedRequestsWithAnInvalidIdLeaveARunningSaveAlone() {
+        // The save's ID is "1", which `"id":1` would become if coerced to a string.
+        startStream("1")
+        val statusCount = statuses.size
+        for (raw in invalidIds("abort", "") + invalidIds("error", "") + invalidIds("url", ",\"url\":\"$base/f\"") +
+            invalidIds("chunk", ",\"sequence\":0,\"data\":\"\"") + invalidIds("finish", ",\"sequence\":0")) send(raw)
+        assertTrue(replies.isEmpty())
+        assertEquals(1, picks)
+        assertEquals(statusCount, statuses.size)
+        assertFalse(worker.call!!.isCanceled())
+
+        chunk(5)
+        worker.steps.put(Step.End)
+        settle("reply") { replies("1").isNotEmpty() }
+        assertEquals(listOf(true), replies("1"))
+    }
+
     @Test fun oversizedMessageForTheActiveSaveEndsIt() {
         startStream("a1")
         send("{\"type\":\"chunk\",\"id\":\"a1\",\"data\":\"" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\"}")

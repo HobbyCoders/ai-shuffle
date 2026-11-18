@@ -91,13 +91,15 @@ internal class ChatTransfers(
 
     /** A message from the authorized page. Every request with a readable ID gets an answer for that ID only. */
     fun receive(raw: String, post: (String) -> Unit) {
-        // A message within the size limit is parsed once and gives its ID in any key order.
+        // A message within the size limit is parsed once. Its ID, in any key order, is then the
+        // only one: it must be a JSON string matching ID (no coercion) or the message gets no
+        // answer. The bounded prefix is read only when the message was too large or did not parse.
         val parsed = if (raw.length <= ChatDownloadPolicy.MAX_MESSAGE) runCatching { JSONObject(raw) }.getOrNull() else null
-        val id = parsed?.optString("id")?.takeIf(ID::matches) ?: prefixId(raw)
+        val id = if (parsed != null) (parsed.opt("id") as? String)?.takeIf(ID::matches) else prefixId(raw)
         fun reply(ok: Boolean) { if (id != null) runCatching { post(JSONObject().put("id", id).put("ok", ok).toString()) } }
         try {
             val message = requireNotNull(parsed)
-            require(id != null && message.optString("id") == id)
+            require(id != null)
             when (message.getString("type")) {
                 "begin", "url" -> {
                     if (active != null || chooserOpen) { status("Finish the current download first."); reply(false); return }
