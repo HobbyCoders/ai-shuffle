@@ -990,7 +990,7 @@
 											title={effortPinned ? "Back to Auto: run at the model's default" : "Auto: the model's default is in use"}
 											onclick={() => { if (effortPinned) onEffortSelect(null); }}>Auto</button>
 									{/if}
-									<span class="mcp-val"><SpeedLabel text={panelEffortValue} speed={effortLocked ? 'standard' : labelSpeed} /></span>
+									<span class="mcp-val"><SpeedLabel text={panelEffortValue} speed={effortLocked ? 'standard' : labelSpeed} bolt={fastShown} /></span>
 								</div>
 								<div class="mcp-effort-body">
 									{#each effortNotes as note}

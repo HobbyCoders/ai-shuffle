@@ -750,7 +750,7 @@
 				aria-haspopup="dialog"
 				aria-expanded={openPopover === 'effort'}
 				aria-label={effortSpeedLabel('Effort: ', effortLabel, labelSpeed)}
-			><SpeedLabel text={effortLabel} speed={labelSpeed} /></button>
+			><SpeedLabel text={effortLabel} speed={labelSpeed} bolt={fastSupported} /></button>
 
 			{#if openPopover === 'effort'}
 				<div

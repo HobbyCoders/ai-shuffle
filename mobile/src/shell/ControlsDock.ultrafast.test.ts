@@ -76,6 +76,13 @@ describe('the effort label shows the speed tier', () => {
 		expect(effortLabel().querySelector('.speed-bolt')!.getAttribute('aria-hidden')).toBe('true');
 	});
 
+	it('keeps no empty bolt slot on a model without a speed choice', async () => {
+		render(ControlsDock, { props: {} });
+		activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
+		await tick();
+		expect(effortLabel().querySelector('.speed-bolt')).toBeNull();
+	});
+
 	it('drops the tier as soon as the model falls back, and restores the pick per model', async () => {
 		render(ControlsDock, { props: {} });
 		await tick();

@@ -17,7 +17,7 @@
 	interface Props {
 		text: string;
 		speed: ComposerSpeed;
-		/** Draw the reduced-motion bolt; off where a badge beside it already does. */
+		/** Draw the reduced-motion bolt slot. Off where a badge beside it already does, and where the model has no speed choice (nothing to keep the width steady for). */
 		bolt?: boolean;
 	}
 
