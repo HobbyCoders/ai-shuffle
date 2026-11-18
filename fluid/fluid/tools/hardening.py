@@ -211,14 +211,18 @@ SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"
 
 
 def is_sensitive_path(path: str) -> bool:
-    """True when ``path`` names a file that exists to hold credentials."""
-    from fnmatch import fnmatch
+    """True when ``path`` names a file that exists to hold credentials.
+
+    Names match case-insensitively on every platform (``.ENV`` is ``.env``):
+    a case-insensitive file system opens either spelling, and treating both as
+    sensitive can only add an ask."""
+    from fnmatch import fnmatch, fnmatchcase
 
     normalized = str(path).replace("\\", "/").rstrip("/")
-    basename = normalized.rsplit("/", 1)[-1]
-    if basename.lower() in SENSITIVE_EXCEPTIONS:
+    basename = normalized.rsplit("/", 1)[-1].lower()
+    if basename in SENSITIVE_EXCEPTIONS:
         return False
-    if any(fnmatch(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
+    if any(fnmatchcase(basename, pattern) for pattern in SENSITIVE_BASENAME_GLOBS):
         return True
     lowered = normalized.lower()
     if any(
@@ -233,6 +237,46 @@ def is_sensitive_path(path: str) -> bool:
         return True
     components = lowered.split("/")
     return any(name in components for name in SENSITIVE_DIR_NAMES)
+
+
+def _credential_folders() -> tuple[str, ...]:
+    """The folders the suffix and full-path rules put credential files in."""
+    return tuple(
+        entry.rsplit("/", 1)[0] for entry in (*SENSITIVE_PATH_SUFFIXES, *SENSITIVE_PATH_GLOBS)
+    )
+
+
+def glob_names_sensitive_path(root: str, pattern: str) -> bool:
+    """True when a Glob of ``pattern`` under ``root`` targets a credential location.
+
+    The pattern's literal parts, joined to the root, must name a credential
+    file (``.env*``, ``**/.env``, ``*.pem``) or a folder that holds one
+    (``.aws/**``, ``.ssh/*``, or ``*`` with the root at ``~/.ssh``). A pattern
+    of wildcards only (``*``, ``**/*``) lists every name and does not ask; the
+    read of any file it finds still does. A brace set too large to expand
+    counts as targeting one (fail closed)."""
+    from fnmatch import fnmatch
+
+    from fluid.tools.builtins.bash_risk import _expand_braces
+
+    alternatives = _expand_braces(pattern.lstrip("!"))
+    if alternatives is None:
+        return True
+    base = str(root).replace("\\", "/").rstrip("/")
+    folders = _credential_folders()
+    for alternative in alternatives:
+        literal = [
+            re.sub(r"[*?\[\]]", "", part)
+            for part in alternative.replace("\\", "/").split("/")
+            if part and not set(part) <= set("*?")
+        ]
+        path = "/".join([base, *literal]) if literal else base
+        lowered = path.lower()
+        if is_sensitive_path(path) or any(
+            fnmatch(lowered, "*" + folder) for folder in folders
+        ):
+            return True
+    return False
 
 
 # ─── provider-side elision detection ─────────────────────────────────────────

@@ -109,6 +109,8 @@ from app.core.provider.session_admission import SessionReplacedError, raw_engine
 from app.db.async_database import run_sync
 from app.core.provider.delegated_saved_rules import SAVED_RULE_DENIAL
 from app.core.session_modes import (
+    CREDENTIAL_ASK_REASON,
+    SAFETY_CHECK_REASON_TYPES,
     bypass_refuses,
     effective_permission_mode,
     mode_approves_without_prompt,
@@ -3242,13 +3244,22 @@ class HarnessAdapter(ProviderAdapter):
                         self.permission_mode,
                         self._permission_tool_name(translated.name),
                         translated.input,
+                        translated.reason,
                     )
                 ):
                     # Native leg, no approver: the modes that approve on their
                     # own allow here too, as they do in a watched session.
-                    # Only a call Ask would put to a person still surfaces,
-                    # and fluid denies it after ``permission_timeout``.
                     await self._allow_without_approver(translated)
+                    continue
+                if (
+                    isinstance(translated, PermissionRequestEvent)
+                    and getattr(translated, "risk", None) != "question"
+                ):
+                    # Native leg, no approver, a call Ask puts to a person:
+                    # saved rules decide it, else it is denied now with the
+                    # reason instead of parking the run for
+                    # ``permission_timeout``.
+                    await self._answer_without_approver(translated)
                     continue
                 if isinstance(translated, ResultMessage) and not self._is_live(event):
                     # A terminal from before this turn was submitted: history
@@ -3943,7 +3954,7 @@ class HarnessAdapter(ProviderAdapter):
         return await run_sync(_lookup)
 
     async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
-        """Decide a delegated prompt with no approver, in the watched order.
+        """Decide a prompt with no approver, in the watched order.
 
         Saved rules first (every mode short of Bypass): a saved Deny denies
         with "Denied by saved rule", a saved Allow allows. Then the mode
@@ -3983,9 +3994,12 @@ class HarnessAdapter(ProviderAdapter):
         if allow is None:
             allow = mode_approves_without_prompt(
                 self.permission_mode, self._permission_tool_name(ev.name), ev.input,
+                ev.reason,
             )
             if not allow:
                 message = _NO_APPROVER_DENIAL
+                if ev.reason == CREDENTIAL_ASK_REASON:
+                    message = f"{message} It needs a person because {CREDENTIAL_ASK_REASON}."
         if not allow:
             logger.info("[HarnessAdapter] denying %s: %s", ev.name, message)
         try:
@@ -4660,6 +4674,26 @@ class HarnessAdapter(ProviderAdapter):
             uuid=self._uuid(event),
         )
 
+    def _is_credential_ask(self, name: str, tool_input: Any, tool_use_id: Any) -> bool:
+        """The session's credential rule is what asks about this call: the last
+        rule matching it (on the resolved path, in the engine's working
+        directory) is the ``CredentialRule``, or the delegated leg's hook put it
+        to a person as a credential access."""
+        from fluid.permissions.rules import CredentialRule, match_rule
+
+        engine = self._engine
+        if tool_use_id in (getattr(engine, "_credential_asked", None) or ()):
+            return True
+        rules = getattr(getattr(engine, "permissions", None), "rules", None)
+        if not rules or not isinstance(tool_input, dict):
+            return False
+        cwd = getattr(getattr(engine, "ctx", None), "cwd", None)
+        try:
+            rule = match_rule(rules, name, tool_input, cwd=cwd)
+        except Exception:  # noqa: BLE001 — a broken path cannot lower the guard
+            return True
+        return isinstance(rule, CredentialRule)
+
     def _translate(self, event: Any) -> list:
         """The core mapping table. Returns a list of mirror events (possibly
         empty) — one fluid event can fan out to a StreamEvent plus a complete
@@ -4912,6 +4946,13 @@ class HarnessAdapter(ProviderAdapter):
             # Record the tool_use_id -> request_id link so respond_to_permission
             # can route the decision back to the right fluid future.
             self._perm_requests[event.tool_use_id] = event.request_id
+            reason = getattr(event, "reason", None)
+            if getattr(event, "reason_type", None) not in SAFETY_CHECK_REASON_TYPES and (
+                self._is_credential_ask(event.name, event.input, event.tool_use_id)
+            ):
+                # Carried to every approver so Accept Edits cannot approve
+                # what the credential rule asked about (session_modes).
+                reason = CREDENTIAL_ASK_REASON
             return [
                 PermissionRequestEvent(
                     tool_use_id=event.tool_use_id,
@@ -4919,7 +4960,7 @@ class HarnessAdapter(ProviderAdapter):
                     input=event.input,
                     risk=event.risk,
                     request_id=event.request_id,
-                    reason=getattr(event, "reason", None),
+                    reason=reason,
                     reason_type=getattr(event, "reason_type", None),
                     classifier_approvable=getattr(event, "classifier_approvable", None),
                 )

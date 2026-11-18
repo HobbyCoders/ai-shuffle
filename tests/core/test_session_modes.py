@@ -663,3 +663,19 @@ def test_chat_delegated_surface_exposes_memory_bridge_without_widening_reads():
     assert "mcp__builtins__Recall" in names
     assert "mcp__builtins__Forget" in names
     assert "Read" not in names
+
+
+def test_accept_edits_never_approves_a_credential_edit_on_its_own():
+    """N8: an edit the engine's credential rule asked about (the resolved
+    path, carried as the prompt's reason) or one naming a credential file in
+    any case still asks under Accept Edits; Bypass approves it."""
+    from app.core.session_modes import (
+        CREDENTIAL_ASK_REASON,
+        mode_approves_without_prompt,
+    )
+
+    alias = {"file_path": "settings.txt"}
+    assert mode_approves_without_prompt("acceptEdits", "Edit", alias)
+    assert not mode_approves_without_prompt("acceptEdits", "Edit", alias, CREDENTIAL_ASK_REASON)
+    assert not mode_approves_without_prompt("acceptEdits", "Write", {"file_path": "deploy/.ENV"})
+    assert mode_approves_without_prompt("bypassPermissions", "Edit", alias, CREDENTIAL_ASK_REASON)

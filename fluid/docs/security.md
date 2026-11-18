@@ -91,35 +91,49 @@ model *reads* framing tokens even when they can't structurally escape.
   and `thread-self`, and `/proc/<pid>/mem`). The list lives in
   `fluid/tools/hardening.py`. A path is matched in every spelling the
   file-tool rules check: as written, normalised (`~/.kube/./config`), made
-  absolute against the working directory, and with symlinks resolved. They
-  are prepended before user rules, so one `[[permission.rules]]` allow
-  overrides them; `.env.example`-style templates are exempt.
+  absolute against the working directory, and with symlinks resolved; names
+  match in any case (`.ENV`). A `Glob` asks when its root or the literal
+  parts of its pattern name a credential file or folder (`.aws/**`,
+  `**/.env*`, `*` under `~/.ssh`); a wildcard-only pattern (`**/*.json`)
+  lists names without asking. They are prepended before user rules, so one
+  `[[permission.rules]]` allow overrides them, and a settings
+  `defaultMode = "acceptEdits"` sits below them, so it never allows a
+  credential edit on its own; `.env.example`-style templates are exempt.
   `permission.protect_sensitive_files = false` disables the set. The AI
   Shuffle app installs the same asks in its own sessions (native and code
-  mode), ahead of its own rules; on the delegated Claude CLI leg the
-  PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/`Glob`
-  or Bash call that touches one, and no earlier "always" covers such a call.
-  Under Bypass nothing asks.
-- The **Bash risk classifier** demotes an otherwise read-only command to
-  `write` (→ prompts under `on_write`) when any argument names a credential
-  file — `cat .env` and `cat /proc/1/environ` do not sail under the
-  read-only fast path — when a glob could expand to one (`cat ~/.config/gcloud/*.db`,
-  matched against the same rules and against what it expands to on disk),
-  and when a recursive search (`grep -r`, `rg`) starts at `/`, `/proc` or a
-  process directory, since it would read a process's environment without
-  naming it. Paths and search roots are resolved against the directory the
-  call runs in (`grep -r x .` from `/proc`, `/proc/../proc`). This is a
-  best-effort text check, not an isolation boundary: a path built while the
-  command runs (`cat $(echo ~/.kube)/config`, a variable, a script that opens
-  the file) is not seen. An option on the read-only list that writes a file
-  or runs a program (`sort -o`, `tree -o`, `rg --pre`, `git log --output`) makes
-  the command `write` in every spelling the program accepts: value glued on
-  (`sort -oFILE`), inside combined flags (`sort -uo FILE`), `--opt=value` and
-  abbreviated (`git log --out=FILE`).
+  mode), ahead of its own rules, and its Accept Edits mode never approves an
+  edit they asked about. A run with nobody to answer (an automation, an API
+  turn) is denied at once with the reason. On the delegated Claude CLI leg
+  the PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/
+  `Glob` call that touches one, judged in the CLI's own working directory,
+  and no earlier "always" covers such a call. Under Bypass nothing asks.
+- **Bash is not a credential boundary.** The risk classifier demotes an
+  otherwise read-only command to `write` (→ prompts under `on_write`) when an
+  argument names a credential file literally (`cat .env`,
+  `cat /proc/1/environ`) or is a glob that could expand to one
+  (`cat ~/.ssh/*`). That is a best-effort text check: a recursive search, a
+  path built while the command runs (`cat $(echo ~/.kube)/config`), a
+  variable or a script that opens the file is not seen. The boundary for
+  shell commands is the opt-in isolated exec profile, not this check. An
+  option on the read-only list that writes a file or runs a program
+  (`sort -o`, `tree -o`, `rg --pre`, `git log --output`) makes the command
+  `write` in every spelling the program accepts: value glued on
+  (`sort -oFILE`), inside combined flags (`sort -uo FILE`), `--opt=value`
+  and abbreviated (`git log --out=FILE`).
+- **Agent-owned ACP tools are outside both guarantees.** A tool an ACP agent
+  runs itself (Antigravity's own file reads and shell) never passes through
+  these rules; the host sees only the permission requests the agent chooses
+  to send. "Always" on such a request reaches the agent as `allow_always`
+  only for the Bash forms listed under allow-always below (and for
+  non-shell tools, as on the native leg); any other shell command is sent
+  back as allow once, since the agent would keep the grant as broadly as it
+  likes.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
-  `.env` contents into context. Reading such a file explicitly still works,
-  through the permission rule above.
+  `.env` contents into context. The check reads ripgrep's own path field
+  (`--null`), so a folder named like a `path:line:` prefix cannot hide one.
+  Reading such a file explicitly still works, through the permission rule
+  above.
 
 **7. Exfiltration gating.**
 
@@ -137,23 +151,16 @@ model *reads* framing tokens even when they can't structurally escape.
 **8. Structural gates** (pre-existing, part of the same story). The
 permission engine (policy + last-match-wins rules + scoped allow-always; an
 MCP tool's own `readOnlyHint` counts only for a server with
-`trust_annotations = true`, and a Bash allow-always covers the program plus
-its subcommand (`git commit`, `npm run build`, `gh pr view`, with known
-options before the subcommand skipped: `git -C repo log`, `docker compose -p
-dev up`), an interpreter plus its script resolved against the directory the
-call runs in (`python /work/tool.py`, so the same spelling elsewhere asks
-again), and what a wrapper such as `sudo` ran, not the wrapper or program
-alone; dangerous forms such as `git push --force`, `git reset --hard`,
-`git clean -f`, `git checkout -- .`, `git restore`, `git commit --amend`,
-`rm -r`, `docker rm`, `docker compose down -v`, `kubectl delete` or
-`npm publish`, a command that reads a credential file, inline code such as
-`python -c` or `deno eval`, and any form whose subcommand cannot be found
-with confidence (an unknown option before it, `git -c key=value`) are never
-covered and ask every time; the prompt says "this call only" for them. On
-the delegated Claude CLI leg a grant stays in fluid (the CLI's own broader
-rule, such as `Bash(git:*)`, is not handed back), and a relative script is
-granted for that call only, since the CLI's shell keeps its own working
-directory), the
+`trust_annotations = true`, and a Bash allow-always covers exactly the same
+command text, offered only for a short allowlist of read-only forms: `git
+status`/`log`/`diff`/`show` with known options and no index paths (`git show
+:.env` is not one), `ls`, `pwd`, `rg`/`grep` without recursive, hidden or
+no-ignore options, and `sed -n 5p`/`5,10p`. Everything else (any compound,
+`cd`, a wrapper such as `timeout`, `env` or `xargs`, `python -m`, a script,
+`git commit`/`push`/`checkout`, an unknown or abbreviated option) is allowed
+for that call only and the prompt says so. On the delegated Claude CLI leg a
+grant stays in fluid; the CLI's own broader rule, such as `Bash(git:*)`, is
+not handed back), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

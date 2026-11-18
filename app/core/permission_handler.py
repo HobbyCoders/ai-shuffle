@@ -1107,6 +1107,7 @@ class PermissionHandler:
             )
             if not mode_approves_without_prompt(
                 mode, payload.get("tool_name", ""), payload.get("tool_input"),
+                payload.get("decision_reason"),
             ):
                 continue
             if payload.get("safety_check"):

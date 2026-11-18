@@ -583,8 +583,16 @@ def turn_permission_mode(overrides: Optional[Mapping[str, Any]], session: Option
     return permission_mode_for_session_mode(mode, session.get("mode"))
 
 
+#: The ``decision_reason`` the adapter gives a prompt the session's credential
+#: rule raised (``fluid.permissions.rules.CredentialRule``, judged on the
+#: resolved path in the session's working directory): no mode short of Bypass
+#: approves it on its own.
+CREDENTIAL_ASK_REASON = "it reads, edits or lists a credential file"
+
+
 def mode_approves_without_prompt(
     permission_mode: Any, tool_name: str, tool_input: Any = None,
+    decision_reason: Any = None,
 ) -> bool:
     """Whether a session in ``permission_mode`` approves ``tool_name`` on its own.
 
@@ -599,17 +607,22 @@ def mode_approves_without_prompt(
     through this, so a run with nobody watching allows exactly what a watched
     one would.
 
-    Accept Edits never approves an edit of a credential file (``tool_input``
-    naming one; see ``fluid.tools.hardening.is_sensitive_path``): that asks
-    as it does in a fluid session, where the sensitive-file ask outranks the
-    mode's allow.
+    Accept Edits never approves an edit of a credential file: one the
+    engine's credential rule asked about (``decision_reason`` is
+    :data:`CREDENTIAL_ASK_REASON`, which follows symlinks and the working
+    directory) or one ``tool_input`` names literally. That asks as it does in
+    a fluid session, where the sensitive-file ask outranks the mode's allow.
     """
     if permission_mode == "bypassPermissions":
         return True
     if permission_mode in (None, "", "default", "plan"):
         return False
     if permission_mode == "acceptEdits":
-        return tool_name in ACCEPT_EDITS_TOOLS and not _edits_credential_file(tool_input)
+        return (
+            tool_name in ACCEPT_EDITS_TOOLS
+            and decision_reason != CREDENTIAL_ASK_REASON
+            and not _edits_credential_file(tool_input)
+        )
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 

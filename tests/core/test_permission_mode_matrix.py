@@ -2,8 +2,8 @@
 
 Mode x leg x watched/unwatched, for a call the runtime asked about:
 
-* Ask (``default``) prompts when watched; unwatched, the native call waits
-  and fluid denies it after ``permission_timeout``.
+* Ask (``default``) prompts when watched; unwatched, saved rules decide the
+  call, and otherwise it is denied at once with the reason.
 * A stored legacy ``auto`` is Ask on the native leg — for the engine AND for
   the app's approver (``effective_permission_mode``). The delegated Claude CLI
   keeps ``auto``.
@@ -429,14 +429,39 @@ async def test_unwatched_native_modes_that_approve_allow_at_once(mode, tool):
     ("acceptEdits", "WebFetch"),
     ("acceptEdits", COMPUTER_USE_REQUEST_ACCESS),
 ])
-async def test_unwatched_native_prompts_are_left_to_the_engine_timeout(mode, tool):
-    """Ask (and, under Accept Edits, everything that is not a file edit —
-    screen control included) is not answered here: the request surfaces and
-    fluid denies it after ``permission_timeout``."""
+async def test_unwatched_native_prompts_are_denied_at_once(mode, tool):
+    """N10: Ask (and, under Accept Edits, everything that is not a file edit —
+    screen control included) has nobody to answer it, so it is denied now
+    with the reason instead of parking the run for ``permission_timeout``."""
     engine = _Engine(_request(name=tool))
     got = await _drain(_native(engine, mode))
-    assert any(isinstance(e, PermissionRequestEvent) for e in got)
-    assert engine.ops == []
+    assert not any(isinstance(e, PermissionRequestEvent) for e in got)
+    assert [(op.request_id, op.decision) for op in engine.ops] == [("perm_1", "deny")]
+    assert "no one to approve" in engine.ops[0].message
+
+
+async def test_unwatched_native_credential_edit_is_denied_with_its_reason(tmp_path):
+    """N8 + N10: Accept Edits does not approve an edit the credential rule
+    asked about, even through an innocent name that resolves to ``.env``;
+    with nobody attached it is denied and says why."""
+    from types import SimpleNamespace
+
+    from fluid.config.loader import _sensitive_file_rules
+
+    from app.core.session_modes import CREDENTIAL_ASK_REASON
+
+    (tmp_path / ".env").write_text("TOKEN=x\n")
+    try:
+        (tmp_path / "settings.txt").symlink_to(tmp_path / ".env")
+    except OSError:
+        pytest.skip("symlinks are not available here")
+    engine = _Engine(_request(name="Edit"))
+    engine._events[0] = dataclasses.replace(engine._events[0], input={"file_path": "settings.txt"})
+    engine.permissions = SimpleNamespace(rules=_sensitive_file_rules())
+    engine.ctx = SimpleNamespace(cwd=str(tmp_path))
+    await _drain(_native(engine, "acceptEdits"))
+    assert [op.decision for op in engine.ops] == ["deny"]
+    assert CREDENTIAL_ASK_REASON in engine.ops[0].message
 
 
 async def test_unwatched_native_accept_edits_honours_a_saved_deny():
@@ -467,6 +492,5 @@ async def test_unwatched_native_legacy_auto_is_ask():
     adapter = _native(engine, "acceptEdits")
     await adapter.set_permission_mode("auto")
     engine.ops.clear()
-    got = await _drain(adapter)
-    assert any(isinstance(e, PermissionRequestEvent) for e in got)
-    assert engine.ops == []
+    await _drain(adapter)
+    assert [op.decision for op in engine.ops] == ["deny"]

@@ -1128,6 +1128,22 @@ class AcpLoop:
                     return str(option["optionId"])
         return None
 
+    @staticmethod
+    def _always_is_scoped(data: Any) -> bool:
+        """Whether an owner's "always" may reach the agent as ``allow_always``.
+
+        The agent keeps that grant itself, as broadly as it likes (a program
+        prefix such as ``git``), and the host never sees the calls it then
+        covers. So a shell command goes back as "always" only when it is on
+        the allowlist the native leg can scope (``bash_risk.session_scope``:
+        ``git status``, ``ls``, ...); any other command is allowed once.
+        Other tools keep a tool-wide "always", as on the native leg."""
+        from fluid.tools.builtins.bash_risk import session_scope
+
+        if not isinstance(data, Mapping) or not isinstance(data.get("command"), str):
+            return True
+        return session_scope(dict(data)) is not None
+
     async def _permission(self, params: dict[str, Any]) -> dict[str, Any]:
         call = params.get("toolCall") if isinstance(params.get("toolCall"), Mapping) else {}
         options = [o for o in params.get("options") or [] if isinstance(o, Mapping)]
@@ -1197,7 +1213,7 @@ class AcpLoop:
                 return cancelled if self._interrupted.is_set() else chose("reject_once", "reject_always")
         finally:
             self._pending_permissions.pop(request_id, None)
-        if response.decision == "allow_always" and not proxied:
+        if response.decision == "allow_always" and not proxied and self._always_is_scoped(data):
             return chose("allow_always", "allow_once")
         if response.decision in ("allow", "allow_always"):
             return allow()

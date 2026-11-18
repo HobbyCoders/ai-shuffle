@@ -430,7 +430,9 @@ async def test_the_child_server_hands_the_marker_to_the_cli() -> None:
 # ─── Credential files ask on the delegated leg too ───────────────────────────
 
 
-async def _pre_tool_use_decision(loop: DelegatedLoop, tool: str, tool_input: dict) -> dict:
+async def _pre_tool_use_decision(
+    loop: DelegatedLoop, tool: str, tool_input: dict, cwd: str | None = None,
+) -> dict:
     await loop._ensure_session()
     written: list[dict] = []
 
@@ -441,7 +443,8 @@ async def _pre_tool_use_decision(loop: DelegatedLoop, tool: str, tool_input: dic
     await loop._answer_hook_request(HookCallbackRequest(
         cli_request_id="cli_hook_c", callback_id="fluid_PreToolUse",
         input={"hook_event_name": "PreToolUse", "tool_name": tool,
-               "tool_input": tool_input, "tool_use_id": "tc"},
+               "tool_input": tool_input, "tool_use_id": "tc",
+               **({"cwd": cwd} if cwd else {})},
         tool_use_id="tc",
     ))
     (frame,) = written
@@ -454,6 +457,7 @@ async def _pre_tool_use_decision(loop: DelegatedLoop, tool: str, tool_input: dic
     ("Edit", {"file_path": "deploy/.env", "old_string": "a", "new_string": "b"}),
     ("Write", {"file_path": "~/.aws/sso/cache/x.json", "content": "{}"}),
     ("Grep", {"pattern": "TOKEN", "path": ".env"}),
+    ("Glob", {"pattern": ".aws/**", "path": "/tmp/fake-home"}),
     ("Bash", {"command": "cat ~/.kube/config"}),
     ("Bash", {"command": "grep -r PATH /proc/1/environ"}),
 ])
@@ -509,3 +513,25 @@ def test_an_earlier_always_never_covers_a_credential_call(tmp_path) -> None:
     fresh = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(tmp_path)))
     assert not fresh._remember_allow("Read", {"file_path": ".env"})
     assert "Read" not in fresh._always_allowed
+
+
+async def test_always_never_covers_a_credential_alias_in_the_clis_own_cwd(tmp_path) -> None:
+    """The hook judges a relative path in the CLI's working directory, which
+    can differ from the session's; its verdict, kept by tool_use_id, stops an
+    earlier tool-wide "always" from answering the prompt it raised."""
+    session_cwd, cli_cwd = tmp_path / "a", tmp_path / "b"
+    session_cwd.mkdir()
+    cli_cwd.mkdir()
+    (cli_cwd / ".env").write_text("TOKEN=x\n")
+    try:
+        (cli_cwd / "settings.txt").symlink_to(cli_cwd / ".env")
+    except OSError:
+        pytest.skip("symlinks are not available here")
+    loop = DelegatedLoop(store=MemoryStore(), model="m", ctx=ToolCtx(cwd=str(session_cwd)))
+    assert loop._remember_allow("Read", {"file_path": "README.md"})
+    call = {"file_path": "settings.txt"}
+    assert loop._session_allows("Read", call)  # an ordinary file in the session's cwd
+    output = await _pre_tool_use_decision(loop, "Read", call, cwd=str(cli_cwd))
+    assert output.get("permissionDecision") == "ask"
+    assert not loop._session_allows("Read", call, "tc")
+    assert not loop._remember_allow("Read", call, "tc")

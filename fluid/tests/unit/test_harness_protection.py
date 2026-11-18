@@ -310,10 +310,10 @@ def test_fluid_codex_token_file_is_sensitive() -> None:
 @pytest.mark.parametrize("command", [
     "cat /proc/1/environ", "strings /proc/self/environ", "xxd /proc/thread-self/environ",
     "cat /proc/1/*", "head /proc/*/environ", "grep -a DATABASE_URL /proc/1/environ",
-    "grep -r TOKEN /proc/1", "grep -rn TOKEN /proc/self/", "grep -R x /proc",
-    "rg TOKEN /proc/self", "grep -r DATABASE_URL /", "grep --recursive x /proc/1/task/7",
 ])
 def test_bash_reads_of_a_process_environment_prompt(command: str) -> None:
+    """Best effort only: a literal operand naming the file asks. A recursive
+    search or a computed path can still reach it; Bash is not a boundary."""
     assert classify({"command": command}) == "write"
 
 
@@ -330,3 +330,74 @@ def test_grep_withholds_process_environment_matches() -> None:
         "/proc/1/environ:1:DATABASE_URL=postgres://x", "/proc/1/status:1:Name: python",
     ])
     assert kept == ["/proc/1/status:1:Name: python"] and dropped == 1
+
+
+@pytest.mark.skipif(not __import__("shutil").which("rg"), reason="needs ripgrep")
+async def test_grep_filters_on_the_structured_path_not_the_line_text(tmp_path) -> None:
+    """N7: a directory named like a ``path:line:`` prefix does not hide the
+    credential file under it; rg's NUL-separated path field is checked."""
+    from fluid.tools.builtins import grep as grep_mod
+
+    secret_dir = tmp_path / "data:1:mock"
+    try:
+        secret_dir.mkdir()
+    except OSError:
+        pytest.skip("this filesystem refuses ':' in names")
+    (secret_dir / ".env").write_text("TOKEN=hunter2\n")
+    (tmp_path / "notes.txt").write_text("TOKEN placeholder\n")
+    outcome = await grep_mod.handler(
+        {"pattern": "TOKEN", "path": str(tmp_path), "no_ignore": True}, ToolCtx(cwd=str(tmp_path)),
+    )
+    assert "hunter2" not in outcome.text
+    assert "notes.txt" in outcome.text
+
+
+@pytest.mark.parametrize("pattern, root, decision", [
+    (".aws/**", "/tmp/fake-home", "ask"),
+    ("**/.env*", ".", "ask"),
+    ("*", "~/.ssh", "ask"),
+    ("**/*.pem", ".", "ask"),
+    ("**/*.py", ".", "allow"),
+    ("*", ".", "allow"),
+])
+def test_glob_asks_when_its_pattern_or_root_names_a_credential_location(
+    pattern: str, root: str, decision: str,
+) -> None:
+    engine = _build_permissions(_config())
+    glob_spec = ToolSpec(name="Glob", description="", input_schema={}, risk="safe")
+    assert engine.decide(glob_spec, {"pattern": pattern, "path": root}).decision == decision
+
+
+def test_credential_names_match_in_any_case() -> None:
+    for path in (".ENV", "deploy/.Env", "~/.SSH/id_rsa", "~/.AWS/Credentials"):
+        assert is_sensitive_path(path), path
+    assert not is_sensitive_path("ENVIRONMENT.md")
+
+
+def test_an_edit_through_a_symlink_to_a_credential_asks(tmp_path) -> None:
+    """N8: the rule resolves the path, so an innocent name that points at
+    ``.env`` asks like ``.env`` itself."""
+    (tmp_path / ".env").write_text("TOKEN=x\n")
+    alias = tmp_path / "settings.txt"
+    try:
+        alias.symlink_to(tmp_path / ".env")
+    except OSError:
+        pytest.skip("symlinks are not available here")
+    engine = _build_permissions(_config())
+    edit_spec = ToolSpec(name="Edit", description="", input_schema={}, risk="write")
+    call = {"file_path": "settings.txt", "old_string": "a", "new_string": "b"}
+    assert engine.decide(edit_spec, call, cwd=str(tmp_path)).decision == "ask"
+
+
+def test_startup_accept_edits_sits_below_the_credential_asks() -> None:
+    """N8: ``defaultMode=acceptEdits`` allows ordinary edits but not a
+    credential edit; an explicit user allow rule still wins."""
+    edit_spec = ToolSpec(name="Edit", description="", input_schema={}, risk="write")
+    call = {"file_path": ".env", "old_string": "a", "new_string": "b"}
+    engine = _build_permissions(_config(), {"permissions": {"defaultMode": "acceptEdits"}})
+    assert engine.decide(edit_spec, call).decision == "ask"
+    assert engine.decide(edit_spec, {**call, "file_path": "src/app.py"}).decision == "allow"
+    allowed = _build_permissions(
+        _config(), {"permissions": {"defaultMode": "acceptEdits", "allow": ["Edit(.env)"]}},
+    )
+    assert allowed.decide(edit_spec, call).decision == "allow"

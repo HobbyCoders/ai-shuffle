@@ -4,18 +4,10 @@ Fluid's Bash risk classifier, its Read/Grep/Glob/Edit/Write ask-rules and the
 delegated leg's PreToolUse hook all key off
 ``fluid.tools.hardening.is_sensitive_path``.
 
-What is checked, and what is not:
-
-* ``_PRIVATE_WRITERS`` is a required registry of every Python module under
-  ``app/``, ``docker/``, ``fluid/fluid/`` and ``scripts/`` that writes a file
-  in owner-only mode (``0o600``/``0o400``/``S_IRUSR``) or through the app's
-  private-storage helpers. A module that starts doing so fails
-  ``test_every_owner_only_writer_is_registered`` until someone registers it,
-  either with the credential paths it writes (asserted sensitive below, built
-  from the writer's own constants) or with the reason it holds no secret.
-* A token written with default permissions by a module none of those markers
-  name, or by non-Python code (the desktop shell under ``desktop/``), is not
-  found by the census.
+Each credential file the app or Fluid writes is checked below, with its path
+built from the writer's own constants. There is no census of writers: a text
+scan for owner-only markers also flags readers and misses writers that use
+default permissions, so it cannot prove completeness either way.
 """
 
 from __future__ import annotations
@@ -31,62 +23,6 @@ from fluid.tools.builtins.bash_risk import classify
 from fluid.tools.hardening import is_sensitive_path
 
 _REPO = Path(__file__).resolve().parents[2]
-_SCANNED = ("app", "docker", "fluid/fluid", "scripts")
-_OWNER_ONLY = re.compile(r"\b(?:protect_private_path|service_files|S_IRUSR)\b|0o600|0o400")
-_CREDENTIAL = "credential"  # its paths are checked in test_credential_writers_paths_are_sensitive
-
-# module -> _CREDENTIAL, or the reason the owner-only file holds no secret.
-_PRIVATE_WRITERS = {
-    "app/core/application_updates.py": "update control and status records, no secret",
-    "app/core/chat_files.py": "keeps the mode of files an agent writes in its chat folder",
-    "app/core/config.py": "reads managed-postgres.json (written by docker/container_runtime.py)",
-    "app/core/confined_files.py": "uploads saved under a confined folder",
-    "app/core/credential_keys.py": _CREDENTIAL,
-    "app/core/event_listener.py": _CREDENTIAL,
-    "app/core/managed_credentials.py": _CREDENTIAL,
-    "app/core/preview_access.py": _CREDENTIAL,
-    "app/core/private_storage.py": "the private-storage helpers themselves",
-    "app/core/process_metrics.py": "process metric samples, no secret",
-    "app/db/history_indexing.py": "history index state, no secret",
-    "app/maintenance/session_recall_cache.py": "session recall cache, no secret",
-    "app/network/identity.py": _CREDENTIAL,
-    "app/preview_run.py": _CREDENTIAL,
-    "docker/agent_isolation.py": "names the protected entries; writes its own record, no secret",
-    "docker/container_runtime.py": _CREDENTIAL,
-    "fluid/fluid/context/settings_importer.py": "copies other harnesses' settings, never their credentials",
-    "fluid/fluid/providers/openai_responses/codex_oauth.py": _CREDENTIAL,
-    "scripts/ci/agent_isolation_probe.py": "CI probe that reads the descriptor as the service account",
-    "scripts/devloop/__main__.py": (
-        "the dev loop status file, which agents are meant to read: it carries the "
-        "access link of a disposable dev instance; the saved grant itself is "
-        "app/preview_run.py's DEV_ACCESS_FILE"
-    ),
-    "scripts/devloop/guardian.py": "a teardown log beside the status file, no secret",
-    "scripts/perf/sync_bench.py": "benchmark receipt for a disposable instance in a temporary folder",
-    "scripts/verify_container_postgres.py": "acceptance check inside a disposable container",
-}
-
-
-def _owner_only_writers() -> set[str]:
-    found = set()
-    for root in _SCANNED:
-        for path in (_REPO / root).rglob("*.py"):
-            if _OWNER_ONLY.search(path.read_text(encoding="utf-8", errors="ignore")):
-                found.add(path.relative_to(_REPO).as_posix())
-    return found
-
-
-def test_every_owner_only_writer_is_registered() -> None:
-    found = _owner_only_writers()
-    unregistered = sorted(found - set(_PRIVATE_WRITERS))
-    assert not unregistered, (
-        f"{unregistered} write owner-only files. If one stores a credential, "
-        "add its path to fluid/fluid/tools/hardening.py and a check to "
-        "test_credential_writers_paths_are_sensitive, then register it here "
-        "as _CREDENTIAL; otherwise register the reason it holds no secret."
-    )
-    stale = sorted(set(_PRIVATE_WRITERS) - found)
-    assert not stale, f"{stale} no longer write owner-only files; drop them from the registry"
 
 
 def _assert_sensitive(path: Path | str) -> None:
@@ -143,7 +79,6 @@ def test_credential_writers_paths_are_sensitive(data_dir: Path) -> None:
         ],
         "fluid/fluid/providers/openai_responses/codex_oauth.py": [codex_oauth.DEFAULT_TOKEN_PATH],
     }
-    assert set(checked) == {name for name, kind in _PRIVATE_WRITERS.items() if kind == _CREDENTIAL}
     for paths in checked.values():
         for path in paths:
             _assert_sensitive(path)

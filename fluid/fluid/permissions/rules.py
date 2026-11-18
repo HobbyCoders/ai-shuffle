@@ -152,6 +152,38 @@ class Rule:
         return True
 
 
+@dataclass(frozen=True, kw_only=True)
+class CredentialRule(Rule):
+    """Matches a file tool call that touches a credential file.
+
+    The shared policy (``fluid.tools.hardening.is_sensitive_path``) is tested
+    against every spelling :func:`path_candidates` gives (raw, normalized,
+    absolute, symlinks followed), case-insensitively; for ``Glob`` the pattern
+    and root are tested together (``glob_names_sensitive_path``), so
+    ``Glob(".aws/**")`` matches as well as ``Glob("*", path="~/.ssh")``.
+    ``input_globs`` names the tool's path field, mapped to ``"*"``.
+    """
+
+    def matches(self, name: str, input: dict[str, Any], *, cwd: str | None = None) -> bool:
+        from fluid.tools.hardening import glob_names_sensitive_path, is_sensitive_path
+
+        if not fnmatchcase(name, self.tool):
+            return False
+        value = next((input.get(key) for key in self.input_globs), None)
+        if not isinstance(value, str) or not value.strip():
+            if name != "Glob":
+                return False
+            value = cwd or "."
+        raw, normalized = path_candidates(value, cwd)
+        candidates = raw | normalized
+        if any(is_sensitive_path(c) for c in candidates):
+            return True
+        pattern = input.get("pattern")
+        return name == "Glob" and isinstance(pattern, str) and any(
+            glob_names_sensitive_path(c, pattern) for c in candidates
+        )
+
+
 def match_rule(
     rules: list[Rule], name: str, input: dict[str, Any], *, cwd: str | None = None
 ) -> Rule | None:

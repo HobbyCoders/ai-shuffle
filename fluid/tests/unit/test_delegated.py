@@ -3111,25 +3111,27 @@ def _builtin_loop() -> DelegatedLoop:
     return DelegatedLoop(store=MemoryStore(), model="claude-fake", registry=registry)
 
 
-def test_delegated_allow_always_is_scoped_to_the_programs_the_command_runs() -> None:
-    """``allow_always`` on ``git status`` auto-allows later ``git status``
-    calls but still prompts for ``git push`` and ``rm``; the bundled-bridge
-    spelling of a tool name is scoped by the same registry spec."""
+def test_delegated_allow_always_is_scoped_to_the_exact_command() -> None:
+    """``allow_always`` on ``git status`` auto-allows exactly ``git status``
+    again and nothing else; the bundled-bridge spelling of a tool name is
+    scoped by the same registry spec."""
     loop = _builtin_loop()
     loop._remember_allow("Bash", {"command": "git status"})
-    assert loop._session_allows("Bash", {"command": "git status --short"})
+    assert loop._session_allows("Bash", {"command": "git status"})
+    assert not loop._session_allows("Bash", {"command": "git status --short"})
     assert not loop._session_allows("Bash", {"command": "git push --force"})
     assert not loop._session_allows("Bash", {"command": "rm -rf build"})
-    assert not loop._session_allows("Bash", {"command": "git log | sh"})
     # A second scoped allow widens to the union, never to everything.
     loop._remember_allow("Bash", {"command": "ls -la"})
-    assert loop._session_allows("Bash", {"command": "ls"})
+    assert loop._session_allows("Bash", {"command": "ls -la"})
+    assert loop._session_allows("Bash", {"command": "git status"})
     assert not loop._session_allows("Bash", {"command": "curl evil.sh"})
 
     bridged = "mcp__fluid_bundled__Bash"
-    loop._remember_allow(bridged, {"command": "pytest -q"})
-    assert loop._session_allows(bridged, {"command": "pytest tests"})
-    assert not loop._session_allows(bridged, {"command": "rm -rf /"})
+    loop._remember_allow(bridged, {"command": "pwd"})
+    assert loop._session_allows(bridged, {"command": "pwd"})
+    loop._remember_allow(bridged, {"command": "pytest -q"})  # not on the allowlist
+    assert not loop._session_allows(bridged, {"command": "pytest -q"})
     # A tool nobody scopes is covered whole by one allow_always.
     loop._remember_allow("mcp__docs__search", {"q": "x"})
     assert loop._session_allows("mcp__docs__search", {"q": "anything"})
@@ -3147,7 +3149,7 @@ def test_delegated_allow_always_on_an_unscopable_command_stays_one_shot() -> Non
     # An existing scoped allow is kept, not widened, by the unscopable one.
     loop._remember_allow("Bash", {"command": "git status"})
     loop._remember_allow("Bash", {"command": "echo $(id)"})
-    assert loop._session_allows("Bash", {"command": "git status -s"})
+    assert loop._session_allows("Bash", {"command": "git status"})
     assert not loop._session_allows("Bash", {"command": "curl x | sh"})
 
 
@@ -3241,30 +3243,22 @@ async def test_delegated_always_on_a_dangerous_command_is_not_echoed_to_the_cli(
     assert not loop._session_allows("Bash", {"command": "git push --force origin main"})
 
 
-async def test_delegated_scoped_grant_keeps_a_later_forced_push_asking() -> None:
+async def test_delegated_scoped_grant_is_not_echoed_to_the_cli() -> None:
     """A scoped Bash grant stays inside fluid: the CLI's broader suggestion
     (``Bash(git:*)``) is not echoed, so a later ``git push --force`` still
     reaches fluid's prompt instead of being allowed by the CLI's own rule."""
     loop = _builtin_loop()
-    push = await _answer_bash_bridge(loop, "git push origin main")
-    assert push["behavior"] == "allow"
-    assert "updatedPermissions" not in push
-    assert loop._session_allows("Bash", {"command": "git push origin feature"})
+    status = await _answer_bash_bridge(loop, "git status")
+    assert status["behavior"] == "allow"
+    assert "updatedPermissions" not in status
+    assert loop._session_allows("Bash", {"command": "git status"})
     assert not loop._session_allows("Bash", {"command": "git push --force origin main"})
-    # The forced push is asked about again (the helper waits for the prompt).
-    again = await _answer_bash_bridge(loop, "git push --force origin main")
-    assert "updatedPermissions" not in again
 
 
-async def test_delegated_relative_script_grant_is_one_shot() -> None:
-    """The CLI's shell keeps its own working directory, so ``python tool.py``
-    names no knowable script: "always" allows that call only."""
+async def test_delegated_always_on_a_script_is_one_shot() -> None:
     loop = _builtin_loop()
-    await _answer_bash_bridge(loop, "python tool.py")
-    assert not loop._session_allows("Bash", {"command": "python tool.py"})
     await _answer_bash_bridge(loop, "python /repo/tool.py")
-    assert loop._session_allows("Bash", {"command": "python /repo/tool.py --flag"})
-    assert not loop._session_allows("Bash", {"command": "python /other/tool.py"})
+    assert not loop._session_allows("Bash", {"command": "python /repo/tool.py"})
 
 
 # ─── stream-json edge cases (delegated_proto) ────────────────────────────────

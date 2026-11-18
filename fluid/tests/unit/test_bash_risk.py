@@ -316,7 +316,6 @@ def test_find_actions_that_write_or_run_are_write(command: str) -> None:
         "awk -vout=1 '{print out}' f",
         "file -m magic archive.zip",
         "sed -n -e 's/is/are/p' f",
-        "sed -n -es/is/are/p f",  # glued script: its i is not -i
         "uniq -c file.txt",
         "git log --oneline",
         "pip list --local",
@@ -511,7 +510,7 @@ async def test_doom_loop_forced_prompt_carries_reason(tmp_path) -> None:
     assert "doom-loop guard" in results[-1].output
 
 
-# ─── allow_always is scoped to what a Bash command runs ──────────────────────
+# ─── allow_always: exactly one allowlisted read-only form, or this call only ─
 
 
 def test_program_names_collects_every_program() -> None:
@@ -524,29 +523,87 @@ def test_program_names_collects_every_program() -> None:
     assert program_names("") is None
 
 
-def test_allow_always_on_bash_covers_same_subcommand_only() -> None:
+@pytest.mark.parametrize("command", [
+    "git status",
+    "git status --short",
+    "git log -5 --oneline",
+    "git diff --stat",
+    "git show HEAD",
+    "ls -la src",
+    "pwd",
+    "rg -n TODO src",
+    "grep -n TODO f.py",
+    "sed -n 5p f.py",
+    "sed -n 5,10p f.py",
+])
+def test_allowlisted_forms_are_scoped_to_their_exact_text(command: str) -> None:
+    from fluid.tools.builtins.bash_risk import session_scope
+
+    assert session_scope({"command": command}) == frozenset({command})
+
+
+@pytest.mark.parametrize("command", [
+    # Reviewer round 2, N3: destructive and abbreviated git forms.
+    "git commit -m note",
+    "git commit --amen",
+    "git push origin test",
+    "git push --mirro origin",
+    "git checkout HEAD~1 file",
+    "git status --porc",  # abbreviated option
+    "git show :.env",  # a path into the index
+    "git -C ../other status",
+    # N4: wrappers and modules.
+    "timeout 1 true",
+    "timeout 1 rm -rf demo",
+    "python -m pip list",
+    "env ls",
+    "nice ls",
+    "xargs ls",
+    "eval ls",
+    # N5: a directory change before the command, and scripts.
+    "cd repo-a && python tool.py",
+    "pushd src && ls",
+    "python tool.py",
+    # N6: glued sed scripts.
+    "sed -n '-esaXaprintf OKaep' f",
+    "sed -n '-esaXaYaw /tmp/review-output' f",
+    # Everything else outside the allowlist.
+    "rg --hidden TODO",
+    "rg -uu TODO",
+    "rg --no-ignore TODO",
+    "grep -r TODO .",
+    "grep --recursive TODO .",
+    "ls -R",
+    "dd if=a of=b",
+    "git status && ls",
+    "ls; pwd",
+    "/usr/bin/git status",
+    "LANG=C git status",
+    "cat README.md",
+    "rm -rf build",
+])
+def test_everything_else_gets_no_session_scope(command: str) -> None:
+    from fluid.tools.builtins.bash_risk import session_scope
+
+    assert session_scope({"command": command}) is None
+
+
+def test_allow_always_reuse_needs_the_exact_same_form() -> None:
     from fluid.permissions.engine import PermissionEngine
     from fluid.tools.builtins.bash import SPEC as bash_spec
 
-    engine = PermissionEngine("on_write")
-    push = {"command": "git push origin main"}
-    assert engine.decide(bash_spec, push).decision == "ask"
-    engine.allow_always(bash_spec.name, bash_spec.scope_of(push))
-    assert engine.decide(bash_spec, push).source == "session"
-    assert engine.decide(bash_spec, {"command": "git push origin feature"}).source == "session"
-    assert engine.decide(bash_spec, {"command": "git commit -m x"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "git push --force"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "rm -rf build"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "git push | tee log"}).decision == "ask"
-    # A later unscoped allow widens to every Bash call.
-    engine.allow_always(bash_spec.name, None)
-    assert engine.decide(bash_spec, {"command": "rm -rf build"}).source == "session"
+    engine = PermissionEngine("always_ask")
+    status = {"command": "git status"}
+    engine.allow_always(bash_spec.name, bash_spec.scope_of(status))
+    assert engine.decide(bash_spec, status).source == "session"
+    for later in ("git status --short", "git status && rm -rf x", "git log", "git status ."):
+        assert engine.decide(bash_spec, {"command": later}).decision == "ask", later
 
 
 def test_a_later_scoped_allow_never_narrows_an_unscoped_one() -> None:
     """Once a session allow covers every Bash call, a later scoped
     ``allow_always`` must leave it covering every call (not crash on the
-    ``None`` marker, not shrink it to the new programs)."""
+    ``None`` marker, not shrink it to the new form)."""
     from fluid.permissions.engine import PermissionEngine
     from fluid.tools.builtins.bash import SPEC as bash_spec
 
@@ -567,337 +624,27 @@ def test_allow_always_without_scope_hook_covers_every_call() -> None:
     assert engine.decide(spec, {"file_path": "b"}).source == "session"
 
 
-# ─── allow_always labels carry what a wrapper or subcommand program runs ─────
-
-
-def test_scope_labels_name_the_wrapped_program() -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels("sudo apt list") == frozenset({"sudo apt list"})
-    assert scope_labels("sudo rm old.log") == frozenset({"sudo rm"})
-    # A dangerous form inside a wrapper is still a dangerous form.
-    assert scope_labels("sudo rm -rf /") is None
-    assert scope_labels("env FOO=1 make test") == frozenset({"env make test"})
-    assert scope_labels("find . -name '*.py' | xargs grep TODO") == frozenset(
-        {"find", "xargs grep"}
-    )
-    assert scope_labels("npm run build") == frozenset({"npm run build"})
-    assert scope_labels("npm install left-pad") == frozenset({"npm install"})
-    assert scope_labels("uv run pytest && uv pip install x") == frozenset(
-        {"uv run pytest", "uv pip"}
-    )
-    assert scope_labels("make") == frozenset({"make"})
-    assert scope_labels("make clean") == frozenset({"make clean"})
-    assert scope_labels("git status && git push") == frozenset({"git status", "git push"})
-    # Plain programs keep their program-wide label.
-    assert scope_labels("ls -la && cat a") == frozenset({"ls", "cat"})
-
-
-def test_scope_labels_refuse_wrappers_with_options() -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    # Which token is the wrapped program is not knowable from the text.
-    assert scope_labels("sudo -u root rm -rf /") is None
-    assert scope_labels("echo $(rm x)") is None
-
-
-def test_allow_always_on_sudo_covers_that_program_only() -> None:
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    engine = PermissionEngine("on_write")
-    listing = {"command": "sudo apt list --upgradable"}
-    engine.allow_always(bash_spec.name, bash_spec.scope_of(listing))
-    assert engine.decide(bash_spec, listing).source == "session"
-    assert engine.decide(bash_spec, {"command": "sudo apt list --installed"}).source == "session"
-    assert engine.decide(bash_spec, {"command": "sudo apt install x"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "sudo rm -rf /"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "sudo -u root apt list"}).decision == "ask"
-
-
-def test_allow_always_on_npm_run_does_not_cover_npm_install() -> None:
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    engine = PermissionEngine("on_write")
-    build = {"command": "npm run build"}
-    engine.allow_always(bash_spec.name, bash_spec.scope_of(build))
-    assert engine.decide(bash_spec, {"command": "npm run build -- --watch"}).source == "session"
-    assert engine.decide(bash_spec, {"command": "npm run deploy"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "npm install evil"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": "npm run build && rm -rf /"}).decision == "ask"
-
-
-# ─── "always" never covers a dangerous form, and scripts are named ──────────
-
-
-@pytest.mark.parametrize("granted, dangerous", [
-    ("git push origin main", "git push --force origin main"),
-    ("git push origin main", "git push -f origin main"),
-    ("git push origin main", "git push --force-with-lease"),
-    ("git push origin main", "git push origin +main"),
-    ("git push origin main", "git push origin --delete feature"),
-    ("git reset HEAD~1", "git reset --hard HEAD~1"),
-    ("git -C repo reset HEAD", "git -C repo reset --hard"),
-    ("git clean -n", "git clean -fd"),
-    ("git checkout main", "git checkout -- ."),
-    ("git checkout main", "git checkout ."),
-    ("git switch main", "git switch --discard-changes main"),
-    ("git branch -d old", "git branch -D old"),
-    ("git stash list", "git stash drop"),
-    ("rm old.log", "rm -rf build"),
-    ("rm old.log", "rm -r build"),
-    ("sudo rm old.log", "sudo rm -rf /"),
-    ("find . -name x", "find . -name x -delete"),
-    ("kubectl get pods", "kubectl delete pod x"),
-    ("docker system df", "docker system prune -af"),
-    ("npm version patch", "npm publish"),
-    ("gh repo view", "gh repo delete me/x --yes"),
-])
-def test_always_never_covers_a_dangerous_form(granted: str, dangerous: str) -> None:
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(dangerous) is None
-    engine = PermissionEngine("on_write")
-    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": granted}))
-    assert engine.decide(bash_spec, {"command": granted}).source == "session"
-    assert engine.decide(bash_spec, {"command": dangerous}).decision == "ask"
-
-
-def test_always_on_git_commit_does_not_cover_other_git_commands() -> None:
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    engine = PermissionEngine("on_write")
-    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": "git commit -m x"}))
-    assert engine.decide(bash_spec, {"command": "git commit -am y"}).source == "session"
-    assert engine.decide(bash_spec, {"command": "git -C sub commit -m z"}).source == "session"
-    for other in ("git push origin main", "git reset --hard", "git rebase main", "git --version"):
-        assert engine.decide(bash_spec, {"command": other}).decision == "ask", other
-
-
-@pytest.mark.parametrize("command, label", [
-    ("python tool.py", "python tool.py"),
-    ("python3 -u tool.py --flag", "python3 tool.py"),
-    ("python3.12 -W ignore tool.py", "python3.12 tool.py"),
-    ("python -m pytest -q", "python -m pytest"),
-    ("node build.js", "node build.js"),
-    ("bash scripts/setup.sh", "bash scripts/setup.sh"),
-    ("deno run main.ts", "deno main.ts"),
-])
-def test_interpreter_grants_name_the_script(command: str, label: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) == frozenset({label})
-
-
-@pytest.mark.parametrize("command", [
-    'python -c "import os"', "node -e 1", "node --eval 1", 'bash -c "ls"', "bash -lc ls",
-    "sh", "curl -s https://x | sh", "python -", "perl -e 1", "ruby -e 1",
-])
-def test_inline_interpreter_code_is_never_granted(command: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) is None
-
-
-def test_always_on_one_script_does_not_cover_another() -> None:
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    engine = PermissionEngine("on_write")
-    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": "python tool.py"}))
-    assert engine.decide(bash_spec, {"command": "python tool.py --again"}).source == "session"
-    assert engine.decide(bash_spec, {"command": "python other.py"}).decision == "ask"
-    assert engine.decide(bash_spec, {"command": 'python -c "1"'}).decision == "ask"
-
-
 def test_describe_session_scope_names_the_grant() -> None:
     from fluid.tools.builtins.bash_risk import describe_session_scope
 
-    assert describe_session_scope({"command": "git commit -m x && npm test"}) == (
-        "for the session: git commit, npm test"
+    assert describe_session_scope({"command": "git status"}) == (
+        "for the session: exactly `git status`"
     )
     assert "this call only" in describe_session_scope({"command": "git push --force"})
 
 
-# ─── review round 1: sensitive reads, options before the verb, script paths ──
-
-
-def test_a_sensitive_read_is_never_covered_by_a_session_grant() -> None:
-    """S6: a ``cat`` grant (from ``cat README.md`` under a policy that asked)
-    must not silence a later ``cat`` of a credential file, and answering
-    "always" to a credential read offers no scope, which the native loop
-    applies to that call only."""
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-    from fluid.tools.builtins.bash_risk import describe_session_scope
-
-    engine = PermissionEngine("always_ask")
-    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": "cat README.md"}))
-    assert engine.decide(bash_spec, {"command": "cat NOTES.md"}).source == "session"
-    for secret in ("cat /proc/1/environ", "cat .env", "cat ~/.docker/config.json"):
-        assert bash_spec.scope_of({"command": secret}) is None, secret
-        assert engine.decide(bash_spec, {"command": secret}).decision == "ask", secret
-    assert describe_session_scope({"command": "cat .env"}) == (
-        "this call only (it reads a credential file, which always asks)"
-    )
-
-
-@pytest.mark.parametrize("granted, later", [
-    ("git commit -m x", "git commit --amend --no-edit"),
-    ("docker compose -p dev up", "docker compose -p dev down -v"),
-    ("docker compose -p dev up", "docker compose down --volumes"),
-    ("git push origin main", "git -c remote.origin.mirror=true push origin"),
-    ("git push origin main", "git push --force-if-includes --force-with-lease"),
-    ("docker ps", "docker rm -f web"),
-    ("podman ps", "podman rmi img"),
-])
-def test_options_before_the_verb_never_reuse_an_ordinary_grant(granted: str, later: str) -> None:
-    """S3: options before the verb are parsed; destructive forms and forms
-    that cannot be parsed confidently get no scope."""
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(later) is None, later
-    engine = PermissionEngine("on_write")
-    engine.allow_always(bash_spec.name, bash_spec.scope_of({"command": granted}))
-    assert engine.decide(bash_spec, {"command": granted}).source == "session"
-    assert engine.decide(bash_spec, {"command": later}).decision == "ask"
-
-
-@pytest.mark.parametrize("command, label", [
-    ("docker compose -p dev up -d", "docker compose up"),
-    ("docker --context prod ps", "docker ps"),
-    ("git -C repo --no-pager log", "git log"),
-    ("kubectl -n web get pods", "kubectl get"),
-])
-def test_known_options_before_the_verb_are_skipped(command: str, label: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) == frozenset({label})
+# ─── best-effort literal credential operands (Bash is not a boundary) ───────
 
 
 @pytest.mark.parametrize("command", [
-    "git -c remote.origin.mirror=true push origin",  # config can change the verb's meaning
-    "git --frobnicate push",  # unknown option: which token is the verb?
-    "docker --unknown x ps",
-    "git --version",  # options only: no verb to scope
-])
-def test_unparseable_prefixes_get_no_scope(command: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) is None
-
-
-def test_a_relative_script_grant_is_scoped_to_its_directory(tmp_path) -> None:
-    """S4: ``python tool.py`` granted in one directory does not cover the same
-    spelling in another (the native leg passes the call's cwd)."""
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    first, second = tmp_path / "a", tmp_path / "b"
-    call = {"command": "python tool.py --flag"}
-    engine = PermissionEngine("on_write")
-    assert engine.decide(bash_spec, call, cwd=str(first)).decision == "ask"
-    engine.allow_always(bash_spec.name, bash_spec.scope_of(call))
-    assert engine.decide(bash_spec, call, cwd=str(first)).source == "session"
-    assert engine.decide(bash_spec, {"command": "python tool.py"}, cwd=str(first)).source == "session"
-    assert engine.decide(bash_spec, call, cwd=str(second)).decision == "ask"
-    # The call's own cwd field is where it runs.
-    moved = {"command": "python tool.py", "cwd": str(second)}
-    assert engine.decide(bash_spec, moved, cwd=str(first)).decision == "ask"
-
-
-def test_a_relative_script_answered_from_two_directories_stays_one_shot(tmp_path) -> None:
-    """Two pending asks with the same spelling but different directories: the
-    engine cannot tell which one the answer is for, so it grants nothing."""
-    from fluid.permissions.engine import PermissionEngine
-    from fluid.tools.builtins.bash import SPEC as bash_spec
-
-    call = {"command": "python tool.py"}
-    engine = PermissionEngine("on_write")
-    engine.decide(bash_spec, call, cwd=str(tmp_path / "a"))
-    engine.decide(bash_spec, call, cwd=str(tmp_path / "b"))
-    engine.allow_always(bash_spec.name, bash_spec.scope_of(call))
-    assert engine.decide(bash_spec, call, cwd=str(tmp_path / "a")).decision == "ask"
-    assert engine.decide(bash_spec, call, cwd=str(tmp_path / "b")).decision == "ask"
-
-
-def test_script_labels_resolve_against_the_cwd(tmp_path) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    here = scope_labels("python tool.py", str(tmp_path / "a"))
-    there = scope_labels("python tool.py", str(tmp_path / "b"))
-    assert here and there and here != there
-    assert scope_labels("python ../a/tool.py", str(tmp_path / "b")) == here
-    assert scope_labels("python -m pytest", str(tmp_path / "a")) != scope_labels(
-        "python -m pytest", str(tmp_path / "b")
-    )
-
-
-@pytest.mark.parametrize("command, label", [
-    ("python -I tool.py", "python tool.py"),
-    ("python -IB tool.py", "python tool.py"),
-    ("python -X dev tool.py", "python tool.py"),
-    ("python -Wignore tool.py", "python tool.py"),
-    ("node --inspect build.js", "node build.js"),
-])
-def test_interpreter_flags_are_parsed(command: str, label: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) == frozenset({label})
-
-
-@pytest.mark.parametrize("command", [
-    "deno eval 1", "deno eval 2", "deno repl", "python -Ic 1", "python -I -", "node -pe 1",
-    "python --frobnicate tool.py",  # unknown option: which token is the script?
-])
-def test_inline_and_unknown_interpreter_forms_are_never_scoped(command: str) -> None:
-    from fluid.tools.builtins.bash_risk import scope_labels
-
-    assert scope_labels(command) is None
-
-
-@pytest.mark.parametrize("command", [
-    "cat ~/.kube/./config",
-    "cat ~/.kube/../.kube/config",
-    "cat ~/.config/gcloud/*.db",
-    "grep -r pattern /proc/../proc",
-    "grep -r pattern /proc/./",
+    "cat /proc/1/environ",
+    "cat /proc/self/environ",
+    "cat ~/.docker/config.json",
+    "cat ~/.kube/config",
+    "cat ~/.config/fluid/codex_auth.json",
     "cat ~/.aws/sso/cache/0a1b2c.json",
-    "cat ~/.aws/sso/cache/*",
     "cat .yarnrc.yml",
-    "cat project/.yarnrc.yml",
+    "cat .ENV",
 ])
-def test_ordinary_spellings_of_a_credential_path_are_write(command: str) -> None:
-    """S5/S8: paths are normalised before matching; globs are matched against
-    the credential rules."""
+def test_literal_credential_operands_ask(command: str) -> None:
     assert classify({"command": command}) == "write", command
-
-
-def test_paths_are_normalised_against_the_calls_cwd(tmp_path) -> None:
-    import os
-
-    assert classify({"command": "grep -r pattern ."}, cwd="/proc") == "write"
-    assert classify({"command": "grep -r pattern .", "cwd": "/proc"}) == "write"
-    assert classify({"command": "cat 1/environ"}, cwd="/proc") == "write"
-    assert classify({"command": "cat config"}, cwd=os.path.expanduser("~/.kube")) == "write"
-    assert classify({"command": "grep -rn TODO src"}, cwd=str(tmp_path)) == "safe"
-
-
-def test_a_symlink_alias_of_a_credential_file_is_write(tmp_path) -> None:
-    secret = tmp_path / "proj" / ".env"
-    secret.parent.mkdir()
-    secret.write_text("TOKEN=x\n")
-    alias = tmp_path / "notes.txt"
-    try:
-        alias.symlink_to(secret)
-    except OSError:
-        pytest.skip("symlinks are not available here")
-    assert classify({"command": f"cat '{alias}'"}) == "write"
-    assert classify({"command": "cat notes.txt"}, cwd=str(tmp_path)) == "write"
-    assert classify({"command": "cat other.txt"}, cwd=str(tmp_path)) == "safe"

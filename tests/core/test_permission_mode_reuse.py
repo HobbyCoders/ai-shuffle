@@ -137,8 +137,9 @@ async def _turns(state, modes, *, expect_error=False, before_run=None):
 
 
 async def _unwatched_prompt(adapter, engine, name="Write"):
-    """Drive one prompted call with no approver; True when it surfaced as a
-    prompt (Ask), False when the adapter approved it on the mode's say-so."""
+    """Drive one prompted call with no approver; True when Ask held it (with
+    nobody to answer, it is denied at once), False when the adapter approved
+    it on the mode's say-so."""
     adapter._can_use_tool = None
     engine.ops.clear()
     engine.script([
@@ -152,10 +153,9 @@ async def _unwatched_prompt(adapter, engine, name="Write"):
     got = [ev async for ev in HarnessAdapter.receive_events(adapter)]
     for _ in range(20):
         await asyncio.sleep(0)
-    prompted = any(isinstance(e, PermissionRequestEvent) for e in got)
-    answered = [op for op in engine.ops if isinstance(op, RespondPermission)]
-    assert prompted != bool(answered)
-    return prompted
+    assert not any(isinstance(e, PermissionRequestEvent) for e in got)
+    (answered,) = [op for op in engine.ops if isinstance(op, RespondPermission)]
+    return answered.decision == "deny"
 
 
 # ─── Fix 1: the reuse path ────────────────────────────────────────────────

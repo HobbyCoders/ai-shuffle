@@ -1077,6 +1077,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # its ``permission_suggestions`` echoed back as ``updatedPermissions``,
         # so a CLI that honours them never asks again either way.
         self._always_allowed: dict[str, set[str] | None] = {}
+        # Calls (by tool_use_id) the PreToolUse hook put to a person because
+        # they touch a credential file, judged in the CLI's own working
+        # directory: no earlier "always" covers them (see _session_allows).
+        self._credential_asked: dict[str, None] = {}
         # The --resume handle the live process was spawned with, and how many
         # turns it has completed. A first turn that fails before mapping a
         # single frame on a resumed process means the handle is dead.
@@ -3942,6 +3946,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             # surfacing a prompt the host already answered.
             auto_allow = mapped.permission is not None and self._session_allows(
                 mapped.permission.tool_name, mapped.permission.input,
+                mapped.permission.tool_use_id,
             )
             if auto_allow:
                 mapped.events = [
@@ -4329,7 +4334,7 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         suggestions: tuple[dict[str, Any], ...] = ()
         if (
             resp.decision == "allow_always"
-            and self._remember_allow(bridge.tool_name, input)
+            and self._remember_allow(bridge.tool_name, input, bridge.tool_use_id)
             and self._always_allowed.get(bridge.tool_name, ()) is None
         ):
             # The CLI's suggested rules are echoed only for a tool-wide grant:
@@ -4433,25 +4438,19 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         base = tool_name[len(_BUNDLED_PREFIX):] if tool_name.startswith(_BUNDLED_PREFIX) else tool_name
         return self.registry.get(base)
 
-    def _remember_allow(self, tool_name: str, input: dict[str, Any]) -> bool:
+    def _remember_allow(
+        self, tool_name: str, input: dict[str, Any], tool_use_id: str | None = None,
+    ) -> bool:
         """Record an ``allow_always`` answer for the rest of the session,
         scoped by the tool's own labels when the registry knows the tool.
 
         False when the answer covers this call only (the tool scopes its
         allows but could not label this one, or the call touches a credential
         file, which asks every time)."""
-        if self._credential_ask(tool_name, input, None) is not None:
+        if self._touches_credential(tool_name, input, tool_use_id):
             return False
         spec = self._registry_spec(tool_name)
         scope = spec.scope_of(input) if spec is not None else None
-        if scope is not None and tool_name in ("Bash", "Monitor"):
-            from fluid.tools.builtins.bash_risk import location_dependent
-
-            if location_dependent(scope):
-                # ``python tool.py``: the CLI's shell keeps its own working
-                # directory between calls, so the script it names is not
-                # knowable here and a grant would cover any tool.py.
-                scope = None
         if scope is None:
             if spec is not None and spec.session_scope is not None:
                 # The tool scopes its allows but could not label this call (a
@@ -4472,10 +4471,22 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         self._always_allowed[tool_name] = current
         return True
 
-    def _session_allows(self, tool_name: str, input: dict[str, Any]) -> bool:
+    def _touches_credential(
+        self, tool_name: str, input: dict[str, Any], tool_use_id: str | None,
+    ) -> bool:
+        """The hook asked about this call as a credential access (in the CLI's
+        working directory), or it names one from the session's."""
+        return (
+            (tool_use_id is not None and tool_use_id in self._credential_asked)
+            or self._credential_ask(tool_name, input, None) is not None
+        )
+
+    def _session_allows(
+        self, tool_name: str, input: dict[str, Any], tool_use_id: str | None = None,
+    ) -> bool:
         if tool_name not in self._always_allowed:
             return False
-        if self._credential_ask(tool_name, input, None) is not None:
+        if self._touches_credential(tool_name, input, tool_use_id):
             # A credential read asks every time, past any earlier "always"
             # (on the native leg its ask rule beats the session grant).
             return False
@@ -4544,16 +4555,17 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         """Why a CLI-run call must be put to a person, or None.
 
         A call that reads or edits a credential file (the shared policy in
-        ``fluid.tools.hardening``; for Bash, ``bash_risk.touches_sensitive_data``)
-        asks, as it does on the native leg, where the CLI would otherwise run
-        it unprompted (it reads freely inside its working directory). A
+        ``fluid.tools.hardening``) or lists a credential location (a Glob
+        pattern such as ``.aws/**``) asks, as it does on the native leg, where
+        the CLI would otherwise run it unprompted (it reads freely inside its
+        working directory). For Bash this is the classifier's best-effort
+        literal-operand check only: Bash is not a credential boundary. A
         configured rule that allows the call keeps its precedence, and Bypass
         asks nothing, as fluid leaves the asks out under ``never_ask``.
         """
         if self.permission_mode == "bypassPermissions":
             return None
-        from fluid.permissions.rules import match_rule, path_candidates
-        from fluid.tools.hardening import is_sensitive_path
+        from fluid.permissions.rules import CredentialRule, match_rule
 
         where = cwd or self.ctx.cwd
         if self.permissions is not None:
@@ -4561,19 +4573,18 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if rule is not None and rule.decision == "allow":
                 return None
         if name == "Bash":
-            from fluid.tools.builtins.bash_risk import touches_sensitive_data
+            from fluid.tools.builtins.bash_risk import touches_sensitive_path
 
             command = tool_input.get("command")
-            if isinstance(command, str) and touches_sensitive_data(command, where):
-                return "the command reads a credential file or a process environment"
+            if isinstance(command, str) and touches_sensitive_path(command):
+                return "the command names a credential file"
             return None
         field = self._CREDENTIAL_PATH_FIELDS.get(name)
-        value = tool_input.get(field) if field else None
-        if not isinstance(value, str) or not value:
-            return None
-        raw, normalized = path_candidates(value, where)
-        if any(is_sensitive_path(candidate) for candidate in raw | normalized):
-            return f"{value} is a credential file"
+        if field is not None and CredentialRule(
+            tool=name, decision="ask", input_globs={field: "*"},
+        ).matches(name, tool_input, cwd=where):
+            target = tool_input.get(field) or tool_input.get("pattern")
+            return f"{target} names a credential file or location"
         return None
 
     async def _initialize_cli_hooks(self) -> str:
@@ -5020,6 +5031,11 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if ask is not None:
                 specific["permissionDecision"] = "ask"
                 specific["permissionDecisionReason"] = ask
+                tid = data.get("tool_use_id") or tool_use_id
+                if isinstance(tid, str) and tid:
+                    self._credential_asked[tid] = None
+                    while len(self._credential_asked) > 512:
+                        self._credential_asked.pop(next(iter(self._credential_asked)))
         if specific.get("permissionDecision") == "allow":
             await self._hook_event(
                 "info", f"hook approved {name}; permission prompt skipped", PRE_TOOL_USE, name,

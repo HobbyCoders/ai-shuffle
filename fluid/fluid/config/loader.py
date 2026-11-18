@@ -575,36 +575,21 @@ def _sensitive_file_rules():
     """Default ask-rules for credential files, per file-taking builtin.
 
     Prepended BEFORE user rules — last match wins, so one user rule allows a
-    path through. Bash gets the same protection through its risk classifier
-    (a read-only command targeting a credential file classifies as write).
+    path through. Bash is not covered: its classifier's check of literal
+    credential operands is best effort, and Bash is not a credential boundary.
     """
-    from fluid.permissions.rules import Rule
-    from fluid.tools.hardening import (
-        PROTECTED_WRITE_PREFIXES,
-        SENSITIVE_BASENAME_GLOBS,
-        SENSITIVE_DIR_NAMES,
-        SENSITIVE_EXCEPTIONS,
-        SENSITIVE_PATH_GLOBS,
-        SENSITIVE_PATH_SUFFIXES,
-    )
+    from fluid.permissions.rules import CredentialRule, Rule
+    from fluid.tools.hardening import PROTECTED_WRITE_PREFIXES, SENSITIVE_EXCEPTIONS
 
-    # "*" prefixes make basename globs match directory-qualified inputs too
-    # ("src/.env"); fnmatch "*" crosses "/" so this is a suffix match.
-    globs = [
-        pattern if pattern.startswith("*") else f"*{pattern}"
-        for pattern in (*SENSITIVE_BASENAME_GLOBS, *SENSITIVE_PATH_SUFFIXES)
-    ]
-    globs.extend(f"*{pattern}" for pattern in SENSITIVE_PATH_GLOBS)
-    for name in SENSITIVE_DIR_NAMES:
-        globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
     field_by_tool = {
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",
     }
-    asks = [
-        Rule(tool=tool, decision="ask", input_globs={field: glob})
+    # One rule per tool tests every spelling of the path (case-insensitive,
+    # symlinks followed) against the shared policy, and a Glob's pattern too.
+    asks: list[Rule] = [
+        CredentialRule(tool=tool, decision="ask", input_globs={field: "*"})
         for tool, field in field_by_tool.items()
-        for glob in globs
     ]
     asks.extend(
         Rule(tool=tool, decision="ask", input_globs={"file_path": f"{prefix}*"})
@@ -633,11 +618,13 @@ def _session_settings(config: HarnessConfig) -> dict[str, Any]:
 def _build_permissions(config: HarnessConfig, settings: dict[str, Any] | None = None):
     """The session's permission engine.
 
-    Rule order, first to last (last match wins): the sensitive-file asks, the
-    allow rules ``permissions.defaultMode = "acceptEdits"`` implies, the
-    settings stack's ``permissions.{allow,ask,deny}``, then ``config.toml``
-    ``[[permission.rules]]`` — so a host's TOML rule outranks a settings rule
-    of the same shape, and a settings deny outranks the mode's allows.
+    Rule order, first to last (last match wins): the allow rules
+    ``permissions.defaultMode = "acceptEdits"`` implies, the sensitive-file
+    asks, the settings stack's ``permissions.{allow,ask,deny}``, then
+    ``config.toml`` ``[[permission.rules]]`` — so a host's TOML rule outranks a
+    settings rule of the same shape, a settings deny outranks the mode's
+    allows, and the mode never allows a credential edit that an explicit rule
+    did not.
     """
     from fluid.context.settings_stack import default_mode_policy, permission_rules
     from fluid.permissions.engine import PermissionEngine
@@ -645,14 +632,13 @@ def _build_permissions(config: HarnessConfig, settings: dict[str, Any] | None = 
 
     if settings is None:
         settings = _session_settings(config)
-    rules = []
+    _policy, mode_rules = default_mode_policy(settings)
+    rules = list(mode_rules)
     if (
         config.permission.protect_sensitive_files
         and config.permission.approval_policy != "never_ask"
     ):
         rules.extend(_sensitive_file_rules())
-    _policy, mode_rules = default_mode_policy(settings)
-    rules.extend(mode_rules)
     rules.extend(permission_rules(settings))
     rules.extend(
         Rule(tool=r.tool, decision=r.decision, input_globs=dict(r.input_globs))

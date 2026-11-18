@@ -447,9 +447,8 @@ async def ask_permission(
 ) -> str:
     """Interactive responder: y = allow once, a = allow for the rest of the
     session, anything else = deny. For Bash and Monitor the prompt names what
-    "always" covers (program plus subcommand, interpreter plus script), or
-    says it covers this call only when the command cannot be allowed for the
-    session (a dangerous form such as ``git push --force``)."""
+    "always" covers: exactly this command, for the few read-only forms that
+    can be allowed for the session, or this call only for everything else."""
     always = "a=always"
     if event.name in ("Bash", "Monitor") and isinstance(event.input, dict):
         from fluid.tools.builtins.bash_risk import describe_session_scope

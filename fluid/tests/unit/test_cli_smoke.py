@@ -301,6 +301,6 @@ async def test_ask_permission_says_what_always_grants() -> None:
         assert await ask_permission(event, _read) == "allow_always"
         return seen[0]
 
-    assert "for the session: git commit" in await prompt_for("Bash", "git commit -m x")
-    assert "this call only" in await prompt_for("Bash", "git push --force")
-    assert "for the session: npm test" in await prompt_for("Monitor", "npm test")
+    assert "for the session: exactly `git status`" in await prompt_for("Bash", "git status")
+    assert "this call only" in await prompt_for("Bash", "git commit -m x")
+    assert "this call only" in await prompt_for("Monitor", "npm test")

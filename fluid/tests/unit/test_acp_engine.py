@@ -737,3 +737,19 @@ async def test_a_model_the_agent_does_not_offer_is_named_in_the_turn(tmp_path: P
         assert served[0].turn_id == end.turn_id
     finally:
         await d.close()
+
+
+@pytest.mark.parametrize("data, scoped", [
+    ({"command": "git status"}, True),
+    ({"command": "git push --force"}, False),
+    ({"command": "timeout 1 rm -rf demo"}, False),
+    ({"command": "python tool.py"}, False),
+    ({"text": "b"}, True),  # not a shell call: tool-wide, as on the native leg
+    (None, True),
+])
+def test_acp_always_reaches_the_agent_only_for_allowlisted_shell_forms(data, scoped) -> None:
+    """N9: the agent keeps an ``allow_always`` grant itself, as wide as it
+    likes, so "always" on any other shell command goes back as once."""
+    from fluid.engine.acp.loop import AcpLoop
+
+    assert AcpLoop._always_is_scoped(data) is scoped

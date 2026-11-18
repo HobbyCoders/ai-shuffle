@@ -2799,7 +2799,9 @@ async def _stream_to_websocket_turn(
                 # remembered Deny rule names it. Saved deny rules beat every
                 # mode short of Bypass, as Claude Code's deny rules beat its
                 # modes; Ask already applies them inside request_permission.
-                if not mode_approves_without_prompt(_perm_mode, tool_name, tool_input):
+                if not mode_approves_without_prompt(
+                    _perm_mode, tool_name, tool_input, _ctx_decision_reason,
+                ):
                     request_id = f"perm-{_sid}-{uuid.uuid4().hex[:8]}"
                     logger.debug(f"[WS] Permission request for {tool_name}: {request_id}")
 

@@ -297,8 +297,11 @@ async def _ripgrep(
     # ``--max-count`` is a PER-FILE bound, so it cannot enforce the global cap
     # on its own — a thousand files each return up to ``limit`` lines. It stays
     # as a cheap per-file bound; the global cap is enforced on the stream below.
+    # ``--null`` ends each printed path with a NUL byte instead of ``:``, so
+    # the credential filter reads the path as its own field: a directory named
+    # ``data:1:x`` cannot pass for a line-number prefix.
     args = [
-        rg, "-n", "--no-heading", "--color=never",
+        rg, "-n", "--no-heading", "--color=never", "--null",
         "--max-count", str(limit),
         "--max-filesize", _MAX_FILESIZE,
     ]
@@ -349,8 +352,18 @@ async def _ripgrep(
             async for raw in stream:
                 if not raw:
                     continue
-                line = _absolutize_line(raw.decode(errors="replace"), run_dir, target)
-                if _is_sensitive_match(line, is_sensitive_path):
+                path, nul, rest = raw.partition(b"\0")
+                if nul:
+                    hit = path.decode(errors="replace")
+                    line = _absolutize_line(
+                        f"{hit}:{rest.decode(errors='replace')}", run_dir, target,
+                    )
+                    sensitive = is_sensitive_path(str(run_dir / hit))
+                else:  # no path field (a single-file target): the older text check
+                    line = _absolutize_line(raw.decode(errors="replace"), run_dir, target)
+                    sensitive = (_is_sensitive_match(line, is_sensitive_path)
+                                 or is_sensitive_path(str(run_dir / target)))
+                if sensitive:
                     dropped += 1
                 elif len(lines) < limit:
                     lines.append(line)

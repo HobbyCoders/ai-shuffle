@@ -458,11 +458,17 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
     assert json.loads(access.read_text())["token"] != first["token"]
 
 
-def test_access_grant_is_saved_only_under_its_credential_name(
-    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(("name", "saved"), [
+    ("preview-access.json", True),
+    ("access.json", True),  # the legacy devloop launcher's name (N12)
+    ("grant.json", False),
+])
+def test_access_grant_is_saved_owner_only_under_known_names(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, saved: bool,
 ) -> None:
-    """The saved grant holds a live token. Agents' file tools treat only
-    DEV_ACCESS_FILE's name as a credential file, so another name is refused."""
+    """The saved grant holds a live token: it is written owner-only, under
+    DEV_ACCESS_FILE (a name agents' file tools treat as a credential) or the
+    legacy access.json older launchers still pass; any other name is refused."""
     from fluid.tools.hardening import is_sensitive_path
 
     from app.core import encryption, preview_access
@@ -471,8 +477,7 @@ def test_access_grant_is_saved_only_under_its_credential_name(
     from app.preview_run import DEV_ACCESS_FILE
 
     assert is_sensitive_path(str(tmp_path / DEV_ACCESS_FILE))
-    access = tmp_path / "access.json"
-    assert not is_sensitive_path(str(access))
+    access = tmp_path / name
     env = preview_environment(tmp_path, 18880, 18881,
                               extra={"SHUFFLE_DEV_ACCESS_FILE": str(access)})
     for key, value in env.items():
@@ -485,7 +490,9 @@ def test_access_grant_is_saved_only_under_its_credential_name(
     assert encryption.initialize_server_key(database)
 
     initialize_preview_access()
-    assert not access.exists()
+    assert access.exists() is saved
+    if saved and os.name == "posix":
+        assert access.stat().st_mode & 0o077 == 0
 
 
 @pytest.mark.parametrize("has_nofollow", [True, False])
