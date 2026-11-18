@@ -575,10 +575,43 @@ class JsonlStore:
         )
 
     async def append_event(self, session_id: str, event: Event) -> None:
+        """Cached only once its line is written: a read through this store
+        must never find an event that is not on disk. A write that fails
+        takes back any part of the line it left, so a later read, by this
+        store or a fresh one, sees the file as it was before the write."""
         self._ensure_events_loaded(session_id)
         self._writable(session_id)
+        path = self._events_path(session_id)
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        try:
+            self._append_line(path, event_to_dict(event))
+        except Exception:
+            self._cut_back(path, size)
+            raise
         self._events[session_id].append(event)
-        self._append_line(self._events_path(session_id), event_to_dict(event))
+
+    def _cut_back(self, path: Path, size: int) -> None:
+        """Truncate what a failed append left past ``size``.
+
+        If the truncate itself fails, the fragment is cut off before the next
+        write instead, the way a torn line found at load is.
+        """
+        fragment = b""
+        try:
+            with path.open("r+b") as fh:
+                fh.seek(size)
+                fragment = fh.read()
+                if fragment:
+                    fh.truncate(size)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if fragment:
+                self._torn[path] = (size, fragment)
+            log.warning("%s: could not take back a failed append: %s", path.name, exc)
 
     async def events_since(self, session_id: str, seq: int) -> list[Event]:
         self._ensure_events_loaded(session_id)

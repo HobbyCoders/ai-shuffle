@@ -53,6 +53,19 @@ def _kind_group(kind: str) -> str:
     return "terminal" if kind in _TERMINAL_TASK_KINDS else kind
 
 
+def _lifecycle_identity(event: SubagentEvent) -> tuple[Any, ...]:
+    """What tells one lifecycle write from another when it is found stored.
+
+    Free text (summary, description, report path) is left out: a store may
+    rewrite it on the way in (the app's Postgres store scrubs credentials and
+    NUL characters), and the status, wake and worker already tell attempts apart.
+    """
+    return (
+        event.session_id, event.task_id, event.kind, event.status, event.wake,
+        event.worker_session_id, event.turn_id, event.serves,
+    )
+
+
 async def await_cancelled_child(task: asyncio.Task[Any]) -> None:
     """Wait for a child task this caller just cancelled.
 
@@ -109,13 +122,18 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         # refused write during recovery is retried by the next lifecycle call.
         self._background_rehydrated = False
         self._background_recovered = False
+        # Completions the host's recovery hook gave, until each is stored.
+        self._background_host_recovery: dict[str, BackgroundTaskFinished] | None = None
         self._background_replay_failures = 0
         self._background_replay_retry_at = 0.0
         self._background_replay_warned_at: float | None = None
         # Lifecycle writes that raised, so may or may not have committed, by
-        # (task id, kind group): the bus seq before the write, where a retry
-        # looks for it in the store before writing again.
-        self._background_uncertain: dict[tuple[str, str], int] = {}
+        # (task id, kind group): the bus seq before the first such write, where
+        # a retry looks in the store, and each attempt's identity with what the
+        # caller keeps for it (its op or receipt).
+        self._background_uncertain: dict[
+            tuple[str, str], tuple[int, list[tuple[tuple[Any, ...], Any]]]
+        ] = {}
         self._background_lock = asyncio.Lock()
         self._background_wake_task: asyncio.Task | None = None
         self._background_waiting_on: asyncio.Task | None = None
@@ -205,9 +223,11 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         """Back off before the next read and warn, at most once an interval."""
         self._background_replay_failures += 1
         now = time.monotonic()
+        # The exponent is capped before the power is taken: a long outage
+        # counts failures without bound, and 2.0 ** 1024 overflows.
+        doublings = min(self._background_replay_failures - 1, 32)
         self._background_replay_retry_at = now + min(
-            _REPLAY_RETRY_MAX_SECONDS,
-            _REPLAY_RETRY_BASE_SECONDS * 2 ** (self._background_replay_failures - 1),
+            _REPLAY_RETRY_MAX_SECONDS, _REPLAY_RETRY_BASE_SECONDS * 2 ** doublings,
         )
         warned = self._background_replay_warned_at
         if warned is None or now - warned >= _REPLAY_WARN_INTERVAL_SECONDS:
@@ -232,14 +252,25 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
-            for op in await recover_host(tuple(self._background_pending)):
-                # A non-terminal status would be recorded as "terminal" here
-                # but replay as still pending after the next restart.
-                if (
-                    op.task_id in self._background_pending
-                    and op.status in _TERMINAL_TASK_KINDS
-                ):
+            if self._background_host_recovery is None:
+                # Asked once: the host's answer can change between calls (a
+                # run can become active again), so completions it gave are
+                # kept until their terminal writes land, not asked for again.
+                accepted: dict[str, BackgroundTaskFinished] = {}
+                for op in await recover_host(tuple(self._background_pending)):
+                    # A non-terminal status would be recorded as "terminal"
+                    # here but replay as still pending after the next restart.
+                    if (
+                        op.task_id in self._background_pending
+                        and op.status in _TERMINAL_TASK_KINDS
+                    ):
+                        accepted.setdefault(op.task_id, op)
+                self._background_host_recovery = accepted
+            for task_id, op in tuple(self._background_host_recovery.items()):
+                if task_id in self._background_pending:
+                    # Its own incarnation check still applies on a retry.
                     await self._finalize_background_task_unlocked(op)
+                del self._background_host_recovery[task_id]
         self._background_recovered = True
 
     def _park_pending_ids(self) -> tuple[str, ...]:
@@ -271,8 +302,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             if not known:
                 meta = await self._ensure_session()
                 # State changes only once the event is stored, so a refused
-                # write leaves the receipt retryable.
-                await self._emit_lifecycle(SubagentEvent(
+                # write leaves the receipt retryable. If an earlier attempt
+                # turns out to have committed, its receipt is the one kept.
+                _, receipt = await self._emit_lifecycle(SubagentEvent(
                     session_id=meta.session_id,
                     turn_id=self._active_turn_id,
                     task_id=receipt.task_id,
@@ -282,7 +314,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     # A task that has only just started owes nobody a wake yet.
                     wake_disposition=WAKE_NOT_APPLICABLE,
                     serves=receipt.serves,
-                ))
+                ), receipt)
                 self._background_pending[receipt.task_id] = receipt
                 if (
                     receipt.task_id not in self._background_early
@@ -322,7 +354,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     meta = await self._ensure_session()
                     if op.is_current is not None and not op.is_current():
                         return
-                    await self._emit_lifecycle(SubagentEvent(
+                    _, early = await self._emit_lifecycle(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
                         task_id=op.task_id,
@@ -335,8 +367,10 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                         # the disposition that counts.
                         wake_disposition=WAKE_NOT_APPLICABLE,
                         report_path=op.report_path,
-                    ))
-                    self._background_early[op.task_id] = op
+                    ), op)
+                    # The completion that was stored, if an earlier attempt
+                    # committed one, not necessarily the one just submitted.
+                    self._background_early[op.task_id] = early
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -356,8 +390,10 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         )
         # Store the terminal event before the task leaves pending: a refused
         # write must leave the completion retryable, and the next attempt
-        # must not find the task already terminal and skip it (#1769).
-        await self._emit_lifecycle(SubagentEvent(
+        # must not find the task already terminal and skip it (#1769). What
+        # follows applies the event that was stored: an earlier attempt that
+        # committed after all decides the status and the wake, not this op.
+        committed, _ = await self._emit_lifecycle(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
             task_id=op.task_id,
@@ -371,60 +407,82 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             # host performs it instead of us.
             wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
             report_path=op.report_path,
-        ))
+        ), op)
         self._background_pending.pop(op.task_id, None)
         self._background_early.pop(op.task_id, None)
         self._background_terminal.add(op.task_id)
-        if op.wake:
+        if committed.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(
                 task_id=op.task_id,
-                status=op.status,
-                summary=op.summary,
-                worker_session_id=worker_session_id,
+                status=committed.kind,
+                summary=committed.summary,
+                worker_session_id=committed.worker_session_id,
                 wake=True,
-                report_path=op.report_path,
+                report_path=committed.report_path,
             )
 
-    async def _emit_lifecycle(self, event: SubagentEvent) -> None:
+    async def _emit_lifecycle(
+        self, event: SubagentEvent, carrier: Any
+    ) -> tuple[SubagentEvent, Any]:
         """Write a task's started, completion-pending or terminal event once.
 
-        The callers change state only after this returns, so a write that
-        raises leaves the step retryable (#1769 case 1). A write can raise and
-        still have committed (a lost acknowledgement, or a cancellation while
-        it ran), and the retry would be a second copy under a new seq. So a
-        write that raised is remembered, and the next attempt first looks for
-        the event in the store, from the bus seq before that write, and skips
-        writing it again when it is there. A lookup that fails raises, so the
-        step stays retryable rather than guessing.
+        Returns the event that counts and the ``carrier`` (the caller's op or
+        receipt) of the attempt that wrote it. The callers change state only
+        after this returns, so a write that raises leaves the step retryable
+        (#1769 case 1). A write can raise and still have committed (a lost
+        acknowledgement, or a cancellation while it ran), and the retry would
+        be a second copy under a new seq. So each write that raised is
+        remembered by identity, and the next attempt first looks in the store,
+        from the bus seq before the first such write. When one of those
+        attempts is there, it is not written again, and the stored event and
+        that attempt's carrier are returned, whatever the retry submitted. A
+        stored event that matches none of them is some other write and does
+        not count. A lookup that fails raises, so the step stays retryable
+        rather than guessing.
 
         Still publish-first through ``_emit``: a refused write was already
         seen live, and its retry is seen again (#1769 case 4 stays open).
         """
         key = (event.task_id, _kind_group(event.kind))
-        since = self._background_uncertain.get(key)
-        if since is not None and await self._lifecycle_event_stored(event, since):
-            del self._background_uncertain[key]
-            return
+        uncertain = self._background_uncertain.get(key)
+        if uncertain is not None:
+            found = await self._stored_lifecycle_attempt(event.session_id, key, *uncertain)
+            if found is not None:
+                del self._background_uncertain[key]
+                return found
         bus = getattr(self, "bus", None)
         before = bus.last_seq(event.session_id) if bus is not None else 0
         try:
             await self._emit(event)
         except BaseException:
-            self._background_uncertain[key] = before if since is None else min(since, before)
+            since, attempts = uncertain if uncertain is not None else (before, [])
+            self._background_uncertain[key] = (
+                min(since, before), [*attempts, (_lifecycle_identity(event), carrier)])
             raise
         self._background_uncertain.pop(key, None)
+        return event, carrier
 
-    async def _lifecycle_event_stored(self, event: SubagentEvent, since: int) -> bool:
-        group = _kind_group(event.kind)
+    async def _stored_lifecycle_attempt(
+        self,
+        session_id: str,
+        key: tuple[str, str],
+        since: int,
+        attempts: list[tuple[tuple[Any, ...], Any]],
+    ) -> tuple[SubagentEvent, Any] | None:
+        task_id, group = key
         try:
             async for stored in iter_events_of_class(
-                self.store, event.session_id, since, (SubagentEvent,)
+                self.store, session_id, since, (SubagentEvent,)
             ):
-                if stored.task_id == event.task_id and _kind_group(stored.kind) == group:
-                    return True
+                if stored.task_id != task_id or _kind_group(stored.kind) != group:
+                    continue
+                identity = _lifecycle_identity(stored)
+                for attempted, carrier in attempts:
+                    if identity == attempted:
+                        return stored, carrier
         except NotImplementedError:
-            return False  # no event log to look in: nothing was stored there
-        return False
+            return None  # no event log to look in: nothing was stored there
+        return None
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
         if not isinstance(event, _TERMINAL_EVENTS):

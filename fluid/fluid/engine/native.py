@@ -117,6 +117,9 @@ _REHYDRATE_BACKOFF_S = 0.2
 # credentials the new session must not inherit.
 _HANDOFF_TRANSCRIPT_CHARS = 60_000
 _HANDOFF_NODE_TEXT_CHARS = 2_000
+# How long close waits for a handoff past its document call to be reported
+# before the bus closes (seconds).
+_HANDOFF_CLOSE_WAIT_S = 10.0
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -1525,6 +1528,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # handoff runs at a time.
         self._handoff_call: asyncio.Task | None = None
         self._handoff_running = False
+        # Set when the running handoff ends, however it ends. Close cancels
+        # the document call, then waits on this so a handoff past that call
+        # is reported before the bus closes.
+        self._handoff_ended: asyncio.Event | None = None
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -2053,13 +2060,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         runs at a time; a second one fails at once. Interrupt and close cancel
         the document call, and then no session is made. That is the cutoff:
         once the document is in hand the new session is created and reported,
-        and an Interrupt arriving after that point does not undo it.
+        and an Interrupt arriving after that point does not undo it. A close
+        arriving after that point waits (bounded) for ``HandoffCreated`` to
+        be published before it closes the bus.
         """
         if self._handoff_running:
             raise RuntimeError("handoff not created: another handoff is already running")
         self._handoff_running = True
+        ended = self._handoff_ended = asyncio.Event()
         try:
             meta = await self._ensure_session()
+            if getattr(self, "_close_task", None) is not None:
+                raise RuntimeError("handoff not created: the engine is closing")
             call = asyncio.create_task(self._handoff_document(meta.session_id, op))
             self._handoff_call = call
             try:
@@ -2087,6 +2099,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             ))
         finally:
             self._handoff_running = False
+            ended.set()
 
     async def _handoff_document(self, sid: str, op: Handoff) -> str:
         """Generate the handoff document; raises when it cannot be had."""
@@ -2238,8 +2251,15 @@ class NativeLoop(BackgroundLifecycleMixin):
         await self.cancel_checkpoint()
         handoff = self._handoff_call
         if handoff is not None and not handoff.done():
-            handoff.cancel()
+            handoff.cancel()  # still in the document call: no session is made
             await await_cancelled_child(handoff)
+        ended = self._handoff_ended
+        if ended is not None and not ended.is_set():
+            # A cancelled document call ends the handoff at once. Past that
+            # call the new session is being made: let its HandoffCreated
+            # reach subscribers before the bus closes.
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(ended.wait(), _HANDOFF_CLOSE_WAIT_S)
         if self._booking_task is not None and not self._booking_task.done():
             # Let a deferred booking finish; anything left is reconciled from
             # the persisted Usage by the next engine for this session.
