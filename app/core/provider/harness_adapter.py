@@ -38,7 +38,9 @@ Native legs:
   * ``max_turns`` becomes ``max_model_calls_per_turn`` (None = unlimited).
     ``env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]`` becomes ``max_tokens``, and no other
     ``env`` key is read. ``thinking`` goes only to Claude models on the anthropic
-    lane. ``fast`` becomes ``service_tier: priority`` only on openai_responses.
+    lane. ``fast`` becomes ``service_tier: priority`` only on openai_responses,
+    and ``speed: ultrafast`` becomes ``service_tier: ultrafast`` where the row
+    offers it (else ``priority``).
   * code mode and the continual learner need an app session id and fail open to
     JSON tool calls; the prompt describes what actually started.
 
@@ -86,7 +88,7 @@ import time
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, NamedTuple, Optional, Tuple, cast
 
 import httpx
 
@@ -1196,7 +1198,8 @@ class HarnessAdapter(ProviderAdapter):
                 pricing=_catalog_pricing_resolver(options),
                 # Per-session fast mode. Only the OpenAI Responses lane
                 # has a wire-level expedited service: ``service_tier:
-                # priority``, merged into the request body by fluid's
+                # priority`` (``ultrafast`` for an Ultrafast chat where the
+                # row offers it), merged into the request body by fluid's
                 # ``request_extra``. The anthropic and openrouter native lanes
                 # have no equivalent knob and ignore ``fast`` entirely.
                 request_extra=request_extra or None,
@@ -1398,6 +1401,8 @@ class HarnessAdapter(ProviderAdapter):
             # Per-session fast mode, stamped by query_options as
             # ``aih_fast`` (override for this turn, else the session row).
             fast=getattr(sdk_options, "aih_fast", None),
+            # The speed tier refining it (``aih_speed``, same source).
+            speed=getattr(sdk_options, "aih_speed", None),
             # Profile scope filter (user/project/local). Native legs map it
             # onto fluid's setting_sources (see _fluid_setting_sources); the
             # delegated leg already carries it to the CLI. None = every scope.
@@ -1888,6 +1893,7 @@ class HarnessAdapter(ProviderAdapter):
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
+        submitted_prompt = prompt
         if self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_delegated_command, expand_native_command
 
@@ -1962,6 +1968,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
+                submitted_prompt=submitted_prompt if content != submitted_prompt else None,
                 context_pin=self._memory_context_pin(content),
                 host_time_note=bool(note) and self._host_time_note_rendered,
                 accepted_at=(getattr(self, "_owner_receipt", {}).get("owner_message_at") if source in ("user", "queue") else None),
@@ -2106,7 +2113,11 @@ class HarnessAdapter(ProviderAdapter):
             permissions=None,
             hooks=self._hooks,
             tool_policy=self._delegated_policy_with_saved_rules(
-                _delegated_tool_policy(options, self._build_permissions(options), blocked)
+                _delegated_tool_policy(
+                    options, self._build_permissions(options), blocked,
+                    bridged=lambda tool: self._engine is not None
+                    and tool in self._engine._served_names(),
+                )
             ),
             system_append=instructions,
             # The models the agent offers become the row's model catalog.
@@ -2685,6 +2696,7 @@ class HarnessAdapter(ProviderAdapter):
                 if name in ("TurnStarted", "ContextCompaction"):
                     rows.append({
                         "_cls": name, "node_id": getattr(event, "node_id", None),
+                        "context_node_id": getattr(event, "context_node_id", None),
                         "reason": getattr(event, "reason", None),
                         "model": getattr(event, "model", None),
                         "provider": getattr(event, "provider", None),
@@ -2703,7 +2715,7 @@ class HarnessAdapter(ProviderAdapter):
             return True
         started = False
         for row in rows:
-            if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
+            if row.get("_cls") == "TurnStarted" and (row.get("context_node_id") or row.get("node_id")) == node_id:
                 started = True
                 # A new adapter may use a different model/provider (including
                 # switching between native and CLI). Its own history, not the
@@ -2753,8 +2765,8 @@ class HarnessAdapter(ProviderAdapter):
     def _observe_memory_event(self, event: Any) -> None:
         """Follow the live turn for the # Memory bookkeeping.
 
-        A turn that carried a full snapshot names its user node in
-        TurnStarted: that node becomes the trusted one. A Claude Code
+        A turn that carried a full snapshot names its context node (the
+        user node on ordinary turns) in TurnStarted: trust that node. A Claude Code
         compaction drops the trust, so the next user message carries the full
         snapshot again, unless the SessionStart hook already put the current
         one back for that compaction (:meth:`_memory_put_back_held`). A
@@ -2765,8 +2777,7 @@ class HarnessAdapter(ProviderAdapter):
         name = type(event).__name__
         if name == "TurnStarted" and self._memory_full_pending:
             self._memory_full_pending = False
-            node_id = getattr(event, "node_id", None)
-            self._memory_trusted_node = node_id or None
+            self._memory_trusted_node = getattr(event, "context_node_id", None) or event.node_id
         elif name == "ContextCompacting" and getattr(event, "active", False):
             self._memory_compacting_seq = int(getattr(event, "seq", -1))
         elif name == "ContextCompaction":
@@ -3448,19 +3459,21 @@ class HarnessAdapter(ProviderAdapter):
         if not getattr(DelegatedLoop, "supports_async_tool_policy", False):
             return inner
 
-        inner_cwd = inner is not None and _policy_accepts_cwd(inner)
+        inner_cwd = inner is not None and _policy_accepts(inner, "cwd")
+        inner_kind = inner is not None and _policy_accepts(inner, "unmapped_kind")
 
         async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
-                         agent_id: Optional[str] = None) -> Optional[str]:
+                         agent_id: Optional[str] = None, unmapped_kind: bool = False) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
             if inner is None:
                 denial = None
-            elif inner_cwd:
-                denial = await run_sync(inner, name, tool_input, cwd=cwd)
             else:
-                denial = await run_sync(inner, name, tool_input)
+                extra: Dict[str, Any] = {"cwd": cwd} if inner_cwd else {}
+                if inner_kind and unmapped_kind:
+                    extra["unmapped_kind"] = True
+                denial = await run_sync(inner, name, tool_input, **extra)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:
@@ -3492,6 +3505,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         from fluid.messages.content import Text as FluidText
         from fluid.messages.content import ToolResultBlock as FluidToolResult
+        from fluid.messages.content import is_harness_note
 
         from app.core.provider.fluid_transcript import prompt_text
 
@@ -3503,7 +3517,7 @@ class HarnessAdapter(ProviderAdapter):
             if role == "assistant" and prompts:
                 has_pair = True
                 continue
-            if role != "user":
+            if role != "user" or is_harness_note(message):
                 continue
             blocks = []
             for block in getattr(message, "content", None) or []:
@@ -4330,10 +4344,18 @@ class HarnessAdapter(ProviderAdapter):
         self._scratch_put_back = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
+        if self._options is not None:
+            # Later picks (Ultrafast, effort) are checked against this model.
+            self._options.model = requested
         self._record_applied("model", requested)
 
-    async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
-        """Apply a session's effort and Fast mode without restarting a live turn.
+    async def set_run_settings(self, *, effort: Optional[str], fast: bool,
+                               speed: Optional[str] = None) -> dict:
+        """Apply a session's effort and speed without restarting a live turn.
+
+        ``speed`` (``standard``/``fast``/``ultrafast``) refines ``fast``; None
+        means the tier ``fast`` alone implies. Ultrafast exists only on the
+        OpenAI Responses lane for a model the bound row offers it on.
 
         When it lands depends on the lane:
 
@@ -4352,6 +4374,15 @@ class HarnessAdapter(ProviderAdapter):
             raise ValueError("This model does not support the selected effort level")
         if fast and not (self._is_delegated or self._provider_kind == "openai_responses"):
             raise ValueError("Fast mode is not supported by this provider")
+        from app.core.model_speed import ULTRAFAST, resolve_speed
+
+        tier = resolve_speed(fast, speed)
+        if tier == ULTRAFAST and (
+            self._is_delegated
+            or self._provider_kind != "openai_responses"
+            or not await run_sync(_ultrafast_ok, self._options, None)
+        ):
+            raise ValueError("Ultrafast is not available for this model")
         if self._is_delegated:
             engine, options = self._engine, self._options
             await engine.set_run_settings(effort=normalized, fast=fast)
@@ -4361,19 +4392,24 @@ class HarnessAdapter(ProviderAdapter):
             # A request already in flight retains its parameters. The next
             # request builder reads these attributes, including within a turn.
             self._engine.effort = normalized
+            from app.core.model_speed import service_tier_for
+
             extra = dict(self._engine.request_extra)
             extra.pop("service_tier", None)
-            if fast:
-                extra["service_tier"] = "priority"
+            service_tier = service_tier_for(tier)
+            if service_tier:
+                extra["service_tier"] = service_tier
             self._engine.request_extra = extra
         self._options.effort = normalized
         self._options.fast = fast
+        self._options.speed = tier
         self._record_applied("effort", normalized)
         self._record_applied("aih_fast", fast)
+        self._record_applied("aih_speed", tier)
         ctx = getattr(self._engine, "ctx", None)
         if ctx is not None:
             ctx.extra["app_caller_effort"] = normalized
-        return {"effort": normalized, "fast": fast}
+        return {"effort": normalized, "fast": fast, "speed": tier}
 
     def fast_waits_for_next_turn(self) -> bool:
         """True when a running turn's speed differs from the Fast setting.
@@ -4616,6 +4652,10 @@ class HarnessAdapter(ProviderAdapter):
             getattr(new_options, "fast", None)
         ):
             return True
+        from app.core.model_speed import options_speed
+
+        if options_speed(old) != options_speed(new_options):
+            return True
         # Resolved provider binding: mirrors
         # ``session_pool.requires_reconnect``. The engine and its credentials are
         # built once in ``connect()`` from this id, so a cross-provider switch
@@ -4701,7 +4741,7 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "FastModeOutcome":
             # How the turn's requests really ran; query_engine turns it into a
             # persisted ``fast_outcome`` note.
-            return [SystemMessage(subtype="fast_outcome", data={
+            data = {
                 "requested": bool(getattr(event, "requested", False)),
                 "requested_at_end": bool(getattr(event, "requested_at_end", False)),
                 "fast_calls": getattr(event, "fast_calls", 0),
@@ -4709,7 +4749,16 @@ class HarnessAdapter(ProviderAdapter):
                 "unknown_calls": getattr(event, "unknown_calls", 0),
                 "state": getattr(event, "state", None),
                 "disabled_reason": getattr(event, "disabled_reason", None),
-            })]
+            }
+            if getattr(event, "speed", None) or getattr(event, "speed_at_end", None):
+                # An Ultrafast turn: which tier was asked for and how many
+                # calls really ran on it.
+                data.update(
+                    ultrafast_calls=getattr(event, "ultrafast_calls", 0),
+                    speed=getattr(event, "speed", None),
+                    speed_at_end=getattr(event, "speed_at_end", None),
+                )
+            return [SystemMessage(subtype="fast_outcome", data=data)]
 
         if cls == "GuardrailBlocked":
             # A provider safety check declined a call and the person (or the
@@ -5901,7 +5950,8 @@ class HarnessAdapter(ProviderAdapter):
             )
             builtins_registered = True
 
-        if _registers_bundled_search(options, native=native):
+        if _registers_bundled_search(options, native=native,
+                                     acp=self._provider_kind == _ANTIGRAVITY_KIND):
             from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
 
             for search_tool in (glob_tool, grep_tool):
@@ -6609,12 +6659,16 @@ def _cli_ships_search_tools() -> bool:
     return os.name == "nt"
 
 
-def _registers_bundled_search(options: SessionOptions, *, native: bool) -> bool:
-    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call."""
+def _registers_bundled_search(options: SessionOptions, *, native: bool, acp: bool = False) -> bool:
+    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call.
+
+    ``acp``: the Antigravity leg takes the bundled copies on every OS;
+    ``_cli_ships_search_tools`` speaks for Claude Code only (#1751).
+    """
     return (
         not native
         and _session_mode(options) != "chat"
-        and not _cli_ships_search_tools()
+        and (acp or not _cli_ships_search_tools())
     )
 
 
@@ -6892,19 +6946,21 @@ def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optiona
     return any(tool_permitted(s, surface, None) for s in spellings)
 
 
-def _policy_accepts_cwd(policy: Any) -> bool:
-    """Whether a PreToolUse policy takes the CLI's ``cwd`` keyword."""
+def _policy_accepts(policy: Any, keyword: str) -> bool:
+    """Whether a PreToolUse policy takes ``keyword`` (the CLI's ``cwd``, the
+    ACP loop's ``unmapped_kind``)."""
     try:
         params = inspect.signature(policy).parameters
     except (TypeError, ValueError):
         return False
-    return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return keyword in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _delegated_tool_policy(
     options: SessionOptions,
     permissions: Optional[PermissionEngine],
     blocked: List[str],
+    bridged: Optional[Callable[[str], bool]] = None,
 ):
     """The deny policy the delegated leg's PreToolUse hook applies.
 
@@ -6918,6 +6974,13 @@ def _delegated_tool_policy(
     raised in bypass mode, and because ``--disallowed-tools`` misses a
     tool the CLI tool cache did not know yet. The surface is
     ``_delegated_surface``: the CLI's names for the tools the user ticked.
+
+    ``bridged(registry name)``, the ACP leg only: whether its bridge serves
+    that tool to this session. A call to one it serves is also judged by the
+    bare registry name, as the bridge filter judges it (#1751), but only
+    when the loop says the call's kind is none of the agent's own tools
+    (``unmapped_kind``): a shell call whose title starts with "Glob" is not
+    the Glob the owner ticked.
     """
     from app.core.tool_access import matches_any, tool_permitted
     from fluid.permissions.engine import Verdict
@@ -6927,7 +6990,8 @@ def _delegated_tool_policy(
     rules = list(getattr(permissions, "rules", None) or ())
     session_cwd = options.cwd
 
-    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+               unmapped_kind: bool = False) -> Optional[str]:
         """``cwd`` is the CLI's shell directory for this call when fluid
         passes it (its Bash keeps a ``cd`` between calls)."""
         from app.core.checkout_lock import tool_denial
@@ -6952,9 +7016,14 @@ def _delegated_tool_policy(
         # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
         # as the bridge filter does (_bridged_tool_permitted): a deny entry in
         # either form withholds it. Not a bare name: "WebFetch" on these lists
-        # is the CLI's own tool, distinct from the bridged app copy.
+        # is the CLI's own tool, distinct from the bridged app copy. Except a
+        # tool the ACP bridge serves (``bridged``) on a call of no kind of the
+        # agent's own, so a Glob it serves because "Glob" is ticked is not
+        # then refused here (#1751).
         served = name.removeprefix(_BUNDLED_CLI_PREFIX)
         spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
+        if unmapped_kind and served != name and bridged is not None and bridged(served):
+            spellings.add(served)
         if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
         if surface and not any(tool_permitted(s, surface, None) for s in spellings):
@@ -10018,12 +10087,39 @@ def _native_request_extra(kind: Optional[str], options: SessionOptions, model: O
     from app.core.local_model_settings import local_request_extra
 
     if kind == "openai_responses":
-        return {"service_tier": "priority"} if getattr(options, "fast", None) else {}
+        return _openai_speed_extra(options, model)
     if kind != "openrouter":
         return {}
     provider_id = (options.extra or {}).get("provider_id")
     row = _lookup_provider_row(provider_id) if provider_id else None
     return local_request_extra(row, model if model is not None else options.model)
+
+
+def _ultrafast_ok(options: SessionOptions, model: Optional[str] = None) -> bool:
+    """Whether the bound row offers Ultrafast for ``model`` (blocking: DB read)."""
+    from app.core.model_speed import ultrafast_supported_for_row
+
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(str(provider_id)) if provider_id else None
+    return ultrafast_supported_for_row(row, model if model is not None else options.model)
+
+
+def _openai_speed_extra(options: SessionOptions, model: Optional[str] = None) -> dict:
+    """The ``service_tier`` an OpenAI Responses request carries for the chat's speed.
+
+    Fast is ``priority``; Ultrafast is ``ultrafast`` when the bound row offers
+    it for the model (its own Codex catalog for a ChatGPT sign-in, the
+    documented models for an API key), else Fast's ``priority``; Standard
+    sends none. Blocking (a DB read for Ultrafast): call through run_sync.
+    """
+    from app.core.model_speed import FAST, ULTRAFAST, options_speed, service_tier_for
+
+    speed = options_speed(options)
+    if speed == ULTRAFAST and not _ultrafast_ok(options, model):
+        logger.info("ultrafast: not offered for %s on this provider; sending Fast", model or options.model)
+        speed = FAST
+    tier = service_tier_for(speed)
+    return {"service_tier": tier} if tier else {}
 
 
 def _openrouter_pricing(options: SessionOptions) -> Dict[str, Dict[str, float]]:

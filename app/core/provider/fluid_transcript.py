@@ -1490,10 +1490,17 @@ def prompt_text(content: Any) -> Optional[str]:
     return joined or None
 
 
+@dataclass(frozen=True)
+class AmbiguousPrompt:
+    """This CLI entry could be a notification, not a submitted turn."""
+
+    text: str
+
+
 def cli_transcript_prompt_tail(
     path: Path, tail_bytes: int = CLI_TRANSCRIPT_TAIL_BYTES
-) -> Tuple[List[str], bool]:
-    """``(typed user prompts, whole file read)`` for a CLI transcript.
+) -> Tuple[List[str | AmbiguousPrompt], bool]:
+    """``(user prompt evidence, whole file read)`` for a CLI transcript.
 
     The prompts come from the last ``tail_bytes``, oldest first. A partial
     first line and lines that are not JSON are skipped, and so are the CLI's
@@ -1507,12 +1514,14 @@ def cli_transcript_prompt_tail(
         handle.seek(0, os.SEEK_END)
         size = handle.tell()
         start = max(0, size - tail_bytes)
-        handle.seek(start)
+        # Include the preceding byte: if it is a newline, the first entry
+        # inside the budget is complete and may be our only evidence.
+        handle.seek(max(0, start - 1))
         data = handle.read()
     lines = data.split(b"\n")
-    if start > 0 and lines:
+    if start > 0:
         lines = lines[1:]
-    prompts: List[str] = []
+    prompts: List[str | AmbiguousPrompt] = []
     summarized = False
     for raw in lines:
         raw = raw.strip()
@@ -1529,8 +1538,16 @@ def cli_transcript_prompt_tail(
             continue
         if entry.get("isMeta"):
             continue
-        text = prompt_text((entry.get("message") or {}).get("content"))
-        if text:
+        content = (entry.get("message") or {}).get("content")
+        text = prompt_text(content)
+        if not text:
+            continue
+        # Only the CLI's single, bare notification block is ambiguous. Do
+        # not classify multipart submissions by their flattened text.
+        if (not entry.get("promptId") and text == "[Request interrupted by user]"
+                and content == [{"type": "text", "text": text}]):
+            prompts.append(AmbiguousPrompt(text))
+        else:
             prompts.append(text)
     return prompts, start == 0 and not summarized
 
@@ -1551,7 +1568,7 @@ def is_slash_command_prompt(text: str) -> bool:
 
 def cli_prompts_cover(
     fluid_prompts: Sequence[str],
-    cli_prompts: Sequence[str],
+    cli_prompts: Sequence[str | AmbiguousPrompt],
     *,
     complete: bool,
     window: int = CLI_PROMPT_MATCH_WINDOW,
@@ -1575,20 +1592,28 @@ def cli_prompts_cover(
     When the tail was cut and holds fewer than ``window`` of fluid's prompts,
     what it holds must be the end of fluid's window. A cut tail with none of
     them (one very long turn) gives no evidence either way and counts as
-    covered. A steer whose text equals one of fluid's prompts breaks the
+    covered, unless an ambiguous entry collides with an unproven prompt.
+    A steer whose text equals one of fluid's prompts breaks the
     match and costs a re-seed, which is the safe direction.
     """
     ours = [p for p in fluid_prompts if not is_slash_command_prompt(p)]
     if not ours:
         return True
     known = set(ours)
-    theirs = [p for p in cli_prompts if p in known]
+    theirs = [p for p in cli_prompts if isinstance(p, str) and p in known]
     expected = ours[-window:]
     if len(theirs) >= len(expected):
         return theirs[-len(expected):] == expected
-    if complete:
+    missing = len(expected) - len(theirs)
+    if complete or theirs != expected[missing:]:
         return False
-    return not theirs or theirs == expected[-len(theirs):]
+    # A shortened tail normally cannot speak for the unseen prefix. If we
+    # actually saw a candidate for one of those turns, require independent
+    # submission evidence instead of letting truncation vouch for it.
+    return not any(
+        isinstance(p, AmbiguousPrompt) and p.text in expected[:missing]
+        for p in cli_prompts
+    )
 
 
 def _write_cli_transcript(

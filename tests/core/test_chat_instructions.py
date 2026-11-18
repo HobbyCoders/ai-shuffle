@@ -4,7 +4,7 @@ The default text tells agents what the chat renders and how to link files so
 the file API serves them; these tests pin the rules that keep links working.
 """
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
@@ -71,16 +71,40 @@ async def test_settings_save_and_revert_control_the_model_instructions():
 
 def test_default_stays_within_its_size_budget():
     assert len(DEFAULT_SECURITY_INSTRUCTIONS) <= PRE_REWRITE_CHARS
+    # Measured at 819 chars after tightening; leave 13 chars of headroom.
+    assert len(_files_on_disk(DEFAULT_SECURITY_INSTRUCTIONS)) <= 832
 
 
-def test_default_states_where_links_work_and_what_to_do_otherwise():
-    text = DEFAULT_SECURITY_INSTRUCTIONS
-    # The served roots (app.api.common.require_file_access).
-    assert "inside your working directory, the workspace or a registered project directory" in text
-    assert "copy it into your working directory and link the copy, never the original" in text
-    assert "Write the file before linking it" in text
-    assert "never secrets or credential files" in text
-    assert "never a bare filesystem path" in text
+def _files_on_disk(text):
+    heading = "### Files on disk"
+    return heading + text.split(heading, 1)[1].split("### HTML previews", 1)[0]
+
+
+def _assert_disk_sharing_rules(text):
+    section = _files_on_disk(text)
+    for rule in (
+        "`/api/files/by-path?path=URL_ENCODED_FULL_PATH`",
+        "`![alt](URL)` for images, `[label](URL)` for links and inline video/audio",
+        "Share only existing files in a served root the viewer can access",
+        "the worker's workspace or a registered project/worktree",
+        "Never share scratch/temp paths",
+        "For scratch/temp or unserved files, copy only the intended deliverable to a served root",
+        "Verify the copy exists and is accessible; link or embed it, not the original",
+        "If access is unverified, say it's unavailable",
+        "Never copy or share secrets or credentials",
+        "Don't commit copies",
+    ):
+        assert rule in section, rule
+
+
+def test_default_states_where_links_and_embeds_work_and_what_to_do_otherwise():
+    _assert_disk_sharing_rules(DEFAULT_SECURITY_INSTRUCTIONS)
+    assert "never a bare filesystem path" in DEFAULT_SECURITY_INSTRUCTIONS
+
+
+def test_default_has_no_repeated_paragraphs():
+    paragraphs = re.split(r"\n\s*\n", DEFAULT_SECURITY_INSTRUCTIONS.strip())
+    assert len(paragraphs) == len(set(paragraphs))
 
 
 def test_default_encoding_examples_are_correct_on_windows_and_posix():
@@ -177,13 +201,61 @@ def _go_live(session_id, source):
     turns_db.start_turn(turn["id"], run["id"], "runner-b")
 
 
-def test_a_top_level_chat_gets_the_chat_instructions(db):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leg", ["native", "delegated", "antigravity"])
+async def test_a_top_level_chat_gets_the_shipped_prompt(db, tmp_path, monkeypatch, leg):
+    from app.core import antigravity
+    from app.core.provider import harness_adapter as ha
     from app.core.query_options import WORKER_REPORT_INSTRUCTIONS
+    from app.core.sdk_options import build_session_options
+    from app.db import database, mobile_tool_identity
+    from fluid.engine.acp.loop import AcpAgentSpec
 
+    # An isolated checkout boundary keeps instruction discovery out of the
+    # machine's installation and other projects. No external provider is run.
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    model = {"native": "gpt-5", "delegated": "opus", "antigravity": "gemini-3.1-pro"}[leg]
+    kind = {"native": "openai_responses", "delegated": "delegated", "antigravity": ha._ANTIGRAVITY_KIND}[leg]
+    monkeypatch.setattr(ha, "_decide_provider_kind", lambda _: kind)
+    if leg == "native":
+        monkeypatch.setattr(ha, "_build_provider_client", AsyncMock(return_value=(object(), None)))
+    elif leg == "delegated":
+        monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: ["unused-claude"])
+    else:
+        monkeypatch.setattr(database, "resolve_model_provider", lambda *_, **__: {"id": "test-acp"})
+        monkeypatch.setattr(antigravity, "find_binary", lambda: "unused-agy")
+        monkeypatch.setattr(antigravity, "build_spec", lambda *_, **__: AcpAgentSpec(argv=["unused-agy"]))
+        monkeypatch.setattr(antigravity, "register_agent", lambda *_: None)
+
+    mobile_tool_identity.init_schema()  # A separate migration, not in the shim's base schema.
+    profile = database.create_profile("t", "Test agent", None, {
+        "model": model, "tools_preset": "claude_code",
+        "system_prompt": {"type": "preset", "preset": "claude_code"},
+        "cwd": str(tmp_path),
+    })
+    database.create_session("human-1", profile["id"], derive_provider_from_profile=False)
     _go_live("human-1", "user")
-    text = _system_text("human-1")
-    assert DEFAULT_SECURITY_INSTRUCTIONS.strip() in text
-    assert WORKER_REPORT_INSTRUCTIONS not in text
+    options, _ = build_session_options(profile=profile, session_id="human-1")
+    if leg == "antigravity":
+        options.aih_provider_id = "test-acp"
+    adapter = ha.HarnessAdapter()
+    await adapter.connect_with_sdk_options(options)
+    try:
+        engine = adapter._engine
+        if leg == "native":
+            assert engine.system_sections is not None  # Not the fallback string.
+            text = engine.system
+        elif leg == "delegated":
+            text = engine.append_system_prompt
+        else:
+            text = engine.system_append
+        _assert_disk_sharing_rules(text)
+        assert text.count(DEFAULT_SECURITY_INSTRUCTIONS.strip()) == 1
+        assert WORKER_REPORT_INSTRUCTIONS not in text
+    finally:
+        await adapter.disconnect()
 
 
 def test_a_worker_gets_the_report_note_instead(db):

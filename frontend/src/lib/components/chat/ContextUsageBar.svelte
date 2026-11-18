@@ -551,7 +551,7 @@
 	): RowSlot[] {
 		return withBaseline(windows, providerBaselineWindows(pb, showsRemaining, noFiveHourLimit), (w) => {
 			const display = providerWindowPercent(w, nowMs, showsRemaining);
-			return { type: w.type, label: windowLabel(w.type), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
+			return { type: w.type, label: windowLabel(w.type, w.label), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
 		});
 	}
 
@@ -1188,11 +1188,12 @@
 	{@const pbDisplay = providerDisplayFor(pb)}
 	{@const pbOpen = isSectionOpen(sectionId)}
 	{@const pbNoFiveHour = providerNoFiveHour(pb)}
-	{@const pbWindows = planDisplayWindows(pb.windows, pbNoFiveHour, now)}
+	{@const isAntigravity = providerUsageType(pb) === 'antigravity'}
+	{@const pbWindows = isAntigravity ? Object.values(pb.windows) : planDisplayWindows(pb.windows, pbNoFiveHour, now)}
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
 	{#snippet providerSummary()}
-		{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+		{@const pbSummary = isAntigravity ? null : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
 		{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit
@@ -1695,6 +1696,12 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+	}
+
+	/* Grouped quota labels may wrap; keep each reset and percentage together. */
+	.popover-row .row-label {
+		white-space: normal;
+		overflow-wrap: anywhere;
 	}
 
 	.row-label {

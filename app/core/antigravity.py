@@ -36,8 +36,10 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from unicodedata import category
 
 from fluid.engine.acp import antigravity as agy_spec
 from fluid.engine.acp.client import AcpConnection, AcpError
@@ -1652,51 +1654,70 @@ async def read_usage(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
-_FRACTION_KEYS = ("remaining_fraction", "remainingFraction", "remaining")
-_RESET_KEYS = ("reset_time", "resetTime", "resets_at", "resetsAt", "reset_at")
-_NAME_KEYS = ("window", "name", "label", "model", "type", "id")
+_USAGE_BUCKET_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
+_USAGE_PERIODS = {"weekly": "weekly", "5h": "5-hour"}
+_MAX_USAGE_LABEL = 80
+_MAX_USAGE_WINDOWS = 20
+
+
+def _usage_reset_time(value: Any) -> Optional[str]:
+    # fromisoformat also accepts date-only values and arbitrary separators,
+    # including NUL. Require a printable ASCII date and time.
+    if not isinstance(value, str) or value[10:11] not in {"T", " "}:
+        return None
+    if not (value.isascii() and value.isprintable()):
+        return None
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    return value
 
 
 def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
-    """Windows from a ``/usage`` JSON reply, or None when it is not understood.
-
-    The shape is unverified against a signed-in binary (community reports
-    describe a remaining fraction and a reset time per window). Anything that
-    does not look like that answers None, which the UI shows as unavailable.
-    """
+    """Read only the agent's grouped quota envelope, not the token usage object."""
     if not isinstance(payload, Mapping) or payload.get("status") == "ERROR":
         return None
-    candidates: List[Mapping[str, Any]] = []
+    command = payload.get("command")
+    data = command.get("data") if isinstance(command, Mapping) else None
+    groups = data.get("groups") if isinstance(data, Mapping) else None
+    if not isinstance(groups, list):
+        return None
 
-    def walk(value: Any, depth: int = 0) -> None:
-        if depth > 4:
-            return
-        if isinstance(value, Mapping):
-            if any(k in value for k in _FRACTION_KEYS):
-                candidates.append(value)
-                return
-            for child in value.values():
-                walk(child, depth + 1)
-        elif isinstance(value, list):
-            for child in value[:50]:
-                walk(child, depth + 1)
-
-    walk({k: v for k, v in payload.items() if k != "usage"})
     windows = []
-    for index, item in enumerate(candidates):
-        fraction = next((item.get(k) for k in _FRACTION_KEYS if k in item), None)
-        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+    seen: set[str] = set()
+    for group in groups:
+        if not isinstance(group, Mapping):
             continue
-        if not 0 <= float(fraction) <= 1:
+        name, buckets = group.get("name"), group.get("buckets")
+        if not isinstance(buckets, list):
             continue
-        name = next((str(item[k]) for k in _NAME_KEYS if isinstance(item.get(k), str) and item[k]), "")
-        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(index)
-        reset = next((item.get(k) for k in _RESET_KEYS if item.get(k) not in (None, "")), None)
-        windows.append({
-            "type": f"antigravity_{slug}",
-            "label": name or None,
-            "utilization": round((1 - float(fraction)) * 100, 2),
-            "resets_at": str(int(reset)) if isinstance(reset, (int, float)) and not isinstance(reset, bool)
-            else (str(reset) if reset is not None else None),
-        })
+        # Drop control characters and lone surrogates before clipping the label.
+        name = "".join(c for c in name if category(c) not in {"Cc", "Cs"}).strip() if isinstance(name, str) else ""
+        for bucket in buckets:
+            if not isinstance(bucket, Mapping):
+                continue
+            bucket_id = bucket.get("id")
+            if not isinstance(bucket_id, str) or not _USAGE_BUCKET_ID.fullmatch(bucket_id):
+                continue
+            # Check every safe ID, even in buckets otherwise skipped or over the limit.
+            if bucket_id in seen:
+                return None
+            seen.add(bucket_id)
+            if len(windows) >= _MAX_USAGE_WINDOWS or not name:
+                continue
+            window = bucket.get("window")
+            period = _USAGE_PERIODS.get(window) if isinstance(window, str) else None
+            fraction = bucket.get("remaining_fraction")
+            if not period or isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+                continue
+            if not 0 <= fraction <= 1:
+                continue
+            suffix = f", {period}"
+            windows.append({
+                "type": f"antigravity_{bucket_id}",
+                "label": name[:_MAX_USAGE_LABEL - len(suffix)] + suffix,
+                "utilization": round((1 - fraction) * 100, 2),
+                "resets_at": _usage_reset_time(bucket.get("reset_time")),
+            })
     return windows or None

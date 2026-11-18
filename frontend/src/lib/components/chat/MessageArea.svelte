@@ -1484,9 +1484,14 @@
 	function latestTurnTailNow(pendingRemoval?: HTMLElement): number | null {
 		if (!containerRef || !tailSpacerRef || currentTurnAnchorId) return null;
 		const latestTurnId = transcript.latestUserTurnId;
-		if (!latestTurnId) return MIN_TRANSCRIPT_TAIL_RESERVE;
-		const anchor = document.getElementById(turnAnchorId(latestTurnId));
-		if (!anchor || !containerRef.contains(anchor)) return MIN_TRANSCRIPT_TAIL_RESERVE;
+		const anchor = latestTurnId ? document.getElementById(turnAnchorId(latestTurnId)) : null;
+		if (!anchor || !containerRef.contains(anchor)) {
+			// No prompt is mounted: none yet, or the window paged it out. Without
+			// its anchor there is no prompt-first room to calculate, but queued and
+			// error controls dock in this reserve and still need it; without them
+			// the queue grows up over the rows above it.
+			return MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
+		}
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
 		const contentEnd = transcriptContentEnd();
@@ -2953,6 +2958,7 @@
 				toolId={message.toolId}
 				rememberedUnavailable={choose.rememberedUnavailable}
 				rememberedUnpriced={choose.rememberedUnpriced}
+				operation={choose.operation}
 			/>
 		{:else}
 			{@const saved = rememberedResult(message)}

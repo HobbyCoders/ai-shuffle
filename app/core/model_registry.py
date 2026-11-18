@@ -566,6 +566,8 @@ def _providers_payload() -> List[Dict[str, object]]:
     (early boot) — an empty table is a normal, distinct case that still
     returns ``[]`` from the query itself.
     """
+    from app.core.model_speed import ultrafast_supported_for_row
+
     try:
         from app.db import database
     except ImportError:
@@ -653,13 +655,37 @@ def _providers_payload() -> List[Dict[str, object]]:
                     # Still per-ROW (no per-model output cap is modelled).
                     "max_output_tokens": row.get("max_output_tokens"),
                     **effort_capabilities(model.get("id"), row, model),
+                    # ``ultrafast: true`` when the composer offers Ultrafast
+                    # for this model (app/core/model_speed.py): a ChatGPT
+                    # sign-in whose own catalog lists the tier, or a
+                    # documented API-key model. Absent means no.
+                    **({"ultrafast": True}
+                       if ultrafast_supported_for_row(row, model.get("id"), model) else {}),
                 }
                 for model in (row.get("models_json") or [])
             ],
             "default_model": row.get("default_model"),
+            # Speed tiers this sign-in hasn't fetched yet: the browser's
+            # capability refresh fetches its catalog once, so a plan with
+            # Ultrafast offers it without a manual model-list refresh.
+            **({"speed_tiers_stale": True} if _speed_tiers_stale(row) else {}),
         }
         for row in rows
     ]
+
+
+def _speed_tiers_stale(row: Dict[str, Any]) -> bool:
+    """A ChatGPT row with a saved model whose tiers its current account didn't fetch.
+
+    Saved before tiers were stored, added by a curated save, or fetched by
+    another account (the row synced from a worker signed in elsewhere): the
+    browser's capability refresh fetches this account's catalog once.
+    """
+    from app.core.model_speed import account_service_tiers, tiers_account
+
+    if preset_kind_for(row) != "chatgpt" or not tiers_account(row.get("codex_account_id")):
+        return False
+    return any(account_service_tiers(row, m) is None for m in row.get("models_json") or [])
 
 
 def _claude_payload() -> Dict[str, object]:

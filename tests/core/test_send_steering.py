@@ -166,7 +166,7 @@ async def test_answer_after_a_mid_turn_setting_change_still_steers(mock_db, chan
     class SwitchingAdapter(_Adapter):
         _options = SimpleNamespace(effort="high", fast=False)
 
-        async def set_run_settings(self, *, effort, fast):
+        async def set_run_settings(self, *, effort, fast, speed=None):
             return {"effort": effort, "fast": fast}
 
         async def set_permission_mode(self, mode):

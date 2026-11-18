@@ -99,9 +99,14 @@ def test_catalog_forwards_filters_and_collects_every_kind(
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: Backend([]))
     data = client.get("/api/v1/generation/catalog?source=openai&model=m&query=cat&limit=3").json()
     assert data["kinds"] == ["image", "video", "audio", "3d"]
+    # A named model is a detail lookup priced fresh next: no listing price read.
     assert calls == [
-        (k, {"source": "openai", "model": "m", "query": "cat", "limit": 3}) for k in data["kinds"]
+        (k, {"source": "openai", "model": "m", "query": "cat", "limit": 3, "listing_prices": False})
+        for k in data["kinds"]
     ]
+    calls.clear()
+    client.get("/api/v1/generation/catalog?kind=image&query=cat&limit=3")
+    assert calls == [("image", {"source": None, "model": None, "query": "cat", "limit": 3})]
 
 
 def test_job_writer_binds_real_session_to_unattended_tool(
@@ -131,6 +136,8 @@ def test_job_writer_binds_real_session_to_unattended_tool(
     entry = candidate()
     pick = entry.choice()
     route = f"/api/v1/generation/jobs/{job_id}/choices/image"
+    backend = FakeBackend([entry])  # the pin is written only after it is quoted
+    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
     response = client.put(route, json=pick)
     assert response.status_code == 200 and response.json()["choice"] == pick
     assert client.get(f"/api/v1/generation/jobs/{job_id}/choices").json()["choices"] == {
@@ -143,8 +150,6 @@ def test_job_writer_binds_real_session_to_unattended_tool(
     context = query_options._generation_context({"image_generation": True}, row, None,
                                                 session_id="run", unattended=True)
     assert context.job_choices == {"image": pick}
-    backend = FakeBackend([entry])
-    monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: backend)
     tool = next(
         t for t in ai_tools_sdk._create_unified_tools(None, context) if t.name == "generateImage"
     )
@@ -200,7 +205,11 @@ def client(mock_db, monkeypatch):
         yield test_client
 
 
-def test_pick_is_remembered_listed_and_forgotten(client):
+def test_pick_is_remembered_listed_and_forgotten(client, monkeypatch):
+    async def priced(*_a, **_kw):
+        # A pick is remembered only once the server-side quote priced it.
+        return {"price": {}, "priced": True, "quote_error": None, "unattended_skip_reason": None, "warning": None}
+    monkeypatch.setattr(api, "_save_time_quote", priced)
     assert client.get("/api/v1/generation/choices").json() == {
         "remembered": {}, "last": {}, "migrated": True, "worker": "worker-a", "kinds": ["image", "video", "audio", "3d"]}
     pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "fal-ai/x", "options": {"size": "wide"}}
@@ -308,3 +317,127 @@ def test_options_list_priced_choices_for_the_settings_picker(client, quote_backe
     assert [o["account"] for o in output["options"]] == ["account-a", "account-b"]
     assert all("price" in o and "schema" in o for o in output["options"])
     assert client.get("/api/v1/generation/options/music").status_code == 404
+
+
+def _fal_entry(model, *media, required=()):
+    """A priced fal candidate whose declared schema takes ``media`` (file inputs)."""
+    from app.services.fal_schema import ModelSchema, ParamField
+    fields = [ParamField("prompt", is_primary_text=True, required=True),
+              *(ParamField(name, type="string", required=name in required) for name in media)]
+    schema = ModelSchema(model, fields, "prompt", input_schema={
+        "type": "object", "properties": {"prompt": {"type": "string"}, **{n: {"type": "string"} for n in media}},
+        "required": ["prompt", *required]})
+    return candidate(account="fal-ai", model=model, schema=schema.to_dict())
+
+
+@pytest.fixture
+def fal_backend(monkeypatch):
+    from app.services import generation_sources
+    backend = QuoteBackend([_fal_entry("fal-ai/text-only"),
+                            _fal_entry("fal-ai/needs-image", "image_url", required=["image_url"])])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    return backend
+
+
+def _pick(model):
+    return {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": model}
+
+
+def test_a_pick_whose_inputs_do_not_fit_its_operation_is_refused_and_not_saved(client, fal_backend):
+    # A text-to-image model cannot take editImage's source image.
+    response = client.put("/api/v1/generation/choices/image?operation=edit-image",
+                          json={"choice": _pick("fal-ai/text-only"), "remember": False})
+    assert response.status_code == 422
+    assert response.json()["detail"] == ("This model does not take a source image, which editImage sends. "
+                                         "It was not saved.")
+    assert client.get("/api/v1/generation/choices").json()["last"] == {}
+    assert not any(call[0] == "prepare" for call in fal_backend.calls)
+    # The same model fits the kind's text operation (no operation: as before).
+    ok = client.put("/api/v1/generation/choices/image", json={"choice": _pick("fal-ai/text-only"), "remember": True})
+    assert ok.status_code == 200 and ok.json()["remembered"] is True
+
+
+def test_remembering_needs_the_text_operation_that_reuses_the_pick(client, fal_backend):
+    # Fits editImage for this one pick, but generateImage (which reads
+    # remembered picks) never sends the image it requires.
+    once = client.put("/api/v1/generation/choices/image?operation=edit-image",
+                      json={"choice": _pick("fal-ai/needs-image"), "remember": False})
+    assert once.status_code == 200 and once.json()["remembered"] is False
+    kept = client.put("/api/v1/generation/choices/image?operation=edit-image",
+                      json={"choice": _pick("fal-ai/needs-image"), "remember": True})
+    assert kept.status_code == 422
+    assert kept.json()["detail"] == "This model needs image_url, which generateImage does not send. It was not saved."
+    listed = client.get("/api/v1/generation/choices").json()
+    assert listed["remembered"] == {} and listed["last"]["image"]["model"] == "fal-ai/needs-image"
+    assert client.put("/api/v1/generation/choices/image?operation=edit-video",
+                      json={"choice": _pick("fal-ai/text-only")}).status_code == 422
+
+
+def test_an_unfit_job_pin_is_refused_but_an_identical_stored_pin_stays(client, fal_backend, monkeypatch):
+    from app.core import generation_choices
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    refused = client.put(route, json=_pick("fal-ai/needs-image"))
+    assert refused.status_code == 422
+    assert refused.json()["detail"] == "This model needs image_url, which generateImage does not send. It was not pinned."
+    assert generation_choices.load_job(IDENTITY, "auto-12345678") == {}
+    # A pin stored before this check (older data) still loads and is kept as is.
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", _pick("fal-ai/needs-image"))
+    kept = client.put(route, json=_pick("fal-ai/needs-image"))
+    assert kept.status_code == 200 and kept.json()["unchanged"] is True
+    assert kept.json()["incompatible"] == "This model needs image_url, which generateImage does not send."
+    assert client.put(route, json=_pick("fal-ai/text-only")).status_code == 200
+    assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/text-only"
+
+
+def test_an_unchanged_legacy_pin_says_what_its_runs_will_really_do(client, fal_backend, monkeypatch):
+    from app.core import generation_choices
+    from app.core.generation_resolver import UNKNOWN_PRICE
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    # Stored before the operation check, with its source image as a saved
+    # option: the resolver merges that and runs it, so it is not "skipped".
+    legacy = {**_pick("fal-ai/needs-image"), "options": {"image_url": "https://example.invalid/a.png"}}
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", legacy)
+    kept = client.put(route, json=legacy).json()
+    assert kept["unchanged"] is True and kept["priced"] is True and kept["unattended_skip_reason"] is None
+    assert kept["warning"] == ("This model needs image_url, which generateImage does not send. "
+                               "It would be refused as a new pin; this job keeps the one it already has.")
+    # Only a pin its runs really refuse (no verified price) is said to be skipped.
+    fal_backend.entries = [replace(e, price=dict(UNKNOWN_PRICE)) for e in fal_backend.entries]
+    unpriced = client.put(route, json=legacy).json()
+    assert unpriced["unchanged"] is True and unpriced["priced"] is False
+    assert unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
+    assert unpriced["warning"] == (kept["warning"] + " This saved choice has no verified price. "
+                                   "Unattended runs will skip it until a price is available.")
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", _pick("fal-ai/text-only"))
+    fit = client.put(route, json=_pick("fal-ai/text-only")).json()
+    assert fit["unchanged"] is True and fit["incompatible"] is None
+    assert fit["warning"] == ("This saved choice has no verified price. "
+                              "Unattended runs will skip it until a price is available.")
+    assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/text-only"
+
+
+def test_an_unchanged_legacy_pin_without_its_source_image_is_not_said_to_be_skipped(client, fal_backend, monkeypatch):
+    # generateImage may pass image_url per call, merged before validation and
+    # pricing, so the saved options failing alone is no skip.
+    from app.core import generation_choices
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    prepare = fal_backend.prepare
+
+    async def validating(c, options, prompt):
+        if c.model == "fal-ai/needs-image" and "image_url" not in options:
+            raise ValueError("Model options do not match the declared input schema.")
+        return await prepare(c, options, prompt)
+    monkeypatch.setattr(fal_backend, "prepare", validating)
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", _pick("fal-ai/needs-image"))
+    kept = client.put(route, json=_pick("fal-ai/needs-image")).json()
+    assert kept["unchanged"] is True and kept["priced"] is False and kept["unattended_skip_reason"] is None
+    assert kept["warning"] == ("This model needs image_url, which generateImage does not send. "
+                               "It would be refused as a new pin; this job keeps the one it already has. "
+                               "A run works only if the call supplies image_url.")
+    assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/needs-image"

@@ -1791,25 +1791,6 @@ class TestImportProfileEndpoint:
         assert "unsupported export version" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
-    async def test_import_profile_empty_name(self):
-        """Importing with empty agent name should fail."""
-        from app.api.agents import import_profile
-        from app.core.models import AgentImportRequest, AgentImportData
-        from fastapi import HTTPException
-
-        # AgentExportData.name is required and can't be None.
-        # Test with empty string which should trigger "name is required" check
-        request = AgentImportRequest(
-            version="1.0",
-            type="ai-shuffle-agent",
-            agent=AgentImportData(name="", description="Empty name agent")
-        )
-
-        with pytest.raises(HTTPException) as exc_info:
-            await import_profile(request, token="test-token")
-
-        assert exc_info.value.status_code == 400
-        assert "name is required" in exc_info.value.detail.lower()
 
     @pytest.mark.asyncio
     async def test_import_profile_with_custom_system_prompt(self):
@@ -2716,6 +2697,82 @@ def test_http_agent_put_accepts_retired_avatar_fields_and_never_returns_them(moc
     assert written["config"]["extension"] == "keep"
     assert written.get("avatar_color") is None
     assert database.get_profile("coloured").get("avatar_color") is None
+
+
+@pytest.mark.parametrize("invalid_name", ["", "🌿" * 101])
+def test_http_agent_update_rejects_invalid_name(authenticated_client, invalid_name):
+    from app.db import database
+
+    database.create_profile("garden", "Garden", "Original", {})
+    response = authenticated_client.put(
+        "/api/v1/agents/garden", json={"name": invalid_name, "description": "Changed"}
+    )
+    assert response.status_code == 422, response.text
+    stored = database.get_profile("garden")
+    assert (stored["name"], stored["description"]) == ("Garden", "Original")
+    listing = authenticated_client.get("/api/v1/agents")
+    assert listing.status_code == 200
+    assert any(row["name"] == "Garden" for row in listing.json())
+
+
+@pytest.mark.parametrize("invalid_name", ["", "🌿" * 101])
+def test_http_agent_import_rejects_invalid_name(authenticated_client, invalid_name):
+    from app.db import database
+
+    response = authenticated_client.post("/api/v1/agents/import", json={
+        "version": "1.0", "type": "ai-shuffle-agent", "agent": {"name": invalid_name},
+        "new_id": "garden",
+    })
+    assert response.status_code == 422, response.text
+    assert database.get_profile("garden") is None
+
+
+def test_http_agent_import_can_rename_a_legacy_export(authenticated_client):
+    response = authenticated_client.post("/api/v1/agents/import", json={
+        "version": "1.0", "type": "ai-shuffle-agent", "agent": {"name": "a" * 101},
+        "new_name": "Rescued export",
+    })
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == "Rescued export"
+
+
+def test_http_nested_agent_writes_reject_invalid_name(authenticated_client):
+    from app.db import database
+
+    database.create_profile("garden", "Garden", None, {})
+    path = "/api/v1/agents/garden/agents"
+    valid = {"name": "Bee", "description": "Original", "prompt": "Pollinate"}
+    created = authenticated_client.post(path, json=valid)
+    assert created.status_code == 201, created.text
+    invalid = {**valid, "name": "🌿" * 101, "description": "Edited"}
+    assert authenticated_client.post(path, json=invalid).status_code == 422
+    assert authenticated_client.put(f"{path}/bee", json=invalid).status_code == 422
+    assert database.get_subagent("bee")["description"] == "Original"
+    listing = authenticated_client.get("/api/v1/agents")
+    assert listing.status_code == 200
+    assert next(row for row in listing.json() if row["id"] == "bee")["name"] == "Bee"
+
+
+def test_http_create_derives_addressable_bounded_ids(authenticated_client):
+    path = "/api/v1/agents"
+    for name, expected_id in [("🌿" * 100, "agent"), ("a" * 100, "a" * 50), ("a" * 100, "a" * 48 + "-1")]:
+        created = authenticated_client.post(path, json={"name": name, "config": {}})
+        assert created.status_code == 201, created.text
+        assert created.json()["id"] == expected_id
+        assert authenticated_client.get(f"{path}/{expected_id}").json()["name"] == name
+
+
+def test_http_agent_names_accept_100_code_points_and_import_ids_leave_room_for_suffix(authenticated_client):
+    payload = {"version": "1.0", "type": "ai-shuffle-agent", "agent": {"name": "a" * 100}}
+    for expected_id in ["a" * 50, "a" * 48 + "-1"]:
+        imported = authenticated_client.post("/api/v1/agents/import", json=payload)
+        assert imported.status_code == 201, imported.text
+        assert imported.json()["id"] == expected_id
+        assert imported.json()["name"] == payload["agent"]["name"]
+
+    renamed = authenticated_client.put(f"/api/v1/agents/{expected_id}", json={"name": "🌿" * 100})
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "🌿" * 100
 
 
 @pytest.mark.parametrize("stored", ["robot", None, "invalid", ["robot"]])

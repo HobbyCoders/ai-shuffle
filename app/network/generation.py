@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import asdict
 from uuid import uuid4
 
-from app.core.generation_resolver import Candidate, RunContext, price_total
+from app.core.generation_resolver import Candidate, RunContext, price_total, same_price
 from app.db.async_database import run_sync
 from app.network import control, engine, runners
 
@@ -45,11 +45,23 @@ async def request(worker, operation, **body):
     return response
 
 
-async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
-    """Ask online peers (or only ``worker``) in parallel, each with a short timeout."""
+async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None, operation=None,
+                  listing_prices=True):
+    """Ask online peers (or only ``worker``) in parallel, each with a short timeout.
+
+    ``operation`` travels as ``media_operation``; an older peer ignores it and
+    lists rows for a text call, so its reply is dropped for any other
+    operation unless a model was named (any category matches a named model).
+    """
+    from app.core import generation_operations
+    text_only = generation_operations.resolve(kind, operation).native
+    # Sent only when off; a peer that ignores it just lists cached prices.
+    extra = {} if listing_prices else {"listing_prices": False}
+
     async def one(peer):
         try:
-            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query,
+                                     limit=limit, prompt=prompt, media_operation=operation, **extra)
         except ValueError as exc:
             # Surface old/unreachable workers rather than silently treating their
             # accounts as absent. No account identities are advertised in presence.
@@ -67,11 +79,82 @@ async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt
             return [Candidate(source or "unavailable", source or peer["device_id"], peer["device_id"],
                               model or "unavailable", kind, False, available=False,
                               reason="Invalid generation catalog from that worker; nothing from it was used.")]
+        if not text_only and not model and response.get("media_operation") != operation:
+            # An older peer ignored the operation: its rows are for a text call.
+            return []
         return found
 
     peers = [p for p in await run_sync(runners.other_workers)
              if p.get("online") and (worker is None or p.get("device_id") == worker)]
     return [c for found in await asyncio.gather(*(one(p) for p in peers)) for c in found]
+
+
+async def fal_pages(kind, *, operation, query=None, offset=0, limit=20, worker=None):
+    """Ask online peers (or only ``worker``) in parallel for one page of fal models.
+
+    Returns ``(served, stale)``. ``served`` holds ``(candidates, total,
+    details, worker, name)`` from each peer that serves fal for ``kind``; its
+    total may be 0 (nothing matches there). A peer without fal is left out.
+    ``stale`` holds ``(worker, name)`` for peers whose older code lists fal but
+    cannot page or filter by operation (or echoes another operation): they
+    need an update before their fal models can be browsed.
+    """
+    peers = [p for p in await run_sync(runners.other_workers)
+             if p.get("online") and (worker is None or p.get("device_id") == worker)]
+
+    async def one(peer):
+        device = peer["device_id"]
+        try:
+            response = await request(device, "catalog", kind=kind, source="fal", query=query,
+                                     limit=max(1, min(limit, 50)), media_operation=operation,
+                                     page={"offset": offset, "limit": limit})
+            found = [Candidate.from_wire(item) for item in response.get("candidates", [])]
+        except (ValueError, TypeError, AttributeError):
+            return None
+        page = response.get("page")
+        if not isinstance(page, dict):
+            # Older code answered with its plain catalog: one unfiltered first page.
+            return "stale" if any(c.source == "fal" for c in found) else None
+        if response.get("media_operation") != operation or type(page.get("total")) is not int:
+            return "stale"
+        # A peer before ``serves`` sent total 0 when it had no fal.
+        if page.get("serves") is False or (page.get("serves") is not True and page["total"] == 0):
+            return None
+        if any(c.source != "fal" or c.kind != kind or c.worker != device for c in found):
+            return None
+        details = page.get("details") if isinstance(page.get("details"), dict) else {}
+        return found, page["total"], details, device, peer.get("device_name") or device
+
+    served, stale = [], []
+    for peer, answer in zip(peers, await asyncio.gather(*(one(p) for p in peers))):
+        if answer == "stale":
+            stale.append((peer["device_id"], peer.get("device_name") or peer["device_id"]))
+        elif answer is not None:
+            served.append(answer)
+    return served, stale
+
+
+def stale_notice(name: str) -> str:
+    return f"Update {name} to browse its fal.ai models here."
+
+
+async def catalog_page(kind, *, operation, worker, query=None, offset=0, limit=20):
+    """One page of fal models from peer ``worker``, the one the user picked.
+
+    There is no implicit winner between workers: the caller names the worker
+    (the provider list has one fal row per serving worker). Returns
+    ``(candidates, total, details, notice)``; ``total`` None means that worker
+    cannot answer now (offline, no fal, or older code) and ``notice`` says so.
+    """
+    served, stale = await fal_pages(kind, operation=operation, query=query, offset=offset, limit=limit, worker=worker)
+    if served:
+        found, total, details, _, _ = served[0]
+        return found, total, details, None
+    if stale:
+        return [], None, {}, stale_notice(stale[0][1])
+    peer = await run_sync(runners.find, worker)
+    name = (peer or {}).get("device_name") or "That worker"
+    return [], None, {}, f"{name} is not serving fal.ai models right now. Reload to try again."
 
 
 async def prepare(candidate, options, prompt, context):
@@ -153,7 +236,27 @@ async def handle(body, from_device):
     limit = body.get("limit", 15)
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Generation catalog limit must be between 1 and 50.")
-    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit, prompt=body.get("prompt"))
+    media_operation = body.get("media_operation")
+    from app.core import generation_operations
+    if media_operation is not None and (not isinstance(media_operation, str)
+                                        or media_operation not in generation_operations.OPERATIONS):
+        raise ValueError("Unknown generation operation.")
+    page = body.get("page")
+    if operation == "catalog" and isinstance(page, dict):
+        offset, size = page.get("offset", 0), page.get("limit", 20)
+        if type(offset) is not int or type(size) is not int or offset < 0 or not 1 <= size <= 50:
+            raise ValueError("Invalid generation catalog page.")
+        served = await backend.fal_page(kind, operation=media_operation, query=body.get("query"),
+                                        offset=offset, limit=size)
+        found, total, details = served or ([], 0, {})
+        # ``serves`` tells a worker without fal for this kind from an empty page.
+        return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in found], "media_operation": media_operation,
+                "page": {"total": total, "offset": offset, "details": details, "serves": served is not None}}
+    # prepare/execute price the one candidate fresh, so they skip listing rates.
+    listing_prices = operation == "catalog" and body.get("listing_prices") is not False
+    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"),
+                                             limit=limit, prompt=body.get("prompt"), operation=media_operation,
+                                             listing_prices=listing_prices)
     if kind == "image":
         # The holding worker applies its own ChatGPT-plan image rule (#1796):
         # it never spends on a fal image its own generateImage would refuse.
@@ -164,7 +267,7 @@ async def handle(body, from_device):
                 raise ValueError(sub.fal_image_refusal())
             candidates = [c for c in candidates if c.source != "fal"]
     if operation == "catalog":
-        return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in candidates]}
+        return {"version": WIRE_VERSION, "candidates": [asdict(c) for c in candidates], "media_operation": media_operation}
     if operation not in ("prepare", "execute") or len(candidates) != 1:
         raise ValueError("No unique matching generation source/account and model on this worker.")
     candidate = candidates[0]
@@ -176,7 +279,7 @@ async def handle(body, from_device):
     candidate = await backend.prepare(candidate, options, prompt)
     if operation == "prepare":
         return {"version": WIRE_VERSION, "candidate": asdict(candidate)}
-    if price_total(candidate.price) is None or candidate.price != body.get("price"):
+    if price_total(candidate.price) is None or not same_price(candidate.price, body.get("price")):
         raise ValueError("The generation price changed or is unavailable. Request a new quote before submitting.")
     if not await run_sync(claim, body.get("command_id")):
         raise ValueError("This generation command was already submitted; its outcome may be unknown. No retry was made.")

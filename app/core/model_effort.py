@@ -237,8 +237,12 @@ def effort_preference_key(model: str | None) -> str:
 
 
 MODEL_FAST_PREFIX = "composer.modelFast."
+#: The composer's Ultrafast pick per model (``"ultrafast"`` or null). It only
+#: refines a ``composer.modelFast`` record that is on, so a client that knows
+#: only Fast keeps reading that one and runs the model on Fast.
+MODEL_SPEED_PREFIX = "composer.modelSpeed."
 #: Per-model composer records whose clears are kept as replicated nulls.
-MODEL_PREFERENCE_PREFIXES = (MODEL_EFFORT_PREFIX, MODEL_FAST_PREFIX)
+MODEL_PREFERENCE_PREFIXES = (MODEL_EFFORT_PREFIX, MODEL_FAST_PREFIX, MODEL_SPEED_PREFIX)
 
 
 def fast_preference_key(model: str | None) -> str:
@@ -246,11 +250,17 @@ def fast_preference_key(model: str | None) -> str:
     return MODEL_FAST_PREFIX + quote(canonical_effort_model(model), safe="-_.!~*'()")
 
 
+def speed_preference_key(model: str | None) -> str:
+    from urllib.parse import quote
+    return MODEL_SPEED_PREFIX + quote(canonical_effort_model(model), safe="-_.!~*'()")
+
+
 def canonical_model_preference_key(key: str) -> str:
     """One stored key per model, however the client spelled the model id."""
     from urllib.parse import unquote
     for prefix, build in ((MODEL_EFFORT_PREFIX, effort_preference_key),
-                          (MODEL_FAST_PREFIX, fast_preference_key)):
+                          (MODEL_FAST_PREFIX, fast_preference_key),
+                          (MODEL_SPEED_PREFIX, speed_preference_key)):
         if key.startswith(prefix):
             return build(unquote(key[len(prefix):]))
     return key

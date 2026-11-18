@@ -25,8 +25,28 @@ The same source/account/model/options on several workers is one option: a usable
 local holder is preferred, otherwise the holder is chosen by worker ID. Different
 accounts or options remain separate. A single quoted match exposes its price both
 on the option and at the top level; with several matches, read each option's price.
-Default options are resolved by the same pricing code used for generation. Prices
-that depend on missing call inputs (for example text length) remain unknown.
+Default options are resolved by the same pricing code used for generation. fal
+prices come from fal's per-endpoint rate and unit (image, megapixel, second,
+minute, second blocks such as "5 seconds", characters, video tokens). A
+quantity set to `auto` or left unset is priced at the largest value the
+model declares (for example the longest duration), so the estimate never
+under-reserves the daily cap. An estimate built on such an assumption carries
+`price.basis`, for example `length up to 30 s (the model picks it)`. Picking
+the options lowers the quote to what they cost.
+
+A price that still cannot be computed has `status: "unknown"`, null
+`amount`/`total` (never zero), a machine-readable `price.reason`, a sentence
+in `price.detail` and, when fal lists one, its raw `price.rate`
+(`{"amount": "0.0214", "unit": "1000 tokens"}`). Reasons are
+`no_pricing_row`, `pricing_request_failed`, `schema_unavailable`,
+`unsupported_unit`, `billed_by_usage`, `depends_on_input` (for example input
+video length), `needs_option` (pick a size or length), `length_not_declared`,
+`needs_prompt`, `rate_not_listed` and `invalid_options`.
+
+Catalog and search listings may reuse fal rates read in the last few hours.
+Admitting a run (the quote behind the cap, the confirmation and a peer's
+submit check) reads fal's current rate; if that read fails the price is
+`pricing_request_failed` and nothing is submitted.
 
 `searchModels` returns compact schemas by default: declared field names, types,
 required flags, enums, defaults and numeric bounds, without descriptions or the
@@ -41,7 +61,17 @@ Media-related boolean switches such as `generate_audio` stay boolean, not file i
 Every call to the four generation tools or `runFalModel`, including subscription
 images priced **Included**, goes through the guard below: a known price,
 confirmation above the threshold and the daily cap. Nothing unpriced is
-submitted, including unattended calls.
+submitted unattended. One interactive exception: in a chat turn with a
+permission prompt, a local fal model whose listed rate applies but whose
+quantity is unknown (`billed_by_usage`, `depends_on_input`, `needs_option`,
+`length_not_declared`) may run once if the user approves it on that prompt.
+A missing, failed or inapplicable rate (`rate_not_listed`, for example
+Seedance at 4k) never qualifies. The prompt shows fal's rate and says the
+total is not bounded; one billing unit is reserved against the daily cap
+first, and a full cap refuses it. Remote workers, unattended runs and clients
+without a prompt keep refusing. If fal's price differs after any approval,
+the call returns `reason: "price_changed"` with the new price and submits
+nothing. The choice card never remembers an unpriced pick.
 
 - **Remembered choices.** A call without `source` or `model` uses the
   account's remembered choice for that kind (see below) without asking, in
@@ -127,6 +157,60 @@ unknown amounts are null, never zero. Native account-disabled routes remain
 visible with their verified combination and price but `available: false`.
 Ordinary API users see only their own permitted sources, not owner accounts.
 Catalog lookup submits no generation; a quote/admission must still recheck cost.
+An optional `operation` (it needs `kind`) limits fal entries to that operation,
+and `worker` asks only that worker (the picker reads a browsed row's options from
+the worker that listed it). A lookup that names a `model` is a detail read that is
+quoted next: it reads no listing price, so it never waits on a listing rate read.
+With `operation`, a fal model whose declared inputs that operation's tool cannot
+fill is `available: false` with the reason, so it cannot be picked. The check
+models the request the tool really builds: the endpoint it calls (a base
+`nano-banana` id is sent to its `/edit` endpoint, a `text-to-video` id to its
+`image-to-video` twin), the field its one source goes in (`kontext` edits send
+`image_url`, so `kontext/max/multi`, which needs `image_urls`, is refused) and
+the fields it never sends (such as `mask_url`). Every picker sends an operation: the chat card sends
+the tool call's, and Settings and the automation picker send the one the browsed
+list was for (the kind's text operation).
+
+### Provider and model listing
+
+The model picker lists in two steps, for one kind and one operation. Operations
+are `text-to-image`, `edit-image`, `reference-to-image`, `text-to-video`,
+`image-to-video`, `reference-to-video`, `extend-video`, `text-to-audio`,
+`audio-to-audio`, `text-to-3d` and `image-to-3d`; each belongs to one kind and one
+generate tool, and the default is the kind's text operation. An unknown operation,
+or one of another kind, is a `422`.
+
+`GET /api/v1/generation/providers/{kind}?operation=` returns `kind`, `operation`,
+`operation_label` and `providers`. Each provider has `source`, `account`,
+`workers`, `available`, `reason` and `native`. Accounts are merged across your
+workers. fal is listed once per worker that holds a fal key, each row with that
+`worker`, its `worker_name` and its `model_count`, because each worker lists its
+own catalog: the user picks the worker. A worker running older code that cannot
+page or filter by operation is its own unavailable row with the reason "Update
+<worker> to browse its fal.ai models here." With no keyed worker there is one
+unavailable fal row saying so; while images use the ChatGPT plan, fal rows are
+unavailable with that reason. Plan accounts only generate from a prompt, so they
+are not offered for edit, reference, extend or image-to operations. A fal row is
+available when its worker holds a key and lists models for the operation; one
+model's missing schema never hides it.
+
+`GET /api/v1/generation/models/{kind}` returns one page of one provider's models.
+Parameters are `source` (default `fal`, or an account), `operation`, `query`
+(server-side search on the model ID, name and description), `offset` and `limit`
+(1–50, default 20), and `worker` for fal (a fal provider row's `worker`; omitted
+means this worker). The response has `models`, `total`, `offset`, `limit`,
+`has_more`, `worker`, `notice` and `available`. Rows are catalog entries plus fal's `name`, `category` and
+`description`, and a `status`. A page reads fal's rates in one batch and no
+schemas, so a fal row is `unpriced` with `price.reason: "not_quoted"` and the raw
+`price.rate` until its schema is cached; then it carries a real price. A model fal
+has no rate for keeps its own reason (for example `no_pricing_row`). When fal's
+pricing service is rate limited, the page keeps rates it already knows and marks
+the rest `pricing_request_failed`. Unknown totals are null, never zero. fal pages
+come only from the named worker, never another, so pages never mix two catalogs; a
+search with no match there is simply empty. When that worker cannot answer
+(offline, no longer keyed, or running older code that cannot page), the page is
+empty with `available: false` and a `notice` saying why; the picker keeps the rows
+it already shows and offers a reload.
 
 `PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
 (`source` or `account`, `model`, optional `worker`, `options`).
@@ -138,10 +222,25 @@ For scheduled automation jobs, owner-only
 `GET /api/v1/generation/jobs/{automation_id}/choices` returns `job_id` and a
 per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
 it must pin `account`, `worker` and `model` (and may include `source`, `options`).
-Its response adds the same save-time `price`, `priced`, `quote_error`,
-`unattended_skip_reason` and `warning` as a remembered pick (below).
+Like remembering, it is stored only after a server-side quote priced it, with
+nothing submitted: a pick that is unavailable or has no verified price is a `409`
+saying why, and the job keeps the choice it had. Saving the job again with the
+exact pin it already has is not a new pin: it stays, with `unchanged: true` and
+a warning. The warning says unattended runs will skip it only when they would (no
+verified price, or unavailable). A pin stored before the operation check that would
+now be refused as a new pin (its `incompatible` reason) is kept and said to be
+refused only as a new pin, since runs still merge its saved options and the call's.
+When its saved options alone leave a required input to the call (such as
+`image_url`), the warning says a run works only if the call supplies it, and
+`unattended_skip_reason` is null. An optional `operation`
+query parameter (default: the kind's text operation) names what the pick is for;
+a fal model whose inputs do not fit it, or the text operation that runs pinned
+picks, is a `422` naming the reason, and nothing is pinned. The response adds the save-time
+`price`, `priced`, `quote_error`, `unattended_skip_reason` and `warning`.
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
-protection as preferences. Job choices are account-scoped preferences, separate
+protection as preferences. The generic `/api/v1/preferences/{key}` route refuses
+(`403`) writes to remembered picks, favourites and job pins (`generation.choice.*`,
+`generation.favourite.*`, `generation.job.*`), so none skips these checks. Job choices are account-scoped preferences, separate
 from favourites and remembered picks. A run session's stored `automation_id`
 binds these choices in the production RunContext; tool arguments cannot invent
 a job binding. Each kind uses its job choice first, then its remembered choice.
@@ -165,13 +264,19 @@ Owner sessions with the app-config tools enabled can call
 `get` returns remembered picks (optionally filtered by `kind`) without migrating
 legacy settings. Writes require a kind and `confirm: true` after the user's
 acknowledgment; `remember` also requires a `choice` using discovered source/account,
-model, worker and declared options. No caller-supplied preference identity is used.
+model, worker and declared options. Like the card, `remember` first takes a fresh
+quote: a pick without a verified price is not remembered, the current default stays,
+and the result is `success: false` with the price `reason`. No caller-supplied
+preference identity is used.
 Only interactive owner turns can write: unattended runs (including automation,
 background, delegated, hidden and voice sessions) cannot save their own choices,
 even with `confirm: true`. Discovery callers default to read-only.
 
 An optional `job_id` targets an existing automation instead of the remembered pick.
-A job choice must pin account, worker and model. Read/remember/forget use the same
+A job choice must pin account, worker and model. A job pin goes through the same
+writer as `PUT .../jobs/{automation_id}/choices/{kind}`: an unfit or unpriced new pin
+is refused (`success: false` with the reason) and nothing is written; the pin the job
+already has is kept with `unchanged: true` and the same warning in `message`. Read/remember/forget use the same
 store as the HTTP APIs and the production run context; favourites remain separate.
 Every generation call re-reads the stored choices, so a write takes effect on the
 next call, including later turns of a Claude session whose tool server lives as long
@@ -276,12 +381,19 @@ preferences:
   copied. A remembered choice is never overwritten by the migration.
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
-saves a pick (`remember: false` records only the last choice). The save response
-includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
+saves a pick (`remember: false` records only the last choice). An optional
+`operation` query parameter (default: the kind's text operation) names what the
+pick is for. A fal model whose inputs do not fit that operation's tool is a `422`
+with the reason and nothing is saved; with `remember: true` it must also fit the
+kind's text operation, which is the one that reuses remembered picks. Choices
+saved without an operation keep loading and resolving as before. A pick is
+remembered only when the server-side quote priced it; otherwise it is saved as
+the last choice only, with `remembered: false` and a warning saying so. The save
+response includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the
 choice cannot run unattended. An unpriced model reports `stored_choice_unpriced`.
 An unavailable account/model or failed quote reports `stored_choice_unavailable`,
 with the quote's error in `quote_error` and the warning. The optional quote has a
-two-second timeout; a failed quote does not lose the saved pick. No price is inferred
+two-second timeout; a failed quote keeps the pick as the last choice. No price is inferred
 for an unpriced model, and saving never reserves or submits a generation. Frontend
 clients must display this warning after saving or remembering a pick: the chat
 choice card, Settings, Default models and the automation editor show the fresh
@@ -292,6 +404,15 @@ in view. A collapsed chat card still says unattended runs will skip the pick.
 and `POST /api/v1/generation/quote` validates options against the model's
 declared schema and prices them, with nothing reserved or submitted. Settings,
 Default models shows and changes the remembered choice per kind.
+
+The chat choice card opens on the agent's recommended options and your saved or
+last pick, so the common case is one click. **All models** opens the same
+provider, then model, then options picker that Settings, Default models and the
+automation job picker use. Pick a provider, search or page its models for the
+operation the tool call needs, then set the model's declared options. The price
+is quoted again with `/quote` as options change. Models without a known price
+show "Unknown" with fal's reason; the remember, threshold and daily-limit rules
+above apply unchanged.
 
 ## Confirmation contract
 
@@ -367,7 +488,12 @@ can use the largest allowed preset only when every enum option has known
 dimensions. Fractional billing units round up for each output. A catalog-only
 character price has unknown total until text is supplied. Unsupported units
 (including tokens and compute time), unbounded dimensions or ambiguous
-duration/count parameters refuse submission rather than guess. Conditional
+duration/count parameters refuse submission rather than guess. A duration's unit
+counts only when it belongs to the field's own value: its name (`duration_seconds`),
+units on its enum values (`"5s"`), a range of its values with a unit ("4 to 30s")
+that bounds it, or a sentence about the field that names its unit ("Duration of
+the video in seconds", "Clip length (seconds)"). Other mentions of seconds, such
+as how long rendering takes, do not count. Conditional
 pricing formulas are not inferred from arbitrary resolution names.
 
 OpenAI/xAI API-key images run only with the exact reviewed record above, priced

@@ -373,6 +373,9 @@ async def seed_default() -> dict:
             boundary.turn(prompt, answer=answer)
         await run_sync(boundary.save)
 
+    from scripts.devloop.fake_agy import seed_usage
+
+    await run_sync(seed_usage)
     return {
         "provider_id": provider_id, "model": model, "agent_id": DEV_AGENT_ID,
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,

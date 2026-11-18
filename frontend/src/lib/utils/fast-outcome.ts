@@ -9,14 +9,14 @@
 
 export const FAST_OUTCOME_SUBTYPE = 'fast_outcome';
 
-export type FastOutcome = 'fast' | 'partial' | 'standard' | 'unknown';
+export type FastOutcome = 'fast' | 'ultrafast' | 'partial' | 'standard' | 'unknown';
 
 export interface FastOutcomeNoteView {
 	outcome: FastOutcome;
 	text: string;
 }
 
-const OUTCOMES: readonly string[] = ['fast', 'partial', 'standard', 'unknown'];
+const OUTCOMES: readonly string[] = ['fast', 'ultrafast', 'partial', 'standard', 'unknown'];
 
 /** The note for a `fast_outcome` system row, else null. */
 export function fastOutcomeNoteView(
@@ -51,4 +51,10 @@ export function fastChangeWaits(state: {
  */
 export function fastAppliesNotice(fastEnabled: boolean): string {
 	return `Fast mode turns ${fastEnabled ? 'on' : 'off'} with your next message. This turn finishes at its current speed.`;
+}
+
+/** The same notice for the three-way speed picker, naming the tier picked. */
+export function speedAppliesNotice(speed: 'standard' | 'fast' | 'ultrafast'): string {
+	const name = speed === 'ultrafast' ? 'Ultrafast' : speed === 'fast' ? 'Fast' : 'Standard';
+	return `${name} speed applies from your next message. This turn finishes at its current speed.`;
 }

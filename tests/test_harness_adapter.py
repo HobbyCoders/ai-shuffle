@@ -1327,7 +1327,8 @@ async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_swi
         question, = handler.get_pending_questions(sid)
         assert question["nonblocking"] is True
         assert await control.handle("run-settings", {"session_id": sid, "fast": True},
-                                    from_device="dev_desktopworker") == {"effort": "high", "fast": True}
+                                    from_device="dev_desktopworker") == {"effort": "high", "fast": True,
+                                                                             "speed": "fast"}
         assert (await control.handle("question", {
             "session_id": sid, "request_id": question["request_id"],
             "answers": {"Route?": "Deploy from ServerWorker"},
@@ -1527,9 +1528,16 @@ async def test_native_slash_submission_expands_from_selected_sources(tmp_path, m
         events = await _collect(adapter)
         assert isinstance(events[-1], ResultMessage)
         assert requests
-        assert expected in str(requests[0].messages)
+        from fluid.providers.anthropic.serialize import build_request_body
+
+        user = next(m for m in requests[0].messages if m.role == "user")
+        assert user.prompt_text() == "/greet world"
+        wire = build_request_body(requests[0])["messages"]
+        texts = [b["text"] for m in wire if m["role"] == "user"
+                 for b in m["content"] if b["type"] == "text"]
+        assert expected in texts
         if sources:
-            assert "/greet world" not in str(requests[0].messages)
+            assert all("/greet world" not in text for text in texts)
     finally:
         await adapter.disconnect()
 

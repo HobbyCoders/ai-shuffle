@@ -1319,6 +1319,7 @@ async def get_live_session(
     # Compute session metadata from DB session — included in all response
     # paths so the frontend can correct any stale state on switch.
     from app.core.workspace_folders import normalize_workspace_project_ids
+    from app.core.model_speed import resolve_speed
     session_meta = {
         "updated_at": serialize_session_updated_at(session.get("updated_at")),
         "mode": session.get("mode"),
@@ -1338,6 +1339,9 @@ async def get_live_session(
         "profile_id": session.get("profile_id"),
         "permission_mode": session.get("permission_mode"),
         "fast": bool(session.get("fast")),
+        # The tier refining it (standard/fast/ultrafast); older clients read
+        # only ``fast``, which is on for Ultrafast too.
+        "speed": resolve_speed(session.get("fast"), session.get("speed")),
         # Runtime status is not Active/Settled membership or composer availability.
         "status": session.get("status"),
         # A subagent's chat shows no Git or private-access controls.

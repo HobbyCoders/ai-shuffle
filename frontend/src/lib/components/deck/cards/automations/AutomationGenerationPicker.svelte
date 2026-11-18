@@ -5,12 +5,13 @@
  import { workerInstalls } from '$lib/stores/worker-presence';
  import { getErrorMessage } from '$lib/api/client';
  import { getProviders, getModelLabel, decodeProviderModel } from '$lib/constants/models';
- import { choiceOf, formatValue, modelLabel, priceView, saveOutcome, sourceLabel,
+ import { LatestRequests, choiceOf, formatValue, modelIdentity, modelLabel, optionsKey, priceView, quoteKey, saveOutcome, sourceLabel,
   type GenerationChoice, type GenerationKind, type GenerationOption, type GenerationPrice,
-  type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
+  type ModelRow, type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
  import { SettingRow, SelectField, Switch, InlineBanner } from '$lib/components/layout/view';
  import TextField from '$lib/components/settings/rows/TextField.svelte';
  import TextAreaField from '$lib/components/layout/view/TextAreaField.svelte';
+ import GenerationModelBrowser from '$lib/components/chat/GenerationModelBrowser.svelte';
  let { kind, options, onpick, pickLabel = 'Pin to this job' }: {
   kind: GenerationKind; options: GenerationOption[];
   onpick: (choice: GenerationChoice) => Promise<Partial<SaveQuote> | void>; pickLabel?: string;
@@ -18,19 +19,32 @@
  const QUOTE_DEBOUNCE_MS = 350;
  let selected = $state(untrack(() => Math.max(0,options.findIndex(o => o.available))));
  let values = $state<Record<string,unknown>[]>(untrack(() => options.map(o => ({...o.options}))));
- let quotes = $state<(GenerationPrice | null)[]>(untrack(() => options.map(o => o.price)));
- let quoteError = $state<string | null>(null);
- let quoting = $state(false);
+ // Quotes are kept by model identity and exact options (quoteKey), as on the chat card.
+ let quoted = $state<Record<string, { price: GenerationPrice | null; error: string | null }>>({});
+ let asking = $state<Record<string, true>>({});
+ let shown = $state<Record<string, GenerationPrice>>({});
  let saving = $state(false);
  let saveError = $state<string | null>(null);
  let advancedOpen = $state(false);
  let outcome = $state<SaveOutcome | null>(null);
  let tick = $state(0);
  let quoteTimer: ReturnType<typeof setTimeout> | null = null;
- let quoteSeq = 0;
+ let timerKey: string | null = null;
+ let destroyed = false;
+ // Only the newest request for a key settles it, as on the chat card.
+ const requests = new LatestRequests();
  const prompt = '';
- const current = $derived(options[selected]);
- const currentPrice = $derived(priceView(quotes[selected],kind));
+ // A model picked from the shared browser joins the options as one extra slot.
+ let browsed = $state<GenerationOption | null>(null);
+ let browseOpen = $state(false);
+ let browseLoading = $state(false);
+ let browseError = $state<string | null>(null);
+ const list = $derived(browsed ? [...options, browsed] : options);
+ const current = $derived(list[selected]);
+ const currentQuote = $derived(quoteAt(selected));
+ const currentPrice = $derived(priceView(currentQuote.price,kind));
+ const quoting = $derived(currentQuote.pending);
+ const quoteError = $derived(currentQuote.error);
  const here = $derived(generationChoices.worker);
  function displayModel(model: string): string {
   if (decodeProviderModel(model)) {
@@ -161,43 +175,119 @@
 	}
 
 	function resetAdvanced() {
-		values = values.map((v, i) => (i === selected ? { ...options[i].options } : v));
-		quotes = quotes.map((q, i) => (i === selected ? options[i].price : q));
-		quoteError = null;
+		cancelQuote();
+		values = values.map((v, i) => (i === selected ? { ...list[i].options } : v));
 	}
 
-	function scheduleQuote() {
+	/** A suggested option as it came carries its price; anything else is fresh only once quoted as it stands. */
+	function quoteAt(index: number) {
+		const option = list[index];
+		if (!option) return { price: null, error: null, pending: false };
+		const key = quoteKey(option, values[index]);
+		const stale = shown[modelIdentity(option)] ?? option.price;
+		const done = quoted[key]
+			?? (index < options.length && optionsKey(values[index]) === optionsKey(option.options) ? { price: option.price, error: null } : null);
+		if (!done) return { price: stale, error: null, pending: true };
+		return { price: done.error ? stale : done.price, error: done.error, pending: !!asking[key] };
+	}
+
+	function unask(key: string | null) {
+		if (!key) return;
+		const { [key]: _drop, ...rest } = asking;
+		void _drop;
+		asking = rest;
+	}
+
+	function cancelQuote() {
 		if (quoteTimer) clearTimeout(quoteTimer);
-		quoting = true;
-		const index = selected;
-		const seq = ++quoteSeq;
+		quoteTimer = null;
+		if (timerKey) requests.drop(timerKey);
+		unask(timerKey);
+		timerKey = null;
+	}
+
+	function scheduleQuote(index = selected, delay = QUOTE_DEBOUNCE_MS) {
+		const option = list[index];
+		if (!option) return;
+		const chosen = { ...values[index] };
+		const key = quoteKey(option, chosen);
+		cancelQuote();
+		const token = requests.begin(key);
+		asking = { ...asking, [key]: true };
+		timerKey = key;
 		quoteTimer = setTimeout(async () => {
 			quoteTimer = null;
+			timerKey = null;
+			let result: { price: GenerationPrice | null; error: string | null };
 			try {
-				const quote = await generationChoices.quote(kind, choiceOf(options[index], values[index]), prompt);
-				if (seq !== quoteSeq) return;
-				if (quote.ok && quote.price) {
-					quotes = quotes.map((q, i) => (i === index ? quote.price! : q));
-					quoteError = null;
-					tick++;
-				} else {
-					quoteError = quote.error || 'These options cannot be priced.';
-				}
+				const quote = await generationChoices.quote(kind, choiceOf(option, chosen), prompt);
+				result = quote.ok && quote.price ? { price: quote.price, error: null } : { price: null, error: quote.error || 'These options cannot be priced.' };
 			} catch (e) {
-				if (seq === quoteSeq) quoteError = getErrorMessage(e, 'Could not update the price.');
-			} finally {
-				if (seq === quoteSeq) quoting = false;
+				result = { price: null, error: getErrorMessage(e, 'Could not update the price.') };
 			}
-		}, QUOTE_DEBOUNCE_MS);
+			if (destroyed || !requests.settle(key, token)) return;
+			quoted = { ...quoted, [key]: result };
+			if (result.price) {
+				shown = { ...shown, [modelIdentity(option)]: result.price };
+				if (key === quoteKey(list[selected], values[selected])) tick++;
+			}
+			unask(key);
+		}, delay);
 	}
 
- onDestroy(() => { if (quoteTimer) clearTimeout(quoteTimer); quoteSeq++; });
- const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving);
+	function retryQuote() {
+		if (!current) return;
+		const { [quoteKey(current, values[selected])]: _drop, ...rest } = quoted;
+		void _drop;
+		quoted = rest;
+	}
+
+	// The selection is quoted once as it stands (a browsed model, unquoted
+	// edits), after the edit debounce, so stepping through models sends no burst.
+	$effect(() => {
+		const option = current;
+		// Not while a browsed model loads: the user has moved on from this one.
+		if (!option?.available || saving || browseLoading) return;
+		const state = quoteAt(selected);
+		if (state.pending && !asking[quoteKey(option, values[selected])]) untrack(() => scheduleQuote(selected));
+	});
+
+ onDestroy(() => { destroyed = true; requests.reset(); if (quoteTimer) clearTimeout(quoteTimer); });
+ // A browsed model still loading means the user moved on from the current one.
+ const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !browseLoading);
+ let browseSeq = 0;
+ /** Select an option; a model still loading and the left row's unsent quote are dropped. */
+ function select(index: number) {
+  browseSeq++; browseLoading = false;
+  if (index !== selected) cancelQuote();
+  selected = index; saveError = null;
+ }
+ async function pickBrowsed(row: ModelRow, listed?: string) {
+  browseError = null;
+  const existing = list.findIndex(o => o.model === row.model && o.account === row.account && o.worker === row.worker);
+  if (existing >= 0 && list[existing].available) { select(existing); return; }
+  const mine = ++browseSeq;
+  // Moving to another row: the previous model's unsent quote is dropped.
+  cancelQuote();
+  browseLoading = true;
+  try {
+   // The detail lookup checks the model's inputs against the operation it was listed for.
+   const option = await generationChoices.optionFor(kind, row, listed);
+   if (mine !== browseSeq || destroyed) return; // a later pick (or a reselect) won
+   const slot = options.length;
+   browsed = option;
+   values = [...values.slice(0, slot), { ...option.options }];
+   selected = slot; saveError = null;
+  } catch (error) { if (mine === browseSeq) browseError = getErrorMessage(error, 'Could not load this model.'); }
+  finally { if (mine === browseSeq) browseLoading = false; }
+ }
  async function use() {
   if (!canUse || !current) return;
+  // A save voids every quote still out: none may settle state after it starts.
+  cancelQuote(); requests.reset(); asking = {};
   saving = true; saveError = null; outcome = null;
-  try { const result = await onpick(choiceOf(current,values[selected])); outcome = saveOutcome(result || null,kind); }
-  catch (error) { saveError = getErrorMessage(error,'Could not use this choice.'); }
+  try { const result = await onpick(choiceOf(current,values[selected])); if (!destroyed) outcome = saveOutcome(result || null,kind); }
+  catch (error) { if (!destroyed) saveError = getErrorMessage(error,'Could not use this choice.'); }
   finally { saving = false; }
  }
 </script>
@@ -205,10 +295,18 @@
  <SettingRow label="Source and model">
   {#snippet expanded()}
    <SelectField label="Source and model" width={620} value={String(selected)}
-    options={options.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
-    onchange={(value) => {selected=Number(value);quoteError=null;saveError=null;}} />
+    options={list.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
+    onchange={(value) => select(Number(value))} />
   {/snippet}
  </SettingRow>
+ <button class="st-btn" aria-expanded={browseOpen} onclick={() => { browseOpen = !browseOpen; if (!browseOpen) { browseSeq++; browseLoading = false; } }}>All models</button>
+ {#if browseOpen}
+  <div class="picker-browse">
+   <GenerationModelBrowser {kind} selected={current} onpick={pickBrowsed} />
+   {#if browseLoading}<p class="st-note" role="status">Loading the model's options…</p>{/if}
+   {#if browseError}<div role="alert"><InlineBanner>{browseError}</InlineBanner></div>{/if}
+  </div>
+ {/if}
  {#if current}
   <p class="st-note">{current.reason || `${sourceLabel(current.source)} · ${displayModel(current.model)}`}</p>
   <p class="st-note">{currentPrice.figure} {currentPrice.note}</p>
@@ -231,12 +329,13 @@
    <button class="st-btn" onclick={resetAdvanced}>Reset options</button>
   {/if}
  {/if}
- {#if quoteError}<div role="alert"><InlineBanner>{quoteError}</InlineBanner></div>{/if}
+ {#if quoteError}<div role="alert"><InlineBanner>{quoteError} <button type="button" class="st-btn" onclick={retryQuote}>Try again</button></InlineBanner></div>{/if}
  {#if saveError}<div role="alert"><InlineBanner>{saveError}</InlineBanner></div>{/if}
  {#if outcome}<div role={outcome.warning ? 'alert' : 'status'}><InlineBanner tone={outcome.warning ? 'warn' : 'info'}>Pinned to this job: {outcome.figure} {outcome.warning || outcome.note}</InlineBanner></div>{/if}
  <div class="picker-actions"><button class="st-btn primary" disabled={!canUse} onclick={use}>{saving ? 'Saving…' : quoting ? 'Checking price…' : pickLabel}</button></div>
 </div>
 <style>
  .picker { font-size:13px; }
+ .picker-browse { margin:8px 0 12px; }
  .picker-actions { display:flex; justify-content:flex-end; margin:16px 0; }
 </style>

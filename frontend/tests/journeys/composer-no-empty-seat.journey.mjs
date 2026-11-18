@@ -230,6 +230,8 @@ await runJourney({
 				made: e.timeStamp, handled: performance.now(), on: e.target.closest?.('button')?.getAttribute('aria-label') ?? null
 			}), true));
 			const cdp = await page.context().newCDPSession(page);
+			let signalStall;
+			await page.exposeFunction('__journeyStallStarted', () => signalStall());
 			for (const stalled of [false, true]) {
 				const what = stalled ? 'a double tap the page handles late, behind a busy main thread' : 'a brisk double tap';
 				await mark(what);
@@ -247,14 +249,22 @@ await runJourney({
 						// together, as a finger does, so the browser stamps both as they
 						// arrive and the page handles them when it is free again.
 						await stopButton(page).waitFor({ timeout: 2000 });
-						void page.evaluate(() => { const end = performance.now() + 700; while (performance.now() < end); }).catch(() => {});
-						await page.waitForTimeout(50);
+						const started = Promise.withResolvers();
+						signalStall = started.resolve;
+						const stall = page.evaluate(() => {
+							const end = performance.now() + 700;
+							// Signal from the same JS task that blocks input dispatch, not from a runner timer.
+							void window.__journeyStallStarted();
+							while (performance.now() < end);
+						});
+						await Promise.race([started.promise, stall.then(() => { throw new Error('the page finished stalling without signalling'); })]);
 						const point = { x: at.x, y: at.y };
 						await Promise.all(isPhone(variant)
 							? [cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [point] }),
 								cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })]
 							: [cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', clickCount: 1 }),
 								cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', clickCount: 1 })]);
+						await stall;
 					} else {
 						await page.waitForTimeout(250);
 						await (isPhone(variant) ? page.touchscreen.tap(at.x, at.y) : page.mouse.click(at.x, at.y));

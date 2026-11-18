@@ -209,6 +209,9 @@ const ROW_PATCHABLE_FIELDS: ReadonlySet<string> = new Set([
 	'context_window',
 	// An effort pick, or Auto (null), made on another tab or device (#1579).
 	'effort',
+	// A speed pick made on another tab or device (the pair a switch-in reads).
+	'fast',
+	'speed',
 	// A user message was persisted (any device): patched at once so a
 	// remembered prose question clears (spec §5); see STALE_COMPANION_FIELDS.
 	'last_user_message_at',
@@ -639,6 +642,20 @@ export function createMessageHandlers(deps: MessageHandlerDeps): {
 					if (cached) sessionEphemeralCache.save(updatedSessionId, { ...cached, effortLevelOverride: effort });
 					if (updatedSessionId === getState().sessionId) {
 						update(s => ({ ...s, effortLevelOverride: effort }));
+						onPersistSession();
+					}
+				}
+				// A speed pick saved from another tab or device, the same way: an
+				// older tab would otherwise send its stale Fast or Ultrafast again.
+				if (updatedSessionId && typeof updates.fast === 'boolean') {
+					const fastMode = updates.fast;
+					const ultrafastMode = fastMode && updates.speed === 'ultrafast';
+					const cached = sessionEphemeralCache.restore(updatedSessionId);
+					if (cached) sessionEphemeralCache.save(updatedSessionId, {
+						...cached, fastMode, ultrafastMode, bindingHydrated: { ...cached.bindingHydrated, fast: true },
+					});
+					if (updatedSessionId === getState().sessionId) {
+						update(s => ({ ...s, fastMode, ultrafastMode, ...markBindingHydrated(s, 'fast') }));
 						onPersistSession();
 					}
 				}
