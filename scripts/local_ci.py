@@ -59,6 +59,9 @@ RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
 MAX_RETRIED = 20
 # Tests that failed and then passed on that rerun, in this process.
 FLAKY: list[str] = []
+# Tests whose call phase passed on those reruns (scripts/ci/record_failures.py):
+# a rerun that skips or xfails a failed test still exits 0.
+RERUN_PASSED: list[str] = []
 
 # The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
 FAST_SUBSET = [
@@ -261,13 +264,18 @@ def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         # Nothing recorded (a collection error, a crash) or many failures: a real break.
         if failed and len(failed) <= MAX_RETRIED:
             print(f"\n{len(failed)} failed test(s); running them once more.", flush=True)
-            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False)]
+            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False),
+                     "-p", "scripts.ci.record_failures"]
+            passed_file = failed_file.with_name("passed.txt")
             try:
-                run(rerun, cwd=cwd, env=env, timeout=timeout, retry=False)
+                run(rerun, cwd=cwd, env={**(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
+                    timeout=timeout, retry=False)
             except Failure:
                 raise Failure(f"{shown} (in {rel}) exited {returncode}; "
                               f"its {len(failed)} failed test(s) failed again") from None
             FLAKY.extend(failed)
+            if passed_file.exists():
+                RERUN_PASSED.extend(passed_file.read_text(encoding="utf-8").splitlines())
             return
     if returncode:
         raise Failure(f"{shown} (in {rel}) exited {returncode}")

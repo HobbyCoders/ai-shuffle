@@ -105,6 +105,7 @@ class ShardRun:
         self.workers = []
         self.durations = {}
         self.failed = set()
+        self.collection_failed = False
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, session, config, items):
@@ -131,6 +132,11 @@ class ShardRun:
     def pytest_testnodedown(self, node, error):
         self.workers.append(None if error else node.workeroutput.get("backend_partition"))
 
+    def pytest_collectreport(self, report):
+        # Under xdist the controller receives each worker's failed collection.
+        if report.failed:
+            self.collection_failed = True
+
     def pytest_runtest_logreport(self, report):
         self.durations[report.nodeid] = self.durations.get(report.nodeid, 0.0) + report.duration
         if report.failed:
@@ -142,8 +148,11 @@ class ShardRun:
             self.config.workeroutput["backend_partition"] = self.evidence
             return
         # Failed tests still leave complete evidence, for the one rerun to
-        # finish; any other fault (collection, interruption) leaves none.
-        if not (exitstatus == 0 or (exitstatus == pytest.ExitCode.TESTS_FAILED and self.failed)):
+        # finish; any other fault (collection, interruption) leaves none. A
+        # collection error shrinks every worker's collection alike, and a
+        # targeted rerun never imports the broken module.
+        if self.collection_failed or not (
+                exitstatus == 0 or (exitstatus == pytest.ExitCode.TESTS_FAILED and self.failed)):
             return
         if (len(self.workers) != 2 or any(not evidence for evidence in self.workers)
                 or self.workers[0] != self.workers[1]):

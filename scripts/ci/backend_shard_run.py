@@ -10,9 +10,12 @@ fails the shard.
 
 The shard plugin (scripts/ci/backend_shards.py) writes its receipt for a
 complete run whose only fault was failed tests, listing them under ``failed``.
-After a passing rerun this marks the receipt with ``rerun_passed``, and only
-when the rerun covered exactly the tests the receipt lists; backend_gate.py
-refuses a receipt whose failed tests have no passing rerun. The first run's
+scripts/ci/record_failures.py lists them for the rerun only after that pytest
+process, its config cleanup included, returned normally. After the rerun this
+marks the receipt with ``rerun_passed``, and only when the rerun ran exactly
+the tests the receipt lists and each one passed its call phase (a skip or an
+xfail is not a pass); backend_gate.py refuses a receipt whose failed tests
+have no passing rerun. The first run's
 JUnit report and --durations output stay as they were, failures included.
 
     python scripts/ci/backend_shard_run.py -- python -m pytest ... -p scripts.ci.backend_shards --backend-shard 3
@@ -33,15 +36,23 @@ import local_ci as ci  # noqa: E402
 from windows_parts import _shown, report_flaky  # noqa: E402
 
 
-def mark_rerun(receipt_path: Path, passed: list[str]) -> None:
-    """Record on the shard receipt that its failed tests passed their rerun."""
+def mark_rerun(receipt_path: Path, rerun: list[str], passed: list[str]) -> None:
+    """Record on the shard receipt that its failed tests passed their rerun.
+
+    ``rerun`` is what was rerun; ``passed`` is what passed its call phase there.
+    Both must equal the receipt's failed tests: a rerun exits 0 when a test
+    skips, xfails or is not collected, and none of those is a pass.
+    """
     if not receipt_path.is_file():
         raise ValueError(f"no shard receipt at {receipt_path} to record the rerun on")
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    rerun = sorted(set(passed))
-    if rerun != sorted(receipt.get("failed", [])):
+    failed = sorted(receipt.get("failed", []))
+    if sorted(set(rerun)) != failed:
         raise ValueError("the rerun tests differ from the tests the shard receipt lists as failed")
-    receipt["rerun_passed"] = rerun
+    if sorted(set(passed)) != failed:
+        raise ValueError("the rerun did not pass exactly the failed tests "
+                         f"(passed: {sorted(set(passed))}; failed: {failed})")
+    receipt["rerun_passed"] = failed
     receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
 
 
@@ -58,9 +69,10 @@ def main(argv: list[str]) -> int:
     try:
         ci.run(command)
         if ci.FLAKY:
-            mark_rerun(args.results / "receipt.json", [_shown(test) for test in ci.FLAKY])
+            mark_rerun(args.results / "receipt.json", [_shown(test) for test in ci.FLAKY],
+                       [_shown(test) for test in ci.RERUN_PASSED])
     except (ci.Failure, ValueError) as error:
-        report_flaky(ci.FLAKY)
+        # FLAKY is set only by a rerun that exited 0; that rerun did not pass here.
         print(f"\nFAILED: {error}", file=sys.stderr)
         return 1
     report_flaky(ci.FLAKY)

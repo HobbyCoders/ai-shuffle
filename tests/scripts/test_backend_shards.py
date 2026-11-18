@@ -148,9 +148,9 @@ def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tm
     index = next(i for i, shard in enumerate(shards, 1) if "test_fixture.py::test_value[3]" in shard)
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
 
-    def run(output):
+    def run(output, target=fixture):
         return subprocess.run([
-            sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
+            sys.executable, "-m", "pytest", str(target), "--rootdir", str(tmp_path),
             "--confcutdir", str(tmp_path), "-o", "addopts=", "-p", "scripts.ci.backend_shards", "-n", "2",
             "--backend-shard", str(index), "--backend-durations", str(manifest),
             "--backend-results", str(output), "-q"],
@@ -162,6 +162,13 @@ def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tm
     assert receipt["failed"] == ["test_fixture.py::test_value[3]"]
     assert receipt["count"] == len(shards[index - 1]) and receipt["workers"] == 2
     assert "rerun_passed" not in receipt
+    # A collection error elsewhere: both workers agree on the smaller
+    # collection and pytest still exits TESTS_FAILED, but there is no receipt.
+    (tmp_path / "test_broken.py").write_text("import not_a_module_anywhere\n\ndef test_x():\n    pass\n")
+    result = run(tmp_path / "partial", tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert not (tmp_path / "partial" / "receipt.json").exists()
+    (tmp_path / "test_broken.py").unlink()
     fixture.write_text("def test_x(:\n")
     result = run(tmp_path / "broken")
     assert result.returncode not in (0, 1), result.stdout + result.stderr
