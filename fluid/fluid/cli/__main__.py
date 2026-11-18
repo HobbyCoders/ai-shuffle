@@ -55,6 +55,7 @@ from fluid.cli.repl import (
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
 from fluid.events import ErrorEvent, Event, Interrupted, TurnComplete, Usage
+from fluid.events.bus import EventBus
 from fluid.store.base import SessionLocked
 
 
@@ -109,11 +110,11 @@ def _reported_tokens(usage: dict[str, Any]) -> dict[str, int]:
 
 
 def _write_usage_event(out: TextIO, event: Event) -> None:
-    """Write only structured accounting fields; never copy transcript text."""
+    """Write normalized engine counters and any estimate flags carried by the event."""
     if isinstance(event, Usage):
-        # Usage defaults to zero when no counters arrived. Raw key presence
-        # (not a successful stop or the existence of a Usage event) distinguishes
-        # an observed zero from that default.
+        # Usage fields default to zero when the engine has no counters. Raw
+        # keys distinguish that default from an engine counter, but provider
+        # normalizers can already have filled missing wire fields with zero.
         counts = _reported_tokens(event.raw)
         acp = event.raw.get("acp_usage")
         for field, wire_key in _ACP_TOKEN_KEYS.items():
@@ -121,16 +122,19 @@ def _write_usage_event(out: TextIO, event: Event) -> None:
             wire_count = acp.get(wire_key) if isinstance(acp, dict) else None
             if count > 0 or (type(wire_count) in (int, float) and wire_count == 0):
                 counts.setdefault(field, count)
-        if not counts:
+        # Background checkpoints are not included in terminal accounting.
+        outside_turn = event.raw.get("auxiliary_background") is True
+        if not counts and not outside_turn:
             return
         record = {
             "type": "usage",
             "turn_id": event.turn_id,
-            # A background checkpoint can finish after its turn. Native does
-            # not include it in that turn's terminal counters.
-            "outside_turn_totals": event.raw.get("auxiliary_background") is True,
+            "outside_turn_totals": outside_turn,
             **counts,
         }
+        if outside_turn:
+            record.update(num_model_calls=1, cost_usd=event.raw.get("cost_usd"))
+        provenance = event.raw
     elif isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
         record = {
             "type": "status",
@@ -143,10 +147,35 @@ def _write_usage_event(out: TextIO, event: Event) -> None:
             "cost_usd": event.cost_usd,
             "usage": _reported_tokens(event.usage),
         }
+        provenance = event.usage
     else:
         return
+    for flag in ("input_tokens_estimated", "output_tokens_estimated", "usage_estimated"):
+        if provenance.get(flag) is True:
+            record[flag] = True
     out.write(json.dumps(record) + "\n")
     out.flush()
+
+
+class _UsageEventBus(EventBus):
+    """Export new parent-session accounting once, even during engine close."""
+
+    def __init__(self, session_id: str, out: TextIO) -> None:
+        super().__init__()
+        self._usage_session_id = session_id
+        self._usage_out = out
+        self.write_error: OSError | None = None
+
+    async def publish(self, event: Event) -> Event:
+        published = await super().publish(event)
+        if published.session_id == self._usage_session_id and self.write_error is None:
+            try:
+                _write_usage_event(self._usage_out, published)
+            except OSError as exc:
+                # Surface export failure to the CLI without disrupting the
+                # turn or preventing durable persistence of this event.
+                self.write_error = exc
+        return published
 
 
 async def run_once(
@@ -165,12 +194,14 @@ async def run_once(
     ``provider`` injects a ProviderClient (offline test hook); when omitted the
     engine is built from ``config`` (real provider). ``session_id`` resumes an
     existing session instead of creating a fresh one. ``usage_out`` receives
-    JSONL accounting events separately from the console transcript.
+    normalized engine accounting separately from the console transcript, through
+    engine close. Some provider normalizers fill missing counters with zeros.
     """
     out = out or sys.stdout
     meta = await open_session(store, session_id, cwd=config.cwd)
+    usage_bus = _UsageEventBus(meta.session_id, usage_out) if usage_out is not None else None
     engine = make_engine(
-        config, store, provider=provider,
+        config, store, provider=provider, bus=usage_bus,
         session_id=meta.session_id, permission_responder=on_permission,
     )
     host = host_of(engine)
@@ -188,10 +219,6 @@ async def run_once(
         request_interrupt(engine)
         abandon_stdin_read()
 
-    def on_event(event: Event) -> None:
-        if usage_out is not None:
-            _write_usage_event(usage_out, event)
-
     try:
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
@@ -200,12 +227,14 @@ async def run_once(
             stop = await stream_turn(
                 engine, meta.session_id, prompt, out=out, on_permission=on_permission,
                 on_question=tty_question_responder() or auto_answer,
-                wait_background=True, on_event=on_event if usage_out is not None else None,
+                wait_background=True,
             )
     finally:
         if host is not None:
             await host.aclose()
         await _close_and_flush_learning(engine, meta.session_id, out)
+    if usage_bus is not None and usage_bus.write_error is not None:
+        raise usage_bus.write_error
     if sigints:
         return SIGINT_EXIT_CODE
     return 0 if stop != "error" else 1

@@ -1,4 +1,5 @@
 """Benchmark contracts without installing Harbor or making provider calls."""
+import asyncio
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 import json
@@ -9,7 +10,9 @@ from unittest.mock import Mock
 import pytest
 
 from fluid.cli import __main__ as cli
+from fluid.context.checkpoint_summary import CHECKPOINT_SYSTEM
 from fluid.events import TurnComplete, Usage
+from fluid.providers._chat_completions import ChatCompletionsNormalizer
 from fluid.providers._transport import truncated_stream_payload
 from fluid.providers.base import ProviderCaps, StreamChunk
 
@@ -112,11 +115,16 @@ def test_run_writes_separate_metrics_that_harbor_reads(adapter, tmp_path, monkey
     }
 
 
-def _run_metrics(adapter, tmp_path, monkeypatch, provider):
+def _run_metrics(adapter, tmp_path, monkeypatch, provider, *, configure=None):
     make_engine = cli.make_engine
-    monkeypatch.setattr(cli, "make_engine", lambda *args, **kw: make_engine(
-        *args, **{**kw, "provider": provider}
-    ))
+
+    def build(*args, **kw):
+        engine = make_engine(*args, **{**kw, "provider": provider})
+        if configure is not None:
+            configure(engine)
+        return engine
+
+    monkeypatch.setattr(cli, "make_engine", build)
     adapter.logs_dir = tmp_path
     log_dir = tmp_path / "agent"
     log_dir.mkdir()
@@ -192,6 +200,90 @@ def test_provider_error_preserves_whether_counts_were_reported(adapter, tmp_path
     assert [record["type"] for record in records] == (["usage", "status"] if reported else ["status"])
 
 
+def test_cli_captures_checkpoint_usage_emitted_during_close(adapter, tmp_path, monkeypatch, capsys):
+    class Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+        checkpoint_started = None
+        checkpoint_cancelled = False
+
+        async def stream(self, request):
+            if request.system == CHECKPOINT_SYSTEM:
+                try:
+                    yield StreamChunk("message_start", {"usage": {"input_tokens": 4, "cost_usd": 0.02}})
+                    self.checkpoint_started.set()
+                    await asyncio.Future()  # Real engine close cancels this stream.
+                finally:
+                    self.checkpoint_cancelled = True
+                return
+
+            self.checkpoint_started = asyncio.Event()
+            self.engine._schedule_checkpoint(self.engine.session_id, self.engine._active_turn_id)
+            await asyncio.wait_for(self.checkpoint_started.wait(), timeout=5)
+            yield StreamChunk("message_start", {"usage": {"input_tokens": 10}})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "done"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {"usage": {"output_tokens": 2, "cost_usd": 0.10},
+                                        "stop_reason": "end_turn"})
+            yield StreamChunk("message_stop", {})
+
+    provider = Provider()
+
+    def configure(engine):
+        provider.engine = engine
+        # Only the region/trigger are fixtures; scheduling, provider streaming,
+        # cancellation, accounting and the CLI run/close are real.
+        monkeypatch.setattr(engine._compactor.config, "summary_enabled", True)
+        monkeypatch.setattr(engine._compactor, "summary_region", lambda *a, **kw: ("a", "b", "summary input"))
+
+    rc, context, records = _run_metrics(adapter, tmp_path, monkeypatch, provider, configure=configure)
+    assert rc == 0
+    assert provider.checkpoint_cancelled
+    [late] = [event for event in provider.engine.bus.log(provider.engine.session_id)
+              if isinstance(event, Usage) and event.raw.get("auxiliary_background")]
+    assert late.input_tokens == 4
+    assert [row["type"] for row in records] == ["usage", "status", "usage"]
+    assert records[0]["input_tokens"] == 10
+    assert records[2]["outside_turn_totals"] and records[2]["input_tokens"] == 4
+    assert (context.n_input_tokens, context.n_output_tokens) == (14, 2)
+    assert context.cost_usd == pytest.approx(0.12)
+    assert context.metadata["num_model_calls"] == 2
+    assert capsys.readouterr().out.count("[usage]") == 1
+
+
+def test_openrouter_normalizer_exports_normalized_zero_for_missing_counters(adapter, tmp_path, monkeypatch):
+    class Provider:
+        name = "openrouter"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            normalizer = ChatCompletionsNormalizer()
+            for packet in (
+                {"choices": [{"index": 0, "delta": {"content": "done"}, "finish_reason": "stop"}]},
+                {"choices": [], "usage": {"prompt_tokens": 10}},
+            ):
+                for chunk in normalizer.consume("message", packet):
+                    yield chunk
+
+    rc, context, records = _run_metrics(adapter, tmp_path, monkeypatch, Provider())
+    assert rc == 0
+    assert (context.n_input_tokens, context.n_output_tokens, context.n_cache_tokens) == (10, 0, 0)
+    assert records[0]["output_tokens"] == records[1]["usage"]["output_tokens"] == 0
+
+
+def test_export_preserves_estimate_flags_carried_by_usage_event(tmp_path):
+    metrics = tmp_path / "usage.jsonl"
+    with metrics.open("w", encoding="utf-8") as stream:
+        cli._write_usage_event(stream, Usage(session_id="s", turn_id="first", input_tokens=10,
+            output_tokens=2, raw={"input_tokens": 10, "output_tokens": 2, "input_tokens_estimated": True,
+                                  "output_tokens_estimated": True, "usage_estimated": True}))
+    record = json.loads(metrics.read_text(encoding="utf-8"))
+    assert record["input_tokens_estimated"] is True
+    assert record["output_tokens_estimated"] is True
+    assert record["usage_estimated"] is True
+
+
 def test_turn_totals_keep_background_usage_and_unfinished_turns(adapter, tmp_path):
     adapter.logs_dir = tmp_path
     log_dir = tmp_path / "agent"
@@ -203,10 +295,10 @@ def test_turn_totals_keep_background_usage_and_unfinished_turns(adapter, tmp_pat
                 "input_tokens": 2, "auxiliary_source": "checkpoint_summary",
             }),
             TurnComplete(session_id="s", turn_id="first", stop_reason="end_turn",
-                         num_model_calls=2, usage={"input_tokens": 22, "output_tokens": 5}),
+                         num_model_calls=2, usage={"input_tokens": 22, "output_tokens": 5}, cost_usd=0.10),
             Usage(session_id="s", turn_id="first", input_tokens=3, raw={
                 "input_tokens": 3, "auxiliary_source": "checkpoint_summary",
-                "auxiliary_background": True,
+                "auxiliary_background": True, "cost_usd": 0.02,
             }),
             # The next turn was killed after one usage record; no terminal status.
             Usage(session_id="s", turn_id="wake", input_tokens=4, raw={"input_tokens": 4}),
@@ -215,6 +307,8 @@ def test_turn_totals_keep_background_usage_and_unfinished_turns(adapter, tmp_pat
     context = SimpleNamespace(n_output_tokens=None)
     adapter.populate_context_post_run(context)
     assert (context.n_input_tokens, context.n_output_tokens) == (29, 5)
+    assert context.cost_usd == pytest.approx(0.12)
+    assert context.metadata["num_model_calls"] == 3
 
 
 def test_multiple_terminal_records_and_truncated_tail(adapter, tmp_path):

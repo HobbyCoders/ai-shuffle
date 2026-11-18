@@ -129,12 +129,20 @@ task verdict plus the agent context the adapter fills in:
 The adapter passes `fluid run --usage-jsonl /logs/agent/fluid-usage.jsonl` and
 reads that file from the trial's logs. For each turn, the adapter uses terminal
 token totals when available and falls back to per-call counts for fields the
-terminal did not report or if the run ended without a terminal record. It adds
-auxiliary usage not included in the turn totals, such as background checkpoint
-summaries, separately. It sums terminal model-call counts and costs once per
-turn and takes the last stop reason. Unreported counts stay unset; a reported
-zero stays zero. A missing file does not fall back to transcript parsing.
-Rebuild older wheels before running this adapter.
+terminal did not report or if the run ended without a terminal record. It sums
+terminal model-call counts and costs once per turn, adds each background
+checkpoint's counters, call and available cost separately, and takes the last
+stop reason. The file records new accounting events through engine close.
+
+The file contains normalized engine counters. OpenRouter Chat Completions and
+OpenAI Responses can turn a missing provider counter into zero. A counter
+absent from the engine event stays unset; the JSONL preserves estimate flags
+when the event supplies them. A missing file does not fall back to transcript
+parsing. Rebuild older wheels before running this adapter.
+
+CLI-hosted subagents run in separate sessions, so their tokens and cost are not
+included in the parent's figures. A killed run keeps flushed token records but
+has no terminal cost or call count for its unfinished turn.
 
 `<job>/…/logs/agent/fluid.txt` still contains the console transcript for
 inspection. Tool text in the transcript does not count as usage or status.

@@ -40,13 +40,18 @@ streaming through the park and wake cycle and only exits once no worker is in
 flight. See [background-tasks.md](background-tasks.md).
 
 `--usage-jsonl PATH` writes UTF-8 JSON Lines to a separate file, replacing any
-existing file at that path. Console output is unchanged. `usage` records carry
-reported token counters and a turn ID; `status` records carry the turn ID, stop
-reason, terminal token totals in `usage`, model-call count and cost when reported.
-Missing token counters are omitted, not written as zero. Usage records outside
-the terminal totals, such as background checkpoint summaries, set
-`outside_turn_totals` to `true`. If the process is killed, the
-file may contain only per-call records or end with a partial line.
+existing file at that path. Console output is unchanged. The file captures
+parent-session accounting through engine close. `usage` records carry normalized
+engine counters and a turn ID; `status` records carry the turn ID, stop reason,
+terminal token totals in `usage`, model-call count and available cost.
+
+Counters absent from engine events are omitted. Some provider normalizers
+(OpenRouter Chat Completions and OpenAI Responses) can fill missing counters
+with zero before the CLI receives them. Estimate flags are included when the
+engine event supplies them. Background checkpoint records set
+`outside_turn_totals` to `true` and carry their own call count and available
+cost. If the process is killed, the file may contain only per-call records or
+end with a partial line.
 
 Permission prompts in `run` depend on where it is running:
 

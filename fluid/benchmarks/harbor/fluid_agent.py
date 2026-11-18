@@ -9,7 +9,10 @@ Python 3.12), and drives ``fluid run`` in one-shot mode with
 
 The default Harbor setup does not protect the metrics file from tool writes.
 The file is separate from the transcript, but Fluid and its Bash tool run
-with the same user identity by default.
+with the same user identity by default. It contains normalized engine
+counters, not raw provider measurements. OpenRouter Chat Completions and
+OpenAI Responses can turn a missing provider counter into zero. The JSONL
+keeps estimate flags when the engine event supplies them.
 
 Usage (from the repo root; see benchmarks/harbor/README.md for the full
 comparison protocol):
@@ -206,8 +209,18 @@ class FluidAgent(BaseInstalledAgent):
                 raise ValueError("invalid token count")
             return counts
 
+        def read_charge(n: object, usd: object) -> tuple[int | None, float | None]:
+            if n is not None and (type(n) is not int or n < 0):
+                raise ValueError("invalid model call count")
+            if usd is not None and (
+                type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0
+            ):
+                raise ValueError("invalid cost")
+            return n, usd
+
         per_call: dict[str | int, Counter[str]] = defaultdict(Counter)
         outside_turn_totals: Counter[str] = Counter()
+        outside_turn_charges: list[tuple[int | None, float | None]] = []
         terminal: dict[str | int, dict[str, int]] = {}
         by_turn: dict[str | int, tuple[int | None, float | None]] = {}
         stop_reason: str | None = None
@@ -222,27 +235,23 @@ class FluidAgent(BaseInstalledAgent):
                     if record.get("type") == "usage":
                         counts = read_counts(record)
                         if record.get("outside_turn_totals") is True:
+                            outside_turn_charges.append(read_charge(
+                                record.get("num_model_calls"), record.get("cost_usd"),
+                            ))
                             outside_turn_totals.update(counts)
                         else:
                             per_call[turn].update(counts)
                     elif record.get("type") == "status":
-                        reason, n, usd = (
-                            record["stop_reason"], record["num_model_calls"], record["cost_usd"],
-                        )
+                        reason = record["stop_reason"]
                         if not isinstance(reason, str):
                             raise ValueError("invalid stop reason")
-                        if n is not None and (type(n) is not int or n < 0):
-                            raise ValueError("invalid model call count")
-                        if usd is not None and (
-                            type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0
-                        ):
-                            raise ValueError("invalid cost")
+                        charge = read_charge(record["num_model_calls"], record["cost_usd"])
                         counts = read_counts(record.get("usage", {}))
                         stop_reason = reason
                         # Some failures emit both ErrorEvent and TurnComplete.
                         # Keep a single terminal snapshot for each turn.
                         terminal[turn] = counts
-                        by_turn[turn] = (n, usd)
+                        by_turn[turn] = charge
                 except (ValueError, KeyError, OverflowError):
                     # A killed process can leave a partial final line.
                     self.logger.warning(f"Ignoring invalid fluid usage record on line {i}")
@@ -265,8 +274,9 @@ class FluidAgent(BaseInstalledAgent):
             context.n_cache_tokens = cache_read
         if "output_tokens" in totals:
             context.n_output_tokens = totals["output_tokens"]
-        calls = [n for n, _ in by_turn.values() if n is not None]
-        costs = [usd for _, usd in by_turn.values() if usd is not None]
+        charges = [*by_turn.values(), *outside_turn_charges]
+        calls = [n for n, _ in charges if n is not None]
+        costs = [usd for _, usd in charges if usd is not None]
         context.cost_usd = sum(costs) if costs else None
         context.metadata = {
             "num_model_calls": sum(calls) if calls else None,
