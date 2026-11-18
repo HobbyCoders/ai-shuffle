@@ -20,8 +20,6 @@ import { ALL_BINDING_UNHYDRATED, restoreComposerBinding } from './composer-bindi
 import { hasComposerDraft } from './composer-suggestion';
 import { flushPendingDraft, readDraft } from './draft-persistence';
 import { joinDrafts } from '$lib/components/chat/tiptap/serialization';
-import { get } from 'svelte/store';
-import { pendingDeepLink } from '../pending-deep-link';
 
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -85,8 +83,7 @@ function getSkipRestore(): boolean {
 export function tabRestoreTarget(): { sessionId: string; title: string } | null {
 	if (typeof window === 'undefined') return null;
 	const saved = savedTabChat();
-	// Boot drops the link from the URL once read; until it opens it is pending.
-	const linked = get(pendingDeepLink) ?? new URLSearchParams(window.location.search).get('session');
+	const linked = new URLSearchParams(window.location.search).get('session');
 	if (linked) return { sessionId: linked, title: linked === saved?.sessionId ? saved.title : '' };
 	return saved && !getSkipRestore() ? saved : null;
 }

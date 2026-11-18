@@ -121,6 +121,12 @@
 		untrack(() => { if (shellHistory.land(state)) showEntry(); });
 	});
 	onDestroy(() => shellHistory.stop());
+	function dropSessionLink() {
+		const url = new URL(window.location.href);
+		if (!url.searchParams.has('session')) return;
+		url.searchParams.delete('session');
+		history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+	}
 	function handleNewSession() {
 		navigationClaimed = true;
 		activeSession.newChat();
@@ -215,8 +221,12 @@
 
 		// Read a deep link before anything awaits: the chat surface shows its
 		// loading state until the linked session opens below, instead of the
-		// New Chat hero for the length of init and the first loads.
-		const deepLinkSessionId = deepLinkSessionIdFrom(window.location.search);
+		// New Chat hero for the length of init and the first loads. A
+		// notification link always loads a fresh entry; an entry with a saved
+		// place is a reload, and a link left on its address was already read.
+		const savedEntry = !!(page.state as ShellState).shell;
+		const deepLinkSessionId = savedEntry ? null : deepLinkSessionIdFrom(window.location.search);
+		if (savedEntry) dropSessionLink();
 		if (deepLinkSessionId) {
 			pendingDeepLink.set(deepLinkSessionId);
 			// Never a permanent spinner: if boot fails before the open, let go.
@@ -224,18 +234,13 @@
 			// Show the linked chat from the first frame. The view saved by the
 			// last visit (often another chat) must not render meanwhile.
 			layout.openChat(deepLinkSessionId);
-			// The link is read: drop it from the URL before the first history
-			// write, so no entry (nor a reload of one) replays it.
-			const url = new URL(window.location.href);
-			url.searchParams.delete('session');
-			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 		}
 		// The arrival entry gets its place now, before anything can push over
 		// it: controls opened while boot loads (Chat controls, the phone drawer)
 		// add their own entries on top, and a reload can already go Back,
-		// Forward and click. A reloaded entry keeps the place it saved; only a
-		// notification link outranks it. Boot's reconcile corrects a new one.
-		shellHistory.start(deepLinkSessionId ? {} : page.state, $activeView);
+		// Forward and click. A reloaded entry keeps the place it saved; boot's
+		// reconcile only corrects a new one.
+		shellHistory.start(page.state, $activeView);
 
 		// The project catalog loads alongside init: a new chat's remembered
 		// project and branch resolve against it, and the composer holds a send
@@ -349,8 +354,8 @@
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification
 		// is tapped. Open that session explicitly — it outranks the restored
-		// session above (it's a fresh user intent). The param left the URL at
-		// mount, so a refresh doesn't re-trigger it. Shared-DB cluster sessions appear in
+		// session above (it's a fresh user intent) — then strip the param so a
+		// refresh doesn't re-trigger it. Shared-DB cluster sessions appear in
 		// $sessions on every install, so handleOpenSession resolves them and (when
 		// the session is owned by another device) relays exactly like a click in
 		// the Sessions board.
@@ -363,6 +368,7 @@
 			if (!navigationClaimed && $activeSession.sessionId === deepLinkSessionId) {
 				handleOpenSession(deepLinkSessionId, undefined, { reopen: true });
 			}
+			dropSessionLink();
 			// The open has bound the session (or will on the next frame when the
 			// sidebar overlay closes first); its own loading state takes over.
 			requestAnimationFrame(() => pendingDeepLink.set(null));

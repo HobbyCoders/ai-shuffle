@@ -193,14 +193,13 @@ describe('Swarm session navigation through the actual active-session store', () 
 		history.replaceState(null, '', '/?session=worker-child');
 		render(Page);
 		// The link is bound at init, before the first loads, so the saved
-		// parent never shows; its lane follows once the deep link is handled.
-		// The param leaves the URL as soon as it is read, before any history
-		// entry is written, so no entry (or its reload) replays it.
+		// parent never shows; its lane follows once the deep link is handled
+		// (the param is stripped then).
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
 		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
-		expect(window.location.search).toBe('');
-		await waitFor(() => expect(appMode.current).toBe('code'));
+		await waitFor(() => expect(window.location.search).toBe(''));
 		expect(activeSession.current.sessionId).toBe('worker-child');
+		expect(appMode.current).toBe('code');
 		expect(feedController.start).toHaveBeenLastCalledWith('worker-child');
 	});
 
@@ -303,13 +302,16 @@ describe('chat link history (#859)', () => {
 		['another chat', { type: 'session' as const, sessionId: 'worker-child' }, () => activeSession.current.sessionId === 'worker-child'],
 	])('reloads onto the place the browser entry saved (%s), not the layout another tab wrote', async (_name, place, shown) => {
 		// This tab's entry was left on `place`; another tab since opened the
-		// parent chat, which rewrote the shared layout snapshot.
+		// parent chat, which rewrote the shared layout snapshot. The address
+		// still has the link this tab arrived by, read long ago.
 		chatHistory.entries = [{ shell: { id: 'saved', place } }];
 		page.state = chatHistory.entries[0];
+		history.replaceState(null, '', '/?session=parent');
 		render(Page);
 		await waitFor(() => expect(shown()).toBe(true));
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(shown()).toBe(true);
+		expect(window.location.search).toBe('');
 		expect(chatHistory.entries).toEqual([{ shell: { id: 'saved', place } }]);
 	});
 
