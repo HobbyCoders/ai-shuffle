@@ -3256,10 +3256,10 @@ class HarnessAdapter(ProviderAdapter):
                     and getattr(translated, "risk", None) != "question"
                 ):
                     # Native leg, no approver, a call Ask puts to a person:
-                    # saved rules decide it, else it is denied now with the
-                    # reason instead of parking the run for
-                    # ``permission_timeout``.
-                    await self._answer_without_approver(translated)
+                    # denied now with the reason (a saved Deny's, if any)
+                    # instead of parking the run for ``permission_timeout``.
+                    # Main never let a saved Allow answer it, so none does.
+                    await self._answer_without_approver(translated, saved_allows=False)
                     continue
                 if isinstance(translated, ResultMessage) and not self._is_live(event):
                     # A terminal from before this turn was submitted: history
@@ -3957,11 +3957,15 @@ class HarnessAdapter(ProviderAdapter):
 
         return await run_sync(_lookup)
 
-    async def _answer_without_approver(self, ev: PermissionRequestEvent) -> None:
+    async def _answer_without_approver(
+        self, ev: PermissionRequestEvent, *, saved_allows: bool = True,
+    ) -> None:
         """Decide a prompt with no approver, in the watched order.
 
         Saved rules first (every mode short of Bypass): a saved Deny denies
-        with "Denied by saved rule", a saved Allow allows. Then the mode
+        with "Denied by saved rule", a saved Allow allows unless
+        ``saved_allows`` is False (the native leg, where a held call was only
+        ever denied on timeout). Then the mode
         (``mode_approves_without_prompt``): Ask denies with the reason, and so
         does every mode short of Bypass for the computer-use access request;
         everything else is allowed. A failed rule lookup denies, since the
@@ -3993,7 +3997,7 @@ class HarnessAdapter(ProviderAdapter):
             else:
                 if saved == "deny":
                     allow, message = False, SAVED_RULE_DENIAL
-                elif saved == "allow":
+                elif saved == "allow" and saved_allows:
                     allow = True
         if allow is None:
             allow = mode_approves_without_prompt(

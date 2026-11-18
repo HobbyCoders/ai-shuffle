@@ -493,6 +493,45 @@ def test_a_restart_with_only_the_legacy_grant_backfills_both_names(
             assert path.stat().st_mode & 0o077 == 0
 
 
+@pytest.mark.parametrize("legacy_only", [False, True])
+def test_a_restart_on_a_read_only_grant_keeps_starting(
+    bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture, legacy_only: bool,
+) -> None:
+    """Valid owner-only copies are not rewritten; a backfill that cannot be
+    written (read-only mount) is a warning while the valid grant is readable."""
+    import json
+
+    from app import preview_run
+    from app.core import encryption, preview_access
+    from app.core.config import settings
+    from app.db import database
+
+    env = preview_environment(tmp_path, 18880, 18881,
+                              extra={"SHUFFLE_DEV_ACCESS_FILE": str(tmp_path / "preview-access.json")})
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(settings, "data_dir", Path(env["DATA_DIR"]))
+    monkeypatch.setattr(type(settings), "managed_database_available", lambda self: True)
+    monkeypatch.setattr(preview_access, "_listener_port", 18880)
+    monkeypatch.setattr(encryption, "_encryption_key", None)
+    monkeypatch.setattr(encryption, "_credential_status", {})
+    assert encryption.initialize_server_key(database)
+    initialize_preview_access()
+    grant = json.loads((tmp_path / "access.json").read_text())
+    if legacy_only:
+        (tmp_path / "preview-access.json").unlink()
+
+    def read_only(path: Path, data: dict) -> None:
+        raise OSError(30, "Read-only file system", str(path))
+
+    monkeypatch.setattr(preview_run, "_write_private_json", read_only)
+    with caplog.at_level("WARNING", logger=preview_run.logger.name):
+        initialize_preview_access()  # the restart: no OSError escapes
+    assert json.loads((tmp_path / "access.json").read_text()) == grant
+    assert ("Could not save the preview grant" in caplog.text) is legacy_only
+
+
 @pytest.mark.parametrize(("name", "saved"), [
     ("preview-access.json", True),
     ("access.json", True),  # the legacy devloop launcher's name (N12)

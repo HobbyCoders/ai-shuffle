@@ -860,6 +860,32 @@ async def test_permission_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_unattended_native_prompt_is_denied_now_even_with_a_saved_allow(monkeypatch):
+    """Native REST turn in Ask, saved profile Allow for Write, ordinary file:
+    main held it until ``permission_timeout`` and denied it; now the deny is
+    immediate, and the saved Allow still does not answer it."""
+    from app.db import database
+
+    database.add_permission_rule("default", "Write", None, "allow")
+    events = [
+        lm.PermissionRequest(
+            session_id=SID, request_id="perm_w", tool_use_id="tu-w", name="Write",
+            input={"file_path": "/repo/notes.md", "content": "hi"}, risk="write",
+        ),
+        lm.TurnComplete(session_id=SID, stop_reason="end_turn", num_model_calls=1),
+    ]
+    engine = FakeEngine(events)
+    adapter = _adapter_with(engine)
+    adapter._options = SessionOptions(
+        model="fake-model", permission_mode="default", extra={"profile_id": "default"},
+    )
+    monkeypatch.setattr(adapter, "_resolve_app_session_id", lambda: "native-rest")
+    assert await adapter._saved_rule_decision("Write", events[0].input) == "allow"
+    await _collect(adapter)
+    assert [op.decision for op in engine.ops] == ["deny"]
+
+
+@pytest.mark.asyncio
 async def test_permission_bridged_to_can_use_tool():
     """With an app can_use_tool callback wired (the WS/chat path), a fluid
     PermissionRequest never surfaces in-stream; the callback's decision is

@@ -16,6 +16,7 @@ import logging
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -155,6 +156,26 @@ def _save_access(access_file: str, grant: dict) -> None:
         _write_private_json(Path(access_file).with_name(name), grant)
 
 
+def _backfill_access(access_file: str, grant: dict) -> None:
+    """On a restart, write only a copy that is missing, stale or not owner-only.
+    A failed write (a read-only mount, say) is a warning: the grant that was
+    just verified is still readable, so the app keeps starting."""
+    for name in _ACCESS_FILE_NAMES:
+        path = Path(access_file).with_name(name)
+        try:
+            info = path.lstat()
+            if (stat.S_ISREG(info.st_mode) and not info.st_mode & 0o077
+                    and json.loads(path.read_text(encoding="utf-8")) == grant):
+                continue
+        except (OSError, ValueError):
+            pass
+        try:
+            _write_private_json(path, grant)
+        except OSError:
+            logger.warning("Could not save the preview grant as %s; starting with the valid one",
+                           path, exc_info=True)
+
+
 def _write_private_json(path: Path, data: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.unlink(missing_ok=True)
@@ -214,7 +235,7 @@ def initialize_preview_access() -> None:
     saved = _saved_access()
     if saved is not None:
         if Path(os.environ["SHUFFLE_DEV_ACCESS_FILE"]).name in _ACCESS_FILE_NAMES:
-            _save_access(os.environ["SHUFFLE_DEV_ACCESS_FILE"], saved)
+            _backfill_access(os.environ["SHUFFLE_DEV_ACCESS_FILE"], saved)
         print("Branch preview access is still valid after the restart", flush=True)
         return
 

@@ -381,11 +381,15 @@ def add_permission_rule(
     profile_id: str,
     tool_name: str,
     tool_pattern: Optional[str],
-    decision: str
+    decision: str,
+    exact_form: bool = False,
 ) -> PermissionRuleRow:
-    """Add a permission rule for a profile"""
+    """Add a permission rule for a profile. ``exact_form`` marks a shell
+    Allow saved as an exact allowlisted form in its id
+    (``permission_handler.EXACT_FORM_RULE_ID_PREFIX``)."""
     import uuid
-    rule_id = f"rule-{uuid.uuid4().hex[:8]}"
+    prefix = "rule-exact-" if exact_form else "rule-"
+    rule_id = f"{prefix}{uuid.uuid4().hex[:8]}"
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = conn.cursor()

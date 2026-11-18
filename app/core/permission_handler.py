@@ -103,6 +103,12 @@ class PermissionRequest:
     response: Optional[Dict[str, Any]] = None
 
 
+#: Id prefix of a saved shell Allow stored as an exact allowlisted form. Ids
+#: saved before exact forms are ``rule-`` plus hex, so they never carry it;
+#: the mark travels with the row (sync, API) without a schema change.
+EXACT_FORM_RULE_ID_PREFIX = "rule-exact-"
+
+
 @dataclass
 class PermissionRule:
     """A saved permission rule"""
@@ -113,6 +119,9 @@ class PermissionRule:
     tool_pattern: Optional[str]  # Optional pattern for tool input matching
     decision: PermissionDecision
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    #: A shell Allow saved as an exact form: it also covers the same words in
+    #: other ASCII spacing. Unmarked rules keep the plain pattern match.
+    exact_form: bool = False
 
     def matches(self, tool_name: str, tool_input: Dict[str, Any]) -> bool:
         """Check if this rule matches the given tool use"""
@@ -145,16 +154,16 @@ class PermissionRule:
 
         # Handle different tool types. A shell rule matches the command only
         # (never another field such as a description), case-sensitively. An
-        # Allow saved as an exact form (``git status``) also covers the same
-        # words in other ASCII spacing; a pattern saved before exact forms
-        # (``git *``) keeps matching as it did.
+        # Allow marked as an exact form (``git status``) also covers the same
+        # words in other ASCII spacing; any other rule, including every one
+        # saved before exact forms, keeps the plain pattern match.
         if _is_shell_tool(self.tool_name):
             command = tool_input.get("command", "")
             if not isinstance(command, str):
                 return False
             if fnmatch.fnmatchcase(command, pattern):
                 return True
-            return (self.decision == PermissionDecision.ALLOW
+            return (self.exact_form and self.decision == PermissionDecision.ALLOW
                     and _remembered_bash_pattern(tool_input) == pattern)
 
         elif self.tool_name in ("Read", "Write", "Edit", "Glob"):
@@ -673,6 +682,8 @@ class PermissionHandler:
                 payload_row.get("tool_name", ""),
                 remembered_pattern,
                 answer.get("decision", "allow"),
+                exact_form=(answer.get("decision", "allow") == "allow"
+                            and _is_shell_tool(payload_row.get("tool_name", ""))),
             )
         decision = answer.get("decision")
         if decision == "defer":
@@ -802,6 +813,7 @@ class PermissionHandler:
         resolved_emits: List[tuple] = []
         if remember and remember != "none":
             profile_id = payload.get("profile_id") or ""
+            exact_form = decision == "allow" and _is_shell_tool(payload.get("tool_name", ""))
             rule = PermissionRule(
                 id=f"rule-{datetime.now().timestamp()}",
                 session_id=session_id if remember == "session" else None,
@@ -809,10 +821,12 @@ class PermissionHandler:
                 tool_name=payload.get("tool_name", ""),
                 tool_pattern=pattern,
                 decision=PermissionDecision(decision),
+                exact_form=exact_form,
             )
             if remember == "session":
                 self._add_session_rule_idempotent(
                     session_id, rule.tool_name, rule.tool_pattern, decision,
+                    exact_form=exact_form,
                 )
             else:
                 # Awaited, not fire-and-forget: the rule must be durable before
@@ -823,6 +837,7 @@ class PermissionHandler:
                     tool_name=rule.tool_name,
                     tool_pattern=rule.tool_pattern,
                     decision=rule.decision.value,
+                    exact_form=exact_form,
                 )
             resolved_ids, resolved_emits = self._v2_resolve_matching(
                 session_id, rule, answered_by_device
@@ -934,6 +949,7 @@ class PermissionHandler:
         tool_name: str,
         pattern: Optional[str],
         decision: str,
+        exact_form: bool = False,
     ) -> None:
         """Install a session-scoped rule locally if an identical one is absent.
 
@@ -949,6 +965,7 @@ class PermissionHandler:
                 existing.tool_name == tool_name
                 and existing.tool_pattern == pattern
                 and existing.decision.value == decision
+                and existing.exact_form == exact_form
             ):
                 return
         rules.append(
@@ -959,6 +976,7 @@ class PermissionHandler:
                 tool_name=tool_name,
                 tool_pattern=pattern,
                 decision=PermissionDecision(decision),
+                exact_form=exact_form,
             )
         )
 
@@ -1277,7 +1295,8 @@ class PermissionHandler:
                     profile_id=rule_data["profile_id"],
                     tool_name=rule_data["tool_name"],
                     tool_pattern=rule_data.get("tool_pattern"),
-                    decision=PermissionDecision(rule_data["decision"])
+                    decision=PermissionDecision(rule_data["decision"]),
+                    exact_form=str(rule_data.get("id") or "").startswith(EXACT_FORM_RULE_ID_PREFIX),
                 )
                 if rule.decides(name, tool_input, decision_reason):
                     return rule

@@ -81,6 +81,29 @@ async def test_remembering_an_allowlisted_form_covers_only_that_form():
     ) is None
 
 
+@pytest.mark.parametrize("respacing", ["git  status", "git\tstatus"])
+def test_only_rules_saved_as_exact_forms_cover_other_spacing(respacing):
+    """A literal ``git status`` saved before exact forms keeps main's matcher;
+    one saved by the new "always" path carries the mark and reuses."""
+    database.add_permission_rule("default", "Bash", "git status", "allow")
+    handler = PermissionHandler()
+    assert handler._check_rules(SID, "default", "Bash", {"command": "git status"})
+    assert handler._check_rules(SID, "default", "Bash", {"command": respacing}) is None
+    handler._add_session_rule_idempotent(SID, "Bash", "git status", "allow")
+    assert handler._check_rules(SID, "default", "Bash", {"command": respacing}) is None
+    database.add_permission_rule("default", "Bash", "git status", "allow", exact_form=True)
+    assert handler._check_rules(SID, "default", "Bash", {"command": respacing})
+
+
+@pytest.mark.asyncio
+async def test_an_exact_form_remembered_for_the_profile_keeps_its_mark():
+    handler = PermissionHandler()
+    task = await _prompt(handler, "Bash", {"command": "git status"})
+    await handler.respond("req", SID, "allow", remember="profile")
+    await task
+    assert PermissionHandler()._check_rules(SID, "default", "Bash", {"command": "git  status"})
+
+
 @pytest.mark.asyncio
 async def test_a_peer_written_tool_wide_shell_hint_is_not_installed():
     from app.core import interaction_wait
