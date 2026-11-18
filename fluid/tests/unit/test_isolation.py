@@ -57,14 +57,15 @@ def _enforceable(request):
     require_enforcement(NOT_ENFORCEABLE)
     # Under `pytest -q` passes are not listed, so on GitHub Actions each
     # enforcement test that got past the gate names itself and the kernel's
-    # Landlock ABI in the job summary.
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary and os.environ.get("GITHUB_ACTIONS") == "true":
+    # Landlock ABI as a run annotation, written past pytest's output capture
+    # so it lands in the job log.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
         import platform
 
-        with open(summary, "a", encoding="utf-8") as handle:
-            handle.write(f"- isolation enforcement test ran: `{request.node.name}` "
-                         f"(Landlock ABI {ABI}, kernel {platform.release()})\n")
+        capture = request.config.pluginmanager.getplugin("capturemanager")
+        with capture.global_and_fixture_disabled():
+            print(f"\n::notice title=isolation enforcement::{request.node.name} ran "
+                  f"under Landlock ABI {ABI} (kernel {platform.release()})", flush=True)
 
 
 needs_landlock = pytest.mark.usefixtures("_enforceable")
