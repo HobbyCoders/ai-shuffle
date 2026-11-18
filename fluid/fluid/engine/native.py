@@ -127,7 +127,7 @@ from fluid.context.trim import (
     estimate_tokens_of_text,
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
-from fluid.engine.background import BackgroundLifecycleMixin, await_cancelled_child
+from fluid.engine.background import BackgroundLifecycleMixin
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.guardrail import (
     GUARDRAIL_TOOL,
@@ -1521,9 +1521,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
-        # A Handoff's document call: Interrupt cancels it. Only one handoff
-        # runs at a time.
-        self._handoff_call: asyncio.Task | None = None
+        # Only one handoff runs at a time.
         self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
@@ -1930,9 +1928,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             manual = self._manual_summary_task
             if manual is not None and not manual.done():
                 manual.cancel()  # the manual turn awaits it and reports Interrupted
-            handoff = self._handoff_call
-            if handoff is not None and not handoff.done():
-                handoff.cancel()  # _do_handoff reports it; no session is made
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
@@ -2049,12 +2044,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         user message. Nothing is summarized in place — the old session stays
         intact; the new one starts small, with a fresh cacheable prefix.
 
-        The document call is billed like the checkpoint side call. One handoff
-        runs at a time; a second one, or one on a closing engine, fails at
-        once. Interrupt cancels the document call, and then no session is
-        made. That is the cutoff: once the document is in hand the new session
-        is created and reported, and an Interrupt arriving after that point
-        does not undo it.
+        One handoff runs at a time; a second one, or one on a closing engine,
+        fails at once.
         """
         if getattr(self, "_close_task", None) is not None:
             raise RuntimeError("handoff not created: the engine is closing")
@@ -2065,18 +2056,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             meta = await self._ensure_session()
             if getattr(self, "_close_task", None) is not None:
                 raise RuntimeError("handoff not created: the engine is closing")
-            call = asyncio.create_task(self._handoff_document(meta.session_id, op))
-            self._handoff_call = call
-            try:
-                content = await call
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    await await_cancelled_child(call)
-                    raise
-                raise RuntimeError("handoff not created: interrupted") from None
-            finally:
-                self._handoff_call = None
+            content = await self._handoff_document(meta.session_id, op)
 
             new_meta = await self.store.create_session(cwd=self.ctx.cwd)
             first = SessionNode(
@@ -2115,31 +2095,11 @@ class NativeLoop(BackgroundLifecycleMixin):
         )
         parts: list[str] = []
         error: str | None = None
-        usage: dict[str, Any] = {}
-        try:
-            async for chunk in self.provider.stream(request):
-                payload = chunk.payload or {}
-                if chunk.kind == "text_delta":
-                    parts.append(payload["text"])
-                elif chunk.kind in ("message_start", "usage", "message_stop"):
-                    if isinstance(payload.get("usage"), dict):
-                        self._merge_usage(usage, payload["usage"],
-                                          replace=payload.get("final_usage") is True)
-                elif chunk.kind == "error" and error is None:
-                    error = str(payload.get("message") or "provider error")
-        finally:
-            if usage:
-                # Bill what the provider reported, on failure and on cancel
-                # too; finish the write before a cancellation tears us down.
-                booking = asyncio.create_task(self._record_side_call_usage(
-                    usage, sid=sid, turn_id=None, model=request.model,
-                    source="handoff", background=True,
-                ))
-                try:
-                    await asyncio.shield(booking)
-                except asyncio.CancelledError:
-                    await booking
-                    raise
+        async for chunk in self.provider.stream(request):
+            if chunk.kind == "text_delta":
+                parts.append(chunk.payload["text"])
+            elif chunk.kind == "error" and error is None:
+                error = str(chunk.payload.get("message") or "provider error")
         content = "".join(parts).strip()
         if error is not None or not content:
             # A cut-off or empty document is no handoff: no session is made.
@@ -3131,52 +3091,6 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._summary_task = None
         self._pending_summary = None
 
-    async def _record_side_call_usage(
-        self, usage: dict[str, Any], *, sid: str, turn_id: str | None, model: str,
-        source: str, background: bool,
-    ) -> None:
-        """Price and record an engine side call's usage (checkpoint, handoff).
-
-        A ``background`` call belongs to no turn: it is flagged, kept out of
-        the turn totals and booked through the host's usage sink (idempotent
-        per seq; a failed booking is retried later). Otherwise it joins the
-        running turn's totals.
-        """
-        # No node/context snapshot: side calls cannot measure the main window.
-        raw = dict(usage)
-        if "cost_usd" not in raw:
-            cost = None
-            estimator = getattr(self.provider, "estimate_cost", None)
-            if estimator is not None:
-                try:
-                    cost = estimator(model, raw)
-                except Exception:
-                    pass
-            if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
-                cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
-            if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
-                cost = 0.0
-            if cost is not None:
-                raw.update(cost_usd=cost, cost_from_table=True)
-        raw.update(model=model, auxiliary_source=source)
-        # Ownership is fixed at dispatch, not by whichever turn happens to
-        # be active at completion. Background calls never enter a terminal.
-        if background:
-            raw["auxiliary_background"] = True
-        else:
-            self._accumulate_usage(self._turn_usage, raw)
-        event = await self._emit(Usage(
-            session_id=sid, turn_id=turn_id,
-            input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
-            output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
-            cache_read_tokens=raw.get("cache_read_input_tokens", 0),
-            cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
-        ))
-        if background and self._background_usage_sink is not None:
-            assert isinstance(event, Usage)
-            self._unbooked_usage[event.seq] = event
-            await self._book_unbooked_usage()
-
     async def _build_checkpoint(self, sid: str, turn_id: str,
                                 region: tuple[str, str, str], *,
                                 background: bool = False) -> tuple[str, str, str] | None:
@@ -3186,10 +3100,40 @@ class NativeLoop(BackgroundLifecycleMixin):
         model = cfg.summary_model or self.model
 
         async def account(usage: dict[str, Any]) -> None:
-            await self._record_side_call_usage(
-                usage, sid=sid, turn_id=turn_id, model=model,
-                source="checkpoint_summary", background=background,
-            )
+            # No node/context snapshot: side calls cannot measure the main window.
+            raw = dict(usage)
+            if "cost_usd" not in raw:
+                cost = None
+                estimator = getattr(self.provider, "estimate_cost", None)
+                if estimator is not None:
+                    try:
+                        cost = estimator(model, raw)
+                    except Exception:
+                        pass
+                if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
+                    cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
+                if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                    cost = 0.0
+                if cost is not None:
+                    raw.update(cost_usd=cost, cost_from_table=True)
+            raw.update(model=model, auxiliary_source="checkpoint_summary")
+            # Ownership is fixed at dispatch, not by whichever turn happens to
+            # be active at completion. Background calls never enter a terminal.
+            if background:
+                raw["auxiliary_background"] = True
+            else:
+                self._accumulate_usage(self._turn_usage, raw)
+            event = await self._emit(Usage(
+                session_id=sid, turn_id=turn_id,
+                input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
+                output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
+                cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+                cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
+            ))
+            if background and self._background_usage_sink is not None:
+                assert isinstance(event, Usage)
+                self._unbooked_usage[event.seq] = event
+                await self._book_unbooked_usage()
 
         key = self._affinity_key()
         extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}

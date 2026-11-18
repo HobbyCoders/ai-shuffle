@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
-import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -26,8 +24,6 @@ from fluid.store.base import iter_events_of_class
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
 
-log = logging.getLogger(__name__)
-
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
 # How much of a long worker report rides the wake turn when the rest is one
 # Read away. Only applied when there IS a report path to point at.
@@ -40,12 +36,6 @@ _BACKGROUND_SPAWN_SETTLE_TIMEOUT = 5.0
 # later completion for the life of the process.
 _BACKGROUND_WAKE_MAX_ATTEMPTS = 3
 _BACKGROUND_WAKE_RETRY_BASE_SECONDS = 0.5
-# A failed read of the lifecycle history is retried by a later lifecycle call,
-# but not before this backoff (doubling per failure, capped); in between the
-# lifecycle runs from memory. The warning repeats at most once per interval.
-_REPLAY_RETRY_BASE_SECONDS = 0.5
-_REPLAY_RETRY_MAX_SECONDS = 30.0
-_REPLAY_WARN_INTERVAL_SECONDS = 60.0
 
 
 async def await_cancelled_child(task: asyncio.Task[Any]) -> None:
@@ -101,9 +91,6 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self._background_early: dict[str, BackgroundTaskFinished] = {}
         self._background_completions: dict[str, BackgroundTaskFinished] = {}
         self._background_rehydrated = False
-        self._background_replay_failures = 0
-        self._background_replay_retry_at = 0.0
-        self._background_replay_warned_at: float | None = None
         self._background_lock = asyncio.Lock()
         self._background_wake_task: asyncio.Task | None = None
         self._background_waiting_on: asyncio.Task | None = None
@@ -117,46 +104,16 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self.ctx.extra["background_task_started"] = self._background_task_started
         self.ctx.extra["background_spawn_tasks"] = self._background_spawn_tasks
 
-    def _note_replay_failure(self, session_id: str, exc: BaseException) -> None:
-        """Back off before the next read and warn, at most once an interval."""
-        self._background_replay_failures += 1
-        now = time.monotonic()
-        # The exponent is capped before the power is taken: a long outage
-        # counts failures without bound, and 2.0 ** 1024 overflows.
-        doublings = min(self._background_replay_failures - 1, 32)
-        self._background_replay_retry_at = now + min(
-            _REPLAY_RETRY_MAX_SECONDS, _REPLAY_RETRY_BASE_SECONDS * 2 ** doublings,
-        )
-        warned = self._background_replay_warned_at
-        if warned is None or now - warned >= _REPLAY_WARN_INTERVAL_SECONDS:
-            self._background_replay_warned_at = now
-            log.warning(
-                "could not read session %s's background task history (%s, %d "
-                "failure(s) in a row); a later lifecycle call retries",
-                session_id, type(exc).__name__, self._background_replay_failures,
-            )
-
     async def _rehydrate_background_lifecycle_unlocked(self) -> None:
         if self._background_rehydrated:
             return
-        if time.monotonic() < self._background_replay_retry_at:
-            return  # backing off after a failed read
         meta = await self._ensure_session()
         try:
             events = [event async for event in iter_events_of_class(
                 self.store, meta.session_id, 0, (SubagentEvent, SessionWoken))]
-        except NotImplementedError:
-            # A store without an event log: the lifecycle runs from memory.
+        except Exception:  # noqa: BLE001 — stores without replay degrade in memory
             self._background_rehydrated = True
             return
-        except Exception as exc:  # noqa: BLE001 — retried by a later lifecycle call
-            # A failed read is not an empty log: leave the latch down so a
-            # later call reads again and finds what is still owed. Until then
-            # the lifecycle runs from memory, as for a store without a log.
-            self._note_replay_failure(meta.session_id, exc)
-            return
-        self._background_replay_failures = 0
-        self._background_replay_retry_at = 0.0
 
         for event in events:
             if isinstance(event, SubagentEvent):
