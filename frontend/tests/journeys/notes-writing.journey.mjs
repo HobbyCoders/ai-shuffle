@@ -1,6 +1,6 @@
 // Real note creation, autosave, Preview and moved controls in both app shells.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, reloadForHistory, uniq } from './lib/app.mjs';
+import { expect, gotoApp, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -114,103 +114,4 @@ function writingCase(name, native = false, mid = false) {
   }
  };
 }
-function historyCase(name) {
- const idA = 'history-note-a', idB = 'history-note-b';
- let release, saving;
- let started, notes, listUnavailable, firstPage;
- return {
-  name, viewports: ['desktop'],
-  allow: name === 'unavailable-notes-list' ? [{ kind: 'failed_requests', status: 503, url: /\/notes(\?|$)/, reason: 'this case makes the Notes list unavailable for one reload' }] : [],
-  async setup({ page, status }) {
-   listUnavailable = false; firstPage = null;
-   const gate = new Promise(resolve => release = resolve);
-   started = new Promise(resolve => saving = resolve);
-   notes = [idA, idB].map(id => ({ id, title: id, content: '', tags: [], is_pinned: false,
-    file_path: null, created_at: new Date().toISOString(), updated_at: new Date().toISOString() }));
-   // Hold only the data responses. The app's editor writes every history entry.
-   await page.route('**/api/v1/notes**', async route => {
-    const path = new URL(route.request().url()).pathname.split('/notes')[1];
-    const note = notes.find(n => path === '/' + n.id);
-    if (!path && listUnavailable) return route.fulfill({ status: 503, json: { detail: 'Notes list is temporarily unavailable' } });
-    if (!path && new URL(route.request().url()).searchParams.get('search') === idB) {
-     saving(); await gate;
-     return route.fulfill({ json: notes.filter(n => n.id === idB) });
-    }
-    if (!path) return route.fulfill({ json: firstPage ?? notes });
-    if (route.request().method() === 'PATCH' && note) {
-     saving(); await gate; Object.assign(note, route.request().postDataJSON());
-    }
-    if (path === '/' + idB && !note) return route.fulfill({ status: 404, json: { detail: 'Note not found' } });
-    return route.fulfill({ json: note ?? [] });
-   });
-   await openNotes(page, status);
-  },
-  async act({ page, mark }) {
-   const open = id => page.locator('[data-settings-item]').filter({ hasText: id }).click();
-   const heading = page.getByRole('textbox', { name: 'Note title' });
-   const landed = id => page.waitForFunction(key => String(history.state?.['sveltekit:metadata']?.state).includes(key), id, { timeout: 5000 });
-   await mark('open note A'); await open(idA); await landed(idA);
-   await mark('open note B'); await open(idB); await landed(idB);
-   const length = await page.evaluate(() => history.length);
-   if (name === 'select-while-restore-pending') {
-    await mark('reload B with a full first page that does not contain B: it opens by id');
-    firstPage = [notes[0], ...Array.from({ length: 99 }, (_, i) => ({ ...notes[0], id: `other-${i}`, title: `Other ${i}` }))];
-    await reloadForHistory(page, mark);
-    const row = id => page.locator('[data-settings-item]').filter({ hasText: id });
-    await row(idA).waitFor(); await landed(idB);
-    expect(!await row(idB).isVisible(), 'B is not on the first page');
-    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
-    // Start a search for B, then clear it to show the first page while its response is in flight.
-    const search = page.getByPlaceholder('Search notes', { exact: true });
-    await search.fill(idB); await started; await search.fill(''); await row(idA).waitFor();
-    await mark('select A while the old search for B is outstanding');
-    await open(idA); await heading.waitFor();
-    expect(await heading.inputValue() === idA, 'the explicit choice opened A');
-    const late = page.waitForResponse(r => new URL(r.url()).searchParams.get('search') === idB);
-    release(); await (await late).finished();
-    await landed(idA);
-    expect(await heading.inputValue() === idA, 'the old result did not select B');
-    await mark('reload A with both notes available');
-    firstPage = null; await reloadForHistory(page, mark); await heading.waitFor();
-    expect(await heading.inputValue() === idA, 'reload follows the last explicit selection');
-    expect(await page.evaluate(() => history.length) === length + 1, 'the selection pushed exactly one entry');
-    await page.goBack(); await landed(idB);
-    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
-   } else if (name === 'unavailable-notes-list') {
-    await mark('reload B while the Notes list is unavailable');
-    listUnavailable = true; await reloadForHistory(page, mark);
-    await page.getByRole('button', { name: 'Retry', exact: true }).first().waitFor();
-    // The list is down, but B itself can still be fetched by id.
-    await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
-    await mark('restore the list service and reload without selecting another note');
-    listUnavailable = false; await reloadForHistory(page, mark);
-    await heading.waitFor({ timeout: 5000 });
-    expect(await heading.inputValue() === idB, 'a list failure did not erase B from history');
-    expect(await page.evaluate(() => history.length) === length, 'recovery did not push another entry');
-   } else if (name === 'deleted-note-entry') {
-    await mark('reload the deleted note, then select a surviving note');
-    notes.pop(); await reloadForHistory(page, mark);
-    await page.locator('[data-settings-item]').filter({ hasText: idA }).waitFor();
-    expect(!await heading.isVisible(), 'a deleted note lands on the list');
-    expect(await page.evaluate(() => history.length) === length, 'missing detail is replaced, not pushed');
-    await mark('choose A from the list'); await open(idA); await landed(idA);
-    await mark('reload the new selection'); await reloadForHistory(page, mark);
-    await heading.waitFor(); expect(await heading.inputValue() === idA, 'the surviving selection was recorded');
-   } else {
-    await mark('Forward to the still-visible editor before its save settles');
-    await heading.fill('Edited B');
-    await page.goBack(); await landed(idA); await started;
-    await mark('return to B, then release its save');
-    await page.goForward(); await landed(idB); release();
-    await page.locator('.note-save').filter({ hasText: /^Saved$/ }).waitFor();
-    expect(await heading.inputValue() === 'Edited B', 'Forward kept the edited B visible after its save');
-    expect(await page.evaluate(() => history.length) === length, 'late save did not add an entry');
-   }
-  }
- };
-}
-await runJourney({
- name: 'notes-writing', allow: DEV_INSTANCE_NOISE,
- // The history cases intercept Notes responses across document reloads.
- browser: () => ({ context: { serviceWorkers: 'block' } }),
- cases: [historyCase('late-save-after-forward'), historyCase('deleted-note-entry'), historyCase('unavailable-notes-list'), historyCase('select-while-restore-pending'), writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), ...(mobileShell ? [writingCase('native-note-writing', true)] : [])] });
+await runJourney({ name: 'notes-writing', allow: DEV_INSTANCE_NOISE, cases: [writingCase('responsive-note-writing'), writingCase('mid-note-writing', false, true), ...(mobileShell ? [writingCase('native-note-writing', true)] : [])] });

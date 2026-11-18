@@ -51,7 +51,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		main: Snippet<[back: () => void]>;
 		label: string;
 		detailOpen?: boolean;
-		onBack?: (current?: () => boolean) => void;
+		onBack?: () => void;
 		/** Settings already owns its multi-level history; other pages leave this on. */
 		manageHistory?: boolean;
 		/** The web UI records this page's selection in its shell history (the phone app keeps the entries below). */
@@ -151,7 +151,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			}
 		});
 	});
-	// Track landings separately from visible changes: opening an editor may wait for a save.
+	// Each landing is followed once; a selection still loading retries until its list settles.
 	let followed: typeof shellHistory.restored = null;
 	let previousKey: string | null | undefined;
 	$effect(() => {
@@ -167,7 +167,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		if (landing && landing !== followed && place.panel !== undefined) {
 			const current = () => shellHistory.restored === landing;
 			if (key !== place.panel) {
-				if (place.panel === null) untrack(() => onBack?.(current));
+				if (place.panel === null) untrack(() => onBack?.());
 				else {
 					const result = restoreSelection?.(place.panel, current);
 					if (result === 'pending') return; // retry when the list settles

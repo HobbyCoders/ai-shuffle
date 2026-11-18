@@ -163,7 +163,7 @@ describe('ViewShell', () => {
 });
 
 describe('ViewShell in the web UI: its selection is a shell-history entry', () => {
-	beforeEach(() => { shellHistory.start({}, { type: 'notes' }); });
+	beforeEach(() => { shellHistory.start({}, { type: 'project' }); });
 	afterEach(() => { shellHistory.stop(); });
 	it('leaving a detail does not pop its entry', async () => {
 		await resize(390);
@@ -184,7 +184,7 @@ describe('ViewShell in the web UI: its selection is a shell-history entry', () =
 		expect(mocks.push).toHaveBeenCalledOnce();
 		const entry = mocks.push.mock.calls[0][1];
 		expect(entry.shell.place.panel).toBe('b');
-		shellHistory.land({ shell: { id: 'list', place: { type: 'notes', panel: null } } });
+		shellHistory.land({ shell: { id: 'list', place: { type: 'project', panel: null } } });
 		await tick(); expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
 		shellHistory.land(entry);
 		await tick(); expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();

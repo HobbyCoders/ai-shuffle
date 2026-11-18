@@ -1,5 +1,6 @@
 import { shellHistory } from '$lib/services/app-history.svelte';
 import { preferenceSync } from '$lib/services/preferences';
+import { platform } from '$lib/stores/platform.svelte';
 /**
  * Layout Store - Manages the sidebar + main panel layout state
  *
@@ -187,8 +188,9 @@ export const layout = {
 
 	/**
 	 * Navigate now, or after an open sidebar overlay closes (the next frame).
-	 * A Back or Forward, or another explicit navigation, in between supersedes
-	 * it; a detail refining the page on screen (a saved note's id) does not.
+	 * In the web UI a Back or Forward, or another explicit navigation, in
+	 * between supersedes it; a detail refining the page on screen does not.
+	 * The phone app runs it on that frame regardless, as on main.
 	 */
 	afterSidebarOverlay(navigate: () => void) {
 		const request = ++navigations;
@@ -196,7 +198,7 @@ export const layout = {
 		const traversals = shellHistory.traversals;
 		_update((s) => ({ ...s, sidebarCollapsed: true }));
 		requestAnimationFrame(() => {
-			if (request === navigations && traversals === shellHistory.traversals) navigate();
+			if (platform.isMobile || (request === navigations && traversals === shellHistory.traversals)) navigate();
 		});
 	},
 

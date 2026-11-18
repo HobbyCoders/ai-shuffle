@@ -61,16 +61,6 @@ let mounted = false;
 let settling = false;
 // The load started on an entry with no saved place of its own.
 let fresh = false;
-// Where SvelteKit numbers the browser's entries (main's settings history reads it too).
-function historyIndex(): number | null {
- const meta = (typeof history === 'undefined' ? null : history.state as Record<string, unknown> | null)?.['sveltekit:metadata'];
- const index = (meta as { historyIndex?: unknown } | null | undefined)?.historyIndex;
- return typeof index === 'number' ? index : null;
-}
-// The entry a Back or Forward left, so a page that refuses the step (a draft
-// the user keeps) can return the browser there without adding a stop.
-let left: { landing: Entry; index: number | null } | null = null;
-let here: number | null = null;
 // Back/Forward landings on another of this module's entries, counted: a
 // navigation deferred to the next frame yields to one that happened since.
 let traversals = 0;
@@ -99,8 +89,6 @@ export const shellHistory = {
  start(state: ShellState, view: ActiveView | null) {
   if (platform.isMobile) return;
   mounted = settling = true;
-  left = null;
-  here = historyIndex();
   if (owned(state) && state.shell) {
    fresh = false;
    entry = restored = shown = { ...state.shell };
@@ -111,7 +99,7 @@ export const shellHistory = {
   shown = { id: randomUUID(), place: viewPlace(view) };
   if (owned(state)) record(shown, 'stamp');
  },
- stop() { mounted = settling = false; entry = restored = shown = held = left = null; },
+ stop() { mounted = settling = false; entry = restored = shown = held = null; },
  /**
   * The chat a fresh load's arrival actually shows (this tab's restored chat
   * may differ from the shared layout snapshot), until the user's first step.
@@ -132,7 +120,6 @@ export const shellHistory = {
   if (at.id === entry?.id) {
    // Back on our entry once an overlay closed: a place held back meanwhile goes in now.
    entry = at;
-   here = historyIndex();
    if (shown?.id === at.id && !samePlace(shown.place, at.place)) record(shown, 'replace');
    return false;
   }
@@ -141,23 +128,8 @@ export const shellHistory = {
   entry = at;
   if (kept) at = { ...kept };
   restored = shown = at;
-  left = { landing: at, index: here };
-  here = historyIndex();
   if (kept) record(at, 'replace');
   return true;
- },
- /** Where a page that may refuse this landing returns the browser: the entry the landing left. */
- returnPoint(landing: Entry | null): number | null {
-  return landing && landing === restored && left?.landing === landing ? left.index : null;
- },
- /**
-  * The page kept what it showed instead of following `landing`: the browser
-  * goes back to `to` (a returnPoint), while that landing is still the current one.
-  */
- refuse(landing: Entry | null, to: number | null) {
-  if (!landing || landing !== restored || to === null || here === null) return;
-  left = null;
-  if (to !== here) history.go(to - here);
  },
  /**
   * A view change; false when declined. `reconcile` is boot settling the view
@@ -259,7 +231,6 @@ function record(next: Entry, mode: 'push' | 'replace' | 'stamp') {
    // reads the entry this one made. No timer: one that let a later write
    // pass before this one committed would reorder the entries.
    await goto(location.href, { shallow: true, replace, persistState: true, state: { shell: next } as ShellState });
-   here = historyIndex();
    if (held?.id === id) held = null;
   } catch (error) {
    keep();

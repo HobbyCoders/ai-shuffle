@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { layout } from '$lib/stores/layout.svelte';
-	import { platform } from '$lib/stores/platform.svelte';
 	import { watchResources } from '$lib/services/watch-resources';
 	/**
 	 * NotesCard - Global notes for ideas, bugs, planning
@@ -35,7 +34,6 @@
 		type NoteAttachment
 	} from '$lib/api/client';
 	import { onMount, untrack } from 'svelte';
-	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { registerReloadBlocker } from '$lib/services/app-update';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
 	import { escapeHtml } from '$lib/utils/escape-html';
@@ -52,7 +50,6 @@
 	let notes = $state<Note[]>([]);
 	let tags = $state<NoteTag[]>([]);
 	let loading = $state(true);
-	let listIsComplete = $state(false);
 	let error = $state<string | null>(null);
 
 	// Filter state
@@ -232,20 +229,8 @@
 		danger: boolean;
 		action: () => void;
 	} | null>(null);
-	// Where a Back or Forward that met the unsaved draft returns the browser on
-	// Cancel: the draft's own entry. Kept across further steps until answered.
-	let draftReturn: number | null = null;
-
-	function cancelPendingConfirm() {
-		const to = draftReturn;
-		draftReturn = null;
-		pendingConfirm = null;
-		// Whichever entry the browser landed on since, the draft stays on screen: go back to its entry.
-		if (shellHistory.restored) shellHistory.refuse(shellHistory.restored, to);
-	}
 
 	function runPendingConfirm() {
-		draftReturn = null;
 		const action = pendingConfirm?.action;
 		pendingConfirm = null;
 		action?.();
@@ -253,8 +238,6 @@
 
 	// Load notes and tags
 	async function loadData(quiet = false) {
-		const filtered = !!(searchQuery || selectedTag);
-		listIsComplete = false;
 		if (!quiet) loading = true;
 		error = null;
 
@@ -268,10 +251,6 @@
 			]);
 			notes = notesData;
 			tags = tagsData;
-			// GET /notes defaults to 100 rows. A full page or filtered list can't
-			// prove that a historical note has been deleted. This describes the
-			// rows just shown, whichever request they answer.
-			listIsComplete = !filtered && notesData.length < 100;
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load notes';
 		} finally {
@@ -367,21 +346,12 @@
 
 	// All editor navigation shares the same save/discard decision. A named note
 	// is flushed before moving on; an untitled or failed draft requires consent.
-	async function changeEditor(action: () => void, restoredEntryCurrent?: () => boolean) {
+	async function changeEditor(action: () => void) {
 		const request = ++navigationRequest;
-		// The web UI's shell history only: the phone app keeps main's flow.
-		const desktop = !platform.isMobile;
-		const landing = shellHistory.restored;
-		const current = restoredEntryCurrent ?? (() => !shellHistory.restored || shellHistory.restored === landing);
-		// The first Back or Forward that leaves an editing draft records the
-		// draft's entry now, before any save is awaited; later steps keep it.
-		if (restoredEntryCurrent && draftReturn === null && (saving || hasUnsavedChanges)) draftReturn = shellHistory.returnPoint(landing);
 		cancelAutosave();
 		if (saving || (hasUnsavedChanges && editorTitle.trim())) await saveNote();
-		if (request !== navigationRequest || (desktop && !current())) return;
+		if (request !== navigationRequest) return;
 		const apply = () => {
-			if (desktop && (request !== navigationRequest || !current())) return;
-			draftReturn = null;
 			cancelAutosave();
 			editorGeneration++;
 			editorSession++;
@@ -389,10 +359,6 @@
 			uploading = false;
 			persistDraft();
 			action();
-			// A committed editor choice is navigation even when ViewShell is still
-			// waiting for an older selection to appear in a partial list. Browser
-			// restores only display their entry; they never push another one.
-			if (!restoredEntryCurrent) shellHistory.detail('notes', { panel: editingNote?.id ?? (isCreatingNew ? 'new' : null) });
 		};
 		if (hasUnsavedChanges) {
 			pendingConfirm = {
@@ -437,18 +403,9 @@
     });
 
 	// Open a note for editing
-	function openNote(note: Note, current?: () => boolean) {
-		if (editingNote?.id === note.id) {
-			if (platform.isMobile) return;
-			// Web UI: the open note, chosen again or landed on, is the latest
-			// choice. A pending step away from it (and its dialog) is retired.
-			navigationRequest++;
-			draftReturn = null;
-			pendingConfirm = null;
-			if (!current) shellHistory.detail('notes', { panel: note.id });
-			return;
-		}
-		void changeEditor(() => selectNote(notes.find((n) => n.id === note.id) ?? note), current);
+	function openNote(note: Note) {
+		if (editingNote?.id === note.id) return;
+		void changeEditor(() => selectNote(notes.find((n) => n.id === note.id) ?? note));
 	}
 
 	function selectNote(note: Note) {
@@ -484,8 +441,8 @@
 	}
 
 	// Close editor and go back to list
-	function closeEditor(current?: () => boolean) {
-		void changeEditor(doCloseEditor, current);
+	function closeEditor() {
+		void changeEditor(doCloseEditor);
 	}
 
 	function doCloseEditor() {
@@ -513,15 +470,11 @@
 					if (idx >= 0) notes[idx] = saved;
 					else notes = [saved, ...notes];
 					if (generation !== editorGeneration) return;
-					// The server resolved the draft's identity, not a new navigation.
-					if (isCreatingNew && shellHistory.place?.panel === 'new') shellHistory.detail('notes', { panel: saved.id }, true);
 					isCreatingNew = false;
 					editingNote = saved;
 					hasUnsavedChanges = revision !== editRevision;
 					persistDraft();
 				} while (hasUnsavedChanges && editorTitle.trim());
-				// Saved: a Back or Forward that met the draft has nothing left to return to.
-				if (!hasUnsavedChanges) draftReturn = null;
 			} catch (e) {
 				error = e instanceof Error ? e.message : 'Failed to save note';
 			} finally {
@@ -886,31 +839,6 @@
 			}
 		}
 	});
-
-	// A saved note the loaded list doesn't show (past its first page, or
-	// filtered out), fetched by id: the note, or null once the server says 404.
-	let savedNote = $state<{ id: string; note: Note | null } | null>(null);
-	let savedFetch: string | null = null;
-
-	function restoreSelection(key: string, current: () => boolean) {
-		if (key === 'new') { void changeEditor(resetNewNote, current); return; }
-		const fetched = savedNote?.id === key ? savedNote.note : undefined;
-		const note = notes.find(n => n.id === key) ?? fetched;
-		if (note) {
-			untrack(() => { savedNote = null; openNote(note, current); });
-			return;
-		}
-		if (fetched === null || listIsComplete) return 'missing';
-		if (!loading && savedFetch !== key) {
-			savedFetch = key;
-			// Only for the landing that asked; a temporary failure keeps the selection.
-			getNote(key)
-				.then((found) => { if (current()) savedNote = { id: key, note: found }; })
-				.catch((e) => { if (current() && (e as { status?: unknown } | null)?.status === 404) savedNote = { id: key, note: null }; })
-				.finally(() => { if (savedFetch === key) savedFetch = null; });
-		}
-		return 'pending';
-	}
 </script>
 
 {#snippet metadata()}
@@ -929,7 +857,7 @@
 
 <svelte:window onclick={(event) => { if (!(event.target as Element)?.closest?.('.note-more')) closeMore(); }} onkeydown={(event) => { if (moreOpen && event.key === 'Escape') { event.preventDefault(); closeMore(true); } }} />
 
-<ViewShell label="Notes" historyType="notes" selection={editingNote?.id ?? 'new'} {restoreSelection} detailOpen={!!(editingNote || isCreatingNew)} detailKey={editorSession} onBack={closeEditor}>
+<ViewShell label="Notes" detailOpen={!!(editingNote || isCreatingNew)} detailKey={editorSession} onBack={closeEditor}>
 	{#snippet panel()}
 		<ViewPanel title="Notes" count={loading ? undefined : notes.length} {loading} listLabel="Notes list">
 			{#snippet actions()}<PanelIconButton label="New note" icon={Plus} onclick={startNewNote} />{/snippet}
@@ -1054,7 +982,7 @@
 	confirmLabel={pendingConfirm?.confirmLabel ?? 'Confirm'}
 	danger={pendingConfirm?.danger ?? false}
 	onConfirm={runPendingConfirm}
-	onCancel={cancelPendingConfirm}
+	onCancel={() => (pendingConfirm = null)}
 />
 
 <style>

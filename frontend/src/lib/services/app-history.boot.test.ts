@@ -303,19 +303,19 @@ it('after a rejected push, selecting the committed place again adds no duplicate
 });
 
 it('retries an identical detail selection whose push was rejected, and settles a detail selection back on the committed one', async () => {
- startOn(saved('arrival', { type: 'notes', panel: 'one' }));
+ startOn(saved('arrival', { type: 'project', panel: 'one' }));
  router.outcomes = ['reject'];
- shellHistory.detail('notes', { panel: 'two' });
+ shellHistory.detail('project', { panel: 'two' });
  await settle(); await settle();
  expect(router.entries).toHaveLength(1);
- shellHistory.detail('notes', { panel: 'two' });
+ shellHistory.detail('project', { panel: 'two' });
  await vi.waitFor(() => expect(router.entries.map(({ state }) => state.shell?.place.panel)).toEqual(['one', 'two']));
  shellHistory.stop();
- startOn(saved('arrival', { type: 'notes', panel: 'one' }));
+ startOn(saved('arrival', { type: 'project', panel: 'one' }));
  router.outcomes = ['reject'];
- shellHistory.detail('notes', { panel: 'two' });
+ shellHistory.detail('project', { panel: 'two' });
  await settle(); await settle();
- shellHistory.detail('notes', { panel: 'one' });
+ shellHistory.detail('project', { panel: 'one' });
  await settle(); await settle();
  expect(router.entries).toHaveLength(1);
  expect(shellHistory.place?.panel).toBe('one');
@@ -330,33 +330,6 @@ it('a late “chat unavailable” for a chat Back already left touches neither t
  expect(shellHistory.unavailable('a')).toBe(false);
  await settle();
  expect(router.entries.map(({ state }) => state.shell?.place.type)).toEqual(['notes', 'session']);
-});
-
-it('a refused landing returns the browser to the entry it left, without a new stop', async () => {
- startOn(saved('a', { type: 'notes', panel: 'a' }), saved('draft', { type: 'notes', panel: 'new' }));
- expect(go(-1)).toBe(true);
- shellHistory.refuse(shellHistory.restored, shellHistory.returnPoint(shellHistory.restored));
- expect(router.index).toBe(1);
- expect(shellHistory.place?.panel).toBe('new');
- expect(router.entries).toHaveLength(2);
- // Back is ordinary again.
- expect(go(-1)).toBe(true);
- expect(shellHistory.place?.panel).toBe('a');
-});
-
-it('a refusal kept across further steps returns to the draft’s own entry, and only from the current landing', async () => {
- startOn(saved('a', { type: 'notes', panel: 'a' }), saved('b', { type: 'notes', panel: 'b' }), saved('draft', { type: 'notes', panel: 'new' }));
- expect(go(-1)).toBe(true);
- const draft = shellHistory.returnPoint(shellHistory.restored);
- const onB = shellHistory.restored;
- expect(go(-1)).toBe(true);
- // The landing on B is no longer current: refusing it moves nothing.
- shellHistory.refuse(onB, draft);
- expect(router.index).toBe(0);
- shellHistory.refuse(shellHistory.restored, draft);
- expect(router.index).toBe(2);
- expect(shellHistory.place?.panel).toBe('new');
- expect(router.entries).toHaveLength(3);
 });
 
 it('choosing the committed place drops a refinement held for its entry (S14)', async () => {
@@ -380,8 +353,8 @@ it('the phone app: shell history reads and writes nothing, so main’s own write
  const arrival = saved('arrival', { type: 'session', sessionId: 'a' });
  startOn(arrival);
  shellHistory.destination({ type: 'session', sessionId: 'b' });
- shellHistory.destination({ type: 'notes' });
- shellHistory.detail('notes', { panel: 'one' });
+ shellHistory.destination({ type: 'project' });
+ shellHistory.detail('project', { panel: 'one' });
  shellHistory.shows('c');
  expect(shellHistory.unavailable('a')).toBe(false);
  pushOverlay({ mobileDrawer: true });
@@ -407,15 +380,15 @@ it('a detail selection whose replace was rejected is written again when chosen a
  expect(router.entries).toHaveLength(1);
 });
 
-it('narrow desktop: a deferred pick survives a draft note getting its id, and yields to Back or a newer pick (S18)', async () => {
- startOn(saved('notes', { type: 'notes', panel: null }), saved('draft', { type: 'notes', panel: 'new' }));
+it('narrow desktop: a deferred pick survives a detail refinement, and yields to Back or a newer pick (S18)', async () => {
+ startOn(saved('list', { type: 'project', panel: null }), saved('detail', { type: 'project', panel: 'local-1' }));
  const frames: FrameRequestCallback[] = [];
  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback));
  const frame = () => { for (const callback of frames.splice(0)) callback(0); };
  const deferred = () => { layout.setSidebarOverlay(true); layout.setSidebarCollapsed(false); const open = vi.fn(); layout.afterSidebarOverlay(open); return open; };
  try {
   const pick = deferred();
-  shellHistory.detail('notes', { panel: 'n1' }, true); // the save resolves the draft's id: not navigation
+  shellHistory.detail('project', { panel: 'v2-1' }, true); // the row arrives under its v2 id: not navigation
   await settle();
   frame();
   expect(pick).toHaveBeenCalledOnce();
@@ -428,6 +401,23 @@ it('narrow desktop: a deferred pick survives a draft note getting its id, and yi
   frame();
   expect(older).not.toHaveBeenCalled();
   expect(newer).toHaveBeenCalledOnce();
+ } finally {
+  layout.setSidebarOverlay(false);
+ }
+});
+
+it('the phone app: a drawer pick deferred to the next frame still runs after a chat opens meanwhile, as on main (S26)', async () => {
+ phone.app = true;
+ const frames: FrameRequestCallback[] = [];
+ vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback));
+ try {
+  // The drawer is open over the native shell: Notes is picked from it.
+  layout.setSidebarOverlay(true); layout.setSidebarCollapsed(false);
+  layout.afterSidebarOverlay(() => layout.openFeaturePage('notes'));
+  // A fork completes before that frame: its open-session event opens the fork at once.
+  layout.openChat('fork');
+  for (const callback of frames.splice(0)) callback(0);
+  expect(layout.current.activeView?.type).toBe('notes');
  } finally {
   layout.setSidebarOverlay(false);
  }
