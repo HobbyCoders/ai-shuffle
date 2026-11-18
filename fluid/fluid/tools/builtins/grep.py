@@ -143,10 +143,17 @@ def _search_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[str, Path, Any, b
     )
 
 
-async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    """The search itself: no session bookkeeping (the registered ``FETCH``)."""
-    pattern, root, glob, no_ignore, limit = _search_args(input, ctx)
+async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> tuple[tuple, ToolOutcome]:
+    """The search itself, with the arguments it resolved (the root once): no
+    session bookkeeping (the registered ``FETCH``)."""
+    args = _search_args(input, ctx)
+    return args, await _search(input, *args, ctx)
 
+
+async def _search(
+    input: dict[str, Any], pattern: str, root: Path, glob: str | None,
+    no_ignore: bool, limit: int, ctx: ToolCtx,
+) -> ToolOutcome:
     # Check the root before shelling out: ripgrep reports a missing directory as
     # a generic "rg error" under the "searched via rg under ..." header, which
     # reads like a search result and has been pasted back as a path.
@@ -167,12 +174,11 @@ async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
 
 
-
 FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
 
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    outcome = await fetch_once(_fetch, input, ctx)
-    pattern, root, glob, no_ignore, limit = _search_args(input, ctx)
+    (pattern, root, glob, no_ignore, limit), outcome = await fetch_once(_fetch, input, ctx)
 
     # One choke point for repeat-search handling, so neither engine has to know
     # about it. The search still ran; when its result has the same lines as the

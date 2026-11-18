@@ -65,6 +65,7 @@ class _Probes:
         self.log: list[str] = []
         self.started: dict[str, asyncio.Event] = {}
         self.runs = 0
+        self.on_cancel: dict[str, Any] = {}  # call id -> coroutine function
 
     def ev(self, call: str) -> asyncio.Event:
         return self.started.setdefault(call, asyncio.Event())
@@ -87,6 +88,8 @@ class _Probes:
             return ToolOutcome(text=f"probe {call} run{run}")
         except asyncio.CancelledError:
             self.log.append(f"cancelled {call}")
+            if call in self.on_cancel:
+                await self.on_cancel[call]()
             raise
 
     def register(self, registry: ToolRegistry) -> ToolRegistry:
@@ -234,15 +237,61 @@ async def test_call_the_gate_prompts_for_does_not_use_its_early_fetch() -> None:
 
 
 async def test_repeated_calls_are_not_fetched_early() -> None:
-    """The repeat guard asks on the third identical call; a call it could
-    count is never fetched before its gate (P4), so no prompt follows a read."""
+    """The repeat guard asks on the third identical call; a call it would ask
+    for is never fetched before its gate (P4): c3 runs once, after approval."""
     probes, store = _Probes(), MemoryStore()
     sid = (await store.create_session()).session_id
     loop = _loop(_Provider(_reply(*[(c, "Probe", {"id": "same"}) for c in ("c1", "c2", "c3")])),
                  probes.register(ToolRegistry()), 4, policy="on_write", store=store, sid=sid)
     assert await _approving(loop, sid) == ["c3"]
-    assert probes.log == ["start same", "end same"] * 3
-    assert [r.output for r in _results(loop)] == [f"probe same run{n}" for n in (1, 2, 3)]
+    assert probes.runs == 3
+    assert [r.output for r in _results(loop)][2] == "probe same run3"
+
+
+def _guarded_reads(tmp_path, monkeypatch, threshold: int, *replies) -> tuple[NativeLoop, list]:
+    """A never-ask loop at limit 4 whose repeat guard trips at ``threshold``
+    (under never_ask it denies), and the files Read opens."""
+    for f in "ab":
+        (tmp_path / f"{f}.txt").write_text(f"{f}\n")
+    loaded = _spy_load(monkeypatch)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(*[_reply(*[(f"{n}{i}", "Read", {"file_path": f"{f}.txt"})
+                                      for i, f in enumerate(files)])
+                             for n, files in enumerate(replies)]),
+                 registry, 4, tmp_path=tmp_path)
+    loop.permissions = PermissionEngine("never_ask", doom_loop_threshold=threshold)
+    return loop, loaded
+
+
+async def test_threshold_one_guard_fetches_nothing_early(tmp_path, monkeypatch) -> None:
+    """With ``doom_loop_threshold=1`` every call trips the guard, so no file
+    is opened before (or after) the gate denies it."""
+    loop, loaded = _guarded_reads(tmp_path, monkeypatch, 1, "ab")
+    await _turn(loop)
+    assert loaded == []
+    assert all(r.is_error for r in _results(loop))
+
+
+async def test_guard_streak_from_an_earlier_reply_counts(tmp_path, monkeypatch) -> None:
+    """Reply 1 reads a.txt; reply 2 opens with the same Read, the guard's
+    second in a row at threshold 2: it is denied, never fetched early."""
+    loop, loaded = _guarded_reads(tmp_path, monkeypatch, 2, "a", "ab")
+    await _turn(loop)
+    assert loaded == ["a.txt", "b.txt"]
+    assert [r.is_error for r in _results(loop)] == [False, True, False]
+
+
+async def test_would_guard_matches_note_execution() -> None:
+    engine = PermissionEngine("on_write", doom_loop_threshold=3)
+    calls = [("Read", {"p": 1})] * 4 + [("Grep", {"q": 1}), ("Read", {"p": 1})]
+    for n, (name, input) in enumerate(calls):
+        expected = engine.would_guard(name, input)
+        assert engine.would_guard(name, input) == expected  # asking changes nothing
+        assert engine.note_execution(name, input) == expected, n
+    fresh = PermissionEngine("on_write", doom_loop_threshold=3)
+    assert fresh.would_guard("Read", {"p": 1}, before=calls[:2])
+    assert not fresh.would_guard("Read", {"p": 1}, before=calls[:3])
 
 
 async def test_failing_fetch_surfaces_at_its_own_position() -> None:
@@ -354,10 +403,14 @@ async def test_look_ahead_authorizes_the_raw_input_the_gate_sees(tmp_path, monke
 def _glob_world(tmp_path):
     """A tree whose full Glob listing is over the spill cap, and the loop's
     state root, so spills land under ``tmp_path / "state"``."""
+    import os
+
     tree = tmp_path / "tree"
-    tree.mkdir()
-    for n in range(400):
-        (tree / f"{'x' * 60}-{n:04}.txt").write_text("")
+    if not tree.exists():
+        tree.mkdir()
+        for n in range(400):
+            (tree / f"{'x' * 60}-{n:04}.txt").write_text("")
+            os.utime(tree / f"{'x' * 60}-{n:04}.txt", (1e9, 1e9))  # ties sort by path
     return tree, tmp_path / "state"
 
 
@@ -380,16 +433,26 @@ async def test_a_discarded_glob_writes_no_spill(tmp_path) -> None:
     )), registry, 4, store=store, sid=sid), state)
     await loop.submit(UserTurn(content="go"))
     await _until(lambda: "l" in loop._prefetches and loop._prefetches["l"][1].done())
-    assert "saved to" in loop._prefetches["l"][1].result()[0].text  # it was oversized
+    assert "saved to" in loop._prefetches["l"][1].result()[0][1].text  # it was oversized
     await loop.submit(Interrupt())
     await asyncio.wait_for(loop.wait_turn(), _HANG)
     assert not state.exists() or not any(p.is_file() for p in state.rglob("*"))
 
 
-async def test_an_early_glob_writes_its_spill_at_its_turn(tmp_path) -> None:
-    """Used, the early Glob's result and spill file are main's."""
-    async def run(limit: int, root) -> tuple[str, list]:
-        tree, state = _glob_world(root)
+async def test_an_early_glob_writes_its_spill_at_its_turn(tmp_path, monkeypatch) -> None:
+    """Used, the early Glob's result, spill file and counter are main's, and
+    each listing ran once: the early results were consumed, not refetched."""
+    from fluid.tools.builtins import glob as glob_tool
+    from fluid.tools.registry import deferred_writes
+
+    early_flags: list[bool] = []
+    real = glob_tool._glob
+    monkeypatch.setattr(glob_tool, "_glob", lambda *a: (
+        early_flags.append(deferred_writes.get() is not None), real(*a))[1])
+
+    async def run(limit: int) -> tuple:
+        tree, _ = _glob_world(tmp_path)
+        state = tmp_path / f"state{limit}"
         store = MemoryStore()
         sid = (await store.create_session()).session_id
         registry = ToolRegistry()
@@ -398,16 +461,85 @@ async def test_an_early_glob_writes_its_spill_at_its_turn(tmp_path) -> None:
             ("g", "Glob", {"pattern": "*-0000.txt", "path": str(tree)}),
             ("l", "Glob", {"pattern": "*.txt", "path": str(tree), "limit": 1000}),
         )), registry, limit, store=store, sid=sid), state)
+        early_flags.clear()
         await _turn(loop)
-        out = _results(loop)[1].output.replace(str(root), "<root>").replace(sid, "<sid>")
+        out = _results(loop)[1].output.replace(str(state), "<state>").replace(sid, "<sid>")
         stats = [json.loads(p.read_text())["spilled"] for p in state.rglob("spill-stats/*")]
-        return out, sorted(p.name for p in state.rglob("tool-output/*")), stats
+        files = sorted(p.name for p in state.rglob("tool-output/*"))
+        return (out, files, stats), list(early_flags)
 
-    (tmp_path / "1").mkdir()
-    (tmp_path / "4").mkdir()
-    serial, early = await run(1, tmp_path / "1"), await run(4, tmp_path / "4")
+    (serial, serial_runs), (early, early_runs) = await run(1), await run(4)
     assert early == serial and "saved to" in early[0] and early[1]
     assert early[2] == [{"Glob": 1}]
+    assert serial_runs == [False, False] and early_runs == [True, True]
+
+
+async def test_a_read_of_the_spill_stats_is_not_fetched_early(tmp_path) -> None:
+    """An oversized Glob, then a Read of the session's spill-stats file: at
+    limit 4 the Read sees the count the Glob just wrote, as at limit 1 (P3)."""
+    from fluid.tools.spill import _stats_path
+
+    async def run(limit: int) -> str:
+        tree, _ = _glob_world(tmp_path)
+        state = tmp_path / f"stats{limit}"
+        store = MemoryStore()
+        sid = (await store.create_session()).session_id
+        registry = ToolRegistry()
+        register_builtins(registry)
+        loop = _with_state(_loop(_Provider(), registry, limit, store=store, sid=sid), state)
+        loop.ctx.session_id = sid  # as the turn sets it
+        stats = str(_stats_path(loop.ctx))
+        loop.provider.replies.insert(0, _reply(
+            ("l", "Glob", {"pattern": "*.txt", "path": str(tree), "limit": 1000}),
+            ("r", "Read", {"file_path": stats}),
+        ))
+        await _turn(loop)
+        return _results(loop)[1].output
+
+    serial, early = await run(1), await run(4)
+    assert '"Glob": 1' in serial and '"Glob": 1' in early
+
+
+async def test_no_fetch_starts_when_the_interrupt_lands_during_cleanup() -> None:
+    """``a, d, e`` at limit 2: d's gate denies it after its fetch started (a
+    rule added mid-reply), so its fetch is stale when the loop moves to e, and
+    the interrupt arrives while that fetch is being cancelled. e's fetch is
+    never scheduled and e gets main's cancellation result (P1, round 2)."""
+    from fluid.permissions.rules import Rule
+
+    probes, store = _Probes(), MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(_Provider(_reply(("a", "Probe", {"id": "a", "meet": "go"}),
+                                  ("d", "Probe", {"id": "d", "hold": True}),
+                                  ("e", "Probe", {"id": "e"}))),
+                 probes.register(ToolRegistry()), 2, policy="on_write", store=store, sid=sid)
+
+    async def interrupt() -> None:
+        await loop.submit(Interrupt())
+
+    probes.on_cancel["d"] = interrupt
+    scheduled: list[str] = []
+
+    class _Recording(dict):
+        def __setitem__(self, key, value) -> None:
+            scheduled.append(key)
+            super().__setitem__(key, value)
+
+    loop._prefetches = _Recording()
+
+    async def deny_d() -> None:
+        await asyncio.wait_for(probes.ev("d").wait(), _HANG)
+        loop.permissions.rules = [Rule(tool="Probe", decision="deny", input_globs={"id": "d"})]
+        probes.ev("go").set()
+
+    denier = asyncio.create_task(deny_d())
+    await _turn(loop)
+    await denier
+    assert scheduled == ["a", "d"] and "cancelled d" in probes.log
+    assert "start e" not in probes.log
+    assert [(r.tool_use_id, r.is_error) for r in _results(loop)] == [
+        ("a", False), ("d", True), ("e", True)]
+    assert "interrupted" in _results(loop)[2].output
 
 
 async def test_a_search_that_can_see_the_spill_folder_is_not_fetched_early(tmp_path) -> None:
@@ -538,3 +670,42 @@ def test_prompt_claims_early_fetch_only_when_the_native_loop_does_it(delegated, 
     assert "Make independent tool calls in the same reply" in prompt
     assert ("Reads and searches (Read, Grep, Glob) among them may be fetched concurrently"
             in prompt) == claimed
+
+
+async def test_a_fetch_task_that_starts_after_the_interrupt_does_not_fetch() -> None:
+    """Scheduled, then the turn is interrupted before the task first runs:
+    the task returns without fetching (P1, round 2)."""
+    probes = _Probes()
+    loop = _loop(_Provider(), probes.register(ToolRegistry()), 2)
+    calls = [{"tool_use_id": "p", "name": "Probe", "input": {"id": "p"}}]
+    await loop._prefetch(calls, 0)
+    task = loop._prefetches["p"][1]
+    loop._interrupted.set()
+    assert await asyncio.wait_for(task, _HANG) is None
+    assert probes.log == []
+    loop._interrupted.clear()
+    await loop._prefetch([], 0)
+
+
+@pytest.mark.parametrize("limit", [1, 4])
+async def test_grep_and_glob_resolve_their_root_once(tmp_path, monkeypatch, limit) -> None:
+    """The fetch hands its resolved arguments to the bookkeeping, so a
+    relative root is resolved once per call, as on main (P2, round 2)."""
+    from fluid.tools.builtins import glob as glob_tool
+    from fluid.tools.builtins import grep as grep_tool
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "f.txt").write_text("needle\n")
+    resolved: list[str] = []
+    for module, name in ((grep_tool, "_search_args"), (glob_tool, "_list_args")):
+        real = getattr(module, name)
+        monkeypatch.setattr(module, name, lambda i, c, real=real, name=name: (
+            resolved.append(name), real(i, c))[1])
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(_reply(("g", "Grep", {"pattern": "needle", "path": "src"}),
+                                  ("l", "Glob", {"pattern": "*.txt", "path": "src"}))),
+                 registry, limit, tmp_path=tmp_path)
+    await _turn(loop)
+    assert sorted(resolved) == ["_list_args", "_search_args"]
+    assert [r.is_error for r in _results(loop)] == [False, False]

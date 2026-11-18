@@ -89,12 +89,13 @@ async def fetch_once(
     held = prefetched.get()
     if held:
         early_input, task = held.pop()
-        if early_input == input:
-            result, writes = await task
+        got = await task if early_input == input else None
+        if got is not None:  # None: the task found the turn interrupted
+            result, writes = got
             written = [write() for write in writes]  # each attempted
             if None not in written:
                 return result
-        else:
+        elif early_input != input:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     return inline(input, ctx) if inline is not None else await fetch(input, ctx)

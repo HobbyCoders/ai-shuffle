@@ -187,13 +187,14 @@ _READERS = {"Read": "file_path", "Grep": "path", "Glob": "path"}
 
 
 def may_see_spills(name: str, input: Any, ctx: ToolCtx | None) -> bool:
-    """Could this Read, Grep or Glob see this session's spill folder? True
-    when its path (Grep and Glob default to the cwd) is the folder, inside it
-    or contains it, or cannot be resolved (other tools: False). Such a call is never fetched early:
-    an earlier call of the same reply may still write a spill file there."""
+    """Could this Read, Grep or Glob see what a spill writes: this session's
+    spill folder or its stats file? True when its path (Grep and Glob default
+    to the cwd) is one of them, inside one or contains one, or cannot be
+    resolved; False for other tools. Such a call is never fetched early: an
+    earlier call of the same reply may still write there."""
     key = _READERS.get(name)
-    directory = spill_dir(ctx)
-    if key is None or directory is None:
+    destinations = [d for d in (spill_dir(ctx), ctx and _stats_path(ctx)) if d]
+    if key is None or not destinations:
         return False
     raw = input.get(key) if isinstance(input, dict) else None
     if not raw and name != "Read":
@@ -204,10 +205,11 @@ def may_see_spills(name: str, input: Any, ctx: ToolCtx | None) -> bool:
         target = Path(raw)
         if not target.is_absolute():
             target = Path(ctx.cwd) / target
-        target, root = target.resolve(), directory.resolve()
+        target = target.resolve()
+        roots = [d.resolve() for d in destinations]
     except (OSError, RuntimeError, ValueError):
         return True
-    return target.is_relative_to(root) or root.is_relative_to(target)
+    return any(target.is_relative_to(r) or r.is_relative_to(target) for r in roots)
 
 
 def note_access(name: str, input: Any, ctx: ToolCtx | None) -> None:

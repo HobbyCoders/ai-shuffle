@@ -231,8 +231,8 @@ async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> Any:
     return await asyncio.to_thread(_load, input, ctx)
 
 
-
 FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
+
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # Without an early fetch, _load runs inline: main's timing, no await.

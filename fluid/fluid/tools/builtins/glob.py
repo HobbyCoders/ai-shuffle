@@ -110,18 +110,19 @@ def _list_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[Path, int]:
     return root, _clamp_limit(input.get("limit"))
 
 
-async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    """The listing itself: no session bookkeeping (the registered ``FETCH``)."""
+async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> tuple[tuple, ToolOutcome]:
+    """The listing itself, with the arguments it resolved (the root once): no
+    session bookkeeping (the registered ``FETCH``)."""
     root, limit = _list_args(input, ctx)
-    return await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
-
+    return (root, limit), await asyncio.to_thread(
+        _glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
 
 
 FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
 
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    outcome = await fetch_once(_fetch, input, ctx)
-    root, limit = _list_args(input, ctx)
+    (root, limit), outcome = await fetch_once(_fetch, input, ctx)
     if outcome.is_error:
         return outcome
     # The listing always runs. When it comes back exactly as the copy still

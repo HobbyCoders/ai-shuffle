@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -186,6 +186,28 @@ class PermissionEngine:
         else:
             self._last_key = key
             self._streak = 1
+        if self._streak >= self._threshold_of(name):
+            self._streak = 0
+            return True
+        return False
+
+    def would_guard(
+        self, name: str, input: dict[str, Any],
+        *, before: Iterable[tuple[str, dict[str, Any]]] = (),
+    ) -> bool:
+        """Would ``note_execution(name, input)`` return True once the calls in
+        ``before`` have been noted, in order? Same streak and threshold as the
+        gate; changes nothing (the native loop's look-ahead asks it)."""
+        last, streak, tripped = self._last_key, self._streak, False
+        for call_name, call_input in (*before, (name, input)):
+            key = (call_name, _input_hash(call_input))
+            streak, last = (streak + 1 if key == last else 1), key
+            tripped = streak >= self._threshold_of(call_name)
+            if tripped:
+                streak = 0
+        return tripped
+
+    def _threshold_of(self, name: str) -> int:
         threshold = self._threshold
         if self._threshold_for is not None:
             try:
@@ -194,7 +216,4 @@ class PermissionEngine:
                 override = None
             if isinstance(override, int) and override > threshold:
                 threshold = override
-        if self._streak >= threshold:
-            self._streak = 0
-            return True
-        return False
+        return threshold

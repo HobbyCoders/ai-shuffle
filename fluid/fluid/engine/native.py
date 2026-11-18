@@ -6099,28 +6099,33 @@ class NativeLoop(BackgroundLifecycleMixin):
         (``_gated_call``). Eligible, checked without side effects on the same
         raw input the gate sees: the tool registered a fetch, permissions allow
         the call without asking, no PreToolUse or PostToolUse hook could act on
-        it, it repeats no call the repeat guard could count it against, and it
-        cannot see the spill folder. Fetches of calls the loop has passed are
-        cancelled; once the turn is interrupted, all are, and none start.
+        it, the repeat guard would not ask (``PermissionEngine.would_guard``,
+        counting the calls before it), and it cannot see what a spill writes.
+        Fetches of calls the loop has passed are cancelled; once the turn is
+        interrupted, all are and none start (checked again after the cleanup
+        await and when a fetch task begins).
         A cancelled fetch running in a worker thread finishes there unseen.
         """
         rest = tool_uses[at:]
         live = set() if self._interrupted.is_set() else {tu["tool_use_id"] for tu in rest}
         stale = [k for k in self._prefetches if k not in live]
         await _cancel_and_join(self._prefetches.pop(k)[1] for k in stale)
+        if self._interrupted.is_set():  # it may have landed during that await
+            early, self._prefetches = self._prefetches, {}
+            await _cancel_and_join(t for _, t in early.values())
+            return
         if not live or self.max_concurrent_tools <= 1 or self.registry is None:
             return
-        from fluid.permissions.engine import _input_hash
         from fluid.tools.hardening import coerce_args
         from fluid.tools.registry import early_fetch
         from fluid.tools.spill import may_see_spills
 
-        def key(tu: dict[str, Any]) -> Any:
-            return (tu["name"], _input_hash(tu["input"]))
+        async def start(fetch: Any, input: dict[str, Any]) -> Any:
+            if self._interrupted.is_set():
+                return None  # not fetched: the handler fetches, if it runs at all
+            return await early_fetch(fetch, input, self.ctx)
 
-        seen = {key(tu) for tu in tool_uses[:at] if isinstance(tu.get("input"), dict)}
-        if self.permissions is not None:
-            seen.add(getattr(self.permissions, "_last_key", None))  # the guard's streak
+        noted: list[tuple[str, dict[str, Any]]] = []  # the guard counts these first
         for tu in rest:
             if len(self._prefetches) >= self.max_concurrent_tools:
                 return
@@ -6129,17 +6134,18 @@ class NativeLoop(BackgroundLifecycleMixin):
             if (
                 spec is None or fetch is None or tu.get("arg_error")
                 or not isinstance(raw, dict) or not self._tool_permitted(name)
-                or key(tu) in seen or may_see_spills(name, raw, self.ctx)
+                or may_see_spills(name, raw, self.ctx)
                 or (self.hooks is not None and (
                     self.hooks.may_act(PRE_TOOL_USE, name)
                     or self.hooks.may_act(POST_TOOL_USE, name)
                 ))
                 or (self.permissions is not None and (
                     self.permissions.decide(spec, raw, cwd=self.ctx.cwd).decision != "allow"
+                    or self.permissions.would_guard(name, raw, before=noted)
                 ))
             ):
                 return
-            seen.add(key(tu))
+            noted.append((name, raw))
             if tool_use_id in self._prefetches:
                 continue
             try:
@@ -6147,7 +6153,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             except Exception:  # noqa: BLE001 — the serial step reports it
                 return
             self._prefetches[tool_use_id] = (
-                input, asyncio.create_task(early_fetch(fetch, input, self.ctx)),
+                input, asyncio.create_task(start(fetch, input)),
             )
 
     async def _dispatch_tool_interruptible(
