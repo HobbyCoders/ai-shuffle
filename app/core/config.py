@@ -856,17 +856,6 @@ class Settings(BaseSettings):
     # PR 2: migrate this area-owned legacy behaviour field.
     task_worker_background_settle_seconds: float = 120.0
 
-    # Compiled system prompt for a PLAIN-STRING profile prompt on the
-    # delegated (claude CLI) leg. Every non-one-shot claude session replaces
-    # Claude Code's own prompt via --system-prompt. True compiles the profile
-    # prompt (base + instruction files + skills + env + app blocks, the same
-    # blocks the native leg gets); False sends it uncompiled plus the agents
-    # index, with fluid's environment section appended. A preset-shape profile
-    # is always compiled (no base, its append as a block), whatever this says.
-    # Native legs always run the compiled prompt. Set via PROMPT_FULL_REPLACE.
-    # PR 2: migrate this area-owned legacy behaviour field.
-    prompt_full_replace: bool = True
-
     # Compact, then continue, a turn the context limit cut off. When a
     # delegated (Claude Code) turn stops because its conversation no longer
     # fits, the engine reports ``needs_compaction`` and the scheduler queues a

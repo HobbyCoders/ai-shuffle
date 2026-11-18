@@ -3504,14 +3504,12 @@ def _plan_registry(with_plan: bool):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("full_replace", [True, False])
 @pytest.mark.parametrize("with_plan", [True, False])
 async def test_delegated_preset_profile_replaces_claude_code_prompt(
-    monkeypatch, tmp_path, full_replace, with_plan
+    monkeypatch, tmp_path, with_plan
 ):
     """Owner decision (uniform app blocks): a preset profile no longer keeps
-    Claude Code's own prompt. Whatever PROMPT_FULL_REPLACE says, it goes out
-    as the compiled --system-prompt with no base, its append riding as a
+    Claude Code's own prompt. It goes out as the compiled --system-prompt with no base, its append riding as a
     block, and the same app blocks as the native leg. The Plan hint names the
     bridged tool when Plan is offered and is absent when it is not."""
     import app.core.provider.harness_adapter as ha
@@ -3519,7 +3517,6 @@ async def test_delegated_preset_profile_replaces_claude_code_prompt(
     from fluid.context.steering import PROMPT_BLOCK as STEERING
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
 
     await ha.HarnessAdapter().connect(
         SessionOptions(
@@ -3546,6 +3543,43 @@ async def test_delegated_preset_profile_replaces_claude_code_prompt(
     _assert_unique_headings(system)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mod, compaction, allow, recall", [
+    (True, True, None, True),
+    (False, True, None, False),
+    (True, False, None, False),
+    # An allow list without the history tools withholds them from the bridge.
+    (True, True, ["Read", "mcp__builtins__Remember"], False),
+])
+async def test_delegated_context_block_matches_the_recall_tools_the_session_offers(
+    monkeypatch, tmp_path, mod, compaction, allow, recall
+):
+    """The recall tools are registered at connect from the same switches the
+    loop gets, so the prompt's context block (fixed before any spawn) names
+    them exactly when the bridge will list them."""
+    import app.core.provider.harness_adapter as ha
+    from app.core import claude_compaction
+    from app.core.config import settings
+    from fluid.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
+    monkeypatch.setattr(settings, "fluid_claude_mod", mod)
+    monkeypatch.setattr(claude_compaction, "read", lambda: compaction)
+    registry = ToolRegistry()
+    await ha.HarnessAdapter().connect(
+        SessionOptions(
+            model="fable", system_prompt="BASE", cwd=str(tmp_path),
+            tool_allowlist=allow, extra={"fluid_registry": registry},
+        )
+    )
+    system = _CapturingLoop.captured["system"]
+    assert (registry.get("HistoryExpand") is not None) is (mod and compaction)
+    spelled = ha._spell_bundled(ha.CONTEXT_BLOCK, ("HistoryExpand", "HistorySearch"))
+    assert (spelled in system) is recall
+    assert (ha.CONTEXT_BLOCK_NO_RECALL in system) is not recall
+    assert system.count("# Context window") == 1
+
+
 def _assert_unique_headings(system):
     headings = [line for line in system.splitlines() if line.startswith("# ")]
     assert len(headings) == len(set(headings)), headings
@@ -3566,13 +3600,10 @@ async def _delegated_system(monkeypatch, tmp_path, system_prompt):
 
 
 @pytest.mark.asyncio
-async def test_delegated_plain_prompt_full_replace_compiles(monkeypatch, tmp_path):
+async def test_delegated_plain_prompt_compiles(monkeypatch, tmp_path):
     """A plain-string profile chose its own prompt, so it still replaces the
-    preset; PROMPT_FULL_REPLACE compiles it with the same app blocks a
-    preset-shape profile gets, in the same order, each once."""
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "prompt_full_replace", True)
+    preset; it compiles with the same app blocks a preset-shape profile
+    gets, in the same order, each once."""
     custom = await _delegated_system(monkeypatch, tmp_path, "BASE PROMPT")
     preset = await _delegated_system(
         monkeypatch, tmp_path, {"type": "preset", "preset": "claude_code", "append": "BASE PROMPT"},
@@ -3588,25 +3619,26 @@ async def test_delegated_plain_prompt_full_replace_compiles(monkeypatch, tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_delegated_plain_prompt_without_full_replace_keeps_the_environment(
-    monkeypatch, tmp_path
-):
-    """PROMPT_FULL_REPLACE=0: the plain prompt goes out uncompiled and still
-    replaces the CLI's preset (with its environment), so fluid's stable
-    environment section rides the append, Worker and runtime lines inside it,
-    even when the prompt text quotes an <env> block."""
+async def test_leftover_prompt_full_replace_env_still_compiles(monkeypatch, tmp_path):
+    """The uncompiled PROMPT_FULL_REPLACE=0 path is gone: an install that
+    still sets it starts normally (Settings ignores unknown env) and a
+    plain-string profile goes out as the compiled --system-prompt, with
+    fluid's environment section and the Worker and runtime lines inside."""
+    import app.core.config as config
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
     from fluid.tools.registry import ToolRegistry
 
+    monkeypatch.setenv("PROMPT_FULL_REPLACE", "0")
+    fresh = config.Settings()
+    assert not hasattr(fresh, "prompt_full_replace")
+    monkeypatch.setattr(config, "settings", fresh)
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", False)
     monkeypatch.setattr(ha, "_worker_identity_text", lambda: "Worker: W1 (device dev_1).")
 
     await ha.HarnessAdapter().connect(
         SessionOptions(
             model="fable",
-            system_prompt="BASE PROMPT\n<env>\nquoted\n</env>",
+            system_prompt="BASE PROMPT",
             cwd=str(tmp_path),
             extra={
                 "fluid_registry": ToolRegistry(),
@@ -3615,15 +3647,12 @@ async def test_delegated_plain_prompt_without_full_replace_keeps_the_environment
         )
     )
     system = _CapturingLoop.captured["system"]
-    append = _CapturingLoop.captured["append_system_prompt"]
-    assert system.startswith("BASE PROMPT") and "# Environment" not in system
-    assert append.count("# Environment") == 1
-    assert f"Working directory: {tmp_path.resolve()}" in append
-    assert "Shell: " in append
-    assert "Worker: W1 (device dev_1)." in append
-    assert "Execution mode: worktree\nBase branch: develop" in append
-    # Session-stable half only: the date and branch ride each turn.
-    assert "Today's date" not in append
+    assert _CapturingLoop.captured["append_system_prompt"] is None
+    assert system.startswith("BASE PROMPT")
+    assert system.count("# Environment") == 1
+    assert "Worker: W1 (device dev_1)." in system
+    assert "Execution mode: worktree\nBase branch: develop" in system
+    assert "# Safety" in system
 
 
 @pytest.mark.asyncio
@@ -6648,15 +6677,12 @@ def _delegated_agents_options(cwd, declared=None):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("full_replace", [True, False])
-async def test_delegated_preset_profile_advertises_agents(monkeypatch, agent_workspace, full_replace):
+async def test_delegated_preset_profile_advertises_agents(monkeypatch, agent_workspace):
     """A preset profile's compiled --system-prompt advertises native file and
-    database agents exactly once, whatever PROMPT_FULL_REPLACE says."""
+    database agents exactly once."""
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
 
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
-    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
 
     await ha.HarnessAdapter().connect(
         _delegated_agents_options(
@@ -8148,20 +8174,18 @@ def test_workspace_card_is_slotted_as_an_environment_section():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["preset", "full_replace", "plain"])
+@pytest.mark.parametrize("shape", ["preset", "plain"])
 async def test_delegated_connect_carries_the_workspace_card(monkeypatch, agent_workspace, shape):
     """#1789: a delegated session's CLI prompt carries the session's
     "# Workspace facts" card, whichever prompt shape the profile uses. The
     card builder itself decides on the preview link (owner yes, API key no;
     see tests/core/test_preview_access_key_sessions.py)."""
     import app.core.provider.harness_adapter as ha
-    from app.core.config import settings
     from fluid.tools.registry import ToolRegistry
 
     card = "# Workspace facts\n- preview link here"
     monkeypatch.setattr(ha, "DelegatedLoop", _CapturingLoop)
     monkeypatch.setattr(ha.HarnessAdapter, "_build_workspace_card", lambda self, options: card)
-    monkeypatch.setattr(settings, "prompt_full_replace", shape == "full_replace")
     prompt = {"type": "preset", "append": "APPEND TEXT"} if shape == "preset" else "BASE PROMPT"
     adapter = ha.HarnessAdapter()
     await adapter.connect(SessionOptions(

@@ -107,6 +107,9 @@ async def _bridge(tmp_path, *, lane="code"):
         bridge_deferred=ha._delegated_bridge_deferral(options),
     )
     try:
+        # As in production, the session exists before the CLI lists the
+        # bridge; it wires the recall tools' history handle.
+        await loop._ensure_session()
         listed = await _answer(
             registry, loop.ctx, {"op": "list"},
             tool_filter=loop._bridge_tool_permitted, deferred=loop.bridge_deferred,

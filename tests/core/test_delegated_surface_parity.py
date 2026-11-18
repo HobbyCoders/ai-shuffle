@@ -446,3 +446,78 @@ def test_seed_walls_every_built_in_production_announced(tmp_path):
     assert set(ANNOUNCED) <= set(KNOWN_CLI_TOOLS)
     denied = set(ha._delegated_disallowed(_options(tmp_path, surface=["Read"])))
     assert {"DesignSync", "ReportFindings"} <= denied
+
+
+def _verification(blocks):
+    [block] = [b for b in blocks if b.startswith("# Verification\n")]
+    return block
+
+
+UNAVAILABLE = "The browser verification surface is unavailable"
+BROWSER = {"command": "node", "args": ["browser-mcp.js"]}
+
+
+@pytest.mark.parametrize("leg,route,surface,expected", [
+    ("claude", "profile", None, "mcp__browser__browser_navigate"),
+    ("claude", "plugin", None, "mcp__browser__browser_navigate"),
+    # Plugin servers join only the unrestricted code lane.
+    ("claude", "plugin", ["Read", "Edit"] + [f"mcp__browser__{t}" for t in ha._VERIFICATION_BROWSER_TOOLS], None),
+    ("claude", "none", None, None),
+    ("claude", "profile", ["Read", "Edit"], None),  # surface withholds the browser
+    ("antigravity", "host", None, "mcp__browser__browser_navigate"),
+    ("antigravity", "agent", None, "browser_navigate"),
+    ("antigravity", "none", None, None),
+    ("antigravity", "host", ["Read", "Edit"], None),
+])
+def test_browser_guidance_follows_the_servers_route(tmp_path, monkeypatch, leg, route, surface, expected):
+    """The Verification block names the browser tools as the route connect
+    picks spells them, and calls the surface unavailable only when it is."""
+    from fluid.tools.registry import ToolRegistry, ToolSpec
+
+    async def handler(args, ctx):
+        return None
+
+    monkeypatch.setattr(
+        ha, "_fluid_plugin_servers",
+        lambda options, *, delegated: {"browser": BROWSER} if route == "plugin" else {},
+    )
+    servers = {"browser": BROWSER} if route in ("profile", "agent", "host") else {}
+    options = _options(tmp_path, servers, surface=surface)
+    registry = ToolRegistry()
+    if route == "host":
+        for tool in ha._VERIFICATION_BROWSER_TOOLS:
+            registry.register_builtin(
+                ToolSpec(name=f"mcp__browser__{tool}", description=tool, input_schema={}), handler,
+            )
+    text = _verification(ha._app_guidance_blocks(
+        options, leg=leg, registry=registry,
+        host_servers={"browser"} if route == "host" else set(),
+    ))
+    if expected is None:
+        assert UNAVAILABLE in text
+        assert "browser_navigate" not in text
+    else:
+        assert UNAVAILABLE not in text
+        assert f"one {expected} and one" in text
+        if not expected.startswith("mcp__"):
+            assert "mcp__browser__" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("logs,expected", [
+    (["GetAppLogs", "GetAppErrors"],
+     "(mcp__fluid_bundled__mcp__builtins__GetAppLogs, "
+     "mcp__fluid_bundled__mcp__builtins__GetAppErrors, a probe, a metric)"),
+    (["GetAppErrors"], "(mcp__fluid_bundled__mcp__builtins__GetAppErrors, a probe, a metric)"),
+    ([], "(a probe, a metric)"),
+])
+async def test_verification_names_only_the_log_tools_the_bridge_serves(
+    tmp_path, builtins_server, logs, expected,
+):
+    options = _options(tmp_path, {"builtins": builtins_server}, surface=["Read", "Edit", *logs])
+    registry = await ha.HarnessAdapter()._build_registry(options, native=False)
+    assert registry.get("mcp__builtins__GetAppLogs") is not None
+    text = _verification(ha._app_guidance_blocks(options, leg="claude", registry=registry))
+    assert f"needs a measurement {expected} before" in text
+    for tool in {"GetAppLogs", "GetAppErrors"} - set(logs):
+        assert tool not in text

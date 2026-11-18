@@ -83,7 +83,7 @@ async def connect(cwd, session_id, delegated, shape="preset"):
 @pytest.mark.parametrize("delegated", [True, False], ids=["claude-cli", "native"])
 @pytest.mark.parametrize("stale_cookie", [None, "shr_obsolete-install-session"])
 @pytest.mark.parametrize("subject", ["preview-owner", "preview-worker"])
-@pytest.mark.parametrize("shape", ["preset", "plain", "full_replace"])
+@pytest.mark.parametrize("shape", ["preset", "plain"])
 async def test_issued_link_authenticates_sidebar_reads(
     preview_app, monkeypatch, delegated, stale_cookie, subject, shape,
 ):
@@ -91,7 +91,6 @@ async def test_issued_link_authenticates_sidebar_reads(
     database.create_session("preview-owner", "default", is_active=True)
     database.create_session("preview-worker", "default", parent_session_id="preview-owner",
                             hidden=True, is_worker=True)
-    monkeypatch.setattr(settings, "prompt_full_replace", shape == "full_replace")
     adapter, prompt = await connect(cwd, subject, delegated, shape)
     try:
         # Extract the URL the engine actually received, not a token seeded in a client.

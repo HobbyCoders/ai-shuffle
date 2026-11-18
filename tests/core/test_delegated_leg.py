@@ -420,9 +420,8 @@ async def _sent_user_turn(adapter, monkeypatch, text="do the thing", *, source="
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("full_replace", [True, False])
 @pytest.mark.parametrize("source", ["user", "queue"])
-async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, full_replace, source):
+async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, source):
     """A custom (plain-string) prompt replaces Claude Code's preset, and with
     it the CLI's own date and git facts; the compiled prompt holds only the
     session-stable environment. So every user turn carries today's date and
@@ -430,10 +429,8 @@ async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_
     the retired inject_env_details switch)."""
     import subprocess
 
-    from app.core.config import settings
     from app.core.environment import TURN_ENV_HEADER
 
-    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     repo = _git_repo(tmp_path, "feature-turn")
     adapter = ha.HarnessAdapter()
