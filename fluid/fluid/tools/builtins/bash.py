@@ -457,6 +457,12 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             await kill_tree(proc)
     text = _render(capture, ctx)
     code = proc.returncode or 0
+    if policy is not None:
+        refused = isolation.launcher_failure(code, text)
+        if refused:
+            # Confinement failed after the probe passed: the command never ran.
+            return ToolOutcome(text=f"Not run: the isolated execution profile could not confine "
+                                    f"the command ({refused}).", is_error=True)
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what
         # happened: a silent success and a silent failure read identically, and

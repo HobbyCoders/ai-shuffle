@@ -516,7 +516,12 @@ class CodeModeSession:
             kernel = SubprocessKernel(self._config)
             # Kept only once it started: a refused start (the isolated
             # profile unavailable) must be retried, not reused half-made.
-            await kernel.start()
+            # A start that fails or is cancelled midway kills what it spawned.
+            try:
+                await kernel.start()
+            except BaseException:
+                await asyncio.shield(kernel.stop())
+                raise
             self._kernel = kernel
             await self._kernel.set_vfs(sources, skills)
             self._vfs_signature = signature

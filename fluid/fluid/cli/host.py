@@ -933,6 +933,12 @@ class CliHost:
                 parent_perms.approval_policy, rules=list(parent_perms.rules)
             )
 
+        child_ctx = ToolCtx(cwd=self.config.cwd, session_id=session_id)
+        # The isolated profile the parent runs under (from config or put on
+        # its ctx by a host) binds the worker too, with its own private dirs.
+        policy = isolation.policy_of(getattr(self.engine, "ctx", None))
+        if policy is not None:
+            child_ctx.extra[isolation.EXTRA_KEY] = policy.for_session()
         child = build_engine(
             self.config,
             self.store,
@@ -943,7 +949,7 @@ class CliHost:
             system_sections=compiled,
             registry=registry,
             permissions=permissions,
-            ctx=ToolCtx(cwd=self.config.cwd, session_id=session_id),
+            ctx=child_ctx,
             allowed_tools=allowed,
             disallowed_tools=disallowed,
             # One learner per store: the worker journals into the parent's

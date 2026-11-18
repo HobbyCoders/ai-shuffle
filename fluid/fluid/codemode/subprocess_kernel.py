@@ -49,6 +49,7 @@ from fluid.codemode.kernel import (
 )
 from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
+from fluid.tools.isolation import IsolationUnavailable
 from fluid.tools.registry import current_call_time_left
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
@@ -220,11 +221,34 @@ class SubprocessKernel:
             )
         self._nonce = secrets.token_hex(16)
         boot_config = {**self.config.boot_payload(), "nonce": self._nonce}
-        await self._send({"kind": "boot", "config": boot_config})
-        await self._read_frame()  # {"kind": "ready"}
+        if self.config.isolation is None:
+            await self._send({"kind": "boot", "config": boot_config})
+            await self._read_frame()  # {"kind": "ready"}
+        else:
+            try:
+                await self._send({"kind": "boot", "config": boot_config})
+                await self._read_frame()  # {"kind": "ready"}
+            except (OSError, asyncio.IncompleteReadError) as exc:
+                refused = await self._launcher_refusal()
+                if refused:
+                    raise IsolationUnavailable(refused) from exc
+                raise
         self._ever_started = True
         if self._vfs_sources or self._skill_sources:
             await self._send_vfs()
+
+    async def _launcher_refusal(self) -> str | None:
+        """The isolation launcher's refusal when the kernel died before
+        ``ready`` because confinement failed (exit 126 plus its message)."""
+        from fluid.tools.isolation import launcher_failure
+
+        proc = self._proc
+        try:
+            code = await asyncio.wait_for(proc.wait(), 5)
+            await asyncio.wait_for(self._stderr_task, 5)
+        except TimeoutError:
+            return None
+        return launcher_failure(code, self._stderr_tail.decode("utf-8", errors="replace"))
 
     async def _send_vfs(self) -> None:
         await self._send({

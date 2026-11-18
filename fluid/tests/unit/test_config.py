@@ -214,6 +214,14 @@ def _non_default_config_dict() -> dict:
         "identity_file": False,
         "model_guidance": ["gpt"],
         "mcp": {"srv": {"transport": "stdio", "command": "x"}},
+        "sandbox": {
+            "mode": "isolated",
+            "network": True,
+            "writable_roots": ["/wr"],
+            "readable_roots": ["/rd"],
+            "env_allow": ["FOO"],
+            "protect": ["/secret"],
+        },
     }
 
 

@@ -256,17 +256,19 @@ and what it does not, is in [security.md](security.md#isolated-execution-profile
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `"off"` | `"isolated"` confines every model-driven child with Landlock and seccomp (Linux 5.13 or newer). When that cannot be enforced here, commands are refused with the reason; they never run unconfined. Other platforms have no backend yet and refuse. A `delegated_claude` provider is refused under the profile. |
-| `network` | `false` | `false` makes new sockets fail (seccomp, every address family) and, on Landlock ABI 4 (Linux 6.7), also denies TCP bind/connect through Landlock. `true` leaves the network fully open; there is no per-host allowlist. |
-| `writable_roots` | `[]` | Directories writable in addition to the session's working directory and its private home and temp directory. |
+| `mode` | `"off"` | `"isolated"` confines every model-driven child with Landlock and seccomp (Linux 5.13 or newer, Landlock ABI up to 12). When that cannot be enforced here, commands are refused with the reason; they never run unconfined. Other platforms have no backend yet and refuse. A `delegated_claude` provider is refused under the profile. Permission bits and timestamps of files outside the writable roots are not protected (Landlock does not mediate `chmod`); ownership and extended attributes cannot be changed at all. |
+| `network` | `false` | `false` makes new sockets fail (seccomp, every address family; `socketpair` stays open) and, on Landlock ABI 4 (Linux 6.7), also denies TCP bind/connect through Landlock (UDP too from ABI 10). `true` leaves the network fully open; there is no per-host allowlist, and before Landlock ABI 9 pathname Unix sockets the user can write stay reachable. |
+| `writable_roots` | `[]` | Directories writable in addition to the session's working directory and its private home and temp directory. A root that would make the Python interpreter, its standard library or the loader's directories writable is refused. |
 | `readable_roots` | `[]` | Directories readable (and executable) in addition to the system directories and the Python installation. |
 | `env_allow` | `[]` | Inherited environment variable names passed to a confined child on top of the built-in allowlist (`PATH`, locale, terminal, user name); `NAME_*` matches a prefix. The settings `env` is always passed. |
-| `protect` | `[]` | Extra credential paths no root may contain, on top of the built-in list (`~/.ssh`, cloud CLI credentials, Fluid's token files, ...). |
+| `protect` | `[]` | Extra credential paths no root may contain or sit inside, on top of the built-in list (`~/.ssh`, cloud CLI credentials, Fluid's token files, ...). |
 
 Only the system and user layers can set these keys. A project
 `.fluid/config.toml` may set `mode = "isolated"`; everything else it puts in
 `[sandbox]` is ignored with a warning, because a confined command can write
-that file. Invalid values (an unknown `mode`, a non-boolean `network`, a
+that file. For the same reason, while the profile is on a project file's
+top-level `cwd` is ignored with a warning: the workspace stays the launch
+directory or the `cwd` a trusted layer sets. Invalid values (an unknown `mode`, a non-boolean `network`, a
 non-list root) fail config loading.
 
 ### `[context]`

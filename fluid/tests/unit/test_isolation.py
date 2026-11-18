@@ -22,16 +22,15 @@ import subprocess
 import sys
 
 import pytest
-
 from fluid.config.loader import _project_sandbox_layer
 from fluid.config.model import HarnessConfig, SandboxConfig
+from fluid.providers.base import ProviderCaps
+from fluid.store.base import MemoryStore
 from fluid.tools import isolation
 from fluid.tools.builtins.bash import handler as bash_handler
 from fluid.tools.builtins.monitor import handler as monitor_handler
 from fluid.tools.registry import ToolCtx
 from fluid.tools.shell import resolve_shell
-from fluid.providers.base import ProviderCaps
-from fluid.store.base import MemoryStore
 
 LINUX = sys.platform.startswith("linux")
 ABI, NO_LANDLOCK = isolation.landlock_abi()
@@ -192,8 +191,265 @@ class _StubBackend:
     def unavailable_reason(self, network):
         return None
 
-    def prefix(self, writable, readable, network):
+    def prefix(self, writable, readable, network, protect=()):
         return ["launcher", *[f"rw={p}" for p in writable], f"net={network}", "--"]
+
+
+class _ProbedLandlock(isolation.LinuxLandlock):
+    """The real launcher command, with the kernel probe passed (so the command
+    line can be checked on machines without Landlock)."""
+
+    def unavailable_reason(self, network):
+        return None
+
+
+_REFUSE = ("import sys; sys.stderr.write('fluid isolation refused: landlock_restrict_self failed: "
+           "Operation not permitted\\n'); sys.exit(126)")
+
+
+class _RefusingLauncher:
+    """The probe passes, then the launcher refuses, as in a container whose
+    seccomp profile allows the probe but denies landlock_restrict_self."""
+
+    name = "refusing"
+
+    def unavailable_reason(self, network):
+        return None
+
+    def prefix(self, writable, readable, network, protect=()):
+        return [sys.executable, "-I", "-c", _REFUSE]
+
+
+# S1: nothing that runs before confinement may be writable by a confined command.
+
+
+def test_launcher_runs_from_a_private_copy_outside_every_root(tmp_path):
+    # The workspace is the very directory that holds isolation.py (a source
+    # checkout or editable install opened as the project).
+    source_dir = os.path.dirname(isolation.SCRIPT)
+    policy = isolation.IsolationPolicy(workspace=source_dir, home=str(tmp_path / "home"),
+                                       backend_impl=_ProbedLandlock())
+    argv, _cwd, _env = policy.wrap(["true"], None, {})
+    script = argv[3]
+    assert argv[0] == isolation.LAUNCH_PYTHON == os.path.realpath(isolation.LAUNCH_PYTHON)
+    assert argv[1:3] == ["-I", "-S"] and script == isolation.launcher_script()
+    writable = [argv[i + 1] for i, a in enumerate(argv) if a == "--rw"]
+    assert writable and not any(isolation._contains(root, script) for root in writable)
+    with open(isolation.SCRIPT, "rb") as handle, open(script, "rb") as copy:
+        assert copy.read() == handle.read()
+    assert os.stat(script).st_mode & 0o777 == 0o400
+
+
+def test_a_writable_interpreter_stdlib_or_launcher_is_refused(tmp_path):
+    import sysconfig
+
+    for root in (os.path.dirname(isolation.LAUNCH_PYTHON), sysconfig.get_path("stdlib"),
+                 os.path.dirname(isolation.launcher_script())):
+        policy = _policy(tmp_path, writable_roots=(root,), backend_impl=_StubBackend())
+        reason = policy.unavailable_reason() or ""
+        assert "cannot be writable" in reason, (root, reason)
+        with pytest.raises(isolation.IsolationUnavailable):
+            policy.wrap(["true"], None, {})
+
+
+# S2: the workspace never comes from a project file.
+
+
+def test_project_cwd_cannot_move_the_isolated_workspace(tmp_path):
+    from fluid.config.loader import load_config
+
+    launch, elsewhere = tmp_path / "proj", tmp_path / "elsewhere"
+    (launch / ".fluid").mkdir(parents=True)
+    elsewhere.mkdir()
+    project = launch / ".fluid" / "config.toml"
+    project.write_text(f'cwd = "{elsewhere}"\n[sandbox]\nmode = "isolated"\n')
+    config = load_config(launch, env={}, include_system=False, include_user=False)
+    assert config.sandbox.mode == "isolated" and str(config.cwd) == str(launch)
+    # With the profile off a project cwd applies exactly as before.
+    project.write_text(f'cwd = "{elsewhere}"\n')
+    config = load_config(launch, env={}, include_system=False, include_user=False)
+    assert config.sandbox.mode == "off" and str(config.cwd) == str(elsewhere)
+
+
+# S3: overlap is refused both ways, and the launcher checks what it opened.
+
+
+def test_a_root_inside_a_credential_location_is_refused(tmp_path):
+    home = tmp_path / "home"
+    inner = home / ".aws" / "sub"
+    inner.mkdir(parents=True)
+    policy = _policy(tmp_path, home=str(home), readable_roots=(str(inner),), backend_impl=_StubBackend())
+    assert "inside the credential location" in (policy.unavailable_reason() or "")
+    # A spawn's own read-only roots pass the same check.
+    plain = _policy(tmp_path, home=str(home), backend_impl=_StubBackend())
+    assert plain.unavailable_reason() is None
+    with pytest.raises(isolation.IsolationUnavailable, match="credential location"):
+        plain.wrap(["true"], None, {}, readable=(str(inner),))
+
+
+@pytest.mark.skipif(not LINUX, reason="the launcher's O_PATH checks are Linux only")
+def test_the_launcher_checks_the_object_it_opened(tmp_path):
+    base = os.path.realpath(tmp_path)
+    home, ws = os.path.join(base, "home"), os.path.join(base, "ws")
+    ssh = os.path.join(home, ".ssh")
+    os.makedirs(os.path.join(ssh, "keys"))
+    os.makedirs(ws)
+    locations, around = isolation.protected_identities([ssh])
+
+    def problem(path):
+        fd = os.open(path, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            return isolation.opened_problem(fd, path, locations, around)
+        finally:
+            os.close(fd)
+
+    assert problem(ws) is None
+    # A root whose name was swapped for a link after the parent's check.
+    os.symlink(ssh, os.path.join(ws, "link"))
+    assert "resolved to" in (problem(os.path.join(ws, "link", "keys")) or "")
+    # Recognised by inode: inside, equal to, or above a protected location
+    # (which is also how a bind mount of one of them is caught).
+    for path in (os.path.join(ssh, "keys"), ssh, home):
+        assert "protected credential location" in (problem(path) or ""), path
+
+
+# S4 / S5 / S7: rules and filters.
+
+
+def test_device_rules_name_single_nodes_without_ioctls():
+    paths = [path for path, _ in isolation.DEVICE_RULES]
+    assert "/dev" not in paths and "/dev/shm" not in paths
+    allowed = isolation.FS_READ_FILE | isolation.FS_WRITE_FILE | isolation.FS_TRUNCATE
+    assert all(access & ~allowed == 0 for _, access in isolation.DEVICE_RULES)
+
+
+def test_seccomp_program_always_blocks_ownership_and_xattr_changes():
+    for arch, spec in isolation.SECCOMP_ARCHES.items():
+        prog = isolation.seccomp_program(arch, block_network=False, block_truncate=False)
+        verdicts = {prog[i][3]: prog[i + 1][3] for i in range(4, len(prog) - 1) if prog[i][0] == 0x15}
+        for nr in spec["metadata"]:
+            assert verdicts[nr] == isolation.SECCOMP_RET_ERRNO | 1, (arch, nr)
+
+
+def test_newer_landlock_abis_are_handled_or_refused():
+    assert isolation.fs_rights(9) & isolation.FS_RESOLVE_UNIX
+    assert not isolation.fs_rights(8) & isolation.FS_RESOLVE_UNIX
+    assert isolation.FS_RESOLVE_UNIX & isolation._FILE_RIGHTS
+    assert isolation.net_rights(4, network=False) == 0b11
+    assert isolation.net_rights(10, network=False) == 0b1111
+    assert isolation.net_rights(12, network=True) == 0
+    assert isolation._abi_verdict(isolation.MAX_ABI, 0) == (isolation.MAX_ABI, "")
+    abi, reason = isolation._abi_verdict(isolation.MAX_ABI + 1, 0)
+    assert abi == 0 and "newer" in reason
+
+
+# S6: a launcher that refuses after the probe passed is not a command exit.
+
+
+def test_launcher_failure_needs_both_the_status_and_the_message():
+    assert isolation.launcher_failure(126, "fluid isolation refused: x\n") == "fluid isolation refused: x"
+    assert isolation.launcher_failure(126, "sh: ./tool: Permission denied") is None
+    assert isolation.launcher_failure(1, "fluid isolation refused: x") is None
+
+
+async def test_a_hook_whose_launcher_refuses_denies_the_tool(tmp_path):
+    from fluid.hooks.command import CommandHook
+
+    marker = tmp_path / "hook-ran"
+    policy = _policy(tmp_path, backend_impl=_RefusingLauncher())
+    pre = CommandHook(event="PreToolUse", command=f"touch {marker}", cwd=str(tmp_path), isolation=policy)
+    decision = await pre("PreToolUse", {"name": "Edit", "input": {}})
+    assert decision is not None and decision.action == "deny", decision
+    assert "restrict_self" in (decision.note or "")
+    post = CommandHook(event="PostToolUse", command=f"touch {marker}", cwd=str(tmp_path), isolation=policy)
+    decision = await post("PostToolUse", {"name": "Edit", "input": {}})
+    assert decision is not None and decision.action != "deny"
+    assert any("restrict_self" in w for w in decision.warnings)
+    assert not marker.exists()
+
+
+async def test_bash_reports_a_launcher_refusal_as_not_run(tmp_path):
+    out = await _bash(_policy(tmp_path, backend_impl=_RefusingLauncher()), "echo hi")
+    assert out.is_error and out.text.startswith("Not run") and "restrict_self" in out.text
+
+
+async def test_code_mode_kernel_reports_a_launcher_refusal(tmp_path):
+    from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+
+    kernel = SubprocessKernel(KernelConfig(isolation=_policy(tmp_path, backend_impl=_RefusingLauncher())))
+    try:
+        with pytest.raises(isolation.IsolationUnavailable, match="restrict_self"):
+            await kernel.start()
+    finally:
+        await kernel.stop()
+
+
+# S8: Task and Swarm workers inherit the effective policy.
+
+
+async def test_a_worker_inherits_the_parent_policy_with_its_own_private_dir(tmp_path):
+    from fluid.cli.config import host_of, make_engine
+    from fluid.cli.host import Worker
+    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
+
+    from tests.unit.test_tool_loop import ScriptedProvider
+
+    store = MemoryStore()
+    meta = await store.create_session()
+    config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
+    engine = make_engine(config, store, provider=ScriptedProvider([]), session_id=meta.session_id)
+    # Config leaves the profile off; the host opted in on the parent's ctx.
+    policy = _policy(tmp_path, backend_impl=_StubBackend())
+    engine.ctx.extra[isolation.EXTRA_KEY] = policy
+    host = host_of(engine)
+    child = None
+    try:
+        child = await host._build_child(None, Worker(task_id="t", kind="task", description="d"))
+        inherited = isolation.policy_of(child.ctx)
+        assert inherited is not None and inherited is not policy
+        assert inherited.workspace == policy.workspace and inherited.network == policy.network
+        assert inherited.private_dir() != policy.private_dir()
+    finally:
+        if child is not None:
+            await child.aclose()
+        await host.aclose()
+        await engine.aclose()
+
+
+# S9 (introduced by this change): a cancelled first start must not orphan the kernel.
+
+
+async def test_a_cancelled_kernel_start_stops_the_process(monkeypatch):
+    from fluid.codemode import session as session_mod
+
+    made = []
+
+    class _SlowKernel:
+        def __init__(self, config):
+            self.stopped = False
+            made.append(self)
+
+        async def start(self):
+            await asyncio.Event().wait()
+
+        async def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(session_mod, "SubprocessKernel", _SlowKernel)
+    sess = object.__new__(session_mod.CodeModeSession)
+    sess._kernel, sess._config, sess._skills = None, None, None
+    sess._projection = lambda: type("P", (), {"sources": staticmethod(dict)})()
+
+    async def no_skills():
+        return {}
+
+    sess._mountable_skills = no_skills
+    task = asyncio.create_task(sess._ensure_kernel())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert made and made[0].stopped and sess._kernel is None
 
 
 def test_wrap_builds_the_launcher_command(tmp_path):
@@ -305,7 +561,7 @@ def test_launcher_refuses_without_landlock(tmp_path):
     marker = tmp_path / "ran"
     proc = subprocess.run(
         [sys.executable, "-I", "-S", isolation.SCRIPT, "--rw", str(tmp_path), "--net", "on", "--",
-         "touch", str(marker)], capture_output=True, text=True, timeout=30)
+         "touch", str(marker)], capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == isolation.REFUSED
     assert isolation.REFUSAL_PREFIX in proc.stderr and not marker.exists()
 
@@ -314,7 +570,7 @@ def test_launcher_refuses_without_landlock(tmp_path):
 def test_launcher_rejects_a_malformed_policy(tmp_path):
     for args in (["--rw", str(tmp_path), "--", "true"], ["--net", "off", "--"], ["--bogus", "x"]):
         proc = subprocess.run([sys.executable, "-I", "-S", isolation.SCRIPT, *args],
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, check=False)
         assert proc.returncode == isolation.REFUSED, (args, proc.stderr)
 
 
@@ -351,8 +607,35 @@ def test_seccomp_blocks_new_sockets_in_a_child():
         "else:\n    print('OPEN')\n"
     )
     proc = subprocess.run([sys.executable, "-I", "-c", probe, os.path.dirname(isolation.SCRIPT)],
-                          capture_output=True, text=True, timeout=30)
+                          capture_output=True, text=True, timeout=30, check=False)
     assert proc.stdout.strip() == "blocked", proc.stderr
+
+
+@needs_seccomp
+def test_seccomp_blocks_ownership_and_xattr_changes_in_a_child(tmp_path):
+    target = tmp_path / "owned"
+    target.write_text("x")
+    probe = (
+        "import os, sys; sys.path.insert(0, sys.argv[1]); import isolation\n"
+        "isolation.apply_seccomp(isolation.machine(), block_network=False, block_truncate=False)\n"
+        "path = sys.argv[2]\n"
+        "def attempt(name, call):\n"
+        "    try:\n        call()\n"
+        "    except PermissionError:\n        print(name, 'blocked')\n"
+        "    except OSError as exc:\n        print(name, 'error', exc.errno)\n"
+        "    else:\n        print(name, 'ALLOWED')\n"
+        "attempt('chown', lambda: os.chown(path, os.getuid(), os.getgid()))\n"
+        "attempt('lchown', lambda: os.lchown(path, os.getuid(), os.getgid()))\n"
+        "attempt('setxattr', lambda: os.setxattr(path, 'user.fluid', b'1'))\n"
+        "attempt('removexattr', lambda: os.removexattr(path, 'user.fluid'))\n"
+        "os.chmod(path, 0o600); print('chmod still works')\n"
+    )
+    proc = subprocess.run([sys.executable, "-I", "-c", probe, os.path.dirname(isolation.SCRIPT), str(target)],
+                          capture_output=True, text=True, timeout=30, check=False)
+    lines = proc.stdout.split("\n")
+    for name in ("chown", "lchown", "setxattr", "removexattr"):
+        assert f"{name} blocked" in lines, (name, proc.stdout, proc.stderr)
+    assert "chmod still works" in lines, proc.stderr
 
 
 @needs_landlock
@@ -378,10 +661,26 @@ async def test_child_cannot_read_a_planted_secret_or_the_real_home(tmp_path):
 
 
 @needs_landlock
-async def test_child_cannot_read_another_process_environ(tmp_path, monkeypatch):
-    monkeypatch.setenv("FLUID_PARENT_CANARY", "canary-value")
-    out = await _bash(_policy(tmp_path), f"cat /proc/{os.getpid()}/environ; echo done")
-    assert "canary-value" not in out.text and "done" in out.text, out.text
+async def test_child_cannot_read_another_process_environ(tmp_path):
+    # A peer with the canary in its exec-time environment, which is what
+    # /proc/<pid>/environ exposes (a later setenv in this process would not be).
+    peer = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(60)"],
+                            env={"PATH": os.environ.get("PATH", ""), "FLUID_PEER_CANARY": "canary-value"})
+    try:
+        environ = f"/proc/{peer.pid}/environ"
+        for _ in range(100):  # until the exec has replaced the forked image
+            with open(environ, "rb") as handle:
+                if b"canary-value" in handle.read():
+                    break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail("the peer's environ never showed the canary, so the test proves nothing")
+        out = await _bash(_policy(tmp_path), f"cat {environ}; echo \"status=$?\"")
+        assert "canary-value" not in out.text, out.text
+        assert "status=0" not in out.text and "status=" in out.text, out.text
+    finally:
+        peer.kill()
+        peer.wait()
 
 
 @needs_landlock

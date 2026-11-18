@@ -599,6 +599,19 @@ def load_config(
     if overrides:
         merged = deep_merge(merged, overrides)
 
+    if (merged.get("sandbox") or {}).get("mode") == "isolated":
+        # The isolated profile makes the session's cwd writable, so it must
+        # not come from a project file a confined command can edit.
+        trusted = str(cwd_path)
+        for layer in (system_toml, user_toml if include_user else {}, env_layer, overrides or {}):
+            if "cwd" in layer:
+                trusted = layer["cwd"]
+        if merged.get("cwd") != trusted:
+            logger.warning(
+                "ignoring cwd = %r from a project config: under the isolated profile the "
+                "workspace is the launch directory (%s)", merged.get("cwd"), trusted)
+            merged["cwd"] = trusted
+
     return HarnessConfig.from_dict(merged)
 
 

@@ -45,7 +45,7 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.isolation import IsolationUnavailable
+from fluid.tools.isolation import IsolationUnavailable, launcher_failure
 
 log = logging.getLogger(__name__)
 
@@ -220,25 +220,36 @@ class CommandHook:
         if self.isolation is not None:
             argv, cwd, env = self.isolation.wrap(argv, cwd, env)
         argv, cwd, env = agent_runner.wrap(argv, cwd, env)
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            **spawn_kwargs,
-            env=env,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd,
+                **spawn_kwargs,
+                env=env,
+            )
+        except OSError as exc:
+            if self.isolation is not None:
+                # The isolation launcher itself did not start.
+                raise IsolationUnavailable(f"the isolation launcher could not start: {exc}") from exc
+            raise
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
         except TimeoutError:
             await _kill_tree(proc)
             raise
-        return (
-            proc.returncode or 0,
-            out.decode("utf-8", errors="replace"),
-            err.decode("utf-8", errors="replace"),
-        )
+        code = proc.returncode or 0
+        stderr = err.decode("utf-8", errors="replace")
+        if self.isolation is not None:
+            # Confinement failed after the probe passed (a container that
+            # refuses landlock_restrict_self, say): the hook never ran, which
+            # is not the same as the hook exiting 126.
+            refused = launcher_failure(code, stderr)
+            if refused:
+                raise IsolationUnavailable(refused)
+        return code, out.decode("utf-8", errors="replace"), stderr
 
     def interpret(self, event: str, code: int, stdout: str, stderr: str) -> HookDecision:
         """Map an exit code plus its streams onto a :class:`HookDecision`.
