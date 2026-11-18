@@ -917,10 +917,14 @@ class ContinualUpdate(Event):
 class AssistantTextSanitized(Event):
     """Model-authored control lookalikes were quoted before storage/replay.
 
-    Visible, nonterminal diagnostic. Never carries the original model text.
+    Visible, nonterminal diagnostic, emitted at most once per turn. Never
+    carries the original model text.
     """
 
-    message: str = "Model-authored control markers were quoted; no host message was delivered."
+    message: str = (
+        "The model wrote text that looks like a host control marker. It is shown "
+        "as a quote, so it cannot pass as a real host message."
+    )
 
 
 @dataclass(frozen=True, kw_only=True)

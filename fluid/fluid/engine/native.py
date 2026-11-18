@@ -1250,6 +1250,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop's local counter so terminal events raised OUTSIDE the loop (the
         # catch-all handler in _start_and_loop) can still report the count.
         self._turn_model_calls = 0
+        # Whether this turn already showed its AssistantTextSanitized notice.
+        self._turn_sanitized_noticed = False
         # The live turn-totals dict the agent loop folds each call's usage
         # into, by reference, for the same reason: a turn that dies outside the
         # loop still bills what it spent.
@@ -2670,6 +2672,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         turn_id = new_id("turn")
         self._background_turn_terminal = False
         self._turn_model_calls = 0
+        self._turn_sanitized_noticed = False
         self._turn_usage = {}
         self._active_turn_id = turn_id
 
@@ -5897,7 +5900,12 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         message = self._assemble_message(blocks, request.model)
         cleaned = sanitize_assistant_history([message])[0]
-        if cleaned is not message:
+        if cleaned is not message and not self._turn_sanitized_noticed:
+            # Quoting still applies to every call; the notice is shown once
+            # per turn. A model that is reasoning about the markers themselves
+            # (for example while auditing the harness) quotes them on nearly
+            # every call, and a card per call buried the work log.
+            self._turn_sanitized_noticed = True
             await self._emit(AssistantTextSanitized(session_id=sid, turn_id=turn_id))
         return _CallResult(
             message=cleaned,
