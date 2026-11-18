@@ -71,6 +71,7 @@
 	}: Props = $props();
 
 	const speedPicker = $derived(fastSupported && ultrafastSupported);
+	const costNote = $derived(ultrafastCost(ultrafastBilling));
 	const speed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
 
 	const pinnedIndex = $derived(options.findIndex((option) => option.value === value));
@@ -145,8 +146,9 @@
 				>{#if option.value !== 'standard'}<span class="seg-bolts" aria-hidden="true"><Zap size={11} strokeWidth={2} />{#if option.value === 'ultrafast'}<Zap size={11} strokeWidth={2} />{/if}</span>{/if}{option.label}</button>
 			{/each}
 		</div>
-		<!-- The cost is said before any pick, for as long as the picker shows. -->
-		<p class="speed-cost" data-testid="ultrafast-cost">{ultrafastCost(ultrafastBilling)}</p>
+		{#if costNote}
+			<p class="speed-cost" data-testid="ultrafast-cost">{costNote}</p>
+		{/if}
 	{/if}
 
 	<div aria-live="polite">

@@ -15,7 +15,7 @@ These are the basics once [First run](/docs/getting-started/first-run) is done.
 3. Type your message and press Enter.
 4. Watch the reply and the agent's tool use stream in.
 
-You can change the reasoning effort and turn **Fast mode** on or off (where the model supports it) while a chat is running. Where the model and account also offer OpenAI's **Ultrafast** tier, the Fast switch becomes a **Standard / Fast / Ultrafast** picker. Ultrafast is the fastest tier and uses plan allowance or credits much faster; the picker says so under it before you choose: about 8x the allowance on a ChatGPT plan, or several times the Standard price on an OpenAI API key. The effort label in the composer shimmers while Fast is on and moves faster for Ultrafast; with reduced motion it shows a bolt instead (two for Ultrafast). The composer remembers your picks for each model. If you switch to a model without Ultrafast, the chat drops to Fast, or to Standard where Fast isn't offered either.
+You can change the reasoning effort and turn **Fast mode** on or off (where the model supports it) while a chat is running. Where the model and account also offer OpenAI's **Ultrafast** tier, the Fast switch becomes a **Standard / Fast / Ultrafast** picker. Ultrafast uses about 8x the allowance on a ChatGPT plan or costs several times the Standard price on an OpenAI API key. The effort label in the composer shimmers while Fast is on and moves faster for Ultrafast; with reduced motion it shows a bolt instead (two for Ultrafast). The composer remembers your picks for each model. If you switch to a model without Ultrafast, the chat drops to Fast, or to Standard where Fast isn't offered either.
 
 ## Create an agent
 
