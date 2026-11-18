@@ -654,19 +654,16 @@ async def test_a_stuck_write_bounds_cancellation_and_reads_and_refuses_a_second_
     task = asyncio.create_task(store.append("ses_stuck", _node("n2", "n1", "next")))
     await asyncio.to_thread(entered.wait, 5)
     task.cancel()
-    await asyncio.sleep(0)
-    waiting_reader = asyncio.create_task(store.get_session("ses_stuck"))
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(asyncio.shield(task), 2)
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(waiting_reader, 2)
     assert not done.is_set()  # the worker is still stuck
 
     started = asyncio.get_running_loop().time()
-    with pytest.raises(TimeoutError):
+    with pytest.raises(module.SessionWriteInFlight) as read:
         await store.get_session("ses_stuck")
-    with pytest.raises(TimeoutError):
+    with pytest.raises(module.SessionWriteInFlight) as write:
         await store.set_head("ses_stuck", "n1")
+    assert type(read.value) is type(write.value) is module.SessionWriteInFlight
     assert asyncio.get_running_loop().time() - started < 1
     assert dispatched == []
 
@@ -674,6 +671,179 @@ async def test_a_stuck_write_bounds_cancellation_and_reads_and_refuses_a_second_
     await asyncio.to_thread(done.wait, 5)
     assert (await store.get_session("ses_stuck")).head_node_id == "n2"
     assert (await PgFluidStore().get_session("ses_stuck")).head_node_id == "n2"
+
+
+@pytest.mark.asyncio
+async def test_a_reader_gives_up_on_a_held_meta_lock_at_its_deadline(mock_db, monkeypatch):
+    """The meta lock is held past the reader's deadline: the reader itself
+    fails with SessionWriteInFlight while the lock is still held."""
+    from app.core.provider import fluid_pg_store as module
+
+    monkeypatch.setattr(module, "_META_WAIT_SECONDS", 0.2)
+    store = PgFluidStore()
+    await store.create_session("ses_held")
+    await store.append("ses_held", _node("n1", None, "root"))
+    lock = store._meta_lock("ses_held")
+    await lock.acquire()
+    try:
+        store._unverified.add("ses_held")  # a read now verifies under the lock
+        reader = asyncio.create_task(store.get_session("ses_held"))
+        await asyncio.sleep(0.6)
+        assert lock.locked() and reader.done()
+        assert type(reader.exception()) is module.SessionWriteInFlight
+    finally:
+        lock.release()
+    assert (await store.get_session("ses_held")).head_node_id == "n1"
+
+
+@pytest.mark.asyncio
+async def test_the_recovery_row_read_waits_behind_the_writing_transaction(mock_db, monkeypatch):
+    """A write's worker can return (the commit watchdog cut its socket) while
+    PostgreSQL is still committing. The recovery read takes a share lock on
+    the row, so it waits for that transaction, within the bound. The shim
+    cannot model the wait itself; this checks the SQL that asks for it."""
+    import contextlib
+
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_order")
+    issued = []
+    real_get_db = module.get_db
+
+    class _Cursor:
+        def __init__(self, cur):
+            self._cur = cur
+
+        def execute(self, sql, params=None):
+            issued.append(sql)
+            return self._cur.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._cur, name)
+
+    class _Conn:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def cursor(self, *args, **kwargs):
+            return _Cursor(self._conn.cursor(*args, **kwargs))
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    @contextlib.contextmanager
+    def spying_get_db():
+        with real_get_db() as conn:
+            yield _Conn(conn)
+
+    monkeypatch.setattr(module, "get_db", spying_get_db)
+    assert module._session_row_sync("ses_order") == {"head_node_id": None, "cli_session_id": None}
+    timeout_ms = int(module._META_WAIT_SECONDS * 1000)
+    assert issued[0] == f"SET LOCAL lock_timeout = '{timeout_ms}ms'"
+    assert "FROM fluid_sessions" in issued[1] and issued[1].rstrip().endswith("FOR SHARE")
+
+
+@pytest.mark.asyncio
+async def test_a_recovery_read_that_times_out_on_the_row_lock_stays_unverified(mock_db, monkeypatch):
+    import psycopg2.errors
+
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_lock")
+    await store.append("ses_lock", _node("n1", None, "root"))
+    await store.append("ses_lock", _node("n2", "n1", "leaf"))
+    real_set, real_row = module._set_head_sync, module._session_row_sync
+
+    def ack_lost(*args, **kwargs):
+        real_set(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    def still_committing(*args, **kwargs):
+        raise psycopg2.errors.LockNotAvailable("canceling statement due to lock timeout")
+
+    monkeypatch.setattr(module, "_set_head_sync", ack_lost)
+    monkeypatch.setattr(module, "_session_row_sync", still_committing)
+    with pytest.raises(ConnectionError):
+        await store.set_head("ses_lock", "n1")
+    with pytest.raises(module.SessionWriteInFlight):
+        await store.get_session("ses_lock")  # retryable, never the stale n2
+    assert "ses_lock" in store._unverified
+    monkeypatch.setattr(module, "_session_row_sync", real_row)
+    assert (await store.get_session("ses_lock")).head_node_id == "n1"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_failed_write_leaves_verification_to_the_next_access(mock_db, monkeypatch):
+    """Close cancels the caller: it must not then wait on a read-back."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_defer")
+    await store.append("ses_defer", _node("n1", None, "root"))
+    real_append, real_row = module._append_node_sync, module._session_row_sync
+
+    def ack_lost(*args, **kwargs):
+        real_append(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    reads = []
+
+    def counted_row(*args, **kwargs):
+        reads.append(args)
+        return real_row(*args, **kwargs)
+
+    helper, entered, gate, _ = _paused(ack_lost)
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+    monkeypatch.setattr(module, "_session_row_sync", counted_row)
+    task = asyncio.create_task(store.append("ses_defer", _node("n2", "n1", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert reads == [] and "ses_defer" in store._unverified
+
+    assert (await store.get_session("ses_defer")).head_node_id == "n2"
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_bounds_its_read_back(mock_db, monkeypatch):
+    """A read-back after an ordinary failure gets the same budget; past it the
+    caller gets its own error and the session stays unverified."""
+    from app.core.provider import fluid_pg_store as module
+
+    monkeypatch.setattr(module, "_META_WAIT_SECONDS", 0.2)
+    store = PgFluidStore()
+    await store.create_session("ses_slow")
+    await store.append("ses_slow", _node("n1", None, "root"))
+    await store.append("ses_slow", _node("n2", "n1", "leaf"))
+    real_set, real_row = module._set_head_sync, module._session_row_sync
+    release = threading.Event()
+
+    def ack_lost(*args, **kwargs):
+        real_set(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    def slow_row(*args, **kwargs):
+        release.wait(5)
+        return real_row(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_set_head_sync", ack_lost)
+    monkeypatch.setattr(module, "_session_row_sync", slow_row)
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(ConnectionError):
+            await store.set_head("ses_slow", "n1")
+        assert asyncio.get_running_loop().time() - started < 2
+        assert "ses_slow" in store._unverified
+    finally:
+        release.set()
+    monkeypatch.setattr(module, "_session_row_sync", real_row)
+    assert (await store.get_session("ses_slow")).head_node_id == "n1"
 
 
 @pytest.mark.asyncio

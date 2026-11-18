@@ -37,6 +37,7 @@ import time
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import psycopg2.errors
 import psycopg2.extensions
 from psycopg2.extras import Json
 
@@ -321,11 +322,19 @@ def _session_head_sync(session_id: str) -> Optional[str]:
 
 
 def _session_row_sync(session_id: str) -> Optional[Dict[str, Any]]:
-    """The session row's fields a head or handle write changes, nothing else."""
+    """The session row's fields a head or handle write changes, nothing else.
+
+    A write's worker can return (the commit watchdog cut its socket) while
+    PostgreSQL is still committing it. The share lock waits for that
+    transaction, every head or handle write updating this row first, so the
+    row read is its outcome; the bound turns a longer wait into
+    LockNotAvailable. A node that write inserted is then visible too.
+    """
     with get_db() as conn:
         cur = conn.cursor()
+        cur.execute(f"SET LOCAL lock_timeout = '{int(_META_WAIT_SECONDS * 1000)}ms'")
         cur.execute(
-            "SELECT head_node_id, cli_session_id FROM fluid_sessions WHERE session_id = %s",
+            "SELECT head_node_id, cli_session_id FROM fluid_sessions WHERE session_id = %s FOR SHARE",
             (session_id,),
         )
         row = cur.fetchone()
@@ -1889,7 +1898,7 @@ class PgFluidStore:
             work.add_done_callback(_retrieve)
             try:
                 result = await asyncio.shield(work)
-            except BaseException:
+            except BaseException as exc:
                 if thread.cancel():
                     raise  # the worker never started, so nothing was written
                 # If the loop is torn down before the worker returns, the
@@ -1906,24 +1915,29 @@ class PgFluidStore:
                         pass  # the caller's own exception is re-raised below
                 if not thread.done():
                     self._stuck[session_id] = thread
+                    self._memory_paths.pop(session_id, None)
                     logger.warning("A write to session %s is still running after %.0fs; "
                                    "the session is reread once it returns", session_id, _META_WAIT_SECONDS)
                     raise
-                if thread.exception() is not None:
-                    await self._read_back(session_id)
-                else:
+                if thread.exception() is None:
                     publish(thread.result())
                     self._unverified.discard(session_id)
+                elif isinstance(exc, asyncio.CancelledError):
+                    # Close must not wait on a read-back: the next access verifies.
+                    self._memory_paths.pop(session_id, None)
+                else:
+                    await self._read_back(session_id)
                 raise
             publish(result)
 
     async def _read_back(self, session_id: str) -> None:
-        """After an unknown write outcome, under the meta lock. A failed read
-        leaves the fields unverified, so the next access rereads them."""
+        """After an unknown write outcome, under the meta lock, within the
+        ``_META_WAIT_SECONDS`` budget. A failed or late read leaves the fields
+        unverified, so the next access rereads them."""
         self._memory_paths.pop(session_id, None)
         self._unverified.add(session_id)
         try:
-            await self._reread_row(session_id)
+            await asyncio.wait_for(self._reread_row(session_id), _META_WAIT_SECONDS)
         except Exception:
             logger.warning("Could not read session %s back after a failed write", session_id, exc_info=True)
 
@@ -1939,7 +1953,11 @@ class PgFluidStore:
                 raise SessionWriteInFlight(
                     f"An earlier write to session {session_id} has not finished; try again")
             del self._stuck[session_id]
-        row = await run_sync(_session_row_sync, session_id)
+        try:
+            row = await run_sync(_session_row_sync, session_id)
+        except psycopg2.errors.LockNotAvailable:  # the write is still committing
+            raise SessionWriteInFlight(
+                f"An earlier write to session {session_id} has not finished; try again") from None
         meta = self._sessions.get(session_id)
         if row is not None and meta is not None:
             head = row["head_node_id"]
