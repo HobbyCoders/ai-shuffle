@@ -9,9 +9,10 @@
 the instance's parent lease is this process, not a CI shell step that
 exits), waits until it is ready (its ``DEVLOOP_READY`` line, then
 ``python -m scripts.devloop status``), runs this shard's journeys, then
-``python -m scripts.devloop down``. With one shard and a
-``frontend/tests/journeys/run-all.mjs`` it runs that; otherwise it runs each
-``*.journey.mjs`` of the shard, every one even after a failure. Shards split
+``python -m scripts.devloop down``. An unfiltered, single-shard run uses
+``frontend/tests/journeys/run-all.mjs`` if present. With ``--only``, sharding
+or retries, it runs the selected ``*.journey.mjs`` files individually, even
+after a failure. Shards split
 the journey files by measured hosted runtime, each file exactly once. Unknown
 or changed case inventories use their current case count (``--list``) times the
 measured per-case median, with conservative floors (not measurements). A stale
@@ -668,9 +669,10 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
           f"({len(kept)} kept): {out}")
 
 
-def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS) -> list[list[str]]:
-    """What a shard runs: run-all.mjs when it is the only shard, else each file."""
-    if shards == 1 and (directory / RUN_ALL).is_file():
+def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS,
+                 *, per_file: bool = False) -> list[list[str]]:
+    """Use the unfiltered aggregate only for a full, single-shard run."""
+    if shard_files and not per_file and shards == 1 and (directory / RUN_ALL).is_file():
         return [["node", str(directory / RUN_ALL)]]
     return [["node", str(directory / name)] for name in shard_files]
 
@@ -845,8 +847,7 @@ def journeys(args: argparse.Namespace) -> int:
     label = f"shard {index}/{shards}"
     only = parse_only(args.only)
     mine = (plan(shards) if only is None else plan(shards, only=only))[index - 1]
-    commands = ([["node", str(JOURNEYS / name)] for name in mine]
-                if args.retry_failures else commands_for(mine, shards))
+    commands = commands_for(mine, shards, per_file=args.only is not None or args.retry_failures)
     print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
           flush=True)
     if not commands:

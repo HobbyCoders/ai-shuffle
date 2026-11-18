@@ -36,8 +36,10 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
+from unicodedata import category
 
 from fluid.engine.acp import antigravity as agy_spec
 from fluid.engine.acp.client import AcpConnection, AcpError
@@ -1652,9 +1654,24 @@ async def read_usage(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
+_USAGE_BUCKET_ID = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _USAGE_PERIODS = {"weekly": "weekly", "5h": "5-hour"}
 _MAX_USAGE_LABEL = 80
 _MAX_USAGE_WINDOWS = 20
+
+
+def _usage_reset_time(value: Any) -> Optional[str]:
+    # fromisoformat also accepts date-only values and arbitrary separators,
+    # including NUL. Require a printable ASCII date and time.
+    if not isinstance(value, str) or value[10:11] not in {"T", " "}:
+        return None
+    if not (value.isascii() and value.isprintable()):
+        return None
+    try:
+        datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    return value
 
 
 def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
@@ -1675,17 +1692,19 @@ def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
         name, buckets = group.get("name"), group.get("buckets")
         if not isinstance(buckets, list):
             continue
+        # Drop control characters and lone surrogates before clipping the label.
+        name = "".join(c for c in name if category(c) not in {"Cc", "Cs"}).strip() if isinstance(name, str) else ""
         for bucket in buckets:
             if not isinstance(bucket, Mapping):
                 continue
             bucket_id = bucket.get("id")
-            if not isinstance(bucket_id, str) or not bucket_id.strip():
+            if not isinstance(bucket_id, str) or not _USAGE_BUCKET_ID.fullmatch(bucket_id):
                 continue
-            # Check even skipped buckets and those beyond the display limit.
+            # Check every safe ID, even in buckets otherwise skipped or over the limit.
             if bucket_id in seen:
                 return None
             seen.add(bucket_id)
-            if len(windows) >= _MAX_USAGE_WINDOWS or not isinstance(name, str) or not name.strip():
+            if len(windows) >= _MAX_USAGE_WINDOWS or not name:
                 continue
             window = bucket.get("window")
             period = _USAGE_PERIODS.get(window) if isinstance(window, str) else None
@@ -1695,11 +1714,10 @@ def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
             if not 0 <= fraction <= 1:
                 continue
             suffix = f", {period}"
-            reset = bucket.get("reset_time")
             windows.append({
                 "type": f"antigravity_{bucket_id}",
                 "label": name[:_MAX_USAGE_LABEL - len(suffix)] + suffix,
                 "utilization": round((1 - fraction) * 100, 2),
-                "resets_at": reset if isinstance(reset, str) and reset else None,
+                "resets_at": _usage_reset_time(bucket.get("reset_time")),
             })
     return windows or None

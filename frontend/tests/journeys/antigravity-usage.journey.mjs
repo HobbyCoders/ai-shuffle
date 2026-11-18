@@ -18,6 +18,8 @@ await runJourney({
 	cases: [{
 		name: 'five-quotas',
 		async setup({ page, status }) {
+			expect(status.fake_antigravity === true,
+				'Antigravity usage fixture is missing: start the dev instance with --fake-antigravity');
 			await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'no_project'))}`);
 			await waitChatOpen(page, { messagesAtLeast: 2 });
 		},

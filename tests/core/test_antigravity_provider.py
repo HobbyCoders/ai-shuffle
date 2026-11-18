@@ -2154,6 +2154,8 @@ def _quota_reply(*buckets, name="Gemini Models", **data):
     {"remaining": 0.5}, _quota_bucket(remaining_fraction=10**400),
     _quota_bucket(remaining_fraction=True), _quota_bucket(remaining_fraction=float("nan")),
     _quota_bucket(window="monthly"),
+    _quota_bucket("gemini\u0000weekly"), _quota_bucket("gemini weekly"),
+    _quota_bucket("中文"), _quota_bucket("x" * 65),
 ])
 def test_invalid_grouped_buckets_do_not_hide_valid_ones_or_use_a_summary(bucket):
     assert ag.normalize_usage(_quota_reply(bucket, summary={"remaining": 0.5})) is None
@@ -2167,6 +2169,24 @@ def test_duplicate_quota_ids_across_groups_invalidate_the_reading():
     payload = _quota_reply(*(_quota_bucket(f"id-{i}") for i in range(20)))
     payload["command"]["data"]["groups"].append({"name": "Other group", "buckets": [_quota_bucket("id-0")]})
     assert ag.normalize_usage(payload) is None
+
+
+def test_bad_ids_are_skipped_before_duplicate_detection():
+    bad = _quota_bucket("bad\u0000id")
+    good = _quota_bucket("A._-" + "1" * 60)
+    windows = ag.normalize_usage(_quota_reply(bad, good, bad))
+    assert [w["type"] for w in windows] == ["antigravity_" + good["id"]]
+
+
+@pytest.mark.parametrize("reset", [17, "not an ISO time", "2026-02-30T01:04:13Z",
+                                   "2026-11-25\x0001:04:13Z", "2026-11-25"])
+def test_grouped_usage_sanitizes_names_and_drops_only_the_invalid_reset(reset):
+    reply = _quota_reply(_quota_bucket(reset_time=reset), name="\x00 Gemini\t \ud800Models\x85 ")
+    reply["command"]["data"]["groups"].append({"name": "\x00 \n", "buckets": [_quota_bucket("other")]})
+    assert ag.normalize_usage(reply) == [
+        {"type": "antigravity_gemini-weekly", "label": "Gemini Models, weekly", "utilization": 25.0,
+         "resets_at": None}
+    ]
 
 
 def test_grouped_usage_bounds_keep_the_first_twenty_windows_and_the_period():
@@ -2209,7 +2229,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
         return await real_read(r)
     monkeypatch.setattr(ag, "read_usage", counted)
     writes = []
-    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)))
+    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)) or True)
     monkeypatch.setattr(db, "record_provider_usage_failure", lambda *a, **kw: writes.append(("fail", a)))
     monitor = ProviderUsageMonitor()
     await monitor._poll_antigravity_provider(row)
@@ -2218,9 +2238,10 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     await monitor._poll_antigravity_provider(row)
     assert calls == ["row-1"] and writes[0][0] == "ok"
     assert writes[0][1][1] == "antigravity" and writes[0][1][3][0]["utilization"] == 25.0
-    row["extra_env_json"]["FAKE_ACP_USAGE"] = json.dumps(_quota_reply(_quota_bucket(remaining_fraction=10**400)))
-    await monitor._poll_antigravity_provider(row)
-    assert writes[1] == ("fail", ("row-1", "antigravity", "unavailable"))
+    for bad_reply in ("{not JSON", json.dumps(_quota_reply(_quota_bucket(remaining_fraction=10**400)))):
+        row["extra_env_json"]["FAKE_ACP_USAGE"] = bad_reply
+        await monitor._poll_antigravity_provider(row)
+    assert writes[1:] == [("fail", ("row-1", "antigravity", "unavailable"))] * 2
 
 
 # --- sign-in lifecycle: one per row, ended by sign-out, delete or idleness --------
@@ -2445,6 +2466,27 @@ async def test_a_reading_is_written_when_nothing_changed(mock_db, fake_agy, monk
         return None
     assert await _poll_with(monkeypatch, row, nothing) == {"source": "antigravity_usage"}
     assert (await _poll_with(monkeypatch, row, nothing, unparsed=True) or {}).get("usage_error") == "unavailable"
+
+
+@pytest.mark.parametrize("sign_out", [False, True], ids=["still-signed-in", "sign-out-during-store"])
+async def test_snapshot_store_failure_is_recorded_unless_signed_out(mock_db, fake_agy, monkeypatch, sign_out):
+    row = await _personal_row()
+
+    def store(*args, **kwargs):
+        if sign_out:
+            ag._signin_epochs[row["id"]] = ag.signin_epoch(row["id"]) + 1
+        raise ValueError("usage snapshot could not be stored")
+
+    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", store)
+
+    async def nothing():
+        return None
+
+    raw = await _poll_with(monkeypatch, row, nothing)
+    if sign_out:
+        assert raw is None
+    else:
+        assert raw["usage_error"] == "unavailable"
 
 
 @pytest.mark.parametrize("unparsed", [False, True], ids=["reading", "unavailable"])

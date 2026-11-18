@@ -26,8 +26,8 @@ The aggregate commands below are available for CI; use the single-file commands
 under **Run one** locally.
 
 ```bash
-# terminal 1 (or a Monitor task): the dev instance
-python -m scripts.devloop up
+# terminal 1 (or a Monitor task): the full run includes antigravity-usage
+python -m scripts.devloop up --fake-antigravity
 
 # terminal 2
 cd frontend
@@ -42,7 +42,9 @@ node tests/journeys/select.mjs --check                # validate map.json
 `run-all.mjs` runs the journeys one after another and prints pass/fail per
 journey and case; it writes `summary.md`/`summary.json` (a table of every
 case) and each journey's full log to `$JOURNEY_OUT`. Exit code 1 if any case
-failed or a journey crashed. A full run takes about 30 minutes.
+failed or a journey crashed. A full run takes about 30 minutes. For a hand run
+that includes `antigravity-usage` (direct or via `run-all.mjs`), start the dev
+instance with `--fake-antigravity`; other selections do not need the fixture.
 
 **Do not edit `frontend/src` while journeys run.** Vite hot-reloads the change
 into the page and the recorder reports the reload as a `remount` (a real
