@@ -101,7 +101,7 @@ curl -X POST http://localhost:8000/api/v1/query \
 | `effort` | string | `low`, `medium`, `high`, `max`, `xhigh` |
 | `context_window` | integer | Context window for this turn. Ignored unless it falls within the model's range, from its Standard window up to its full Extended window |
 | `fast` | boolean | Fast mode for this turn. Omit to use the session's setting |
-| `speed` | string | `standard`, `fast` or `ultrafast`. Wins over `fast` and sets it. `ultrafast` is accepted only where the model offers it (see [model registry](/docs/api-reference/model-providers)); with `fast` alone, turning Fast on keeps a chat's Ultrafast tier |
+| `speed` | string | `standard`, `fast` or `ultrafast`. Wins over `fast` and sets it. `ultrafast` is accepted only where the model offers it (see [model registry](/docs/api-reference/model-providers)); with `fast` alone, turning Fast on keeps a chat that is on Ultrafast there, and otherwise means Fast |
 | `workspace_project_ids` | string[] | Up to 50 other project ids whose folders the agent may also use. A key limited to one project cannot add others |
 
 **Response:**

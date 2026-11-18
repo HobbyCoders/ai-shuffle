@@ -119,6 +119,8 @@ describe('the phone controls offer the three tiers', () => {
 		const radios = Array.from(group.querySelectorAll<HTMLButtonElement>('[role="radio"]'));
 		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Standard', 'Fast', 'Ultrafast']);
 		expect(screen.queryByRole('switch', { name: 'Fast mode' })).toBeNull();
+		// The cost shows before any pick, worded for the ChatGPT plan.
+		expect(document.querySelector('.mcp [data-testid="ultrafast-cost"]')!.textContent).toMatch(/8x the plan allowance/);
 		await fireEvent.click(radios[2]);
 		await tick();
 		expect(get(activeSession)).toMatchObject({ fastMode: true, ultrafastMode: true });

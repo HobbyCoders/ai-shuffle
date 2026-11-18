@@ -6,8 +6,10 @@
 	 * Standard is the plain text. Fast runs a slow sheen across the letters and
 	 * Ultrafast a quicker double one; both move only `background-position`, so
 	 * the label never reflows. With reduced motion the text is tinted instead
-	 * and a bolt (two for Ultrafast) says the same thing. The decoration is not
-	 * read out: the owning control names the tier in its accessible label.
+	 * and a bolt (two for Ultrafast) says the same thing, in a slot of one width
+	 * that every tier keeps (empty on Standard), so a pick never shifts the
+	 * label. The decoration is not read out: the owning control names the tier
+	 * in its accessible label.
 	 */
 	import { Zap } from 'lucide-svelte';
 	import type { ComposerSpeed } from './speed-tier';
@@ -24,8 +26,8 @@
 
 <span class="speed-label" data-speed={speed} class:fast={speed === 'fast'} class:ultrafast={speed === 'ultrafast'}
 	><span class="speed-text" data-text={text}>{text}</span
-	>{#if bolt && speed !== 'standard'}<span class="speed-bolt" aria-hidden="true"
-		><Zap size={10} strokeWidth={2.25} fill="currentColor" />{#if speed === 'ultrafast'}<Zap size={10} strokeWidth={2.25} fill="currentColor" />{/if}</span
+	>{#if bolt}<span class="speed-bolt" aria-hidden="true"
+		>{#if speed !== 'standard'}<Zap size={10} strokeWidth={2.25} fill="currentColor" />{/if}{#if speed === 'ultrafast'}<Zap size={10} strokeWidth={2.25} fill="currentColor" />{/if}</span
 	>{/if}</span>
 
 <style>
@@ -72,11 +74,13 @@
 		to { background-position: 0% 0; }
 	}
 
-	/* Only drawn when motion is off: the sheen says it otherwise. */
+	/* Only drawn when motion is off: the sheen says it otherwise. Two bolts'
+	   width on every tier, so the label is as wide on Standard as on Ultrafast. */
 	.speed-bolt {
 		display: none;
 		flex: none;
 		align-items: center;
+		width: 17px;
 		margin-left: 3px;
 		color: var(--primary);
 	}

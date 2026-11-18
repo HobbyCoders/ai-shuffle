@@ -1,4 +1,5 @@
 """Ultrafast speed tier: representation, gating, wire mapping, sync and notes."""
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,6 +25,28 @@ from app.network import policy
 ])
 def test_fast_decides_on_and_speed_refines(fast, speed, expected):
     assert ms.resolve_speed(fast, speed) == expected
+
+
+@pytest.mark.parametrize("fast,speed,prior,expected", [
+    # A known speed is the pick; fast follows it.
+    (None, "ultrafast", None, (True, "ultrafast")),
+    (False, "ultrafast", None, (True, "ultrafast")),
+    (None, "standard", {"fast": True, "speed": "ultrafast"}, (False, "standard")),
+    # A fast-only (older) write: off is Standard, on keeps a consistent Ultrafast.
+    (False, None, {"fast": True, "speed": "ultrafast"}, (False, "standard")),
+    (True, None, {"fast": True, "speed": "ultrafast"}, (True, "ultrafast")),
+    (True, None, {"fast": False, "speed": "ultrafast"}, (True, "fast")),
+    (True, None, {"fast": False, "speed": "standard"}, (True, "fast")),
+    (True, None, None, (True, "fast")),
+    # A copy (fork, mirror) keeps the prior's effective tier.
+    (None, None, {"fast": False, "speed": "ultrafast"}, (False, "standard")),
+    (None, None, {"fast": True, "speed": None}, (True, "fast")),
+    (None, None, {"fast": True, "speed": "ultrafast"}, (True, "ultrafast")),
+    (None, None, None, (None, None)),
+])
+def test_one_invariant_for_the_stored_pair(fast, speed, prior, expected):
+    pair = ms.stored_pair(fast, speed, prior=prior)
+    assert (pair["fast"], pair["speed"]) == expected
 
 
 def test_speed_fields_keep_fast_for_older_readers():
@@ -58,19 +81,47 @@ def test_codex_catalog_keeps_known_service_tiers_only():
 
 
 def test_fresh_catalog_replaces_tiers_and_saved_lists_cannot_forge_them():
-    stored = [{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]}, {"id": "gpt-6-astra"}]
-    # A plan change: the account's catalog no longer lists Ultrafast.
+    stored = [{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]},
+              {"id": "gpt-6-astra", "service_tiers": ["ultrafast"]}]
+    # A plan change: the account's catalog no longer lists Ultrafast, and a
+    # model it no longer lists loses its tiers.
     merged = ms.merge_service_tiers(stored, [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}])
     assert merged[0]["service_tiers"] == ["priority"]
     assert merged[1] == {"id": "gpt-6-astra"}
-    # A client save keeps the stored tiers whatever it sends; a new model
-    # keeps only known ids.
+    # A client save keeps the stored tiers whatever it sends; a model with
+    # none stored (new, or a create) gets none until the next catalog fetch.
     saved = _keep_stored_service_tiers(
         [{"id": "gpt-6.1-sol", "service_tiers": ["ultrafast"]},
-         {"id": "gpt-6-astra", "service_tiers": ["ultrafast", "warp"]}],
+         {"id": "gpt-6-astra", "service_tiers": ["ultrafast"]}],
         [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}])
-    assert saved == [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]},
-                     {"id": "gpt-6-astra", "service_tiers": ["ultrafast"]}]
+    assert saved == [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}, {"id": "gpt-6-astra"}]
+    assert _keep_stored_service_tiers([{"id": "gpt-6.1-sol", "service_tiers": ["ultrafast"]}], None) == [
+        {"id": "gpt-6.1-sol"}]
+
+
+def test_signing_in_to_another_account_clears_the_tiers(mock_db):
+    from app.db import model_providers as providers_db
+
+    pid = providers_db.create_model_provider(
+        "codex-x", "ChatGPT", "chatgpt", "https://chatgpt.com/backend-api/codex", auth_mode="chatgpt",
+        models=[{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]}])["id"]
+    bundle = dict(access_token="a", refresh_token="r")
+    providers_db.set_codex_token_bundle(pid, account_id="acct-pro", **bundle)
+    # The Pro account's catalog lists Ultrafast (as a fetch would store it).
+    providers_db.update_model_provider(
+        pid, models_json=[{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]}])
+
+    def tiers():
+        models = providers_db.get_model_provider(pid)["models_json"]
+        models = json.loads(models) if isinstance(models, str) else models
+        return [m.get("service_tiers") for m in models]
+    assert tiers() == [["priority", "ultrafast"]]
+    # The same account refreshing its token keeps them.
+    providers_db.set_codex_token_bundle(pid, account_id="acct-pro", **bundle)
+    assert tiers() == [["priority", "ultrafast"]]
+    # Another account (a Plus plan, say) has none until its own catalog is read.
+    providers_db.set_codex_token_bundle(pid, account_id="acct-plus", **bundle)
+    assert tiers() == [None]
 
 
 # ── who may run Ultrafast ──────────────────────────────────────────────────
@@ -92,7 +143,9 @@ CHATGPT_PLUS = {"provider_type": "chatgpt", "models_json": [
     ({"provider_type": "openai"}, "gpt-6-astra", True),
     ({"provider_type": "openai"}, "gpt-6.1-sol", True),
     ({"provider_type": "openai"}, "gpt-6.2-astra", True),
-    ({"provider_type": "openai"}, "gpt-6.2-sol-2026-11-01", True),
+    ({"provider_type": "openai"}, "gpt-6.2-sol", True),
+    ({"provider_type": "openai"}, "gpt-6.2-sol-2026-11-01", False),
+    ({"provider_type": "openai"}, "gpt-6-astra-mini", False),
     ({"provider_type": "openai"}, "gpt-6-luna", False),
     ({"provider_type": "openai"}, "gpt-5.4", False),
     ({"provider_type": "openrouter"}, "gpt-6.1-sol", False),
@@ -197,9 +250,41 @@ async def test_run_settings_speed_writes_fast_and_speed(live):
     save.assert_called_with("s", effort="high", fast=True, speed="ultrafast", clear_effort=False)
     assert runtime.turn["overrides"]["speed"] == "ultrafast"
     assert state.connect_options.aih_speed == "ultrafast"
-    # An older client's ``fast: true`` keeps Ultrafast; ``fast: false`` is Standard.
+    # An older client's ``fast: true`` keeps a stored Ultrafast; ``fast: false``
+    # is Standard, and the next ``fast: true`` is plain Fast.
     assert (await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True)))["speed"] == "ultrafast"
     assert (await api.apply_run_settings("s", api.RunSettingsUpdate(fast=False)))["speed"] == "standard"
+    assert (await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True)))["speed"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_a_speed_pick_is_announced_to_other_devices(monkeypatch):
+    from app.core.sync_engine import sync_engine
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated",
+                        AsyncMock(side_effect=lambda **kw: sent.append(kw["updates"])))
+    answer = {"effort": "high", "fast": True, "speed": "ultrafast"}
+    await api._announce_run_settings("s", answer, effort_asked=False, speed_asked=True)
+    assert sent[-1] == {"fast": True, "speed": "ultrafast"}
+    # An owner older than ``speed`` answers without it: announced as Fast.
+    await api._announce_run_settings("s", {"effort": "high", "fast": True}, effort_asked=False, speed_asked=True)
+    assert sent[-1] == {"fast": True, "speed": "fast"}
+    # An effort pick says nothing about speed.
+    await api._announce_run_settings("s", answer, effort_asked=True)
+    assert sent[-1] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_a_swapped_model_is_the_one_ultrafast_is_checked_against(monkeypatch):
+    adapter = _live_adapter(monkeypatch, {"provider_type": "openai"})
+    adapter._options.model = "gpt-6-luna"
+    adapter._engine.model = "gpt-6-luna"
+    adapter._engine.submit = AsyncMock(side_effect=NotImplementedError)
+    await adapter.set_model("gpt-6-astra")
+    assert adapter._options.model == "gpt-6-astra"
+    result = await adapter.set_run_settings(effort="high", fast=True, speed="ultrafast")
+    assert result["speed"] == "ultrafast"
 
 
 @pytest.mark.asyncio
@@ -232,6 +317,33 @@ async def test_remote_owner_older_than_speed_degrades_to_fast(monkeypatch):
                      {"session_id": "s", "fast": True}]
 
 
+@pytest.mark.parametrize("message,retry", [
+    ("1 validation error for RunSettingsUpdate\nspeed\n  Extra inputs are not permitted [type=extra_forbidden]", True),
+    # Any other refusal is the answer, even one that says "speed" and "extra".
+    ("Ultrafast is not available for this model", False),
+    ("1 validation error for RunSettingsUpdate\nfast\n  Extra inputs are not permitted (speed)", False),
+    ("1 validation error for RunSettingsUpdate\nspeed\n  Input should be 'standard', 'fast' or 'ultrafast'", False),
+])
+def test_only_an_unknown_speed_field_is_retried_without_it(message, retry):
+    assert api._older_owner_refused_speed(api.control.ControlRefused(message)) is retry
+
+
+def test_a_null_pick_is_refused_before_it_is_forwarded():
+    # Checked here, so an older owner's retry without ``speed`` cannot turn it
+    # into a Fast write.
+    with pytest.raises(ValueError):
+        api._checked_changes(api.RunSettingsUpdate(speed=None, fast=True))
+    assert api._checked_changes(api.RunSettingsUpdate(speed="ultrafast")) == {"speed": "ultrafast"}
+
+
+def test_a_forwarded_turn_carries_the_speed_with_the_model():
+    from app.network import control
+
+    overrides = control._turn_overrides({"model": "gpt-6.1-sol", "fast": True, "speed": "ultrafast", "cwd": "/x"})
+    assert overrides == {"model": "gpt-6.1-sol", "fast": True, "speed": "ultrafast"}
+    assert control._turn_overrides({"fast": "yes", "speed": "warp"}) is None
+
+
 # ── storage and peer sync ──────────────────────────────────────────────────
 
 def test_binding_writes_both_and_old_writers_keep_working(mock_db):
@@ -242,8 +354,21 @@ def test_binding_writes_both_and_old_writers_keep_working(mock_db):
     db.set_session_run_binding("speedy", fast=False)
     row = db.get_session("speedy")
     assert ms.resolve_speed(row["fast"], row.get("speed")) == "standard"
+    assert (row["fast"], row["speed"]) == (False, "standard")
+    # Turned back on by the same writer: plain Fast, never a stale Ultrafast.
+    db.set_session_run_binding("speedy", fast=True)
+    row = db.get_session("speedy")
+    assert (row["fast"], row["speed"]) == (True, "fast")
+    db.set_session_run_binding("speedy", speed="ultrafast")
+    db.set_session_run_binding("speedy", fast=True)
+    row = db.get_session("speedy")
+    assert (row["fast"], row["speed"]) == (True, "ultrafast")
     db.set_session_run_binding("speedy", speed="fast")
     row = db.get_session("speedy")
+    assert (row["fast"], row["speed"]) == (True, "fast")
+    # A legacy create: the pair is made consistent.
+    db.create_session("legacy", profile_id=None, model="gpt-6.1-sol", fast=True)
+    row = db.get_session("legacy")
     assert (row["fast"], row["speed"]) == (True, "fast")
 
 
@@ -254,8 +379,9 @@ def test_session_sync_carries_speed_and_older_owner_rows_clear_it():
     materialized = coll.materialize_hook({"id": "s", "fast": True})
     assert materialized["speed"] is None
     assert ms.resolve_speed(materialized["fast"], materialized["speed"]) == "fast"
-    # A newer owner's record keeps it.
+    # A newer owner's record keeps it, made consistent with its ``fast``.
     assert coll.materialize_hook({"id": "s", "fast": True, "speed": "ultrafast"})["speed"] == "ultrafast"
+    assert coll.materialize_hook({"id": "s", "fast": False, "speed": "ultrafast"})["speed"] == "standard"
 
 
 def test_unset_speed_keeps_the_published_content_hash():

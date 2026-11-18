@@ -742,7 +742,8 @@ _MAX_CONTEXT_WINDOW = 10_000_000
 
 def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     """Only the run settings the local WebSocket composer sends: model,
-    permission mode, effort and context window (with its acknowledged base).
+    permission mode, effort, speed (``fast`` and ``speed``) and context window
+    (with its acknowledged base).
 
     Anything else — ``cwd`` and ``worktree_info`` above all — is dropped so a
     member cannot run the owner's agent outside the session's checkout. The
@@ -750,6 +751,11 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     travel through ``run-settings``), so a window picked mid-chat on another
     device must ride the turn; ``query_options`` then keeps it only when the
     session's model offers it.
+
+    The speed rides for the same reason: a model switch and the tier picked
+    with it are sent together, and the owner applies them together (its wire
+    sends Ultrafast only where the bound row offers it). An unknown tier is
+    dropped.
 
     The effort rides too, as it does on a local send: a running turn takes a
     message at its next tool boundary only when the message names the same
@@ -775,6 +781,12 @@ def _turn_overrides(raw: Any) -> Optional[Dict[str, Any]]:
     effort = raw.get("effort")
     if isinstance(effort, str) and effort in VALID_EFFORTS:
         overrides["effort"] = effort
+    if isinstance(raw.get("fast"), bool):
+        overrides["fast"] = raw["fast"]
+    from app.core.model_speed import normalize_speed
+    speed = normalize_speed(raw.get("speed"))
+    if speed:
+        overrides["speed"] = speed
     context_window = raw.get("context_window")
     if context_window is not None:
         if type(context_window) is not int or not 0 < context_window <= _MAX_CONTEXT_WINDOW:
@@ -1194,6 +1206,7 @@ def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Opti
     from app.db import database
     from app.db.base import transaction
     from app.network import catalog
+    from app.core.model_speed import stored_pair
     original = database.get_session(session_id)
     if original is None:
         raise LookupError("Unknown session")
@@ -1206,7 +1219,7 @@ def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Opti
             title=title or f"{original.get('title') or 'Session'} (forked)", api_user_id=api_user_id,
             parent_session_id=session_id, is_active=True, model=original.get("model"),
             effort=original.get("effort"), permission_mode=original.get("permission_mode"),
-            context_window=original.get("context_window"), fast=original.get("fast"), speed=original.get("speed"),
+            context_window=original.get("context_window"), **stored_pair(prior=original),
             mode=original.get("mode"),
             _conn=txn)
         if creator:

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { effortSpeedLabel, pickedSpeed, shownSpeed, SPEED_OPTIONS, ULTRAFAST_COST } from './speed-tier';
+import { effortSpeedLabel, pickedSpeed, shownSpeed, SPEED_OPTIONS, ultrafastCost } from './speed-tier';
 
 describe('speed tier', () => {
 	const on = { fastSupported: true, fastEnabled: true, ultrafastSupported: true, ultrafastEnabled: true };
@@ -27,11 +27,17 @@ describe('speed tier', () => {
 		expect(effortSpeedLabel('Effort: ', 'High', 'ultrafast')).toBe('Effort: High, Ultrafast');
 	});
 
-	it('states the Ultrafast price up front', () => {
+	it('states the Ultrafast price in the terms the row bills in', () => {
 		const ultra = SPEED_OPTIONS.find((o) => o.value === 'ultrafast')!;
-		expect(ultra.title).toContain(ULTRAFAST_COST);
-		expect(ULTRAFAST_COST).toMatch(/fastest tier/);
-		expect(ULTRAFAST_COST).toMatch(/8x on ChatGPT plans/);
-		expect(ULTRAFAST_COST).toMatch(/several times the API price/);
+		expect(ultra.title).toMatch(/fastest tier.*much faster/);
+		// A ChatGPT sign-in pays with its plan allowance; an API key pays a price.
+		expect(ultrafastCost('plan')).toMatch(/fastest tier.*ChatGPT plan allowance about 8x faster/);
+		expect(ultrafastCost('plan', true)).toMatch(/8x the plan allowance/);
+		expect(ultrafastCost('api')).toMatch(/fastest tier.*several times the Standard API price/);
+		expect(ultrafastCost('api', true)).toMatch(/several times the Standard price/);
+		for (const short of [false, true]) {
+			expect(ultrafastCost('plan', short)).not.toMatch(/price/);
+			expect(ultrafastCost('api', short)).not.toMatch(/allowance/);
+		}
 	});
 });

@@ -15,7 +15,8 @@ describe('SpeedLabel', () => {
 		expect(label().classList.contains('fast')).toBe(false);
 		expect(label().classList.contains('ultrafast')).toBe(false);
 		expect(label().textContent).toBe('High');
-		expect(document.querySelector('.speed-bolt')).toBeNull();
+		// The reduced-motion slot is kept, empty, so a pick never shifts the label.
+		expect(document.querySelector('.speed-bolt')!.querySelectorAll('svg')).toHaveLength(0);
 	});
 
 	it('marks Fast and Ultrafast apart, with hidden bolts for reduced motion', () => {

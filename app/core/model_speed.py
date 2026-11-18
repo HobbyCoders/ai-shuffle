@@ -9,8 +9,8 @@ mode keep working:
 ``fast`` decides on or off; ``speed`` only refines an on chat. So a chat an
 older peer or the Android app turned off is Standard whatever ``speed`` still
 says, and an older peer that reads only ``fast`` runs an Ultrafast chat on Fast
-instead of failing. Every writer in this build writes both
-(:func:`speed_fields`).
+instead of failing. Every writer in this build stores an agreeing pair
+(:func:`stored_pair`).
 
 On the wire (OpenAI Responses, HTTP or WebSocket) Fast is ``service_tier:
 "priority"`` and Ultrafast is ``service_tier: "ultrafast"``; Standard sends no
@@ -21,7 +21,6 @@ own Codex model catalog lists the ``ultrafast`` service tier for the model
 """
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 STANDARD = "standard"
@@ -37,12 +36,9 @@ SERVICE_TIERS: Dict[str, str] = {FAST: "priority", ULTRAFAST: "ultrafast"}
 KNOWN_SERVICE_TIERS: Tuple[str, ...] = ("priority", "flex", "ultrafast")
 
 # The models OpenAI documents for Ultrafast on the API
-# (developers.openai.com/api/docs/guides/ultrafast-mode), exact ids or a dated
-# snapshot of one. Other GPT-6 variants are not assumed to have it.
-_ULTRAFAST_API_MODEL = re.compile(
-    r"^(?:gpt-6\.2-astra|gpt-6\.2-sol|gpt-6-astra|gpt-6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$",
-    re.I,
-)
+# (developers.openai.com/api/docs/guides/ultrafast-mode), exact ids only: no
+# snapshot or other GPT-6 variant is documented to have it.
+_ULTRAFAST_API_MODELS = frozenset({"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"})
 
 
 def normalize_speed(value: Any) -> Optional[str]:
@@ -69,6 +65,33 @@ def speed_fields(speed: str) -> Dict[str, Any]:
     """The ``fast``/``speed`` pair every writer stores for ``speed``."""
     speed = normalize_speed(speed) or STANDARD
     return {"fast": speed != STANDARD, "speed": speed}
+
+
+def stored_pair(fast: Any = None, speed: Any = None, *,
+                prior: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """The ``fast``/``speed`` pair to store; every writer of the pair uses it.
+
+    The stored pair always agrees: ``fast`` off has speed ``standard``,
+    ``fast`` on has ``fast`` or ``ultrafast`` (NULL only on rows never written
+    by this build, read as :func:`resolve_speed` says).
+
+    * A known ``speed`` is the pick, and ``fast`` follows it.
+    * ``fast`` alone (an older client, peer or parent): off is Standard; on is
+      Ultrafast only when ``prior`` (the stored pair it replaces) runs
+      Ultrafast, else Fast.
+    * Neither, with ``prior``: a stored pair being copied (fork, clone,
+      mirror), carried over at the tier it runs.
+    * Neither and no ``prior``: nothing was picked (both None).
+    """
+    tier = normalize_speed(speed)
+    if tier is None and fast is None and prior is not None:
+        fast = prior.get("fast")
+    if tier is None:
+        if fast is None:
+            return {"fast": None, "speed": None}
+        kept = prior is not None and resolve_speed(prior.get("fast"), prior.get("speed")) == ULTRAFAST
+        tier = (ULTRAFAST if kept else FAST) if fast else STANDARD
+    return speed_fields(tier)
 
 
 def service_tier_for(speed: Any) -> Optional[str]:
@@ -123,12 +146,13 @@ def stored_service_tiers(entry: Any) -> Optional[List[str]]:
 
 
 def merge_service_tiers(models: Iterable[Any], catalog: Iterable[Mapping[str, Any]]) -> List[Any]:
-    """Saved model entries with ``service_tiers`` taken from a fresh catalog.
+    """Saved model entries with ``service_tiers`` set from a fresh catalog only.
 
-    The catalog is the account's own answer, so its tiers replace saved ones
-    for every model it lists (a plan change can take Ultrafast away). A model
-    the catalog does not list keeps what it had. A catalog entry without tier
-    fields (an older backend) leaves the saved value alone.
+    A successful catalog fetch is the only source of tiers, so it replaces
+    them on every saved model: one it lists takes the tiers listed there, and
+    one it omits, or lists without tiers, loses any it had (a plan change can
+    take Ultrafast away). Catalogs without tiers (every non-ChatGPT row) leave
+    no tiers at all.
     """
     fresh = {}
     for entry in catalog or ():
@@ -139,11 +163,11 @@ def merge_service_tiers(models: Iterable[Any], catalog: Iterable[Mapping[str, An
         if not isinstance(entry, Mapping):
             merged.append(entry)
             continue
+        updated = {k: v for k, v in entry.items() if k != "service_tiers"}
         tiers = fresh.get(entry.get("id"))
-        if tiers is None:
-            merged.append(entry)
-        else:
-            merged.append({**entry, "service_tiers": tiers})
+        if tiers is not None:
+            updated["service_tiers"] = tiers
+        merged.append(updated)
     return merged
 
 
@@ -182,13 +206,13 @@ def ultrafast_supported_for_row(row: Optional[Mapping[str, Any]], model_id: Opti
         entry = model_entry if model_entry is not None else _row_model_entry(row, model_id)
         return ULTRAFAST in (stored_service_tiers(entry) or [])
     if kind == "openai":
-        return bool(_ULTRAFAST_API_MODEL.match(model_id))
+        return model_id in _ULTRAFAST_API_MODELS
     return False
 
 
 __all__ = [
     "STANDARD", "FAST", "ULTRAFAST", "SPEEDS", "SERVICE_TIERS", "KNOWN_SERVICE_TIERS",
-    "normalize_speed", "resolve_speed", "speed_fields", "service_tier_for",
+    "normalize_speed", "resolve_speed", "speed_fields", "stored_pair", "service_tier_for",
     "options_speed", "sanitize_service_tiers", "stored_service_tiers", "merge_service_tiers",
     "ultrafast_supported_for_row",
 ]

@@ -442,9 +442,16 @@ _register(Collection(
 def _materialize_session_questions(record: Dict[str, Any]) -> Dict[str, Any]:
     # An older owner's full catalog row cannot retain a newer peer's stale mark.
     # The same holds for ``speed``: an owner that only knows ``fast`` runs the
-    # chat on Fast, so its row clears a tier it never published.
-    return {"last_assistant_question_seq": None, "last_assistant_question_epoch": None, "speed": None,
-            **record}
+    # chat on Fast, so its row clears a tier it never published. A row that
+    # names a tier is stored as an agreeing pair (model_speed.stored_pair);
+    # an owner of this build already publishes one, so its hash is unchanged.
+    record = {"last_assistant_question_seq": None, "last_assistant_question_epoch": None, "speed": None,
+              **record}
+    if record.get("speed") is not None:
+        from app.core.model_speed import stored_pair
+
+        record.update(stored_pair(prior=record))
+    return record
 
 
 _register(Collection(

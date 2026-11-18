@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Request
 from app.db import database
 from app.db.async_database import run_sync
 from app.core.mobile_tool_identity import record_creator
+from app.core.model_speed import stored_pair
 from app.api.auth import require_auth, get_api_user_from_request
 from app.core.project_utils import get_project_working_dir
 from app.api.sessions_helpers import (
@@ -46,8 +47,8 @@ def _fork_inherited_fields(original_session: dict) -> dict:
         "effort": original_session.get("effort"),
         "permission_mode": original_session.get("permission_mode"),
         "context_window": original_session.get("context_window"),
-        "fast": original_session.get("fast"),
-        "speed": original_session.get("speed"),
+        # The parent's pair at the tier it runs (never a stale refinement).
+        **stored_pair(prior=original_session),
         "worktree_id": original_session.get("worktree_id"),
         "worktree_branch": original_session.get("worktree_branch"),
         "worktree_path": original_session.get("worktree_path"),

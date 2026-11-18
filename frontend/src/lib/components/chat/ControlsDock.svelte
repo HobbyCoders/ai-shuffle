@@ -56,6 +56,7 @@
 		supportsAutoPermission,
 		isFastModeCapable,
 		isUltrafastCapable,
+		ultrafastBilling,
 		isRegistryHydrated,
 		isReroute
 	} from '$lib/constants/models';
@@ -324,6 +325,7 @@
 	// API model). Elsewhere the plain Fast toggle stays as it is.
 	const ultrafastMode = $derived(!!$activeSession.ultrafastMode);
 	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue));
+	const speedBilling = $derived(ultrafastBilling(modelValue));
 	// The same reset for the dearer tier: a model without it runs the chat on
 	// Fast (Standard where Fast is gone too, which the effect above handles).
 	// Not before the registry has answered, which would drop every pick on load.
@@ -771,6 +773,7 @@
 						onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
 						{ultrafastSupported}
 						ultrafastEnabled={ultrafastMode}
+						ultrafastBilling={speedBilling}
 						onSelectSpeed={selectSpeed}
 					/>
 				</div>
@@ -816,6 +819,7 @@
 	onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
 	{ultrafastSupported}
 	ultrafastEnabled={ultrafastMode}
+	ultrafastBilling={speedBilling}
 	onSelectSpeed={selectSpeed}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}

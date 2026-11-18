@@ -339,11 +339,13 @@ async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
 
-    # A Fast change says nothing new about effort.
+    # A Fast change says nothing new about effort; it announces the speed pair
+    # (an owner older than ``speed`` answers without it: Fast).
     broadcast.reset_mock()
     monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": True}))
     await api.update_run_settings(None, "announce", api.RunSettingsUpdate(fast=True))
-    broadcast.assert_not_awaited()
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"fast": True, "speed": "fast"}, source_device_id=None)
 
 
 @pytest.mark.asyncio

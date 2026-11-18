@@ -33,7 +33,7 @@ import {
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode, getPersistedUltrafastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, listedComposeMode, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -932,6 +932,11 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 	const ownerEpoch = sessionOwnerEpoch();
 	const sessionId = _state.sessionId;
 	const selectedModel = _state.modelOverride || getDefaultModel();
+	// A speed picked with an unsent model switch is checked against that model
+	// and travels with its send, as the model does; the running binding may not
+	// offer it.
+	const row = speedField && sessionId && _state.modelOverride ? appData.current.sessions.find(s => s.id === sessionId) : undefined;
+	const staged = !!row && sessionModelBinding(row) !== _state.modelOverride;
 	const stateKey = field === 'effort' ? 'effortLevelOverride' : speedField ? 'fastMode' : 'contextWindowChoice';
 	let selected = field === 'speed' ? value !== 'standard' : value;
 	// The answered Ultrafast refinement; undefined keeps the chat's own (a
@@ -939,7 +944,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 	let ultrafast: boolean | undefined = field === 'speed' ? value === 'ultrafast' : undefined;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
-	if (sessionId) {
+	if (sessionId && !staged) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
 		const queueKey = `${ownerEpoch}:${sessionId}`;
@@ -1002,7 +1007,7 @@ async function setLiveRunSetting(field: RunSettingField, value: string | null | 
 	_update(s => ({
 		...s, [stateKey]: selected,
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
-		...(speedField ? { ...markBindingHydrated(s, 'fast'), ultrafastMode: ultrafastNow } : {}),
+		...(speedField ? { ...(staged ? markBindingPicked(s, 'fast') : markBindingHydrated(s, 'fast')), ultrafastMode: ultrafastNow } : {}),
 		// A context-window answer says nothing about Fast.
 		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})

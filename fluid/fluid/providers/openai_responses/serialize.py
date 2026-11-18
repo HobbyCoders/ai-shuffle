@@ -789,6 +789,11 @@ class ResponsesStreamNormalizer:
                 payload["code"] = code
             if etype is not None:
                 payload["type"] = etype
+            param = err.get("param") if isinstance(err, dict) else None
+            if isinstance(param, str):
+                # Which request field was refused (``service_tier`` for a
+                # tier the account or model lacks).
+                payload["param"] = param
             status = coerce_status(status)
             if status is None and code in _CODE_STATUS:
                 status = _CODE_STATUS[code]

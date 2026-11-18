@@ -16,7 +16,7 @@ import pytest
 
 from fluid.engine.native import NativeLoop, _is_ultrafast_rejection, _reported_speed
 from fluid.events import TurnComplete, UserTurn
-from fluid.events.model import FastModeOutcome, ProviderRetry
+from fluid.events.model import ErrorEvent, FastModeOutcome, ProviderRetry
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers._retry import RetryPolicy
 from fluid.providers.openai_responses.client import OpenAIResponsesClient
@@ -40,6 +40,13 @@ def _load_fake_server():
 fps = _load_fake_server()
 Responses = fps.Responses
 REFUSAL = "The requested service_tier 'ultrafast' is not available for this model or account."
+#: OpenAI's structured refusal of a request field.
+TIER_REFUSAL = {"error": {"message": REFUSAL, "type": "invalid_request_error",
+                          "param": "service_tier", "code": "unsupported_value"}}
+
+
+def _refused():
+    return fps.error_reply(400, body=TIER_REFUSAL)
 
 
 def _reply(text: str, tier: str | None) -> list:
@@ -56,16 +63,31 @@ def server():
         srv.close()
 
 
-async def _turn(server, tier: str | None) -> tuple[list, NativeLoop]:
+async def _turn(server, tier: str | None, picks: dict | None = None,
+                **loop_kwargs) -> tuple[list, NativeLoop]:
+    """One turn starting at ``tier``; ``picks`` maps a call number (1-based)
+    to the tier the host picks just before that call, as a mid-turn pick."""
     loop = NativeLoop(
         provider=OpenAIResponsesClient(
             api_key="k", base_url=server.url + "/v1/responses",
             retry=RetryPolicy(max_retries=2, base_delay=0.01, max_delay=0.05, jitter=0)),
         store=MemoryStore(), model="gpt-6.1-sol", registry=ToolRegistry(),
-        permissions=PermissionEngine("never_ask"),
+        permissions=PermissionEngine("never_ask"), **loop_kwargs,
     )
     if tier:
         loop.request_extra["service_tier"] = tier
+    if picks:
+        stream_once, calls = loop._stream_once, [0]
+
+        async def picking(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] in picks:
+                loop.request_extra.pop("service_tier", None)
+                if picks[calls[0]]:
+                    loop.request_extra["service_tier"] = picks[calls[0]]
+            return await stream_once(*args, **kwargs)
+
+        loop._stream_once = picking
     await loop.submit(UserTurn(content="go"))
     await asyncio.wait_for(loop.wait_turn(), 20.0)
     events = loop.bus.log(loop.session_id)
@@ -87,15 +109,53 @@ async def test_ultrafast_is_sent_and_reported(server):
 
 
 async def test_a_refused_ultrafast_runs_the_turn_on_standard(server):
-    server.script(fps.error_reply(400, REFUSAL), _reply("still answered", "default"))
-    events, _ = await _turn(server, "ultrafast")
+    server.script(_refused(), _reply("still answered", "default"))
+    # A budget of one call: the refused attempt ran nothing and is not counted.
+    events, _ = await _turn(server, "ultrafast", max_model_calls_per_turn=1)
     assert [r.body.get("service_tier") for r in server.requests] == ["ultrafast", None]
     [retry] = _of(events, ProviderRetry)
     assert "Ultrafast isn't available" in retry.reason
     [outcome] = _of(events, FastModeOutcome)
     assert outcome.disabled_reason == "ultrafast_unavailable"
     assert (outcome.standard_calls, outcome.ultrafast_calls) == (1, 0)
+    [done] = _of(events, TurnComplete)
+    assert done.num_model_calls == 1
+
+
+async def test_a_refusal_pins_the_turn_to_standard_and_always_reports(server):
+    # Standard at the start, Ultrafast picked before the first call (refused),
+    # then Fast before the retry: the retry still runs Standard, and the note
+    # comes although neither end of the turn is Ultrafast.
+    server.script(_refused(), _reply("answered", "default"))
+    events, _ = await _turn(server, None, picks={1: "ultrafast", 2: "priority"})
+    assert [r.body.get("service_tier") for r in server.requests] == ["ultrafast", None]
+    [outcome] = _of(events, FastModeOutcome)
+    assert (outcome.speed, outcome.speed_at_end) == ("standard", "fast")
+    assert outcome.disabled_reason == "ultrafast_unavailable"
     assert _of(events, TurnComplete)
+
+
+async def test_only_the_tier_the_failed_request_sent_counts(server):
+    # A Fast request refused for its tier is not an Ultrafast refusal, even
+    # when Ultrafast is picked while it fails: no Standard replay.
+    server.script(_refused())
+    events, _ = await _turn(server, "priority", picks={1: "priority"})
+    assert [r.body.get("service_tier") for r in server.requests] == ["priority"]
+    assert not _of(events, ProviderRetry)
+    assert _of(events, ErrorEvent)
+
+
+async def test_an_error_that_only_mentions_the_tier_fails_the_turn(server):
+    # A tool-schema error naming a tool called ultrafast_search is not a tier
+    # refusal: the turn fails instead of replaying on Standard.
+    body = {"error": {"message": "Invalid schema for function 'ultrafast_search' (service_tier)",
+                      "type": "invalid_request_error", "param": "tools[0].parameters",
+                      "code": "invalid_function_parameters"}}
+    server.script(fps.error_reply(400, body=body))
+    events, _ = await _turn(server, "ultrafast")
+    assert len(server.requests) == 1
+    assert not _of(events, ProviderRetry)
+    assert _of(events, ErrorEvent)
 
 
 async def test_fast_turns_report_nothing_new(server):
@@ -105,13 +165,25 @@ async def test_fast_turns_report_nothing_new(server):
     assert not _of(events, FastModeOutcome)
 
 
-def test_the_refusal_rule_skips_rate_limits_and_server_errors():
-    assert _is_ultrafast_rejection(REFUSAL, 400)
-    assert _is_ultrafast_rejection("Unsupported value for service_tier", 403)
-    assert not _is_ultrafast_rejection("Rate limit for service tier ultrafast reached", 429)
-    assert not _is_ultrafast_rejection(REFUSAL, 503)
-    assert not _is_ultrafast_rejection("tools.0.name: invalid", 400)
-    assert not _is_ultrafast_rejection("ultrafast rate_limit exceeded", None)
+def test_the_refusal_rule_reads_only_structured_fields():
+    import json
+
+    body = json.dumps(TIER_REFUSAL)
+    assert _is_ultrafast_rejection({"status": 400, "message": body})
+    assert _is_ultrafast_rejection({"status": 403, "message": json.dumps(
+        {"error": {"message": "no", "code": "service_tier_unavailable"}})})
+    # An in-stream error carries the fields on the chunk itself.
+    assert _is_ultrafast_rejection({"message": "{...}", "param": "service_tier"})
+    # The words alone never count.
+    assert not _is_ultrafast_rejection({"status": 400, "message": REFUSAL})
+    # Nor do rate limits, server errors, retriable or transport failures.
+    assert not _is_ultrafast_rejection({"status": 429, "message": body})
+    assert not _is_ultrafast_rejection({"status": 503, "message": body})
+    assert not _is_ultrafast_rejection({"param": "service_tier", "retriable": True})
+    assert not _is_ultrafast_rejection({"param": "service_tier", "transport_failure": {}})
+    # A context or tool-schema error names another field.
+    assert not _is_ultrafast_rejection({"status": 400, "message": json.dumps(
+        {"error": {"param": "input", "code": "context_length_exceeded"}})})
 
 
 def test_reported_tier_classifies_the_call():

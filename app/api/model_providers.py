@@ -638,15 +638,13 @@ def _with_context_windows(
 def _keep_stored_service_tiers(
     models: Optional[List[Any]], stored: Optional[List[Any]],
 ) -> List[Any]:
-    """``models`` with ``service_tiers`` kept from the saved entries.
+    """``models`` with ``service_tiers`` kept from the saved entries only.
 
-    The tiers come from the account's own catalog fetch: a model already saved
-    keeps its stored tiers whatever a client sends. A model new to the row
-    takes the tiers the settings page fetched with it, re-sanitized to known
-    ids (the next catalog fetch replaces them either way).
+    The tiers come only from the account's own catalog fetch
+    (:func:`_fetch_models`), never from a client: whatever a save sends is
+    dropped, a model already saved keeps its stored tiers, and a model new to
+    the row has none until the next catalog fetch.
     """
-    from app.core.model_speed import stored_service_tiers
-
     saved = {entry.get("id"): entry.get("service_tiers") for entry in stored or []
              if isinstance(entry, dict) and isinstance(entry.get("service_tiers"), list)}
     result: List[Any] = []
@@ -655,7 +653,7 @@ def _keep_stored_service_tiers(
             result.append(entry)
             continue
         updated = {k: v for k, v in entry.items() if k != "service_tiers"}
-        tiers = saved[entry["id"]] if entry.get("id") in saved else stored_service_tiers(entry)
+        tiers = saved.get(entry.get("id"))
         if tiers is not None:
             updated["service_tiers"] = tiers
         result.append(updated)

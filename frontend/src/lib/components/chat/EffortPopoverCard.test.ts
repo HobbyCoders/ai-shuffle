@@ -225,6 +225,7 @@ describe('EffortPopoverCard — Ultrafast speed picker', () => {
 		render(EffortPopoverCard, { props: { ...base, fastEnabled: true } });
 		expect(screen.getByRole('button', { name: 'Fast mode' })).toBeTruthy();
 		expect(screen.queryByRole('radiogroup', { name: 'Speed' })).toBeNull();
+		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
 	});
 
 	it('offers Standard, Fast and Ultrafast as one pick', async () => {
@@ -234,8 +235,9 @@ describe('EffortPopoverCard — Ultrafast speed picker', () => {
 		const radios = screen.getAllByRole('radio');
 		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Standard', 'Fast', 'Ultrafast']);
 		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
-		expect(radios[2].getAttribute('title')).toMatch(/8x on ChatGPT plans/);
-		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+		expect(radios[2].getAttribute('title')).toMatch(/fastest tier/);
+		// The cost is said before any pick (an API-key row by default: a price).
+		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/several times the Standard API price/);
 		await fireEvent.click(radios[2]);
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('ultrafast');
 		// The current pick is not sent again.
@@ -247,6 +249,9 @@ describe('EffortPopoverCard — Ultrafast speed picker', () => {
 		expect(document.querySelector('.effort-pop-card')!.classList.contains('ultrafast-active')).toBe(true);
 		await fireEvent.click(screen.getByRole('radio', { name: /Standard/ }));
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
+		// A ChatGPT sign-in words it as plan allowance.
+		await view.rerender({ ...base, fastEnabled: false, ultrafastSupported: true, ultrafastBilling: 'plan', onSelectSpeed });
+		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/ChatGPT plan allowance about 8x faster/);
 	});
 
 	it('holds every tier while the chat\'s own value loads', async () => {

@@ -13,14 +13,26 @@ export const SPEED_NAMES: Record<ComposerSpeed, string> = {
 	ultrafast: 'Ultrafast'
 };
 
-/** The cost guard: Ultrafast is offered with its price said up front, never a dialog. */
-export const ULTRAFAST_COST =
-	'Ultrafast is the fastest tier. It uses plan allowance or credits much faster: about 8x on ChatGPT plans, several times the API price.';
+/** How the picked model's Ultrafast is paid for: a ChatGPT plan's allowance or API pricing. */
+export type UltrafastBilling = 'plan' | 'api';
+
+/**
+ * The cost guard: shown whenever the picker is, before any pick and never as a
+ * dialog, in the terms the row bills in. `short` is the phone sheet's line.
+ */
+export function ultrafastCost(billing: UltrafastBilling, short = false): string {
+	if (billing === 'plan') {
+		return short ? 'Ultrafast uses about 8x the plan allowance'
+			: 'Ultrafast is the fastest tier. It uses your ChatGPT plan allowance about 8x faster.';
+	}
+	return short ? 'Ultrafast costs several times the Standard price'
+		: 'Ultrafast is the fastest tier. It costs several times the Standard API price.';
+}
 
 export const SPEED_OPTIONS: { value: ComposerSpeed; label: string; title: string }[] = [
 	{ value: 'standard', label: 'Standard', title: 'Standard: the normal speed and price.' },
 	{ value: 'fast', label: 'Fast', title: 'Fast: faster output at a higher price. Switching clears the prompt cache.' },
-	{ value: 'ultrafast', label: 'Ultrafast', title: `${ULTRAFAST_COST} Switching clears the prompt cache.` }
+	{ value: 'ultrafast', label: 'Ultrafast', title: 'Ultrafast: the fastest tier; it uses plan allowance or credits much faster. Switching clears the prompt cache.' }
 ];
 
 export interface SpeedShownInput {

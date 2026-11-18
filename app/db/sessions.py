@@ -681,12 +681,10 @@ def create_session(
         selected_context_window = None
     if selected_context_window is not None and selected_context_window <= 0:
         selected_context_window = None
-    selected_fast = None if fast is None else bool(fast)
-    from app.core.model_speed import normalize_speed
+    from app.core.model_speed import stored_pair
 
-    selected_speed = normalize_speed(speed)
-    if selected_speed is not None:
-        selected_fast = selected_speed != "standard"
+    _pair = stored_pair(fast, speed)
+    selected_fast, selected_speed = _pair["fast"], _pair["speed"]
     if resolved_provider_id is None and selected_model:
         from app.core.query_options import decode_provider_model
 
@@ -1059,22 +1057,18 @@ def set_session_run_binding(
         values.append(clean_context_window)
     # Boolean binding: False is a real pick ("turn fast mode off"), so it
     # must reach the row. Only an absent field (None) is a no-op.
-    # ``speed`` is the tier this build picks; it writes ``fast`` with it so an
-    # older reader of ``fast`` alone runs Ultrafast on Fast. A caller with only
-    # ``fast`` (an older client) leaves ``speed`` alone: ``fast`` off is
-    # Standard whatever it says.
-    from app.core.model_speed import normalize_speed, speed_fields
+    # ``speed`` and ``fast`` are stored as one agreeing pair
+    # (app/core/model_speed.stored_pair): a ``speed`` pick writes the ``fast``
+    # it implies, and ``fast`` alone (an older client) is normalized against
+    # the pair it replaces, read in the same transaction below.
+    from app.core.model_speed import normalize_speed, stored_pair
 
-    clean_speed = normalize_speed(speed)
-    if clean_speed is not None:
-        fields = speed_fields(clean_speed)
-        updates.append(f"fast = {_ph}")
-        values.append(fields["fast"])
-        updates.append(f"speed = {_ph}")
-        values.append(fields["speed"])
-    elif fast is not None:
-        updates.append(f"fast = {_ph}")
-        values.append(bool(fast))
+    speed_pick = normalize_speed(speed)
+    fast_only = speed_pick is None and fast is not None
+    if speed_pick is not None:
+        pair = stored_pair(speed=speed_pick)
+        updates += [f"fast = {_ph}", f"speed = {_ph}"]
+        values += [pair["fast"], pair["speed"]]
     # Away mode is boolean the same way: False is "the owner is back".
     if away_mode is not None:
         updates.append(f"away_mode = {_ph}")
@@ -1089,14 +1083,19 @@ def set_session_run_binding(
         updates.append(f"workspace_project_ids = {_ph}")
         values.append(json.dumps(normalize_workspace_project_ids(workspace_project_ids)))
 
-    if not updates:
+    if not updates and not fast_only:
         return
-    values.append(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
+        if fast_only:
+            cursor.execute(f"SELECT fast, speed FROM sessions WHERE id = {_ph}", (session_id,))
+            current = cursor.fetchone()
+            pair = stored_pair(fast, prior=dict(current) if current else None)
+            updates += [f"fast = {_ph}", f"speed = {_ph}"]
+            values += [pair["fast"], pair["speed"]]
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
-            values,
+            [*values, session_id],
         )
 
 
@@ -1121,6 +1120,12 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
         raise ValueError("Unsupported voice context field")
     if not changes:
         return
+    if "fast" in changes:
+        # A voice worker context runs Fast at most, never Ultrafast; the
+        # pair stays agreeing (model_speed.stored_pair).
+        from app.core.model_speed import stored_pair
+
+        changes = {**changes, **stored_pair(changes["fast"])}
     placeholder = ph()
     assignments = ", ".join(f"{field} = {placeholder}" for field in changes)
     with get_db() as conn:

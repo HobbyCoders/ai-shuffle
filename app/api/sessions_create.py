@@ -267,7 +267,9 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
         "model": overrides.get("model"), "effort": overrides.get("effort"),
         "permission_mode": overrides.get("permission_mode"),
         "context_window": row.get("context_window"),
-        "fast": overrides.get("fast"), "speed": overrides.get("speed"), "mode": mode,
+        # The pair as stored here, so an owner that predates ``speed`` still
+        # gets the ``fast`` a speed-only pick implies.
+        "fast": row.get("fast"), "speed": row.get("speed"), "mode": mode,
         "hidden": bool(row.get("hidden")),
         # Who started it; the worker that runs it labels it (#1877).
         "provenance_owner": (principal or {}).get("owner"),

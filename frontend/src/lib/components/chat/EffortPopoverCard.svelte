@@ -17,7 +17,7 @@
 	 * drag pins a level. The header's Auto toggle unpins it again (#1579).
 	 */
 	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
-	import { SPEED_OPTIONS, pickedSpeed, type ComposerSpeed } from './speed-tier';
+	import { SPEED_OPTIONS, pickedSpeed, ultrafastCost, type ComposerSpeed, type UltrafastBilling } from './speed-tier';
 	import { Zap } from 'lucide-svelte';
 	import { NO_ADJUSTABLE_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 
@@ -47,6 +47,8 @@
 		ultrafastSupported?: boolean;
 		/** The chat's Fast runs as Ultrafast. */
 		ultrafastEnabled?: boolean;
+		/** How the model's Ultrafast is paid for, which words its cost line. */
+		ultrafastBilling?: UltrafastBilling;
 		onSelectSpeed?: (speed: ComposerSpeed) => void;
 	}
 
@@ -64,6 +66,7 @@
 		onToggleFast,
 		ultrafastSupported = false,
 		ultrafastEnabled = false,
+		ultrafastBilling = 'api',
 		onSelectSpeed
 	}: Props = $props();
 
@@ -142,9 +145,8 @@
 				>{#if option.value !== 'standard'}<span class="seg-bolts" aria-hidden="true"><Zap size={11} strokeWidth={2} />{#if option.value === 'ultrafast'}<Zap size={11} strokeWidth={2} />{/if}</span>{/if}{option.label}</button>
 			{/each}
 		</div>
-		{#if speed === 'ultrafast' && !fastPending}
-			<p class="speed-cost" data-testid="ultrafast-cost">Uses allowance about 8x faster on ChatGPT plans; several times the API price.</p>
-		{/if}
+		<!-- The cost is said before any pick, for as long as the picker shows. -->
+		<p class="speed-cost" data-testid="ultrafast-cost">{ultrafastCost(ultrafastBilling)}</p>
 	{/if}
 
 	<div aria-live="polite">

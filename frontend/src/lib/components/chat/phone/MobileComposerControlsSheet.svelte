@@ -70,7 +70,7 @@
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
 	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
 	import SpeedLabel from '$lib/components/chat/SpeedLabel.svelte';
-	import { SPEED_NAMES, SPEED_OPTIONS, pickedSpeed, shownSpeed } from '$lib/components/chat/speed-tier';
+	import { SPEED_NAMES, SPEED_OPTIONS, pickedSpeed, shownSpeed, ultrafastCost } from '$lib/components/chat/speed-tier';
 	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 		import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
@@ -83,7 +83,7 @@
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortKnown = true, effortDefaultValue = null,
 		fastSupported = false, fastEnabled = false, fastPending = false, fastWaitsForNextMessage = false, onToggleFast, showCodeControls = true,
-		ultrafastSupported = false, ultrafastEnabled = false, onSelectSpeed,
+		ultrafastSupported = false, ultrafastEnabled = false, ultrafastBilling = 'api', onSelectSpeed,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, awayGlobal = false, onToggleAway,
 		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
@@ -1014,7 +1014,7 @@
 								<div class="mcp-stack" data-row="speed">
 									<div class="mcp-rowhead">
 										<span class="mcp-ic" aria-hidden="true"><Zap size={18} /></span>
-										<span class="mcp-lbl"><span>Speed</span>{#if sheetSpeed === 'ultrafast' && !fastPending}<small data-testid="ultrafast-cost">About 8x the allowance on ChatGPT plans</small>{/if}</span>
+										<span class="mcp-lbl"><span>Speed</span><small data-testid="ultrafast-cost">{ultrafastCost(ultrafastBilling, true)}</small></span>
 										{#if fastPending}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{/if}
 									</div>
 									<!-- While the chat's own value loads, no tier is checked. -->

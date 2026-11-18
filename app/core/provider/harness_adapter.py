@@ -4344,6 +4344,9 @@ class HarnessAdapter(ProviderAdapter):
         self._scratch_put_back = None
         if request_extra is not None:
             self._engine.request_extra = request_extra
+        if self._options is not None:
+            # Later picks (Ultrafast, effort) are checked against this model.
+            self._options.model = requested
         self._record_applied("model", requested)
 
     async def set_run_settings(self, *, effort: Optional[str], fast: bool,

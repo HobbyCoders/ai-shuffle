@@ -141,6 +141,15 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     return result
 
 
+def _checked_changes(body: RunSettingsUpdate) -> dict:
+    """The changes ``body`` asks for, refused when it names none or a null pick."""
+    changes = body.model_dump(exclude_unset=True)
+    if not changes or ("fast" in changes and changes["fast"] is None) or (
+            "speed" in changes and changes["speed"] is None):
+        raise ValueError("Provide effort, a boolean fast setting, a speed, or a context_window")
+    return changes
+
+
 async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool) -> dict:
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
@@ -149,14 +158,10 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     from app.core.provider.types import SessionOptions
     from app.db.model_providers import resolve_model_provider
 
-    from app.core.model_speed import resolve_speed
+    from app.core.model_speed import resolve_speed, stored_pair
 
-    changes = body.model_dump(exclude_unset=True)
-    if not changes or ("fast" in changes and changes["fast"] is None) or (
-            "speed" in changes and changes["speed"] is None):
-        raise ValueError("Provide effort, a boolean fast setting, a speed, or a context_window")
-    if "speed" in changes:
-        changes["fast"] = changes["speed"] != "standard"
+    changes = _checked_changes(body)
+    picks_speed = "fast" in changes or "speed" in changes
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = await run_sync(control._require_owned, session_id)
@@ -191,11 +196,11 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         old = {"effort": options.effort if options else session.get("effort"),
                "fast": bool(options.fast if options else session.get("fast"))}
         old["speed"] = resolve_speed(old["fast"], getattr(options, "speed", None) if options else session.get("speed"))
-        if "fast" in changes and "speed" not in changes:
-            # Only ``fast`` (an older client, or a parent): on keeps Ultrafast.
-            changes["speed"] = resolve_speed(changes["fast"], old["speed"])
+        if picks_speed:
+            # One rule for the stored pair: a speed pick sets fast; fast alone
+            # (an older client) keeps Ultrafast only when it already runs it.
+            changes.update(stored_pair(changes.get("fast"), changes.get("speed"), prior=old))
         selected = {**old, **changes}
-        selected["speed"] = resolve_speed(selected["fast"], selected["speed"])
         if connected:
             selected = {"speed": selected["speed"], **await state.adapter.set_run_settings(**selected)}
             if get_session_pool().peek(session_id) is not state or not state.is_connected:
@@ -223,7 +228,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         # The owner's own pick on a subagent pins it: a parent's later toggle
         # leaves it alone.
         pin = ({"fast_pinned": True}
-               if not inherited and "fast" in changes and session.get("is_worker") else {})
+               if not inherited and picks_speed and session.get("is_worker") else {})
         try:
             await run_sync(database.set_session_run_binding, session_id, **stored,
                            clear_effort=stored["effort"] is None, **pin)
@@ -294,14 +299,15 @@ async def read_fast_waiting_turn(session: dict, session_id: str) -> Optional[str
         return None
 
 
-async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool) -> None:
+async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool,
+                                 speed_asked: bool = False) -> None:
     """Tell this worker's open clients of the chat about a saved setting pick.
 
     Without it another tab, the phone or the other worker's browser keeps its
     older window or effort until a reload, and its next send carries it and
     pins it again (#1895, #1579). Effort goes out only when the request set it,
-    an explicit Auto (``None``) included. Every socket gets it, the picker's own
-    too: the REST call names no device, and the value is the one the picker
+    an explicit Auto (``None``) included; ``fast`` and ``speed`` likewise, as a
+    pair. Every socket gets it, the picker's own too: the REST call names no device, and the value is the one the picker
     already applied. A client that does not know a field reloads the row.
     """
     if not isinstance(result, dict):
@@ -311,6 +317,10 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
         updates["context_window"] = result["context_window"]
     if effort_asked and "effort" in result:
         updates["effort"] = result["effort"]
+    if speed_asked and isinstance(result.get("fast"), bool):
+        updates["fast"] = result["fast"]
+        # An owner older than ``speed`` answers without it: Fast at most.
+        updates["speed"] = result.get("speed") or ("fast" if result["fast"] else "standard")
     if not updates:
         return
     try:
@@ -328,14 +338,20 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
     result = await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
         {key: value for key, value in body.items() if key not in ("session_id", "inherited")}),
         inherited=body.get("inherited") is True)
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body)
+    await _announce_run_settings(session_id, result, effort_asked="effort" in body,
+                                 speed_asked="fast" in body or "speed" in body)
     return result
 
 
 def _older_owner_refused_speed(exc: Exception) -> bool:
-    """Did an owner that predates ``speed`` refuse the field?"""
-    text = str(exc).lower()
-    return "speed" in text and ("extra" in text or "not permitted" in text)
+    """Did an owner that predates ``speed`` refuse it as an unknown field?
+
+    Its ``RunSettingsUpdate`` forbids extra fields, so pydantic names the field
+    on one line and "Extra inputs are not permitted" on the next.
+    """
+    lines = [line.strip().lower() for line in str(exc).splitlines()]
+    return any(line == "speed" and "extra inputs are not permitted" in following
+               for line, following in zip(lines, lines[1:]))
 
 
 async def _call_owner_run_settings(owner: Any, session_id: str, changes: dict) -> dict:
@@ -366,7 +382,7 @@ async def update_run_settings(
     owner = await run_sync(control.owner_of, session)
     try:
         if owner is not None:
-            result = await _call_owner_run_settings(owner, session_id, body.model_dump(exclude_unset=True))
+            result = await _call_owner_run_settings(owner, session_id, _checked_changes(body))
         else:
             result = await apply_run_settings(session_id, body)
     except (control.ControlRefused, ValueError) as exc:
@@ -374,7 +390,8 @@ async def update_run_settings(
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set)
+    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set,
+                                 speed_asked=bool({"fast", "speed"} & body.model_fields_set))
     return result
 
 

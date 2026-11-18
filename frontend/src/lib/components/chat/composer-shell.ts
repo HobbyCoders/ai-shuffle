@@ -129,6 +129,8 @@ export interface ComposerSheetProps {
 	ultrafastSupported?: boolean;
 	/** The chat's Fast runs as Ultrafast. */
 	ultrafastEnabled?: boolean;
+	/** How the model's Ultrafast is paid for (a ChatGPT plan or API pricing), for its cost line. */
+	ultrafastBilling?: 'plan' | 'api';
 	onSelectSpeed?: (speed: 'standard' | 'fast' | 'ultrafast') => void;
 	showCodeControls?: boolean;
 	/** Agent, workspace, branch and runner selectors. */

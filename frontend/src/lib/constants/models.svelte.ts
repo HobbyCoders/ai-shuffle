@@ -701,6 +701,14 @@ export function isUltrafastCapable(value: string | null): boolean {
 	return provider?.models.find((m) => m.id === composite.modelId)?.ultrafast === true;
 }
 
+/** How `value`'s Ultrafast is paid for: a ChatGPT sign-in's plan allowance, else API pricing. */
+export function ultrafastBilling(value: string | null): 'plan' | 'api' {
+	const composite = decodeProviderModel(value);
+	const provider = composite ? _registry.providers.find((p) => p.id === composite.providerId) : undefined;
+	return provider && classifyRow({ provider_type: provider.provider_type, auth_mode: provider.auth_mode ?? null }) === 'chatgpt'
+		? 'plan' : 'api';
+}
+
 /**
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
