@@ -97,10 +97,26 @@ def hook_reminder(label: str, text: str) -> str:
 class HookBus:
     def __init__(self) -> None:
         self._hooks: dict[str, list[HookCallback]] = {}
+        self._scopes: dict[str, list[Callable[[str], bool] | None]] = {}
         self._allowed_observers: list[ToolAllowedCallback] = []
 
-    def on(self, event: str, callback: HookCallback) -> None:
+    def on(
+        self, event: str, callback: HookCallback,
+        *, matches: Callable[[str], bool] | None = None,
+    ) -> None:
+        """Register ``callback`` for ``event``. ``matches`` (default: the
+        callback's own ``matches`` attribute, as on ``CommandHook``) says,
+        without side effects, whether it can act on a tool name; without one
+        it can act on every tool (see ``may_act``)."""
+        if matches is None and callable(getattr(callback, "matches", None)):
+            matches = callback.matches  # type: ignore[attr-defined]
         self._hooks.setdefault(event, []).append(callback)
+        self._scopes.setdefault(event, []).append(matches)
+
+    def may_act(self, event: str, tool_name: str) -> bool:
+        """Could a hook registered for ``event`` act on ``tool_name``? Pure:
+        runs no hook, so the native loop can ask it before a call's turn."""
+        return any(m is None or m(tool_name) for m in self._scopes.get(event, ()))
 
     def on_tool_allowed(self, callback: ToolAllowedCallback) -> None:
         """Observe each tool call a gate allowed, before it dispatches."""

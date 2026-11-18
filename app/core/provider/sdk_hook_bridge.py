@@ -107,6 +107,7 @@ def _callback_hook(
         return HookDecision(warnings=(f"{reader.label} {problem}; continuing",))
 
     hook.label = reader.label  # type: ignore[attr-defined]
+    hook.matches = reader.matches  # type: ignore[attr-defined]  # HookBus.may_act
     return hook
 
 

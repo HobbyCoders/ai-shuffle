@@ -206,6 +206,7 @@ def _non_default_config_dict() -> dict:
         "cwd": "/w",
         "max_tokens": 1000,
         "max_model_calls": 50,
+        "max_concurrent_tools": 3,
         "context_window": 200_000,
         "cache_key": "ck",
         "system": "sys",

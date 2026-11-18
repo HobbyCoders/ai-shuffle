@@ -248,7 +248,7 @@ from fluid.tools.builtins.tool_search import (
 )
 from fluid.tools.images import condition_image
 from fluid.tools.mrtr import resolve_input_required
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, prefetched
 from fluid.tools.view import commit_delivery, settle_pointers, verbatim_tool_results
 
 log = logging.getLogger(__name__)
@@ -271,6 +271,15 @@ _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
 # hosts that want to find or filter it. See NativeLoop._reflection_nudge.
 REFLECTION_NUDGE_MARK = "This turn cost you some harness friction"
 REFLECTION_NUDGE_DISPATCH_MARK = "This turn dispatched background work"
+
+
+async def _cancel_and_join(tasks: Any) -> None:
+    """Cancel ``tasks`` and wait until each has ended; results are discarded."""
+    tasks = list(tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _reflection_nudge_text(events: int, dispatches: int) -> str:
@@ -1133,6 +1142,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         codemode: CodeModeSession | None = None,
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
+        max_concurrent_tools: int = 8,
         max_continuations_per_turn: int = 3,
         turn_watchdog_seconds: float | None = DEFAULT_TURN_WATCHDOG_SECONDS,
         tool_arg_guard: ToolArgStreamGuard | None = None,
@@ -1238,6 +1248,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # ``None`` means unlimited: the provider stays the source of truth for
         # when a turn has to stop. Every comparison below guards that case.
         self.max_model_calls_per_turn = max_model_calls_per_turn
+        # Fetches of one reply's calls that may run at once (_prefetch); 1 = none.
+        self.max_concurrent_tools = max(1, max_concurrent_tools)
+        self._prefetches: dict[str, tuple[dict[str, Any], asyncio.Task[Any]]] = {}
         self.max_continuations_per_turn = max_continuations_per_turn
         # Runaway tool-argument streams. Pass
         # ``ToolArgStreamGuard(max_bytes=None, stall_bytes=None,
@@ -4797,14 +4810,20 @@ class NativeLoop(BackgroundLifecycleMixin):
                         is_error=True,
                     ))
             else:
-                for tu in result.tool_uses:
-                    if tu.get("arg_error"):
-                        tu["arg_error"] = _explain_truncation(
-                            tu["arg_error"], result.stop_reason
+                try:
+                    for i, tu in enumerate(result.tool_uses):
+                        if tu.get("arg_error"):
+                            tu["arg_error"] = _explain_truncation(
+                                tu["arg_error"], result.stop_reason
+                            )
+                        await self._prefetch(result.tool_uses[i:])
+                        blocks.append(
+                            await self._dispatch_tool_interruptible(sid, turn_id, tu)
                         )
-                    blocks.append(
-                        await self._dispatch_tool_interruptible(sid, turn_id, tu)
-                    )
+                finally:
+                    # Whatever ended the round, no early fetch outlives it.
+                    early, self._prefetches = self._prefetches, {}
+                    await _cancel_and_join(t for _, t in early.values())
             answers = await self.pending_question_answers()
             if answers and blocks and not self._interrupted.is_set():
                 blocks[-1] = replace(
@@ -6069,6 +6088,52 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
+    async def _prefetch(self, rest: list[dict[str, Any]]) -> None:
+        """Start the fetch (``ToolSpec.fetch``) of the consecutive eligible
+        calls from ``rest[0]`` on, up to ``max_concurrent_tools`` at once.
+
+        Only the fetch runs early. Each call still goes through its gate,
+        hooks, bookkeeping, publish and store when the serial loop reaches it,
+        and its handler takes the early result only if the gate allowed exactly
+        that input without a prompt (``_gated_call``). A call is eligible when
+        its tool opts in, permissions allow it without asking and no PreToolUse
+        or PostToolUse hook could act on it, all checked without side effects.
+        Early fetches of calls already behind the loop are cancelled here.
+        """
+        live = {tu["tool_use_id"] for tu in rest}
+        stale = [k for k in self._prefetches if k not in live]
+        await _cancel_and_join(self._prefetches.pop(k)[1] for k in stale)
+        if self.max_concurrent_tools <= 1 or self.registry is None:
+            return
+        from fluid.tools.hardening import coerce_args
+
+        for tu in rest:
+            if len(self._prefetches) >= self.max_concurrent_tools:
+                return
+            name, tool_use_id = tu["name"], tu["tool_use_id"]
+            if tool_use_id in self._prefetches:
+                continue
+            spec = self.registry.get(name)
+            if (
+                spec is None or spec.fetch is None or tu.get("arg_error")
+                or not isinstance(tu.get("input"), dict) or not self._tool_permitted(name)
+                or (self.hooks is not None and (
+                    self.hooks.may_act(PRE_TOOL_USE, name)
+                    or self.hooks.may_act(POST_TOOL_USE, name)
+                ))
+            ):
+                return
+            try:
+                input = coerce_args(tu["input"], spec.input_schema)
+            except Exception:  # noqa: BLE001 — the serial step reports it
+                return
+            if (
+                self.permissions is not None
+                and self.permissions.decide(spec, input, cwd=self.ctx.cwd).decision != "allow"
+            ):
+                return
+            self._prefetches[tool_use_id] = (input, asyncio.create_task(spec.fetch(input, self.ctx)))
+
     async def _dispatch_tool_interruptible(
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
@@ -6373,6 +6438,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # forces a prompt; a stop denies the call and ends the turn after it.
         hook_permission: str | None = None
         hook_reason: str | None = None
+        prompted = False  # an early fetch serves only a call allowed without a prompt
         if self.hooks is not None:
             decision = await self.hooks.emit(
                 PRE_TOOL_USE,
@@ -6430,6 +6496,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 verdict = "ask"
                 ask_reason = hook_reason or "a PreToolUse hook asked for confirmation"
             if verdict == "ask":
+                prompted = True
                 verdict, responder_message, updated_input = await self._await_permission(
                     sid, turn_id, name, tool_use_id, input, decided.risk,
                     reason=ask_reason,
@@ -6467,7 +6534,17 @@ class NativeLoop(BackgroundLifecycleMixin):
                 sid=sid, turn_id=turn_id, input=input, loop=self
             )
         else:
-            outcome = await self.registry.dispatch(name, input, self.ctx)
+            early = self._prefetches.pop(tool_use_id, None)
+            if early is not None and prompted:
+                await _cancel_and_join([early[1]])
+                early = None
+            held = [early] if early is not None else []
+            token = prefetched.set(held or None)
+            try:
+                outcome = await self.registry.dispatch(name, input, self.ctx)
+            finally:
+                prefetched.reset(token)
+                await _cancel_and_join(task for _, task in held)  # one the handler never took
 
         # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
         # Collect answers via QuestionRequest/RespondQuestion round-trips, then

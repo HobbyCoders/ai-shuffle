@@ -25,7 +25,7 @@ from fluid.tools.builtins._util import (
     truncate,
 )
 from fluid.tools import view
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once
 
 MAX_RESULTS = 200
 MAX_LIMIT = 5000
@@ -89,6 +89,7 @@ SPEC = ToolSpec(
         "required": ["pattern"],
     },
     risk="safe",
+    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -103,12 +104,22 @@ def _clamp_limit(raw: Any) -> int:
     return max(1, min(MAX_LIMIT, value))
 
 
-async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+def _list_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[Path, int]:
     root = Path(input.get("path") or ctx.cwd)
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
-    limit = _clamp_limit(input.get("limit"))
-    outcome = await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
+    return root, _clamp_limit(input.get("limit"))
+
+
+async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    """The listing itself: no session bookkeeping (``ToolSpec.fetch``)."""
+    root, limit = _list_args(input, ctx)
+    return await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
+
+
+async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    outcome = await fetch_once(_fetch, input, ctx)
+    root, limit = _list_args(input, ctx)
     if outcome.is_error:
         return outcome
     # The listing always runs. When it comes back exactly as the copy still

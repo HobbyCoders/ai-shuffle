@@ -61,6 +61,7 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
     "cwd": ".",
     "max_tokens": None,
     "max_model_calls": 200,
+    "max_concurrent_tools": 8,
     "context_window": None,
     # CLI prompt. ``system`` is your own base prompt: when set it REPLACES the
     # shipped default (fluid.cli.prompt.DEFAULT_BASE_PROMPT). ``base_prompt``
@@ -443,6 +444,11 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
     if "FLUID_MAX_CALLS" in env:
         try:
             out["max_model_calls"] = int(env["FLUID_MAX_CALLS"])
+        except ValueError:
+            pass
+    if "FLUID_MAX_CONCURRENT_TOOLS" in env:
+        try:
+            out["max_concurrent_tools"] = int(env["FLUID_MAX_CONCURRENT_TOOLS"])
         except ValueError:
             pass
     if "FLUID_CONTEXT_WINDOW" in env:
@@ -1143,6 +1149,7 @@ def build_engine(
         max_tokens=config.max_tokens,
         # 0 means unlimited; NativeLoop spells that None.
         max_model_calls_per_turn=config.max_model_calls or None,
+        max_concurrent_tools=config.max_concurrent_tools,
         registry=registry,
         permissions=permissions,
         hooks=hooks,

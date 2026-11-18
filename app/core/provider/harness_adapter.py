@@ -566,7 +566,10 @@ class HarnessAdapter(ProviderAdapter):
         from app.core.provider.sdk_hook_bridge import BUS_EVENTS
 
         for bus_event in BUS_EVENTS:
-            self._hooks.on(bus_event, self._run_sdk_hooks)
+            self._hooks.on(
+                bus_event, self._run_sdk_hooks,
+                matches=lambda name, e=bus_event: self._sdk_hooks_may_act(e, name),
+            )
 
     # ─── Transition helper ────────────────────────────────────────────
 
@@ -588,6 +591,11 @@ class HarnessAdapter(ProviderAdapter):
         emitter for it lives in its CLI host, which the app does not run.
         """
         return self._hooks
+
+    def _sdk_hooks_may_act(self, event: str, tool_name: str) -> bool:
+        """Could an SDK hook of the current connect act on ``tool_name``?"""
+        bus = self._sdk_hook_bus
+        return bus is not None and bus.may_act(event, tool_name)
 
     async def _run_sdk_hooks(self, event: str, payload: Dict[str, Any]) -> Optional[Any]:
         """HookBus dispatcher for the SDK hooks of the current connect."""

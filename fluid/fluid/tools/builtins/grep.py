@@ -37,7 +37,7 @@ from fluid.tools.builtins._util import (
 )
 from fluid.tools import view
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once
 
 MAX_MATCHES = 200
 MAX_LIMIT = 5000
@@ -119,6 +119,7 @@ SPEC = ToolSpec(
         "required": ["pattern"],
     },
     risk="safe",
+    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -133,14 +134,19 @@ def _clamp_limit(raw: Any) -> int:
     return max(1, min(MAX_LIMIT, value))
 
 
-async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    pattern = input["pattern"]
+def _search_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[str, Path, Any, bool, int]:
     root = Path(input.get("path") or ctx.cwd)
     if not root.is_absolute():
         root = (Path(ctx.cwd) / root).resolve()
-    glob = input.get("glob")
-    no_ignore = bool(input.get("no_ignore"))
-    limit = _clamp_limit(input.get("limit"))
+    return (
+        input["pattern"], root, input.get("glob"), bool(input.get("no_ignore")),
+        _clamp_limit(input.get("limit")),
+    )
+
+
+async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    """The search itself: no session bookkeeping (``ToolSpec.fetch``)."""
+    pattern, root, glob, no_ignore, limit = _search_args(input, ctx)
 
     # Check the root before shelling out: ripgrep reports a missing directory as
     # a generic "rg error" under the "searched via rg under ..." header, which
@@ -158,9 +164,13 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
     rg = shutil.which("rg")
     if rg:
-        outcome = await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
-    else:
-        outcome = await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
+        return await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
+    return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
+
+
+async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    outcome = await fetch_once(_fetch, input, ctx)
+    pattern, root, glob, no_ignore, limit = _search_args(input, ctx)
 
     # One choke point for repeat-search handling, so neither engine has to know
     # about it. The search still ran; when its result has the same lines as the

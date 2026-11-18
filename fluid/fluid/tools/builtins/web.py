@@ -31,7 +31,7 @@ from urllib.parse import urljoin, urlparse
 
 from fluid.tools.fragments import WEB_UNTRUSTED
 from fluid.tools.hardening import fence_untrusted
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, fetch_once
 
 # One page per call; the rest stays one `offset` away (the footer names it), so
 # a larger window only moves text the agent may not need into the context.
@@ -572,6 +572,8 @@ SEARCH_SPEC = ToolSpec(
         "required": ["query"],
     },
     risk="safe",
+    # The whole search is the fetch: a POST and parsing, no session state.
+    fetch=lambda input, ctx: search_handler(input, ctx),
 )
 
 _RESULT_RE = re.compile(
@@ -679,4 +681,8 @@ async def search_handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
 
 # builtins/__init__ registers via the module convention (SPEC + handler); this
 # module carries two tools, so it exposes them as a list instead.
-SPECS = ((FETCH_SPEC, fetch_handler), (SEARCH_SPEC, search_handler))
+async def _search_step(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    return await fetch_once(search_handler, input, ctx)
+
+
+SPECS = ((FETCH_SPEC, fetch_handler), (SEARCH_SPEC, _search_step))

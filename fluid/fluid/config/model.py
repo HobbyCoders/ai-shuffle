@@ -475,6 +475,9 @@ class HarnessConfig:
     # ``0`` means unlimited (normalized to None for NativeLoop), leaving the
     # provider as the sole authority on when a turn has to stop.
     max_model_calls: int = 200
+    # Read, Grep, Glob and WebSearch calls of one model reply whose fetch the
+    # native loop may run at once (NativeLoop._prefetch). 1 = no prefetch.
+    max_concurrent_tools: int = 8
     # Model context window, when the host app knows it. Feeds
     # maxTokens/rawMaxTokens/percentage in the context-usage breakdown; None
     # falls back to fluid.providers.windows.context_window_for(model).
@@ -536,6 +539,7 @@ class HarnessConfig:
             cwd=d.get("cwd", "."),
             max_tokens=_optional_int(d.get("max_tokens")),
             max_model_calls=int(d.get("max_model_calls", 200)),
+            max_concurrent_tools=max(1, int(d.get("max_concurrent_tools", 8))),
             context_window=(
                 int(d["context_window"]) if d.get("context_window") else None
             ),
@@ -580,6 +584,7 @@ class HarnessConfig:
             "cwd": self.cwd,
             "max_tokens": self.max_tokens,
             "max_model_calls": self.max_model_calls,
+            "max_concurrent_tools": self.max_concurrent_tools,
             "context_window": self.context_window,
             "cache_key": self.cache_key,
             "system": self.system,

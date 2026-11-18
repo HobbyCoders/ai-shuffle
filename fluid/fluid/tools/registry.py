@@ -49,6 +49,30 @@ current_call_in_cell: ContextVar[bool] = ContextVar(
     "fluid_current_call_in_cell", default=False,
 )
 
+# The native loop's early run of this call's ``ToolSpec.fetch``: a list holding
+# one ``(input, task)`` pair, emptied by the first ``fetch_once``.
+prefetched: ContextVar[list[tuple[dict[str, Any], asyncio.Task[Any]]] | None] = ContextVar(
+    "fluid_prefetched", default=None,
+)
+
+
+async def fetch_once(
+    fetch: Callable[[dict[str, Any], ToolCtx], Awaitable[Any]],
+    input: dict[str, Any], ctx: ToolCtx,
+) -> Any:
+    """``await fetch(input, ctx)``, or the early run of it the native loop
+    started for this call. The early run is used only when it had exactly this
+    input; otherwise it is cancelled and the fetch runs here. Either way its
+    exception surfaces here, at the call's own turn."""
+    held = prefetched.get()
+    if held:
+        early_input, task = held.pop()
+        if early_input == input:
+            return await task
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    return await fetch(input, ctx)
+
 # Seconds left before the code-mode kernel cancels the host call being served
 # (its per-call ceiling, human wait credited), or None outside one. The kernel
 # sets it around each host call; every ``dispatch`` that is not a cell's own
@@ -188,6 +212,14 @@ class ToolSpec:
     # Retired compatibility aliases remain callable with normal permissions,
     # but are never advertised to a new model context.
     discoverable: bool = True
+    # Optional side-effect-free first half of the handler (its file or network
+    # work, no session bookkeeping), taken by the handler through
+    # ``fetch_once``. Setting it lets the native loop start it early for the
+    # consecutive calls of a reply (NativeLoop._prefetch); only a tool whose
+    # fetch cannot write and reads no state an earlier call changes may opt in.
+    fetch: Callable[[dict[str, Any], ToolCtx], Awaitable[Any]] | None = field(
+        default=None, compare=False, repr=False
+    )
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""

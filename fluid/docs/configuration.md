@@ -60,6 +60,7 @@ the start directory sits under it.
 | `cwd` | `"."` | Working directory for config discovery, instruction files, tools, and the prompt's environment block. |
 | `max_tokens` | none | Maximum output tokens per model call. Unset, each request gets the model's own output maximum. |
 | `max_model_calls` | `200` | Maximum model calls in one turn before the turn stops with `max_calls`. Set it to `0` for no ceiling at all, leaving the provider the only authority on when a turn ends. |
+| `max_concurrent_tools` | `8` | How many Read, Grep, Glob and WebSearch calls from one model reply the native loop may fetch at the same time. While it works through a reply in order, it starts the file or network work of the following consecutive reads and searches early, when permissions allow them without asking and no PreToolUse or PostToolUse hook matches them. Each call still passes its permission check, hooks and bookkeeping in call order, and results reach the model and live clients in call order. `1` fetches nothing early. |
 | `context_window` | none | The model's context window in tokens. Unset, fluid looks the model id up in a built-in table (`fluid/providers/windows.py`): Claude models from the 4.6 generation on 1M, earlier Claude models 200K, any Claude id carrying `[1m]` 1M; `gpt-5*` 400K, `gpt-4.1*` 1,047,576, `gpt-4o*` 128K, `o1`/`o3`/`o4` 200K. An OpenRouter vendor prefix (`anthropic/…`) is stripped before the lookup. A local or unknown model stays unknown: `/context` then shows no percentage or free space and the compaction trigger falls back to the flat `trigger_tokens`. A value here, or `FLUID_CONTEXT_WINDOW`, always wins over the table. |
 | `cache_key` | none | Prompt-cache affinity key sent as OpenAI Responses `prompt_cache_key` / OpenRouter `session_id`. Unset, fluid sends the session id, which is right until a conversation is resumed onto a **new** fluid session — that repartitions the provider cache exactly when the prefix is longest and most expensive to re-send. A host with its own durable conversation id sets it here; it must be stable for the life of the conversation and distinct per conversation. |
 | `system` | none | Your own base system prompt. When set it replaces the shipped default (`fluid/cli/prompt.py`) entirely; the instruction stack, skills index, and environment block are still appended after it. |
@@ -833,6 +834,7 @@ Config overrides, applied as layer 6 (`env_overrides` in the loader):
 | `FLUID_ANCHOR_BUDGET` | `anchor_budget` (ignored if not an integer) |
 | `FLUID_MAX_TOKENS` | `max_tokens` (ignored if not an integer) |
 | `FLUID_MAX_CALLS` | `max_model_calls` (ignored if not an integer) |
+| `FLUID_MAX_CONCURRENT_TOOLS` | `max_concurrent_tools` (ignored if not an integer) |
 | `FLUID_CONTEXT_WINDOW` | `context_window` (ignored if not an integer) |
 | `FLUID_APPROVAL_POLICY` | `permission.approval_policy` |
 | `FLUID_CONTEXT_ENABLED` | `context.enabled` |

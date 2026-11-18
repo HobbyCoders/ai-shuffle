@@ -17,6 +17,7 @@ Three content paths, in order of dispatch:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from io import BytesIO
 from itertools import islice
@@ -38,6 +39,7 @@ from fluid.tools.registry import (
     ToolImage,
     ToolOutcome,
     ToolSpec,
+    fetch_once,
 )
 
 # Media types the Anthropic/OpenAI vision APIs accept as base64 images.
@@ -110,6 +112,7 @@ SPEC = ToolSpec(
         "required": ["file_path"],
     },
     risk="safe",
+    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -192,35 +195,54 @@ def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool, i
     return numbered, more, len(out)
 
 
-async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+def _load(
+    input: dict[str, Any], ctx: ToolCtx,
+) -> tuple[Path, ToolOutcome | None, tuple[str, bool, int, tuple[int, int] | None] | None]:
+    """Read's file I/O and nothing else: the path, then either a finished
+    outcome (missing, binary, image) or the page with the file's stamp."""
     path: Path = resolve(input["file_path"], ctx)
     if not path.exists() or not path.is_file():
         note = missing_path_note(str(input["file_path"]), path)
-        return ToolOutcome(
+        return path, ToolOutcome(
             text=f"file not found: {path}{note}", is_error=True,
             error_code="missing_path" if not path.exists() else None,
-        )
+        ), None
 
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if media_type is not None:
-        outcome = _read_image(path, media_type)
-        if not outcome.is_error:
-            ctx.read_files.add(str(path))
-            read_window.record_whole(ctx, str(path))
-        return outcome
+        return path, _read_image(path, media_type), None
 
     if is_binary(path):
-        return ToolOutcome(
+        return path, ToolOutcome(
             text=(
                 f"binary file: {path} ({path.stat().st_size} bytes) — "
                 "Read shows text and images only"
             ),
             is_error=True,
-        )
+        ), None
+
+    offset = max(1, int(input.get("offset", 1)))
+    return path, None, (*_read_text(path, offset, input.get("limit")), _stamp(path))
+
+
+async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> Any:
+    """``_load`` in a worker thread, with no session bookkeeping
+    (``ToolSpec.fetch``): the read and window ledgers, repeat detection and
+    the view record are all written by the handler, at the call's own turn."""
+    return await asyncio.to_thread(_load, input, ctx)
+
+
+async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    path, outcome, page = await fetch_once(_fetch, input, ctx)
+    if outcome is not None:
+        if not outcome.is_error:  # only an image read reaches here unfailed
+            ctx.read_files.add(str(path))
+            read_window.record_whole(ctx, str(path))
+        return outcome
 
     offset = max(1, int(input.get("offset", 1)))
     limit = input.get("limit")
-    numbered, more, window_len = _read_text(path, offset, limit)
+    numbered, more, window_len, stamp = page
     ctx.read_files.add(str(path))
     # The lines actually delivered, for Edit's window check: a windowed read
     # that stopped short owns exactly its window; one that reached the end of
@@ -231,7 +253,6 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # the conversation. A write elsewhere moves mtime_ns, so the entry stops
     # matching without any explicit invalidation.
     key = (str(path), offset, int(limit) if limit else None)
-    stamp = _stamp(path)
     prior_stamp = ctx.read_seen.get(key)
     # …but "already in the conversation" is a claim about the MODEL's context,
     # not about this process's memory. In code mode an oversized result never
