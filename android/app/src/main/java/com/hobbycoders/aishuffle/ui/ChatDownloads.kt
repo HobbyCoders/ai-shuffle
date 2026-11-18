@@ -36,7 +36,8 @@ internal class ChatDownloads(
     /** Whether the page has the `shuffleFileSave` bridge (advertised as the "file-save" capability). */
     val available get() = bridgeInstalled
     private val client = WorkerDownloadClient()
-    private val transfers = ChatTransfers(
+    // Explicit type: this initializer captures `chooser`, whose callback calls `transfers`.
+    private val transfers: ChatTransfers = ChatTransfers(
         baseUrl = server.baseUrl,
         scope = activity.lifecycleScope,
         io = Dispatchers.IO,

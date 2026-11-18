@@ -6,7 +6,6 @@ import org.json.JSONObject
 import java.io.OutputStream
 import java.util.Base64
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
@@ -52,23 +51,40 @@ internal class ChatTransfers(
 
     private class Transfer(val id: String, val page: Int, val size: Long, val url: String?, val reply: ((Boolean) -> Unit)?) {
         val output = AtomicReference<OutputStream?>()
-        @Volatile var uri: String? = null
+        /** This save's turn on its chosen document; set once, on the main thread, by [chosen]. */
+        @Volatile var claim: Claim? = null
         val chunks = if (url == null) DownloadChunks(size) else null
         var job: Job? = null
         var timeout: Job? = null
         @Volatile var call: Call? = null
         /** [clock] time of the last chunk a streamed save read or wrote. */
         @Volatile var progressAt = 0L
-        /** Set by a successful save or the first [cleanup]; only that first cleanup may delete the document. */
+        /** Set by a successful save or the first [cleanup]; only that first cleanup releases the claim. */
         val settled = AtomicBoolean(false)
-        /** The latest cleanup; a retry that picks the same document waits for it. */
+        /** The latest cleanup; a second cleanup runs after it. */
         var teardown: Job? = null
+    }
+
+    /**
+     * One turn on a chosen document. Every save of a document, and every late picker result
+     * for it, takes a claim in the order the picker returned it. A claim may open, write,
+     * close or delete the document only after the claim before it has been released, and is
+     * released only after its own IO (close and any delete) has returned, so a stopped save
+     * stays in line even if it is cancelled while it waits. A claim deletes its partial only
+     * if no later claim exists; a later claim truncates and overwrites the document instead.
+     */
+    private inner class Claim(val uri: String) {
+        private val held = Job()
+        /** Released when the claim before this one has finished with the document. */
+        val prior: Job? = lanes.put(uri, held)
+        val latest get() = lanes[uri] === held
+        fun release() { lanes.remove(uri, held); held.complete() }
     }
     @Volatile private var active: Transfer? = null
     private var page = 0
     private var chooserOpen = false
-    /** The transfer that owns each chosen document. A retry that picks the same document takes it over. */
-    private val owners = ConcurrentHashMap<String, Transfer>()
+    /** The newest claim on each chosen document. Main thread only. */
+    private val lanes = HashMap<String, Job>()
 
     private fun current(transfer: Transfer) = active === transfer && transfer.page == page && pageReady()
 
@@ -142,17 +158,18 @@ internal class ChatTransfers(
     fun chosen(uri: String?) {
         chooserOpen = false
         val transfer = active
-        if (transfer == null || !current(transfer) || uri == null) {
-            if (uri != null) scope.launch(io + NonCancellable) { runCatching { documents.delete(uri) } }
-            end(if (uri == null) "Download cancelled." else "Chat changed. Download the file again.")
+        if (uri == null) { end("Download cancelled."); return }
+        val claim = Claim(uri)
+        if (transfer == null || !current(transfer)) {
+            // A late result: its document waits its turn like any save, then is removed unless a later save claimed it.
+            scope.launch(NonCancellable) { retire(claim) }
+            end("Chat changed. Download the file again.")
             return
         }
-        transfer.uri = uri
-        val previous = owners.put(uri, transfer)
+        transfer.claim = claim
         transfer.job = scope.launch {
             try {
-                // An earlier save of this document finishes its IO and teardown before this one opens it.
-                previous?.teardown?.join()
+                claim.prior?.join()
                 withContext(io + NonCancellable) { transfer.output.set(documents.open(uri)) }
                 if (!current(transfer)) {
                     if (active === transfer) end("Chat changed. Download the file again.") else cleanup(transfer)
@@ -196,7 +213,7 @@ internal class ChatTransfers(
             active = null
             transfer.timeout?.cancel()
             transfer.settled.set(true)
-            transfer.uri?.let { owners.remove(it, transfer) }
+            transfer.claim?.release()
             status(SAVED_MESSAGE)
             true
         } catch (error: Exception) { failed(transfer, error); false }
@@ -225,22 +242,29 @@ internal class ChatTransfers(
 
     /**
      * Teardown. It waits for the transfer's in-flight IO (a write or close a stuck provider
-     * holds), closes the transfer's own stream, and deletes the partial document only on
-     * the first call and only while no later save has claimed the same document. A later
-     * call (the stalled IO failing after the user retried) can only close that transfer's
-     * own stream.
+     * holds) and closes the transfer's own stream. Only the first call retires the claim, so
+     * a later call (the stalled IO failing after the user retried) can only close that
+     * transfer's own stream.
      */
     private fun cleanup(transfer: Transfer) {
         val first = transfer.settled.compareAndSet(false, true)
         val work = transfer.job
         val earlier = transfer.teardown
-        transfer.teardown = scope.launch(io + NonCancellable) {
+        transfer.teardown = scope.launch(NonCancellable) {
             work?.join()
             earlier?.join()
-            runCatching { transfer.output.getAndSet(null)?.close() }
-            val uri = transfer.uri
-            if (first && uri != null && owners.remove(uri, transfer)) runCatching { documents.delete(uri) }
+            withContext(io) { runCatching { transfer.output.getAndSet(null)?.close() } }
+            val claim = transfer.claim
+            if (first && claim != null) retire(claim)
         }
+    }
+
+    /** Ends a claim that did not save: after the claim before it, delete unless a later claim exists, then release. */
+    private suspend fun retire(claim: Claim) {
+        try {
+            claim.prior?.join()
+            if (claim.latest) withContext(io) { runCatching { documents.delete(claim.uri) } }
+        } finally { claim.release() }
     }
 
     fun navigating() { page++; end("Chat changed. Download the file again.") }

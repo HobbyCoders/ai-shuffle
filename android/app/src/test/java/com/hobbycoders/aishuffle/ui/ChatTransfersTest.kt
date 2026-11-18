@@ -74,7 +74,13 @@ class ChatTransfersTest {
             events += "open $uri"
             return Stream(nextGates.poll()).also { streams += it }
         }
-        override fun delete(uri: String) { events += "delete $uri" }
+        /** Gates for the next deletes; the delete returns once its gate opens. */
+        val deleteGates = LinkedBlockingQueue<CountDownLatch>()
+        override fun delete(uri: String) {
+            events += "delete $uri"
+            deleteGates.poll()?.await()
+            events += "deleted $uri"
+        }
     }
     private sealed class Step {
         class Chunk(val bytes: ByteArray) : Step()
@@ -119,11 +125,11 @@ class ChatTransfersTest {
             Thread.sleep(2)
         }
     }
-    /** Waits until neither the main queue nor any IO thread has work left. */
-    private fun quiesce() {
+    /** Waits until the main queue is drained and only [stuck] IO threads (held by a gate) are busy. */
+    private fun quiesce(stuck: Int = 0) {
         var calm = 0
         settle("quiet") {
-            calm = if (pool.activeCount == 0) calm + 1 else 0
+            calm = if (pool.activeCount == stuck) calm + 1 else 0
             calm >= 25
         }
     }
@@ -172,19 +178,14 @@ class ChatTransfersTest {
         worker.steps.put(Step.Fail)
         settle("partial removed") { "delete $doc" in docs.events }
         quiesce()
-        assertEquals(listOf("open $doc", "delete $doc"), docs.events)
+        assertEquals(listOf("open $doc", "delete $doc", "deleted $doc"), docs.events)
         assertTrue(docs.streams.single().closed)
         assertTrue(replies("a1").none { it })
     }
 
     @Test fun stalledCloseCannotTouchARetryOfTheSameDocument() {
-        val gate = CountDownLatch(1).also { docs.gates += it; docs.nextGates += it }
-        startStream("a1")
-        chunk(1)
-        worker.steps.put(Step.End)
-        settle("old close stuck") { docs.streams.single().closing }
-        advance(ChatTransfers.STALL_MS + ChatTransfers.STALL_CHECK_MS)
-        assertEquals(listOf(false), replies("a1"))
+        val gate = closeGate()
+        stuckClose(gate)
 
         // The user retries and picks the same document while the old close is still stuck.
         send(url("a2"))
@@ -223,7 +224,7 @@ class ChatTransfersTest {
         settle("retry reply") { replies("a2").isNotEmpty() }
         quiesce()
         assertEquals(listOf(true), replies("a2"))
-        assertEquals(listOf("open $doc", "delete $doc", "open $doc"), docs.events)
+        assertEquals(listOf("open $doc", "delete $doc", "deleted $doc", "open $doc"), docs.events)
         assertArrayEquals(byteArrayOf(9), docs.streams[1].toByteArray())
     }
 
@@ -268,5 +269,115 @@ class ChatTransfersTest {
         transfers.chosen(doc)
         settle("late pick removed") { "delete $doc" in docs.events }
         assertEquals(1, picks)
+    }
+
+    private fun closeGate() = CountDownLatch(1).also { docs.gates += it; docs.nextGates += it }
+    private fun deleteGate() = CountDownLatch(1).also { docs.gates += it; docs.deleteGates += it }
+    /** Save "a1" writes a byte, then its close sticks on [gate] until the stall watchdog retires it. */
+    private fun stuckClose(gate: CountDownLatch) {
+        startStream("a1")
+        chunk(1)
+        worker.steps.put(Step.End)
+        settle("old close stuck") { docs.streams.single().closing }
+        advance(ChatTransfers.STALL_MS + ChatTransfers.STALL_CHECK_MS)
+        assertEquals(listOf(false), replies("a1"))
+        assertFalse(gate.count == 0L)
+    }
+
+    @Test fun retryCancelledWhileWaitingKeepsTheNextRetryInLine() {
+        val gate = closeGate()
+        stuckClose(gate)
+        // B picks the same document and waits behind A's stuck close; then B is cancelled.
+        send(url("b1"))
+        transfers.chosen(doc)
+        scheduler.runCurrent()
+        transfers.navigating()
+        assertEquals(listOf(false), replies("b1"))
+        // C picks the same document while A's close is still stuck.
+        send(url("c1"))
+        transfers.chosen(doc)
+        quiesce(stuck = 1)
+        assertEquals(listOf("open $doc"), docs.events)
+        assertEquals(1, worker.started.get())
+
+        gate.countDown()
+        settle("C streaming") { worker.started.get() == 2 }
+        chunk(7)
+        worker.steps.put(Step.End)
+        settle("C reply") { replies("c1").isNotEmpty() }
+        quiesce()
+        assertEquals(listOf(true), replies("c1"))
+        // Neither A nor B deleted the document C claimed; C truncated and wrote it.
+        assertEquals(listOf("open $doc", "open $doc"), docs.events)
+        assertTrue(docs.streams[0].closed)
+        assertArrayEquals(byteArrayOf(7), docs.streams[1].toByteArray())
+    }
+
+    @Test fun retryWaitsUntilAnEarlierDeleteReturns() {
+        val gate = deleteGate()
+        startStream("a1")
+        chunk(1)
+        advance(ChatTransfers.STALL_MS + ChatTransfers.STALL_CHECK_MS)
+        worker.steps.put(Step.Fail)
+        settle("delete started") { "delete $doc" in docs.events }
+        // The user retries and picks the same document while the provider is still deleting it.
+        send(url("a2"))
+        transfers.chosen(doc)
+        quiesce(stuck = 1)
+        assertEquals(listOf("open $doc", "delete $doc"), docs.events)
+        assertTrue(replies("a2").isEmpty())
+
+        gate.countDown()
+        settle("retry streaming") { worker.started.get() == 2 }
+        assertEquals(listOf("open $doc", "delete $doc", "deleted $doc", "open $doc"), docs.events)
+        chunk(9)
+        worker.steps.put(Step.End)
+        settle("retry reply") { replies("a2").isNotEmpty() }
+        quiesce()
+        assertEquals(listOf(true), replies("a2"))
+        assertEquals(4, docs.events.size)
+    }
+
+    @Test fun latePickerResultWaitsItsTurnAndSparesANewerSave() {
+        val gate = closeGate()
+        stuckClose(gate)
+        // X opens the picker; the chat changes before the user picks the same document.
+        send(url("x1"))
+        transfers.navigating()
+        assertEquals(listOf(false), replies("x1"))
+        transfers.chosen(doc)
+        scheduler.runCurrent()
+        // C claims the same document after the late result.
+        send(url("c1"))
+        transfers.chosen(doc)
+        quiesce(stuck = 1)
+        assertEquals(listOf("open $doc"), docs.events)
+
+        gate.countDown()
+        settle("C streaming") { worker.started.get() == 2 }
+        chunk(3)
+        worker.steps.put(Step.End)
+        settle("C reply") { replies("c1").isNotEmpty() }
+        quiesce()
+        assertEquals(listOf(true), replies("c1"))
+        assertEquals(listOf("open $doc", "open $doc"), docs.events)
+        assertArrayEquals(byteArrayOf(3), docs.streams[1].toByteArray())
+    }
+
+    @Test fun latePickerResultDeletesOnlyAfterAnEarlierCloseReturns() {
+        val gate = closeGate()
+        stuckClose(gate)
+        send(url("x1"))
+        transfers.navigating()
+        transfers.chosen(doc)
+        quiesce(stuck = 1)
+        assertEquals(listOf("open $doc"), docs.events)
+
+        gate.countDown()
+        settle("late pick removed") { "deleted $doc" in docs.events }
+        quiesce()
+        // A saw the later claim and left the delete to it: one delete, after A's close.
+        assertEquals(listOf("open $doc", "delete $doc", "deleted $doc"), docs.events)
+        assertTrue(docs.streams.single().closed)
     }
 }
