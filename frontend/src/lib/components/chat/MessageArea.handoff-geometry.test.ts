@@ -40,7 +40,7 @@ type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; l
 function view(layout: Layout, anchored: boolean) {
 	const store: Record<string, unknown> = {
 		...autoScroll, landedFromQueue, layout, anchored,
-		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, tailErrorBaselinePx: 0, tailErrorWidthPx: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
+		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, tailErrorBaselinePx: 0, tailErrorWidthPx: 0, tailErrorDockedPx: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
 		document: { getElementById: () => anchorEl },
 		getComputedStyle: () => ({ rowGap: String(ROW_GAP), marginTop: '0', marginBottom: '0', getPropertyValue: () => '0' }),
 	};
@@ -422,6 +422,64 @@ describe('queue handoff hold geometry', () => {
 				expect(followed.banner.bottom).toBeLessThanOrEqual(layout.clientHeight);
 				// In the app, following again is what asks for that pass (wiring).
 				expect(source).toMatch(/if \(!shouldAutoScroll\) return;\s*untrack\(\(\) => \{\s*if \(!presentedTailError \|\| handoffSlotPx\) return;\s*if \(currentTurnAnchorId\) scheduleCurrentTurnAnchorMaintenance\(\);\s*else scheduleLatestTurnTailRefresh\(\);/);
+			});
+
+			/** A settled error over one queued bubble, its banner shown or stepped aside for its Error row. */
+			async function settledError(anchored: boolean, banner: number) {
+				const layout: Layout = { clientHeight: 400, scrollTop: 0, proseEnd: 2000, anchorTop: 1000, bubbles: [80], banner };
+				const v = view(layout, anchored);
+				await v.update(turn(4, 1));
+				if (anchored) await v.place();
+				await v.grow(10);
+				await v.update(turn(4, 1, 'CLI error'));
+				await v.frame(); await v.grow(0);
+				v.scroll(layout.proseEnd);
+				return { layout, v };
+			}
+
+			it.each([
+				['an inline Error row, passive follow', false, 0], ['an inline Error row, active anchor', true, 0],
+				['the banner shown, passive follow', false, 60], ['the banner shown, active anchor', true, 60]
+			])('keeps a scrolled-up reader still when the last bubble is withdrawn under %s (S18)', async (_name, anchored, banner) => {
+				const { layout, v } = await settledError(anchored, banner);
+				v.scroll(-48);
+				const away = v.read();
+				await withdraw(v, layout, []);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd, padding: away.padding });
+				// Following again re-measures, and ends where a reader who never left does.
+				v.scroll(layout.proseEnd);
+				await v.grow(0); await v.frame(); await v.grow(0);
+				const stayed = await settledError(anchored, banner);
+				await withdraw(stayed.v, stayed.layout, []);
+				for (let i = 0; i < 3; i++) { await stayed.v.frame(); await stayed.v.grow(0); }
+				expect(v.read()).toMatchObject({ padding: stayed.v.read().padding, replyEnd: stayed.v.read().replyEnd, banner: stayed.v.read().banner });
+			});
+
+			it('keeps a scrolled-up reader still through a narrow drain with the banner stepped aside (S18)', async () => {
+				const { layout, v } = await narrowLift(false);
+				layout.banner = 0;
+				await v.grow(0);
+				v.scroll(-48);
+				const away = v.read();
+				await withdraw(v, layout, [180]);
+				await withdraw(v, layout, []);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, padding: away.padding });
+			});
+
+			it('keeps the detached reserve through zero geometry, and drops it on a session switch (S18)', async () => {
+				const { layout, v } = await settledError(false, 0);
+				v.scroll(-48);
+				const away = v.read();
+				await withdraw(v, layout, []);
+				await v.resize(0); await v.frame(); await v.grow(0);
+				await v.resize(400); await v.frame(); await v.grow(0);
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, padding: away.padding });
+				// Another chat, no queue and no error: nothing of the old slot is kept.
+				await v.update({ ...turn(4, 0), sessionId: 'other' });
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read().padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
 			});
 
 			it('leaves the floor of an ordinary dequeue still waiting for its transcript row', async () => {
