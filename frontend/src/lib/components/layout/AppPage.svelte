@@ -204,6 +204,8 @@
 	onMount(async () => {
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
+		// Overlays opened while boot loads (Chat controls, the phone drawer) own a Back entry at once.
+		shellHistory.arm();
 		// Reloaded controls can already accept Back, Forward and clicks while the
 		// boot requests are pending. Their existing entry must already have an owner.
 		if ((page.state as ShellState).shell) shellHistory.start(page.state, $activeView);

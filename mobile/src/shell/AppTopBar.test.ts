@@ -38,6 +38,11 @@ vi.mock('$lib/stores/hotkeyPreferences.svelte', async () => {
 	const { writable } = await import('svelte/store');
 	return { hotkeyPreferences: writable({ globalSttEnabled: false }) };
 });
+// The router behind the shell history: a shallow push lands as the new page state.
+vi.mock('$app/navigation', async () => {
+	const { page } = await import('$app/state');
+	return { goto: vi.fn(async (_url: string, options: { state: Record<string, unknown> }) => { page.state = { ...options.state }; }) };
+});
 vi.mock('$lib/services/globalStt', async () => {
 	const { writable } = await import('svelte/store');
 	return { globalSttState: writable({ isRecording: false }), triggerToggle: vi.fn() };
@@ -345,6 +350,7 @@ describe('AppTopBar drawer lifecycle', () => {
 		const { page } = await import('$app/state');
 		const push = vi.spyOn(shellHistory, 'overlay').mockImplementation((state) => {
 			page.state = state as Record<string, unknown>;
+			return true;
 		});
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {
 			page.state = {};
@@ -376,12 +382,42 @@ describe('AppTopBar drawer lifecycle', () => {
 		}
 	});
 
+	it('owns a Back entry when opened while boot still loads, before the shell history starts', async () => {
+		const { shellHistory } = await import('$lib/services/app-history.svelte');
+		const { page } = await import('$app/state');
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {
+			page.state = {};
+		});
+		try {
+			shellHistory.arm();
+			renderBar();
+			await fireEvent.click(menuButton());
+			await vi.waitFor(() => expect(page.state.mobileDrawer).toBe(true));
+			// System Back before boot finishes closes the drawer, not the app.
+			page.state = {};
+			await tick();
+			expect(drawerClosed()).toBe(true);
+			// Closed from inside the app instead: its entry is popped once.
+			await fireEvent.click(menuButton());
+			await vi.waitFor(() => expect(page.state.mobileDrawer).toBe(true));
+			await fireEvent.keyDown(window, { key: 'Escape' });
+			await tick();
+			expect(back).toHaveBeenCalledTimes(1);
+			expect(drawerClosed()).toBe(true);
+		} finally {
+			shellHistory.stop();
+			back.mockRestore();
+			page.state = {};
+		}
+	});
+
 	it('opens a Settings target only once the drawer has popped its entry, so the pop cannot undo it', async () => {
 		vi.useFakeTimers();
 		const { shellHistory } = await import('$lib/services/app-history.svelte');
 		const { page } = await import('$app/state');
 		const push = vi.spyOn(shellHistory, 'overlay').mockImplementation((state) => {
 			page.state = state as Record<string, unknown>;
+			return true;
 		});
 		// The real Back is asynchronous: the router hears popstate later.
 		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
@@ -450,7 +486,7 @@ describe('AppTopBar drawer lifecycle', () => {
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 
 			// The drawer's entry was never pushed (router not ready): it opens at once.
-			push.mockImplementation(async () => {});
+			push.mockImplementation(() => false);
 			await fireEvent.click(menuButton());
 			await tick();
 			await fireEvent.click(screen.getByRole('button', { name: 'Stub settings target' }));

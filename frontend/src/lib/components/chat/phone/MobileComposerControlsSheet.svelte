@@ -48,6 +48,7 @@
 	import { tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
+	import { randomUUID } from '$lib/utils/id';
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
@@ -333,7 +334,7 @@
 		if (pageName === 'main') return;
 		if (pageEntry && !closingPanel) {
 			pageEntry = false;
-			if (!fromHistory && page.state?.mobileControlsPage) history.back();
+			if (!fromHistory) retireEntries(pageToken);
 		}
 		const from = pageName;
 		dismissHostedMenus();
@@ -434,21 +435,38 @@
 	let historyEntry = false;
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
-	let closeThroughList: string | undefined;
-	/** Opened before the shell history started (boot still loading): its entry waits for the first one. */
-	let awaitingShell = false;
-	/** That late entry, landing under a page the user may already be on: nothing to reconstruct. */
-	let adoptedEntry: string | undefined;
+	/** Each entry's own id: the list's (or a direct page's), and a page's over the list. */
+	let listToken: string | undefined;
+	let pageToken: string | undefined;
+	/** Entries this panel is backing off: their landings on the way are no Forward. */
+	const retiring = new Set<string>();
 
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
-		// No router or no shell history yet: Back closes the panel instead.
-		pageEntry = shellHistory.overlay({ mobileControls: true, mobileControlsPage: target, mobileControlsList: shellHistory.entryId });
+		const token = (pageToken = randomUUID());
+		pageEntry = shellHistory.overlay(
+			{ mobileControls: true, mobileControlsPage: target, mobileControlsId: token, mobileControlsList: listToken },
+			() => { if (pageToken === token) pageEntry = false; }
+		);
 	}
 
 	function recordPanelEntry() {
-		historyEntry = shellHistory.overlay({ mobileControls: true, mobileControlsPage: direct ? pageName : undefined });
-		return historyEntry;
+		const token = (listToken = randomUUID());
+		// No app around this panel (a component test): Back closes it instead.
+		historyEntry = shellHistory.overlay(
+			{ mobileControls: true, mobileControlsId: token, mobileControlsPage: direct ? pageName : undefined },
+			() => { if (listToken === token) historyEntry = pageEntry = false; }
+		);
+	}
+
+	/** Back off these entries once they committed, never over one this panel did not push. */
+	function retireEntries(...tokens: (string | undefined)[]) {
+		const own = tokens.filter((token): token is string => !!token);
+		for (const token of own) retiring.add(token);
+		const owned = (id: string | undefined) => !!id && own.includes(id);
+		void shellHistory
+			.retire((state) => (owned(state.mobileControlsId) ? 1 + Number(owned(state.mobileControlsList)) : 0))
+			.then(() => { for (const token of own) retiring.delete(token); });
 	}
 
 	$effect(() => {
@@ -462,7 +480,7 @@
 				rendered = true;
 				picker = null;
 				void focusPanel();
-				if (!historyEntry) awaitingShell = !recordPanelEntry();
+				if (!historyEntry) recordPanelEntry();
 				void tick().then(() => {
 					if (bodyRef && pageName === 'main') bodyRef.scrollTop = 0;
 				});
@@ -487,14 +505,9 @@
 				}
 				if (historyEntry) {
 					historyEntry = false;
-					// Never jump over an assumed parent. Retire the second entry only if
-					// Back actually lands on this page's own controls list.
-					if (page.state?.mobileControls) {
-						closeThroughList = page.state.mobileControlsList;
-						history.back();
-					}
+					retireEntries(pageEntry ? pageToken : undefined, listToken);
 				}
-				pageEntry = awaitingShell = false;
+				pageEntry = false;
 			}
 		});
 	});
@@ -507,30 +520,25 @@
 	// Reconstruct the panel from the landed entry, including a Forward during its close slide.
 	$effect(() => {
 		const state = page.state as ShellState;
-		const { mobileControls, mobileControlsPage, mobileControlsList, shell } = state;
+		const { mobileControls, mobileControlsPage, mobileControlsId, mobileControlsList } = state;
 		untrack(() => {
 			// Shell writes land in order after the call that queued them: one queued
-			// before the panel's entry is no Back, and neither is the panel's late entry.
+			// before the panel's entry is no Back.
 			if (shellHistory.superseded(state)) return;
-			if (shell && shell.id === adoptedEntry) { adoptedEntry = undefined; return; }
-			const closeList = closeThroughList && closeThroughList === shell?.id && mobileControls && !mobileControlsPage;
-			closeThroughList = undefined;
-			if (closeList) { history.back(); return; }
+			if (mobileControlsId && retiring.has(mobileControlsId)) return;
 			if (mobileControls) {
 				historyEntry = true;
 				closingPanel = false;
 				direct = !!mobileControlsPage && !mobileControlsList;
 				pageEntry = !!mobileControlsPage && !direct;
+				listToken = mobileControlsList ?? mobileControlsId;
+				pageToken = pageEntry ? mobileControlsId : undefined;
 				if (mobileControlsPage) setPage(mobileControlsPage as Page);
 				else if (pageName !== 'main') backToMain(true);
 				if (!open) requestOpen(true);
 			} else if (historyEntry && open) {
 				historyEntry = pageEntry = false;
 				closePanel();
-			} else if (awaitingShell && open && shell) {
-				// The shell history's first entry: record the panel's over it now.
-				awaitingShell = false;
-				if (recordPanelEntry()) adoptedEntry = shellHistory.entryId;
 			}
 		});
 	});

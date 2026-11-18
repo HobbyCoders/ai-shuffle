@@ -174,11 +174,9 @@
 	let pendingTarget: (() => void) | null = null;
 
 	function pushDrawerEntry() {
-		try {
-			shellHistory.overlay({ mobileDrawer: true });
-		} catch {
-			// Router not ready (early boot, tests): Back just won't close it.
-		}
+		// Pushed during boot too. With no app around the bar (tests) nothing is
+		// recorded and Back just won't close it.
+		shellHistory.overlay({ mobileDrawer: true });
 	}
 
 	function popDrawerEntry() {
