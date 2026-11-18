@@ -214,6 +214,27 @@ async def test_concurrency_dependencies_failure_and_early_completion():
     assert rows["a"]["worker_session_id"] == "session-a"
     finished.assert_awaited_once()
 
+@pytest.mark.parametrize("order", [
+    ("leaf", "middle", "root"),  # reverse-topological: one scan reaches only middle
+    ("root", "middle", "leaf"),
+    ("middle", "leaf", "root"),
+    ("leaf", "root", "middle"),
+])
+async def test_transitively_blocked_task_is_blocked_in_any_input_order(order):
+    launched = []
+
+    async def dispatch(data, ctx):
+        launched.append(data["label"])
+        return ToolOutcome(text="boom", is_error=True)
+
+    deps = {"leaf": ["middle"], "middle": ["root"], "root": []}
+    c = SwarmCoordinator("main", dispatch, AsyncMock(), AsyncMock(), AsyncMock())
+    _, receipt = await c.start({"tasks": [spec(key, deps[key]) for key in order]}, ToolCtx())
+    await asyncio.wait_for(c.jobs[receipt.task_id], 5)
+    rows = {t["id"]: t["status"] for t in c.snapshot(receipt.task_id)["tasks"]}
+    assert rows == {"root": "failed", "middle": "blocked", "leaf": "blocked"}
+    assert launched == ["root"]
+
 @pytest.mark.parametrize("interrupt", [False, True], ids=["cancel", "coordinator-interrupt"])
 async def test_cancel_during_receipt_publication_stops_worker_once(interrupt):
     """#794: the receipt is visible to cancel() before _task resumes its emit."""

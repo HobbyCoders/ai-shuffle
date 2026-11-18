@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -20,9 +21,11 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.engine.questions import QuestionLifecycleMixin
-from fluid.store.base import iter_events_of_class
+from fluid.store.base import iter_events_of_class, persist_event
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
+
+log = logging.getLogger(__name__)
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
 # How much of a long worker report rides the wake turn when the rest is one
@@ -111,8 +114,18 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         try:
             events = [event async for event in iter_events_of_class(
                 self.store, meta.session_id, 0, (SubagentEvent, SessionWoken))]
-        except Exception:  # noqa: BLE001 — stores without replay degrade in memory
+        except NotImplementedError:
+            # A store without an event log: the lifecycle runs from memory.
             self._background_rehydrated = True
+            return
+        except Exception as exc:  # noqa: BLE001 — retried by the next lifecycle call
+            # A failed read is not an empty log: leave the latch down so the
+            # next call reads again and finds what is still owed. Until then
+            # the lifecycle runs from memory, as for a store without a log.
+            log.warning(
+                "could not read session %s's background task history (%s); "
+                "the next lifecycle call retries", meta.session_id, type(exc).__name__,
+            )
             return
 
         for event in events:
@@ -157,8 +170,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
         for task_id in tuple(self._background_early):
             if task_id in self._background_pending:
-                op = self._background_early.pop(task_id)
-                await self._finalize_background_task_unlocked(op)
+                # Finalizing pops it, once its terminal event is stored.
+                await self._finalize_background_task_unlocked(
+                    self._background_early[task_id])
 
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
@@ -198,9 +212,10 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 or receipt.task_id in self._background_terminal
             )
             if not known:
-                self._background_pending[receipt.task_id] = receipt
                 meta = await self._ensure_session()
-                await self._emit(SubagentEvent(
+                # State changes only once the event is stored, so a refused
+                # write leaves the receipt retryable.
+                await self._emit_committed(SubagentEvent(
                     session_id=meta.session_id,
                     turn_id=self._active_turn_id,
                     task_id=receipt.task_id,
@@ -211,10 +226,11 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     wake_disposition=WAKE_NOT_APPLICABLE,
                     serves=receipt.serves,
                 ))
-                early = self._background_early.pop(receipt.task_id, None)
-                if early is not None:
-                    await self._finalize_background_task_unlocked(early)
-                elif self._background_turn_terminal:
+                self._background_pending[receipt.task_id] = receipt
+                if (
+                    receipt.task_id not in self._background_early
+                    and self._background_turn_terminal
+                ):
                     parked_on = self._park_pending_ids()
                     if parked_on:
                         await self._emit(SessionParked(
@@ -223,6 +239,11 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                             pending_task_ids=parked_on,
                             reason="background_tasks",
                         ))
+            # An early completion is finalized here, and again by a retried
+            # receipt if its terminal write was refused the first time.
+            early = self._background_early.get(receipt.task_id)
+            if early is not None and receipt.task_id in self._background_pending:
+                await self._finalize_background_task_unlocked(early)
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -244,8 +265,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     meta = await self._ensure_session()
                     if op.is_current is not None and not op.is_current():
                         return
-                    self._background_early[op.task_id] = op
-                    await self._emit(SubagentEvent(
+                    await self._emit_committed(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
                         task_id=op.task_id,
@@ -259,6 +279,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                         wake_disposition=WAKE_NOT_APPLICABLE,
                         report_path=op.report_path,
                     ))
+                    self._background_early[op.task_id] = op
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -269,12 +290,14 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         meta = await self._ensure_session()
         if op.is_current is not None and not op.is_current():
             return
-        receipt = self._background_pending.pop(op.task_id, None)
+        receipt = self._background_pending.get(op.task_id)
         worker_session_id = op.worker_session_id or (
             receipt.worker_session_id if receipt is not None else None
         )
-        self._background_terminal.add(op.task_id)
-        await self._emit(SubagentEvent(
+        # Store the terminal event before the task leaves pending: a refused
+        # write must leave the completion retryable, and the next attempt
+        # must not find the task already terminal and skip it (#1769).
+        await self._emit_committed(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
             task_id=op.task_id,
@@ -289,6 +312,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
             report_path=op.report_path,
         ))
+        self._background_pending.pop(op.task_id, None)
+        self._background_early.pop(op.task_id, None)
+        self._background_terminal.add(op.task_id)
         if op.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(
                 task_id=op.task_id,
@@ -298,6 +324,30 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 wake=True,
                 report_path=op.report_path,
             )
+
+    async def _emit_committed(self, event: Event) -> Event:
+        """Persist a background lifecycle event, then publish it.
+
+        ``_emit`` publishes first, so a refused write would leave live
+        subscribers holding an event the store never got, and a successful
+        retry would show them a second copy (#1769 case 4). Here the bus
+        numbers the event, the store writes it, and only then does anyone see
+        it; a refused write gives the number back as a hole. A bus without a
+        replay source cannot bridge holes, and a host without a bus of its
+        own only has ``_emit``, so both keep the ordinary path.
+        """
+        if getattr(self, "_abandoned", False):
+            return event  # an abandoned delegated loop writes nothing
+        bus = getattr(self, "bus", None)
+        if bus is None or bus.replay_source is None:
+            return await self._emit(event)
+        sequenced = bus.reserve(event)
+        try:
+            await persist_event(self.store, sequenced)
+        except BaseException:
+            bus.release(sequenced)
+            raise
+        return bus.deliver(sequenced)
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
         if not isinstance(event, _TERMINAL_EVENTS):

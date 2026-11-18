@@ -111,6 +111,12 @@ _REHYDRATE_ATTEMPTS = 3
 # placeholder would save next to nothing.
 _ADMISSION_MIN_RESULT_CHARS = 2_000
 _REHYDRATE_BACKOFF_S = 0.2
+# The handoff call's transcript: newest nodes first until the budget is spent.
+# Text is clipped per node, and each tool call and result to a short excerpt,
+# so a tool-heavy session still hands over what it did.
+_HANDOFF_TRANSCRIPT_CHARS = 60_000
+_HANDOFF_NODE_TEXT_CHARS = 2_000
+_HANDOFF_TOOL_CHARS = 300
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -121,7 +127,7 @@ from fluid.context.trim import (
     estimate_tokens_of_text,
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
-from fluid.engine.background import BackgroundLifecycleMixin
+from fluid.engine.background import BackgroundLifecycleMixin, await_cancelled_child
 from fluid.engine.base import EngineCaps, matches_tool_pattern
 from fluid.engine.guardrail import (
     GUARDRAIL_TOOL,
@@ -389,6 +395,48 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     wrote plainly does not.
     """
     return SteerDelivery(text=text, sender=sender, origin=origin).render()
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _handoff_line(node: SessionNode) -> str:
+    """One node of the handoff transcript: its text and a compact line per
+    tool call and result, or "" when it carries neither."""
+    message = node.message
+    parts: list[str] = []
+    text = message.text().strip()
+    if text:
+        parts.append(_clip(text, _HANDOFF_NODE_TEXT_CHARS))
+    for block in message.content:
+        if isinstance(block, ToolUseBlock):
+            args = json.dumps(block.input, ensure_ascii=False, default=str)
+            parts.append(f"[tool call {block.name}: {_clip(args, _HANDOFF_TOOL_CHARS)}]")
+        elif isinstance(block, ToolResultBlock):
+            output = "".join(
+                b.text for b in block.content if isinstance(b, Text)
+            ).strip() or "(no text output)"
+            label = "tool error" if block.is_error else "tool result"
+            parts.append(f"[{label}: {_clip(output, _HANDOFF_TOOL_CHARS)}]")
+    return f"{message.role}: " + " ".join(parts) if parts else ""
+
+
+def _handoff_transcript(nodes: list[SessionNode]) -> str:
+    """The newest nodes that fit ``_HANDOFF_TRANSCRIPT_CHARS``, oldest first."""
+    lines: list[str] = []
+    budget = _HANDOFF_TRANSCRIPT_CHARS
+    for node in reversed(nodes):
+        line = _handoff_line(node)
+        if not line:
+            continue
+        if len(line) + 1 > budget:
+            if not lines:  # the newest node alone is over budget: keep its head
+                lines.append(_clip(line, budget))
+            break
+        lines.append(line)
+        budget -= len(line) + 1
+    return "\n".join(reversed(lines))
 
 
 def _steer_receipt(
@@ -1465,6 +1513,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
+        # A Handoff's document call: Interrupt and close cancel it.
+        self._handoff_call: asyncio.Task | None = None
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -1870,6 +1920,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             manual = self._manual_summary_task
             if manual is not None and not manual.done():
                 manual.cancel()  # the manual turn awaits it and reports Interrupted
+            handoff = self._handoff_call
+            if handoff is not None and not handoff.done():
+                handoff.cancel()  # _do_handoff reports it; no session is made
         elif isinstance(op, Steer):
             # Mid-turn user text: queued here, appended to the NEXT tool
             # result inside the steering marker (fluid.context.steering) —
@@ -1985,47 +2038,24 @@ class NativeLoop(BackgroundLifecycleMixin):
         over the current session, then seed a NEW session with it as the first
         user message. Nothing is summarized in place — the old session stays
         intact; the new one starts small, with a fresh cacheable prefix.
+
+        The document call is billed like the checkpoint side call, and an
+        Interrupt or close cancels it; either way no session is made.
         """
         meta = await self._ensure_session()
-        nodes = await self.store.load_path(meta.session_id)
-
-        # Bounded plain-text transcript for the summary call (newest last).
-        lines: list[str] = []
-        for node in nodes[-40:]:
-            text = node.message.text().strip()
-            if text:
-                lines.append(f"{node.message.role}: {text[:2000]}")
-        goal_line = f"\nThe stated goal for the next session: {op.goal}" if op.goal else ""
-        prompt = (
-            "Write a handoff document for a fresh agent session continuing this "
-            "work. Structure it as: Goal, Current state (what is done and "
-            "verified), Key decisions and constraints, Relevant files/paths, "
-            "Next steps (ordered). Be specific; the reader has NO other "
-            f"context.{goal_line}\n\n--- transcript ---\n" + "\n".join(lines)
-        )
-        request = ProviderRequest(
-            model=self.model,
-            messages=[Message(role="user", content=[Text(prompt)])],
-            system="You write precise engineering handoff documents.",
-            session_id=meta.session_id,
-            tools=[],
-            max_tokens=self.max_tokens,
-            cache_breakpoints=0,
-        )
-        parts: list[str] = []
-        error: str | None = None
-        async for chunk in self.provider.stream(request):
-            if chunk.kind == "text_delta":
-                parts.append(chunk.payload["text"])
-            elif chunk.kind == "error" and error is None:
-                error = str(chunk.payload.get("message") or "provider error")
-        content = "".join(parts).strip()
-        if error is not None or not content:
-            # A cut-off or empty document is no handoff: no session is made.
-            raise RuntimeError(
-                "handoff not created: the handoff document could not be generated"
-                + (f" ({error})" if error else " (empty reply)")
-            )
+        call = asyncio.create_task(self._handoff_document(meta.session_id, op))
+        self._handoff_call = call
+        try:
+            content = await call
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                await await_cancelled_child(call)
+                raise
+            raise RuntimeError("handoff not created: interrupted") from None
+        finally:
+            if self._handoff_call is call:
+                self._handoff_call = None
 
         new_meta = await self.store.create_session(cwd=self.ctx.cwd)
         first = SessionNode(
@@ -2039,6 +2069,62 @@ class NativeLoop(BackgroundLifecycleMixin):
             content=content,
             goal=op.goal,
         ))
+
+    async def _handoff_document(self, sid: str, op: Handoff) -> str:
+        """Generate the handoff document; raises when it cannot be had."""
+        nodes = await self.store.load_path(sid)
+        goal_line = f"\nThe stated goal for the next session: {op.goal}" if op.goal else ""
+        prompt = (
+            "Write a handoff document for a fresh agent session continuing this "
+            "work. Structure it as: Goal, Current state (what is done and "
+            "verified), Key decisions and constraints, Relevant files/paths, "
+            "Next steps (ordered). Be specific; the reader has NO other "
+            f"context.{goal_line}\n\n--- transcript ---\n" + _handoff_transcript(nodes)
+        )
+        request = ProviderRequest(
+            model=self.model,
+            messages=[Message(role="user", content=[Text(prompt)])],
+            system="You write precise engineering handoff documents.",
+            session_id=sid,
+            tools=[],
+            max_tokens=self.max_tokens,
+            cache_breakpoints=0,
+        )
+        parts: list[str] = []
+        error: str | None = None
+        usage: dict[str, Any] = {}
+        try:
+            async for chunk in self.provider.stream(request):
+                payload = chunk.payload or {}
+                if chunk.kind == "text_delta":
+                    parts.append(payload["text"])
+                elif chunk.kind in ("message_start", "usage", "message_stop"):
+                    if isinstance(payload.get("usage"), dict):
+                        self._merge_usage(usage, payload["usage"],
+                                          replace=payload.get("final_usage") is True)
+                elif chunk.kind == "error" and error is None:
+                    error = str(payload.get("message") or "provider error")
+        finally:
+            if usage:
+                # Bill what the provider reported, on failure and on cancel
+                # too; finish the write before a cancellation tears us down.
+                booking = asyncio.create_task(self._record_side_call_usage(
+                    usage, sid=sid, turn_id=None, model=self.model,
+                    source="handoff", background=True,
+                ))
+                try:
+                    await asyncio.shield(booking)
+                except asyncio.CancelledError:
+                    await booking
+                    raise
+        content = "".join(parts).strip()
+        if error is not None or not content:
+            # A cut-off or empty document is no handoff: no session is made.
+            raise RuntimeError(
+                "handoff not created: the handoff document could not be generated"
+                + (f" ({error})" if error else " (empty reply)")
+            )
+        return content
 
     async def _emit(self, event: Event) -> Event:
         """Publish to the bus (assigns seq) and persist for durable replay.
@@ -2132,6 +2218,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 pass
         await self.cancel_checkpoint()
+        handoff = self._handoff_call
+        if handoff is not None and not handoff.done():
+            handoff.cancel()
+            await await_cancelled_child(handoff)
         if self._booking_task is not None and not self._booking_task.done():
             # Let a deferred booking finish; anything left is reconciled from
             # the persisted Usage by the next engine for this session.
@@ -3022,6 +3112,52 @@ class NativeLoop(BackgroundLifecycleMixin):
         self._summary_task = None
         self._pending_summary = None
 
+    async def _record_side_call_usage(
+        self, usage: dict[str, Any], *, sid: str, turn_id: str | None, model: str,
+        source: str, background: bool,
+    ) -> None:
+        """Price and record an engine side call's usage (checkpoint, handoff).
+
+        A ``background`` call belongs to no turn: it is flagged, kept out of
+        the turn totals and booked through the host's usage sink (idempotent
+        per seq; a failed booking is retried later). Otherwise it joins the
+        running turn's totals.
+        """
+        # No node/context snapshot: side calls cannot measure the main window.
+        raw = dict(usage)
+        if "cost_usd" not in raw:
+            cost = None
+            estimator = getattr(self.provider, "estimate_cost", None)
+            if estimator is not None:
+                try:
+                    cost = estimator(model, raw)
+                except Exception:
+                    pass
+            if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
+                cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
+            if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
+                cost = 0.0
+            if cost is not None:
+                raw.update(cost_usd=cost, cost_from_table=True)
+        raw.update(model=model, auxiliary_source=source)
+        # Ownership is fixed at dispatch, not by whichever turn happens to
+        # be active at completion. Background calls never enter a terminal.
+        if background:
+            raw["auxiliary_background"] = True
+        else:
+            self._accumulate_usage(self._turn_usage, raw)
+        event = await self._emit(Usage(
+            session_id=sid, turn_id=turn_id,
+            input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
+            output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
+            cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+            cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
+        ))
+        if background and self._background_usage_sink is not None:
+            assert isinstance(event, Usage)
+            self._unbooked_usage[event.seq] = event
+            await self._book_unbooked_usage()
+
     async def _build_checkpoint(self, sid: str, turn_id: str,
                                 region: tuple[str, str, str], *,
                                 background: bool = False) -> tuple[str, str, str] | None:
@@ -3031,40 +3167,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         model = cfg.summary_model or self.model
 
         async def account(usage: dict[str, Any]) -> None:
-            # No node/context snapshot: side calls cannot measure the main window.
-            raw = dict(usage)
-            if "cost_usd" not in raw:
-                cost = None
-                estimator = getattr(self.provider, "estimate_cost", None)
-                if estimator is not None:
-                    try:
-                        cost = estimator(model, raw)
-                    except Exception:
-                        pass
-                if cost is None and not getattr(self.provider, "pricing_is_authoritative", False):
-                    cost = estimate_cost_from_table(model, raw, resolver=self._pricing_resolver)
-                if getattr(self.provider, "name", None) == LOCAL_PROVIDER_NAME:
-                    cost = 0.0
-                if cost is not None:
-                    raw.update(cost_usd=cost, cost_from_table=True)
-            raw.update(model=model, auxiliary_source="checkpoint_summary")
-            # Ownership is fixed at dispatch, not by whichever turn happens to
-            # be active at completion. Background calls never enter a terminal.
-            if background:
-                raw["auxiliary_background"] = True
-            else:
-                self._accumulate_usage(self._turn_usage, raw)
-            event = await self._emit(Usage(
-                session_id=sid, turn_id=turn_id,
-                input_tokens=raw.get("input_tokens", raw.get("prompt_tokens", 0)),
-                output_tokens=raw.get("output_tokens", raw.get("completion_tokens", 0)),
-                cache_read_tokens=raw.get("cache_read_input_tokens", 0),
-                cache_creation_tokens=raw.get("cache_creation_input_tokens", 0), raw=raw,
-            ))
-            if background and self._background_usage_sink is not None:
-                assert isinstance(event, Usage)
-                self._unbooked_usage[event.seq] = event
-                await self._book_unbooked_usage()
+            await self._record_side_call_usage(
+                usage, sid=sid, turn_id=turn_id, model=model,
+                source="checkpoint_summary", background=background,
+            )
 
         key = self._affinity_key()
         extra = {"prompt_cache_key": f"checkpoint:{key}"} if key and not self._sticky_poisoned else {}
