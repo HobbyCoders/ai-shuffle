@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -430,41 +430,76 @@ def _same_pin(a: dict, b: dict) -> bool:
     return key(a) == key(b)
 
 
-@router.put("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
-async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Request,
-                          operation: Optional[str] = None,
-                          token: str = Depends(require_preference_write)) -> dict:
-    """Pin a pick for a job's unattended runs. Like remembering, it is written
-    only after a successful server-side quote priced it (nothing is
-    submitted); otherwise 409 says why and the job keeps what it had. A fal
-    model whose inputs do not fit ``operation`` and the kind's text operation
-    is refused (422) with the reason."""
-    _kind(kind)
-    job_id = await _job(job_id)
-    pinned = generation_choices.clean(body.model_dump(exclude_none=True))
+class PinRefused(Exception):
+    """A job pin that was not written: ``status`` (422 unfit, 409 unpriced) and the reason."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status, self.detail = status, detail
+
+
+async def pin_job_choice(identity: Callable[[], tuple[str, str]], job_id: str, kind: str, value: Any,
+                         context, operation: Optional[str] = None) -> dict:
+    """Pin a pick for a job's unattended runs: the one writer of a job pin
+    (the PUT route below and the agent's ``generationPreferences``).
+
+    ``job_id`` is already validated; ``identity`` is called off the event
+    loop. Like remembering, a pin is written only after a successful
+    server-side quote priced it (nothing is submitted); a fal model whose
+    inputs do not fit ``operation`` and the kind's text operation is refused
+    (422), an unpriced one too (409), and the job keeps what it had. Saving
+    the pin the job already has is never refused (``unchanged``).
+    """
+    pinned = generation_choices.clean(value)
     if pinned is None or not pinned.get("account") or not pinned.get("worker"):
-        raise HTTPException(422, "A job choice must pin its account, worker and model.")
-    quoted = await _save_time_quote(kind, body, request, token, _operations(kind, operation, stored=True))
+        raise PinRefused(422, "A job choice must pin its account, worker and model.")
+    quoted = await save_time_quote(kind, pinned, context, _operations(kind, operation, stored=True))
     if not quoted["priced"]:
         try:
-            stored = (await run_sync(lambda: generation_choices.load_job(_identity(request), job_id))).get(kind)
+            stored = (await run_sync(lambda: generation_choices.load_job(identity(), job_id))).get(kind)
         except ValueError:
             stored = None
         if stored is not None and _same_pin(stored, pinned):
             # Saving the job again with the pick it already has is not a new
-            # pin: keep it and say why it will be skipped (unpriced or unfit).
-            return {"job_id": job_id, "kind": kind, "choice": stored, "unchanged": True, **quoted}
+            # pin: keep it and say what its next run will do.
+            return {"job_id": job_id, "kind": kind, "choice": stored, "unchanged": True,
+                    **await _kept_pin(kind, pinned, context, quoted)}
         if quoted.get("incompatible"):
-            raise HTTPException(422, f"{quoted['incompatible']} It was not pinned.")
+            raise PinRefused(422, f"{quoted['incompatible']} It was not pinned.")
         why = (quoted["quote_error"] or "This choice is unavailable right now.") \
             if quoted["unattended_skip_reason"] == "stored_choice_unavailable" else "This choice has no verified price."
-        raise HTTPException(409, f"{why} It was not pinned; unattended runs skip a step without a priced pick.")
+        raise PinRefused(409, f"{why} It was not pinned; unattended runs skip a step without a priced pick.")
     try:
-        choice = await run_sync(lambda: generation_choices.save_job(
-            _identity(request), job_id, kind, body.model_dump(exclude_none=True)))
+        choice = await run_sync(lambda: generation_choices.save_job(identity(), job_id, kind, pinned))
     except ValueError as exc:
-        raise HTTPException(422, str(exc)) from None
+        raise PinRefused(422, str(exc)) from None
     return {"job_id": job_id, "kind": kind, "choice": choice, **quoted}
+
+
+async def _kept_pin(kind: str, pinned: dict, context, quoted: dict) -> dict:
+    """What an unchanged stored pin does on its next run. One stored before the
+    operation check is not refused by the resolver (which merges its saved
+    options), so only a run-time quote says whether runs will skip it."""
+    reason = quoted.get("incompatible")
+    if not reason:
+        return quoted
+    runs = await save_time_quote(kind, pinned, context, operations=())
+    kept = f"{reason} It would be refused as a new pin; this job keeps the one it already has."
+    return {**runs, "incompatible": reason, "warning": kept if runs["priced"] else f"{kept} {runs['warning']}"}
+
+
+@router.put("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
+async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Request,
+                          operation: Optional[str] = None,
+                          token: str = Depends(require_preference_write)) -> dict:
+    """Pin a pick for a job's unattended runs (``pin_job_choice``)."""
+    _kind(kind)
+    job_id = await _job(job_id)
+    try:
+        return await pin_job_choice(lambda: _identity(request), job_id, kind, body.model_dump(exclude_none=True),
+                                    _context(request), operation)
+    except PinRefused as exc:
+        raise HTTPException(exc.status, exc.detail) from None
 
 
 @router.delete("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])

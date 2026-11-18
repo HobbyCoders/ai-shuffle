@@ -389,3 +389,32 @@ def test_an_unfit_job_pin_is_refused_but_an_identical_stored_pin_stays(client, f
     assert kept.json()["incompatible"] == "This model needs image_url, which generateImage does not send."
     assert client.put(route, json=_pick("fal-ai/text-only")).status_code == 200
     assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/text-only"
+
+
+def test_an_unchanged_legacy_pin_says_what_its_runs_will_really_do(client, fal_backend, monkeypatch):
+    from app.core import generation_choices
+    from app.core.generation_resolver import UNKNOWN_PRICE
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    # Stored before the operation check, with its source image as a saved
+    # option: the resolver merges that and runs it, so it is not "skipped".
+    legacy = {**_pick("fal-ai/needs-image"), "options": {"image_url": "https://example.invalid/a.png"}}
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", legacy)
+    kept = client.put(route, json=legacy).json()
+    assert kept["unchanged"] is True and kept["priced"] is True and kept["unattended_skip_reason"] is None
+    assert kept["warning"] == ("This model needs image_url, which generateImage does not send. "
+                               "It would be refused as a new pin; this job keeps the one it already has.")
+    # Only a pin its runs really refuse (no verified price) is said to be skipped.
+    fal_backend.entries = [replace(e, price=dict(UNKNOWN_PRICE)) for e in fal_backend.entries]
+    unpriced = client.put(route, json=legacy).json()
+    assert unpriced["unchanged"] is True and unpriced["priced"] is False
+    assert unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
+    assert unpriced["warning"] == (kept["warning"] + " This saved choice has no verified price. "
+                                   "Unattended runs will skip it until a price is available.")
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", _pick("fal-ai/text-only"))
+    fit = client.put(route, json=_pick("fal-ai/text-only")).json()
+    assert fit["unchanged"] is True and fit["incompatible"] is None
+    assert fit["warning"] == ("This saved choice has no verified price. "
+                              "Unattended runs will skip it until a price is available.")
+    assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/text-only"

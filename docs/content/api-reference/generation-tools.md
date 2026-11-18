@@ -226,13 +226,18 @@ Like remembering, it is stored only after a server-side quote priced it, with
 nothing submitted: a pick that is unavailable or has no verified price is a `409`
 saying why, and the job keeps the choice it had. Saving the job again with the
 exact pin it already has is not a new pin: it stays, with `unchanged: true` and
-the warning, even if its price has since become unknown. An optional `operation`
+a warning. The warning says unattended runs will skip it only when they would (no
+verified price, or unavailable). A pin stored before the operation check that would
+now be refused as a new pin (its `incompatible` reason) is kept and said to be
+refused only as a new pin, since runs still merge its saved options. An optional `operation`
 query parameter (default: the kind's text operation) names what the pick is for;
 a fal model whose inputs do not fit it, or the text operation that runs pinned
 picks, is a `422` naming the reason, and nothing is pinned. The response adds the save-time
 `price`, `priced`, `quote_error`, `unattended_skip_reason` and `warning`.
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
-protection as preferences. Job choices are account-scoped preferences, separate
+protection as preferences. The generic `/api/v1/preferences/{key}` route refuses
+(`403`) writes to remembered picks, favourites and job pins (`generation.choice.*`,
+`generation.favourite.*`, `generation.job.*`), so none skips these checks. Job choices are account-scoped preferences, separate
 from favourites and remembered picks. A run session's stored `automation_id`
 binds these choices in the production RunContext; tool arguments cannot invent
 a job binding. Each kind uses its job choice first, then its remembered choice.
@@ -265,7 +270,10 @@ background, delegated, hidden and voice sessions) cannot save their own choices,
 even with `confirm: true`. Discovery callers default to read-only.
 
 An optional `job_id` targets an existing automation instead of the remembered pick.
-A job choice must pin account, worker and model. Read/remember/forget use the same
+A job choice must pin account, worker and model. A job pin goes through the same
+writer as `PUT .../jobs/{automation_id}/choices/{kind}`: an unfit or unpriced new pin
+is refused (`success: false` with the reason) and nothing is written; the pin the job
+already has is kept with `unchanged: true` and the same warning in `message`. Read/remember/forget use the same
 store as the HTTP APIs and the production run context; favourites remain separate.
 Every generation call re-reads the stored choices, so a write takes effect on the
 next call, including later turns of a Claude session whose tool server lives as long
