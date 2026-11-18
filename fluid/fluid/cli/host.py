@@ -541,6 +541,11 @@ class CliHost:
         finally:
             if worker.launch is not None:
                 worker.launch.finish()
+        if worker.status == "cancelled":
+            # cancel() publishes the one terminal outcome; a launcher it
+            # killed before the acknowledgement is not also a failure.
+            worker.summary = _monitor_summary(worker, code, cancelled=True)
+            return
         if worker.launch is not None and not worker.launch.finish():
             # No acknowledgement: the launcher could not confine the command,
             # which never ran (whatever it exited with).
@@ -548,9 +553,6 @@ class CliHost:
             return
         if worker.launch is not None and worker.launch.exec_error:
             await self._report(worker, "failed", worker.launch.exec_failed(worker.output()))
-            return
-        if worker.status == "cancelled":
-            worker.summary = _monitor_summary(worker, code, cancelled=True)
             return
         status = "finished" if code == 0 else "failed"
         await self._report(worker, status, _monitor_summary(worker, code))

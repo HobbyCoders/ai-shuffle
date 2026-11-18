@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -152,6 +153,20 @@ def test_profile_is_off_by_default():
     assert config.sandbox.mode == "off"
     assert isolation.policy_from_config(config.sandbox, "/") is None
     assert isolation.policy_of(ToolCtx()) is None
+
+
+def test_fluid_config_output_is_unchanged_when_the_profile_is_off():
+    # Round 4 P1: `fluid config` prints to_dict(). With no [sandbox] section
+    # (or mode = "off") the profile adds nothing to it, so the output is what
+    # it was before the profile existed; turned on, it adds exactly one key.
+    import json
+
+    off = HarnessConfig.from_dict({}).to_dict()
+    assert "sandbox" not in off and "sandbox" not in json.dumps(off)
+    assert HarnessConfig.from_dict({"sandbox": {"mode": "off"}}).to_dict() == off
+    assert HarnessConfig.from_dict(json.loads(json.dumps(off))).sandbox == SandboxConfig()
+    on = HarnessConfig.from_dict({"sandbox": {"mode": "isolated", "network": True}}).to_dict()
+    assert on.pop("sandbox")["network"] is True and on == off
 
 
 async def test_bash_spawn_is_unchanged_when_off(tmp_path, monkeypatch):
@@ -485,6 +500,77 @@ class _FakeLauncher:
 # S1: nothing that runs before confinement may be writable by a confined command.
 
 
+def _python_with_linked_stdlib(tmp_path, ctypes_target: str) -> str:
+    """A copy of the launcher's interpreter whose stdlib is per-entry links to
+    the real one, except ``ctypes`` (which the launcher imports before it
+    confines itself), linked to ``ctypes_target``. The real stdlib directory
+    and ``_ctypes`` stay where they are."""
+    import shutil
+    import sysconfig
+
+    stdlib = sysconfig.get_path("stdlib")
+    libdir = os.path.dirname(stdlib)
+    prefix = tmp_path / "prefix"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "lib").mkdir()
+    for entry in os.listdir(libdir):  # libpython, for an $ORIGIN/../lib rpath
+        if entry != os.path.basename(stdlib):
+            (prefix / "lib" / entry).symlink_to(os.path.join(libdir, entry))
+    linked = prefix / "lib" / os.path.basename(stdlib)
+    linked.mkdir()
+    for entry in os.listdir(stdlib):
+        if entry != "ctypes":
+            (linked / entry).symlink_to(os.path.join(stdlib, entry))
+    (linked / "ctypes").symlink_to(ctypes_target)
+    python = prefix / "bin" / os.path.basename(isolation.LAUNCH_PYTHON)
+    shutil.copy2(isolation.LAUNCH_PYTHON, python)
+    found = subprocess.run([str(python), "-I", "-S", "-c", "import ctypes; print(ctypes.__file__)"],
+                           env={}, capture_output=True, text=True, timeout=60)
+    assert found.stdout.startswith(str(linked)), (found.stdout, found.stderr)
+    return str(python)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the startup probe reads /proc/self/maps")
+def test_a_stdlib_package_that_resolves_into_the_workspace_is_refused(tmp_path, monkeypatch):
+    # Round 4 P2: the stdlib directory, _ctypes and the interpreter are all
+    # outside the workspace, but the ctypes package the launcher imports
+    # before confinement resolves into it. Only the launcher's dry run, which
+    # reports what it actually loaded, can see that.
+    import shutil
+    import sysconfig
+
+    real_ctypes = os.path.join(sysconfig.get_path("stdlib"), "ctypes")
+    planted = tmp_path / "ws" / "ctypes"
+    shutil.copytree(real_ctypes, planted, ignore=shutil.ignore_patterns("__pycache__"))
+    control = tmp_path / "control"
+    control.mkdir()
+    # Control: the same layout with ctypes linked to the real package passes.
+    monkeypatch.setattr(isolation, "LAUNCH_PYTHON", _python_with_linked_stdlib(control, real_ctypes))
+    assert _policy(tmp_path, backend_impl=_ProbedLandlock()).unavailable_reason() is None
+    monkeypatch.setattr(isolation, "LAUNCH_PYTHON", _python_with_linked_stdlib(tmp_path, str(planted)))
+    policy = _policy(tmp_path, backend_impl=_ProbedLandlock())
+    reason = policy.unavailable_reason()
+    assert reason and "loads" in reason and f"{policy.workspace}/ctypes/" in reason, reason
+    with pytest.raises(isolation.IsolationUnavailable, match="before it is confined"):
+        policy.launch(["true"], None, {})
+
+
+def test_the_startup_probe_reports_what_the_launcher_loads_and_fails_closed(tmp_path, monkeypatch):
+    # The dry run sees the modules the launcher imports (and, on Linux, the
+    # interpreter's mapped files); a probe that cannot run refuses the profile.
+    import ctypes
+
+    workspace = str(tmp_path)
+    files, search = isolation.startup_files((workspace,))
+    assert os.path.realpath(ctypes.__file__) in files and search
+    if sys.platform.startswith("linux"):
+        assert isolation.LAUNCH_PYTHON in files
+    monkeypatch.setattr(isolation, "_probed", {})
+    monkeypatch.setattr(isolation, "LAUNCH_PYTHON", str(tmp_path / "no-python"))
+    with pytest.raises(isolation._Unverifiable, match="probe"):
+        isolation.startup_files((workspace,))
+
+
 def test_launcher_runs_from_a_private_copy_outside_every_root(tmp_path):
     # The workspace is the very directory that holds isolation.py (a source
     # checkout or editable install opened as the project).
@@ -603,6 +689,22 @@ def test_seccomp_program_blocks_io_uring_in_both_network_modes(network):
             assert verdicts.get(nr) == isolation.SECCOMP_RET_ERRNO | 13, (arch, nr, network)
 
 
+def test_writable_roots_never_get_device_creation_or_ioctl_rights():
+    # Round 4 P3: the device list is the only way to a device the profile
+    # grants; a writable root cannot make new nodes or ioctl existing ones.
+    banned = isolation.FS_MAKE_CHAR | isolation.FS_MAKE_BLOCK | isolation.FS_IOCTL_DEV
+    for abi in range(isolation.MIN_ABI, isolation.MAX_ABI + 1):
+        handled = isolation.fs_rights(abi)
+        rules = isolation.ruleset_rules(["/w"], ["/r"], handled)
+        writable = [access for path, access, kind in rules if kind == "rw"]
+        assert writable and not any(access & banned for access in writable), abi
+        assert all(access & isolation.FS_MAKE_REG and access & isolation.FS_MAKE_FIFO
+                   for access in writable)
+        # Handled but not granted: the kernel denies them, not just omits them.
+        assert handled & isolation.FS_MAKE_CHAR and handled & isolation.FS_MAKE_BLOCK
+        assert not any(access & banned for path, access, kind in rules if kind == "ro")
+
+
 def test_newer_landlock_abis_are_handled_or_refused():
     assert isolation.fs_rights(9) & isolation.FS_RESOLVE_UNIX
     assert not isolation.fs_rights(8) & isolation.FS_RESOLVE_UNIX
@@ -662,12 +764,12 @@ async def test_bash_is_not_run_when_the_launcher_copy_is_unreadable(tmp_path, mo
     holder = tempfile.mkdtemp(prefix="fluid-test-launcher-")
     copy = os.path.join(holder, "fluid_isolation_launcher.py")
     shutil.copyfile(isolation.SCRIPT, copy)
-    os.chmod(copy, 0)
     monkeypatch.setattr(isolation, "_launcher_copy", copy)
     marker = tmp_path / "ran"
     try:
         policy = _policy(tmp_path, backend_impl=_ProbedLandlock())
-        assert policy.unavailable_reason() is None
+        assert policy.unavailable_reason() is None  # the startup probe ran and is cached
+        os.chmod(copy, 0)
         out = await _bash(policy, f"touch {marker}")
     finally:
         os.chmod(copy, 0o600)
@@ -699,9 +801,69 @@ async def test_monitor_reports_whether_the_launch_was_confirmed(tmp_path, monkey
     assert "could not be started after confinement" in exec_failed, exec_failed
 
 
+async def test_cancelling_monitor_before_the_ack_reports_only_cancelled(tmp_path, monkeypatch):
+    # Round 4 P5: cancel() kills a launcher still short of its ack; the
+    # supervisor must not also publish "failed: not run" for the same task.
+    from fluid.cli.host import CliHost
+
+    reports = []
+    host = CliHost(config=None, store=None)
+
+    async def record(worker, status, summary):
+        reports.append((worker.task_id, status))
+        worker.status = status
+
+    monkeypatch.setattr(host, "_report", record)
+    await host.monitor_spawn({"command": "echo never"},
+                             _ctx(_policy(tmp_path, backend_impl=_FakeLauncher(delay=60))))
+    worker = list(host.workers.values())[-1]
+    await asyncio.sleep(1)  # the launcher has the handoff and sits before its ack
+    assert worker.process.returncode is None and worker.launch._report is None
+    assert await host.cancel(worker.task_id)
+    await asyncio.sleep(0)
+    assert reports == [(worker.task_id, "cancelled")], reports
+
+
 async def test_bash_reports_a_launcher_refusal_as_not_run(tmp_path):
     out = await _bash(_policy(tmp_path, backend_impl=_RefusingLauncher()), "echo hi")
     assert out.is_error and out.text.startswith("Not run") and "restrict_self" in out.text
+
+
+_ENV_DIGEST = ("import hashlib, os; names = sorted(n for n in os.environ if n.startswith('FLUID_BIG_'));"
+               "print(len(names), hashlib.sha256(''.join(n + os.environ[n] for n in names)"
+               ".encode()).hexdigest())")
+
+
+def _big_env() -> dict[str, str]:
+    # About 1.2 MB, several times the default socket buffer (208 KiB), in
+    # values under the kernel's 128 KiB per-string limit for execve.
+    return {f"FLUID_BIG_{i}": f"{i:03d}" + "x" * 30_000 for i in range(40)}
+
+
+def _digest(env: dict[str, str]) -> str:
+    import hashlib
+
+    names = sorted(env)
+    return f"{len(names)} " + hashlib.sha256("".join(n + env[n] for n in names).encode()).hexdigest()
+
+
+async def test_an_environment_larger_than_the_socket_buffer_round_trips(tmp_path):
+    # Round 4 P6: the real launcher main() (Landlock and seccomp stubbed)
+    # reads a block that cannot fit in the socket at once.
+    big = _big_env()
+    launch = _policy(tmp_path, backend_impl=_FakeLauncher()).launch(
+        [sys.executable, "-I", "-S", "-c", _ENV_DIGEST], None, {}, overlay=big)
+    code, out, acked = await _run_launch(launch)
+    assert code == 0 and acked and _digest(big) in out, out
+
+
+@needs_landlock
+async def test_an_environment_larger_than_the_socket_buffer_reaches_a_confined_command(tmp_path):
+    big = _big_env()
+    launch = _policy(tmp_path).launch(
+        [sys.executable, "-I", "-S", "-c", _ENV_DIGEST], None, {}, overlay=big)
+    code, out, acked = await _run_launch(launch)
+    assert code == 0 and acked and _digest(big) in out, out
 
 
 def test_launch_builds_the_launcher_command(tmp_path):
@@ -868,6 +1030,39 @@ def test_fluids_own_git_probes_skip_the_profiles_writable_roots(tmp_path):
     assert not marker.exists() and environment.git_probes_skipped(str(repo / "sub"))
     assert environment.git_context_parts(str(repo)) is None and not marker.exists()
     assert "Git repository" not in text or "yes" not in text.split("Git repository", 1)[1][:20]
+
+
+@pytest.mark.skipif(not (shutil.which("rg") and shutil.which("git")), reason="needs rg and git")
+async def test_glob_spawns_no_git_in_the_profiles_writable_roots(tmp_path, monkeypatch):
+    # Round 4 P4: Glob's link probe lists files with `git ls-files`, which
+    # reads the repository's config, unconfined. In a registered root it uses
+    # the filesystem walk instead, and still finds the symlinked file.
+    from fluid.context import environment
+    from fluid.tools.builtins import _util
+    from fluid.tools.builtins.glob import handler as glob_handler
+
+    spawned: list[str] = []
+    real_popen = _util.subprocess.Popen
+
+    def spy(argv, *args, **kwargs):
+        spawned.append(os.path.basename(argv[0]))
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(_util.subprocess, "Popen", spy)
+    for name in ("plain", "ws"):
+        repo = tmp_path / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        (repo / "real.txt").write_text("x")
+        (repo / "link.txt").symlink_to(repo / "real.txt")
+    # Unregistered: the probe runs git (this is what the spy can see).
+    out = await glob_handler({"pattern": "*.txt"}, ToolCtx(cwd=str(tmp_path / "plain")))
+    assert "link.txt" in out.text and "git" in spawned
+    spawned.clear()
+    environment.skip_git_probes(str(tmp_path / "ws"))
+    out = await glob_handler({"pattern": "*.txt"}, ToolCtx(cwd=str(tmp_path / "ws")))
+    assert not out.is_error and "link.txt" in out.text and "real.txt" in out.text
+    assert spawned and "git" not in spawned  # rg ran; git did not
 
 
 @pytest.mark.skipif(not LINUX, reason="the launcher is Linux only")
@@ -1167,25 +1362,37 @@ def test_the_launcher_refuses_a_file_as_a_writable_root(tmp_path):
 
 @needs_landlock
 async def test_a_pending_handoff_is_not_readable_by_another_confined_command(tmp_path):
-    # P3: the environment travels over the launcher's stdin, so even with the
-    # temporary directory readable there is nothing on disk to find, and the
-    # command's own stdin is /dev/null rather than the handoff socket.
+    # P3, round 4 P6: the first launcher is held (behind a FIFO) before it
+    # reads its standard input, with the environment block already sent into
+    # the socket. A confined command searching the readable temporary
+    # directory and every process's environ and command line finds nothing,
+    # and its own stdin is /dev/null rather than a handoff socket.
     import tempfile
 
     canary = "canary-2xyz"
     policy = _policy(tmp_path, readable_roots=(tempfile.gettempdir(),))
-    first = policy.launch(["sleep", "5"], None, {}, overlay={"FLUID_HANDOFF_CANARY": canary})
-    running = asyncio.create_task(_run_launch(first))
-    await asyncio.sleep(1)
+    first = policy.launch(["true"], None, {}, overlay={"FLUID_HANDOFF_CANARY": canary})
+    gate = tmp_path / "gate"
+    os.mkfifo(gate)
+    held = await asyncio.create_subprocess_exec(
+        "sh", "-c", 'read go < "$0"; exec "$@"', str(gate), *first.argv,
+        env=first.env, stdin=first.stdin,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    first.started()
     try:
+        await asyncio.wait_for(first._sender, 10)  # the block sits in the socket
+        assert held.returncode is None
         out = await _bash(policy, (
-            f"if grep -rqs \"canary-$((1+1))xyz\" {tempfile.gettempdir()} /proc/[0-9]*/environ; "
-            "then echo FOUND; else echo clean; fi; cat; readlink /proc/self/fd/0"))
+            f"if grep -rqs \"canary-$((1+1))xyz\" {tempfile.gettempdir()} /proc/[0-9]*/environ "
+            "/proc/[0-9]*/cmdline; then echo FOUND; else echo clean; fi; cat; "
+            "readlink /proc/self/fd/0"))
     finally:
-        code, _out, acked = await running
+        await asyncio.to_thread(gate.write_text, "go\n")
+        output, _ = await asyncio.wait_for(held.communicate(), 60)
     assert "clean" in out.text and "FOUND" not in out.text, out.text
     assert "/dev/null" in out.text, out.text
-    assert code == 0 and acked
+    # Released, the held launcher consumed the very block that was pending.
+    assert held.returncode == 0 and first.finish(), output
 
 
 @needs_landlock
@@ -1202,6 +1409,28 @@ async def test_io_uring_is_blocked_in_a_confined_command_with_the_network_on(tmp
             "print('io_uring', 'blocked' if fd < 0 and err == 13 else f'OPEN fd={fd} errno={err}')\n")
     out = await _bash(policy, f"{sys.executable} -I -S {script}")
     assert "io_uring blocked" in out.text, out.text
+
+
+@needs_landlock
+async def test_a_confined_command_cannot_make_device_nodes_in_the_workspace(tmp_path):
+    # Round 4 P3 end to end. Landlock's mknod hook runs before the kernel's
+    # CAP_MKNOD check, so its EACCES (rather than EPERM, or success for an
+    # overlayfs whiteout 0:0) shows the profile, not a missing capability,
+    # refused it. A FIFO is not a device and is still allowed.
+    policy = _policy(tmp_path)
+    script = os.path.join(policy.workspace, "nodes.py")
+    with open(script, "w") as handle:
+        handle.write(
+            "import errno, os, stat\n"
+            "for name, mode in (('chr', stat.S_IFCHR), ('blk', stat.S_IFBLK), ('fifo', stat.S_IFIFO)):\n"
+            "    try:\n"
+            "        os.mknod(name, mode | 0o600, os.makedev(0, 0))\n"
+            "        print(name, 'made')\n"
+            "    except OSError as exc:\n"
+            "        print(name, errno.errorcode[exc.errno])\n")
+    out = await _bash(policy, f"cd {policy.workspace} && {sys.executable} -I -S {script}")
+    assert "chr EACCES" in out.text and "blk EACCES" in out.text, out.text
+    assert "fifo made" in out.text, out.text
 
 
 @needs_landlock

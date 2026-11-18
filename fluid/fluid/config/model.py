@@ -657,7 +657,7 @@ class HarnessConfig:
 
     def to_dict(self) -> dict[str, Any]:
         """Round-trippable plain-dict view (used by ``fluid config``)."""
-        return {
+        out = {
             "default_provider": self.default_provider,
             "default_model": self.default_model,
             "model_override": self.model_override,
@@ -704,7 +704,6 @@ class HarnessConfig:
                 "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,
                 "disallowed": list(self.tools.disallowed),
             },
-            "sandbox": self.sandbox.to_dict(),
             "context": {
                 "enabled": self.context.enabled,
                 "trim_only": self.context.trim_only,
@@ -767,3 +766,8 @@ class HarnessConfig:
             },
             "mcp": {name: dict(cfg) for name, cfg in self.mcp.items()},
         }
+        # The isolated profile is opt-in: with it off the view is exactly
+        # what it was before the profile existed.
+        if self.sandbox.mode != "off":
+            out["sandbox"] = self.sandbox.to_dict()
+        return out

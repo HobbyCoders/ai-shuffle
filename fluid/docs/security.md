@@ -184,7 +184,7 @@ system or environment layer or the host sets.
 | Code mode (`run_python`) | refused when the session is built: the kernel is not confined, and a cell is model-written code. Turn `code_mode` off to use the profile |
 | `delegated_claude` provider | refused when the session is built: the delegated CLI runs its own tools |
 | Slash-command `` !`cmd` `` expansion | not run (the text is left as written) |
-| Fluid's own git probes (the prompt's git status and recent commits, the worktree setup receipt) | not run in the workspace or a writable root: `git status` runs programs that `.git/config` names (`core.fsmonitor`, for one), and a confined command can write that file. The prompt then has no git block for the workspace. A second session in the same process inherits the skip for those directories |
+| Fluid's own git probes (the prompt's git status and recent commits, the worktree setup receipt, Glob's `git ls-files` listing of symlinked files) | not run in the workspace or a writable root (Glob falls back to walking the directories): `git status` runs programs that `.git/config` names (`core.fsmonitor`, for one), and a confined command can write that file. The prompt then has no git block for the workspace. A second session in the same process inherits the skip for those directories |
 | `[[hooks]]` commands | **not confined**: they run as on main, with the user's access |
 | Task and Swarm workers | **not a confined spawner of their own**: a worker is built from the same config, so its Bash and Monitor are confined when `[sandbox]` in the config turns the profile on. A policy a host put only on the parent's context does not reach workers, whose commands then run unconfined |
 | MCP stdio servers, Grep's ripgrep, provider sign-in helpers, the ACP leg (`fluid.engine.acp`), the app's own host-side spawners | **not confined** |
@@ -216,6 +216,17 @@ is a link into a writable root is caught, and a layout it cannot verify (an
 interpreter that is not a regular file, a missing standard library) is
 refused too.
 
+Directory checks cannot see one file inside the standard library that is a
+link into the workspace. So before a policy is used (once per interpreter and
+set of writable roots), Fluid runs the launcher in a dry mode, under the same
+interpreter, flags and empty environment: it loads what it loads before
+confining itself, reports every file mapped into the process
+(`/proc/self/maps`), every imported module's file and cached bytecode, and its
+module search path, then exits without confining anything. If any of those,
+resolved to its real path, is inside a writable root, the profile is refused
+and the message names the file. A dry run that cannot run or report also
+refuses the profile.
+
 **The handoff, and what the acknowledgement proves.** Nothing about a launch
 is written to disk. The launcher's standard input is one end of a Unix
 socket pair (descriptors 0 to 2 are the only ones that survive the app's
@@ -226,9 +237,11 @@ Docker agent runner):
    socket on a close-on-exec descriptor, and puts `/dev/null` on standard
    input, which is what the command gets (Bash and Monitor give commands no
    standard input either way).
-2. The launcher applies Landlock and seccomp. Only when both succeeded does
-   it write one acknowledgement byte on the socket. The byte proves that
-   confinement is in place; `exec` has not been attempted yet.
+2. The launcher applies Landlock and seccomp and closes every other
+   descriptor. Only when all of that succeeded does it write one
+   acknowledgement byte on the socket. The byte proves that confinement is in
+   place; `exec` has not been attempted yet, and nothing but the `exec` (with
+   its `PATH` search) is left.
 3. It `exec`s the command with that environment. Success closes the socket,
    so the command never holds it. If the `exec` fails (a shell or program
    that is missing, or outside the readable roots), the launcher writes a
@@ -244,9 +257,12 @@ exit status:
   launcher's message.
 - **Acknowledged, then `exec` failed: ran, and could not start the command.**
   Reported as a failed run with exit code 127 and the reason.
-- **Acknowledged, `exec` went ahead: ran.** Whatever the command prints,
+- **Acknowledged, no failure report: ran.** Whatever the command prints,
   including text that looks like the launcher's refusal, it is reported as a
-  run with its own exit status.
+  run with its own exit status. Strictly, this confirms confinement, not that
+  the command started: a launcher killed or timed out between the
+  acknowledgement and the `exec` leaves exactly the same report. Either way
+  nothing ran unconfined.
 
 **Guaranteed on Linux with Landlock (kernel 5.13 or newer, ABI up to 12), for
 Bash and Monitor commands:**
@@ -254,12 +270,20 @@ Bash and Monitor commands:**
 - File contents: data is written, created, removed, renamed or truncated only
   under the session's working directory, `writable_roots` and a private
   per-session home and temp directory (`HOME` and `TMPDIR` point there).
-- Device nodes: only `/dev/null`, `/dev/full` and `/dev/tty` (read and write)
-  and `/dev/zero`, `/dev/random` and `/dev/urandom` (read) can be opened.
-  `/dev/shm` and every other node are not reachable, and device ioctls are
-  denied from ABI 5. `/dev` and anything under it, in any spelling (`//dev`
-  included), cannot be added as a writable or readable root: config loading
-  fails, and the policy refuses it.
+- Device nodes under `/dev`: only `/dev/null`, `/dev/full` and `/dev/tty`
+  (read and write) and `/dev/zero`, `/dev/random` and `/dev/urandom` (read)
+  can be opened. `/dev/shm` and every other node there are not reachable, and
+  device ioctls on them are denied from ABI 5. `/dev` and anything under it,
+  in any spelling (`//dev` included), cannot be added as a writable or
+  readable root: config loading fails, and the policy refuses it.
+- Device nodes in writable roots: no rule ever grants creating a character
+  or block device or a device ioctl there (Landlock refuses `mknod` of a
+  device with `EACCES`, even for a process holding `CAP_MKNOD`, and device
+  ioctls from ABI 5). This is narrower than "only the list above": a device
+  node that **already exists** inside a writable or readable root (a copied
+  root filesystem in the workspace, say) can still be opened for reading and
+  writing, subject to its normal file permissions. Do not point a root at a
+  tree that holds device nodes you would not hand the model.
 - Reads and execution are limited to the system directories (`/usr`, `/bin`,
   `/lib*`, `/etc`, `/opt`, `/proc`, `/sys`), the Python installation,
   `readable_roots` and the writable roots. The rest of the home directory,

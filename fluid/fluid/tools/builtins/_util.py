@@ -304,7 +304,11 @@ class _LinkProbe:
         self.root = root
         self.procs: list[subprocess.Popen[bytes]] = []
         git = shutil.which("git")
-        if git is None:
+        # Inside an isolated profile's writable roots a confined command can
+        # rewrite the repository's config, and this git runs unconfined.
+        from fluid.context.environment import git_probes_skipped
+
+        if git is None or git_probes_skipped(root):
             return
         try:
             for cmd in _GIT_CMDS:

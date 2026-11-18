@@ -21,15 +21,24 @@ Docker agent runner, which closes the rest); nothing touches the disk:
    project controls) as a length-prefixed block; the launcher reads exactly
    that many bytes, keeps the socket on a close-on-exec descriptor and puts
    ``/dev/null`` on standard input, which is what the command gets.
-2. The launcher applies Landlock and seccomp, then writes :data:`ACK`. The
-   acknowledgement proves confinement is in place; ``exec`` has not been
-   attempted yet.
+2. The launcher applies Landlock and seccomp, closes every other
+   descriptor, then writes :data:`ACK`. The acknowledgement proves
+   confinement is in place; ``exec`` has not been attempted yet, and nothing
+   but ``execve`` (with its ``PATH`` search) is left to do.
 3. It calls ``execve`` on the command with that environment. Success closes the
    socket (close-on-exec); a failed ``exec`` writes :data:`EXEC_FAILED` and
    the reason first.
 
 A spawn site that finds no acknowledgement knows the command never ran,
-whatever the process printed or exited with (:class:`Launch`).
+whatever the process printed or exited with (:class:`Launch`). An
+acknowledgement with no failure report confirms confinement, not that the
+command started: a launcher killed between the two looks the same.
+
+Before a policy is used, the launcher also runs once as ``COPY --probe``: it
+loads what it loads before confining itself, then reports every file mapped
+into it and every module it imported, and exits without confining
+anything. A policy whose writable roots hold any of them (by real path) is
+refused (:func:`boot_problem`).
 
 The policy is an allowlist:
 
@@ -153,6 +162,22 @@ def fs_rights(abi: int) -> int:
     return rights
 
 
+#: Rights a writable root never gets, whatever the ABI: creating device
+#: nodes and device ioctls. A device node that already exists inside a
+#: writable root can still be opened, subject to its file permissions.
+_NOT_WRITABLE = FS_MAKE_CHAR | FS_MAKE_BLOCK | FS_IOCTL_DEV
+
+
+def ruleset_rules(rw, ro, handled: int) -> list[tuple[str, int, str]]:
+    """``(path, access, kind)`` for every rule the launcher adds: ``"rw"``
+    for the writable roots (no device creation or ioctls), ``"ro"`` for
+    the readable ones and ``"dev"`` for the fixed device list."""
+    rules = [(p, handled & ~_NOT_WRITABLE, "rw") for p in rw]
+    rules += [(p, _READ & handled, "ro") for p in ro]
+    rules += [(p, access & handled, "dev") for p, access in DEVICE_RULES]
+    return rules
+
+
 def net_rights(abi: int, network: bool) -> int:
     """The network rights the ruleset handles (denies): all of them when the
     network is off, none when it is on."""
@@ -194,6 +219,40 @@ SECCOMP_ARCHES = {
                 "socket": 198, "socketpair": 199, "truncate": 45, "io_uring": (425, 426, 427),
                 "metadata": (54, 55, 5, 6, 7, 14, 15, 16, 463, 466)},
 }
+
+
+def _preload() -> None:
+    """Load everything the launcher uses before it confines itself, so the
+    ``--probe`` dry run sees what a real launch loads."""
+    import ctypes
+    import errno  # noqa: F401
+    import stat  # noqa: F401
+
+    ctypes.CDLL(None, use_errno=True)
+    machine()
+
+
+def probe_report() -> bytes:
+    """The ``--probe`` dry run's report: ``F<path>`` for each file mapped into
+    this process or imported as a module, ``P<path>`` for each ``sys.path``
+    entry, NUL-separated. Raises OSError if ``/proc/self/maps`` (Linux) is
+    unreadable, so a layout it cannot see is refused."""
+    _preload()
+    files: list[str] = []
+    for module in list(sys.modules.values()):
+        for attr in ("__file__", "__cached__"):
+            path = getattr(module, attr, None)
+            if isinstance(path, str) and path:
+                files.append(os.path.abspath(path))
+    if sys.platform.startswith("linux"):
+        with open("/proc/self/maps", "rb") as handle:
+            for line in handle.read().decode("utf-8", "surrogateescape").splitlines():
+                parts = line.split(None, 5)
+                if len(parts) == 6 and parts[5].startswith("/"):
+                    files.append(parts[5].removesuffix(" (deleted)"))
+    records = [f"F{path}" for path in dict.fromkeys(files)]
+    records += [f"P{os.path.abspath(path)}" for path in sys.path if path]
+    return "\0".join(records).encode("utf-8", "surrogateescape")
 
 
 def machine() -> str | None:
@@ -510,19 +569,68 @@ def boot_paths() -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(dict.fromkeys(trees)), tuple(files)
 
 
+#: ``(interpreter, launcher copy, writable roots)`` -> the probe's
+#: ``(files, sys.path)``, each path both as reported and resolved.
+_probed: dict[tuple, tuple[tuple[str, ...], tuple[str, ...]]] = {}
+
+
+def startup_files(writable: tuple[str, ...]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """What the launcher actually loads before it confines itself, from one
+    ``--probe`` dry run under the launcher's own interpreter, flags and
+    environment (cached per interpreter and writable-root set). Raises
+    :class:`_Unverifiable` if the probe does not report."""
+    import subprocess
+
+    key = (LAUNCH_PYTHON, launcher_script(), tuple(writable))
+    if key not in _probed:
+        try:
+            proc = subprocess.run(
+                [LAUNCH_PYTHON, "-I", "-S", launcher_script(), "--probe"],
+                env=dict(LAUNCHER_ENV), stdin=subprocess.DEVNULL, capture_output=True,
+                cwd=writable[0] if writable and os.path.isdir(writable[0]) else "/",
+                timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise _Unverifiable(f"the launcher's startup probe could not run ({exc})") from exc
+        if proc.returncode != 0 or not proc.stdout:
+            detail = proc.stderr.decode("utf-8", "replace").strip()[-300:]
+            raise _Unverifiable(f"the launcher's startup probe failed (exit {proc.returncode}: {detail})")
+        files: list[str] = []
+        paths: list[str] = []
+        for record in proc.stdout.decode("utf-8", "surrogateescape").split("\0"):
+            kind, path = record[:1], record[1:]
+            if kind in ("F", "P") and os.path.isabs(path):
+                (files if kind == "F" else paths).extend((path, os.path.realpath(path)))
+        if not files:
+            raise _Unverifiable("the launcher's startup probe reported no files")
+        _probed[key] = (tuple(dict.fromkeys(files)), tuple(dict.fromkeys(paths)))
+    return _probed[key]
+
+
 def boot_problem(writable: tuple[str, ...]) -> str | None:
     """Why ``writable`` would let a confined command change what the next
     launch runs before confinement, or None. ``writable`` holds real paths;
-    the trees are compared both as named and by their real targets."""
+    the trees are compared both as named and by their real targets, and
+    every file the launcher was seen to load (:func:`startup_files`) by its
+    real path."""
     if not LAUNCH_PYTHON:
         return "there is no Python interpreter to run the isolation launcher with"
     if not LAUNCHER_SOURCE:
         return "the isolation launcher's source could not be read"
     try:
         trees, files = boot_paths()
+        loaded, search = startup_files(writable)
     except _Unverifiable as exc:
         return f"what the isolation launcher loads before it is confined cannot be verified: {exc}"
     for root in writable:
+        for path in loaded:
+            if _contains(root, path):
+                return (f"{root} cannot be writable: the isolation launcher loads {path} before "
+                        "it is confined, so a confined command could change what the next one "
+                        "runs unconfined")
+        for tree in search:
+            if _overlaps(root, tree):
+                return (f"{root} cannot be writable: the isolation launcher imports from {tree} "
+                        "before it is confined")
         for tree in trees:
             if _overlaps(root, tree):
                 return (f"{root} cannot be writable: the isolation launcher reads {tree} before it "
@@ -1050,9 +1158,7 @@ def apply_landlock(rw: list[str], ro: list[str], network: bool, protect: list[st
     ruleset = _check(libc.syscall(ctypes.c_long(SYS_LANDLOCK_CREATE_RULESET), ctypes.byref(attr),
                                   ctypes.c_long(size), ctypes.c_long(0)), "landlock_create_ruleset")
     try:
-        rules = [(p, handled, False) for p in rw] + [(p, _READ, False) for p in ro]
-        rules += [(p, access, True) for p, access in DEVICE_RULES]
-        for path, access, device in rules:
+        for path, access, kind in ruleset_rules(rw, ro, handled):
             try:
                 fd = os.open(path, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW)
             except FileNotFoundError:
@@ -1061,12 +1167,12 @@ def apply_landlock(rw: list[str], ro: list[str], network: bool, protect: list[st
                 raise Refused(f"could not open {path}: {exc.strerror}") from exc
             try:
                 mode = os.fstat(fd).st_mode
-                if device:
+                if kind == "dev":
                     if not stat.S_ISCHR(mode):
                         continue  # not the device node it should be: grant nothing
                 elif stat.S_ISLNK(mode):  # O_NOFOLLOW opened the link itself
                     raise Refused(f"{path} is a symbolic link; a granted root must not be a link")
-                elif access == handled and not stat.S_ISDIR(mode):
+                elif kind == "rw" and not stat.S_ISDIR(mode):
                     raise Refused(f"{path} is not a directory; a writable root must be one")
                 else:
                     problem = opened_problem(fd, path, locations, around)
@@ -1117,7 +1223,18 @@ def apply_seccomp(arch: str | None, *, block_network: bool, block_truncate: bool
 def main(args: list[str] | None = None) -> int:
     args = sys.argv[1:] if args is None else args
     report = -1
+    if args == ["--probe"]:
+        # The dry run: what the launcher loads before confinement, then exit
+        # without confining (see boot_problem).
+        try:
+            sys.stdout.buffer.write(probe_report())
+            sys.stdout.flush()
+        except Exception as exc:  # noqa: BLE001 - reported, and refused upstream
+            sys.stderr.write(f"{REFUSAL_PREFIX}: probe failed: {exc}\n")
+            return REFUSED
+        return 0
     try:
+        _preload()
         if not sys.platform.startswith("linux"):
             raise Refused(f"no isolation backend for {sys.platform}")
         rw, ro, network, command, protect = _parse(args)
@@ -1134,16 +1251,17 @@ def main(args: list[str] | None = None) -> int:
         os.close(null)
         abi = apply_landlock(rw, ro, network, protect)
         apply_seccomp(machine(), block_network=not network, block_truncate=abi < 3)
-        # The positive acknowledgement: confined; exec not yet attempted.
-        if os.write(report, ACK) != len(ACK):
-            raise Refused("could not write the confinement acknowledgement")
         try:
             limit = os.sysconf("SC_OPEN_MAX")
         except (ValueError, OSError):
             limit = 65536
         os.closerange(3, report)
         os.closerange(report + 1, max(limit, report + 1))
-    except (Refused, OSError) as exc:
+        # The positive acknowledgement: confined, all setup done; only the
+        # exec is left. It does not prove the exec happened.
+        if os.write(report, ACK) != len(ACK):
+            raise Refused("could not write the confinement acknowledgement")
+    except Exception as exc:  # noqa: BLE001 - nothing may run unconfined after this
         sys.stderr.write(f"{REFUSAL_PREFIX}: {exc}\n")
         return REFUSED
     try:
