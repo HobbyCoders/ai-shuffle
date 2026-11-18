@@ -1379,33 +1379,10 @@
 
 	function readingFloorReserve(): number {
 		if (!containerRef || !tailSpacerRef || !shouldAutoScroll || windowShifting) return 0;
-		const proseEnd = rebaseFloorOnReflow(containerRef, tailSpacerRef);
+		const proseEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
 		// Dequeue and delivered user row are separate commits. Keep the read
 		// viewport available between them; subsequent content consumes it.
 		return Math.max(0, followedViewportEnd - proseEnd);
-	}
-
-	// Where the prose ended, and at which column width, when the floor was last
-	// captured or read. Width 0: not measured yet.
-	let floorProseEnd = 0;
-	let floorColumnWidth = 0;
-
-	/**
-	 * The prose end now. A floor kept across a column width change moves with the
-	 * reflowed prose: wider prose ends higher, and a floor left in the narrow
-	 * layout's coordinates would hold blank viewport above the tail controls.
-	 * Moving it by the prose end's change keeps the read gap; at the same width
-	 * only content changed, which consumes the floor instead.
-	 */
-	function rebaseFloorOnReflow(container: HTMLElement, spacer: HTMLElement): number {
-		const proseEnd = container.scrollTop + spacer.getBoundingClientRect().top - container.getBoundingClientRect().top;
-		const width = chatColumnRef?.clientWidth ?? 0;
-		if (followedViewportEnd > 0 && floorColumnWidth > 0 && width !== floorColumnWidth) {
-			followedViewportEnd = Math.max(0, followedViewportEnd + proseEnd - floorProseEnd);
-		}
-		floorProseEnd = proseEnd;
-		floorColumnWidth = width;
-		return proseEnd;
 	}
 
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
@@ -1513,7 +1490,7 @@
 			// window. Every mounted row is after it, so no prompt-first room is owed,
 			// but queued and error controls dock in this reserve and still need it;
 			// without them the queue grows up over the rows above it.
-			return Math.max(readingFloorReserve(), MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent());
+			return MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
 		}
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
@@ -2286,8 +2263,6 @@
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
 		if (resetFloor || !untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
 		const beforeTop = untrack(() => lastKnownScrollTop);
-		// Record the width this floor belongs to, rebasing one kept from another.
-		untrack(() => { if (containerRef && tailSpacerRef) rebaseFloorOnReflow(containerRef, tailSpacerRef); });
 		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
 		const sessionId = s.sessionId;
 		const version = untrack(() => windowShiftVersion);

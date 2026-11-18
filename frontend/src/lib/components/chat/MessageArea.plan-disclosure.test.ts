@@ -105,12 +105,11 @@ describe('passive reserve without a mounted latest prompt', () => {
   f.scope.transcript.latestUserTurnId = null as unknown as string;
   expect(f.owner.latestTurnTailNow()).toBe(24 + 135);
  });
- it('falls back to the minimum with no controls and keeps a larger reading floor', () => {
+ it('falls back to the bare minimum with no controls, as before', () => {
   const f = reserveFixture();
   document.getElementById('latest-user')!.remove();
-  expect(f.owner.latestTurnTailNow()).toBe(24);
   f.scope.readingFloorReserve = () => 300;
-  expect(f.owner.latestTurnTailNow()).toBe(300);
+  expect(f.owner.latestTurnTailNow()).toBe(24);
  });
 });
 
