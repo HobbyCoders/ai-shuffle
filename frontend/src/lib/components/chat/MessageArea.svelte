@@ -256,10 +256,6 @@
 	// banner readable; see queueSlotExtent), and the slot width the current
 	// offset was measured at.
 	let tailErrorBaselinePx = 0, tailErrorWidthPx = 0;
-	// The docked share the error-owned slot reserved last (placeErrorBanner); for
-	// a detached reader, the share the painted reserve holds and the scroll
-	// geometry it was read in.
-	let tailErrorDockedPx = 0, tailErrorPaintedDockedPx = 0, tailErrorDockedAt = '';
 	let tailQueueSlotPx = $state(0);
 	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
 	let handoffSlotPx = $state(0);
@@ -1380,10 +1376,11 @@
 		const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
 		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
 		// An error owns the slot's painted height, not its blank: it reserves only
-		// what is docked (none of an empty slot); placeErrorBanner sizes and lifts it.
+		// what is docked now (none of an empty slot); placeErrorBanner lifts it.
 		if (tailQueueSlotPx && !handoffSlotPx) {
 			const docked = box.height - blank;
-			return presentedTailError ? placeErrorBanner(box, docked) : docked;
+			if (presentedTailError) placeErrorBanner(box, docked);
+			return docked;
 		}
 		// A bubble sent into the hold docks in its blank; an unheld slot has none.
 		if (blank < heldBlankPx) heldBlankPx = blank;
@@ -1399,8 +1396,7 @@
 	}
 
 	/**
-	 * The error-owned slot's share of the reserve, which it returns, and the error
-	 * banner's lift over the slot (tailErrorOffsetPx). A docked bubble
+	 * The error banner's lift over its slot (tailErrorOffsetPx). A docked bubble
 	 * that grows (a narrower column wraps it) lifts the banner above it: clearance
 	 * for docked bubbles is always enforced. Lift nothing docked needs (where the
 	 * error put it, or what a leaving bubble left at this width) is kept only while
@@ -1414,53 +1410,28 @@
 	 * from usable (non-zero) geometry. Nothing else changes the lift downward
 	 * (clearing the error resets it with its slot).
 	 *
-	 * The same holds for the slot's docked share: for a reader who is not following
-	 * it shrinks only by the room below their view (scrollHeight past scrollTop +
-	 * clientHeight), once per painted layout, so a bubble that leaves (a withdrawal
-	 * with no transcript row) clamps nobody, even while the banner steps aside for
-	 * its Error row and so reserves nothing itself; a reader far above the queue
-	 * gets back a stack that narrowed and widened again. The first following pass
-	 * reserves what is docked, exactly as it does for a reader who followed all
-	 * along (whose floor holds a dequeue's room until its row lands).
-	 *
-	 * This is the one place that lowers either. Every reserve pass measures the
+	 * This is the one place that lowers the lift. Every reserve pass measures the
 	 * controls (transcriptContentEnd) before it reads the floor, so the reserve it
 	 * sets already leaves the amount released here. A reader who scrolled away keeps
-	 * the lift, and the share their position needs, until following resumes (the
-	 * effect after the pending-bubble observer re-measures then): a give-back
-	 * shrinks the reserve, and the browser's clamp would move a reader who is not
-	 * following the edge.
+	 * the lift until following resumes (the effect after the pending-bubble
+	 * observer re-measures then): a give-back shrinks the reserve, and the browser's
+	 * clamp would move a reader who is not following the edge.
 	 */
-	function placeErrorBanner(box: DOMRect, docked: number): number {
+	function placeErrorBanner(box: DOMRect, docked: number) {
 		// A zero-height pane or hidden column measures nothing worth remembering.
-		if (!containerRef?.clientHeight || !chatColumnRef || box.width <= 0) return tailErrorDockedPx;
-		const following = shouldAutoScroll && !windowShifting;
-		if (following) {
-			tailErrorDockedPx = docked;
-			tailErrorDockedAt = '';
-		} else {
-			// One reserve pass measures the controls more than once against the same
-			// painted reserve: its room below the view is given up once, not per read.
-			const { scrollHeight, scrollTop, clientHeight } = containerRef;
-			const at = `${scrollHeight}:${scrollTop}:${clientHeight}`;
-			if (at !== tailErrorDockedAt) {
-				tailErrorPaintedDockedPx = tailErrorDockedPx;
-				tailErrorDockedAt = at;
-			}
-			const below = Math.max(0, scrollHeight - scrollTop - clientHeight);
-			tailErrorDockedPx = Math.max(docked, tailErrorPaintedDockedPx - below);
-		}
+		if (!containerRef?.clientHeight || !chatColumnRef || box.width <= 0) return;
 		const clear = docked > 0 ? docked + rowGapPx() : 0;
 		const kept = Math.max(tailErrorBaselinePx, box.width === tailErrorWidthPx ? tailErrorOffsetPx : 0);
 		const lift = Math.max(clear, Math.min(kept, readableErrorOffset(box)));
 		const excess = tailErrorOffsetPx - lift;
-		if (excess > 0 && !following) return tailErrorDockedPx;
-		// The floor captured the old lift. Release only that amount: the floor that
-		// protects a dequeue still waiting for its transcript row stays.
-		if (excess > 0) freeFollowedFloor(excess);
+		if (excess > 0) {
+			if (!shouldAutoScroll || windowShifting) return;
+			// The floor captured the old lift. Release only that amount: the floor that
+			// protects a dequeue still waiting for its transcript row stays.
+			freeFollowedFloor(excess);
+		}
 		tailErrorOffsetPx = lift;
 		tailErrorWidthPx = box.width;
-		return tailErrorDockedPx;
 	}
 
 	/** Stop reserving px the followed floor captured: it gives them up once. */
@@ -1512,12 +1483,30 @@
 		return transcriptContentEnd() + (callRoom > 0 ? callRoom + MIN_TRANSCRIPT_TAIL_RESERVE : 0);
 	}
 
+	/**
+	 * The least reserve either reserve pass may apply: room below the prose up to
+	 * the viewport end the reader is owed. Both passes take the max of this and
+	 * what they compute, after the controls, gaps and breathing room are added.
+	 *
+	 * A followed reader is owed the viewport end the boundary effect captured:
+	 * dequeue and its delivered user row are separate commits, so the read viewport
+	 * stays available between them and later content consumes it.
+	 *
+	 * Rule: a reader who is not following is owed their own viewport end, so the
+	 * applied reserve drops by at most the room below their view and never clamps
+	 * scrollTop. It may grow freely. The floor is read from painted geometry, not
+	 * from any remembered share, so repeated passes over one layout cannot give the
+	 * same room up twice. Once following resumes, the plain followed value applies.
+	 * Like the followed floor it counts from the prose end, so the safe-area inset
+	 * and call room the padding adds come on top: it can over-hold, never under.
+	 * A zero-height pane has no view to measure, so it holds the applied reserve.
+	 */
 	function readingFloorReserve(): number {
-		if (!containerRef || !tailSpacerRef || !shouldAutoScroll || windowShifting) return 0;
+		if (!containerRef || !tailSpacerRef || windowShifting) return 0;
+		if (!shouldAutoScroll && !containerRef.clientHeight) return Math.max(tailReservePx, latestTurnTailPx);
 		const proseEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
-		// Dequeue and delivered user row are separate commits. Keep the read
-		// viewport available between them; subsequent content consumes it.
-		return Math.max(0, followedViewportEnd - proseEnd);
+		const owedEnd = shouldAutoScroll ? followedViewportEnd : containerRef.scrollTop + containerRef.clientHeight;
+		return Math.max(0, owedEnd - proseEnd);
 	}
 
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
@@ -2402,8 +2391,6 @@
 			// above the bubbles docked now; a handoff hold's blank is not theirs.
 			const docked = box && row ? box.bottom - row.getBoundingClientRect().top : 0;
 			tailErrorOffsetPx = tailErrorBaselinePx = docked > 0 ? docked + rowGapPx() : 0;
-			tailErrorDockedPx = Math.max(0, docked);
-			tailErrorDockedAt = '';
 			tailErrorWidthPx = box?.width ?? 0;
 			// A live hold's blank is no longer reserved (freed after the floor capture below).
 			if (untrack(() => handoffSlotPx) && shouldAutoScroll && !windowShifting) takeoverBlank = Math.max(0, (box?.height ?? 0) - docked - heldBlankPx);

@@ -507,6 +507,40 @@ describe('queue handoff hold geometry', () => {
 				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd });
 			});
 
+			// The last bubble takes the controls' gap and breathing room with it: the
+			// applied reserve falls by more than the bubble. Room between the two is the
+			// boundary a share-sized hold missed.
+			it('spends no more than the room below a reader when the last bubble goes, under an inline Error row (S20)', async () => {
+				const { layout, v } = await settledError(false, 0, [80]);
+				const room = 90;
+				v.scroll(-room);
+				const away = v.read();
+				expect(away.padding - autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE).toBeGreaterThan(room);
+				await withdraw(v, layout, []);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd, padding: away.padding - room });
+				// Following again applies what a reader who never left has.
+				v.scroll(layout.proseEnd);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				const stayed = await settledError(false, 0, [80]);
+				await withdraw(stayed.v, stayed.layout, []);
+				for (let i = 0; i < 3; i++) { await stayed.v.frame(); await stayed.v.grow(0); }
+				expect(v.read().padding).toBe(stayed.v.read().padding);
+			});
+
+			it('gives up the room below a reader once, however many passes and small scrolls the banner hides (S20)', async () => {
+				const { layout, v } = await settledError(false, 60, [200]);
+				v.scroll(-50);
+				await withdraw(v, layout, []);
+				// The kept lift holds the painted reserve; the reader nudges up and passes run.
+				for (let i = 0; i < 3; i++) { v.scroll(-10); await v.frame(); await v.grow(0); }
+				const away = v.read();
+				// The banner steps aside for an inline Error row shorter than itself.
+				await v.update(turn(4, 0, 'CLI error'), () => { layout.banner = 0; layout.proseEnd += 40; });
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd + 40 });
+			});
+
 			it('keeps the detached reserve through zero geometry, and drops it on a session switch (S18)', async () => {
 				const { layout, v } = await settledError(false, 0);
 				v.scroll(-48);
@@ -515,8 +549,10 @@ describe('queue handoff hold geometry', () => {
 				await v.resize(0); await v.frame(); await v.grow(0);
 				await v.resize(400); await v.frame(); await v.grow(0);
 				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd });
-				// Another chat, no queue and no error: nothing of the old slot is kept.
+				// Another chat, no queue and no error: nothing of the old slot is kept. The
+				// switch opens it at the bottom, following (the session-switch effect).
 				await v.update({ ...turn(4, 0), sessionId: 'other' });
+				v.scroll(0);
 				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
 				expect(v.read().padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
 			});

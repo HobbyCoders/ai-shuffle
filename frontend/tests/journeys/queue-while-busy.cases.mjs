@@ -379,44 +379,52 @@ export const journey = {
 			}
 		})),
 		{
-			// #1623: a reader who scrolled away from a queue after an inline Error row
-			// is not moved by it. A queued prompt fails (HTTP 500) while two more wait;
-			// the next runs slowly, so the last stays docked. On a phone the reader
-			// scrolls far up and the column narrows (the long bubble wraps taller) and
-			// widens back: no blank above the bubbles is left over from the narrow
-			// stack. Then, 30-120px above the bottom, they unsend the docked bubble: no
-			// painted frame moves their scroll position. Here the next turn already
-			// owns the reserve, so neither step changes it; the error-owned slot's
-			// detached geometry (S18/S19) is covered in MessageArea.handoff-geometry.test.ts.
+			// #1623: a reader who scrolled away from a queue under an inline Error row
+			// is not moved by it. A queued prompt fails (HTTP 500) and the next one
+			// starts: the failure keeps the queue's slot (a queued start does not clear
+			// it), and the next reply is long and held open, so the reserve under the
+			// reader is the slot's bubble and gaps, with the last prompt docked in it.
+			// On a phone the reader scrolls far up and the column narrows (the long
+			// bubble wraps taller) and widens back: no blank above the bubbles is left
+			// over from the narrow stack. Then, with the bottom further below them than
+			// the bubble is tall but nearer than the reserve it frees, they unsend it:
+			// no painted frame moves their scroll position.
 			name: 'detached-reader-keeps-place-under-error-row',
-			expectShift: [{ step: 'unsend the docked bubble a little above the bottom', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.08,
-				reason: 'unsend puts the prompt back in the composer, which grows; the DOM click is not a recorded input' }],
+			expectShift: [{ step: 'unsend the docked bubble', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.06,
+				reason: 'unsend puts the prompt back in the composer, which grows (the layer above it moves with it); the DOM click is not a recorded input' }],
 			async setup(ctx) {
-				await openNewChat(ctx);
+				await openStopChat(ctx);
 				await ctx.page.waitForTimeout(800);
 			},
 			async act({ page, mark, variant, log }) {
 				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
 				const docked = () => page.locator('.pending-messages [role="article"]').filter({ hasText: needles[2] });
 				const frame = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
-				// The pane's scroll position, how far its bottom is, and the blank between the reply's end and the first bubble.
+				// The pane's scroll position, how far its bottom is, the reserve, and the
+				// blank between the reply's end and the first bubble.
 				const geometry = () => page.evaluate(() => {
 					const pane = document.querySelector('.msg-scroll');
+					const slot = document.querySelector('.tail-controls');
 					const bubble = document.querySelector('.pending-messages [role="article"]');
 					const spacer = document.querySelector('.transcript-tail-spacer');
+					const column = spacer?.closest('.chat-column');
 					return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+						// The column's padding under the prose's end.
+						reserve: column && spacer ? column.getBoundingClientRect().bottom - spacer.getBoundingClientRect().top : 0,
+						// The docked bubbles and their action row: the slot keeps its held height around them.
+						docked: bubble && slot ? slot.getBoundingClientRect().bottom - bubble.getBoundingClientRect().top : 0,
 						blank: bubble && spacer ? bubble.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null,
-						// The bubbles themselves: the slot keeps its held height around them.
 						stack: [...document.querySelectorAll('.pending-messages [role="article"]')].reduce((sum, el) => sum + el.getBoundingClientRect().height, 0),
-						width: document.querySelector('.chat-column')?.getBoundingClientRect().width ?? 0 };
+						width: column?.getBoundingClientRect().width ?? 0 };
 				});
 				/** Wheel the transcript until its bottom is between min and max px below the view. */
 				const scrollAway = async (min, max) => {
 					await page.locator('.msg-scroll').hover();
+					const target = (min + max) / 2;
 					for (let i = 0; i < 30; i++) {
 						const { below } = await geometry();
 						if (below >= min && below <= max) break;
-						await page.mouse.wheel(0, below < min ? -Math.min(min + 40 - below, 600) : Math.min(below - max + 20, 600));
+						await page.mouse.wheel(0, Math.max(-600, Math.min(600, below - target)));
 						await page.waitForTimeout(120);
 					}
 					await page.waitForTimeout(400);
@@ -429,16 +437,20 @@ export const journey = {
 				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
 				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
 				await waitChat(page, { streaming: 'true' });
-				await mark('queue a failing prompt, a slow one and a long one');
+				await mark('queue a failing prompt, a long one and one more');
 				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, 'error-500', { latency_ms: 0 })}`);
-				await quickSend(page, `queued ${needles[1]} ${scriptTag(variant, 'slow', { tps: 1 })}`);
+				await quickSend(page, `queued ${needles[1]} ${scriptTag(variant, 'long', { tps: 400, hold_open: true })}`);
 				await quickSend(page, `queued ${needles[2]} a longer prompt that wraps across several lines in the docked queue bubble `
 					+ `so that narrowing the column makes it taller by at least one more line in every variant`);
 				await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 120_000 });
-				await page.waitForFunction((n) => [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(n)),
-					needles[1], { timeout: 120_000, polling: 'raf' });
+				await page.getByText('That is the end of the long reply.', { exact: false }).first().waitFor({ timeout: 120_000 });
 				await page.waitForTimeout(1000);
-				expect(await docked().count() === 1, 'the long prompt is still docked under the Error row');
+				const settled = await geometry();
+				log(`settled under the error: ${JSON.stringify(settled)}`);
+				expect(await docked().count() === 1, 'the last prompt is still docked under the Error row');
+				// The long reply fills the view, so the reserve is the slot's: its bubble,
+				// the breathing room under it and above it, and the column's row gap.
+				expect(settled.reserve > settled.docked + 40, `the docked bubble and its gaps make the reserve (${settled.reserve}px over ${settled.docked}px docked)`);
 
 				if (variant.viewport === 'phone') {
 					await mark('scroll far up, narrow the column and widen it back');
@@ -452,19 +464,24 @@ export const journey = {
 					const wide = await geometry();
 					log(`detached resize: ${JSON.stringify({ away, narrow, wide })}`);
 					expect(narrow.width < away.width - 1 && narrow.stack > away.stack + 1, `the column narrowed and the stack grew (${away.stack}px -> ${narrow.stack}px)`);
+					expect(narrow.reserve > away.reserve + 1, `the narrow stack grew the reserve (${away.reserve}px -> ${narrow.reserve}px)`);
 					expect(Math.abs(wide.stack - away.stack) <= 1, 'the stack is back to its wide height');
-					// The streaming reply may consume reserve meanwhile; it never adds blank.
-					expect(wide.blank <= away.blank + 1, `no blank above the bubbles is left from the narrow stack (${away.blank}px -> ${wide.blank}px)`);
+					expect(wide.reserve <= away.reserve + 1 && wide.blank <= away.blank + 1,
+						`no reserve or blank above the bubbles is left from the narrow stack (${away.reserve}px -> ${wide.reserve}px, blank ${away.blank}px -> ${wide.blank}px)`);
 				}
 
-				await mark('unsend the docked bubble a little above the bottom');
-				const near = await scrollAway(30, 120);
+				// The last bubble frees itself, the gap above it and the breathing room
+				// under it: room between the bubble and all of that is where a hold sized
+				// to the bubble alone clamps the reader.
+				const before = await geometry();
+				const near = await scrollAway(before.docked + 8, before.reserve - 24 - 8);
 				await page.evaluate(() => {
 					const pane = document.querySelector('.msg-scroll');
 					const p = (window.__scrollProbe = { tops: [], running: true });
 					const next = () => requestAnimationFrame(() => { if (!p.running) return; p.tops.push(pane.scrollTop); next(); });
 					next();
 				});
+				await mark('unsend the docked bubble');
 				// A DOM click, as a withdrawal from elsewhere would land: the last bubble's
 				// unsend button sits below a view scrolled this far up, and Playwright's own
 				// click (or hover) would scroll it into view first.
@@ -473,9 +490,14 @@ export const journey = {
 				await page.waitForTimeout(1500);
 				const tops = await page.evaluate(() => { const p = window.__scrollProbe; p.running = false; return p.tops; });
 				const moved = tops.filter((t) => Math.abs(t - near.top) > 1);
-				log(`detached withdraw: ${JSON.stringify({ near, frames: tops.length, moved: moved.slice(0, 5), after: await geometry() })}`);
+				const after = await geometry();
+				log(`detached withdraw: ${JSON.stringify({ near, frames: tops.length, moved: moved.slice(0, 5), after })}`);
 				expect(tops.length > 10, 'frames were sampled through the withdrawal');
+				expect(after.reserve < near.reserve - 1, `the withdrawal gave reserve back (${near.reserve}px -> ${after.reserve}px)`);
 				expect(moved.length === 0, `no painted frame moved the reader (${near.top} -> ${JSON.stringify(moved.slice(0, 5))})`);
+				await mark('stop');
+				await stopButton(page).click();
+				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
 			}
 		},
 		{
