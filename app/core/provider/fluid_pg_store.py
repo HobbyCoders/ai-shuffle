@@ -29,6 +29,7 @@ A store that never claimed (a reader, or a script) writes unchecked.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import time
@@ -1812,29 +1813,56 @@ class PgFluidStore:
     async def _write_meta(self, session_id: str, publish: Any, fn: Any, *args: Any, **kwargs: Any) -> None:
         """Run a write that moves the session row's head or handle.
 
-        ``publish(result)`` updates the cache from the worker's result, under
-        the session's meta lock. Cancelling the caller does not abandon the
-        worker: the lock is held until it finishes, and a write that finished
-        is published before the cancellation propagates. A write that raised
-        may have committed before the connection failed, or not: the row is
-        read back instead. The caller's exception is re-raised either way.
+        Under the session's meta lock: a failed earlier read-back is retried
+        first, and the write is refused (raises) if it fails again, so nothing
+        is written over a row this cache has not seen. ``publish(result)``
+        updates the cache from the worker's result. Cancelling the caller, or
+        the task around the worker, does not abandon the worker: the lock is
+        held until its thread returns, and a write that finished is published
+        before the cancellation propagates. A write that raised may have
+        committed before the connection failed, or not: the row is read back
+        instead. The caller's exception is re-raised either way.
         """
         async with self._meta_lock(session_id):
-            work = asyncio.ensure_future(run_sync(fn, *args, **kwargs))
+            if session_id in self._unverified:
+                await self._reread_row(session_id)
+            # Read at dispatch: abandon_writes() may have fenced it meanwhile.
+            kwargs["generation"] = self._generations.get(session_id)
+            thread: concurrent.futures.Future = concurrent.futures.Future()
+
+            def worker() -> Any:
+                if not thread.set_running_or_notify_cancel():
+                    return None  # given up on before it started: never runs
+                try:
+                    result = fn(*args, **kwargs)
+                except BaseException as exc:
+                    thread.set_exception(exc)
+                    raise
+                thread.set_result(result)
+                return result
+
+            work = asyncio.ensure_future(run_sync(worker))
+            work.add_done_callback(lambda done: done.cancelled() or done.exception())
             try:
-                await asyncio.shield(work)
+                result = await asyncio.shield(work)
             except BaseException:
-                while not work.done():
+                if thread.cancel():
+                    raise  # the worker never started, so nothing was written
+                # If the loop is torn down before the worker returns, the
+                # session stays unverified and the next access rereads it.
+                self._unverified.add(session_id)
+                while not thread.done():
                     try:
-                        await asyncio.wait({work})
+                        await asyncio.wait({asyncio.wrap_future(thread)})
                     except asyncio.CancelledError:
                         pass  # the caller's own exception is re-raised below
-                if work.cancelled() or work.exception() is not None:
+                if thread.exception() is not None:
                     await self._read_back(session_id)
                 else:
-                    publish(work.result())
+                    publish(thread.result())
+                    self._unverified.discard(session_id)
                 raise
-            publish(work.result())
+            publish(result)
 
     async def _read_back(self, session_id: str) -> None:
         """After an unknown write outcome, under the meta lock. A failed read
@@ -2042,8 +2070,7 @@ class PgFluidStore:
                 self._sessions[session_id].head_node_id = cached.node_id
 
         await self._write_meta(
-            session_id, publish, _append_node_sync, session_id, node,
-            measure_bytes=self.cache_nodes, generation=self._generations.get(session_id),
+            session_id, publish, _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
         )
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
@@ -2194,10 +2221,7 @@ class PgFluidStore:
             if session_id in self._sessions:
                 self._sessions[session_id].head_node_id = node_id
 
-        await self._write_meta(
-            session_id, publish, _set_head_sync, session_id, node_id,
-            generation=self._generations.get(session_id),
-        )
+        await self._write_meta(session_id, publish, _set_head_sync, session_id, node_id)
 
     async def set_cli_session_id(
         self, session_id: str, cli_session_id: Optional[str]
@@ -2218,10 +2242,7 @@ class PgFluidStore:
                 if meta is not None:
                     meta.cli_session_id = cli_session_id
 
-            await self._write_meta(
-                session_id, publish, _set_cli_session_id_sync, session_id, cli_session_id,
-                generation=self._generations.get(session_id),
-            )
+            await self._write_meta(session_id, publish, _set_cli_session_id_sync, session_id, cli_session_id)
 
     async def append_event(self, session_id: str, event: Event) -> None:
         async with self._event_lock:

@@ -183,10 +183,11 @@ async def test_every_leg_rereads_a_session_it_held_across_an_unreadable_write(
 
 @pytest.mark.parametrize("kind", ["native", "delegated", "acp"])
 async def test_a_session_read_failing_at_turn_start_ends_the_turn_with_an_error(
-    tmp_path, monkeypatch, kind
+    tmp_path, monkeypatch, caplog, kind
 ) -> None:
     """``submit`` has returned and the host waits on the bus, not the task: a
-    turn that cannot read its session must still publish a terminal event."""
+    turn that cannot read its session must still publish a terminal event.
+    The user sees a stable message; the operator log names the failure."""
     from fluid.events.model import ErrorEvent
 
     store = MemoryStore()
@@ -201,5 +202,36 @@ async def test_a_session_read_failing_at_turn_start_ends_the_turn_with_an_error(
     await asyncio.wait_for(asyncio.shield(leg._turn_task), 5)
 
     errors = [e for e in leg.bus.log("ses_leg") if isinstance(e, ErrorEvent)]
-    assert len(errors) == 1 and "I/O error" in errors[0].message
+    assert [e.message for e in errors] == ["Couldn't read the session. Try again."]
+    assert any("OSError" in r.getMessage() and "ses_leg" in r.getMessage() for r in caplog.records)
+    await leg.aclose()
+
+
+async def test_a_peer_message_is_refused_while_the_turn_cannot_yet_read_its_session(
+    tmp_path, monkeypatch
+) -> None:
+    """A peer message queued before the turn has read its session would be
+    dropped if that read fails. It is refused instead, so the sender (which
+    keeps it on its durable queue) retries it."""
+    from fluid.events.ops import AgentMessage
+
+    store = MemoryStore()
+    leg = _leg("native", store, tmp_path)
+    await leg._ensure_session()
+    reading, release = asyncio.Event(), asyncio.Event()
+
+    async def unreadable(_session_id):
+        reading.set()
+        await release.wait()
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(store, "get_session", unreadable)
+    await leg.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(reading.wait(), 5)
+    with pytest.raises(RuntimeError, match="retry"):
+        await leg.submit(AgentMessage(text="result is ready", sender="ses_peer"))
+    release.set()
+    await asyncio.wait_for(asyncio.shield(leg._turn_task), 5)
+
+    assert not leg._pending_steers
     await leg.aclose()

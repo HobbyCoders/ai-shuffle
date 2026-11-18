@@ -122,7 +122,7 @@ from fluid.context.trim import (
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
-from fluid.engine.base import EngineCaps, SessionBusy, matches_tool_pattern
+from fluid.engine.base import SESSION_READ_FAILED, EngineCaps, SessionBusy, matches_tool_pattern
 from fluid.engine.guardrail import (
     GUARDRAIL_TOOL,
     anthropic_fallback,
@@ -1806,7 +1806,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 raise SessionBusy("a turn is already running; Interrupt it first")
             self._interrupted.clear()
             self._checkpoint_latched = False
-            self._peer_delivery_sealed = False
+            self._peer_delivery_sealed = True  # opened once the turn has read its session
             self._turn_task = asyncio.create_task(self._run_turn(op))
         elif isinstance(op, Interrupt):
             self._interrupted.set()
@@ -1864,7 +1864,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 from fluid.context.peer import format_peer_message
 
                 self._interrupted.clear()
-                self._peer_delivery_sealed = False
+                self._peer_delivery_sealed = True  # opened once the turn has read its session
                 self._turn_task = asyncio.create_task(self._run_turn(UserTurn(
                     content=format_peer_message(op.sender, text, op.provenance).strip(),
                     source="agent_message",
@@ -2676,7 +2676,6 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
         self._resume_environment = None
-        self._peer_delivery_sealed = False
         try:
             meta = await self._ensure_session()
         except Exception as exc:
@@ -2685,8 +2684,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             if held is None:
                 raise
             # Not through the park: it reads the session again and would fail too.
-            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=repr(exc)))
+            log.warning("turn start could not read session %s (%s)", held, type(exc).__name__)
+            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=SESSION_READ_FAILED))
             return
+        # A peer message queued before this point would be lost had the read
+        # failed: until now it was refused, so its sender retries it.
+        self._peer_delivery_sealed = False
         sid = meta.session_id
         turn_id = new_id("turn")
         self._background_turn_terminal = False

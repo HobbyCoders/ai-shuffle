@@ -443,11 +443,15 @@ async def test_a_cancelled_append_publishes_the_head_its_worker_committed(mock_d
     await asyncio.to_thread(entered.wait, 5)
     task.cancel()
     await asyncio.sleep(0.05)
-    assert (await store.get_session("ses_cxl")).head_node_id == "n2"  # still in flight
+    assert entered.is_set() and not task.done()  # held until the worker returns
+    read = asyncio.create_task(store.get_session("ses_cxl"))
+    await asyncio.sleep(0.05)
+    assert not read.done()  # outcome unknown: waits, never answers the old head
     gate.set()
     with pytest.raises(asyncio.CancelledError):
         await task
     await asyncio.to_thread(done.wait, 5)
+    assert (await read).head_node_id == "n3"
 
     assert (await PgFluidStore().get_session("ses_cxl")).head_node_id == "n3"
     assert (await store.get_session("ses_cxl")).head_node_id == "n3"
@@ -455,45 +459,160 @@ async def test_a_cancelled_append_publishes_the_head_its_worker_committed(mock_d
 
 
 @pytest.mark.asyncio
+async def test_loop_shutdown_cancelling_the_worker_task_still_waits_for_the_worker(mock_db, monkeypatch):
+    """``asyncio.run`` shutdown cancels every task, the one wrapping the DB
+    thread included. That thread is still writing: nothing may be read back
+    or published until it has returned."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_down")
+    await store.append("ses_down", _node("n1", None, "root"))
+    await store.append("ses_down", _node("n2", "n1", "leaf"))
+    helper, entered, gate, done = _paused(module._append_node_sync)
+    real_run_sync, real_row = module.run_sync, module._session_row_sync
+    wrappers, reads = [], []
+
+    async def tracking_run_sync(fn, *args, **kwargs):
+        wrappers.append(asyncio.current_task())
+        return await real_run_sync(fn, *args, **kwargs)
+
+    def counted_row(*args, **kwargs):
+        reads.append(args)
+        return real_row(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+    monkeypatch.setattr(module, "run_sync", tracking_run_sync)
+    monkeypatch.setattr(module, "_session_row_sync", counted_row)
+
+    task = asyncio.create_task(store.append("ses_down", _node("n3", "n2", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    for wrapper in wrappers:
+        wrapper.cancel()
+    await asyncio.sleep(0.05)
+    assert not task.done() and reads == []
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.to_thread(done.wait, 5)
+
+    assert (await PgFluidStore().get_session("ses_down")).head_node_id == "n3"
+    assert (await store.get_session("ses_down")).head_node_id == "n3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovered", "still-down"])
+async def test_a_queued_write_runs_recovery_first(mock_db, monkeypatch, recovers):
+    """An append commits n1, loses its ack and cannot read the row back. A
+    head move queued behind it must apply on top of the real row, or be
+    refused; either way the cache then agrees with a reopen."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_q")
+    await store.append("ses_q", _node("r", None, "root"))
+    real_append, real_row = module._append_node_sync, module._session_row_sync
+
+    def ack_lost(*args, **kwargs):
+        real_append(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    helper, entered, gate, _ = _paused(ack_lost)
+    down = [True] if recovers else [True, True]
+
+    def flaky_row(*args, **kwargs):
+        if down:
+            down.pop()
+            raise ConnectionError("database unreachable")
+        return real_row(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+    monkeypatch.setattr(module, "_session_row_sync", flaky_row)
+
+    append = asyncio.create_task(store.append("ses_q", _node("n1", "r", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    move = asyncio.create_task(store.set_head("ses_q", "r"))
+    await asyncio.sleep(0.05)  # queued behind the append
+    gate.set()
+    with pytest.raises(ConnectionError):
+        await append
+    if recovers:
+        await move
+    else:
+        with pytest.raises(ConnectionError):
+            await move  # refused: recovery failed, so it never dispatched
+
+    fresh = PgFluidStore()
+    assert (await store.get_session("ses_q")).head_node_id == (
+        await fresh.get_session("ses_q")).head_node_id == ("r" if recovers else "n1")
+    assert await store.get_node("ses_q", "n1") == await fresh.get_node("ses_q", "n1") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_write_queued_before_abandonment_is_fenced(mock_db, monkeypatch):
+    """abandon_writes() fences writes that have not been dispatched yet,
+    including one that was already waiting for the session's lock."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.claim_session("ses_fence")
+    await store.create_session("ses_fence")
+    await store.append("ses_fence", _node("n1", None, "root"))
+    helper, entered, gate, _ = _paused(module._set_cli_session_id_sync)
+    monkeypatch.setattr(module, "_set_cli_session_id_sync", helper)
+
+    handle = asyncio.create_task(store.set_cli_session_id("ses_fence", "cli-1"))
+    await asyncio.to_thread(entered.wait, 5)
+    append = asyncio.create_task(store.append("ses_fence", _node("n2", "n1", "next")))
+    await asyncio.sleep(0.05)  # waiting for the lock the handle write holds
+    store.abandon_writes()
+    gate.set()
+    await handle
+    await append
+
+    assert [n.node_id for n in await PgFluidStore().load_path("ses_fence")] == ["n1"]
+
+
+@pytest.mark.asyncio
 async def test_a_read_back_never_overwrites_a_concurrent_append(mock_db, monkeypatch):
-    """A failed handle write reads the row back; an append in flight at the
-    same time must not have its head replaced by that older snapshot."""
+    """A failed handle write reads the row back; an append must not dispatch
+    while that snapshot is held, or the snapshot replaces its head."""
     from app.core.provider import fluid_pg_store as module
 
     store = PgFluidStore()
     await store.create_session("ses_race")
     await store.append("ses_race", _node("n1", None, "root"))
     await store.append("ses_race", _node("n2", "n1", "leaf"))
-    append_helper, entered, append_gate, _ = _paused(module._append_node_sync)
-    read_gate = threading.Event()
-    real_load = module._load_session_sync
+    append_helper, append_entered, append_gate, _ = _paused(module._append_node_sync)
+    row_read, row_gate = threading.Event(), threading.Event()
+    real_row = module._session_row_sync
 
-    def slow_load(*args, **kwargs):
-        data = real_load(*args, **kwargs)
-        read_gate.wait(5)
-        return data
+    def held_row(*args, **kwargs):
+        row = real_row(*args, **kwargs)
+        row_read.set()
+        row_gate.wait(5)
+        return row
 
     def rejected(*args, **kwargs):
         raise ConnectionError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(module, "_append_node_sync", append_helper)
-    monkeypatch.setattr(module, "_load_session_sync", slow_load)
+    monkeypatch.setattr(module, "_session_row_sync", held_row)
     monkeypatch.setattr(module, "_set_cli_session_id_sync", rejected)
 
-    append = asyncio.create_task(store.append("ses_race", _node("n3", "n2", "next")))
-    await asyncio.to_thread(entered.wait, 5)
     handle = asyncio.create_task(store.set_cli_session_id("ses_race", "cli-x"))
-    await asyncio.wait({handle}, timeout=0.5)
-    reader = asyncio.create_task(store.get_session("ses_race"))
-    await asyncio.wait({reader}, timeout=0.5)
+    await asyncio.to_thread(row_read.wait, 5)  # snapshot of n2 taken and held
     append_gate.set()
-    await append
-    read_gate.set()
-    await reader
+    append = asyncio.create_task(store.append("ses_race", _node("n3", "n2", "next")))
+    assert not await asyncio.to_thread(append_entered.wait, 0.3)
+    row_gate.set()
     with pytest.raises(ConnectionError):
         await handle
+    await append
 
     assert (await store.get_session("ses_race")).head_node_id == "n3"
+    assert (await PgFluidStore().get_session("ses_race")).head_node_id == "n3"
 
 
 @pytest.mark.asyncio

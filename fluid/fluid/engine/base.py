@@ -28,6 +28,12 @@ class SessionBusy(RuntimeError):
     """An op that needs an idle session was submitted while a turn runs."""
 
 
+# What the user sees when a turn cannot read its session at start. The
+# exception goes to the operator log by class name only: driver errors can
+# echo a connection string.
+SESSION_READ_FAILED = "Couldn't read the session. Try again."
+
+
 def matches_tool_pattern(name: str, patterns: Iterable[str]) -> bool:
     """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
 

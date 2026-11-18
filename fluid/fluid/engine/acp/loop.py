@@ -47,7 +47,7 @@ from fluid.engine.acp.client import (
     INVALID_PARAMS,
 )
 from fluid.engine.acp.mapping import TurnMapper, safe_server_name
-from fluid.engine.base import EngineCaps
+from fluid.engine.base import SESSION_READ_FAILED, EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
     ErrorEvent,
@@ -882,7 +882,8 @@ class AcpLoop:
             held = self._session.session_id if self._session is not None else self._session_id
             if held is None:
                 raise
-            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=repr(exc)))
+            logger.warning("turn start could not read session %s (%s)", held, type(exc).__name__)
+            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=SESSION_READ_FAILED))
             return
         sid = meta.session_id
         turn_id = new_id("turn")

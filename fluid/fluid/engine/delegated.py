@@ -83,7 +83,7 @@ from typing import TYPE_CHECKING, Any
 
 from fluid.engine import delegated_guard_policy as guard_policy
 from fluid.engine.background import BackgroundLifecycleMixin, await_cancelled_child
-from fluid.engine.base import EngineCaps, matches_tool_pattern
+from fluid.engine.base import SESSION_READ_FAILED, EngineCaps, matches_tool_pattern
 from fluid.engine.claude_mod_usage import USAGE_PATH, PlanUsageReport, parse_plan_usage_report
 from fluid.engine.claude_mod_compaction import (
     COMPACT_PATH, MAX_COMPACT_BODY_BYTES, NothingToCompact, ReplayFilter, compact_messages,
@@ -2720,7 +2720,8 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             if held is None:
                 raise
             # Not through the park: it reads the session again and would fail too.
-            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=repr(exc)))
+            logger.warning("turn start could not read session %s (%s)", held, type(exc).__name__)
+            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=SESSION_READ_FAILED))
             return
         sid = meta.session_id
         turn_id = new_id("turn")
