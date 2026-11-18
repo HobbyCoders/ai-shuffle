@@ -718,6 +718,18 @@ def _compact_generation_option(option):
 CHOOSE_RESULT_CHARS = 40_000
 
 
+def _with_operation(output, operation):
+    """Tell the choice card which models fit this call (generation_operations)."""
+    if operation and isinstance(output, dict) and output.get("status") == "choose":
+        return {**output, "operation": operation}
+    return output
+
+
+def _catalog_category(endpoint):
+    from app.services.fal_catalog import catalog_service
+    return next((m.category for m in catalog_service.search() if m.endpoint_id == endpoint), None)
+
+
 def _bounded_choose(output):
     """A ``choose`` result the chat can still draw as a card on every leg.
 
@@ -752,6 +764,7 @@ def _bounded_choose(output):
 
 
 def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
+    from app.core import generation_operations
     from app.core.generation_resolver import (
         Resolver, RunContext, current_context, no_active_turn_result, normalize_source, same_backend_identity,
     )
@@ -833,7 +846,8 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
             current, call_resolver = await for_this_call()
             output = await call_resolver.generate(kind, request, current,
                                                   exclude_sources=("fal",) if restricted else ())
-            return _tool_result(_bounded_choose(output))
+            return _tool_result(_bounded_choose(_with_operation(output, operation)))
+        operation = generation_operations.for_tool(name).id
         return generate
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
@@ -933,7 +947,8 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         output = await call_resolver.generate(kind, request, current)
         if current.unattended and output.get("status") == "refused":
             output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
-        return _tool_result(_bounded_choose(output))
+        op = generation_operations.for_endpoint(_catalog_category(endpoint), endpoint, kind)
+        return _tool_result(_bounded_choose(_with_operation(output, op.id if op else None)))
 
     tools.append(run_fal)
     return tools

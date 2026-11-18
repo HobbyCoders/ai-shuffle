@@ -171,3 +171,42 @@ async def test_one_malformed_peer_reply_marks_only_that_peer_unavailable(monkeyp
     entries = await peer.catalog("image")
     assert [(c.worker, c.available) for c in entries] == [("p1", False), ("p2", True)]
     assert "nothing from it was used" in entries[0].reason
+
+
+async def test_holding_worker_serves_pages_for_an_operation(monkeypatch):
+    from app.services import generation_sources
+    from app.mcp.node_worker import NodeWorker
+    from app.network import runners
+    fal = Candidate("fal", "fal-ai", "peer-worker", "fal-ai/i2v", "video", False, options={}, price=PRICE)
+    monkeypatch.setattr(runners, "self_device_id", lambda: "peer-worker")
+    page = AsyncMock(return_value=([fal], 9, {"fal-ai/i2v": {"name": "I2V"}}))
+    monkeypatch.setattr(generation_sources.Sources, "fal_page", page)
+    monkeypatch.setattr(NodeWorker, "shutdown", AsyncMock())
+    body = {"version": peer.WIRE_VERSION, "operation": "catalog", "kind": "video", "source": "fal",
+            "media_operation": "image-to-video", "page": {"offset": 20, "limit": 20}, "query": "kling"}
+    output = await peer.handle(body, "origin-worker")
+    assert output["page"] == {"total": 9, "offset": 20, "details": {"fal-ai/i2v": {"name": "I2V"}}}
+    assert output["media_operation"] == "image-to-video"
+    assert page.await_args.kwargs == {"operation": "image-to-video", "query": "kling", "offset": 20, "limit": 20}
+    with pytest.raises(ValueError, match="Unknown generation operation"):
+        await peer.handle({**body, "media_operation": "rm -rf"}, "origin-worker")
+    with pytest.raises(ValueError, match="page"):
+        await peer.handle({**body, "page": {"offset": -1, "limit": 20}}, "origin-worker")
+
+
+async def test_older_peer_text_rows_are_not_offered_for_another_operation(monkeypatch):
+    from app.network import runners
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "p1", "online": True}])
+    fal = asdict(Candidate("fal", "fal-ai", "p1", "fal-ai/t2v", "video", False, price=PRICE))
+    plan = asdict(replace(ENTRY, worker="p1", kind="video"))
+    sent = []
+
+    async def old_peer(worker, operation, **body):
+        sent.append(body)
+        return {"version": peer.WIRE_VERSION, "candidates": [fal, plan]}  # no media_operation echo
+    monkeypatch.setattr(peer, "request", old_peer)
+    assert await peer.catalog("video", operation="image-to-video") == []
+    assert sent[-1]["media_operation"] == "image-to-video"
+    # Its text rows still serve a text call, and a named model of any category.
+    assert [c.source for c in await peer.catalog("video")] == ["fal", "chatgpt"]
+    assert len(await peer.catalog("video", operation="image-to-video", model="fal-ai/t2v")) == 2

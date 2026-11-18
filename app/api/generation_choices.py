@@ -151,10 +151,103 @@ async def list_options(kind: str, request: Request, query: Optional[str] = None,
     return {"kind": kind, "options": catalog.get("options", [])[: limit * 2]}
 
 
+def _operation(kind: str, operation: Optional[str]):
+    from app.core import generation_operations
+    try:
+        return generation_operations.resolve(_kind(kind), operation)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+
+
+def _status(entry: dict) -> str:
+    from app.core.generation_resolver import price_total
+    return ("unavailable" if not entry["available"] else
+            "unpriced" if price_total(entry["price"]) is None else "available")
+
+
+@router.get("/providers/{kind}")
+async def list_providers(kind: str, request: Request, operation: Optional[str] = None,
+                         token: str = Depends(require_auth)) -> dict:
+    """The providers/accounts that can perform ``operation`` (default: the
+    kind's text operation), merged across workers, unavailable ones with
+    their reason. Pick one, then page its models with ``/models/{kind}``."""
+    from app.services.generation_sources import Sources
+
+    op = _operation(kind, operation)
+    backend = Sources(None, _context(request))
+    entries = await backend.catalog(kind, operation=op.id, limit=1)
+    providers: dict[tuple, dict] = {}
+    for entry in entries:
+        key = ("fal",) if entry.source == "fal" else (entry.source, entry.account)
+        row = providers.setdefault(key, {
+            "source": entry.source, "account": entry.account, "workers": [], "available": False, "reason": None,
+            "native": entry.source != "fal"})
+        if entry.worker not in row["workers"]:
+            row["workers"].append(entry.worker)
+        if entry.available:
+            row["available"], row["reason"] = True, None
+        elif not row["available"] and not row["reason"]:
+            row["reason"] = entry.reason
+        if entry.source != "fal" and entry.available:
+            row["model"] = entry.model
+    fal = providers.get(("fal",))
+    if fal is not None and kind == "image":
+        from app.core.provider import subscription_images as sub
+        if await run_sync(sub.plan_images_configured):
+            # generateImage refuses fal while images use the ChatGPT plan (#1796).
+            fal.update(available=False, reason="Image generation is set to the ChatGPT plan, so fal.ai is not used for images.")
+    if fal is not None and fal["available"] and await backend.fal_key():
+        fal["model_count"] = len(await backend.fal_models(kind, operation=op.id))
+    return {"kind": kind, "operation": op.id, "operation_label": op.label,
+            "providers": sorted(providers.values(), key=lambda p: (not p["available"], p["source"] != "fal"))}
+
+
+@router.get("/models/{kind}")
+async def list_models(kind: str, request: Request, source: str = "fal", operation: Optional[str] = None,
+                      query: Optional[str] = None, offset: int = 0, limit: int = 20,
+                      token: str = Depends(require_auth)) -> dict:
+    """One page of one provider's models for ``operation``, searched server-side.
+
+    fal rows carry fal's rate and, once a model's schema is cached, a price;
+    ``POST /quote`` prices the picked options. Nothing is submitted.
+    """
+    from app.core.generation_resolver import normalize_source
+    from app.services.generation_sources import Sources
+
+    op = _operation(kind, operation)
+    offset, limit = max(0, offset), max(1, min(limit, 50))
+    query = (query or "").strip()[:200] or None
+    backend = Sources(None, _context(request))
+    source = normalize_source(source) or "fal"
+    details: dict = {}
+    if source == "fal":
+        if await backend.fal_key():
+            entries, total, details = await backend.fal_page(kind, operation=op.id, query=query, offset=offset, limit=limit)
+        elif backend.context.owner:
+            from app.network.generation import catalog_page
+            entries, total, details, _ = await catalog_page(kind, operation=op.id, query=query, offset=offset, limit=limit)
+            total = total or 0
+        else:
+            entries, total = [], 0
+    else:
+        found = await backend.catalog(kind, source=source, operation=op.id, limit=1)
+        entries = [e for e in found if e.source != "fal" and (source in (e.source, e.account))]
+        if query:
+            entries = [e for e in entries if query.casefold() in f"{e.source} {e.account} {e.model}".casefold()]
+        total = len(entries)
+        entries = entries[offset:offset + limit]
+    models = []
+    for entry in entries:
+        view = entry.view()
+        models.append({**view, **details.get(entry.model, {}), "status": _status(view)})
+    return {"kind": kind, "operation": op.id, "source": source, "query": query, "models": models,
+            "total": total, "offset": offset, "limit": limit, "has_more": offset + len(entries) < total}
+
+
 @router.get("/catalog")
 async def catalog(request: Request, kind: Optional[str] = None, source: Optional[str] = None,
                   model: Optional[str] = None, query: Optional[str] = None, limit: int = 15,
-                  token: str = Depends(require_auth)) -> dict:
+                  operation: Optional[str] = None, token: str = Depends(require_auth)) -> dict:
     """All connected accounts/holding workers, including unavailable routes.
 
     Limit is per kind/source, capped at 50; use query/model to narrow the fal
@@ -166,10 +259,13 @@ async def catalog(request: Request, kind: Optional[str] = None, source: Optional
     from app.services.generation_sources import Sources
 
     kinds = [_kind(kind)] if kind else list(generation_choices.KINDS)
+    if operation is not None and not kind:
+        raise HTTPException(422, "operation needs a kind.")
+    op = _operation(kinds[0], operation).id if operation else None
     limit = max(1, min(limit, 50))
     resolver = Resolver(Sources(None, _context(request)))
     catalogs = await asyncio.gather(*(
-        resolver.catalog(k, source=source, model=model, query=query, limit=limit)
+        resolver.catalog(k, source=source, model=model, query=query, limit=limit, operation=op)
         for k in kinds
     ))
     entries = []

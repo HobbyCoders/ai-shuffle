@@ -35,6 +35,7 @@ REASONS = {
     "needs_prompt": "Priced by text length; the prompt is needed for a price.",
     "rate_not_listed": "fal lists no rate for the chosen options.",
     "invalid_options": "The options do not match the model.",
+    "not_quoted": "Pick this model to price its options.",
 }
 
 

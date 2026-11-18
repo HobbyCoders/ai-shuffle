@@ -155,6 +155,17 @@ async def test_guard_refusals_never_fall_back(monkeypatch, why):
     assert not any(c[0] == "execute" for c in backend.calls) or why == "chat"
 
 
+@pytest.mark.parametrize("name,kind,operation", [
+    ("generateImage", "image", "text-to-image"), ("generateVideo", "video", "text-to-video"),
+    ("generateAudio", "audio", "text-to-audio"), ("textTo3D", "3d", "text-to-3d"),
+])
+async def test_choice_card_names_the_operation_its_models_must_fit(monkeypatch, name, kind, operation):
+    entries = [replace(candidate(), kind=kind), replace(candidate(account="b"), kind=kind)]
+    tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE, names=(name,))
+    output = payload(await tools[name].handler({"prompt": "tree"}))
+    assert output["status"] == "choose" and output["operation"] == operation
+
+
 async def test_chat_mode_has_no_settings_default(monkeypatch):
     tools, backend, legacy = lane_tools(monkeypatch, [candidate(), candidate(account="b")], replace(INTERACTIVE, chat_mode=True))
     assert payload(await tools["generateImage"].handler({"prompt": "tree"}))["status"] == "choose"

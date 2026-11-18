@@ -662,6 +662,11 @@ class FalSchemaService:
             return None
         return entry
 
+    def peek(self, endpoint_id: str) -> Optional[ModelSchema]:
+        """The cached schema, without any network read (None if not cached)."""
+        cached = self._cached((endpoint_id or "").strip())
+        return cached[1] if cached else None
+
     async def get_schema(
         self, endpoint_id: str, api_key: Optional[str] = None, force: bool = False
     ) -> Optional[ModelSchema]:

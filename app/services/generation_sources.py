@@ -93,15 +93,21 @@ class Sources:
             return await run_sync(fal_credential.api_key)
         return None
 
-    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None,
+                      operation=None):
+        """``operation`` (``generation_operations``) picks the fal models that
+        fit the call; None is the kind's text operation. A named model keeps
+        any category."""
         here = self.local_worker()
         entries = []
         if worker in (None, here):
-            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                               operation=operation)
         # A request pinned to this worker never waits on peers.
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
-            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
+            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                         worker=worker, operation=operation))
         # Workers are execution holders, not distinct owner choices. Keep
         # different accounts/options separate, and prefer a usable local holder.
         unique = {}
@@ -111,7 +117,60 @@ class Sources:
             unique.setdefault(key, entry)
         return list(unique.values())
 
-    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
+    async def fal_models(self, kind, *, operation=None, query=None):
+        """This worker's fal catalog rows that perform ``operation``."""
+        from app.core import generation_operations
+        from app.services.fal_catalog import catalog_service
+
+        op = generation_operations.resolve(kind, operation)
+        if catalog_service.is_stale:
+            await catalog_service.refresh(await self.fal_key())
+        return [m for m in catalog_service.search(output_type=kind, q=query)
+                if generation_operations.fits(op, m.category, m.endpoint_id)]
+
+    async def fal_page(self, kind, *, operation=None, query=None, offset=0, limit=20):
+        """One page of fal models for the picker, fast: one batched rate read
+        for the page and only already cached schemas. A row without a cached
+        schema carries fal's raw rate; the card quotes the picked model.
+
+        Returns ``(candidates, total, details)``; details hold display names.
+        """
+        from app.services import fal_pricing
+        from app.services.fal_schema import schema_service
+
+        worker = self.local_worker()
+        if not await self.fal_key():
+            return [], 0, {}
+        if kind == "image":
+            from app.core.provider import subscription_images as sub
+            if await run_sync(sub.plan_images_configured):
+                return [], 0, {}
+        models = await self.fal_models(kind, operation=operation, query=query)
+        page = models[offset:offset + limit]
+        try:
+            rows = await fal_pricing.rates.rows([m.endpoint_id for m in page], await self.fal_key())
+        except fal_pricing.PricingRequestFailed:
+            rows = None
+        entries, details = [], {}
+        for m in page:
+            schema = schema_service.peek(m.endpoint_id)
+            options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
+            if rows is None:
+                price = fal_pricing.unknown("pricing_request_failed")
+            elif schema is None:
+                price = fal_pricing.price_from_row(rows.get(m.endpoint_id), None, {}, None)
+                if price.get("reason") == "schema_unavailable":
+                    price = fal_pricing.unknown("not_quoted", row=rows.get(m.endpoint_id))
+            else:
+                price = fal_pricing.price_from_row(rows.get(m.endpoint_id), schema, options, None)
+            entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False, options=options,
+                                     price=price, schema=schema.to_dict() if schema else None))
+            details[m.endpoint_id] = {"name": m.display_name, "category": m.category,
+                                      "description": (m.description or "")[:240]}
+        return entries, len(models), details
+
+    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, operation=None):
+        from app.core import generation_operations
         from app.core import native_generation_settings as native
         from app.db import model_providers
         from app.services.fal_catalog import catalog_service
@@ -119,13 +178,15 @@ class Sources:
 
         entries = []
         worker = self.local_worker()
+        op = generation_operations.resolve(kind, operation)
         if source in (None, "fal", "fal.ai", "fal-ai") and await self.fal_key():
-            if catalog_service.is_stale:
-                await catalog_service.refresh(await self.fal_key())
-            models = catalog_service.search(output_type=kind, q=query)
-            # Discovery offers text generation endpoints only; an exactly named
-            # model (runFalModel, image-to-video, audio-to-audio...) keeps any category.
-            models = [m for m in models if (m.endpoint_id == model if model else m.category.startswith("text-to-"))]
+            if model:
+                # An exactly named model (runFalModel, a picked card row) keeps any category.
+                if catalog_service.is_stale:
+                    await catalog_service.refresh(await self.fal_key())
+                models = [m for m in catalog_service.search(output_type=kind) if m.endpoint_id == model]
+            else:
+                models = await self.fal_models(kind, operation=op.id, query=query)
             models = models[:max(1, min(limit, 50))]
             from app.services import fal_pricing
             try:
@@ -140,7 +201,8 @@ class Sources:
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))
-        if not self.context.owner:
+        if not self.context.owner or not op.native:
+            # Subscription accounts generate from a prompt only.
             return entries
         rows = await run_sync(model_providers.list_usable_model_providers)
         for row in rows:
