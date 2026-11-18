@@ -253,6 +253,8 @@
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
 	let tailQueueSlotPx = $state(0);
+	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
+	let handoffSlotPx = $state(0);
 	let presentedTailError: string | null = null;
 	// The banner a failed turn raised steps aside while its own transcript error
 	// row says the same words (#1341); one with an action (Fork here) stays.
@@ -2238,8 +2240,8 @@
 		}
 		// A queued prompt's row can land in the same commit its bubble leaves
 		// (#1052). The row's follow scroll and the slot's shrink in one paint
-		// read as a shift, so hold the painted slot for that paint only and give
-		// it back on the next frame, where it shrinks on its own.
+		// read as a shift, so hold the painted slot. It is given back once no
+		// bubble is docked under it (the effect after pendingMessages).
 		const mark = { sessionId: s.sessionId, messages: s.messages.length, queued: s.queuedMessages.length };
 		const handoff = landedFromQueue(handoffMark, mark) && s.isStreaming && !s.stopRequestedTurnId && !presentedTailError;
 		handoffMark = mark;
@@ -2247,9 +2249,7 @@
 			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
 			if (pendingHeight > untrack(() => tailQueueSlotPx)) {
 				tailQueueSlotPx = pendingHeight;
-				requestAnimationFrame(() => requestAnimationFrame(() => {
-					if (!presentedTailError && tailQueueSlotPx === pendingHeight) tailQueueSlotPx = 0;
-				}));
+				handoffSlotPx = pendingHeight;
 			}
 		}
 		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
@@ -2373,6 +2373,18 @@
 		$activeSession.messages
 	));
 	const pendingPeerMessages = $derived($activeSession.pendingPeerMessages ?? []);
+
+	// Give a queue handoff's held slot back only once no bubble is docked under
+	// it. Shrinking it above a bubble moves the slot's top edge, and the browser
+	// scores that move together with any scroll in the same paint. On a slow
+	// device the next reply chunk's follow scroll lands in that paint, which
+	// counts the whole scroll as a shift of the controls (queue-while-busy,
+	// #1623). An empty slot paints nothing, so its shrink is never scored.
+	$effect.pre(() => {
+		if (pendingMessages.length || !handoffSlotPx) return;
+		if (!presentedTailError && untrack(() => tailQueueSlotPx) === handoffSlotPx) tailQueueSlotPx = 0;
+		handoffSlotPx = 0;
+	});
 
 	// Keep a freshly-sent pending bubble in view. The content effect below tracks
 	// `messages` only, so appending to `queuedMessages` grows the column without

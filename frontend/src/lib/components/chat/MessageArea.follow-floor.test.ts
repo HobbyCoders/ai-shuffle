@@ -51,7 +51,7 @@ function probe() {
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
 		let followedViewportEnd = 0, followedFloorContext = null;
-		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0;
+		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
@@ -90,12 +90,13 @@ function probe() {
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
 			queueSlot: () => tailQueueSlotPx,
+			handoffSlot: () => handoffSlotPx,
 			errorOffset: () => tailErrorOffsetPx,
 			presentedError: () => presentedTailError,
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
 	return { env, ...state, render() { state.run(); tail.style.minHeight = renderSlotStyle(state.queueSlot()); return tail; }, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
 }
 
@@ -242,6 +243,51 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		p.env.session = { ...session('long', 18), error: 'CLI error' }; p.run();
 		p.start(fromQueue);
 		expect(p.queueSlot()).toBe(fromQueue ? 164.9375 : 0);
+	});
+
+	it('holds a queue handoff slot past later frames while bubbles stay docked under it', () => {
+		const p = probe();
+		const queued = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `q${i}` })) as unknown as Session['queuedMessages'];
+		p.env.session = { ...session('long', 18), isStreaming: true, queuedMessages: queued(2) }; p.run();
+		// The row lands in the same commit its bubble leaves; the slot is measured
+		// before that commit paints. requestAnimationFrame runs synchronously here,
+		// so a frame-timed release would already have given the slot back.
+		p.env.pendingHeight = 176.828125;
+		p.env.session = { ...session('long', 19), isStreaming: true, queuedMessages: queued(1) }; p.run();
+		expect(p.queueSlot()).toBe(176.828125);
+		expect(p.handoffSlot()).toBe(176.828125);
+		// The next handoff measures the held slot, not a taller one: nothing moves.
+		p.env.session = { ...session('long', 20), isStreaming: true, queuedMessages: queued(0) }; p.run();
+		expect(p.queueSlot()).toBe(176.828125);
+	});
+
+	describe('handoff slot release', () => {
+		const release = source.slice(source.indexOf("\t// Give a queue handoff's held slot back"));
+		const body = release.slice(0, release.indexOf('\n\t});\n') + 5);
+		function harness(pending: number, slot: number, held: number, error: string | null = null) {
+			return new Function('pendingCount', 'slot', 'held', 'error', `
+				let tailQueueSlotPx = slot, handoffSlotPx = held, presentedTailError = error, effect;
+				const pendingMessages = { length: pendingCount };
+				const untrack = fn => fn();
+				const $effect = { pre: fn => { effect = fn; } };
+				${body}
+				effect();
+				return { slot: tailQueueSlotPx, held: handoffSlotPx };
+			`)(pending, slot, held, error) as { slot: number; held: number };
+		}
+
+		it('keeps the slot while any bubble is docked under it', () => {
+			expect(harness(1, 176.828125, 176.828125)).toEqual({ slot: 176.828125, held: 176.828125 });
+		});
+
+		it('gives the slot back once the queue below it is empty', () => {
+			expect(harness(0, 176.828125, 176.828125)).toEqual({ slot: 0, held: 0 });
+		});
+
+		it('leaves a slot that now belongs to an error or a newer measurement alone', () => {
+			expect(harness(0, 176.828125, 176.828125, 'CLI error')).toEqual({ slot: 176.828125, held: 0 });
+			expect(harness(0, 120.71875, 176.828125)).toEqual({ slot: 120.71875, held: 0 });
+		});
 	});
 
 	it('releases both slots when the reader dismisses the error', () => {
