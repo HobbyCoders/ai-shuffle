@@ -1922,12 +1922,6 @@
     "reason": "Windows machine-wide configuration root",
     "base_settings": true
   },
-  "PROMPT_FULL_REPLACE": {
-    "kind": "internal",
-    "reason": "Temporary legacy behaviour reader; DEFAULT migration deferred: Use the compiled delegated-agent system prompt rather than appending to the CLI preset",
-    "target_pr": 2,
-    "base_settings": true
-  },
   "PROVIDER_AGENT_ENABLED": {
     "kind": "internal",
     "reason": "Temporary legacy behaviour reader; SETTING migration deferred: Allow agents to use delegated model-provider workers",

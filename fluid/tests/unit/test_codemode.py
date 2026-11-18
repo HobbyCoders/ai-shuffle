@@ -333,6 +333,61 @@ async def test_four_tool_schema_and_task_uses_three_tools() -> None:
         await loop.aclose()
 
 
+async def test_in_kernel_tool_hooks_get_the_json_path_payload(tmp_path) -> None:
+    """An in-kernel call reaches PreToolUse/PostToolUse hooks with the same
+    session id, transcript path and turn id the JSON path sends, so a command
+    hook's stdin is not ``session_id: null`` / ``transcript_path: ""``."""
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus
+    from fluid.hooks.command import CommandHook
+    from fluid.store.jsonl import JsonlStore
+
+    hooks = HookBus()
+    seen: list[tuple[str, dict]] = []
+
+    async def record(event: str, payload: dict) -> None:
+        seen.append((event, dict(payload)))
+
+    hooks.on(PRE_TOOL_USE, record)
+    hooks.on(POST_TOOL_USE, record)
+    registry = _weather_registry()
+    session = CodeModeSession(registry)
+    code = "from tools.get_weather import get_weather\nprint(get_weather('Paris'))\n"
+    provider = ScriptedProvider([_run_python(code), _text("done")])
+    store = JsonlStore(tmp_path)
+    sid = (await store.create_session()).session_id
+    loop = NativeLoop(
+        provider=provider, store=store, model="claude-sonnet-5", session_id=sid,
+        registry=registry, codemode=session, permissions=PermissionEngine("never_ask"),
+        hooks=hooks,
+    )
+    try:
+        await loop.submit(UserTurn(content="weather"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=15)
+
+        transcript = loop._transcript_path(sid)
+        assert transcript  # a real on-disk transcript, so the check means something
+        native = {e: p for e, p in seen if p.get("name") == "run_python"}
+        inner = {e: p for e, p in seen if p.get("name") == "mcp__geo__get_weather"}
+        assert set(native) == set(inner) == {PRE_TOOL_USE, POST_TOOL_USE}
+        inner_use = next(
+            e for e in loop.bus.log(sid)
+            if isinstance(e, ToolUse) and e.name == "mcp__geo__get_weather"
+        )
+        for event in (PRE_TOOL_USE, POST_TOOL_USE):
+            assert set(native[event]) <= set(inner[event])
+            assert inner[event]["session_id"] == native[event]["session_id"] == sid
+            assert inner[event]["transcript_path"] == native[event]["transcript_path"] == transcript
+            assert inner[event]["turn_id"] == native[event]["turn_id"]
+            assert inner[event]["tool_use_id"] == inner_use.tool_use_id
+            stdin = CommandHook(event=event, command="true").build_payload(event, inner[event])
+            assert stdin["session_id"] == sid
+            assert stdin["transcript_path"] == transcript
+            assert stdin["tool_use_id"] == inner_use.tool_use_id
+        assert "Paris: 21C sunny" in inner[POST_TOOL_USE]["output"]
+    finally:
+        await loop.aclose()
+
+
 @pytest.mark.parametrize("decision,expect_error", [("allow", False), ("deny", True)])
 async def test_destructive_host_call_triggers_permission_request(
     decision, expect_error

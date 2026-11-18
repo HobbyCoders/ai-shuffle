@@ -264,7 +264,10 @@ async def test_a_worktree_chats_opening_prompt_is_the_owners_only_when_the_owner
         payload = {"api_user_id": api_user_id} if api_user_id else None
         await turn_manager.submit_async(SID, "worktree", prompt=body.prompt, profile_id="default",
                                         payload=payload, person_entered=entry)
-        return None
+        return sessions_worktree.WorktreeSessionResponse(
+            session_id=SID, branch_name=body.branch_name, base_branch=body.base_branch,
+            worktree_path="/fixture/garden", status="active", query_started=True,
+        )
 
     monkeypatch.setattr(sessions_worktree, "require_origin_access",
                         lambda **_: {"legacy": None, "project_v2": {"id": "pv2-fake"}})

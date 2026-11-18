@@ -193,11 +193,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                 },
                 "system_prompt_content": {
                     "type": "string",
-                    "description": "Custom system prompt content. If omitted, uses claude_code preset.",
+                    "description": "Custom system prompt content. If omitted, the profile has no base prompt.",
                 },
                 "system_prompt_append": {
                     "type": "string",
-                    "description": "Text to append to the preset system prompt.",
+                    "description": "Text added after the app's prompt sections when there is no custom prompt.",
                 },
                 "tool_selection_mode": {
                     **_TOOL_MODE_SCHEMA,
@@ -360,12 +360,12 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "max_turns": {"type": "integer"},
                 "app_config_tools": {"type": "boolean"},
                 "system_prompt_content": {"type": "string", "description": "Replace the whole prompt (custom)."},
-                "system_prompt_append": {"type": "string", "description": "Switch to the preset prompt plus this text."},
-                "reset_system_prompt": {"type": "boolean", "description": "Restore the bare preset prompt."},
+                "system_prompt_append": {"type": "string", "description": "Drop the custom prompt; add this text after the app's sections."},
+                "reset_system_prompt": {"type": "boolean", "description": "Clear the profile's own prompt text."},
                 "prompt_edits": {
                     **PROMPT_EDITS_SCHEMA,
                     "description": PROMPT_EDITS_SCHEMA["description"].replace(
-                        "the prompt", "the prompt (custom text, or text appended to the preset)", 1),
+                        "the prompt", "the prompt (custom text, or the added text)", 1),
                 },
                 "tool_selection_mode": _TOOL_MODE_SCHEMA,
                 "allowed_tools": {

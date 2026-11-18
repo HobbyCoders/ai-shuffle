@@ -31,6 +31,7 @@ will pick the turn up). Nothing here imports a caller.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 import logging
 import threading
@@ -305,7 +306,7 @@ def _submit_blocking(
     command_id: Optional[str] = None,
     parent_turn_id: Optional[str] = None,
     instance_id: Optional[str] = None,
-    window_pin: Optional[Dict[str, int]] = None,
+    window_pin: Optional[Dict[str, Any]] = None,
     reactivated: dict[str, Any] | None = None,
     caller: Optional[str] = None,
     person_entered: Any = False,
@@ -319,7 +320,8 @@ def _submit_blocking(
 
     ``window_pin``, when given, receives ``{"context_window": pin}`` if the
     send carried a ``context_window_base`` that is not the pin saved after it,
-    so :func:`submit_async` can push the pin to the chat's open clients.
+    and the saved ``fast``/``speed`` pair when the send carried a speed pick,
+    so :func:`submit_async` can push them to the chat's open clients.
 
     Returns the new turn's id. The turn is durably ``queued`` before the kick
     fires, so even if the kick is a no-op (nothing registered yet) or fails, the
@@ -412,16 +414,28 @@ def _submit_blocking(
         explicit_permission = False
     elif source in _BINDING_SOURCES and overrides:
         try:
+            from app.core.model_speed import stored_pair
             from app.db import database
 
+            # Composer sends carry the shown pair every time; only a change is announced.
+            picks_speed = window_pin is not None and (overrides.get("fast") is not None
+                                                      or bool(overrides.get("speed")))
+            pair_before = stored_pair(prior=database.get_session(session_id) or {}) if picks_speed else None
             database.set_session_run_binding(
                 session_id,
                 model=overrides.get("model"),
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode") if explicit_permission else None,
                 fast=overrides.get("fast"),
+                speed=overrides.get("speed"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
             )
+            if picks_speed:
+                # The pair as saved (a speed picked with a model switch is
+                # stored only now), for the chat's other clients.
+                saved = stored_pair(prior=database.get_session(session_id) or {})
+                if saved["fast"] is not None and saved != pair_before:
+                    window_pin.update(saved)
             if overrides.get("context_window"):
                 # Checked against the model just saved, as the picker checks
                 # it. A window the model does not offer is ignored: never
@@ -615,31 +629,41 @@ async def submit_async(
         from app.core import owner_confirm
 
         held = await owner_confirm.on_owner_message(session_id, prompt)
-    window_pin: Dict[str, int] = {}
+    window_pin: Dict[str, Any] = {}
     reactivated: dict[str, Any] = {}
-    try:
-        turn_id = await asyncio.to_thread(
-            _submit_blocking,
-            session_id,
-            source,
-            prompt=prompt,
-            profile_id=profile_id,
-            project_id=project_id,
-            worktree_id=worktree_id,
-            overrides=overrides,
-            explicit_permission=explicit_permission,
-            payload=payload,
-            command_id=command_id,
-            parent_turn_id=parent_turn_id,
-            instance_id=instance_id,
-            window_pin=window_pin,
-            reactivated=reactivated,
-            caller=caller,
-            person_entered=person_entered,
-        )
-    finally:
-        if reactivated:
-            await _announce_reactivated(session_id, reactivated["user_id"])
+    picks_speed = source in _BINDING_SOURCES and bool(overrides) and (
+        overrides.get("fast") is not None or bool(overrides.get("speed")))
+    from app.api.sessions_permissions import settings_lock
+
+    # A speed pick is saved and announced under the lock live picks use, so
+    # the chat's clients hear the pairs in the order they were saved.
+    async with settings_lock(session_id) if picks_speed else contextlib.nullcontext():
+        try:
+            blocking = asyncio.to_thread(
+                _submit_blocking,
+                session_id,
+                source,
+                prompt=prompt,
+                profile_id=profile_id,
+                project_id=project_id,
+                worktree_id=worktree_id,
+                overrides=overrides,
+                explicit_permission=explicit_permission,
+                payload=payload,
+                command_id=command_id,
+                parent_turn_id=parent_turn_id,
+                instance_id=instance_id,
+                window_pin=window_pin,
+                reactivated=reactivated,
+                caller=caller,
+                person_entered=person_entered,
+            )
+            turn_id = await (_to_the_end(blocking) if picks_speed else blocking)
+        finally:
+            if reactivated:
+                await _announce_reactivated(session_id, reactivated["user_id"])
+        if window_pin:
+            await _announce_window_pin(session_id, window_pin)
     if held is not None:
         # The message is durably queued now, so the waiting call's release
         # can hand it to the engine before answering the call "not run yet".
@@ -648,9 +672,21 @@ async def submit_async(
         await owner_confirm.park(session_id, held.get("park") or ())
     if not no_kick:
         _kick(session_id)
-    if window_pin:
-        await _announce_window_pin(session_id, window_pin["context_window"])
     return turn_id
+
+
+async def _to_the_end(work: Any) -> Any:
+    """Await ``work``; a cancel waits for it to finish first, then propagates.
+
+    The save runs on a thread that a cancel does not stop, so the lock around
+    it is let go only once the pair is written.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.wait({task})
+        raise
 
 
 def _reactivate_for_send(
@@ -733,8 +769,8 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
 
 
-async def _announce_window_pin(session_id: str, window: int) -> None:
-    """Push the chat's saved context-window pin to its open clients.
+async def _announce_window_pin(session_id: str, updates: Dict[str, Any]) -> None:
+    """Push the chat's saved context-window pin (and speed pair) to its open clients.
 
     The same ``session_updated`` push a picker change sends (#1895): a client
     adopts it as its pin, so its next send's ``context_window_base`` matches.
@@ -743,7 +779,7 @@ async def _announce_window_pin(session_id: str, window: int) -> None:
         from app.core.sync_engine import sync_engine
 
         await sync_engine.broadcast_session_updated(
-            session_id=session_id, updates={"context_window": window}, source_device_id=None,
+            session_id=session_id, updates=updates, source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — the turn is queued either way.
         logger.warning("Could not announce the context window of %s", session_id, exc_info=True)

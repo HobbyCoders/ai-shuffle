@@ -9,6 +9,7 @@
 	import { NO_CALL_ROOM, nextCallRoom, type CallRoom } from './callDockRoom';
 	import { finishJourneyAfterPaint } from '$lib/services/journey-timing';
 	import { activeSession, activeWsConnected, streamingSessions } from '$lib/stores/active-session';
+	import { attachRefusals } from '$lib/stores/session/attach-refusals';
 	import { sessions } from '$lib/stores/app-data.svelte';
 	import { openSession } from '$lib/services/session-navigation';
 	import { interruptSession, stopSessionTask } from '$lib/api/sessions';
@@ -43,6 +44,9 @@
 	import { watchCallOutcomes } from '$lib/services/voiceCallOutcome';
 	import { RotateCcw, LoaderCircle, CloudOff } from 'lucide-svelte';
 	import { chatHeaderTitle, chatHeroKind, chatLayoutSurface, classifyChatSurface, createChatLayoutTracker, HISTORY_STALL_MESSAGE, initialChatLayout, settledEmptyChat } from './chat-empty-state';
+	import OpeningRecovery from './OpeningRecovery.svelte';
+	import { recoveringOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
+	import { getInitGeneration as openingGeneration } from '$lib/stores/session/session-init';
 	import { pendingDeepLink, deepLinkLoading } from '$lib/stores/pending-deep-link';
 	// The phone shell docks prompts above its composer; the web build has none.
 	import { composerShell } from '$lib/components/chat/composer-shell';
@@ -501,6 +505,9 @@
 	const statusOffset = $derived(
 		connectionNotice === 'pill' && reconnectPillHeight ? `${reconnectPillHeight + 6}px` : undefined
 	);
+	const recovery = $derived(($recoveringOpening && !$activeSession.sessionId && pendingOpening()?.id === $recoveringOpening.note.id
+		&& (!$recoveringOpening.ready || (openingGeneration() === $recoveringOpening.note.generation &&
+		$activeSession.project === $recoveringOpening.note.project && $activeSession.projectV2Id === $recoveringOpening.note.shared))) ? $recoveringOpening : null);
 </script>
 
 <div class="chat-view" bind:clientHeight={surfaceHeight} style:--chat-surface-height={surfaceHeight ? `${surfaceHeight}px` : undefined}
@@ -514,6 +521,13 @@
 	data-ui-messages={!isEmptyState && !mirrorSync.waiting && transcriptMessageCount !== null ? String(transcriptMessageCount) : uiSignature.messages}
 	data-ui-loading={uiSignature.loading}
 	data-ui-streaming={uiSignature.streaming}>
+	{#if recovery && !recovery.adopt}
+		<OpeningRecovery {...recovery} />
+	{:else}
+		{#if $activeSession.sessionId && attachRefusals.has($activeSession.sessionId)}
+			<Banner severity="error" message={attachRefusals.get($activeSession.sessionId)!} dismissible
+				onDismiss={() => attachRefusals.delete($activeSession.sessionId!)} />
+		{/if}
 	{#if showEmptyHero}
 		<!-- Empty state hero: workspace selector / cleared hint. The ChatInput is
 		     NOT rendered here — it lives in the always-mounted .input-slot below so
@@ -612,7 +626,7 @@
 	     conditional strips below are siblings of ChatInput, not ancestors, so they
 	     never remount it. All three lanes keep this same editor. -->
 	{#if showComposer}
-		<div class="input-slot" bind:this={inputSlot} bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
+		<div class="input-slot" inert={!!recovery?.adopt} class:checking-opening={!!recovery?.adopt} bind:this={inputSlot} bind:clientHeight={composerHeight} class:composer-overflow={surfaceHeight > 0 && composerHeight > surfaceHeight} class:input-wrapper={!showEmptyHero} class:empty-input-layout={showEmptyHero}>
 			{#if voiceCallActive && $activeSession.sessionId}
 				<div class="call-dock-slot" bind:clientHeight={callDockHeight}><VoiceCallPanel sessionId={$activeSession.sessionId} compact /></div>
 			{/if}
@@ -637,6 +651,9 @@
 		</div>
 	{/if}
 
+	{#if recovery?.adopt}
+		<div class="live-opening"><OpeningRecovery {...recovery} /></div>
+	{/if}
 	{#if showEmptyHero && showComposer}
 		<!-- Desktop only: balances the flex:1 hero so the hero + persistent input pair sits
 		     vertically centered — reproduces the old .empty-state
@@ -659,9 +676,12 @@
 		</div>
 	{/if}
 	{/if}
+	{/if}
 </div>
 
 <style>
+	.checking-opening { visibility: hidden; }
+	.live-opening { position: absolute; inset: auto 0 0; max-height: 50%; overflow: auto; background: var(--background); }
 	.chat-view {
 		position: relative;
 		display: flex;

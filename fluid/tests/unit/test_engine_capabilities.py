@@ -8,7 +8,9 @@ from fluid.events.model import (
     ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
     ToolResult, ToolUse, TurnComplete,
 )
-from fluid.events.ops import BackgroundTaskFinished, Interrupt, RespondPermission, Resume, UserTurn
+from fluid.events.ops import (
+    BackgroundTaskFinished, Fork, Interrupt, RespondPermission, Resume, Rewind, UserTurn,
+)
 from fluid.messages import Message, Text
 from fluid.permissions.rules import Rule
 from fluid.store.base import SessionNode
@@ -55,6 +57,48 @@ async def _seed_unanswered_prompt(loop, text):
     await loop.store.append(loop.session_id, SessionNode(
         node_id="unanswered", parent_id=None, message=Message(role="user", content=[Text(text)]),
     ))
+
+
+async def test_native_refuses_fork_and_rewind_while_a_turn_runs(server):
+    server.script(Messages.text("first"), Messages.text("second"))
+    run = Harness(server)
+    loop = run.loop
+    # Turn two is held open while its reply is being stored, so the ops below
+    # land in a running turn, not by timing.
+    storing, release = asyncio.Event(), asyncio.Event()
+    append = run.store.append
+
+    async def gated_append(session_id, node):
+        if node.message.role == "assistant" and node.message.text() == "second":
+            storing.set()
+            await release.wait()
+        await append(session_id, node)
+
+    run.store.append = gated_append
+    try:
+        assert isinstance((await run.turn("one"))[-1], TurnComplete)
+        first_prompt = (await loop.store.load_path(loop.session_id))[0]
+        seq = loop.bus.last_seq(loop.session_id)
+        await loop.submit(UserTurn(content="two"))
+        assert "second".startswith((await _event(loop, TextDelta, since=seq)).text)
+        await asyncio.wait_for(storing.wait(), 10)
+        assert loop.turn_running
+        for op in (Fork(from_node_id=first_prompt.node_id), Rewind(to_node_id=first_prompt.node_id)):
+            with pytest.raises(RuntimeError, match="a turn is running"):
+                await loop.submit(op)
+        release.set()
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        path = await loop.store.load_path(loop.session_id)
+        assert [n.message.text() for n in path] == ["one", "first", "two", "second"]
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == path[-1].node_id
+        # Between turns both still move the head.
+        await loop.submit(Rewind(to_node_id=path[1].node_id))
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == path[1].node_id
+        await loop.submit(Fork(from_node_id=first_prompt.node_id))
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == first_prompt.node_id
+    finally:
+        release.set()
+        await run.aclose()
 
 
 async def test_native_resumes_an_unanswered_prompt(server):

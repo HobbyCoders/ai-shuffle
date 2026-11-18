@@ -2102,16 +2102,103 @@ def test_this_worker_advertises_the_capability():
 
 # --- /usage ---------------------------------------------------------------------
 
-def test_usage_parses_the_reported_shape():
-    windows = ag.normalize_usage({"status": "OK", "quotas": [
-        {"model": "gemini-3.1-pro", "remainingFraction": 0.75, "resetTime": "2026-11-12T10:00:00Z"}]})
-    assert windows == [{"type": "antigravity_gemini_3_1_pro", "label": "gemini-3.1-pro",
-                        "utilization": 25.0, "resets_at": "2026-11-12T10:00:00Z"}]
+def test_usage_parses_grouped_agent_buckets():
+    # agy 1.5.9's /usage envelope (#1752); redacted reset times filled in.
+    windows = ag.normalize_usage({
+        "status": "SUCCESS",
+        "response": "Quota limits",
+        "usage": {"input_tokens": 0},
+        "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+                 "remaining_fraction": 1, "reset_time": "2026-11-25T01:04:13Z"},
+                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+                 "remaining_fraction": 1, "reset_time": "2026-11-18T06:04:13Z"},
+            ]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"id": "3p-weekly", "window": "weekly",
+                 "remaining_fraction": 1, "reset_time": "2026-11-24T20:00:00Z"},
+                {"id": "3p-5h", "window": "5h",
+                 "remaining_fraction": 1, "reset_time": "2026-11-18T05:00:00Z"},
+            ]},
+            {"name": "Gemini 4 Argon", "buckets": [
+                {"id": "gemini-argon-wtu-weekly", "name": "Gemini 4 Argon Weekly Limit",
+                 "window": "weekly", "remaining_fraction": 0.9898, "reset_time": "2026-11-25T00:00:00Z"},
+            ]},
+        ]}},
+    })
+    assert windows == [
+        {"type": "antigravity_gemini-weekly", "label": "Gemini Models, weekly",
+         "utilization": 0.0, "resets_at": "2026-11-25T01:04:13Z"},
+        {"type": "antigravity_gemini-5h", "label": "Gemini Models, 5-hour",
+         "utilization": 0.0, "resets_at": "2026-11-18T06:04:13Z"},
+        {"type": "antigravity_3p-weekly", "label": "Claude and GPT models, weekly",
+         "utilization": 0.0, "resets_at": "2026-11-24T20:00:00Z"},
+        {"type": "antigravity_3p-5h", "label": "Claude and GPT models, 5-hour",
+         "utilization": 0.0, "resets_at": "2026-11-18T05:00:00Z"},
+        {"type": "antigravity_gemini-argon-wtu-weekly", "label": "Gemini 4 Argon, weekly",
+         "utilization": 1.02, "resets_at": "2026-11-25T00:00:00Z"},
+    ]
+
+
+def _quota_bucket(bucket_id="gemini-weekly", **overrides):
+    return {"id": bucket_id, "window": "weekly", "remaining_fraction": 0.75,
+            "reset_time": "2026-11-25T01:04:13Z", **overrides}
+
+
+def _quota_reply(*buckets, name="Gemini Models", **data):
+    return {"command": {"data": {"groups": [{"name": name, "buckets": list(buckets)}], **data}}}
+
+
+@pytest.mark.parametrize("bucket", [
+    {"remaining": 0.5}, _quota_bucket(remaining_fraction=10**400),
+    _quota_bucket(remaining_fraction=True), _quota_bucket(remaining_fraction=float("nan")),
+    _quota_bucket(window="monthly"),
+    _quota_bucket("gemini\u0000weekly"), _quota_bucket("gemini weekly"),
+    _quota_bucket("中文"), _quota_bucket("x" * 65),
+])
+def test_invalid_grouped_buckets_do_not_hide_valid_ones_or_use_a_summary(bucket):
+    assert ag.normalize_usage(_quota_reply(bucket, summary={"remaining": 0.5})) is None
+    assert ag.normalize_usage(_quota_reply(bucket, _quota_bucket("good"))) == [
+        {"type": "antigravity_good", "label": "Gemini Models, weekly", "utilization": 25.0,
+         "resets_at": "2026-11-25T01:04:13Z"}
+    ]
+
+
+def test_duplicate_quota_ids_across_groups_invalidate_the_reading():
+    payload = _quota_reply(*(_quota_bucket(f"id-{i}") for i in range(20)))
+    payload["command"]["data"]["groups"].append({"name": "Other group", "buckets": [_quota_bucket("id-0")]})
+    assert ag.normalize_usage(payload) is None
+
+
+def test_bad_ids_are_skipped_before_duplicate_detection():
+    bad = _quota_bucket("bad\u0000id")
+    good = _quota_bucket("A._-" + "1" * 60)
+    windows = ag.normalize_usage(_quota_reply(bad, good, bad))
+    assert [w["type"] for w in windows] == ["antigravity_" + good["id"]]
+
+
+@pytest.mark.parametrize("reset", [17, "not an ISO time", "2026-02-30T01:04:13Z",
+                                   "2026-11-25\x0001:04:13Z", "2026-11-25"])
+def test_grouped_usage_sanitizes_names_and_drops_only_the_invalid_reset(reset):
+    reply = _quota_reply(_quota_bucket(reset_time=reset), name="\x00 Gemini\t \ud800Models\x85 ")
+    reply["command"]["data"]["groups"].append({"name": "\x00 \n", "buckets": [_quota_bucket("other")]})
+    assert ag.normalize_usage(reply) == [
+        {"type": "antigravity_gemini-weekly", "label": "Gemini Models, weekly", "utilization": 25.0,
+         "resets_at": None}
+    ]
+
+
+def test_grouped_usage_bounds_keep_the_first_twenty_windows_and_the_period():
+    windows = ag.normalize_usage(_quota_reply(*(_quota_bucket(str(i)) for i in range(22)), name="x" * 100))
+    assert [w["type"] for w in windows] == [f"antigravity_{i}" for i in range(20)]
+    assert all(w["label"] == "x" * 72 + ", weekly" for w in windows)
 
 
 @pytest.mark.parametrize("payload", [
     None, [], "text", {"status": "ERROR", "error": {"message": "Authentication required"}},
-    {"quotas": [{"remainingFraction": 7}]}, {"quotas": [{"remainingFraction": "half"}]},
+    {"status": "ERROR", **_quota_reply(_quota_bucket())},
+    {"quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.75}]},
     {"usage": {"remaining": 0.5}}, {"status": "OK"},
 ])
 def test_usage_that_does_not_parse_is_unavailable(payload):
@@ -2133,7 +2220,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     from app.core.provider_usage import ProviderUsageMonitor
 
     row = {"id": "row-1", "provider_type": "antigravity", "auth_mode": "oauth-personal",
-           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1"}}
+           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1", "FAKE_ACP_USAGE": json.dumps(_quota_reply(_quota_bucket()))}}
     calls = []
     real_read = ag.read_usage
 
@@ -2142,7 +2229,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
         return await real_read(r)
     monkeypatch.setattr(ag, "read_usage", counted)
     writes = []
-    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)))
+    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", lambda *a, **kw: writes.append(("ok", a)) or True)
     monkeypatch.setattr(db, "record_provider_usage_failure", lambda *a, **kw: writes.append(("fail", a)))
     monitor = ProviderUsageMonitor()
     await monitor._poll_antigravity_provider(row)
@@ -2151,10 +2238,10 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     await monitor._poll_antigravity_provider(row)
     assert calls == ["row-1"] and writes[0][0] == "ok"
     assert writes[0][1][1] == "antigravity" and writes[0][1][3][0]["utilization"] == 25.0
-    monkeypatch.setenv("FAKE_ACP_USAGE", "not json")
-    row["extra_env_json"]["FAKE_ACP_USAGE"] = "not json"
-    await monitor._poll_antigravity_provider(row)
-    assert writes[1] == ("fail", ("row-1", "antigravity", "unavailable"))
+    for bad_reply in ("{not JSON", json.dumps(_quota_reply(_quota_bucket(remaining_fraction=10**400)))):
+        row["extra_env_json"]["FAKE_ACP_USAGE"] = bad_reply
+        await monitor._poll_antigravity_provider(row)
+    assert writes[1:] == [("fail", ("row-1", "antigravity", "unavailable"))] * 2
 
 
 # --- sign-in lifecycle: one per row, ended by sign-out, delete or idleness --------
@@ -2364,8 +2451,7 @@ async def _poll_with(monkeypatch, row, during, unparsed=False):
 
     async def read(r):
         await during()
-        return None if unparsed else {"status": "OK", "quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.5,
-                                                                  "resetTime": "2026-11-12T10:00:00Z"}]}
+        return None if unparsed else _quota_reply(_quota_bucket(remaining_fraction=0.5))
     monkeypatch.setattr(ag, "read_usage", read)
     monitor = ProviderUsageMonitor()
     monitor._on_demand = True
@@ -2378,8 +2464,29 @@ async def test_a_reading_is_written_when_nothing_changed(mock_db, fake_agy, monk
 
     async def nothing():
         return None
-    assert await _poll_with(monkeypatch, row, nothing) is not None
+    assert await _poll_with(monkeypatch, row, nothing) == {"source": "antigravity_usage"}
     assert (await _poll_with(monkeypatch, row, nothing, unparsed=True) or {}).get("usage_error") == "unavailable"
+
+
+@pytest.mark.parametrize("sign_out", [False, True], ids=["still-signed-in", "sign-out-during-store"])
+async def test_snapshot_store_failure_is_recorded_unless_signed_out(mock_db, fake_agy, monkeypatch, sign_out):
+    row = await _personal_row()
+
+    def store(*args, **kwargs):
+        if sign_out:
+            ag._signin_epochs[row["id"]] = ag.signin_epoch(row["id"]) + 1
+        raise ValueError("usage snapshot could not be stored")
+
+    monkeypatch.setattr(db, "upsert_provider_usage_snapshot", store)
+
+    async def nothing():
+        return None
+
+    raw = await _poll_with(monkeypatch, row, nothing)
+    if sign_out:
+        assert raw is None
+    else:
+        assert raw["usage_error"] == "unavailable"
 
 
 @pytest.mark.parametrize("unparsed", [False, True], ids=["reading", "unavailable"])

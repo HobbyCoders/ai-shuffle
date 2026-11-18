@@ -56,7 +56,40 @@ def _create_generation_tools(
                 "Explain the change and get the user's acknowledgment, then set confirm=true."
             )
 
-        if action == "remember" and args.get("job_id") is None:
+        def identity() -> tuple[str, str]:
+            from app.core.preference_identity import principal_preference_identity
+
+            # Same authenticated owner namespace as the Settings API and run context.
+            # Never accept an identity/account principal supplied in tool arguments.
+            return principal_preference_identity({"kind": "admin"})
+
+        if action == "remember" and args.get("job_id") is not None:
+            # The job-pin PUT's own writer: the same fit, fresh-price and
+            # unchanged-pin rules, so nothing is pinned here that it refuses.
+            from app.api.generation_choices import PinRefused, pin_job_choice
+            from app.core import generation_choices as choices
+            from app.core.generation_resolver import RunContext
+
+            try:
+                job_id = await run_sync(choices.validate_job_id, args["job_id"])
+                pinned = await pin_job_choice(identity, job_id, kind, args.get("choice"),
+                                              RunContext(unattended=False, owner=True))
+            except PinRefused as exc:
+                return _tool_result({"success": False, "pinned": False, "kind": kind, "job_id": args["job_id"],
+                                     "error": f"{exc.detail} The job keeps its current pick."})
+            except (ValueError, TypeError):
+                return _error("Invalid choice or job: use an existing automation ID and a model "
+                              "with source/account; job choices also need account and worker.")
+            except Exception:  # noqa: BLE001 - never expose identity/database internals
+                return _error("Generation preferences could not be accessed. Nothing was generated. "
+                              "Read the choices again before retrying a change.")
+            return _tool_result({
+                "success": True, "kind": kind, "job_id": job_id, "choice": pinned["choice"],
+                **({"unchanged": True} if pinned.get("unchanged") else {}),
+                "message": pinned.get("warning") or "Pinned for this job's runs. Each run rechecks price and caps.",
+            })
+
+        if action == "remember":
             # The same rule as the card: a pick is remembered only after a fresh
             # server-side quote priced it, so a working default is never
             # replaced by one every run would refuse or skip.
@@ -85,19 +118,16 @@ def _create_generation_tools(
 
         def apply() -> dict:
             from app.core import generation_choices as choices
-            from app.core.preference_identity import principal_preference_identity
 
-            # Same authenticated owner namespace as the Settings API and run context.
-            # Never accept an identity/account principal supplied in tool arguments.
-            identity = principal_preference_identity({"kind": "admin"})
+            owner = identity()
             job_id = args.get("job_id")
             if job_id is not None:
                 job_id = choices.validate_job_id(job_id)
             if action == "get":
                 stored = (
-                    choices.load_job(identity, job_id)
+                    choices.load_job(owner, job_id)
                     if job_id
-                    else choices.load(identity, run_migration=False)["remembered"]
+                    else choices.load(owner, run_migration=False)["remembered"]
                 )
                 if kind is not None:
                     stored = {kind: stored[kind]} if kind in stored else {}
@@ -106,21 +136,18 @@ def _create_generation_tools(
                 value = choices.clean(args.get("choice"))
                 if value is None:
                     raise ValueError("A remembered pick needs a choice.")
-                if job_id:
-                    choice = choices.save_job(identity, job_id, kind, value)
-                else:
-                    choice = choices.save(identity, kind, value, remember=True, origin="conversation")
+                choice = choices.save(owner, kind, value, remember=True, origin="conversation")
                 return {
                     "kind": kind,
                     "choice": choice,
-                    "job_id": job_id,
+                    "job_id": None,
                     "message": "Saved for subsequent turns. Availability and price are "
                     "not verified by saving; execution rechecks every guard.",
                 }
             if job_id:
-                choices.save_job(identity, job_id, kind, None)
+                choices.save_job(owner, job_id, kind, None)
             else:
-                choices.forget(identity, kind)
+                choices.forget(owner, kind)
             return {"kind": kind, "choice": None, "job_id": job_id}
 
         try:

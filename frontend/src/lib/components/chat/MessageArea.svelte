@@ -2958,6 +2958,7 @@
 				toolId={message.toolId}
 				rememberedUnavailable={choose.rememberedUnavailable}
 				rememberedUnpriced={choose.rememberedUnpriced}
+				operation={choose.operation}
 			/>
 		{:else}
 			{@const saved = rememberedResult(message)}

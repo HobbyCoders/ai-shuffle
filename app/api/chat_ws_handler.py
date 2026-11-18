@@ -1623,6 +1623,7 @@ class ChatWebSocketHandler:
                         permission_mode=(overrides or {}).get("permission_mode"),
                         context_window=create_window,
                         fast=(overrides or {}).get("fast"),
+                        speed=(overrides or {}).get("speed"),
                         # The composer's sidepanel mode is likewise settled at
                         # birth — 'code' persists as NULL, the same as every
                         # session written before modes existed.
@@ -1656,6 +1657,7 @@ class ChatWebSocketHandler:
             if target_instance_id:
                 owner_device = await self._network_owner(session_id)
                 if owner_device:
+                    from app.core.model_speed import stored_pair
                     from app.network import control
                     try:
                         await control.create_session(owner_device, {
@@ -1664,7 +1666,10 @@ class ChatWebSocketHandler:
                             "model": (overrides or {}).get("model"), "effort": (overrides or {}).get("effort"),
                             "permission_mode": (overrides or {}).get("permission_mode"),
                             "context_window": create_window,
-                            "fast": (overrides or {}).get("fast"), "mode": session_mode,
+                            # The pair create_session stored, so an owner that
+                            # predates ``speed`` still gets the implied ``fast``.
+                            **stored_pair((overrides or {}).get("fast"), (overrides or {}).get("speed")),
+                            "mode": session_mode,
                             "hidden": disposable_test,
                             # Who started it, recorded above; the worker that
                             # runs it labels it at creation (#1877).

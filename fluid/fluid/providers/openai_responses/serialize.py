@@ -516,6 +516,11 @@ class ResponsesStreamNormalizer:
         served = response.get("model")
         if isinstance(served, str) and served:
             payload["served_model"] = served
+        # The service tier that served the call (``priority`` for Fast,
+        # ``ultrafast``, ``default``...): what the speed outcome counts.
+        tier = response.get("service_tier")
+        if isinstance(tier, str) and tier:
+            payload["service_tier"] = tier
         return [StreamChunk("usage", payload), StreamChunk("message_stop", {})]
 
     def _open(
@@ -784,6 +789,11 @@ class ResponsesStreamNormalizer:
                 payload["code"] = code
             if etype is not None:
                 payload["type"] = etype
+            param = err.get("param") if isinstance(err, dict) else None
+            if isinstance(param, str):
+                # Which request field was refused (``service_tier`` for a
+                # tier the account or model lacks).
+                payload["param"] = param
             status = coerce_status(status)
             if status is None and code in _CODE_STATUS:
                 status = _CODE_STATUS[code]

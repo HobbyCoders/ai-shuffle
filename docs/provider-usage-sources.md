@@ -45,10 +45,10 @@ popover keeps the rows it already shows.
 
 `antigravity_usage` runs Google's own binary in the row's private home, only when
 the usage popover refreshes (the 30 s forced-refresh cooldown applies). The
-reply's shape is unverified against a signed-in agent: the parser accepts
-per-window `remaining_fraction`/`remainingFraction` and a reset time, and any
-other reply, a timeout or a signed-out agent records `unavailable` with the
-dashboard link. Per-turn tokens and cost come only from what ACP reports in a
+signed-in reply reported in #1752 groups model quotas under
+`command.data.groups[].buckets[]`. Each valid weekly or 5-hour bucket supplies
+its own ID, remaining fraction and reset time. An unrecognized reply, a timeout
+or a signed-out agent records `unavailable` with the dashboard link. Per-turn tokens and cost come only from what ACP reports in a
 turn; nothing is estimated.
 
 What each source cannot report is listed with it in the registry (for example,

@@ -111,7 +111,9 @@ def backend(monkeypatch):
     monkeypatch.setattr(runners, "self_device_id", lambda: "worker-a")
     monkeypatch.setattr(fal_credential, "api_key", lambda user=None: "test-fal-key")
     monkeypatch.setattr(catalog_service, "refresh", AsyncMock())
-    monkeypatch.setattr(catalog_service, "search", lambda **kw: [SimpleNamespace(endpoint_id="fake/model", category="text-to-image")])
+    # One text model of whichever kind is searched (discovery filters by operation).
+    monkeypatch.setattr(catalog_service, "search", lambda **kw: [SimpleNamespace(
+        endpoint_id="fake/model", category=f"text-to-{kw.get('output_type') or 'image'}")])
     schema = ModelSchema("fake/model", [ParamField("prompt", is_primary_text=True, required=True),
         ParamField("num_images", type="integer", default=1, minimum=1, maximum=4),
         ParamField("size", type="enum", default="square", enum=["square", "wide"])], "prompt")

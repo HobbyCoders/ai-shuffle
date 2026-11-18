@@ -16,6 +16,7 @@
 	import { activeSession } from '$lib/stores/active-session';
 	import { attachProject } from '$lib/api/sessions';
 	import { getErrorMessage } from '$lib/api/client';
+	import { attachRefusals, beginAttach } from '$lib/stores/session/attach-refusals';
 	import { notify } from '$lib/stores/notifications';
 	import { focusTrap } from '$lib/components/ui/focus-trap';
 	import {
@@ -260,11 +261,13 @@
 			: { project_id: pickedItem.project };
 		// The page moved to another chat while waiting. The attach still happened
 		// on the server; that chat shows its project when it is opened again.
-		const left = () => sessionId !== id || activeSession.current.sessionId !== id;
+		const left = () => !mounted || !open || sessionId !== id || activeSession.current.sessionId !== id;
+		const attempt = beginAttach(id);
 		attaching = true;
 		error = null;
 		try {
 			const result = await attachProject(id, target);
+			if (!attempt.current()) return;
 			if (left()) {
 				closeIfMounted();
 				return;
@@ -288,15 +291,16 @@
 			notify(`${name} attached. ${agent} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
+			if (!attempt.current()) return;
 			const message = getErrorMessage(e, 'Could not attach the project.');
 			if (left()) {
-				// The sheet belongs to another chat now; say it outside it.
+				attachRefusals.set(id, `Could not attach ${name}: ${message}`);
 				closeIfMounted();
-				notify(message, { severity: 'error' });
 			} else {
 				error = message;
 			}
 		} finally {
+			attempt.finish();
 			attaching = false;
 		}
 	}

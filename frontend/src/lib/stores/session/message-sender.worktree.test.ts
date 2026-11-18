@@ -27,6 +27,7 @@ vi.mock('./v2/feed-controller', () => ({
 }));
 
 import { feedController } from './v2/feed-controller';
+import { pendingOpening, finishOpening, recoveringOpening } from './worktree-opening';
 import { generateBranchName } from '$lib/api/git';
 
 function setup(overrides: Partial<ActiveSessionState> = {}, options: { realActiveSession?: boolean } = {}) {
@@ -255,10 +256,22 @@ describe('autoCreateWorktree', () => {
 		expect(noProject.state().worktreeError).toBe('Please select a project');
 		expect(post).not.toHaveBeenCalled();
 
-		post.mockRejectedValueOnce({ status: 500, detail: 'Internal server error' });
+		post.mockRejectedValueOnce({ status: 422, detail: 'Invalid branch' });
 		const failed = setup();
 		expect(await failed.sender.autoCreateWorktree('hi')).toBe(false);
 		expect(failed.state().messages).toEqual([]);
+	});
+
+	it('keeps the receipt and pending echo, not a fresh unsent draft, after an ambiguous server failure', async () => {
+		post.mockRejectedValueOnce({ status: 500, detail: 'Internal server error' });
+		const { sender, state } = setup();
+		expect(await sender.autoCreateWorktree('hi')).toBe(true);
+		const note = pendingOpening();
+		expect(note).toMatchObject({ dispatched: true, project: 'proj-1', prompt: 'hi' });
+		expect(state().messages).toHaveLength(1);
+		expect(post).toHaveBeenCalledTimes(1);
+		finishOpening(note!.id);
+		recoveringOpening.set(null);
 	});
 
 	it('resolves true once the backend accepted the create', async () => {

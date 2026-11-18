@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+	LatestRequests,
+	optionsKey as canonicalOptionsKey,
 	chooseResult,
 	generationToolKind,
 	isGenerationChoiceRow,
@@ -193,5 +195,53 @@ describe('labels and prices', () => {
 		const included = { currency: 'USD', unit: 'item', amount: '0', total: '0', status: 'included' };
 		expect(repliedFigure(pickMessage('generateImage', 'image', pick, {}, priceView(included, 'image'), false))).toBe('Included');
 		expect(repliedFigure('Use the cheap one please ($5).')).toBeNull();
+	});
+});
+
+describe('model picker helpers', () => {
+	it('shows edited options first, then the quick settings, from the values that will run', async () => {
+		const { optionChips } = await import('./generation-choice');
+		const option = { options: { duration: 5, aspect_ratio: '16:9', seed: null }, quick_settings: { aspect_ratio: '16:9' } };
+		expect(optionChips(option, { duration: 10, aspect_ratio: '16:9' })).toEqual(['duration 10', 'aspect ratio 16:9']);
+		expect(optionChips(option, option.options)).toEqual(['aspect ratio 16:9']);
+		// An edited quick setting past the chip limit still leads (fal's first four defaults).
+		const kling = { options: { cfg_scale: 0.5, shot_type: 'customize', aspect_ratio: '16:9', duration: '5' }, quick_settings: { cfg_scale: 0.5, shot_type: 'customize', aspect_ratio: '16:9', duration: '5' } };
+		expect(optionChips(kling, { ...kling.options, duration: '10' })).toEqual(['duration 10', 'cfg scale 0.5', 'shot type customize']);
+	});
+
+	it('reads the operation a choose result names, ignoring anything malformed', async () => {
+		const { chooseResult } = await import('./generation-choice');
+		const base = { type: 'tool_use' as const, toolName: 'mcp__ai-tools__generateVideo', toolInput: { prompt: 'p' } };
+		const option = { source: 'fal', account: 'fal-ai', worker: 'w', model: 'm', kind: 'video', options: {}, verified: false, price: { currency: 'USD', unit: 'video', amount: '0.1', total: '0.1', status: 'estimated' }, available: true };
+		const result = (extra: object) => JSON.stringify({ status: 'choose', options: [option], ...extra });
+		expect(chooseResult({ ...base, toolResult: result({ operation: 'text-to-video' }) })?.operation).toBe('text-to-video');
+		expect(chooseResult({ ...base, toolResult: result({ operation: '<script>' }) })?.operation).toBeUndefined();
+		expect(chooseResult({ ...base, toolResult: result({}) })?.operation).toBeUndefined();
+	});
+});
+
+
+describe('optionsKey and LatestRequests', () => {
+	it('keys options as canonical wire JSON: sorted at every depth, undefined dropped', () => {
+		const a = canonicalOptionsKey({ b: 1, a: { y: [1, { d: 2, c: 3 }], x: undefined } });
+		expect(a).toBe('{"a":{"y":[1,{"c":3,"d":2}]},"b":1}');
+		expect(canonicalOptionsKey({ a: { y: [1, { c: 3, d: 2 }] }, b: 1 })).toBe(a);
+		expect(a).toBe(JSON.stringify({ a: { y: [1, { c: 3, d: 2 }] }, b: 1 }));
+	});
+
+	it('settles a key only for its newest request, once, and voids all on reset', () => {
+		const r = new LatestRequests();
+		const first = r.begin('x');
+		const second = r.begin('x');
+		expect(r.settle('x', first)).toBe(false);
+		expect(r.pending('x')).toBe(true);
+		expect(r.settle('x', second)).toBe(true);
+		expect(r.settle('x', second)).toBe(false);
+		const third = r.begin('y');
+		r.reset();
+		expect(r.settle('y', third)).toBe(false);
+		const fourth = r.begin('z');
+		r.drop('z');
+		expect(r.settle('z', fourth)).toBe(false);
 	});
 });

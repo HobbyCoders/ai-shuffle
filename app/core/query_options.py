@@ -1331,6 +1331,17 @@ def build_options_from_profile(
         else _session_fast
     )
     fast = None if _fast_value is None else bool(_fast_value)
+    # The speed tier refines ``fast`` (app/core/model_speed.py). A turn that
+    # names a tier wins; one that sends only ``fast`` (an older client) keeps
+    # the session's tier when it is on, and ``fast`` off is Standard.
+    from app.core.model_speed import normalize_speed, resolve_speed
+
+    _speed_override = normalize_speed(overrides.get("speed"))
+    if _speed_override is not None:
+        fast = _speed_override != "standard"
+        speed = _speed_override
+    else:
+        speed = resolve_speed(fast, (_binding_row or {}).get("speed"))
 
     # Determine permission mode. Like the model and effort, this is the
     # session's own binding with the agent's legacy config as the fallback for
@@ -2160,6 +2171,10 @@ def build_options_from_profile(
     # the OpenAI Responses lane into ``service_tier: priority``. None/False both
     # mean standard; stamped unconditionally so presence is not a signal.
     options.aih_fast = fast
+    # The tier inside fast mode: ``ultrafast`` sends ``service_tier:
+    # ultrafast`` where the model offers it (the adapter checks); ``fast`` and
+    # ``standard`` follow ``aih_fast``.
+    options.aih_speed = speed
     # CLI credentials are no longer part of the shared tool environment.
     # Keep account/mode rotation visible to the warm pool using only a digest.
     from app.core import claude_auth_mode

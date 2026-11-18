@@ -13,6 +13,9 @@ import type {
 	GenerationKind,
 	GenerationOption,
 	GenerationPrice,
+	ModelPage,
+	ModelRow,
+	ProvidersResponse,
 	SaveQuote
 } from '$lib/utils/generation-choice';
 
@@ -84,10 +87,18 @@ class GenerationChoices {
 	 * response carries the server's fresh quote and, when unattended runs will
 	 * skip the pick, why. It never submits or approves anything.
 	 */
-	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<SavedChoice> {
+	async save(
+		kind: GenerationKind,
+		choice: GenerationChoice,
+		remember: boolean,
+		origin: 'card' | 'settings' = 'card',
+		operation?: string
+	): Promise<SavedChoice> {
 		const { origin: _drop, ...body } = choice;
 		void _drop;
-		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}`, {
+		// The server refuses a fal model whose inputs do not fit the call's tool.
+		const q = operation ? `?operation=${encodeURIComponent(operation)}` : '';
+		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}${q}`, {
 			choice: body,
 			remember,
 			origin
@@ -149,6 +160,70 @@ class GenerationChoices {
 		const next = { ...this.favourites };
 		delete next[kind];
 		this.favourites = next;
+	}
+
+	/**
+	 * The providers/accounts on every worker that can perform `operation`
+	 * (default: the kind's text operation), unavailable ones with their reason.
+	 */
+	providers(kind: GenerationKind, operation?: string): Promise<ProvidersResponse> {
+		const q = operation ? `?operation=${encodeURIComponent(operation)}` : '';
+		return api.get<ProvidersResponse>(`/generation/providers/${encodeURIComponent(kind)}${q}`);
+	}
+
+	/** One page of one provider's models, searched server-side. Rows from fal may be unpriced until picked. */
+	async models(
+		kind: GenerationKind,
+		params: { source: string; operation?: string; query?: string; offset?: number; limit?: number; worker?: string | null }
+	): Promise<ModelPage> {
+		const q = new URLSearchParams({ source: params.source, offset: String(params.offset ?? 0), limit: String(params.limit ?? 20) });
+		if (params.operation) q.set('operation', params.operation);
+		if (params.worker) q.set('worker', params.worker);
+		if (params.query?.trim()) q.set('query', params.query.trim());
+		const page = await api.get<ModelPage>(`/generation/models/${encodeURIComponent(kind)}?${q}`);
+		return {
+			...page,
+			models: (page.models ?? []).map((m) => ({ ...m, kind, options: m.options ?? {}, available: m.available !== false }))
+		};
+	}
+
+	/**
+	 * One named model with its declared options and default-options price.
+	 * With `worker`, only that worker is asked and only its entry is taken.
+	 */
+	async model(kind: GenerationKind, source: string, model: string, operation?: string, worker?: string | null): Promise<CatalogEntry | null> {
+		const params = new URLSearchParams({ kind, source, model, limit: '1' });
+		if (operation) params.set('operation', operation);
+		if (worker) params.set('worker', worker);
+		const data = await api.get<CatalogResponse>(`/generation/catalog?${params}`);
+		const entries = (data.entries ?? []).filter((e) => e.model === model && (!worker || e.worker === worker));
+		const entry = entries.find((e) => e.available !== false) ?? entries[0];
+		return entry ? { ...entry, kind, options: entry.options ?? {}, available: entry.available !== false } : null;
+	}
+
+	/**
+	 * A browsed model row as a pickable option. A fal row is listed without
+	 * its schema, so its declared options and default price are read from the
+	 * worker that listed it, for the same account and model; another worker's
+	 * copy is never substituted. Throws with the reason when it cannot be picked.
+	 */
+	async optionFor(kind: GenerationKind, row: ModelRow, operation?: string): Promise<GenerationOption> {
+		let option: GenerationOption = row;
+		if (row.source === 'fal') {
+			const full = await this.model(kind, 'fal', row.model, operation, row.worker);
+			if (!full || full.source !== row.source || full.account !== row.account) {
+				throw new Error(row.worker ? 'The worker that listed this model no longer offers it.' : 'This model is no longer listed.');
+			}
+			option = full;
+		}
+		if (!option.available) throw new Error(option.reason || 'This model is not available right now.');
+		// The detail lookup reads no listing price (the card quotes this call
+		// next); the row's listing figure is shown, marked busy, meanwhile.
+		return {
+			source: option.source, account: option.account, worker: option.worker, model: option.model, kind,
+			options: { ...(option.options ?? {}) }, verified: option.verified, price: row.source === 'fal' ? row.price : option.price,
+			quick_settings: option.quick_settings, schema: option.schema, available: true, reason: null
+		};
 	}
 
 	/** Priced options across accounts, for picking from Settings. */

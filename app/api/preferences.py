@@ -76,6 +76,17 @@ def require_preference_write(request: Request, token: str = Depends(require_auth
     return token
 
 
+# Generation picks have their own writers (app/api/generation_choices.py),
+# which check the model's fit and a fresh price before storing; a raw value
+# written here would skip both.
+_GENERATION_PICK_PREFIXES = ("generation.choice.", "generation.job.", "generation.favourite.")
+
+
+def _check_writable(key: str) -> None:
+    if key.startswith(_GENERATION_PICK_PREFIXES):
+        raise HTTPException(403, "Generation picks are changed through the generation choices API.")
+
+
 @router.get("/all")
 async def get_all_preferences(
     request: Request,
@@ -123,6 +134,7 @@ async def set_preference(
     token: str = Depends(require_preference_write)
 ) -> PreferenceResponse:
     """Set a preference value"""
+    _check_writable(key)
     options = _write_options(body)
     try:
         result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,
@@ -151,6 +163,7 @@ async def set_preference_post(
     Needed for navigator.sendBeacon() which only supports POST method.
     sendBeacon is used for reliable preference saves during page unload.
     """
+    _check_writable(key)
     options = _write_options(body)
     try:
         result = await run_sync(_with_user_identity, request, database.set_user_preference, key, body.value,

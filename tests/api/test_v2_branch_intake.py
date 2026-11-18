@@ -395,7 +395,8 @@ async def test_missing_branch_non_new_raises_409_with_branch_message(monkeypatch
 # ---------------------------------------------------------------------------
 
 
-async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
+@pytest.mark.parametrize("admitted", [True, False])
+async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch, admitted):
     """``create_session_with_worktree`` unconditionally routes to
     ``_create_v2_branch_session`` (after XOR / origin-access checks)."""
     monkeypatch.setattr(worktree_api, "run_sync", _passthrough_run_sync)
@@ -414,17 +415,23 @@ async def test_endpoint_delegates_to_v2_branch_intake(monkeypatch):
         },
     )
 
-    v2_helper = AsyncMock(return_value="v2-response")
+    response = worktree_api.WorktreeSessionResponse(session_id="new-chat", branch_name="feature/x",
+                                                    base_branch="main", worktree_path="/tmp/checkout",
+                                                    status="created", query_started=admitted)
+    body = _body(prompt="open", client_message_id="client-" + ("a" if admitted else "b") * 32)
+    v2_helper = AsyncMock(return_value=response)
     monkeypatch.setattr(worktree_api, "_create_v2_branch_session", v2_helper)
 
     resp = await worktree_api.create_session_with_worktree(
         request=MagicMock(),
-        body=_body(prompt=""),
+        body=body,
         token="tok",
     )
 
     v2_helper.assert_awaited_once()
-    assert resp == "v2-response"
+    assert resp is response
+    key = worktree_api._receipt_key("tok", body)
+    assert worktree_api._opening_receipts.get(key) == ("new-chat" if admitted else None)
 
 
 async def test_no_project_dict_falls_back_to_first_profile(monkeypatch):

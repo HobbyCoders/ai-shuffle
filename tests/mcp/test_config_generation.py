@@ -2,6 +2,7 @@
 
 import json
 from collections import OrderedDict
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -13,6 +14,7 @@ from app.core import generation_resolver as gr
 from app.core import preference_identity, query_options
 from app.db import database
 from app.mcp.app_config_sdk import collect_app_config_tools, get_app_config_tool_names
+from app.api.generation_choices import save_time_quote as REAL_SAVE_TIME_QUOTE
 from app.mcp.config_generation import _create_generation_tools
 
 OWNER = ("account", "origin#owner")
@@ -34,7 +36,7 @@ def setup(mock_db: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     from app.api import generation_choices as api
 
-    async def priced(kind: str, choice: dict, context: Any) -> dict:
+    async def priced(kind: str, choice: dict, context: Any, operations: Any = None) -> dict:
         return {"price": {}, "priced": True, "quote_error": None, "unattended_skip_reason": None, "warning": None}
     monkeypatch.setattr(api, "save_time_quote", priced)
 
@@ -413,7 +415,7 @@ async def test_an_unpriced_pick_is_not_remembered_and_the_default_stays(monkeypa
     assert (await call({"action": "remember", "kind": "image", "choice": PICK, "confirm": True}))["success"]
     asked = []
 
-    async def unpriced(kind: str, choice: dict, context: Any) -> dict:
+    async def unpriced(kind: str, choice: dict, context: Any, operations: Any = None) -> dict:
         asked.append((kind, choice["model"], context.unattended))
         return {**quoted, "warning": "x"}
     monkeypatch.setattr(api, "save_time_quote", unpriced)
@@ -423,3 +425,61 @@ async def test_an_unpriced_pick_is_not_remembered_and_the_default_stays(monkeypa
     assert result["error"].startswith("Not remembered.") and said in result["error"]
     assert asked == [("image", "unpriced-model", False)]
     assert choices.load(OWNER, run_migration=False)["remembered"]["image"]["model"] == PICK["model"]
+
+
+JOB = "auto-12345678"
+
+
+def fal_pick(model: str, **options: Any) -> dict:
+    return {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": model, "options": options}
+
+
+@pytest.fixture
+def fal_quotes(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The real save-time quote over fal candidates with declared schemas."""
+    from app.api import generation_choices as api
+    from app.services import generation_sources
+    from tests.api.test_generation_choices_api import QuoteBackend, _fal_entry
+
+    backend = QuoteBackend([
+        _fal_entry("fal-ai/text-only"),
+        _fal_entry("fal-ai/flux-pro/kontext", "image_url", required=["image_url"]),
+        replace(_fal_entry("fal-ai/unpriced"), price=dict(gr.UNKNOWN_PRICE)),
+    ])
+    monkeypatch.setattr(generation_sources, "Sources", lambda *args, **kw: backend)
+    monkeypatch.setattr(api, "save_time_quote", REAL_SAVE_TIME_QUOTE)
+    monkeypatch.setattr(choices, "validate_job_id", lambda job_id: job_id)
+    return backend
+
+
+def pin(choice: dict) -> dict:
+    return {"action": "remember", "job_id": JOB, "kind": "image", "choice": choice, "confirm": True}
+
+
+@pytest.mark.asyncio
+async def test_agent_job_pin_refuses_a_model_its_tool_cannot_feed(fal_quotes: Any) -> None:
+    # The job-pin PUT refuses this (422); the agent's pin is the same writer.
+    result = await call(pin(fal_pick("fal-ai/flux-pro/kontext")))
+    assert result["success"] is False and result["pinned"] is False
+    assert result["error"] == ("This model needs image_url, which generateImage does not send. "
+                               "It was not pinned. The job keeps its current pick.")
+    assert choices.load_job(OWNER, JOB) == {}
+    assert not any(call[0] == "prepare" for call in fal_quotes.calls)
+
+
+@pytest.mark.asyncio
+async def test_agent_job_pin_refuses_an_unpriced_model_but_keeps_the_pin_it_has(fal_quotes: Any) -> None:
+    assert (await call(pin(fal_pick("fal-ai/text-only"))))["success"] is True
+    kept = choices.load_job(OWNER, JOB)
+    assert kept["image"]["model"] == "fal-ai/text-only"
+    refused = await call(pin(fal_pick("fal-ai/unpriced")))
+    assert refused["success"] is False
+    assert "no verified price" in refused["error"] and "not pinned" in refused["error"]
+    assert choices.load_job(OWNER, JOB) == kept
+    # Its price went unknown since: saving the same pin again is a no-op that says so.
+    fal_quotes.entries = [replace(e, price=dict(gr.UNKNOWN_PRICE)) for e in fal_quotes.entries]
+    same = await call(pin(fal_pick("fal-ai/text-only")))
+    assert same["success"] is True and same["unchanged"] is True
+    assert same["message"] == ("This saved choice has no verified price. "
+                               "Unattended runs will skip it until a price is available.")
+    assert choices.load_job(OWNER, JOB) == kept

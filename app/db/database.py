@@ -2553,6 +2553,15 @@ def _run_column_migrations(cursor: Any) -> None:
         cursor.execute("ALTER TABLE sessions ADD COLUMN fast_pinned BOOLEAN")
         migrations_applied.append("sessions.fast_pinned")
 
+    # Per-session speed tier (app/core/model_speed.py): ``standard``, ``fast``
+    # or ``ultrafast``, refining ``fast`` (which stays the on/off switch older
+    # peers and the Android app read). NULL on every pre-existing row = the
+    # tier ``fast`` alone implies. Additive, no index, no SCHEMA_VERSION bump
+    # (the migrations fingerprint covers this block).
+    if table_exists(cursor, "sessions") and not column_exists(cursor, "sessions", "speed"):
+        cursor.execute("ALTER TABLE sessions ADD COLUMN speed TEXT")
+        migrations_applied.append("sessions.speed")
+
     # Snooze (sidebar): a settled chat that returns to Active on its own at
     # this time. NULL on every pre-existing row = not snoozed. Projected from
     # the shared membership record. Additive/nullable, no index, no

@@ -282,7 +282,7 @@ describe('AttachProjectSheet', () => {
 		expect(mocks.notify).not.toHaveBeenCalled();
 	});
 
-	it('says a refusal that returns after the page left in a toast, not in the other chat’s sheet', async () => {
+	it('says a refusal that returns after the page left only on its chat, not in a global notification', async () => {
 		const answer = pending<unknown>();
 		mocks.attachProject.mockReturnValue(answer.promise);
 		const onClose = vi.fn();
@@ -294,7 +294,7 @@ describe('AttachProjectSheet', () => {
 		answer.reject(new Error('Worker B is offline. It must be online to attach a project.'));
 
 		await waitFor(() => expect(onClose).toHaveBeenCalled());
-		expect(mocks.notify).toHaveBeenCalledWith('Worker B is offline. It must be online to attach a project.', { severity: 'error' });
+		expect(mocks.notify).not.toHaveBeenCalled();
 		expect(screen.queryByText(/Worker B is offline/)).toBeNull();
 		expect(mocks.applyAttachedProject).not.toHaveBeenCalled();
 	});

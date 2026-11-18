@@ -1377,7 +1377,8 @@
 		color: var(--muted-foreground);
 	}
 
-	[data-outcome='fast'] .fo-icon {
+	[data-outcome='fast'] .fo-icon,
+	[data-outcome='ultrafast'] .fo-icon {
 		color: var(--primary);
 	}
 

@@ -111,6 +111,12 @@ _REHYDRATE_ATTEMPTS = 3
 # placeholder would save next to nothing.
 _ADMISSION_MIN_RESULT_CHARS = 2_000
 _REHYDRATE_BACKOFF_S = 0.2
+# The handoff call's transcript: newest nodes first until the budget is spent.
+# Text is clipped per node. Tool activity appears as the tool's name and the
+# result's status and size, never its arguments or output, which can carry
+# credentials the new session must not inherit.
+_HANDOFF_TRANSCRIPT_CHARS = 60_000
+_HANDOFF_NODE_TEXT_CHARS = 2_000
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -141,6 +147,7 @@ from fluid.events.model import (
     DelegatedDiagnostic,
     ErrorEvent,
     Event,
+    FastModeOutcome,
     HandoffCreated,
     HookEvent,
     Interrupted,
@@ -390,6 +397,56 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     return SteerDelivery(text=text, sender=sender, origin=origin).render()
 
 
+def _clip(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters, the ellipsis included."""
+    return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
+
+
+def _handoff_line(node: SessionNode, tool_names: dict[str, str]) -> str:
+    """One node of the handoff transcript, or "" when it has nothing to show.
+
+    Its text, clipped, then a marker per tool call and result: the tool's name
+    and the result's status and size. Arguments and output stay out; they can
+    hold credentials, and the new session must not inherit them.
+    """
+    message = node.message
+    parts: list[str] = []
+    text = message.text().strip()
+    if text:
+        parts.append(_clip(text, _HANDOFF_NODE_TEXT_CHARS))
+    for block in message.content:
+        if isinstance(block, ToolUseBlock):
+            parts.append(f"[tool call: {block.name}]")
+        elif isinstance(block, ToolResultBlock):
+            size = sum(len(b.text) for b in block.content if isinstance(b, Text))
+            name = tool_names.get(block.tool_use_id, "tool")
+            status = "error" if block.is_error else "ok"
+            parts.append(f"[{name} result: {status}, {size} chars]")
+    return f"{message.role}: " + " ".join(parts) if parts else ""
+
+
+def _handoff_transcript(nodes: list[SessionNode]) -> str:
+    """The newest nodes that fit ``_HANDOFF_TRANSCRIPT_CHARS``, oldest first."""
+    tool_names = {
+        block.id: block.name
+        for node in nodes for block in node.message.content
+        if isinstance(block, ToolUseBlock)
+    }
+    lines: list[str] = []
+    budget = _HANDOFF_TRANSCRIPT_CHARS
+    for node in reversed(nodes):
+        line = _handoff_line(node, tool_names)
+        if not line:
+            continue
+        if len(line) + 1 > budget:
+            if not lines:  # the newest node alone is over budget: keep its head
+                lines.append(_clip(line, budget))
+            break
+        lines.append(line)
+        budget -= len(line) + 1
+    return "\n".join(reversed(lines))
+
+
 def _steer_receipt(
     steer_id: str | None, text: str, sender: str | None, origin: str
 ) -> dict[str, Any]:
@@ -465,6 +522,10 @@ class _CallResult:
     # Anthropic ``stop_details`` on a ``refusal`` stop: ``category``,
     # ``explanation`` and, with server-side fallback, ``recommended_model``.
     stop_details: dict[str, Any] | None = None
+    # This request sent Ultrafast, the provider refused that tier
+    # (:func:`_is_ultrafast_rejection`) and nothing of it streamed, so it can
+    # be sent again on Standard.
+    ultrafast_refused: bool = False
 
 
 # Guardrail prompts one turn may raise. A retry the next model also declines
@@ -622,6 +683,54 @@ def _is_context_overflow(message: str, status: int | None = None) -> bool:
 # size: "The image you provided requires 38025 patches after processing,
 # exceeding the limit of 30000", or an undecodable image source.
 _PAYLOAD_IMAGE_MARKERS = ("image", "patches")
+
+
+#: The ``service_tier`` value of OpenAI's Ultrafast tier (gated by model, plan
+#: and API eligibility).
+ULTRAFAST_TIER = "ultrafast"
+#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast,
+#: anything else the response names is standard speed.
+_REPORTED_TIERS = {"ultrafast": "ultrafast", "priority": "fast"}
+
+
+def _is_ultrafast_rejection(payload: dict[str, Any]) -> bool:
+    """Did the provider refuse the ``service_tier`` of a request (an ``error`` chunk)?
+
+    Only a structured refusal counts: an error whose ``param`` is
+    ``service_tier`` or whose ``code`` names it, in the chunk itself (an
+    in-stream error) or in the JSON body of an HTTP refusal. A rate limit, a
+    server error, a retriable or transport failure, and every other client
+    error (context size, tool schemas) never counts, whatever its text says.
+    """
+    status = payload.get("status")
+    if isinstance(status, int) and (not 400 <= status < 500 or status == 429):
+        return False
+    if payload.get("retriable") or payload.get("usage_limit") or "transport_failure" in payload:
+        return False
+    errors = [payload]
+    try:
+        body = json.loads(payload.get("message") or "")
+    except (TypeError, ValueError):
+        body = None
+    if isinstance(body, dict):
+        errors.append(body["error"] if isinstance(body.get("error"), dict) else body)
+    return any(
+        err.get("param") == "service_tier"
+        or (isinstance(err.get("code"), str) and "service_tier" in err["code"].lower())
+        for err in errors
+    )
+
+
+def _reported_speed(requested_tier: Any, reported_tier: Any) -> str:
+    """``ultrafast``/``fast``/``standard``/``unknown`` for one finished call.
+
+    The response's own ``service_tier`` wins; a response that names none
+    leaves the call unknown rather than assuming the requested tier.
+    """
+    del requested_tier  # what was asked never decides what ran
+    if isinstance(reported_tier, str) and reported_tier:
+        return _REPORTED_TIERS.get(reported_tier.lower(), "standard")
+    return "unknown"
 
 
 def _is_payload_rejection(message: str, status: int | None = None) -> bool:
@@ -1358,6 +1467,14 @@ class NativeLoop(BackgroundLifecycleMixin):
         # paying a doomed call per turn (see _agent_loop; the strip itself is
         # strip_opaque_reasoning).
         self._encrypted_reasoning_poisoned = False
+        # Ultrafast, per turn: the provider refused the tier (every later
+        # request of the turn runs standard), whether any request sent it, the
+        # tier each call reported, and the tier asked for at the turn's start.
+        # Reset per turn.
+        self._turn_ultrafast_refused = False
+        self._turn_ultrafast_attempted = False
+        self._turn_speed_calls: dict[str, int] = {}
+        self._turn_speed_at_start = "standard"
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -1404,6 +1521,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
+        # Only one handoff runs at a time.
+        self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -1897,6 +2016,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
+        elif isinstance(op, Fork | Rewind) and self.turn_running:
+            # The running turn appends to the head it started from, which
+            # would silently undo the move.
+            raise RuntimeError(
+                f"{type(op).__name__} refused: a turn is running; wait for it to end or Interrupt it first"
+            )
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays
@@ -1918,51 +2043,71 @@ class NativeLoop(BackgroundLifecycleMixin):
         over the current session, then seed a NEW session with it as the first
         user message. Nothing is summarized in place — the old session stays
         intact; the new one starts small, with a fresh cacheable prefix.
-        """
-        meta = await self._ensure_session()
-        nodes = await self.store.load_path(meta.session_id)
 
-        # Bounded plain-text transcript for the summary call (newest last).
-        lines: list[str] = []
-        for node in nodes[-40:]:
-            text = node.message.text().strip()
-            if text:
-                lines.append(f"{node.message.role}: {text[:2000]}")
+        One handoff runs at a time; a second one, or one on a closing engine,
+        fails at once.
+        """
+        if getattr(self, "_close_task", None) is not None:
+            raise RuntimeError("handoff not created: the engine is closing")
+        if self._handoff_running:
+            raise RuntimeError("handoff not created: another handoff is already running")
+        self._handoff_running = True
+        try:
+            meta = await self._ensure_session()
+            if getattr(self, "_close_task", None) is not None:
+                raise RuntimeError("handoff not created: the engine is closing")
+            content = await self._handoff_document(meta.session_id, op)
+
+            new_meta = await self.store.create_session(cwd=self.ctx.cwd)
+            first = SessionNode(
+                node_id=new_id("node"), parent_id=None,
+                message=Message(role="user", content=[Text(content)]),
+            )
+            await self.store.append(new_meta.session_id, first)
+            await self._emit(HandoffCreated(
+                session_id=meta.session_id,
+                new_session_id=new_meta.session_id,
+                content=content,
+                goal=op.goal,
+            ))
+        finally:
+            self._handoff_running = False
+
+    async def _handoff_document(self, sid: str, op: Handoff) -> str:
+        """Generate the handoff document; raises when it cannot be had."""
+        nodes = await self.store.load_path(sid)
         goal_line = f"\nThe stated goal for the next session: {op.goal}" if op.goal else ""
         prompt = (
             "Write a handoff document for a fresh agent session continuing this "
             "work. Structure it as: Goal, Current state (what is done and "
             "verified), Key decisions and constraints, Relevant files/paths, "
             "Next steps (ordered). Be specific; the reader has NO other "
-            f"context.{goal_line}\n\n--- transcript ---\n" + "\n".join(lines)
+            f"context.{goal_line}\n\n--- transcript ---\n" + _handoff_transcript(nodes)
         )
         request = ProviderRequest(
             model=self.model,
             messages=[Message(role="user", content=[Text(prompt)])],
             system="You write precise engineering handoff documents.",
-            session_id=meta.session_id,
+            session_id=sid,
             tools=[],
             max_tokens=self.max_tokens,
             cache_breakpoints=0,
         )
         parts: list[str] = []
+        error: str | None = None
         async for chunk in self.provider.stream(request):
             if chunk.kind == "text_delta":
                 parts.append(chunk.payload["text"])
-        content = "".join(parts).strip() or "(handoff document generation failed)"
-
-        new_meta = await self.store.create_session(cwd=self.ctx.cwd)
-        first = SessionNode(
-            node_id=new_id("node"), parent_id=None,
-            message=Message(role="user", content=[Text(content)]),
-        )
-        await self.store.append(new_meta.session_id, first)
-        await self._emit(HandoffCreated(
-            session_id=meta.session_id,
-            new_session_id=new_meta.session_id,
-            content=content,
-            goal=op.goal,
-        ))
+            elif chunk.kind == "error" and error is None:
+                error = str(chunk.payload.get("message") or "provider error")
+        content = "".join(parts).strip()
+        if error is not None or not content:
+            # A cut-off or empty document is no handoff: no session is made.
+            raise RuntimeError(
+                "handoff not created: the handoff document could not be generated"
+                + (f" ({error})" if error else " (empty reply)")
+            )
+        return content
 
     async def _emit(self, event: Event) -> Event:
         """Publish to the bus (assigns seq) and persist for durable replay.
@@ -3971,6 +4116,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         parent = user_node
         num_calls = 0
         self._turn_model_calls = 0
+        self._turn_ultrafast_refused = False
+        self._turn_ultrafast_attempted = False
+        self._turn_speed_calls = {}
+        self._turn_speed_at_start = self._requested_speed()
         # A run of misses is only interesting inside one turn: the gap between
         # turns is user time, and a cache that expired over it is ordinary.
         self._unexplained_misses = 0
@@ -4465,6 +4614,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                         ))
                         return
                     continue
+                if not self._turn_ultrafast_refused and result.ultrafast_refused:
+                    # The account or model has no Ultrafast (a plan without it,
+                    # a model outside it, API eligibility). Every retry would
+                    # fail the same way, so the rest of the turn runs at
+                    # Standard, whatever is picked meanwhile, and the turn's
+                    # outcome says why. The refused call ran nothing, so it
+                    # does not count against the turn's call budget.
+                    self._turn_ultrafast_refused = True
+                    num_calls -= 1
+                    self._turn_model_calls = num_calls
+                    await self._emit(ProviderRetry(
+                        session_id=sid, turn_id=turn_id,
+                        attempt=1, max_attempts=1,
+                        reason="Ultrafast isn't available for this account or model; retrying on Standard",
+                        delay_seconds=0.0, model=self.model,
+                    ))
+                    continue
                 if (
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
@@ -4889,6 +5055,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._pending_steers.clear()
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
         cost_total = total_usage.pop("cost_usd", None)
+        speed_outcome = self._speed_outcome(sid, turn_id)
+        if speed_outcome is not None:
+            await self._emit(speed_outcome)
         await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, node_id=parent.node_id, turn_id=turn_id,
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
@@ -5199,8 +5368,59 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
-            extra={**self._affinity_keys(sticky), **routing, **self.request_extra},
+            extra=self._request_extra_for_call(sticky, routing),
             wire_state=wire_state,
+        )
+
+    def _request_extra_for_call(self, sticky: bool, routing: dict[str, Any]) -> dict[str, Any]:
+        """A request's ``extra``: affinity keys, routing, then the host's keys.
+
+        After the provider refused Ultrafast this turn, no ``service_tier``
+        is sent (Standard) until the turn ends, whatever the host picks
+        meanwhile, Fast included.
+        """
+        extra = {**self._affinity_keys(sticky), **routing, **self.request_extra}
+        if self._turn_ultrafast_refused:
+            extra.pop("service_tier", None)
+        elif extra.get("service_tier") == ULTRAFAST_TIER:
+            self._turn_ultrafast_attempted = True
+        return extra
+
+    def _note_call_speed(self, request: ProviderRequest, reported_tier: Any) -> None:
+        """Count how a finished main call ran, for the turn's speed outcome."""
+        speed = _reported_speed((request.extra or {}).get("service_tier"), reported_tier)
+        self._turn_speed_calls[speed] = self._turn_speed_calls.get(speed, 0) + 1
+
+    def _requested_speed(self) -> str:
+        """The tier the host asks for now: ``ultrafast``, ``fast`` or ``standard``."""
+        tier = self.request_extra.get("service_tier")
+        return _REPORTED_TIERS.get(tier, "standard") if isinstance(tier, str) else "standard"
+
+    def _speed_outcome(self, sid: str, turn_id: str) -> FastModeOutcome | None:
+        """The turn's :class:`FastModeOutcome` when it asked for Ultrafast.
+
+        Only a turn that asked for Ultrafast at its start or end, or sent it
+        on any request, reports one here: a Fast or standard turn on this lane
+        has nothing to explain.
+        ``speed``/``speed_at_end`` name the tier asked for at the turn's start
+        and end; ``disabled_reason`` is ``ultrafast_unavailable`` when the
+        provider refused it.
+        """
+        start, end = self._turn_speed_at_start, self._requested_speed()
+        if ULTRAFAST_TIER not in (start, end) and not self._turn_ultrafast_attempted:
+            return None
+        calls = self._turn_speed_calls
+        return FastModeOutcome(
+            session_id=sid, turn_id=turn_id,
+            requested=start != "standard",
+            requested_at_end=end != "standard",
+            fast_calls=calls.get("fast", 0),
+            standard_calls=calls.get("standard", 0),
+            unknown_calls=calls.get("unknown", 0),
+            ultrafast_calls=calls.get("ultrafast", 0),
+            speed=start,
+            speed_at_end=end,
+            disabled_reason="ultrafast_unavailable" if self._turn_ultrafast_refused else None,
         )
 
     def _wire_state(self, role: str) -> WireState | None:
@@ -5764,6 +5984,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if isinstance(late_served, str) and late_served:
                     served_model = late_served
                     await self._note_served_model(sid, turn_id, request.model, late_served)
+                if payload.get("stop_reason"):
+                    # A finished call; the Responses lane names the tier it ran on.
+                    self._note_call_speed(request, payload.get("service_tier"))
             elif chunk.kind == "error":
                 if payload.get("transport_failure"):
                     usage_totals["transport_failure"] = payload["transport_failure"]
@@ -5824,6 +6047,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                         for b in blocks.values()
                     ),
                     replay_safe=payload.get("replay_safe") is not False,
+                    ultrafast_refused=(
+                        (request.extra or {}).get("service_tier") == ULTRAFAST_TIER
+                        and not blocks and payload.get("replay_safe") is not False
+                        and _is_ultrafast_rejection(payload)
+                    ),
                 )
 
         if self._interrupted.is_set():

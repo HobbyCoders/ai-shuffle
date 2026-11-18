@@ -852,6 +852,8 @@ class Repl:
             self.out.write(f"{label} ok\n")
         except NotImplementedError:
             self.out.write(f"{label} not supported by this engine\n")
+        except RuntimeError as exc:  # e.g. refused while a turn is running
+            self.out.write(f"{label} not done: {exc}\n")
 
     async def run(self) -> int:
         """Main loop: read lines, dispatch slash-commands or run turns.

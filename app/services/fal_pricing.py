@@ -40,6 +40,7 @@ REASONS = {
     "needs_prompt": "Priced by text length; the prompt is needed for a price.",
     "rate_not_listed": "fal lists no rate for the chosen options.",
     "invalid_options": "The options do not match the model.",
+    "not_quoted": "Pick this model to price its options.",
 }
 
 
@@ -108,6 +109,10 @@ class FalRates:
 
     def __init__(self):
         self._cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
+        # fal allows about ten price reads a minute, then answers 429 with a
+        # Retry-After of tens of seconds: until then a LISTING read fails at
+        # once (its page keeps cached rates); a fresh read still asks fal.
+        self._blocked: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -116,6 +121,13 @@ class FalRates:
 
     def clear(self):
         self._cache.clear()
+        self._blocked.clear()
+
+    def cached(self, endpoint_ids, api_key: str | None) -> dict[str, dict | None]:
+        """The rows already known, without asking fal."""
+        scope, now = self._scope(api_key), time.time()
+        hits = {e: self._cache.get((scope, e)) for e in endpoint_ids}
+        return {e: hit[1] for e, hit in hits.items() if hit and hit[0] > now}
 
     async def rows(self, endpoint_ids, api_key: str | None, *, fresh: bool = False) -> dict[str, dict | None]:
         """``{endpoint: row or None}``; None means fal lists no price.
@@ -135,14 +147,33 @@ class FalRates:
             return found
         if fresh:
             # One endpoint, bounded, and not queued behind a catalog page's
-            # batches on the lock.
+            # batches on the lock. It always asks fal: the listing rate-limit
+            # window below never answers or shortens an admission read.
             try:
                 async with asyncio.timeout(FRESH_READ_SECONDS):
                     return await self._fetch(wanted, api_key, scope, cache=False)
             except TimeoutError:
                 raise PricingRequestFailed(f"fal pricing did not answer within {FRESH_READ_SECONDS} s.") from None
+        self._raise_if_blocked(scope)
         async with self._lock:
-            return {**found, **await self._fetch(wanted, api_key, scope, cache=True)}
+            # A page queued behind one that hit fal's limit, or filled the
+            # cache, sees that now rather than asking fal again.
+            self._raise_if_blocked(scope)
+            now, missing = time.time(), []
+            for endpoint in wanted:
+                cached = self._cache.get((scope, endpoint))
+                if cached and cached[0] > now:
+                    found[endpoint] = cached[1]
+                else:
+                    missing.append(endpoint)
+            if not missing:
+                return found
+            return {**found, **await self._fetch(missing, api_key, scope, cache=True)}
+
+    def _raise_if_blocked(self, scope: str) -> None:
+        if self._blocked.get(scope, 0) > time.monotonic():
+            # Listing only: callers keep the rows they already know (cached()).
+            raise PricingRequestFailed("fal pricing is rate limited for now.")
 
     async def _fetch(self, wanted, api_key, scope, *, cache: bool) -> dict[str, dict | None]:
         """Read ``wanted`` from fal. Only listing reads (under the lock) write
@@ -152,7 +183,7 @@ class FalRates:
             queue = [wanted[i:i + BATCH] for i in range(0, len(wanted), BATCH)]
             while queue:
                 chunk = queue.pop(0)
-                response = await self._get(client, chunk, api_key)
+                response = await self._get(client, chunk, api_key, listing=cache)
                 if response.status_code == 404 and len(chunk) > 1:
                     # fal answers 404 for a whole batch naming one retired
                     # endpoint; split it so the rest still price.
@@ -161,6 +192,10 @@ class FalRates:
                     continue
                 if response.status_code == 404:
                     rows = {}
+                elif response.status_code == 429:
+                    if cache:
+                        self._blocked[scope] = time.monotonic() + _retry_after(response)
+                    raise PricingRequestFailed("fal pricing is rate limited for now.")
                 elif response.status_code != 200:
                     raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")
                 else:
@@ -189,17 +224,27 @@ class FalRates:
         return {r["endpoint_id"]: r for r in prices}
 
     @staticmethod
-    async def _get(client, chunk, api_key):
+    async def _get(client, chunk, api_key, *, listing: bool = False):
+        """A 429 is retried after each RETRY_DELAYS pause. A listing read
+        gives up at once when fal asks for a longer wait than that."""
         for delay in (*RETRY_DELAYS, None):
             try:
                 response = await client.get(PRICING_URL, params=[("endpoint_id", e) for e in chunk],
                                             headers={"Authorization": "Key " + (api_key or "")})
             except httpx.HTTPError:
                 raise PricingRequestFailed("fal pricing could not be reached.") from None
-            if response.status_code != 429 or delay is None:
+            if (response.status_code != 429 or delay is None
+                    or (listing and _retry_after(response) > max(RETRY_DELAYS))):
                 return response
             await asyncio.sleep(delay)
         return response
+
+
+def _retry_after(response) -> float:
+    try:
+        return min(max(float(response.headers.get("retry-after", "")), 0.0), 120.0)
+    except ValueError:
+        return 0.0
 
 
 rates = FalRates()

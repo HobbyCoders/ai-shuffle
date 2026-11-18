@@ -29,6 +29,7 @@
 	import { needsYouCount as countNeedsYou, openSessionNeeds, sessionNeedsInput, attentionTitle } from './session-card-data';
 	import { chatPreferences } from '$lib/stores/chatPreferences.svelte';
 	import { appMode } from '$lib/stores/sessionMode.svelte';
+	import { recoveringOpening, keepOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 	import { openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
@@ -251,6 +252,9 @@
 		const savedChat = saved?.type === 'session' ? saved.sessionId ?? null : null;
 		const deepLinkSessionId = !saved ? deepLinkSessionIdFrom(window.location.search)
 			: savedChat !== tabRestoreTarget()?.sessionId ? savedChat : null;
+		const note = pendingOpening();
+		const opening = !deepLinkSessionId && note?.generation === getInitGeneration() ? note : null;
+		if (!opening) recoveringOpening.set(null);
 		if (saved && !deepLinkSessionId) {
 			if (saved.type === 'session') layout.openChat(savedChat);
 			else layout.openFeaturePage(saved.type);
@@ -406,6 +410,23 @@
 			handleNotificationOpenSession((event as CustomEvent).detail?.sessionId);
 		};
 		window.addEventListener('open-session', openSessionEventHandler);
+
+		if (opening) {
+			const place = activeSession.current;
+			if (!navigationClaimed && pendingOpening()?.id === opening.id && initGeneration === getInitGeneration()
+				&& !place.sessionId && !place.isCreatingWorktree && place.project === opening.project && place.projectV2Id === opening.shared) {
+				if (opening.dispatched) {
+					// init advanced the epoch. Adopt only the pre-init attempt whose
+					// account, navigation and project still matched after the loads.
+					const adopted = { ...opening, generation: initGeneration };
+					keepOpening(adopted);
+					recoveringOpening.set({ note: adopted, ready: true });
+				} else {
+					activeSession.setPendingRestorePrompt(opening.prompt, opening.paths);
+					finishOpening(opening.id);
+				}
+			} else recoveringOpening.set(null);
+		}
 
 		// Sync from server when window regains focus / the tab becomes visible.
 		// Keeps the sessions board fresh with cross-install mutations (e.g. a

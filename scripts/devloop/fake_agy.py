@@ -10,8 +10,11 @@ state stay under the instance's scratch directory.
 """
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,3 +43,39 @@ def install(directory: Path, *, python: str | None = None) -> Path:
 
 def log_path(directory: Path) -> Path:
     return Path(directory).resolve() / "fake-agy.jsonl"
+
+
+def seed_usage() -> None:
+    """Seed a signed-in row only when this disposable instance installed the fake."""
+    from app.core import antigravity
+    from app.db import database
+
+    seed_file = os.environ.get("SHUFFLE_DEV_SEED_FILE")
+    if not seed_file:
+        return
+    directory = Path(seed_file).resolve().parent
+    shim = directory / "fake-agy-bin" / "agy"
+    if os.environ.get(antigravity.BINARY_ENV) != str(shim) or not shim.is_file():
+        return
+
+    now = datetime.now(UTC)
+    groups = []
+    for name, quotas in (
+        ("Gemini Models", (("gemini-weekly", "weekly", 0.8), ("gemini-5h", "5h", 0.8))),
+        ("Claude and GPT models", (("3p-weekly", "weekly", 0.75), ("3p-5h", "5h", 0.75))),
+        ("Gemini 4 Argon", (("gemini-argon-wtu-weekly", "weekly", 0.0),)),
+    ):
+        groups.append({"name": name, "buckets": [
+            {"id": bucket_id, "window": period, "remaining_fraction": remaining,
+             "reset_time": (now + (timedelta(days=6) if period == "weekly" else timedelta(hours=4))).isoformat()}
+            for bucket_id, period, remaining in quotas
+        ]})
+    reading = {"status": "SUCCESS", "usage": {"input_tokens": 0},
+               "command": {"name": "usage", "data": {"groups": groups}}}
+    row_id = "dev-antigravity-usage"
+    database.create_model_provider(
+        provider_id=row_id, name="Fixture Antigravity", provider_type=antigravity.PROVIDER_TYPE,
+        base_url="", auth_mode="oauth-personal", models=list(antigravity.DEFAULT_MODELS),
+        extra_env={"FAKE_ACP_SIGNED_IN": "1", "FAKE_ACP_USAGE": json.dumps(reading)},
+    )
+    antigravity._note_signin(row_id, "signed_in")

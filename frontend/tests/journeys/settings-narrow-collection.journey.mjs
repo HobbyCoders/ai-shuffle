@@ -117,6 +117,41 @@ async function headingPlace(page, name, level) {
 // The service worker would answer the stubbed requests before page.route sees them.
 await runJourney({ name: 'settings-narrow-collection', browser: async () => ({ context: { serviceWorkers: 'block' } }), allow: DEV_INSTANCE_NOISE, cases: [
  {
+  name: 'desktop-reselect-category-opens-at-top', viewports: ['desktop'],
+  async setup({ page, status }) {
+   await openSettings(page, status, 1440);
+   await page.setViewportSize({ width: 1440, height: 900 });
+   await category(page, 'General');
+  },
+  async act({ page, mark }) {
+   await mark('scroll General, then select General again in the desktop index');
+   await page.locator('.settings-viewport').evaluate(el => el.scrollTo({ top: 300 }));
+   expect((await scrollState(page)).page > 100, 'General was scrolled');
+   await category(page, 'General');
+   const { page: top } = await scrollState(page);
+   expect(top === 0, `General returns to the top (scrollTop=${top})`);
+  }
+ },
+ {
+  name: 'desktop-category-opens-at-top', viewports: ['desktop'],
+  async setup({ page, status }) {
+   await stubHooks(page);
+   await openSettings(page, status, 1440);
+   await page.setViewportSize({ width: 1440, height: 900 });
+   await category(page, 'General');
+  },
+  async act({ page, mark }) {
+   await mark('scroll General in the shared Settings viewport');
+   await page.locator('.settings-viewport').evaluate(el => el.scrollTo({ top: 300 }));
+   expect((await scrollState(page)).page > 100, 'General was scrolled');
+   await mark('select Hooks from the category index');
+   await category(page, 'Hooks');
+   await hookRow(page).waitFor();
+   const { page: top } = await scrollState(page);
+   expect(top === 0, `Hooks opens at the top (scrollTop=${top})`);
+  }
+ },
+ {
   name: 'one-pane-run-and-back', viewports: ['desktop'], throttles: ['fast'],
   async setup({ page, status }) {
    await stub(page);

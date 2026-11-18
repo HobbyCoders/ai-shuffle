@@ -106,9 +106,10 @@ def compile_fixture(*, native=True, environment_text=None):
             compiled = ha.HarnessAdapter._compile_prompt_sections(
                 base, None, options, code_mode=True, codemode=codemode, registry=registry)
         else:
-            # The CLI owns its preset prompt. Exercise the actual host append path,
-            # not a reconstruction of the proprietary CLI prompt or a model call.
-            compiled = SimpleNamespace(text=ha._delegated_append_text(base, options, registry))
+            # The claude CLI's --system-prompt for a preset-shape profile (no
+            # base; its append rides as a block): the actual host compile path.
+            compiled = SimpleNamespace(text=ha.HarnessAdapter._compile_prompt(
+                None, base, options, registry=registry))
         assert compiled is not None and compiled.text, "Prompt compilation failed"
         db_guard.assert_not_called()
         full = ha._code_mode_tool_sections(codemode, deferred=frozenset(), registry=registry)

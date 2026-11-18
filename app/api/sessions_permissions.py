@@ -1,7 +1,7 @@
 """Owner-routed live run settings; never interrupt or reconnect a turn."""
 import asyncio
 import logging
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,6 +17,16 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _FAST_WAIT_READ_SECONDS = 1.5
 _locks = WeakValueDictionary()
+
+
+def settings_lock(session_id: str) -> asyncio.Lock:
+    """The chat's lock for saving a setting and announcing what was saved.
+
+    Turn admission takes it too when a send saves a speed pick, so the chat's
+    clients hear speed pairs in the order they were saved. Held weakly: it
+    goes away once nothing holds or waits on it.
+    """
+    return _locks.setdefault(session_id, asyncio.Lock())
 #: Running fast-mode hand-downs (strong references until they finish).
 _fast_propagations: set = set()
 
@@ -25,6 +35,10 @@ class RunSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]] = None
     fast: Optional[StrictBool] = None
+    # The speed tier (app/core/model_speed.py). Wins over ``fast`` and sets it;
+    # a request with only ``fast`` (an older client) keeps an Ultrafast tier
+    # when it turns fast on, and turning it off is Standard.
+    speed: Optional[Literal["standard", "fast", "ultrafast"]] = None
     context_window: Optional[int] = Field(None, strict=True, gt=0)
 
 
@@ -113,8 +127,8 @@ def _start_propagation(session_id: str, fast: bool) -> None:
     task.add_done_callback(_fast_propagations.discard)
 
 
-async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
-                             inherited: bool = False, propagate: bool = True) -> dict:
+async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool = False,
+                             propagate: bool = True, announce: bool = False) -> dict:
     """Change a session's live run settings.
 
     A fast-mode change is then handed down to the session's subagents in the
@@ -129,15 +143,27 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     message. It is absent when the setting already holds: nothing is running,
     or the lane switches at its next request (see
     ``HarnessAdapter.set_run_settings``). ``GET /live`` reports the same, so a
-    reload or another device can say so too.
+    reload or another device can say so too. ``announce`` tells this worker's
+    clients of the chat what was saved (:func:`_announce_run_settings`) before
+    the chat's lock is let go.
     """
-    result = await _apply_run_settings(session_id, body, inherited=inherited)
-    if propagate and "fast" in body.model_fields_set and "skipped" not in result:
+    result = await _apply_run_settings(session_id, body, inherited=inherited, announce=announce)
+    if propagate and ({"fast", "speed"} & body.model_fields_set) and "skipped" not in result:
         _start_propagation(session_id, bool(result["fast"]))
     return result
 
 
-async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool) -> dict:
+def _checked_changes(body: RunSettingsUpdate) -> dict:
+    """The changes ``body`` asks for, refused when it names none or a null pick."""
+    changes = body.model_dump(exclude_unset=True)
+    if not changes or ("fast" in changes and changes["fast"] is None) or (
+            "speed" in changes and changes["speed"] is None):
+        raise ValueError("Provide effort, a boolean fast setting, a speed, or a context_window")
+    return changes
+
+
+async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool,
+                              announce: bool = False) -> dict:
     from app.core.session_pool import get_session_pool
     from app.core.session_runtime import get_live_runtime
     from app.core.model_effort import normalize_effort
@@ -145,18 +171,22 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     from app.core.provider.types import SessionOptions
     from app.db.model_providers import resolve_model_provider
 
-    changes = body.model_dump(exclude_unset=True)
-    if not changes or ("fast" in changes and changes["fast"] is None):
-        raise ValueError("Provide effort, a boolean fast setting, or a context_window")
-    lock = _locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
+    from app.core.model_speed import resolve_speed, stored_pair
+
+    changes = _checked_changes(body)
+    picks_speed = "fast" in changes or "speed" in changes
+    asked = {"effort_asked": "effort" in changes, "speed_asked": picks_speed}
+    async with settings_lock(session_id):
         session = await run_sync(control._require_owned, session_id)
         if inherited:
             if set(changes) != {"fast"}:
+                # Ultrafast is never inherited: a parent hands down Fast on/off.
                 raise ValueError("A parent hands down only fast mode")
             skip = await run_sync(_inherited_fast_skip, session)
             if skip:
                 return {"skipped": skip}
+            # On is Fast, never a tier the child's row still remembers.
+            changes["speed"] = "fast" if changes["fast"] else "standard"
         if "context_window" in changes:
             # Unlike effort, a window is connect-time state on BOTH legs. Save
             # it now, but never interrupt/reconfigure an in-flight request. The
@@ -169,6 +199,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             if window is None:
                 raise ValueError("This model does not support the selected context window")
             await run_sync(database.set_session_run_binding, session_id, context_window=window)
+            if announce:
+                await _announce_run_settings(session_id, {"context_window": window}, **asked)
             return {"context_window": window}
         state = get_session_pool().peek(session_id)
         runtime = get_live_runtime(session_id)
@@ -178,9 +210,14 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         options = getattr(state.adapter, "_options", None) if connected else None
         old = {"effort": options.effort if options else session.get("effort"),
                "fast": bool(options.fast if options else session.get("fast"))}
+        old["speed"] = resolve_speed(old["fast"], getattr(options, "speed", None) if options else session.get("speed"))
+        if picks_speed:
+            # One rule for the stored pair: a speed pick sets fast; fast alone
+            # (an older client) keeps Ultrafast only when it already runs it.
+            changes.update(stored_pair(changes.get("fast"), changes.get("speed"), prior=old))
         selected = {**old, **changes}
         if connected:
-            selected = await state.adapter.set_run_settings(**selected)
+            selected = {"speed": selected["speed"], **await state.adapter.set_run_settings(**selected)}
             if get_session_pool().peek(session_id) is not state or not state.is_connected:
                 raise RuntimeError("Session connection changed before the setting was confirmed")
         else:
@@ -196,12 +233,17 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
                 raise ValueError("This model does not support the selected effort level")
             if selected["fast"] and route not in ("delegated", "openai_responses"):
                 raise ValueError("Fast mode is not supported by this provider")
+            if selected["speed"] == "ultrafast":
+                from app.core.model_speed import ultrafast_supported_for_row
+
+                if route != "openai_responses" or not ultrafast_supported_for_row(provider, model):
+                    raise ValueError("Ultrafast is not available for this model")
             selected["effort"] = effort
         stored = selected
         # The owner's own pick on a subagent pins it: a parent's later toggle
         # leaves it alone.
         pin = ({"fast_pinned": True}
-               if not inherited and "fast" in changes and session.get("is_worker") else {})
+               if not inherited and picks_speed and session.get("is_worker") else {})
         try:
             await run_sync(database.set_session_run_binding, session_id, **stored,
                            clear_effort=stored["effort"] is None, **pin)
@@ -217,7 +259,11 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
+            state.connect_options.aih_speed = selected["speed"]
         waiting = fast_waiting_turn(session_id)
+        if announce:
+            # Under the lock, so a send admitted meanwhile announces after this.
+            await _announce_run_settings(session_id, selected, **asked)
         return {**selected, "fast_applies_turn": waiting} if waiting else selected
 
 
@@ -271,14 +317,15 @@ async def read_fast_waiting_turn(session: dict, session_id: str) -> Optional[str
         return None
 
 
-async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool) -> None:
+async def _announce_run_settings(session_id: str, result: dict, *, effort_asked: bool,
+                                 speed_asked: bool = False) -> None:
     """Tell this worker's open clients of the chat about a saved setting pick.
 
     Without it another tab, the phone or the other worker's browser keeps its
     older window or effort until a reload, and its next send carries it and
     pins it again (#1895, #1579). Effort goes out only when the request set it,
-    an explicit Auto (``None``) included. Every socket gets it, the picker's own
-    too: the REST call names no device, and the value is the one the picker
+    an explicit Auto (``None``) included; ``fast`` and ``speed`` likewise, as a
+    pair. Every socket gets it, the picker's own too: the REST call names no device, and the value is the one the picker
     already applied. A client that does not know a field reloads the row.
     """
     if not isinstance(result, dict):
@@ -288,6 +335,13 @@ async def _announce_run_settings(session_id: str, result: dict, *, effort_asked:
         updates["context_window"] = result["context_window"]
     if effort_asked and "effort" in result:
         updates["effort"] = result["effort"]
+    if speed_asked and ("fast" in result or "speed" in result):
+        # The tier the chat runs on: a cleared pair is Standard, and an owner
+        # older than ``speed`` answers without it (Fast at most).
+        from app.core.model_speed import STANDARD, resolve_speed
+
+        updates["speed"] = resolve_speed(result.get("fast"), result.get("speed"))
+        updates["fast"] = updates["speed"] != STANDARD
     if not updates:
         return
     try:
@@ -304,9 +358,38 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
         raise ValueError("session_id is required")
     result = await apply_run_settings(session_id, RunSettingsUpdate.model_validate(
         {key: value for key, value in body.items() if key not in ("session_id", "inherited")}),
-        inherited=body.get("inherited") is True)
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body)
+        inherited=body.get("inherited") is True, announce=True)
     return result
+
+
+def _older_owner_refused_speed(exc: Exception) -> bool:
+    """Did an owner that predates ``speed`` refuse it as an unknown field?
+
+    Its ``RunSettingsUpdate`` forbids extra fields, so pydantic names the field
+    on one line and "Extra inputs are not permitted" on the next.
+    """
+    lines = [line.strip().lower() for line in str(exc).splitlines()]
+    return any(line == "speed" and "extra inputs are not permitted" in following
+               for line, following in zip(lines, lines[1:]))
+
+
+async def _call_owner_run_settings(owner: Any, session_id: str, changes: dict) -> dict:
+    """``run-settings`` on the worker that runs the chat.
+
+    A ``speed`` pick also sends the ``fast`` it implies. An owner older than
+    ``speed`` refuses the field, so it is asked again with ``fast`` alone: it
+    runs an Ultrafast pick on Fast rather than failing the change.
+    """
+    if changes.get("speed") is not None:
+        changes = {**changes, "fast": changes["speed"] != "standard"}
+    try:
+        return await control.call(owner, "run-settings", {"session_id": session_id, **changes})
+    except (control.ControlRefused, ValueError) as exc:
+        if "speed" not in changes or not _older_owner_refused_speed(exc):
+            raise
+        logger.info("Owner of %s predates the speed setting; sending fast only", session_id)
+        legacy = {key: value for key, value in changes.items() if key != "speed"}
+        return await control.call(owner, "run-settings", {"session_id": session_id, **legacy})
 
 
 @router.put("/{session_id}/run-settings")
@@ -318,17 +401,17 @@ async def update_run_settings(
     owner = await run_sync(control.owner_of, session)
     try:
         if owner is not None:
-            result = await control.call(owner, "run-settings", {
-                "session_id": session_id, **body.model_dump(exclude_unset=True),
-            })
+            result = await _call_owner_run_settings(owner, session_id, _checked_changes(body))
         else:
-            result = await apply_run_settings(session_id, body)
+            return await apply_run_settings(session_id, body, announce=True)
     except (control.ControlRefused, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
         logger.exception("Could not change run settings for %s", session_id)
         raise HTTPException(503, "Could not confirm the setting change. Retry when the session is connected.") from exc
-    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set)
+    # Another worker runs the chat and announced it there; tell this one's clients.
+    await _announce_run_settings(session_id, result, effort_asked="effort" in body.model_fields_set,
+                                 speed_asked=bool({"fast", "speed"} & body.model_fields_set))
     return result
 
 
@@ -344,8 +427,7 @@ async def apply_permission_mode(session_id: str, mode: str) -> dict:
     from app.core.session_runtime import get_live_runtime
     from app.core.permission_handler import permission_handler
 
-    lock = _locks.setdefault(session_id, asyncio.Lock())
-    async with lock:
+    async with settings_lock(session_id):
         session = await run_sync(control._require_owned, session_id)
         mode = permission_mode_for_session_mode(mode, session.get("mode"))
         state = get_session_pool().peek(session_id)

@@ -105,6 +105,69 @@ export interface CatalogEntry extends GenerationOption {
 	status: CatalogStatus;
 }
 
+/** A provider or account that can make one kind for one operation (`GET /generation/providers/{kind}`). */
+export interface GenerationProvider {
+	source: string;
+	account: string;
+	workers: string[];
+	available: boolean;
+	reason: string | null;
+	native: boolean;
+	/** A subscription account's model. */
+	model?: string;
+	/** fal: how many models fit the operation. */
+	model_count?: number;
+	/** fal: the one worker whose catalog this row browses (one row per keyed worker). */
+	worker?: string | null;
+	worker_name?: string | null;
+}
+
+export interface ProvidersResponse {
+	kind: GenerationKind;
+	operation: string;
+	operation_label: string;
+	providers: GenerationProvider[];
+}
+
+/** One row of a provider's models (`GET /generation/models/{kind}`). */
+export interface ModelRow extends CatalogEntry {
+	/** fal's display name and category. */
+	name?: string;
+	category?: string;
+	description?: string;
+}
+
+export interface ModelPage {
+	models: ModelRow[];
+	total: number;
+	offset: number;
+	limit: number;
+	has_more: boolean;
+	/** The worker that served this fal page (the one asked for). */
+	worker?: string | null;
+	/** Why that worker cannot answer now (offline, needs an update). */
+	notice?: string | null;
+	/** False when the worker could not answer: keep what is shown, offer a reload. */
+	available?: boolean;
+}
+
+/** One provider row: a subscription account, or fal on one worker. */
+export function providerKey(provider: Pick<GenerationProvider, 'source' | 'account' | 'worker'>): string {
+	return provider.source === 'fal' ? `fal:${provider.worker ?? ''}` : provider.account;
+}
+
+/** A fal row names its worker only when more than one worker lists fal. */
+export function providerTitle(provider: GenerationProvider, all: readonly GenerationProvider[]): string {
+	const base = sourceLabel(provider.source);
+	if (provider.source !== 'fal' || !provider.worker_name) return base;
+	return all.filter((p) => p.source === 'fal').length > 1 ? `${base} · ${provider.worker_name}` : base;
+}
+
+/** A model row's title: fal's display name, else the readable model id. */
+export function modelRowTitle(row: Pick<ModelRow, 'name' | 'model'>): string {
+	return row.name?.trim() || modelLabel(row.model);
+}
+
 /**
  * A short name for the worker holding an account: its device name when the
  * install registry knows it, `This worker` for the local one, else a clipped
@@ -127,6 +190,8 @@ export interface ChooseResult {
 	tool: string;
 	options: GenerationOption[];
 	prompt: string;
+	/** What the call does (`image-to-video`...); the model browser lists models that fit it. */
+	operation?: string;
 	rememberedUnavailable: boolean;
 	/** The remembered choice has no known price, so it did not run unasked. */
 	rememberedUnpriced: boolean;
@@ -206,6 +271,7 @@ export function chooseResult(message: Pick<ChatMessage, 'type' | 'toolName' | 't
 		tool: displayToolName(message.toolName!),
 		options,
 		prompt,
+		...(typeof result.operation === 'string' && /^[a-z0-9-]{1,40}$/.test(result.operation) ? { operation: result.operation } : {}),
 		rememberedUnavailable: result.remembered_unavailable === true,
 		rememberedUnpriced: result.remembered_unpriced === true
 	};
@@ -419,8 +485,94 @@ export function quickChips(option: Pick<GenerationOption, 'quick_settings' | 'op
 		.map(([k, v]) => `${k.replace(/_/g, ' ')} ${formatValue(v)}`);
 }
 
+/**
+ * The chips an option shows for the options it will run with (`values`):
+ * edited settings first, then the server's quick settings, so a card never
+ * shows the defaults next to a price quoted for edited options.
+ */
+export function optionChips(option: Pick<GenerationOption, 'quick_settings' | 'options'>, values: Record<string, unknown>, max = 3): string[] {
+	const quick = option.quick_settings && Object.keys(option.quick_settings).length ? Object.keys(option.quick_settings) : Object.keys(values);
+	const edited = Object.keys(values).filter((k) => JSON.stringify(values[k]) !== JSON.stringify(option.options?.[k]));
+	const shown = [...edited, ...quick.filter((k) => !edited.includes(k))].filter((k) => Object.hasOwn(values, k));
+	return quickChips({ options: Object.fromEntries(shown.map((k) => [k, values[k]])) }, max);
+}
+
 export function choiceOf(option: GenerationOption, options: Record<string, unknown> = option.options): GenerationChoice {
 	return { source: option.source, account: option.account, worker: option.worker, model: option.model, options };
+}
+
+function canonical(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonical);
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const k of Object.keys(value).sort()) {
+			const v = (value as Record<string, unknown>)[k];
+			if (v !== undefined) out[k] = canonical(v);
+		}
+		return out;
+	}
+	return value;
+}
+
+/** The options as JSON exactly as sent on the wire, keys sorted at every depth. */
+export function optionsKey(options: Record<string, unknown> | undefined): string {
+	return JSON.stringify(canonical(options ?? {}));
+}
+
+/**
+ * Per-key request tokens, shared by the chat card and the automation picker:
+ * only the latest request for a key may settle it, so an older answer for the
+ * same key (edit X, Y, back to X) never ends the wait for the newer one.
+ * `reset()` voids every outstanding request (close, save, destroy).
+ */
+export class LatestRequests {
+	private latest = new Map<string, number>();
+	private next = 0;
+
+	/** Start a request for `key`; pass the token to `settle`. */
+	begin(key: string): number {
+		const token = ++this.next;
+		this.latest.set(key, token);
+		return token;
+	}
+
+	/** True once, for the newest request of `key`; false for any stale answer. */
+	settle(key: string, token: number): boolean {
+		if (this.latest.get(key) !== token) return false;
+		this.latest.delete(key);
+		return true;
+	}
+
+	pending(key: string): boolean {
+		return this.latest.has(key);
+	}
+
+	/** Forget `key`'s outstanding request: its answer will be ignored. */
+	drop(key: string): void {
+		this.latest.delete(key);
+	}
+
+	reset(): void {
+		this.latest.clear();
+	}
+}
+
+/** Which model a quote is for: source, account, holding worker, model and operation. */
+export function modelIdentity(option: Pick<GenerationOption, 'source' | 'account' | 'worker' | 'model'>, operation?: string): string {
+	return JSON.stringify([option.source, option.account, option.worker ?? null, option.model, operation ?? null]);
+}
+
+/**
+ * The key a quote is kept under: the model and its exact options. A quote
+ * answers only for its key, so a late answer for another model, or for
+ * options since changed, never prices what is on screen.
+ */
+export function quoteKey(
+	option: Pick<GenerationOption, 'source' | 'account' | 'worker' | 'model'>,
+	options: Record<string, unknown> | undefined,
+	operation?: string
+): string {
+	return modelIdentity(option, operation) + optionsKey(options);
 }
 
 export function sameChoice(a: Partial<GenerationChoice> | null | undefined, b: Partial<GenerationChoice> | null | undefined): boolean {

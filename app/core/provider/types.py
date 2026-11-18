@@ -67,6 +67,11 @@ class SessionOptions:
     # The anthropic and openrouter native lanes have no equivalent and ignore
     # it. None/False both mean standard.
     fast: Optional[bool] = None
+    # The tier inside fast mode (app/core/model_speed.py): ``"ultrafast"``
+    # with ``fast`` on sends ``service_tier: ultrafast`` on the OpenAI
+    # Responses lane where the model offers it, else priority. Any other value
+    # follows ``fast``. The delegated CLI has no Ultrafast and reads only ``fast``.
+    speed: Optional[str] = None
 
     # Permission mode
     permission_mode: Optional[str] = None

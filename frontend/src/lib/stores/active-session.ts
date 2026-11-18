@@ -31,9 +31,9 @@ import {
 	createSessionSwitcher,
 	getPersistedProfile,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
-	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
+	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode, getPersistedUltrafastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, listedComposeMode, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, listedComposeMode, sessionModelBinding, type AttachRowFields,
 } from './session/session-switcher';
 
 // Extracted sub-modules
@@ -60,7 +60,7 @@ import { notify } from './notifications';
 import { getOrCreateDeviceId } from './device-id';
 import { getPersistedDeviceIntent, setPersistedDeviceIntent } from './worker-selection';
 import { appData } from './app-data.svelte';
-import { composerPreferences, resolveComposerProject } from './composer-preferences';
+import { composerPreferences, composerSpeed, resolveComposerProject, type ComposerSpeed } from './composer-preferences';
 import { type SessionMode } from './sessionMode.svelte';
 import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { git } from './git.svelte';
@@ -70,7 +70,7 @@ import { ensureModelRegistryHydrated } from '$lib/constants/models.svelte';
 import { clampStandardCap, contextWindowForChoice, contextChoiceFromWindow, getModelContextControl, type ContextWindowChoice } from '$lib/constants/model-context';
 import { standardContextCap } from './session/context-window';
 import { clearSentQuestions } from './session/sent-questions';
-import { getDefaultModel, isFastModeCapable } from '$lib/constants/models';
+import { getDefaultModel, isFastModeCapable, isUltrafastCapable } from '$lib/constants/models';
 // Shared types
 import type {
 	ChatMessage, MessageType,
@@ -237,9 +237,13 @@ export interface ActiveSessionState {
 	effortLevelOverride: string | null;
 	/** Fast service tier for this session — faster output at a higher price, and
 	 *  a cleared prompt cache whenever it flips. Only offered on models that
-	 *  support it (`isFastModeCapable`); false everywhere else. */
-	fastMode: boolean;
-	/** Agent / access / Fast fields that still hold a placeholder until the
+		 *  support it (`isFastModeCapable`); false everywhere else. */
+		fastMode: boolean;
+		/** Fast refined to OpenAI's Ultrafast tier. Meaningful only while
+		 *  `fastMode` is on, and only on a model that offers it
+		 *  (`isUltrafastCapable`); code that knows only `fastMode` runs Fast. */
+		ultrafastMode?: boolean;
+/** Agent / access / Fast fields that still hold a placeholder until the
 	 *  session's own binding arrives from `/live` (#418). Shown as loading and
 	 *  never sent. See session/composer-binding.ts. */
 	bindingUnhydrated?: ComposerBindingFlags;
@@ -378,6 +382,7 @@ export interface PersistedSession {
 	permissionModeOverride: string | null;
 	effortLevelOverride: string | null;
 	fastMode?: boolean;
+	ultrafastMode?: boolean;
 	/** Which of profile / access / Fast this snapshot holds as real values.
 	 *  Absent on snapshots written before #418, which are not trusted for them. */
 	bindingHydrated?: ComposerBindingFlags;
@@ -452,6 +457,7 @@ function defaultState(): ActiveSessionState {
 		permissionModeOverride: getPersistedPermissionMode(),
 		effortLevelOverride: getPersistedEffort(),
 		fastMode: getPersistedFastMode(),
+		ultrafastMode: getPersistedUltrafastMode(),
 		bindingUnhydrated: {},
 		bindingPicks: {},
 		workspaceProjectIds: [],
@@ -899,27 +905,53 @@ function fastModeForModel(model: string | null, current: boolean): boolean {
 	return composerPreferences.fastForModel(model) ?? current;
 }
 
+/** Whether Fast on `model` runs as Ultrafast: the owner's pick for the model,
+ *  else `current`. Off when Fast is off or the model has no Ultrafast, so a
+ *  switch to such a model falls back to Fast (or Standard where Fast is off). */
+function ultrafastForModel(model: string | null, fast: boolean, current: boolean | undefined): boolean {
+	if (!fast || !isUltrafastCapable(model || getDefaultModel())) return false;
+	const picked = composerPreferences.speedForModel(model);
+	return picked != null ? picked === 'ultrafast' : !!current;
+}
+
+/** The chat's speed tier from its Fast switch and Ultrafast refinement. */
+export { composerSpeed };
+
 let permissionSelectionGeneration = 0;
 const runSettingGenerations = { effort: 0, fast: 0, context_window: 0 };
 const runSettingQueues = new Map<string, Promise<unknown>>();
 
-async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', value: string | null | boolean | number, remember = true) {
-	const generation = ++runSettingGenerations[field];
+type RunSettingField = 'effort' | 'fast' | 'speed' | 'context_window';
+type RunSettingsAnswer = { effort: string | null; fast: boolean; speed?: ComposerSpeed; context_window: number; fast_applies_turn?: string | null };
+
+async function setLiveRunSetting(field: RunSettingField, value: string | null | boolean | number, remember = true) {
+	// Fast and Speed are one setting: the newest pick of either wins.
+	const generationKey = field === 'speed' ? 'fast' : field;
+	const speedField = field === 'fast' || field === 'speed';
+	const generation = ++runSettingGenerations[generationKey];
 	const ownerEpoch = sessionOwnerEpoch();
 	const sessionId = _state.sessionId;
 	const selectedModel = _state.modelOverride || getDefaultModel();
-	const stateKey = field === 'effort' ? 'effortLevelOverride' : field === 'fast' ? 'fastMode' : 'contextWindowChoice';
-	let selected = value;
+	// A speed picked with an unsent model switch is checked against that model
+	// and travels with its send, as the model does; the running binding may not
+	// offer it.
+	const row = speedField && sessionId && _state.modelOverride ? appData.current.sessions.find(s => s.id === sessionId) : undefined;
+	const staged = !!row && sessionModelBinding(row) !== _state.modelOverride;
+	const stateKey = field === 'effort' ? 'effortLevelOverride' : speedField ? 'fastMode' : 'contextWindowChoice';
+	let selected = field === 'speed' ? value !== 'standard' : value;
+	// The answered Ultrafast refinement; undefined keeps the chat's own (a
+	// Fast toggle keeps the tier, as the worker does).
+	let ultrafast: boolean | undefined = field === 'speed' ? value === 'ultrafast' : undefined;
 	let savedWindow: number | null = null;
 	let fastAppliesTurn: string | null = null;
-	if (sessionId) {
+	if (sessionId && !staged) {
 		// Serialize picks for the same owner/session so a slow earlier request
 		// cannot overwrite a newer pick at the running worker.
 		const queueKey = `${ownerEpoch}:${sessionId}`;
 		const previous = runSettingQueues.get(queueKey);
 		const apply = () => {
 			if (sessionOwnerEpoch() !== ownerEpoch) return null;
-			return api.put<{ effort: string | null; fast: boolean; context_window: number; fast_applies_turn?: string | null }>(
+			return api.put<RunSettingsAnswer>(
 				`/sessions/${sessionId}/run-settings`, { [field]: value }
 			);
 		};
@@ -928,7 +960,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		try {
 			const saved = await pending;
 			if (!saved || sessionOwnerEpoch() !== ownerEpoch) return;
-			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel) : saved[field];
+			selected = field === 'context_window' ? contextChoiceFromWindow(saved.context_window, selectedModel)
+				: speedField ? saved.fast : saved[field as 'effort'];
+			if (speedField && saved.speed) ultrafast = saved.speed === 'ultrafast';
+			else if (field === 'speed') ultrafast = false; // an older owner runs it as Fast
 			fastAppliesTurn = saved.fast_applies_turn ?? null;
 			if (field === 'context_window' && selected) {
 				savedWindow = saved.context_window;
@@ -939,11 +974,12 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			const cached = sessionEphemeralCache.restore(sessionId);
 			if (cached) sessionEphemeralCache.save(sessionId, {
 				...cached, [stateKey]: selected,
-				...(field === 'fast' ? { bindingHydrated: { ...cached.bindingHydrated, fast: true } } : {}),
+				...(speedField ? { bindingHydrated: { ...cached.bindingHydrated, fast: true },
+					ultrafastMode: !!selected && (ultrafast ?? !!cached.ultrafastMode) } : {}),
 			});
 		} catch (error) {
-			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
+			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[generationKey]) {
+				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : field === 'speed' ? 'speed' : 'context window'}: ${getErrorMessage(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
 			return;
@@ -951,7 +987,8 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			if (runSettingQueues.get(queueKey) === pending) runSettingQueues.delete(queueKey);
 		}
 	}
-	if (generation !== runSettingGenerations[field] || sessionOwnerEpoch() !== ownerEpoch) return;
+	if (generation !== runSettingGenerations[generationKey] || sessionOwnerEpoch() !== ownerEpoch) return;
+	const ultrafastNow = !!selected && (ultrafast ?? !!_state.ultrafastMode);
 	if (field === 'context_window') {
 		selected = sessionId ? selected : contextChoiceFromWindow(value as number, selectedModel);
 		setPersistedRunBinding('contextWindowChoice', selected as ContextWindowChoice);
@@ -959,7 +996,10 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 		if (field === 'effort' && remember) composerPreferences.rememberEffort(selectedModel, selected as string | null);
 		// Only a model that offers fast mode keeps a pick; switching to one that
 		// does not turns it off without forgetting the owner's choice.
-		if (field === 'fast' && remember && isFastModeCapable(selectedModel)) composerPreferences.rememberFast(selectedModel, !!selected);
+		if (speedField && remember && isFastModeCapable(selectedModel)) {
+			if (isUltrafastCapable(selectedModel)) composerPreferences.rememberSpeed(selectedModel, composerSpeed({ fastMode: !!selected, ultrafastMode: ultrafastNow }));
+			else composerPreferences.rememberFast(selectedModel, !!selected);
+		}
 		setPersistedRunBinding(field === 'effort' ? 'effort' : 'fastMode',
 			field === 'effort' ? selected as string | null : selected ? '1' : '');
 	}
@@ -967,7 +1007,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 	_update(s => ({
 		...s, [stateKey]: selected,
 		// An acknowledged (or new-compose) Fast pick is a real value (#418).
-		...(field === 'fast' ? markBindingHydrated(s, 'fast') : {}),
+		...(speedField ? { ...(staged ? markBindingPicked(s, 'fast') : markBindingHydrated(s, 'fast')), ultrafastMode: ultrafastNow } : {}),
 		// A context-window answer says nothing about Fast.
 		...(field !== 'context_window' ? { fastAppliesTurnId: fastAppliesTurn } : {}),
 		...(field === 'context_window' && sessionId && savedWindow != null ? { contextWindowPin: savedWindow } : {})
@@ -1488,13 +1528,14 @@ export const activeSession = {
 	setModelOverride(model: string | null) {
 		_update(s => {
 			const fastMode = fastModeForModel(model, s.fastMode);
+			const ultrafastMode = ultrafastForModel(model, fastMode, s.ultrafastMode);
 			// A model with no tier, or one with the owner's own pick, decides Fast
 			// for the (unsent) model switch. Otherwise the session's value stands,
 			// placeholder included (#418).
 			const implied = !isFastModeCapable(model || getDefaultModel()) || composerPreferences.fastForModel(model) != null;
 			return {
-				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode,
-				...(implied && (fastMode !== s.fastMode || s.bindingUnhydrated?.fast) ? markBindingPicked(s, 'fast') : {}),
+				...s, modelOverride: model, effortLevelOverride: composerPreferences.effortForModel(model) ?? s.effortLevelOverride, fastMode, ultrafastMode,
+				...(implied && (fastMode !== s.fastMode || ultrafastMode !== !!s.ultrafastMode || s.bindingUnhydrated?.fast) ? markBindingPicked(s, 'fast') : {}),
 			};
 		});
 		setPersistedRunBinding('model', model); persistSession();
@@ -1523,6 +1564,8 @@ export const activeSession = {
 	},
 	setEffortLevelOverride(level: string | null, remember = true) { return setLiveRunSetting('effort', level, remember); },
 	setFastMode(on: boolean, remember = true) { return setLiveRunSetting('fast', on, remember); },
+	/** Pick Standard, Fast or Ultrafast (the 3-way control on Ultrafast models). */
+	setSpeed(speed: ComposerSpeed, remember = true) { return setLiveRunSetting('speed', speed, remember); },
 	async setWorkspaceProjectIds(ids: string[]) {
 		const owner = { sessionId: _state.sessionId, project: _state.project, projectV2Id: _state.projectV2Id };
 		let next = [...new Set(ids)].filter(id => id !== owner.project);
@@ -1664,7 +1707,8 @@ export const activeSession = {
 		const code = mode !== 'chat';
 		_update(s => ({...s, mode,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
-			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
+			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)),	fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
+				ultrafastMode:ultrafastForModel(picks.model, fastModeForModel(picks.model, picks.fastMode === '1'), false),
 			contextWindowChoice:getPersistedContextWindowChoice(),
 			...composerCheckoutDefaults(code, {projectId:own.project, projectV2Id:own.projectV2Id}, own),
 		}));

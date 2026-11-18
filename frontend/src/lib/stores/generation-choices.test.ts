@@ -67,3 +67,21 @@ describe('saveOutcome', () => {
 		expect(saveOutcome({}, 'image')).toBeNull();
 	});
 });
+
+describe('generationChoices.optionFor', () => {
+	const ROW = {
+		source: 'fal', account: 'fal-ai', worker: 'worker-b', model: 'fal-ai/kling/v3', kind: 'video' as const, options: {},
+		verified: false, price: UNKNOWN, schema: null, available: true, reason: null, status: 'unpriced' as const, name: 'Kling v3'
+	};
+	const entry = (worker: string) => ({ ...ROW, worker, schema: { fields: [] }, price: { ...UNKNOWN, status: 'estimated', total: '0.7', amount: '0.7' } });
+
+	it('reads a browsed row from the worker that listed it and never takes another worker', async () => {
+		mocks.get.mockResolvedValue({ entries: [entry('worker-c'), entry('worker-b')], favourites: {} });
+		const option = await generationChoices.optionFor('video', ROW, 'image-to-video');
+		expect(option.worker).toBe('worker-b');
+		expect(mocks.get.mock.calls[0][0]).toContain('worker=worker-b');
+		expect(mocks.get.mock.calls[0][0]).toContain('operation=image-to-video');
+		mocks.get.mockResolvedValue({ entries: [entry('worker-c')], favourites: {} });
+		await expect(generationChoices.optionFor('video', ROW)).rejects.toThrow('The worker that listed this model no longer offers it.');
+	});
+});
