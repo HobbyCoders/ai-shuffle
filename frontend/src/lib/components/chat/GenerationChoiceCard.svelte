@@ -494,8 +494,10 @@
 	const approvable = $derived(
 		variant === 'chat' && !handoff && !!current && current.source === 'fal' && !currentPrice.priced && !!currentPrice.approvable && !elsewhere(current)
 	);
+	// While a browsed model's detail loads, the user has moved on from the
+	// current selection, so it cannot be used either.
 	const canUse = $derived(
-		!!current?.available && (currentPrice.priced || approvable) && !quoting && !quoteError && !saving && !collapsed
+		!!current?.available && (currentPrice.priced || approvable) && !quoting && !quoteError && !saving && !collapsed && !browseLoading
 	);
 
 	async function use() {

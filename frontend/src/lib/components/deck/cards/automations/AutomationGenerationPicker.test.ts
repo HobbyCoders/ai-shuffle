@@ -69,6 +69,23 @@ describe('automation generation picker',() => {
   await new Promise(r => setTimeout(r,20));
   expect((screen.getByRole('button',{name:/Pin to this job|Checking price/}) as HTMLButtonElement).disabled).toBe(true);
  });
+ it('keeps the previous option from being pinned while a browsed model is still loading',async () => {
+  const kling={...option,model:'fal-ai/kling/v3',options:{shape:'wide'}};
+  let release:(v:unknown)=>void=() => {};
+  mocks.quote.mockResolvedValue({ok:true,price:option.price});
+  mocks.providers.mockResolvedValue({kind:'image',operation:'text-to-image',operation_label:'Text to image',providers:[{source:'fal',account:'test-account',worker:'worker-a',workers:['worker-a'],available:true,reason:null,native:false,model_count:1}]});
+  mocks.models.mockResolvedValue({models:[{...kling,status:'available',name:'Kling v3'}],total:1,offset:0,limit:20,has_more:false});
+  mocks.optionFor.mockImplementation(() => new Promise(resolve => release=resolve));
+  render(AutomationGenerationPicker,{kind:'image',options:[option],onpick:vi.fn(async () => {})});
+  const pin = () => document.querySelector('.picker-actions button') as HTMLButtonElement;
+  await waitFor(() => expect(pin().disabled).toBe(false));
+  await fireEvent.click(screen.getByRole('button',{name:'All models'}));
+  await fireEvent.click(await screen.findByRole('button',{name:/Kling v3/}));
+  await new Promise(r => setTimeout(r,20));
+  expect(pin().disabled).toBe(true);
+  release(kling);
+  await waitFor(() => expect(pin().disabled).toBe(false));
+ });
  it('lets only the newest quote for the same options settle them (edit X, Y, back to X)',async () => {
   const held: Record<string, ((v: unknown) => void)[]> = {};
   mocks.quote.mockImplementation((_k: string, choice: {options: Record<string, unknown>}) =>

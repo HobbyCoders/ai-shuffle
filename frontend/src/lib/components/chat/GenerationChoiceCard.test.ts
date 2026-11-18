@@ -817,6 +817,26 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(mocks.post.mock.calls[0][1].choice.model).toBe('fal-ai/flux/dev');
 	});
 
+	it('keeps the previous option from being used while a browsed model is still loading', async () => {
+		withModels([row('fal-ai/recraft/v3', 'Recraft V3')], () => ({ ...RECRAFT, status: 'available' }));
+		const loaded = mocks.get.getMockImplementation()!;
+		let release: () => void = () => {};
+		mocks.get.mockImplementation((url: string) => url.startsWith('/generation/catalog')
+			? new Promise((resolve) => (release = () => resolve(loaded(url))))
+			: loaded(url));
+		mocks.post.mockImplementation(async () => ({ ok: true, priced: true, price: { ...PRICE, amount: '0.04', total: '0.04' } }));
+		card();
+		await waitFor(() => expect(useButton().disabled).toBe(false));
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		await new Promise((r) => setTimeout(r, 20));
+		// The user moved on from the first option; "Use this" must not send it.
+		expect(useButton().disabled).toBe(true);
+		release();
+		await waitFor(() => expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/recraft/i));
+		await waitFor(() => expect(useButton().disabled).toBe(false));
+	});
+
 	it('refuses a browsed model whose declared inputs this tool cannot fill, with the reason', async () => {
 		withModels([row('fal-ai/fill', 'Fill')], () => ({
 			...RECRAFT, model: 'fal-ai/fill', available: false, status: 'unavailable',

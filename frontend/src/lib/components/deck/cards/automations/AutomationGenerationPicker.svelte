@@ -252,7 +252,8 @@
 	});
 
  onDestroy(() => { destroyed = true; requests.reset(); if (quoteTimer) clearTimeout(quoteTimer); });
- const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving);
+ // A browsed model still loading means the user moved on from the current one.
+ const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !browseLoading);
  let browseSeq = 0;
  async function pickBrowsed(row: ModelRow) {
   browseError = null;
