@@ -49,7 +49,7 @@
 	   (the effort card's `.fast-active` colour) passing through it. */
 	.fast .speed-text,
 	.ultrafast .speed-text {
-		--speed-band: color-mix(in oklch, var(--primary) 70%, var(--foreground));
+		--speed-band: color-mix(in oklab, var(--primary) 70%, var(--foreground));
 		background-image: linear-gradient(100deg, currentColor 0%, currentColor 38%, var(--speed-band) 50%, currentColor 62%, currentColor 100%);
 		background-size: 300% 100%;
 		background-position: 100% 0;
@@ -61,7 +61,7 @@
 
 	/* Ultrafast: two bands, a brighter accent and a quicker pass. */
 	.ultrafast .speed-text {
-		--speed-band: color-mix(in oklch, var(--primary) 88%, var(--foreground));
+		--speed-band: color-mix(in oklab, var(--primary) 88%, var(--foreground));
 		background-image: linear-gradient(100deg,
 			currentColor 0%, currentColor 30%, var(--speed-band) 38%, currentColor 46%,
 			currentColor 54%, var(--speed-band) 62%, currentColor 70%, currentColor 100%);
@@ -95,7 +95,7 @@
 			animation: none;
 			background-image: none;
 			-webkit-text-fill-color: currentColor;
-			color: color-mix(in oklch, var(--primary) 60%, var(--foreground));
+			color: color-mix(in oklab, var(--primary) 60%, var(--foreground));
 		}
 
 		.speed-bolt {
