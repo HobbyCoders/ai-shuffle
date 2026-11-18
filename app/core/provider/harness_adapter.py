@@ -7038,13 +7038,19 @@ def _delegated_tool_policy(
         # A bridged server tool (the ACP leg names it
         # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
         # as the bridge filter does (_bridged_tool_permitted): a deny entry in
-        # either form withholds it. Not a bare name: "WebFetch" on these lists
-        # is the CLI's own tool, distinct from the bridged app copy.
+        # either form withholds it. Not a bare name: "WebFetch" on the
+        # blocklist is the CLI's own tool, distinct from the bridged app copy.
         served = name.removeprefix(_BUNDLED_CLI_PREFIX)
         spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
         if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
-        if surface and not any(tool_permitted(s, surface, None) for s in spellings):
+        # The surface check takes every spelling the bridge serves on
+        # (_bridged_tool_permitted), the bare registry name included: the ACP
+        # leg asks this policy about bridged calls too, and a tool the bridge
+        # served because "Glob" is ticked must not then be refused (#1751).
+        # The prefix makes the call the bridged copy, never the agent's own.
+        on_surface = spellings | ({served} if served != name else set())
+        if surface and not any(tool_permitted(s, surface, None) for s in on_surface):
             return f"Tool '{name}' is not enabled in this profile"
         rule = match_rule(rules, name, tool_input, cwd=session_cwd)
         if rule is not None and rule.decision == "deny":

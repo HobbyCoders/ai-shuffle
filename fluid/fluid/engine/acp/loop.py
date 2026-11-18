@@ -46,7 +46,7 @@ from fluid.engine.acp.client import (
     RpcFailure,
     INVALID_PARAMS,
 )
-from fluid.engine.acp.mapping import TurnMapper, safe_server_name
+from fluid.engine.acp.mapping import KIND_TOOL_NAMES, TurnMapper, safe_server_name
 from fluid.engine.base import EngineCaps
 from fluid.events.bus import EventBus
 from fluid.events.model import (
@@ -306,6 +306,9 @@ class AcpLoop:
         # True while the running turn can still take a steer: from its mapper
         # opening until the turn starts to store what it gathered.
         self._steering_open = False
+        # The running turn's last refused permission request, in the host's
+        # words (``_silent_end``).
+        self._turn_refusal: str | None = None
         self._interrupted = asyncio.Event()
         self._pending_permissions: dict[str, asyncio.Future[RespondPermission]] = {}
         self._pending_questions: dict[str, asyncio.Future[RespondQuestion]] = {}
@@ -608,10 +611,25 @@ class AcpLoop:
         return self.registry.get(tool_name[len(prefix):])
 
     def _bridged_name(self, call: Mapping[str, Any]) -> str | None:
+        """The bridge's name for a call to one of its tools, or None.
+
+        Every name the engine gives an ACP call comes from here (through
+        ``TurnMapper.tool_name_and_input``): the transcript card, the
+        permission card, the host's policy and saved rules, and the proxy
+        checks, so they all agree.
+        """
         title = str(call.get("title") or "")
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
         candidates = [str(meta.get(k)) for k in ("toolName", "tool_name", "mcpTool") if meta.get(k)]
         candidates.append(title)
+        if str(call.get("kind") or "other") not in KIND_TOOL_NAMES:
+            # agy 1.5.9 titles an MCP call with a verb before the tool
+            # ("Run mcp_fluid_bundled_Glob", issue #1751). Only for a kind that
+            # is none of the agent's own tools: a shell call's title can name
+            # a bridged tool too, and must never pass as that tool.
+            verb, _, rest = title.partition(" ")
+            if verb.isalpha() and rest.strip():
+                candidates.append(rest.strip())
         served = self.bridged_tools()
         for text in candidates:
             for name in served:
@@ -927,6 +945,7 @@ class AcpLoop:
         finally:
             self._steering_open = False
             self._mapper = None
+            self._turn_refusal = None
             self._steer_requests = []
             self._stop_reason = None
             with contextlib.suppress(Exception):
@@ -938,6 +957,7 @@ class AcpLoop:
         mapper = TurnMapper(session_id=sid, turn_id=turn_id, bridged_name=self._bridged_name,
                             unwrap_bridged=self._unwrap_bridged)
         self._mapper = mapper
+        self._turn_refusal = None
         self._steering_open = True
         failure: AcpError | None = None
         result: Any = None
@@ -1009,9 +1029,45 @@ class AcpLoop:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                         message="The agent refused this request.", usage=usage, cost_usd=cost))
             return
+        silent = self._silent_end(mapper)
+        if silent:
+            await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=silent,
+                                        usage=usage, cost_usd=cost))
+            return
         await self._emit(TurnComplete(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                       stop_reason=stop, num_model_calls=1 if mapper.text or segments else 0,
                                       usage=usage, cost_usd=cost))
+
+    def _silent_end(self, mapper: TurnMapper) -> str | None:
+        """Why a turn that ended with no reply right after a refused or failed
+        tool call failed, or None when it did not end that way.
+
+        agy ends its turn when a permission request is rejected, as if a
+        person said no: its other open calls fail and no reply comes. Read as
+        a completed turn, a delegate's parent got an empty report and took
+        the task as done (issue #1751). The text is chosen here: the host's
+        own refusal reason or a tool name the engine resolved, never the
+        agent's output.
+        """
+        if mapper.text.strip() or mapper.ended_on_failure is None or self._interrupted.is_set():
+            return None
+        why = self._turn_refusal or f"{self._plain_tool_name(mapper.ended_on_failure)} failed"
+        return f"The agent ended its turn without a reply after {why}."
+
+    def _plain_tool_name(self, name: str) -> str:
+        """``name`` when the engine chose it (one of the kind map's tools, or
+        a tool the bridge serves); a title the agent wrote is never repeated."""
+        if name in KIND_TOOL_NAMES.values() or name == "Write":
+            return name
+        prefix = f"mcp__{BUNDLED_SERVER_NAME}__"
+        tail = name[len(prefix):] if name.startswith(prefix) else None
+        if tail and (tail in self._served_names() or tail in self.bridged_tools()):
+            return name
+        return "a tool"
+
+    def _note_refusal(self, mapper: TurnMapper | None, why: str) -> None:
+        if mapper is not None and mapper is self._mapper:
+            self._turn_refusal = why
 
     @staticmethod
     def _usage(result: Any, mapper: TurnMapper) -> tuple[dict[str, int], float | None]:
@@ -1173,10 +1229,16 @@ class AcpLoop:
                     "content": [{"type": "content", "content": {"type": "text", "text": denial}}],
                 }):
                     await self._emit(event)
+            # The host's denial quotes the call's name, which may be a title
+            # the agent wrote: quoted only when the engine chose the name.
+            self._note_refusal(mapper, f"a tool call was refused ({denial.strip().rstrip('.')})"
+                               if self._plain_tool_name(name) == name else "a tool call was refused")
             return chose("reject_once", "reject_always")
         if self.permission_mode == "bypassPermissions":
             return allow()
+        shown = self._plain_tool_name(name)
         if self.permission_mode == "plan":
+            self._note_refusal(mapper, f"{shown} was refused in Plan mode")
             return chose("reject_once", "reject_always")
         request_id = new_id("perm")
         tool_use_id = str(call.get("toolCallId") or request_id)
@@ -1194,13 +1256,17 @@ class AcpLoop:
             try:
                 response = await asyncio.wait_for(fut, timeout=timeout)
             except (asyncio.TimeoutError, asyncio.CancelledError):
-                return cancelled if self._interrupted.is_set() else chose("reject_once", "reject_always")
+                if self._interrupted.is_set():
+                    return cancelled
+                self._note_refusal(mapper, f"the permission request for {shown} got no answer in time")
+                return chose("reject_once", "reject_always")
         finally:
             self._pending_permissions.pop(request_id, None)
         if response.decision == "allow_always" and not proxied:
             return chose("allow_always", "allow_once")
         if response.decision in ("allow", "allow_always"):
             return allow()
+        self._note_refusal(mapper, f"the permission request for {shown} was refused")
         return chose("reject_once", "reject_always")
 
     async def _elicit(self, params: dict[str, Any]) -> dict[str, Any]:

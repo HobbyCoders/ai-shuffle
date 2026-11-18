@@ -192,6 +192,32 @@ async def test_kill_switch_restores_the_eager_bridge_and_agent_side_servers(
         await adapter._registry.aclose()
 
 
+@pytest.mark.asyncio
+async def test_a_read_only_profile_runs_the_bundled_glob_agy_asks_for(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    """#1751: the investigator's surface ticks bare Glob/Grep/Read. agy asks
+    for the bridged Glob titled "Run mcp_fluid_bundled_Glob"; the real app
+    policy must admit what the bridge serves, and the delegate gets results."""
+    from fluid.events.model import ErrorEvent, ToolUse, TurnComplete
+
+    (tmp_path / "notes.txt").write_text("x")
+    adapter = await _connected(tmp_path, client, monkeypatch, tool_allowlist=["Read", "Glob", "Grep"])
+    engine = adapter._engine
+    try:
+        assert "Glob" in engine.bridged_tools()
+        assert await engine._policy_denial("mcp__fluid_bundled__Glob", {"pattern": "*.txt"}) is None
+        text, events = await _run_turn(engine, 'agymcp Glob {"pattern": "*.txt"}')
+        assert not [e for e in events if isinstance(e, ErrorEvent)], text
+        assert isinstance(events[-1], TurnComplete)
+        assert next(e.name for e in events if isinstance(e, ToolUse)) == "mcp__fluid_bundled__Glob"
+        assert "mcp said:" in text and "notes.txt" in text, text
+        # Off the surface, the same call is still refused, by name.
+        assert "not enabled" in await engine._policy_denial("mcp__fluid_bundled__HistorySearch", {})
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
 def _call(tool, ask=False, **args):
     """The fake agent's CallTool turn; ``ask`` sends the permission request
     a real agent sends before an MCP call."""

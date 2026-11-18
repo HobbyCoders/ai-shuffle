@@ -144,6 +144,10 @@ class TurnMapper:
         self.config_options: list[dict[str, Any]] | None = None
         self.usage_update: dict[str, Any] | None = None
         self.commands: list[dict[str, Any]] | None = None
+        # The name of the tool whose result came last, when that result was a
+        # failure (None once a later tool completes): a turn that then ends
+        # with no text ended on it.
+        self.ended_on_failure: str | None = None
 
     def _ev(self, cls: type[Event], **kw: Any) -> Event:
         return cls(session_id=self.session_id, turn_id=self.turn_id, **kw)
@@ -247,6 +251,7 @@ class TurnMapper:
                 text = raw if isinstance(raw, str) else json.dumps(_jsonable(raw))
             if not text:
                 text = "(failed)" if status == "failed" else "(done)"
+            self.ended_on_failure = state.name if status == "failed" else None
             out.extend(self._finish_assistant())
             self._segments.append(("tool_results", [ToolResultBlock(
                 tool_use_id=tool_id, content=[Text(text=text)], is_error=status == "failed",

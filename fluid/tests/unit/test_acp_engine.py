@@ -37,6 +37,7 @@ from fluid.events.model import (
 from fluid.events.ops import (
     AgentMessage, Interrupt, RespondPermission, RespondQuestion, Resume, SetModel, SetPermissionMode, Steer, UserTurn,
 )
+from fluid.messages.content import ToolUseBlock
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -225,6 +226,101 @@ async def test_host_tools_reach_the_agent_over_the_bundled_bridge(tmp_path: Path
         hidden_result = await d.turn('mcp Hidden {"text": "x"}', timeout=60)
         assert isinstance(hidden_result, TurnComplete)
         assert "not listed" in d.text()
+    finally:
+        await d.close()
+
+
+def _glob_registry(seen: list[dict]) -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def glob(args: dict, ctx: ToolCtx) -> ToolOutcome:
+        seen.append(args)
+        return ToolOutcome(text="notes.txt")
+
+    schema = {"type": "object", "properties": {"pattern": {"type": "string"}}}
+    registry.register_builtin(ToolSpec(name="Glob", description="glob", input_schema=schema), glob)
+    return registry
+
+
+async def test_a_bridged_call_titled_as_agy_titles_it_runs_as_the_registry_tool(tmp_path: Path) -> None:
+    """agy 1.5.9 titles a bridged call "Run mcp_fluid_bundled_Glob" with a kind
+    outside the kind map (#1751). Its card, the policy and the transcript all
+    name the registry tool, so a policy that serves Glob lets it run."""
+    seen: list[dict] = []
+    judged: list[tuple[str, dict]] = []
+
+    async def policy(name: str, data: dict) -> str | None:
+        judged.append((name, data))
+        return None if name == "mcp__fluid_bundled__Glob" else f"Tool '{name}' is not enabled in this profile"
+
+    d = await _driver(tmp_path, registry=_glob_registry(seen), ctx=ToolCtx(cwd=str(tmp_path)),
+                      tool_policy=policy)
+    try:
+        await d.loop.submit(UserTurn(content='agymcp Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        assert (ask.name, ask.input) == ("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})
+        assert judged == [("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})]
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        end = await d.until(TERMINAL, timeout=60)
+        assert isinstance(end, TurnComplete), end
+        assert seen == [{"pattern": "*.txt"}]
+        assert "mcp said: notes.txt" in d.text()
+        assert [e.name for e in d.events if isinstance(e, ToolUse)] == ["mcp__fluid_bundled__Glob", "Read"]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        stored = [b.name for n in nodes for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert stored[0] == "mcp__fluid_bundled__Glob"
+    finally:
+        await d.close()
+
+
+def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp_path: Path) -> None:
+    from fluid.tools.mcp.call_through import CALL_TOOL
+
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]))
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == "mcp__fluid_bundled__Glob"
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob"}) == "mcp__fluid_bundled__Glob"
+    # The agent's own shell call whose title names the tool is not that tool.
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "execute"}) is None
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Globber", "kind": "other"}) is None
+    # The proxy check reads the same name.
+    loop.deferred = lambda name: name == "Glob"
+    call = {"title": f"Run mcp_fluid_bundled_{CALL_TOOL}", "kind": "other"}
+    assert loop._is_call_proxy(call)
+
+
+async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: Path) -> None:
+    """agy ends its turn on a rejected permission: siblings fail, no reply.
+    That is a failed turn with the host's own reason, never a completed one
+    (a delegate's parent got an empty report as a finished task, #1751)."""
+
+    async def policy(name: str, data: dict) -> str | None:
+        return f"Tool '{name}' is not enabled in this profile"
+
+    d = await _driver(tmp_path, registry=_glob_registry([]), ctx=ToolCtx(cwd=str(tmp_path)),
+                      tool_policy=policy)
+    try:
+        end = await d.turn('agymcp Glob {"pattern": "*.txt"}')
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after a tool call was refused "
+                               "(Tool 'mcp__fluid_bundled__Glob' is not enabled in this profile).")
+        assert not [e for e in d.events if isinstance(e, TurnComplete)]
+        # The transcript still holds what happened.
+        results = [(r.name, r.is_error) for r in d.events if isinstance(r, ToolResult)]
+        assert results == [("mcp__fluid_bundled__Glob", True), ("Read", True)]
+        # The owner's own "no" ends it the same way, in words the host chose.
+        d.loop.tool_policy = None
+        await d.loop.submit(UserTurn(content='agymcp Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob was refused.")
+        # A refused call the agent then answers about is an ordinary turn.
+        await d.loop.submit(UserTurn(content="tool"))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        assert isinstance(await d.until(TERMINAL), TurnComplete)
     finally:
         await d.close()
 
