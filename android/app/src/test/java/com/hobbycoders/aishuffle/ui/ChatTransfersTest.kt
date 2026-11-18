@@ -1,0 +1,272 @@
+package com.hobbycoders.aishuffle.ui
+
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import okhttp3.Call
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.io.IOException
+import java.io.OutputStream
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.SynchronousQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CancellationException
+
+/**
+ * Drives the production save lifecycle with a virtual clock for its timers and real
+ * threads for document IO, so a provider can stall while minutes pass.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class ChatTransfersTest {
+    private val base = "https://worker.example"
+    private val doc = "content://docs/document/big.zip"
+    private val scheduler = TestCoroutineScheduler()
+    private val errors = CopyOnWriteArrayList<Throwable>()
+    private val scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler) +
+        CoroutineExceptionHandler { _, error -> errors += error })
+    private val pool = ThreadPoolExecutor(0, 16, 1, TimeUnit.SECONDS, SynchronousQueue())
+    private val docs = Docs()
+    private val worker = FakeStreamer()
+    private val statuses = CopyOnWriteArrayList<String>()
+    private val replies = CopyOnWriteArrayList<String>()
+    private var picks = 0
+    private val transfers = ChatTransfers(base, scope, pool.asCoroutineDispatcher(), { scheduler.currentTime }, docs,
+        { true }, { true }, { worker }, { _, _ -> picks++ }, { statuses += it })
+
+    @After fun tearDown() {
+        worker.steps.put(Step.Fail)
+        docs.gates.forEach { it.countDown() }
+        scope.cancel()
+        pool.shutdownNow()
+        assertTrue("uncaught: $errors", errors.isEmpty())
+    }
+
+    private class Stream(private val gate: CountDownLatch?) : ByteArrayOutputStream() {
+        @Volatile var closing = false
+        @Volatile var closed = false
+        override fun close() { closing = true; gate?.await(); closed = true }
+    }
+    private inner class Docs : ChatTransfers.Documents {
+        val events = CopyOnWriteArrayList<String>()
+        val streams = CopyOnWriteArrayList<Stream>()
+        /** Gates handed to the next opened streams' close(); empty means close returns at once. */
+        val gates = CopyOnWriteArrayList<CountDownLatch>()
+        val nextGates = LinkedBlockingQueue<CountDownLatch>()
+        override fun open(uri: String): OutputStream {
+            events += "open $uri"
+            return Stream(nextGates.poll()).also { streams += it }
+        }
+        override fun delete(uri: String) { events += "delete $uri" }
+    }
+    private sealed class Step {
+        class Chunk(val bytes: ByteArray) : Step()
+        object End : Step()
+        object Fail : Step()
+    }
+    /** Stands in for WorkerDownloadClient: each step is one network read the test releases. */
+    private class FakeStreamer : ChatTransfers.Streamer {
+        val steps = LinkedBlockingQueue<Step>()
+        val started = AtomicInteger()
+        val written = AtomicInteger()
+        @Volatile var call: Call? = null
+        override fun save(url: String, output: OutputStream, onChunk: () -> Boolean, onCall: (Call) -> Unit) {
+            call = OkHttpClient().newCall(Request.Builder().url(url).build()).also(onCall)
+            started.incrementAndGet()
+            while (true) {
+                when (val step = steps.take()) {
+                    is Step.Chunk -> {
+                        if (!onChunk()) throw CancellationException("Download cancelled")
+                        output.write(step.bytes)
+                        written.incrementAndGet()
+                    }
+                    Step.End -> return
+                    Step.Fail -> throw IOException("Canceled")
+                }
+            }
+        }
+    }
+
+    private fun url(id: String, target: String = "$base/api/files/by-path?path=big.zip") =
+        "{\"type\":\"url\",\"id\":\"$id\",\"url\":\"$target\",\"name\":\"big.zip\"}"
+    private fun send(raw: String) = transfers.receive(raw) { replies += it }
+    private fun replies(id: String) = replies.map(::JSONObject).filter { it.getString("id") == id }.map { it.getBoolean("ok") }
+
+    /** Runs main-thread work until [condition] holds; IO runs on real threads meanwhile. */
+    private fun settle(what: String, condition: () -> Boolean) {
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (true) {
+            scheduler.runCurrent()
+            if (condition()) return
+            check(System.nanoTime() < end) { "Timed out waiting for $what" }
+            Thread.sleep(2)
+        }
+    }
+    /** Waits until neither the main queue nor any IO thread has work left. */
+    private fun quiesce() {
+        var calm = 0
+        settle("quiet") {
+            calm = if (pool.activeCount == 0) calm + 1 else 0
+            calm >= 25
+        }
+    }
+    private fun advance(ms: Long) { scheduler.advanceTimeBy(ms); scheduler.runCurrent() }
+    private fun chunk(vararg bytes: Byte) {
+        val before = worker.written.get()
+        worker.steps.put(Step.Chunk(bytes))
+        settle("chunk written") { worker.written.get() > before }
+    }
+    private fun startStream(id: String) {
+        val starts = worker.started.get()
+        send(url(id))
+        transfers.chosen(doc)
+        settle("stream started") { worker.started.get() > starts }
+    }
+
+    @Test fun movingStreamOutlivesTheFiveMinuteChooserWindow() {
+        startStream("a1")
+        repeat(8) { advance(60_000); chunk(it.toByte()) }
+        assertTrue(scheduler.currentTime > ChatTransfers.CHOOSE_MS)
+        assertTrue(replies.isEmpty())
+        assertEquals("Saving file…", statuses.last())
+
+        worker.steps.put(Step.End)
+        settle("reply") { replies.isNotEmpty() }
+        assertEquals(listOf(true), replies("a1"))
+        assertEquals(ChatTransfers.SAVED_MESSAGE, statuses.last())
+        assertArrayEquals(ByteArray(8) { it.toByte() }, docs.streams.single().toByteArray())
+        assertTrue(docs.streams.single().closed)
+        quiesce()
+        assertEquals(listOf("open $doc"), docs.events)
+    }
+
+    @Test fun stalledStreamRetiresRepliesAndRemovesThePartial() {
+        startStream("a1")
+        chunk(1)
+        advance(ChatTransfers.STALL_MS)
+        assertTrue(replies.isEmpty())
+        advance(ChatTransfers.STALL_CHECK_MS)
+        assertEquals(listOf(false), replies("a1"))
+        assertEquals("The download stopped. Check your connection and try again.", statuses.last())
+        assertTrue(worker.call!!.isCanceled())
+        // Teardown waits for the stuck read to give up before touching the document.
+        assertEquals(listOf("open $doc"), docs.events)
+
+        worker.steps.put(Step.Fail)
+        settle("partial removed") { "delete $doc" in docs.events }
+        quiesce()
+        assertEquals(listOf("open $doc", "delete $doc"), docs.events)
+        assertTrue(docs.streams.single().closed)
+        assertTrue(replies("a1").none { it })
+    }
+
+    @Test fun stalledCloseCannotTouchARetryOfTheSameDocument() {
+        val gate = CountDownLatch(1).also { docs.gates += it; docs.nextGates += it }
+        startStream("a1")
+        chunk(1)
+        worker.steps.put(Step.End)
+        settle("old close stuck") { docs.streams.single().closing }
+        advance(ChatTransfers.STALL_MS + ChatTransfers.STALL_CHECK_MS)
+        assertEquals(listOf(false), replies("a1"))
+
+        // The user retries and picks the same document while the old close is still stuck.
+        send(url("a2"))
+        assertEquals(2, picks)
+        transfers.chosen(doc)
+        scheduler.runCurrent()
+        assertEquals(listOf("open $doc"), docs.events)
+
+        gate.countDown()
+        settle("retry streaming") { worker.started.get() == 2 }
+        chunk(9)
+        worker.steps.put(Step.End)
+        settle("retry reply") { replies("a2").isNotEmpty() }
+        quiesce()
+        assertEquals(listOf(true), replies("a2"))
+        assertEquals(ChatTransfers.SAVED_MESSAGE, statuses.last())
+        assertEquals(listOf("open $doc", "open $doc"), docs.events)
+        assertArrayEquals(byteArrayOf(9), docs.streams[1].toByteArray())
+        assertTrue(replies("a1").none { it })
+    }
+
+    @Test fun lateFailureAfterCleanupCannotDeleteALaterSave() {
+        val gate = CountDownLatch(1).also { docs.gates += it; docs.nextGates += it }
+        startStream("a1")
+        chunk(1)
+        worker.steps.put(Step.End)
+        settle("old close stuck") { docs.streams.single().closing }
+        advance(ChatTransfers.STALL_MS + ChatTransfers.STALL_CHECK_MS)
+        gate.countDown()
+        settle("partial removed") { "delete $doc" in docs.events }
+        quiesce()
+
+        startStream("a2")
+        chunk(9)
+        worker.steps.put(Step.End)
+        settle("retry reply") { replies("a2").isNotEmpty() }
+        quiesce()
+        assertEquals(listOf(true), replies("a2"))
+        assertEquals(listOf("open $doc", "delete $doc", "open $doc"), docs.events)
+        assertArrayEquals(byteArrayOf(9), docs.streams[1].toByteArray())
+    }
+
+    @Test fun badRequestsAreRejectedByTheirOwnIdOnly() {
+        send(url("r1", "$base/" + "a".repeat(8192)))
+        assertEquals(listOf(false), replies("r1"))
+        assertEquals(0, picks)
+        assertEquals("The file could not be saved. Try again.", statuses.last())
+
+        startStream("a1")
+        send("{\"type\":\"url\",\"id\":\"r2\",\"url\":\"$base/" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\"}")
+        assertEquals(listOf(false), replies("r2"))
+        send("{not json")
+        send("{\"type\":\"chunk\",\"id\":\"r3\",\"sequence\":0,\"data\":\"\"}")
+        assertEquals(listOf(false), replies("r3"))
+        assertEquals(3, replies.size)
+        assertFalse(worker.call!!.isCanceled())
+        assertEquals("Saving file…", statuses.last())
+
+        chunk(5)
+        worker.steps.put(Step.End)
+        settle("reply") { replies("a1").isNotEmpty() }
+        assertEquals(listOf(true), replies("a1"))
+    }
+
+    @Test fun oversizedMessageForTheActiveSaveEndsIt() {
+        startStream("a1")
+        send("{\"type\":\"chunk\",\"id\":\"a1\",\"data\":\"" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\"}")
+        assertEquals(listOf(false, false), replies("a1"))
+        assertTrue(worker.call!!.isCanceled())
+        worker.steps.put(Step.Fail)
+        settle("partial removed") { "delete $doc" in docs.events }
+    }
+
+    @Test fun destinationNotChosenInFiveMinutesExpires() {
+        send(url("a1"))
+        advance(ChatTransfers.CHOOSE_MS - 1)
+        assertTrue(replies.isEmpty())
+        advance(1)
+        assertEquals(listOf(false), replies("a1"))
+        assertEquals("Download expired. Try again.", statuses.last())
+        transfers.chosen(doc)
+        settle("late pick removed") { "delete $doc" in docs.events }
+        assertEquals(1, picks)
+    }
+}
