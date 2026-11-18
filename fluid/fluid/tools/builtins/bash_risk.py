@@ -52,7 +52,8 @@ Programs with extra rules:
 - ``date``: display only, see :func:`_date_ok`: at most one operand, a
   ``+FORMAT``, and only ``-d``/``-u``/``-I``/``-R``/``--rfc-3339``/``-r``/``-f``
   (and their long names), ``--resolution``, ``--help`` and ``--version``.
-- ``sort``: no ``-o``/``--output`` or ``--compress-program``. ``uniq``: at
+- ``sort``: no ``-o``/``--output``, ``-T``/``--temporary-directory`` or
+  ``--compress-program``; every letter of a short-option word counts. ``uniq``: at
   most one positional argument (the second is an output file). ``tree``: no
   ``-o`` or ``-R``. ``file``: no ``-C``/``--compile``. ``env``: no arguments
   (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` or ``--hostname-bin`` (both
@@ -714,8 +715,13 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     # getopt, so every word is scanned, ``--`` or not.
     "tree": _no_flags("-o", "-R"),
     "diff": None, "cmp": None,
+    # sort writes with -o, runs a helper with --compress-program and spills
+    # into a chosen directory with -T. Which bundled letters take a value
+    # differs between sorts, so every letter of a short-option word counts,
+    # attached values included (a false ask beats a missed -o). Spill into
+    # the default temp directory, with no -T, stays read-only.
     "sort": _no_flags(
-        "-o", "--output", "--compress-program", takes_value="ktSTy",
+        "-o", "-T", "--output", "--compress-program", "--temporary-directory",
         long_options=_SORT_LONG_OPTIONS,
     ),
     "uniq": _uniq_ok, "cut": None, "tr": None,

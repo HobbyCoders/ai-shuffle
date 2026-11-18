@@ -373,7 +373,7 @@ def test_common_read_only_forms_stay_safe(command: str) -> None:
 # A ``--`` that is an option's value is not end-of-options: the program keeps
 # reading options after it. Every value-taking option spelling, given ``--``
 # as its value, followed by every spelling of a banned option, must ask.
-_SORT_VALUE_SPELLINGS = ["-k", "-nk", "-t", "-S", "-T", "--key", "--ke", "--field-separator"]
+_SORT_VALUE_SPELLINGS = ["-k", "-nk", "-t", "-S", "--key", "--ke", "--field-separator"]
 _SORT_BANNED_SPELLINGS = ["--outp=x", "--compress=x", "-ox", "-uox", "-uo x"]
 DASH_DASH_AS_VALUE = [
     f"sort {value} -- {banned} f"
@@ -403,7 +403,7 @@ _SORT_OBSOLETE_SPELLINGS = ["-y", "-ny"]
 SORT_UNCERTAIN_VALUE = [
     f"sort {obsolete} {value} -- {banned} f"
     for obsolete in _SORT_OBSOLETE_SPELLINGS
-    for value in ["-k", "-t", "-S", "-T", "--key"]
+    for value in ["-k", "-t", "-S", "--key"]
     for banned in _SORT_BANNED_SPELLINGS
 ] + ["sort -- -old.txt", "sort -k2 -- -o x f"]
 
@@ -412,6 +412,35 @@ SORT_UNCERTAIN_VALUE = [
 def test_sort_scans_every_word(command: str) -> None:
     assert not is_read_only(command), command
     assert classify({"command": command}) == "write"
+
+
+# Which bundled sort letters take a value differs between sorts, so a banned
+# letter anywhere in a short-option word counts, after a value-taking letter
+# or inside what one sort would read as its value. -T and its long name pick
+# the directory sort writes temporary files to.
+SORT_BUNDLED_OR_TEMP_DIR = [
+    f"sort -{lead}{banned} f"
+    for lead in ["S", "nS", "k", "t", "y", "S1"]
+    for banned in ["o x", "ox", "T x", "Tx", "uo x"]
+] + [
+    "sort -T x f", "sort -Tx f", "sort -uT x f",
+    "sort --temporary-directory=x f", "sort --temporary-directory x f",
+    "sort --temp x f", "sort --te=x f", "sort --t x f",
+]
+
+
+@pytest.mark.parametrize("command", SORT_BUNDLED_OR_TEMP_DIR)
+def test_sort_banned_letters_anywhere_and_temp_dir_ask(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "sort -S 1M file", "sort -S1M -n file", "sort --buffer-size=1M file",
+    "sort -t: -k2,2n file", "sort -k1,1 -k2nr file", "sort file",
+])
+def test_sort_default_temp_spill_and_values_stay_safe(command: str) -> None:
+    assert is_read_only(command), command
 
 
 # awk may carry only POSIX -F/-v (attached or separate) and --. Any other
