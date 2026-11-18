@@ -163,6 +163,51 @@ class ChatTransfersTest {
         assertEquals(listOf("open $doc"), docs.events)
     }
 
+    /**
+     * A finished stream is closed, reported saved, survives the stall window and frees the
+     * slot and the document, whether it came from the page bridge (with a reply) or the
+     * WebView download listener (no reply).
+     */
+    private fun finishedSaveIsFinal(start: (String) -> Unit) {
+        start("a1")
+        transfers.chosen(doc)
+        settle("stream started") { worker.started.get() == 1 }
+        chunk(4); chunk(2)
+        worker.steps.put(Step.End)
+        settle("saved") { statuses.last() == ChatTransfers.SAVED_MESSAGE }
+        quiesce()
+        assertTrue(docs.streams.single().closed)
+        assertArrayEquals(byteArrayOf(4, 2), docs.streams.single().toByteArray())
+        advance(ChatTransfers.STALL_MS + 2 * ChatTransfers.STALL_CHECK_MS)
+        quiesce()
+        assertEquals(ChatTransfers.SAVED_MESSAGE, statuses.last())
+        assertEquals(listOf("open $doc"), docs.events)
+
+        // The same entry point can save again, to the same document, at once.
+        start("a2")
+        assertEquals(2, picks)
+        transfers.chosen(doc)
+        settle("second stream started") { worker.started.get() == 2 }
+        chunk(8)
+        worker.steps.put(Step.End)
+        settle("saved again") { docs.streams.size == 2 && docs.streams[1].closed }
+        quiesce()
+        assertEquals(ChatTransfers.SAVED_MESSAGE, statuses.last())
+        assertEquals(listOf("open $doc", "open $doc"), docs.events)
+        assertArrayEquals(byteArrayOf(8), docs.streams[1].toByteArray())
+    }
+
+    @Test fun bridgeUrlSaveFinishesAndFreesTheSlot() {
+        finishedSaveIsFinal { send(url(it)) }
+        assertEquals(listOf(true), replies("a1"))
+        assertEquals(listOf(true), replies("a2"))
+    }
+
+    @Test fun downloadListenerSaveFinishesAndFreesTheSlot() {
+        finishedSaveIsFinal { transfers.fromUrl("$base/api/files/by-path?path=big.zip", "big.zip", "application/zip") }
+        assertTrue(replies.isEmpty())
+    }
+
     @Test fun stalledStreamRetiresRepliesAndRemovesThePartial() {
         startStream("a1")
         chunk(1)

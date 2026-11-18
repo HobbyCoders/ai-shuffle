@@ -200,7 +200,9 @@ internal class ChatTransfers(
             streamer.save(requireNotNull(transfer.url), requireNotNull(transfer.output.get()),
                 { transfer.progressAt = clock(); active === transfer && authorized() }, { transfer.call = it })
         }
-        transfer.reply?.invoke(finish(transfer))
+        // Finish first: a download-listener save has no reply, and `reply?.invoke(finish(…))` would skip it.
+        val saved = finish(transfer)
+        transfer.reply?.invoke(saved)
     }
 
     private suspend fun finish(transfer: Transfer): Boolean {
