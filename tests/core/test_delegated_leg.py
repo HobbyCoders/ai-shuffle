@@ -260,6 +260,40 @@ class _KwargsLoop:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_time_rule_arrives_exactly_once(monkeypatch, tmp_path, fallback):
+    """The relative-time rule reaches the model once per session: in the
+    compiled prompt's environment section, or, when the compile fell back to
+    the raw profile text (a manifest the compiler cannot read), in the host
+    turn note and the internal wake note instead."""
+    from fluid.context.time_awareness import RELATIVE_TIME_RULE
+    from fluid.messages import Text
+    from fluid.tools.time_context import delegated_wake_time
+
+    if fallback:
+        (tmp_path / "package.json").write_text('{"scripts": true}', encoding="utf-8")
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    clock = {"zone": "UTC"}
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_preset_options(tmp_path))
+    try:
+        system = adapter.engine.system
+        assert adapter.engine.append_system_prompt is None
+        assert ("# Environment" not in system) is fallback
+        monkeypatch.setattr(adapter, "_time_context", lambda source=None: clock)
+        adapter.engine.ctx.extra["time_context"] = lambda source: clock
+        turn_note = adapter._env_note()
+        woken = delegated_wake_time([Text("wake up")], adapter.engine.ctx.extra, "wakeup")
+        wake_note = "".join(block.text for block in woken if isinstance(block, Text))
+        assert "Current time:" in turn_note and "Current time:" in wake_note
+        assert system.count(RELATIVE_TIME_RULE) == (0 if fallback else 1)
+        assert turn_note.count(RELATIVE_TIME_RULE) == (1 if fallback else 0)
+        assert wake_note.count(RELATIVE_TIME_RULE) == (1 if fallback else 0)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_prompt_and_mcp_config_share_one_server_map(monkeypatch, tmp_path):
     """Connect reads the CLI's server map once: the browser guidance frozen in
     the prompt names the servers ``--mcp-config`` connects, even when a plugin

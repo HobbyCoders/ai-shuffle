@@ -487,11 +487,12 @@ class HarnessAdapter(ProviderAdapter):
         # ``session_runtime_lines``) follow them, so they reach every prompt
         # shape the Worker line does.
         self._worker_identity: Optional[str] = None
-        # A claude session whose prompt replaces Claude Code's (every one but
-        # a one-shot generation), and with it the CLI's own date and git
-        # facts: the adapter's per-turn note (``_env_note``) puts the date and
-        # branch back, and fluid's environment section carries the time rule.
-        self._delegated_replaces_preset: bool = False
+        # The claude CLI's outgoing --system-prompt carries fluid's
+        # relative-time rule (its environment section), so the per-turn clock
+        # leaves the rule out. Read from the prompt actually sent, once per
+        # connect: a compile that fell back to the raw profile text has no
+        # environment section, and then the clock carries the rule.
+        self._time_rule_in_prompt: bool = False
         # Everything a prompt recompile needs (the Task roster refresh, see
         # ``_refresh_task_roster``) — captured at connect, never rebuilt.
         self._prompt_inputs: Optional[Dict[str, Any]] = None
@@ -685,9 +686,8 @@ class HarnessAdapter(ProviderAdapter):
         # A one-shot generation sends the caller's prompt alone: no system
         # prompt, no app text, no per-turn notes (see _turn_context_note).
         one_shot = bool((options.extra or {}).get("one_shot"))
-        # Every non-one-shot claude session replaces Claude Code's prompt,
-        # environment block included, whatever the profile's shape.
-        self._delegated_replaces_preset = self._is_delegated and not one_shot
+        # Set below from the compiled claude prompt; False on every other leg.
+        self._time_rule_in_prompt = False
 
         if kind == _ANTIGRAVITY_KIND:
             await self._connect_antigravity(
@@ -747,6 +747,9 @@ class HarnessAdapter(ProviderAdapter):
                     delegated_servers,
                 )
                 delegated_append = None
+                from fluid.context.time_awareness import RELATIVE_TIME_RULE
+
+                self._time_rule_in_prompt = RELATIVE_TIME_RULE in (delegated_system or "")
             # Resolving the CLI stats PATH entries on disk. A missing CLI
             # raises ClaudeCliMissingError here, before any engine is built.
             claude_cmd = await run_sync(_resolve_claude_cmd)
@@ -2377,7 +2380,7 @@ class HarnessAdapter(ProviderAdapter):
 
         if not (getattr(self._options, "extra", None) or {}).get("one_shot"):
             ctx.extra["time_context"] = self._time_context
-            ctx.extra["time_rule_in_prefix"] = self._delegated_replaces_preset or not self._is_delegated
+            ctx.extra["time_rule_in_prefix"] = self._time_rule_in_prompt or not self._is_delegated
         ctx.extra["auto_answer_questions"] = make_question_auto_answer(
             self._resolve_app_session_id
         )
@@ -2906,7 +2909,7 @@ class HarnessAdapter(ProviderAdapter):
             cwd = getattr(self._options, "cwd", None)
             return generate_turn_environment_note(
                 branch=checkout_branch(cwd), time_context=self._time_context(source),
-                include_rule=not self._delegated_replaces_preset,
+                include_rule=not self._time_rule_in_prompt,
             )
         except Exception:  # noqa: BLE001 — a reminder never fails a turn
             logger.warning("[HarnessAdapter] turn env note failed", exc_info=True)
