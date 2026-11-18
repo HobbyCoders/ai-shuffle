@@ -227,7 +227,7 @@ jobs:
       - name: Audit JavaScript dependencies
         run: |
           for package in frontend tools browser-mcp; do
-            (cd "$package" && npx -y npm@11 audit --audit-level=high)
+            (cd "$package" && python3 ../scripts/npm_audit_gate.py)
           done
 
   # Main only: it compares with what main has published and with the pull
