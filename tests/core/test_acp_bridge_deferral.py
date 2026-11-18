@@ -587,12 +587,18 @@ async def test_search_guidance_names_only_what_the_acp_bridge_serves(
     from app.core import cli_tool_surface
 
     cli_tool_surface.reset_cli_tools()
-    adapter = await _connected(tmp_path, client, monkeypatch, defer=defer,
-                               tool_allowlist=list(surface))
+    # Deferral needs ToolSearch on the surface (_acp_bridge_deferral).
+    tools = [*surface, "ToolSearch"] if defer else list(surface)
+    adapter = await _connected(tmp_path, client, monkeypatch, tool_allowlist=tools)
     engine = adapter._engine
     try:
-        listed = set(engine.bridged_tools()) | set(engine.deferred_tools() or ())
-        served = {tool for tool in ("Glob", "Grep") if tool in listed}
+        assert (engine.deferred is not None) is defer
+        bridged, deferred = set(engine.bridged_tools()), set(engine.deferred_tools())
+        assert defer or not deferred
+        served = {tool for tool in ("Glob", "Grep") if tool in bridged | deferred}
+        # Each served search tool sits on the tier deferral puts it on.
+        for tool in served:
+            assert (tool in bridged) is (not defer or tool in ACP_LOADED_TOOLS), tool
         assert served == ({"Glob"} if "Glob" in surface else set())
         assert_search_guidance_matches(engine.system_append, served)
     finally:
