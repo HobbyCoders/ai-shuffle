@@ -71,8 +71,8 @@ async def test_settings_save_and_revert_control_the_model_instructions():
 
 def test_default_stays_within_its_size_budget():
     assert len(DEFAULT_SECURITY_INSTRUCTIONS) <= PRE_REWRITE_CHARS
-    # Baseline after the scratch/inline-media clarification, plus 32 chars.
-    assert len(_files_on_disk(DEFAULT_SECURITY_INSTRUCTIONS)) <= 1063
+    # Measured at 819 chars after tightening; leave 13 chars of headroom.
+    assert len(_files_on_disk(DEFAULT_SECURITY_INSTRUCTIONS)) <= 832
 
 
 def _files_on_disk(text):
@@ -83,16 +83,16 @@ def _files_on_disk(text):
 def _assert_disk_sharing_rules(text):
     section = _files_on_disk(text)
     for rule in (
-        "Never share scratch or temp paths",
-        "Link files and embed video/audio as [description](/api/files/by-path?path=URL_ENCODED_FULL_PATH)",
-        "embed images as `![description](URL)` with the same URL",
+        "`/api/files/by-path?path=URL_ENCODED_FULL_PATH`",
+        "`![alt](URL)` for images, `[label](URL)` for links and inline video/audio",
         "Share only existing files in a served root the viewer can access",
         "the worker's workspace or a registered project/worktree",
-        "For scratch, temp or unserved files, copy only the intended deliverable into a served root",
-        "Verify the copy exists there and can be served; link or embed the copy, not the original",
-        "Do not commit the copy",
-        "If you can't verify access, say it's unavailable",
-        "Never copy or share secrets or credential files",
+        "Never share scratch/temp paths",
+        "For scratch/temp or unserved files, copy only the intended deliverable to a served root",
+        "Verify the copy exists and is accessible; link or embed it, not the original",
+        "If access is unverified, say it's unavailable",
+        "Never copy or share secrets or credentials",
+        "Don't commit copies",
     ):
         assert rule in section, rule
 
