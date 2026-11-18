@@ -330,6 +330,9 @@ It is chosen by the request alone, so it behaves the same after restarts:
   taller than the screen, then waits on a 60-second foreground `Bash`: the
   turn stays open with still content and the running-task row under it, for
   Stop with a running task (#1147). Same project and access needs as below.
+* `[script:tool-background-heavy]` is the same open, idle turn behind a log
+  reply larger than the transcript's mounted-content budget, so the turn's own
+  prompt is no longer mounted. For queued bubbles over the running-task row.
 * `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
   (`sleep 120`, no inline wait), then streams a reply at six words per second
   while the task remains in `/live`'s `activeTasks` and the running-tasks list.
@@ -614,6 +617,12 @@ installed, and every provider screen works without a Google account:
 - personal sign-in prints a fake `accounts.google.com` link and accepts any
   code;
 - a chat message containing "tool" runs a tool call with a permission prompt;
+- `agymcp Glob {"pattern": "*"}` calls a bundled tool the way agy 1.5.9 does
+  (titled `Run mcp_fluid_bundled_Glob`, with a permission request); refused,
+  it ends the turn with no reply, as agy does (`agyquiet` ends it without
+  failing its calls first; `agyid` asks permission by the call's id alone;
+  `agyalways` and `agycancelled` offer only "Always allow", the second then
+  stopping with `cancelled`; `agyhold` waits for the session to be cancelled);
 - `/usage` answers with a quota reply.
 
 The agent's message log is `fake-agy.jsonl` in the scratch directory. Without

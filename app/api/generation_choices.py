@@ -17,11 +17,15 @@ from app.api.preferences import require_preference_write
 from app.core import generation_choices
 from app.core.preference_identity import request_preference_identity
 from app.db.async_database import run_sync
+from app.services import fal_pricing
 
 router = APIRouter(prefix="/api/v1/generation", tags=["Generation choices"])
 
 _QUOTE_PROMPT = "A preview of this choice."
-_SAVE_QUOTE_TIMEOUT_SECONDS = 2
+# Remembering waits for a fresh quote: fal's bounded fresh read (its 429
+# retries included) plus the model lookup and schema read around it. Past it
+# the pick is kept for this time only and says so; no cached rate is used.
+_SAVE_QUOTE_TIMEOUT_SECONDS = fal_pricing.FRESH_READ_SECONDS + 10
 
 
 class ChoiceBody(BaseModel):
@@ -90,29 +94,41 @@ async def list_choices(request: Request, token: str = Depends(require_auth)) -> 
 @router.put("/choices/{kind}")
 async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
                       token: str = Depends(require_preference_write)) -> dict:
-    """Record a pick as the last choice and, with ``remember``, reuse it next time."""
+    """Record a pick as the last choice and, with ``remember``, reuse it next time.
+
+    A pick is remembered only after a successful server-side quote priced it;
+    otherwise it is kept as the last choice (this pick only) and says why.
+    """
     _kind(kind)
+    quoted = await _save_time_quote(kind, body.choice, request, token)
+    remember = body.remember and quoted["priced"]
     try:
         choice = await run_sync(lambda: generation_choices.save(
             _identity(request), kind, body.choice.model_dump(exclude_none=True),
-            remember=body.remember, origin=body.origin))
+            remember=remember, origin=body.origin))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"kind": kind, "choice": choice, "remembered": body.remember,
-            **await _save_time_quote(kind, body.choice, request, token)}
+    if body.remember and not remember:
+        why = (quoted["quote_error"] or "This choice is unavailable right now.") \
+            if quoted["unattended_skip_reason"] == "stored_choice_unavailable" else "This choice has no verified price."
+        quoted["warning"] = f"{why} It was not remembered and is used for this pick only."
+    return {"kind": kind, "choice": choice, "remembered": remember, **quoted}
 
 
 async def _save_time_quote(kind: str, choice: ChoiceBody, request: Request, token: str) -> dict:
-    """A fresh server-side quote for a pick that was just saved.
+    return await save_time_quote(kind, choice.model_dump(exclude_none=True), _context(request))
+
+
+async def save_time_quote(kind: str, choice: dict, context) -> dict:
+    """A fresh server-side quote for a pick that was just saved (also used by
+    the agent's ``generationPreferences`` before it remembers a pick).
 
     Never a client-supplied price. Failure to quote does not lose the pick or
     imply it is free; it reports what unattended runs will do with it.
     """
     from app.core.generation_resolver import UNKNOWN_PRICE
     try:
-        quoted = await asyncio.wait_for(
-            quote(QuoteRequest(kind=kind, choice=choice), request, token=token),
-            timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
+        quoted = await asyncio.wait_for(quote_choice(kind, choice, context), timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
     except TimeoutError:
         quoted = {"ok": False, "error": "The saved choice's quote timed out. Its worker or provider may be unavailable."}
     except Exception:  # noqa: BLE001 - optional provider quote must not lose a saved pick
@@ -250,22 +266,25 @@ async def delete_job_choice(job_id: str, kind: str, request: Request,
 @router.post("/quote")
 async def quote(body: QuoteRequest, request: Request, token: str = Depends(require_auth)) -> dict:
     """Validate options against the model's declared schema and price them."""
+    return await quote_choice(_kind(body.kind), body.choice.model_dump(exclude_none=True), _context(request), body.prompt)
+
+
+async def quote_choice(kind: str, choice: dict, context, prompt: str | None = None) -> dict:
     from app.core.generation_resolver import matches, normalize_source, price_total
     from app.services.generation_sources import Sources
 
-    kind = _kind(body.kind)
-    choice = body.choice.model_dump(exclude_none=True)
-    backend = Sources(None, _context(request))
-    prompt = (body.prompt or "").strip() or _QUOTE_PROMPT
+    backend = Sources(None, context)
+    prompt = (prompt or "").strip() or _QUOTE_PROMPT
     source = normalize_source(choice.get("account") or choice.get("source"))
+    # Priced fresh by prepare below; no listing rate (cache or its lock) first.
     candidates = await backend.catalog(kind, source=source, model=choice["model"], limit=1, prompt=prompt,
-                                       worker=choice.get("worker"))
+                                       worker=choice.get("worker"), listing_prices=False)
     candidates = [c for c in candidates if c.available and matches(c, {k: v for k, v in choice.items() if k != "source"})]
     if len(candidates) != 1:
         return {"ok": False, "error": "This account or model is not available right now."}
     candidate = candidates[0]
     try:
-        prepared = await backend.prepare(candidate, {**candidate.options, **body.choice.options}, prompt)
+        prepared = await backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, prompt)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "price": candidate.price}
     price = prepared.price

@@ -179,6 +179,15 @@ def _no_real_claude_on_path():
 
 
 @pytest.fixture(autouse=True)
+def _no_fal_rates_across_tests():
+    """fal rate rows are cached per process; each test fakes its own replies."""
+    rates = sys.modules.get("app.services.fal_pricing")
+    if rates is not None:
+        rates.rates.clear()
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_session_admission_across_tests():
     """Which engine holds a session is per process; a test's engines end with it."""
     admission = sys.modules.get("app.core.provider.session_admission")

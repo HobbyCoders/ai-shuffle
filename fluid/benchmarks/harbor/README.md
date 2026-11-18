@@ -125,19 +125,48 @@ Useful variants:
 Harbor prints a job directory at the end of each run. Per trial it stores the
 task verdict plus the agent context the adapter fills in:
 `n_input_tokens` / `n_cache_tokens` / `n_output_tokens`, `cost_usd`, and
-`metadata.cache_hit_rate` / `metadata.num_model_calls` (parsed from fluid's
-`[usage]` and `[done]` output lines, saved verbatim at
-`<job>/…/logs/agent/fluid.txt`). Compare per side:
+`metadata.cache_hit_rate` / `metadata.num_model_calls` / `metadata.stop_reason`.
+The adapter passes `fluid run --usage-jsonl /logs/agent/fluid-usage.jsonl` and
+reads that file from the trial's logs. For each turn, the adapter uses terminal
+token totals when available and falls back to per-call counts for fields the
+terminal did not report or if the run ended without a terminal record. It sums
+terminal model-call counts and costs once per turn, adds each background
+checkpoint's counters, call and available cost separately, and takes the last
+stop reason. The file records new accounting events through engine close.
+
+The file contains normalized engine counters. Some provider normalizers, for
+example OpenRouter Chat Completions, OpenAI Responses, and Gemini, can turn a
+missing provider counter into zero. A counter absent from the engine event
+stays unset. The JSONL preserves `input_tokens_estimated`,
+`output_tokens_estimated`, `usage_estimated`, and `cost_from_table` when the
+event sets them; Harbor ignores these flags when aggregating. A missing file
+does not fall back to transcript parsing. Rebuild older wheels before running
+this adapter.
+
+CLI-hosted subagents run in separate sessions, so their tokens, costs, and
+calls are not included in the parent's figures. With `continual=true`, the
+learner's separate provider calls, tokens, and costs are also excluded, so
+cost per solved task does not include the cost of learning. A killed run keeps
+flushed token records but has no terminal cost or call count for its unfinished
+turn.
+
+`<job>/…/logs/agent/fluid.txt` still contains the console transcript for
+inspection. Tool text in the transcript does not count as usage or status.
+The default Harbor setup does not protect the metrics file from tool writes:
+Fluid and its Bash tool run as the same user by default. Treat these metrics
+as transcript-isolated, not tamper-resistant.
+
+Compare per side:
 
 - **resolve rate** (Harbor's headline number)
 - **cost per solved task** and total tokens
 - **cache hit rate** (fluid's first-class metric)
-- **model calls per task** (code-mode should drive this down)
+- **model calls per task** (compare with and without code mode)
 
-fluid's `[usage]` line reports `cache_write` (cache-creation) tokens, and the
-adapter includes them in `n_input_tokens`, so the prompt total is complete.
-For cross-side cost comparisons still prefer `cost_usd`, which is
-provider-reported.
+`n_input_tokens` includes uncached input, cache reads and cache creation;
+`n_cache_tokens` counts only cache reads. `cache_hit_rate` divides cache reads
+by the full prompt total. `cost_usd` is the cost reported by the engine when
+available, not inferred from the transcript.
 
 ## Cost warning
 

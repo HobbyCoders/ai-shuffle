@@ -200,7 +200,11 @@ def client(mock_db, monkeypatch):
         yield test_client
 
 
-def test_pick_is_remembered_listed_and_forgotten(client):
+def test_pick_is_remembered_listed_and_forgotten(client, monkeypatch):
+    async def priced(*_a, **_kw):
+        # A pick is remembered only once the server-side quote priced it.
+        return {"price": {}, "priced": True, "quote_error": None, "unattended_skip_reason": None, "warning": None}
+    monkeypatch.setattr(api, "_save_time_quote", priced)
     assert client.get("/api/v1/generation/choices").json() == {
         "remembered": {}, "last": {}, "migrated": True, "worker": "worker-a", "kinds": ["image", "video", "audio", "3d"]}
     pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "fal-ai/x", "options": {"size": "wide"}}

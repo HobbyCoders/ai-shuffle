@@ -84,7 +84,7 @@ import time
 import weakref
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, NamedTuple, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, List, NamedTuple, Optional, Tuple, cast
 
 import httpx
 
@@ -1903,6 +1903,7 @@ class HarnessAdapter(ProviderAdapter):
         await self.reconcile_user_questions()
         self._mark_turn_floor()
         await self._refresh_task_roster()
+        submitted_prompt = prompt
         if self._options is not None and prompt.startswith("/"):
             from app.core.slash_commands import expand_delegated_command, expand_native_command
 
@@ -1977,6 +1978,7 @@ class HarnessAdapter(ProviderAdapter):
         try:
             await self._submit_turn(UserTurn(
                 content=cast(Any, content), source=source,
+                submitted_prompt=submitted_prompt if content != submitted_prompt else None,
                 context_pin=self._memory_context_pin(content),
                 host_time_note=bool(note) and self._host_time_note_rendered,
                 accepted_at=(getattr(self, "_owner_receipt", {}).get("owner_message_at") if source in ("user", "queue") else None),
@@ -2112,7 +2114,11 @@ class HarnessAdapter(ProviderAdapter):
             permissions=None,
             hooks=self._hooks,
             tool_policy=self._delegated_policy_with_saved_rules(
-                _delegated_tool_policy(options, self._build_permissions(options), blocked)
+                _delegated_tool_policy(
+                    options, self._build_permissions(options), blocked,
+                    bridged=lambda tool: self._engine is not None
+                    and tool in self._engine._served_names(),
+                )
             ),
             system_append=instructions,
             # The models the agent offers become the row's model catalog.
@@ -2691,6 +2697,7 @@ class HarnessAdapter(ProviderAdapter):
                 if name in ("TurnStarted", "ContextCompaction"):
                     rows.append({
                         "_cls": name, "node_id": getattr(event, "node_id", None),
+                        "context_node_id": getattr(event, "context_node_id", None),
                         "reason": getattr(event, "reason", None),
                         "model": getattr(event, "model", None),
                         "provider": getattr(event, "provider", None),
@@ -2709,7 +2716,7 @@ class HarnessAdapter(ProviderAdapter):
             return True
         started = False
         for row in rows:
-            if row.get("_cls") == "TurnStarted" and row.get("node_id") == node_id:
+            if row.get("_cls") == "TurnStarted" and (row.get("context_node_id") or row.get("node_id")) == node_id:
                 started = True
                 # A new adapter may use a different model/provider (including
                 # switching between native and CLI). Its own history, not the
@@ -2759,8 +2766,8 @@ class HarnessAdapter(ProviderAdapter):
     def _observe_memory_event(self, event: Any) -> None:
         """Follow the live turn for the # Memory bookkeeping.
 
-        A turn that carried a full snapshot names its user node in
-        TurnStarted: that node becomes the trusted one. A Claude Code
+        A turn that carried a full snapshot names its context node (the
+        user node on ordinary turns) in TurnStarted: trust that node. A Claude Code
         compaction drops the trust, so the next user message carries the full
         snapshot again, unless the SessionStart hook already put the current
         one back for that compaction (:meth:`_memory_put_back_held`). A
@@ -2771,8 +2778,7 @@ class HarnessAdapter(ProviderAdapter):
         name = type(event).__name__
         if name == "TurnStarted" and self._memory_full_pending:
             self._memory_full_pending = False
-            node_id = getattr(event, "node_id", None)
-            self._memory_trusted_node = node_id or None
+            self._memory_trusted_node = getattr(event, "context_node_id", None) or event.node_id
         elif name == "ContextCompacting" and getattr(event, "active", False):
             self._memory_compacting_seq = int(getattr(event, "seq", -1))
         elif name == "ContextCompaction":
@@ -3454,19 +3460,21 @@ class HarnessAdapter(ProviderAdapter):
         if not getattr(DelegatedLoop, "supports_async_tool_policy", False):
             return inner
 
-        inner_cwd = inner is not None and _policy_accepts_cwd(inner)
+        inner_cwd = inner is not None and _policy_accepts(inner, "cwd")
+        inner_kind = inner is not None and _policy_accepts(inner, "unmapped_kind")
 
         async def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
-                         agent_id: Optional[str] = None) -> Optional[str]:
+                         agent_id: Optional[str] = None, unmapped_kind: bool = False) -> Optional[str]:
             # fluid's to_thread only builds this coroutine; it runs on the
             # loop. ``inner`` may read the database and run Git (the checkout
             # lock), so it runs in a thread.
             if inner is None:
                 denial = None
-            elif inner_cwd:
-                denial = await run_sync(inner, name, tool_input, cwd=cwd)
             else:
-                denial = await run_sync(inner, name, tool_input)
+                extra: Dict[str, Any] = {"cwd": cwd} if inner_cwd else {}
+                if inner_kind and unmapped_kind:
+                    extra["unmapped_kind"] = True
+                denial = await run_sync(inner, name, tool_input, **extra)
             if inspect.isawaitable(denial):
                 denial = await denial
             if denial:
@@ -3498,6 +3506,7 @@ class HarnessAdapter(ProviderAdapter):
         """
         from fluid.messages.content import Text as FluidText
         from fluid.messages.content import ToolResultBlock as FluidToolResult
+        from fluid.messages.content import is_harness_note
 
         from app.core.provider.fluid_transcript import prompt_text
 
@@ -3509,7 +3518,7 @@ class HarnessAdapter(ProviderAdapter):
             if role == "assistant" and prompts:
                 has_pair = True
                 continue
-            if role != "user":
+            if role != "user" or is_harness_note(message):
                 continue
             blocks = []
             for block in getattr(message, "content", None) or []:
@@ -5987,7 +5996,8 @@ class HarnessAdapter(ProviderAdapter):
             )
             builtins_registered = True
 
-        if _registers_bundled_search(options, native=native):
+        if _registers_bundled_search(options, native=native,
+                                     acp=self._provider_kind == _ANTIGRAVITY_KIND):
             from fluid.tools.builtins import glob as glob_tool, grep as grep_tool
 
             for search_tool in (glob_tool, grep_tool):
@@ -6696,12 +6706,16 @@ def _cli_ships_search_tools() -> bool:
     return os.name == "nt"
 
 
-def _registers_bundled_search(options: SessionOptions, *, native: bool) -> bool:
-    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call."""
+def _registers_bundled_search(options: SessionOptions, *, native: bool, acp: bool = False) -> bool:
+    """Whether ``_build_registry`` adds fluid's Glob/Grep for the CLI to call.
+
+    ``acp``: the Antigravity leg takes the bundled copies on every OS;
+    ``_cli_ships_search_tools`` speaks for Claude Code only (#1751).
+    """
     return (
         not native
         and _session_mode(options) != "chat"
-        and not _cli_ships_search_tools()
+        and (acp or not _cli_ships_search_tools())
     )
 
 
@@ -6979,19 +6993,21 @@ def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optiona
     return any(tool_permitted(s, surface, None) for s in spellings)
 
 
-def _policy_accepts_cwd(policy: Any) -> bool:
-    """Whether a PreToolUse policy takes the CLI's ``cwd`` keyword."""
+def _policy_accepts(policy: Any, keyword: str) -> bool:
+    """Whether a PreToolUse policy takes ``keyword`` (the CLI's ``cwd``, the
+    ACP loop's ``unmapped_kind``)."""
     try:
         params = inspect.signature(policy).parameters
     except (TypeError, ValueError):
         return False
-    return "cwd" in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
+    return keyword in params or any(p.kind is p.VAR_KEYWORD for p in params.values())
 
 
 def _delegated_tool_policy(
     options: SessionOptions,
     permissions: Optional[PermissionEngine],
     blocked: List[str],
+    bridged: Optional[Callable[[str], bool]] = None,
 ):
     """The deny policy the delegated leg's PreToolUse hook applies.
 
@@ -7005,6 +7021,13 @@ def _delegated_tool_policy(
     raised in bypass mode, and because ``--disallowed-tools`` misses a
     tool the CLI tool cache did not know yet. The surface is
     ``_delegated_surface``: the CLI's names for the tools the user ticked.
+
+    ``bridged(registry name)``, the ACP leg only: whether its bridge serves
+    that tool to this session. A call to one it serves is also judged by the
+    bare registry name, as the bridge filter judges it (#1751), but only
+    when the loop says the call's kind is none of the agent's own tools
+    (``unmapped_kind``): a shell call whose title starts with "Glob" is not
+    the Glob the owner ticked.
     """
     from app.core.tool_access import matches_any, tool_permitted
     from fluid.permissions.engine import Verdict
@@ -7014,7 +7037,8 @@ def _delegated_tool_policy(
     rules = list(getattr(permissions, "rules", None) or ())
     session_cwd = options.cwd
 
-    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None) -> Optional[str]:
+    def policy(name: str, tool_input: Dict[str, Any], cwd: Optional[str] = None,
+               unmapped_kind: bool = False) -> Optional[str]:
         """``cwd`` is the CLI's shell directory for this call when fluid
         passes it (its Bash keeps a ``cd`` between calls)."""
         from app.core.checkout_lock import tool_denial
@@ -7039,9 +7063,14 @@ def _delegated_tool_policy(
         # mcp__fluid_bundled__mcp__<server>__<tool>) matches either spelling,
         # as the bridge filter does (_bridged_tool_permitted): a deny entry in
         # either form withholds it. Not a bare name: "WebFetch" on these lists
-        # is the CLI's own tool, distinct from the bridged app copy.
+        # is the CLI's own tool, distinct from the bridged app copy. Except a
+        # tool the ACP bridge serves (``bridged``) on a call of no kind of the
+        # agent's own, so a Glob it serves because "Glob" is ticked is not
+        # then refused here (#1751).
         served = name.removeprefix(_BUNDLED_CLI_PREFIX)
         spellings = {name, served} if served != name and served.startswith("mcp__") else {name}
+        if unmapped_kind and served != name and bridged is not None and bridged(served):
+            spellings.add(served)
         if blocked and any(matches_any(s, blocked) for s in spellings):
             return f"Tool '{name}' is disabled in this profile"
         if surface and not any(tool_permitted(s, surface, None) for s in spellings):

@@ -1250,6 +1250,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # loop's local counter so terminal events raised OUTSIDE the loop (the
         # catch-all handler in _start_and_loop) can still report the count.
         self._turn_model_calls = 0
+        # Whether this turn already showed its AssistantTextSanitized notice.
+        self._turn_sanitized_noticed = False
         # The live turn-totals dict the agent loop folds each call's usage
         # into, by reference, for the same reason: a turn that dies outside the
         # loop still bills what it spent.
@@ -2670,6 +2672,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         turn_id = new_id("turn")
         self._background_turn_terminal = False
         self._turn_model_calls = 0
+        self._turn_sanitized_noticed = False
         self._turn_usage = {}
         self._active_turn_id = turn_id
 
@@ -2750,10 +2753,10 @@ class NativeLoop(BackgroundLifecycleMixin):
                     node_id=new_id("node"), parent_id=head.node_id,
                     message=Message(
                         role="user", content=[Text(context_note)],
+                        provider_meta={HARNESS_NOTE_META_KEY: True},
                     ).pin_context(context_note),
                 )
                 await self._append_node(sid, head)
-                prompt = head
             # One request-only tail note is reserved before admission and
             # attached after rendering, so no digest can retire or reorder it.
             # No repair nodes are stored: retries cannot accumulate stale facts.
@@ -2764,12 +2767,13 @@ class NativeLoop(BackgroundLifecycleMixin):
             # harness-only environment node.
             await self._emit(TurnStarted(
                 session_id=sid, node_id=prompt.node_id, turn_id=turn_id,
+                context_node_id=head.node_id if context_note else None,
                 model=self.model, provider=self.provider.name, source=op.source,
                 thinking=self._session_thinking.get(sid),
             ))
             await self._emit_profile_resolved(sid, turn_id)
             blocked, _ = await self._turn_start_hook(
-                sid, turn_id, prompt.message.text(), with_context=False
+                sid, turn_id, prompt.message.prompt_text(), with_context=False
             )
             if blocked:
                 return
@@ -2782,6 +2786,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._run_manual_compaction(sid, turn_id, op.source)
             return
 
+        submitted_prompt = op.submitted_prompt
+        if submitted_prompt is None:
+            submitted_prompt = op.content if isinstance(op.content, str) else _plain_text(op.content)
         op, question_ids = await self._question_turn_content(op)
         content: list[Any] = (
             [Text(op.content)] if isinstance(op.content, str) else list(op.content)
@@ -2842,7 +2849,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             thinking=self._session_thinking.get(sid),
         ))
         await self._emit_profile_resolved(sid, turn_id)
-        blocked, hook_context = await self._turn_start_hook(sid, turn_id, prompt_text)
+        blocked, hook_context = await self._turn_start_hook(sid, turn_id, submitted_prompt)
         if blocked:
             return
         if hook_context:
@@ -2860,6 +2867,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             details_at += 1
         if details_block is not None:
             _add_pinned_block(user_node.message, details_block, details_at)
+        user_node.message.record_prompt(submitted_prompt)
         await self._append_node(sid, user_node)
         await self._mark_questions_delivered(question_ids)
         await self._mark_background_woken(op, sid, user_node.node_id, turn_id)
@@ -5897,7 +5905,12 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         message = self._assemble_message(blocks, request.model)
         cleaned = sanitize_assistant_history([message])[0]
-        if cleaned is not message:
+        if cleaned is not message and not self._turn_sanitized_noticed:
+            # Quoting still applies to every call; the notice is shown once
+            # per turn. A model that is reasoning about the markers themselves
+            # (for example while auditing the harness) quotes them on nearly
+            # every call, and a card per call buried the work log.
+            self._turn_sanitized_noticed = True
             await self._emit(AssistantTextSanitized(session_id=sid, turn_id=turn_id))
         return _CallResult(
             message=cleaned,

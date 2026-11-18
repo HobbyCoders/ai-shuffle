@@ -9,6 +9,16 @@ The prompt text picks the behaviour:
   a diff, rejected → failed.
 * ``mcp <Tool> <json>`` — calls a tool on the first stdio MCP server the
   client passed in session/new, by launching it like a real agent would.
+  ``mcpask`` asks permission first, titled ``mcp__fluid_bundled__<Tool>``.
+* ``agymcp <Tool> <json>`` — a bridged call as agy 1.5.9 sends it (seen live,
+  issue #1751): titled ``Run mcp_fluid_bundled_<Tool>``, kind ``other``, and
+  it asks permission (and says ``chose=<option>``). Allowed, it runs the
+  tool. Rejected, agy ends the turn: a sibling call of its own (``Read``)
+  fails with no text and the turn ends with no message at all. ``agyquiet``
+  ends it at once, with no failed calls; ``agyid`` asks by the call's id
+  alone, as the ACP protocol's example does; ``agyalways`` offers only
+  "Always allow" and, unless chosen, ends it at once (``agycancelled``: with
+  stopReason cancelled); ``agyhold``, rejected, waits for session/cancel.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
@@ -302,6 +312,42 @@ class Agent:
                                     "rawInput": json.loads(args), "content": [{"type": "content",
                                     "content": {"type": "text", "text": result}}]})
             await self.say(sid, "mcp said: " + result)
+            return {"stopReason": "end_turn"}
+        if word in ("agymcp", "agyquiet", "agyid", "agyalways", "agycancelled", "agyhold"):
+            _, name, args = text.split(" ", 2)
+            call = {"toolCallId": "agy-1", "title": f"Run mcp_fluid_bundled_{name}", "kind": "other",
+                    "status": "pending", "rawInput": json.loads(args)}
+            await self.update(sid, {"sessionUpdate": "tool_call", **call})
+            sibling = {"toolCallId": "agy-2", "title": "Read notes.txt", "kind": "read", "status": "pending",
+                       "rawInput": {"Path": "notes.txt", "file_path": "notes.txt"}}
+            await self.update(sid, {"sessionUpdate": "tool_call", **sibling})
+            asked = {"toolCallId": "agy-1"} if word == "agyid" else call
+            offered = [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                       {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
+                       {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]
+            if word in ("agyalways", "agycancelled"):
+                offered = offered[1:2]
+            reply = await self.call("session/request_permission",
+                                    {"sessionId": sid, "toolCall": asked, "options": offered})
+            outcome = (reply.get("result") or {}).get("outcome") or {}
+            if outcome.get("optionId") not in ("allow", "always"):
+                # agy reads a rejection as the person saying no: every open
+                # call fails without text and the turn ends silently.
+                for tool_id in ("agy-1", "agy-2") if word == "agymcp" else ():
+                    await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": tool_id,
+                                            "status": "failed"})
+                if word == "agyhold":
+                    assert self.turn is not None
+                    await asyncio.wait_for(self.turn["cancel"].wait(), timeout=10)
+                return {"stopReason": "cancelled" if word in ("agycancelled", "agyhold") else "end_turn"}
+            result = await self.call_mcp(sid, name, json.loads(args))
+            await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "agy-1",
+                                    "status": "completed", "content": [{"type": "content",
+                                    "content": {"type": "text", "text": result}}]})
+            await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "agy-2",
+                                    "status": "completed", "content": [{"type": "content",
+                                    "content": {"type": "text", "text": "notes"}}]})
+            await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
         if word == "slow":
             await self.say(sid, "working")

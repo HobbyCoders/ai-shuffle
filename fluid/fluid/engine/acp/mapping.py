@@ -117,13 +117,14 @@ class TurnMapper:
     """One turn's mapping state.
 
     ``bridged_name`` resolves a tool call to the registry name the bundled
-    MCP bridge serves (None when it is one of the agent's own tools).
+    MCP bridge serves and whether only agy's title form named it (None when
+    it is one of the agent's own tools).
     ``unwrap_bridged`` turns a bridged proxy call (``CallTool``) into the real
     tool name and input it runs.
     """
 
     def __init__(self, *, session_id: str, turn_id: str,
-                 bridged_name: Callable[[Mapping[str, Any]], str | None] | None = None,
+                 bridged_name: Callable[[Mapping[str, Any]], tuple[str, bool] | None] | None = None,
                  unwrap_bridged: Callable[[str, dict[str, Any]], tuple[str, dict[str, Any]]] | None = None,
                  ) -> None:
         self.session_id = session_id
@@ -144,6 +145,12 @@ class TurnMapper:
         self.config_options: list[dict[str, Any]] | None = None
         self.usage_update: dict[str, Any] | None = None
         self.commands: list[dict[str, Any]] | None = None
+        # What the turn's last step was when it went wrong, as a fixed phrase
+        # and the tool's name (AcpLoop._silent_end words it): a failed tool,
+        # or a refused request (AcpLoop._note_refusal). A completed tool or a
+        # plan with entries clears it; a failure after a refusal keeps the
+        # refusal.
+        self.stalled: tuple[str, str] | None = None
 
     def _ev(self, cls: type[Event], **kw: Any) -> Event:
         return cls(session_id=self.session_id, turn_id=self.turn_id, **kw)
@@ -181,16 +188,17 @@ class TurnMapper:
 
     # ─── tools ──────────────────────────────────────────────────────────
 
-    def tool_name_and_input(self, call: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    def tool_name_and_input(self, call: Mapping[str, Any]) -> tuple[str, dict[str, Any], bool]:
         raw = call.get("rawInput")
         data: dict[str, Any] = dict(raw) if isinstance(raw, Mapping) else (
             {} if raw is None else {"input": _jsonable(raw)}
         )
         bridged = self.bridged_name(call) if self.bridged_name is not None else None
         if bridged:
+            name, titled = bridged
             if self.unwrap_bridged is not None:
-                return self.unwrap_bridged(bridged, data)
-            return bridged, data
+                name, data = self.unwrap_bridged(name, data)
+            return name, data, titled
         kind = str(call.get("kind") or "other")
         name = KIND_TOOL_NAMES.get(kind) or str(call.get("title") or "Tool")
         title = call.get("title")
@@ -209,7 +217,7 @@ class TurnMapper:
             first = locations[0] if isinstance(locations[0], Mapping) else {}
             if first.get("path"):
                 data["file_path"] = str(first["path"])
-        return name, data
+        return name, data, False
 
     def _start_tool(self, call: Mapping[str, Any]) -> list[Event]:
         tool_id = str(call.get("toolCallId") or "")
@@ -218,7 +226,7 @@ class TurnMapper:
         state = self.tools.get(tool_id)
         out = self.close_block()
         if state is None:
-            name, data = self.tool_name_and_input(call)
+            name, data, _ = self.tool_name_and_input(call)
             state = _ToolState(tool_use_id=tool_id, name=name, input=data)
             self.tools[tool_id] = state
         if not state.started:
@@ -247,6 +255,10 @@ class TurnMapper:
                 text = raw if isinstance(raw, str) else json.dumps(_jsonable(raw))
             if not text:
                 text = "(failed)" if status == "failed" else "(done)"
+            if status == "failed":
+                self.stalled = self.stalled or ("{} failed", state.name)
+            else:
+                self.stalled = None
             out.extend(self._finish_assistant())
             self._segments.append(("tool_results", [ToolResultBlock(
                 tool_use_id=tool_id, content=[Text(text=text)], is_error=status == "failed",
@@ -280,6 +292,9 @@ class TurnMapper:
                 todos.append({"content": content, "activeForm": content,
                               "status": _PLAN_STATUS.get(str(entry.get("status")), "pending")})
         self.plan_count += 1
+        if todos:
+            # A plan clear is no sign the turn went on after a refusal.
+            self.stalled = None
         tool_id = f"acp-plan-{self.turn_id}-{self.plan_count}"
         out = self.close_block()
         data = {"todos": todos}

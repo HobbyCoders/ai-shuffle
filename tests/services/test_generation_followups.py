@@ -192,10 +192,13 @@ def test_saving_unpriced_pick_reports_future_unattended_skip(client, quote_backe
         "choice": entry.choice(), "remember": remember, "origin": origin})
     assert response.status_code == 200
     output = response.json()
-    assert output["remembered"] is remember
+    # Remembered only once a server-side quote priced it; the one-time pick stays.
+    assert output["remembered"] is False
     assert output["priced"] is False and output["price"]["status"] == "unknown"
     assert output["unattended_skip_reason"] == "stored_choice_unpriced"
-    assert "Unattended runs will skip" in output["warning"]
+    assert ("was not remembered" if remember else "Unattended runs will skip") in output["warning"]
+    listed = client.get("/api/v1/generation/choices").json()
+    assert "image" not in listed["remembered"] and listed["last"]["image"]["model"] == entry.model
     assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)
 
 
@@ -226,7 +229,7 @@ async def test_search_bounds_actual_wire_json_across_many_large_options(backend,
 def test_saving_priced_pick_returns_quote_without_warning(client, quote_backend):
     entry = quote_backend.entries[0]
     output = client.put("/api/v1/generation/choices/image", json={"choice": entry.choice()}).json()
-    assert output["priced"] is True and output["warning"] is None
+    assert output["priced"] is True and output["warning"] is None and output["remembered"] is True
     assert output["unattended_skip_reason"] is None
     assert output["price"]["total"] == "0.05"
 
@@ -305,12 +308,13 @@ def test_save_unavailable_pick_preserves_quote_error(client, quote_backend):
     choice = quote_backend.entries[0].choice()
     quote_backend.entries = []
     output = client.put("/api/v1/generation/choices/image", json={"choice": choice}).json()
-    assert output["remembered"] and not output["priced"]
+    assert not output["remembered"] and not output["priced"]
     assert output["quote_error"] == "This account or model is not available right now."
-    assert output["quote_error"] in output["warning"]
+    assert output["quote_error"] in output["warning"] and "was not remembered" in output["warning"]
     assert "no verified price" not in output["warning"]
     assert output["unattended_skip_reason"] == "stored_choice_unavailable"
-    assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
+    listed = client.get("/api/v1/generation/choices").json()
+    assert listed["remembered"] == {} and listed["last"]["image"]["account"] == choice["account"]
 
 
 def test_job_choice_save_reports_the_same_save_time_quote(
@@ -359,10 +363,11 @@ def test_save_bounds_quote_wait_and_preserves_pick(client, quote_backend, monkey
     response = client.put("/api/v1/generation/choices/image", json={"choice": choice})
     output = response.json()
     assert response.status_code == 200 and cancelled
-    assert output["remembered"] and not output["priced"]
+    assert not output["remembered"] and not output["priced"]
     assert "timed out" in output["quote_error"] and output["quote_error"] in output["warning"]
     assert output["unattended_skip_reason"] == "stored_choice_unavailable"
-    assert client.get("/api/v1/generation/choices").json()["remembered"]["image"]["account"] == choice["account"]
+    listed = client.get("/api/v1/generation/choices").json()
+    assert listed["remembered"] == {} and listed["last"]["image"]["account"] == choice["account"]
     assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)
 
 

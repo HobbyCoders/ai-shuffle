@@ -88,9 +88,11 @@ class TurnStarted(Event):
     # The session's thinking setting as the host passed it (Anthropic shape),
     # None when it sends none. Recorded on every turn because a session keeps
     # the setting it started with: a resumed engine reads it back from here
-    # (NativeLoop._resolve_session_thinking). Optional and last so rows
-    # persisted before the field existed still load, as None.
+    # (NativeLoop._resolve_session_thinking).
     thinking: dict[str, Any] | None = None
+    # Resume can append a separate node containing host context. node_id
+    # still identifies the submitted prompt; reminders belong to this node.
+    context_node_id: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -917,10 +919,14 @@ class ContinualUpdate(Event):
 class AssistantTextSanitized(Event):
     """Model-authored control lookalikes were quoted before storage/replay.
 
-    Visible, nonterminal diagnostic. Never carries the original model text.
+    Visible, nonterminal diagnostic, emitted at most once per turn. Never
+    carries the original model text.
     """
 
-    message: str = "Model-authored control markers were quoted; no host message was delivered."
+    message: str = (
+        "The model wrote text that looks like a host control marker. It is shown "
+        "as a quote, so it cannot pass as a real host message."
+    )
 
 
 @dataclass(frozen=True, kw_only=True)

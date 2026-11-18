@@ -139,6 +139,18 @@ class TestGetProfile:
 
 class TestCreateProfile:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["create", "update"])
+    async def test_invalid_name_never_reaches_profile_write(self, admin_tools, action):
+        tool = get_tool(admin_tools, action + "Profile")
+        with patch(f"app.db.database.{action}_profile") as write:
+            result = await tool.handler({"profile_id": "existing", "name": "🌿" * 101,
+                                         "description": "Original", "prompt": "Hello"})
+        body = tool_result_json(result)
+        assert body["success"] is False
+        assert "1 and 100 characters" in body["error"]
+        write.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_create_profile_minimal_only_name(self, admin_tools):
         created = _make_profile(id="simple-test-profile", name="Simple Test Profile")
         tool = get_tool(admin_tools, "createProfile")
