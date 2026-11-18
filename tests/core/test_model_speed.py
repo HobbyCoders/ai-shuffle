@@ -504,7 +504,7 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
     monkeypatch.setattr("app.core.provider.harness_adapter._lookup_provider_row_shape",
                         lambda pid: ("openai", None, None))
     assert ultrafast_supported("gpt-6.2-sol", "oa") and not ultrafast_supported("gpt-6-luna", "oa")
-    await api.propagate_fast("parent")
+    await api.propagate_fast("parent", True, speed="ultrafast")
     # The pinned one's own workers follow it, not the parent.
     assert applied == {"able": "ultrafast", "grandchild": "ultrafast", "unable": "fast",
                        "pinned-child": "fast"}
@@ -574,7 +574,7 @@ async def test_a_worker_without_fast_hands_its_own_workers_standard(monkeypatch,
         return {"effort": None, "fast": tier != "standard", "speed": tier}
 
     monkeypatch.setattr(api, "apply_run_settings", apply)
-    await api.propagate_fast("root")
+    await api.propagate_fast("root", True, speed="ultrafast")
     assert applied == {"nested": "standard"}
 
 
@@ -634,7 +634,7 @@ async def test_interleaved_fan_outs_end_on_the_parents_latest_tier(monkeypatch):
 
     async def switch(tier):
         rows["parent"]["tier"] = tier
-        fan_outs.append(asyncio.create_task(api.propagate_fast("parent")))
+        fan_outs.append(asyncio.create_task(api.propagate_fast("parent", tier != "standard", speed=tier)))
         await settle()
         assert len(landing) <= 1
 
