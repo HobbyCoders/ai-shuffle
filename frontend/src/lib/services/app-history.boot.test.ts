@@ -422,6 +422,24 @@ it('the phone app: a drawer pick deferred to the next frame still runs after a c
  }
 });
 
+it('narrow desktop: a destination left from a panel’s own detail step is pushed after that step retires, and its pop is not a step', async () => {
+ const landed: boolean[] = [];
+ router.onState = state => { landed.push(shellHistory.land(state)); };
+ startOn(saved('automations', { type: 'automations' }));
+ // ViewShell's own Back stop for the open automation, as main pushes it.
+ router.entries.push({ state: { ...here(), viewPanelDetail: 'automation' } as ShellState, persisted: true });
+ router.index = 1; page.state = here();
+ shellHistory.destination({ type: 'settings' });
+ await settle(); await settle();
+ // Leaving Automations retires its step (ViewShell's history.back()) after the push was queued.
+ router.index = 0; page.state = here();
+ landed.push(shellHistory.land(here()));
+ await vi.waitFor(() => expect(places()).toEqual(['automations', 'settings']));
+ expect(router.index).toBe(1);
+ expect(landed).not.toContain(true);
+ expect(shellHistory.place?.type).toBe('settings');
+});
+
 it('narrow desktop: a first send’s chat adopted between a sidebar pick and its frame does not drop the pick (S18)', async () => {
  startOn(saved('new', { type: 'session', sessionId: null }));
  layout.openChat(null, 'reconcile');

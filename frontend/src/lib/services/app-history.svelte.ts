@@ -205,7 +205,7 @@ function record(next: Entry, mode: 'push' | 'replace' | 'stamp') {
  const { id } = next;
  const before = entry;
  entry = next;
- pending.set(id, (pending.get(id) ?? 0) + 1);
+ hold(id);
  const replace = mode !== 'push';
  // Not written: the browser stays where it is. Later writes already queued set their own.
  const keep = () => {
@@ -216,6 +216,7 @@ function record(next: Entry, mode: 'push' | 'replace' | 'stamp') {
  };
  writes = writes.then(async () => {
   try {
+   if (!replace) await detailStepRetired(before);
    const state = page.state as ShellState;
    // A replace refines only our entry the browser is on; the arrival is stamped only while bare.
    if (replace && (!owned(state) || (state.shell?.id ?? (mode === 'stamp' ? id : null)) !== id)) return keep();
@@ -229,8 +230,35 @@ function record(next: Entry, mode: 'push' | 'replace' | 'stamp') {
    keep();
    console.warn('Could not record navigation', error);
   } finally {
-   const left = (pending.get(id) ?? 1) - 1;
-   if (left) pending.set(id, left); else pending.delete(id);
+   release(id);
   }
+ });
+}
+
+function hold(id: string) { pending.set(id, (pending.get(id) ?? 0) + 1); }
+function release(id: string) {
+ const left = (pending.get(id) ?? 1) - 1;
+ if (left) pending.set(id, left); else pending.delete(id);
+}
+
+// A panel's own detail step is on top (ViewShell's, in a phone-width window, as
+// on main). Leaving the panel pops it, asynchronously: a push written first is
+// the entry that pop would take. So a push waits for that pop, whose landing
+// on the entry under the step is not the user's. Bounded, should no pop come.
+function detailStepRetired(under: Entry | null): Promise<void> {
+ const onStep = () => !!(page.state as { viewPanelDetail?: string }).viewPanelDetail;
+ if (!onStep()) return Promise.resolve();
+ if (under) hold(under.id);
+ return new Promise(resolve => {
+  let finished = false;
+  const finish = () => {
+   if (finished) return;
+   finished = true;
+   clearTimeout(timer);
+   // After this flush: the landing's own effects read the hold first.
+   queueMicrotask(() => { stop(); if (under) release(under.id); resolve(); });
+  };
+  const timer = setTimeout(finish, 1000);
+  const stop = $effect.root(() => { $effect(() => { if (!onStep()) finish(); }); });
  });
 }
