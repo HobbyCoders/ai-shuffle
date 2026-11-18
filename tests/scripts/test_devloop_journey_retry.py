@@ -26,14 +26,15 @@ def driver(tmp_path, monkeypatch):
     # CI must clear this inherited developer filter, not run a partial shard.
     monkeypatch.setenv("JOURNEY_ONLY", "a developer's substring")
     files = ["flow.journey.mjs", "other.journey.mjs"]
-    monkeypatch.setattr(ci, "plan", lambda _: [files, [], [], []])
+    monkeypatch.setattr(ci, "plan", lambda _, only=None: [files if only is None else only, [], [], []])
     weights = tmp_path / "weights.json"
     weights.write_text(json.dumps({"seconds": {name: 10 for name in files}}))
     monkeypatch.setattr(ci, "WEIGHTS", weights)
 
     class Instance:
-        def __init__(self, *args):
+        def __init__(self, out, ttl, *, fake_antigravity):
             instances.append(self)
+            self.fake_antigravity = fake_antigravity
             self.status = tmp_path / "status.json"
             self.stopped = False
 
@@ -48,7 +49,7 @@ def driver(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ci, "DevInstance", Instance)
 
-    def run(first, second=None, *, opt=True):
+    def run(first, second=None, *, opt=True, only=None):
         def command(argv, env, log, timeout):
             assert not instances[0].stopped  # same live instance on both attempts
             attempt = 2 if "attempt-2" in str(log) else 1
@@ -77,10 +78,20 @@ def driver(tmp_path, monkeypatch):
         argv = ["journeys", "--shard", "1/4", "--out", str(out)]
         if opt:
             argv.append("--retry-failures")
+        if only is not None:
+            argv.extend(["--only", only])
         code = ci.main(argv)
         return code
 
     return run, calls, out, summary, outputs, instances
+
+
+def test_antigravity_retries_on_the_same_fixture_instance(driver):
+    run, calls, _, _, _, instances = driver
+    name = "antigravity-usage.journey.mjs"
+    assert run({name: [case()]}, {name: [case(status="pass")]}, only="antigravity-usage") == 0
+    assert [(attempt, file) for attempt, file, *_ in calls] == [(1, name), (2, name)]
+    assert len(instances) == 1 and instances[0].fake_antigravity and instances[0].stopped
 
 
 def test_retries_only_failed_cases_once_and_preserves_both_errors(driver, capsys):

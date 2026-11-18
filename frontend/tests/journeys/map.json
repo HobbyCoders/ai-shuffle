@@ -71,6 +71,22 @@
 	],
 	"rules": [
 		{
+			"why": "Antigravity's grouped quota reply passes through the real parser and usage API to its ordered meters",
+			"journeys": ["antigravity-usage"],
+			"globs": [
+				"frontend/tests/journeys/antigravity-usage.journey.mjs",
+				"scripts/devloop/fake_agy.py",
+				"scripts/devloop/seed.py",
+				"app/core/antigravity.py",
+				"app/core/provider_usage.py",
+				"app/api/usage.py",
+				"frontend/src/lib/stores/rate-limit.ts",
+				"frontend/src/lib/components/chat/ContextUsageBar.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte",
+				"frontend/src/lib/components/settings/providers/AntigravityDetail.svelte"
+			]
+		},
+		{
 			"why": "the Away for all chats switch, its always-on band and the per-chat control it locks: real taps, a real layout and a second browser are what these depend on",
 			"journeys": [
 				"away-all-chats"

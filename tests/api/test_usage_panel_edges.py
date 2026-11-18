@@ -299,7 +299,10 @@ class TestRouteStatusAndCooldown:
             {"type": "grok_chat", "utilization": 12.5, "resets_at": None},
         ])
         entry = _providers(_get())["gk"]
-        assert entry["windows"] == [{"type": "grok_chat", "utilization": 12.5, "resets_at": None}]
+        # ``label`` is optional on every provider window; only Antigravity fills it.
+        assert entry["windows"] == [
+            {"type": "grok_chat", "label": None, "utilization": 12.5, "resets_at": None},
+        ]
 
 
 # ---------------------------------------------------------------------------

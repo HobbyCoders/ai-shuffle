@@ -83,7 +83,11 @@ describe('Google Antigravity rows', () => {
 		expect(creds.map((c) => c.statusText)).not.toContain('Active');
 	});
 
-	it('label per-model quota windows from the agent', () => {
+	it('prefers the quota label over the bucket ID', () => {
+		expect(windowLabel('antigravity_3p-5h', 'Claude and GPT models, 5-hour')).toBe('Claude and GPT models, 5-hour');
+	});
+
+	it('humanizes older model slugs without a quota label', () => {
 		expect(windowLabel('antigravity_gemini_3_1_pro')).toBe('Gemini 3.1 Pro');
 		expect(windowLabel('antigravity_gemini_3_8_flash')).toBe('Gemini 3.8 Flash');
 	});

@@ -19,7 +19,7 @@
 	} from '$lib/api/antigravity';
 	import { updateModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
-	import { windowLabel } from '$lib/stores/rate-limit';
+	import { remainingFromUsedPct, windowLabel, windowRolledOver } from '$lib/stores/rate-limit';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
@@ -146,6 +146,7 @@
 
 	const usageEntry = $derived(providers.current.usage?.providers?.find((p) => p.provider_id === row.id) ?? null);
 	const usageWindows = $derived(usageEntry?.windows ?? []);
+	let now = $state(Date.now());
 	const usageState = $derived(
 		usageEntry?.last_error_kind === 'unavailable' || usageEntry?.last_error_kind === 'timeout' || usageEntry?.status === 'unavailable'
 			? 'unavailable'
@@ -225,6 +226,7 @@
 		});
 	});
 	onMount(() => {
+		const clock = setInterval(() => { now = Date.now(); }, 1000);
 		const onFocus = () => {
 			if (document.visibilityState === 'visible') void loadStatus();
 		};
@@ -232,6 +234,7 @@
 		document.addEventListener('visibilitychange', onFocus);
 		return () => {
 			destroyed = true;
+			clearInterval(clock);
 			window.removeEventListener('focus', onFocus);
 			document.removeEventListener('visibilitychange', onFocus);
 		};
@@ -265,8 +268,9 @@
 			<RowGroup title="Quota" id="providers-antigravity-usage">
 				{#if usageWindows.length}
 					{#each usageWindows as w (w.type)}
-						<SettingRow label={windowLabel(w.type)} hint={usageState === 'fresh' ? undefined : 'Last reading'}>
-							<ValueText tone="fg" value={`${Math.max(0, Math.round(100 - w.utilization))}% left`} />
+						{@const hint = windowRolledOver(w, now) ? 'Reset · awaiting next report' : usageState === 'fresh' ? undefined : 'Last reading'}
+						<SettingRow label={windowLabel(w.type, w.label)} {hint}>
+							<ValueText tone="fg" value={`${remainingFromUsedPct(w, now)}% left`} />
 						</SettingRow>
 					{/each}
 				{/if}

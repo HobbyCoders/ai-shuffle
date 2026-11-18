@@ -571,7 +571,7 @@ The agent keeps a Google sign-in in its own files on the worker. AI Shuffle star
 
 **Interactive only.** A personal sign-in row runs only in chats you type into yourself. Automations, scheduled or automatic turns, Task, Swarm and subagent children, sessions another agent started, requests the voice assistant writes on its own, answers Away mode gives for you, and background calls are refused with a message that names the reason and points back to the row. **Allow unattended use** on the row's Overview tab lifts this; it is off for every new row. Key and business rows are not limited.
 
-**Usage.** Google documents no usage API for Antigravity. When you open the usage popover or press **Refresh** on the row's Usage tab, AI Shuffle asks the agent for its own `/usage` reading (at most every 30 seconds) and shows the quota left per model. A reply that cannot be read shows **Unavailable**, an older reading is marked as old, and both link to the Antigravity FAQ (Google publishes no usage page for these plans). Stats count a Google sign-in as a subscription and a Gemini API key as API use.
+**Usage.** Google documents no usage API for Antigravity. When you open the usage popover or press **Refresh** on the row's Usage tab, AI Shuffle asks the agent for its own `/usage` reading (at most every 30 seconds) and shows the quota left for each group and time window the agent reports. A reply that cannot be read shows **Unavailable**, an older reading is marked as old, and both link to the Antigravity FAQ (Google publishes no usage page for these plans). Stats count a Google sign-in as a subscription and a Gemini API key as API use.
 
 ### Antigravity endpoints
 

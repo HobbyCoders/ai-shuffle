@@ -1361,20 +1361,26 @@ class ProviderUsageMonitor:
         epoch = antigravity.signin_epoch(provider_id)
         revision = (provider_id, row.get("revision"))
         try:
-            payload = await antigravity.read_usage(row)
-            windows = antigravity.normalize_usage(payload)
-            if antigravity.signin_epoch(provider_id) != epoch:
-                return
-            if windows is None:
+            written = None
+            try:
+                payload = await antigravity.read_usage(row)
+                windows = antigravity.normalize_usage(payload)
+                if antigravity.signin_epoch(provider_id) != epoch:
+                    return
+                if windows is not None:
+                    written = await run_sync(
+                        db.upsert_provider_usage_snapshot, provider_id, "antigravity", None, windows,
+                        None, {"source": "antigravity_usage"}, int(time.time() * 1000),
+                        expected_provider_revision=revision,
+                    )
+            except Exception:  # noqa: BLE001 — a failed snapshot write still counts as an attempt
+                logger.warning("Antigravity usage read or snapshot write failed for provider %s", provider_id)
+            if written is None:
+                if antigravity.signin_epoch(provider_id) != epoch:
+                    return
                 written = await run_sync(functools.partial(
                     db.record_provider_usage_failure, provider_id, "antigravity", "unavailable",
                     expected_provider_revision=revision))
-            else:
-                written = await run_sync(
-                    db.upsert_provider_usage_snapshot, provider_id, "antigravity", None, windows,
-                    None, {"source": "antigravity_usage"}, int(time.time() * 1000),
-                    expected_provider_revision=revision,
-                )
             if written and antigravity.signin_epoch(provider_id) != epoch:
                 # A sign-out landed while this was written: its own clear may
                 # have run first, so clear again.

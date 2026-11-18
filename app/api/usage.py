@@ -105,6 +105,7 @@ class AccountUsageSnapshot(BaseModel):
 class ProviderUsageWindow(BaseModel):
     """A single non-Claude provider usage window."""
     type: str
+    label: str | None = None
     utilization: float
     resets_at: Optional[str] = None
 
