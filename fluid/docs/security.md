@@ -75,13 +75,26 @@ model *reads* framing tokens even when they can't structurally escape.
 - **Sensitive-file rules**: under any policy except `never_ask`, default
   ask-before-touching rules cover credential files (`.env` and variants, SSH
   keys, `*.pem`/`*.p12`/`*.pfx`, `.netrc`, `.npmrc`, `.pypirc`,
-  `.git-credentials`, `~/.aws/credentials`) for `Read`/`Edit`/`Write`/
-  `Grep`/`Glob`. They are prepended before user rules, so one
+  `.git-credentials`, `~/.aws/credentials`) and a process's `environ`,
+  `cmdline` and `mem` under `/proc` (the host's own environment holds the
+  provider keys) for `Read`/`Edit`/`Write`/`Grep`/`Glob`. They are prepended before user rules, so one
   `[[permission.rules]]` allow overrides them; `.env.example`-style templates
   are exempt. `permission.protect_sensitive_files = false` disables the set.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
-  file — `cat .env` does not sail under the read-only fast path.
+  file or a process's `environ`/`cmdline`/`mem` — `cat .env` and
+  `cat /proc/$PPID/environ` do not sail under the read-only fast path. This
+  includes a value attached to an option (`--file=.env`), a `<rev>:<path>`
+  (`git show HEAD:.env`), any `/proc` spelling (`self`, `$PPID`, globs, `..`,
+  `/dev/fd/..`) and a relative name under the call's `cwd`. Shell searches
+  that walk a tree prompt too, because they print credential files that the
+  Grep tool would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`,
+  `--recursive`), `rg` (it is recursive by default and reads options such as
+  `--pre` from `RIPGREP_CONFIG_PATH`), `diff` (two directories compare every
+  file in them) and `git diff` with `--no-index` or two operands (outside a
+  repository it compares plain directories; `git diff A..B` stays read-only).
+  A word the shell builds from something the classifier cannot see prompts
+  as well: `$'…'` quoting, `${X:-…}`, `$_`, `$1` and brace expansion.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,
@@ -118,8 +131,8 @@ cell code cannot reach the machine directly: an interpreter audit hook
 the first cell and irremovable after) refuses `open`, directory listing,
 `shutil`, socket creation and connection, `subprocess.Popen`, `os.system` /
 `os.exec*` / `os.spawn*`, `ctypes`, environment edits and further audit hooks
-whenever a cell frame is on the stack or the call runs off the main thread,
-so reaching the real builtins through a pre-bound module
+in any frame on any thread once the runner first hands control to cell code
+(it arms then and never disarms), so reaching the real builtins through a pre-bound module
 (`json.__builtins__['__import__']('os')`) gains nothing. The child is also
 spawned with credential-looking variables (`*KEY*`, `*TOKEN*`, `*SECRET*`,
 `*PASSWORD*`, `*CREDENTIAL*` and the known provider names) stripped from its

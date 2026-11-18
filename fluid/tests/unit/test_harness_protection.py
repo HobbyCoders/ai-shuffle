@@ -149,6 +149,28 @@ def test_default_rules_gate_app_secrets_and_app_code_writes() -> None:
     assert engine.decide(read_spec, {"file_path": "/app/app/main.py"}).decision == "allow"
 
 
+@pytest.mark.parametrize("path", [
+    "/proc/self/environ", "/proc/123/environ", "/proc/thread-self/environ",
+    "/proc/1/task/2/environ", "/proc/self/cmdline", "/proc/1/mem",
+])
+def test_process_environment_files_are_sensitive(path: str) -> None:
+    assert is_sensitive_path(path)
+
+
+@pytest.mark.parametrize("path", ["/proc/cpuinfo", "/proc/self/status", "/srv/environ"])
+def test_other_proc_files_are_not_sensitive(path: str) -> None:
+    assert not is_sensitive_path(path)
+
+
+def test_read_of_a_process_environment_asks() -> None:
+    """The Read tool runs inside the host: /proc/self/environ is the host's."""
+    engine = _build_permissions(_config())
+    read_spec = ToolSpec(name="Read", description="", input_schema={}, risk="safe")
+    for path in ("/proc/self/environ", "/proc/4242/environ", "/proc/1/task/7/cmdline"):
+        assert engine.decide(read_spec, {"file_path": path}).decision == "ask", path
+    assert engine.decide(read_spec, {"file_path": "/proc/cpuinfo"}).decision == "allow"
+
+
 def test_bash_read_only_of_credentials_still_prompts() -> None:
     assert classify({"command": "cat README.md"}) == "safe"
     assert classify({"command": "cat .env"}) == "write"

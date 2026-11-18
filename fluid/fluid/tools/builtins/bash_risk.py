@@ -20,16 +20,37 @@ only when:
 - there is no command substitution (``$(`` or backticks), no background ``&``,
   no subshell parentheses, and no program outside the table (so ``sudo``,
   ``xargs``, ``env cmd``, ``python`` and friends are all ``write``);
+- the shell builds no word the lexer cannot see (:func:`_hidden_expansion`):
+  no ANSI-C or locale quoting (``$'-exec'``, ``$"x"``), no ``${…}`` beyond a
+  plain ``${NAME}``, no special parameter (``$_`` is the previous command's
+  last word, ``$1``, ``$?`` ...), no ``$BASH*`` and no
+  brace expansion (``{-exec,rm}``). Each of these turns into an option or a
+  file name the checks below never saw;
 - any leading ``VAR=value`` assignment names a variable in
   :data:`INERT_ENV_VARS`. Locale and colour variables cannot change what a
   program does; almost anything else can (``LD_PRELOAD``, ``GIT_EXTERNAL_DIFF``,
   ``GIT_PAGER``, ``BASH_ENV``, ``LESSOPEN`` all run a program of the caller's
   choosing), so an assignment outside the list makes the command ``write``.
 
-A read-only command whose argument names a credential file (``cat .env``) is
-still ``write``; see :func:`_touches_sensitive_path`. An unquoted glob argument
+A read-only command whose argument names a credential file (``cat .env``) or
+a process's environment, command line or memory (``cat /proc/$PPID/environ``:
+the parent is the host, whose environment holds the provider keys) is still
+``write``; see :func:`_touches_sensitive_path`. An unquoted glob argument
 counts when any file it could expand to is a credential file (``cat .env*``,
-``cat ?env``, ``cat ~/.ssh/*``).
+``cat ?env``, ``cat ~/.ssh/*``). A value attached to an option counts too
+(``date --file=.env``), and relative arguments are also read against the
+call's ``cwd`` (``cat environ`` with ``cwd=/proc/1``).
+
+A search or comparison across a directory tree prints whatever credential
+file sits in it, so it is ``write``: recursive ``grep`` (any word with a
+``-r``/``-R``/``-d`` letter, or a long option that could abbreviate
+``--recursive``, ``--dereference-recursive`` or ``--directories``), and
+``grep`` at all when ``GREP_OPTIONS`` is set (BSD grep reads options from
+it). ``rg``, ``ag``, ``ack`` and ``diff`` are not in the table: rg searches
+the tree by default and loads options (``--pre`` included) from
+``RIPGREP_CONFIG_PATH``, and ``diff`` of two directories compares the files in
+them (``diff -rN . empty`` prints every file). The built-in Grep tool is the
+tree-wide search that withholds credential files.
 
 Programs with extra rules:
 
@@ -55,20 +76,23 @@ Programs with extra rules:
 - ``sort``: no ``-o``/``--output``, ``-T``/``--temporary-directory`` or
   ``--compress-program``; every letter of a short-option word counts. ``uniq``: at
   most one positional argument (the second is an output file). ``tree``: no
-  ``-o`` or ``-R``. ``file``: no ``-C``/``--compile``. ``env``: no arguments
-  (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` or ``--hostname-bin`` (both
-  run a command).
+  ``-o`` or ``-R``. ``file``: no ``-C``/``--compile`` and no
+  ``-p``/``--preserve-date`` (it resets the access time it read, a metadata
+  write). ``env``: no arguments (``env cmd`` runs ``cmd``).
 
 A banned option counts when attached (``-ofile``) or bundled (``-uo file``),
 and for programs that parse long options with getopt_long (sort, file, sed,
 date, gawk) when abbreviated to a prefix that names it unambiguously
 (``--outp=file``; ``sort --c`` is ambiguous and getopt_long refuses it).
-ripgrep and tree reject abbreviations, so their long options match exactly.
+tree rejects abbreviations, so its long options match exactly.
 Every word is scanned, ``--`` and option values included. See :func:`_no_flags`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
-  external program); any ``--output*`` argument is rejected.
+  external program); any ``--output*`` argument is rejected. ``git diff``
+  asks with ``--no-index`` or two or more non-option words: given two paths
+  outside the work tree (or run outside a repository) it compares them as
+  plain directories, like ``diff -rN``.
 - ``uv``/``pip``/``npm``/``pnpm``/``yarn``/``cargo``: only the informational
   subcommands in :data:`PACKAGE_MANAGER_READ_ONLY` (``uv pip list`` is handled
   by skipping the ``pip`` word).
@@ -82,9 +106,12 @@ with a trailing ``.exe`` stripped.
 
 from __future__ import annotations
 
+import os
+import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from fnmatch import fnmatchcase
 from typing import Any
 
 SAFE = "safe"
@@ -190,6 +217,32 @@ def _no_flags(
 
 def _find_ok(args: list[str]) -> bool:
     return not any(a in _FIND_EXEC_FLAGS or a.startswith("-fprint") for a in args)
+
+
+# Long options that make grep descend into directories, or that could be
+# abbreviated to one (getopt_long accepts any unambiguous prefix).
+_GREP_RECURSIVE_LONG = ("--recursive", "--dereference-recursive", "--directories")
+
+
+def _grep_ok(args: list[str]) -> bool:
+    """No recursion: a tree-wide grep prints the lines of any ``.env`` in it.
+
+    Deliberately blunt so no dialect slips through: any short-option word
+    with an ``r``, ``R`` or ``d`` letter asks (``-d recurse``, ``-drec``,
+    ``-inr``, even ``-e red``), and so does any long option that is a prefix
+    of a recursion option. Every word is scanned, ``--`` included. BSD grep
+    reads extra options from ``GREP_OPTIONS``, so grep asks when it is set.
+    """
+    if os.environ.get("GREP_OPTIONS"):
+        return False
+    for a in args:
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if len(name) > 2 and any(o.startswith(name) for o in _GREP_RECURSIVE_LONG):
+                return False
+        elif a.startswith("-") and any(ch in "rRd" for ch in a[1:]):
+            return False
+    return True
 
 
 # Real long options, for getopt_long abbreviation (GNU coreutils / libmagic).
@@ -697,12 +750,14 @@ def _exact(*allowed: tuple[str, ...]) -> Check:
 READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
     "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
-    "grep": None, "egrep": None, "fgrep": None,
-    # Both run a program. ripgrep rejects abbreviated long options, so exact.
-    "rg": _no_flags("--pre", "--hostname-bin"),
+    "grep": _grep_ok, "egrep": _grep_ok, "fgrep": _grep_ok,
+    # No rg: it searches the whole tree unless given files, and options from
+    # its config file (RIPGREP_CONFIG_PATH) can add --pre, which runs a program.
     "find": _find_ok,
+    # -C compiles a magic file; -p resets the access time after reading.
     "file": _no_flags(
-        "-C", "--compile", takes_value="efFmP", long_options=_FILE_LONG_OPTIONS,
+        "-C", "--compile", "-p", "--preserve-date",
+        takes_value="efFmP", long_options=_FILE_LONG_OPTIONS,
     ),
     "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
@@ -714,7 +769,10 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     # every letter of a bundle is a flag. tree has its own parser, not
     # getopt, so every word is scanned, ``--`` or not.
     "tree": _no_flags("-o", "-R"),
-    "diff": None, "cmp": None,
+    # No diff: given two directories it compares the files in them, so
+    # ``diff -rN . empty`` prints every file, .env included. cmp refuses
+    # a directory.
+    "cmp": None,
     # sort writes with -o, runs a helper with --compress-program and spills
     # into a chosen directory with -T. Which bundled letters take a value
     # differs between sorts, so every letter of a short-option word counts,
@@ -731,9 +789,24 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "jq": None,
 }
 
+def _git_diff_ok(args: list[str]) -> bool:
+    """Not the plain-directory form: ``--no-index``, or two non-option words.
+
+    git compares two paths as ``diff -rN`` would when one lies outside the
+    work tree or the command runs outside a repository, which the text does
+    not show; both need exactly two operands. Option values count as
+    words here (``-S foo a``), which can only add a prompt.
+    """
+    for a in args:
+        name = a.split("=", 1)[0]
+        if len(name) >= 5 and "--no-index".startswith(name):
+            return False
+    return sum(1 for a in args if not a.startswith("-")) < 2
+
+
 # git subcommand → check over the subcommand's own arguments.
 GIT_READ_ONLY: dict[str, Check | None] = {
-    "status": None, "log": None, "diff": None, "show": None,
+    "status": None, "log": None, "diff": _git_diff_ok, "show": None,
     "rev-parse": None, "ls-files": None, "blame": None, "describe": None,
     "branch": lambda args: all(
         a in ("-a", "-r", "--list", "-l", "--show-current", "-v", "-vv") for a in args
@@ -806,6 +879,91 @@ def _lex(line: str) -> list[str] | None:
         return None
 
 
+_SHELL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_WORD_END = frozenset(" \t\r\n;&|<>()")
+
+
+def _plain_parameter(name: str) -> bool:
+    """A variable the command line cannot set: its value is ambient.
+
+    ``$_`` is the last word of the previous command (``echo -exec; find .
+    $_ …``) and ``$BASH_COMMAND`` and friends echo the command line, so
+    those are not. ``$PWD`` is the call's ``cwd``, which the command cannot
+    change without ``cd`` (not in the table).
+    """
+    return name != "_" and not name.startswith("BASH")
+
+
+def _brace_expands(command: str, i: int) -> bool:
+    """True when the unquoted ``{`` at ``i`` could open a brace expansion.
+
+    Any ``,`` or ``..`` later in the same word counts, quoted or not; a
+    quoted comma does not split, so that only adds a prompt.
+    """
+    quote = ""
+    i += 1
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch == "\\":
+            i += 1
+        elif ch in "'\"":
+            quote = ch
+        elif ch in _WORD_END:
+            return False
+        if ch == "," or command.startswith("..", i):
+            return True
+        i += 1
+    return False
+
+
+def _hidden_expansion(command: str) -> bool:
+    """True when the shell would build a word the classifier cannot see.
+
+    shlex keeps ``$'-exec'``, ``${X:--exec}`` and ``{-exec,rm}`` as words
+    that look like operands, but bash turns each into ``-exec``: ``find .
+    ${X:--exec} rm {} +`` runs ``rm``. So outside single quotes this refuses
+    ANSI-C and locale quoting, any ``${…}`` other than a plain ``${NAME}``,
+    special parameters (``$1``, ``$@``, ``$?``, ``$$``, ``$-``, ``$[…]``), the
+    variables in :func:`_plain_parameter`, and unquoted brace expansion.
+    A plain ``$NAME`` stays: no part of a read-only command can set one.
+    """
+    quote = ""
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+        elif ch == "\\":
+            i += 1  # the next character is literal
+        elif ch == '"':
+            quote = "" if quote else '"'
+        elif ch == "'" and not quote:
+            quote = "'"
+        elif ch == "{" and not quote and _brace_expands(command, i):
+            return True
+        elif ch == "$":
+            nxt = command[i + 1:i + 2]
+            if nxt in ("'", '"'):
+                if not quote:
+                    return True  # $'…' / $"…"; inside "…" the $ is literal
+            elif nxt == "{":
+                end = command.find("}", i + 2)
+                name = command[i + 2:end] if end >= 0 else ""
+                if not (_SHELL_NAME.fullmatch(name) and _plain_parameter(name)):
+                    return True
+            elif m := _SHELL_NAME.match(command, i + 1):
+                if not _plain_parameter(m.group()):
+                    return True
+            elif nxt and (nxt.isdigit() or nxt in "@*#?-$![("):
+                return True
+        i += 1
+    return False
+
+
 def _simple_command_ok(tokens: list[str]) -> bool:
     # Leading VAR=value assignments pass only for inert variables; a bare
     # assignment is not a command.
@@ -827,6 +985,8 @@ def is_read_only(command: str) -> bool:
     if not command or not command.strip():
         return False
     if "$(" in command or "`" in command:
+        return False
+    if _hidden_expansion(command):
         return False
     for line in command.splitlines():
         line = re.sub(r"(?<!\S)2>&1(?!\S)", " ", line)
@@ -1085,18 +1245,56 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
     return False
 
 
-def _touches_sensitive_path(command: str) -> bool:
+_SHELL_PARAMETER = re.compile(r"\$(\{[^}]*\}?|[A-Za-z0-9_]+|.)?")
+
+
+def _could_name_process_secret(path: str) -> bool:
+    """True when ``path`` could be a process's environ, cmdline or mem file.
+
+    Matched on the last component alone, wherever the directory part points:
+    ``/proc/$PPID/environ``, ``/proc/self/task/1/environ`` and
+    ``/dev/fd/../../1/environ`` (``/dev/fd`` is ``/proc/self/fd``) all reach a
+    process, and the shell resolves ``..`` after symlinks, so the directory
+    spelling proves nothing. A word without a ``/`` is a pattern or a file
+    in the working directory, not a /proc path. Globs, braces and ``$NAME``
+    in the last component count as wildcards (``/proc/self/e*``,
+    ``/proc/1/{environ,x}``, ``/proc/1/$F``).
+    """
+    from fluid.tools.hardening import SENSITIVE_PROCESS_FILES
+
+    normalized = path.replace("\\", "/").rstrip("/")
+    if "/" not in normalized:
+        return False
+    last = _SHELL_PARAMETER.sub("*", normalized.rsplit("/", 1)[-1].lower())
+    alternatives = _expand_braces(last)
+    if alternatives is None:
+        # Unbalanced (the shell keeps it literal: awk's ``'{print $1/2}'``)
+        # or too many to list: braces and commas as wildcards over-match.
+        alternatives = [re.sub(r"[{},]", "*", last)]
+    return any(
+        fnmatchcase(name, alt) for alt in alternatives for name in SENSITIVE_PROCESS_FILES
+    )
+
+
+def _touches_sensitive_path(command: str, cwd: str | None = None) -> bool:
     """True when any argument names a credential file (``cat .env`` etc.).
 
     A read-only command is still an exfiltration read when its target is a
-    credential file, so it must not sail under the on_write policy. Best-effort
-    shlex tokenization; a command we cannot tokenize was already rejected by
-    the read-only classifier.
+    credential file or a process's environment, so it must not sail under the
+    on_write policy. Best-effort shlex tokenization; a command we cannot
+    tokenize was already rejected by the read-only classifier.
 
     Tokens are lexed with their quotes kept so an unquoted glob (``.env*``,
     ``?env``, ``.{env,bashrc}``) can be told apart from a quoted regex
     (``'foo.*'``): the shell expands the former after the classifier has seen
     it, so it counts when any file it could match is sensitive.
+
+    An option word is checked at every suffix, since its value may be
+    attached (``--file=.env``, ``-f.env``), and asks outright with an unquoted
+    glob (the shell expands that value too). The part after a ``:`` is
+    checked as a path too (``git show HEAD:.env``). With a ``cwd``, every
+    candidate is also checked joined to it (``cat environ`` run in
+    ``/proc/1``).
     """
     from fluid.tools.hardening import is_sensitive_path
 
@@ -1106,17 +1304,28 @@ def _touches_sensitive_path(command: str) -> bool:
         raw_tokens = list(lex)
     except ValueError:
         return False
+    base = cwd.replace("\\", "/") if cwd else ""
     for raw in raw_tokens[1:]:
-        if raw.startswith("-"):
-            continue
         try:
             literal = " ".join(shlex.split(raw))
         except ValueError:
             return True
-        if is_sensitive_path(literal):
-            return True
-        if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
-            return True
+        glob = _has_unquoted_glob(raw)
+        if literal.startswith("-"):
+            if glob:
+                return True
+            paths = [literal[k:] for k in range(len(literal))]
+        else:
+            paths = [literal]
+        # git's <rev>:<path> (``git show HEAD:.env``) names a file too.
+        paths += [p.split(":", 1)[1] for p in paths if ":" in p]
+        if base:
+            paths += [posixpath.join(base, p) for p in paths]
+        for path in paths:
+            if is_sensitive_path(path) or _could_name_process_secret(path):
+                return True
+            if glob and _glob_could_name_sensitive_path(path):
+                return True
     return False
 
 
@@ -1127,5 +1336,7 @@ def classify(input: dict[str, Any]) -> str:
         return WRITE
     if not is_read_only(command):
         return WRITE
+    cwd = input.get("cwd")
     # Read-only, but targeting a credential file → keep the prompt.
-    return WRITE if _touches_sensitive_path(command) else SAFE
+    sensitive = _touches_sensitive_path(command, cwd if isinstance(cwd, str) else None)
+    return WRITE if sensitive else SAFE

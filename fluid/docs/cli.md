@@ -195,7 +195,12 @@ and combines that with the approval policy:
 read-only (`git status`, `ls`, `grep ... | head`, `git log --oneline -5`, and
 similar: no redirection, no substitution, no program outside the allowlist) is
 treated as `safe` and runs without a prompt under `on_write`. The allowlist is
-in `fluid/tools/builtins/bash_risk.py`.
+in `fluid/tools/builtins/bash_risk.py`. A read-only command still asks when it
+names a credential file or a process's environment (`cat .env`,
+`cat /proc/$PPID/environ`), or when it searches or compares a whole tree
+(`grep -r`, `rg`, `diff`, `git diff a b`), since that would print any `.env`
+inside it. Use the Grep tool for tree-wide searches: it withholds credential
+files.
 
 When a prompt appears it looks like
 
