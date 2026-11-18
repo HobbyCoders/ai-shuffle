@@ -875,7 +875,15 @@ class AcpLoop:
                           provider_message=message, **extra)
 
     async def _run_turn(self, op: UserTurn | Resume) -> None:
-        meta = await self._ensure_session()
+        try:
+            meta = await self._ensure_session()
+        except Exception as exc:
+            # submit() has returned and the host waits on the bus: end the turn there.
+            held = self._session.session_id if self._session is not None else self._session_id
+            if held is None:
+                raise
+            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=repr(exc)))
+            return
         sid = meta.session_id
         turn_id = new_id("turn")
         try:

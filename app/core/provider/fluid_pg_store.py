@@ -298,6 +298,18 @@ def _session_head_sync(session_id: str) -> Optional[str]:
     return row["head_node_id"]
 
 
+def _session_row_sync(session_id: str) -> Optional[Dict[str, Any]]:
+    """The session row's fields a head or handle write changes, nothing else."""
+    with get_db() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT head_node_id, cli_session_id FROM fluid_sessions WHERE session_id = %s",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    return None if row is None else dict(row)
+
+
 def _load_memory_path_sync(session_id: str, head: Optional[str]) -> Optional[List[SessionNode]]:
     """Cold/rewound path only: indexed ancestry IDs, memory candidates only.
 
@@ -1705,6 +1717,12 @@ class PgFluidStore:
         # Handle writes are fire-and-forget tasks on separate threads. Keep them
         # in order: a refused --resume's erase must land before the new handle.
         self._handle_lock = asyncio.Lock()
+        # Per session: every write that moves the row's head or handle, its
+        # cache update, and the read-back after an unknown outcome run under
+        # one lock (taken after _handle_lock, never before it). Sessions whose
+        # read-back failed reread those fields before the next use.
+        self._meta_locks: Dict[str, asyncio.Lock] = {}
+        self._unverified: set = set()
         self._resume_trim_pending = False
         # The generation each claimed session is written under, and the sessions
         # another writer has since taken over (see the module docstring).
@@ -1768,6 +1786,11 @@ class PgFluidStore:
         # Another engine created the row after this store's claim found none.
         if session_id in self._claim_when_found:
             await self.claim_session(session_id)
+        # Set only on a loaded session, after a read-back failed.
+        if session_id in self._unverified:
+            async with self._meta_lock(session_id):
+                if session_id in self._unverified:
+                    await self._reread_row(session_id)  # raises: never the stale value
         async with self._load_lock:
             if session_id in self._loaded:
                 return session_id in self._sessions
@@ -1783,16 +1806,64 @@ class PgFluidStore:
             self._loaded.add(session_id)
             return data is not None
 
-    def _forget_session(self, session_id: str) -> None:
-        """Drop the cached session after a write whose outcome is unknown.
+    def _meta_lock(self, session_id: str) -> asyncio.Lock:
+        return self._meta_locks.setdefault(session_id, asyncio.Lock())
 
-        PG may have committed it before the connection failed, or never seen
-        it. The next access reads the row again, as a reopen would; if that
-        read fails it raises, so the stale value is never served.
+    async def _write_meta(self, session_id: str, publish: Any, fn: Any, *args: Any, **kwargs: Any) -> None:
+        """Run a write that moves the session row's head or handle.
+
+        ``publish(result)`` updates the cache from the worker's result, under
+        the session's meta lock. Cancelling the caller does not abandon the
+        worker: the lock is held until it finishes, and a write that finished
+        is published before the cancellation propagates. A write that raised
+        may have committed before the connection failed, or not: the row is
+        read back instead. The caller's exception is re-raised either way.
         """
-        self._loaded.discard(session_id)
-        self._sessions.pop(session_id, None)
+        async with self._meta_lock(session_id):
+            work = asyncio.ensure_future(run_sync(fn, *args, **kwargs))
+            try:
+                await asyncio.shield(work)
+            except BaseException:
+                while not work.done():
+                    try:
+                        await asyncio.wait({work})
+                    except asyncio.CancelledError:
+                        pass  # the caller's own exception is re-raised below
+                if work.cancelled() or work.exception() is not None:
+                    await self._read_back(session_id)
+                else:
+                    publish(work.result())
+                raise
+            publish(work.result())
+
+    async def _read_back(self, session_id: str) -> None:
+        """After an unknown write outcome, under the meta lock. A failed read
+        leaves the fields unverified, so the next access rereads them."""
         self._memory_paths.pop(session_id, None)
+        self._unverified.add(session_id)
+        try:
+            await self._reread_row(session_id)
+        except Exception:
+            logger.warning("Could not read session %s back after a failed write", session_id, exc_info=True)
+
+    async def _reread_row(self, session_id: str) -> None:
+        """Refresh the cached head and handle from the session row, in place.
+
+        Nodes and the live window are left alone; only a head the cache does
+        not hold (the node a failed append may have committed) is fetched.
+        """
+        row = await run_sync(_session_row_sync, session_id)
+        meta = self._sessions.get(session_id)
+        if row is not None and meta is not None:
+            head = row["head_node_id"]
+            nodes = self._nodes.get(session_id, {})
+            if self.cache_nodes and head is not None and head not in nodes:
+                node = await run_sync(_get_node_sync, session_id, head)
+                if node is not None:
+                    self._cache_node(session_id, node, len(json.dumps(node.message.to_dict())))
+            meta.head_node_id = head
+            meta.cli_session_id = row["cli_session_id"]
+        self._unverified.discard(session_id)
 
     def _cache_node(self, session_id: str, node: SessionNode, size: int) -> None:
         nodes = self._nodes.setdefault(session_id, {})
@@ -1945,35 +2016,35 @@ class PgFluidStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
-        try:
-            written = await run_sync(
-                _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
-                generation=self._generations.get(session_id),
-            )
-        except BaseException:
-            self._forget_session(session_id)
-            raise
-        if written is None:
-            self._note_replaced(session_id)
-            # Not saved, but the old engine's turn still builds its next prompt
-            # from this cache, so it carries on as if the write had landed.
-            size = len(json.dumps(node.message.to_dict())) if self.cache_nodes else 0
-        else:
-            size, stored = written
-            # A retried append keeps the stored node, as the table does, even
-            # when the live window had evicted it from the cache.
-            node = stored or node
-        if self.cache_nodes:
-            if node.node_id not in self._nodes.get(session_id, {}):
-                self._cache_node(session_id, node, size)
-        elif session_id in self._memory_paths:
-            head, projection = self._memory_paths[session_id]
-            if node.parent_id == head:
-                self._memory_paths[session_id] = (node.node_id, _memory_projection(projection, node))
+
+        def publish(written: Any) -> None:
+            cached = node
+            if written is None:
+                self._note_replaced(session_id)
+                # Not saved, but the old engine's turn still builds its next prompt
+                # from this cache, so it carries on as if the write had landed.
+                size = len(json.dumps(node.message.to_dict())) if self.cache_nodes else 0
             else:
-                self._memory_paths.pop(session_id, None)
-        if session_id in self._sessions:
-            self._sessions[session_id].head_node_id = node.node_id
+                size, stored = written
+                # A retried append keeps the stored node, as the table does, even
+                # when the live window had evicted it from the cache.
+                cached = stored or node
+            if self.cache_nodes:
+                if cached.node_id not in self._nodes.get(session_id, {}):
+                    self._cache_node(session_id, cached, size)
+            elif session_id in self._memory_paths:
+                head, projection = self._memory_paths[session_id]
+                if cached.parent_id == head:
+                    self._memory_paths[session_id] = (cached.node_id, _memory_projection(projection, cached))
+                else:
+                    self._memory_paths.pop(session_id, None)
+            if session_id in self._sessions:
+                self._sessions[session_id].head_node_id = cached.node_id
+
+        await self._write_meta(
+            session_id, publish, _append_node_sync, session_id, node,
+            measure_bytes=self.cache_nodes, generation=self._generations.get(session_id),
+        )
 
     async def get_node(self, session_id: str, node_id: str) -> Optional[SessionNode]:
         if not await self._ensure_loaded(session_id):
@@ -2116,18 +2187,17 @@ class PgFluidStore:
         self._memory_paths.pop(session_id, None)
         # Memory follows the write; a failed one is read back from the row.
         # A replaced writer carries on as if it landed.
-        try:
-            applied = await run_sync(
-                _set_head_sync, session_id, node_id,
-                generation=self._generations.get(session_id),
-            )
-        except BaseException:
-            self._forget_session(session_id)
-            raise
-        if not applied:
-            self._note_replaced(session_id)
-        if session_id in self._sessions:
-            self._sessions[session_id].head_node_id = node_id
+
+        def publish(applied: Any) -> None:
+            if not applied:
+                self._note_replaced(session_id)
+            if session_id in self._sessions:
+                self._sessions[session_id].head_node_id = node_id
+
+        await self._write_meta(
+            session_id, publish, _set_head_sync, session_id, node_id,
+            generation=self._generations.get(session_id),
+        )
 
     async def set_cli_session_id(
         self, session_id: str, cli_session_id: Optional[str]
@@ -2140,19 +2210,18 @@ class PgFluidStore:
         """
         async with self._handle_lock:
             await self._ensure_loaded(session_id)
-            try:
-                applied = await run_sync(
-                    _set_cli_session_id_sync, session_id, cli_session_id,
-                    generation=self._generations.get(session_id),
-                )
-            except BaseException:
-                self._forget_session(session_id)
-                raise
-            if not applied:
-                self._note_replaced(session_id)
-            meta = self._sessions.get(session_id)
-            if meta is not None:
-                meta.cli_session_id = cli_session_id
+
+            def publish(applied: Any) -> None:
+                if not applied:
+                    self._note_replaced(session_id)
+                meta = self._sessions.get(session_id)
+                if meta is not None:
+                    meta.cli_session_id = cli_session_id
+
+            await self._write_meta(
+                session_id, publish, _set_cli_session_id_sync, session_id, cli_session_id,
+                generation=self._generations.get(session_id),
+            )
 
     async def append_event(self, session_id: str, event: Event) -> None:
         async with self._event_lock:

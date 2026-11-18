@@ -179,3 +179,27 @@ async def test_every_leg_rereads_a_session_it_held_across_an_unreadable_write(
     monkeypatch.setattr(JsonlStore, "_parse_log", real_parse)
     assert (await leg._ensure_session()).head_node_id == "u1"
     await leg.aclose()
+
+
+@pytest.mark.parametrize("kind", ["native", "delegated", "acp"])
+async def test_a_session_read_failing_at_turn_start_ends_the_turn_with_an_error(
+    tmp_path, monkeypatch, kind
+) -> None:
+    """``submit`` has returned and the host waits on the bus, not the task: a
+    turn that cannot read its session must still publish a terminal event."""
+    from fluid.events.model import ErrorEvent
+
+    store = MemoryStore()
+    leg = _leg(kind, store, tmp_path)
+    await leg._ensure_session()
+
+    async def unreadable(_session_id):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(store, "get_session", unreadable)
+    await leg.submit(UserTurn(content="hello"))
+    await asyncio.wait_for(asyncio.shield(leg._turn_task), 5)
+
+    errors = [e for e in leg.bus.log("ses_leg") if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1 and "I/O error" in errors[0].message
+    await leg.aclose()

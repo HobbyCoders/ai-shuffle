@@ -2677,7 +2677,16 @@ class NativeLoop(BackgroundLifecycleMixin):
     async def _run_turn_inner(self, op: UserTurn | Resume) -> None:
         self._resume_environment = None
         self._peer_delivery_sealed = False
-        meta = await self._ensure_session()
+        try:
+            meta = await self._ensure_session()
+        except Exception as exc:
+            # submit() has returned and the host waits on the bus: end the turn there.
+            held = self._session.session_id if self._session is not None else self._session_id
+            if held is None:
+                raise
+            # Not through the park: it reads the session again and would fail too.
+            await self._emit(ErrorEvent(session_id=held, turn_id=new_id("turn"), message=repr(exc)))
+            return
         sid = meta.session_id
         turn_id = new_id("turn")
         self._background_turn_terminal = False

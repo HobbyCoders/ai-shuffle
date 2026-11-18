@@ -9,8 +9,10 @@ copying, and the event log replays idempotently by (session_id, seq).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import threading
 from contextlib import contextmanager
 from dataclasses import replace
 
@@ -392,7 +394,7 @@ async def test_a_failed_read_back_leaves_no_stale_meta(mock_db, monkeypatch):
     await store.create_session("ses_amb2")
     await store.append("ses_amb2", _node("n1", None, "root"))
     await store.append("ses_amb2", _node("n2", "n1", "leaf"))
-    real_set, real_load = module._set_head_sync, module._load_session_sync
+    real_set, real_row = module._set_head_sync, module._session_row_sync
 
     def ack_lost(*args, **kwargs):
         real_set(*args, **kwargs)
@@ -402,13 +404,96 @@ async def test_a_failed_read_back_leaves_no_stale_meta(mock_db, monkeypatch):
         raise ConnectionError("database unreachable")
 
     monkeypatch.setattr(module, "_set_head_sync", ack_lost)
-    monkeypatch.setattr(module, "_load_session_sync", unreachable)
+    monkeypatch.setattr(module, "_session_row_sync", unreachable)
     with pytest.raises(ConnectionError):
         await store.set_head("ses_amb2", "n1")
     with pytest.raises(ConnectionError):
         await store.get_session("ses_amb2")  # refused, never the stale n2
-    monkeypatch.setattr(module, "_load_session_sync", real_load)
+    monkeypatch.setattr(module, "_session_row_sync", real_row)
     assert (await store.get_session("ses_amb2")).head_node_id == "n1"
+
+
+def _paused(real):
+    """A DB helper whose worker waits for ``gate`` before it writes."""
+    entered, gate, done = threading.Event(), threading.Event(), threading.Event()
+
+    def helper(*args, **kwargs):
+        entered.set()
+        gate.wait(5)
+        try:
+            return real(*args, **kwargs)
+        finally:
+            done.set()
+
+    return helper, entered, gate, done
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_append_publishes_the_head_its_worker_committed(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_cxl")
+    await store.append("ses_cxl", _node("n1", None, "root"))
+    await store.append("ses_cxl", _node("n2", "n1", "leaf"))
+    helper, entered, gate, done = _paused(module._append_node_sync)
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+
+    task = asyncio.create_task(store.append("ses_cxl", _node("n3", "n2", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    assert (await store.get_session("ses_cxl")).head_node_id == "n2"  # still in flight
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.to_thread(done.wait, 5)
+
+    assert (await PgFluidStore().get_session("ses_cxl")).head_node_id == "n3"
+    assert (await store.get_session("ses_cxl")).head_node_id == "n3"
+    assert [n.node_id for n in await store.load_path("ses_cxl")] == ["n1", "n2", "n3"]
+
+
+@pytest.mark.asyncio
+async def test_a_read_back_never_overwrites_a_concurrent_append(mock_db, monkeypatch):
+    """A failed handle write reads the row back; an append in flight at the
+    same time must not have its head replaced by that older snapshot."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_race")
+    await store.append("ses_race", _node("n1", None, "root"))
+    await store.append("ses_race", _node("n2", "n1", "leaf"))
+    append_helper, entered, append_gate, _ = _paused(module._append_node_sync)
+    read_gate = threading.Event()
+    real_load = module._load_session_sync
+
+    def slow_load(*args, **kwargs):
+        data = real_load(*args, **kwargs)
+        read_gate.wait(5)
+        return data
+
+    def rejected(*args, **kwargs):
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(module, "_append_node_sync", append_helper)
+    monkeypatch.setattr(module, "_load_session_sync", slow_load)
+    monkeypatch.setattr(module, "_set_cli_session_id_sync", rejected)
+
+    append = asyncio.create_task(store.append("ses_race", _node("n3", "n2", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    handle = asyncio.create_task(store.set_cli_session_id("ses_race", "cli-x"))
+    await asyncio.wait({handle}, timeout=0.5)
+    reader = asyncio.create_task(store.get_session("ses_race"))
+    await asyncio.wait({reader}, timeout=0.5)
+    append_gate.set()
+    await append
+    read_gate.set()
+    await reader
+    with pytest.raises(ConnectionError):
+        await handle
+
+    assert (await store.get_session("ses_race")).head_node_id == "n3"
 
 
 @pytest.mark.asyncio

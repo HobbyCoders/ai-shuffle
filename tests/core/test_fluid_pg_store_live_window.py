@@ -350,3 +350,57 @@ async def test_a_retry_of_an_evicted_node_caches_the_stored_row(mock_db):
     assert [n.ts for n in await store.load_path("evr")] == [
         n.ts for n in await PgFluidStore().load_path("evr")]
 
+
+
+# ── An unknown write outcome reads back the session row, not the prefix ──────
+
+async def test_a_failed_head_write_reads_back_the_row_not_the_evicted_prefix(mock_db, monkeypatch):
+    """Re-reading the whole tree after a failed head move would refill the
+    prefix the window evicted while ``load_window`` still reports the window."""
+    import pytest
+
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await chain(store, "evh", 20)
+    await store.evict_prefix("evh", "n15", {"n0"})
+    retained, window = set(store._nodes["evh"]), store._windows["evh"]
+
+    def ack_lost(*args, **kwargs):
+        real(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    real = module._set_head_sync
+    monkeypatch.setattr(module, "_set_head_sync", ack_lost)
+    with pytest.raises(ConnectionError):
+        await store.set_head("evh", "n17")
+
+    assert (await store.get_session("evh")).head_node_id == "n17"
+    assert set(store._nodes["evh"]) == retained
+    assert store._windows["evh"] == window
+
+
+async def test_a_landed_append_read_back_keeps_the_window(mock_db, monkeypatch):
+    import pytest
+
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await chain(store, "eva", 20)
+    await store.evict_prefix("eva", "n15", {"n0"})
+    retained, window = set(store._nodes["eva"]), store._windows["eva"]
+
+    def ack_lost(*args, **kwargs):
+        real(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    real = module._append_node_sync
+    monkeypatch.setattr(module, "_append_node_sync", ack_lost)
+    with pytest.raises(ConnectionError):
+        await store.append("eva", node("n20", "n19"))
+
+    assert (await store.get_session("eva")).head_node_id == "n20"
+    path, end = await store.load_window("eva")
+    assert end == "n15" and path[-1].node_id == "n20"
+    assert set(store._nodes["eva"]) == retained | {"n20"}
+    assert store._windows["eva"] == window
