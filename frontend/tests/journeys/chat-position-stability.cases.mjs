@@ -1034,6 +1034,106 @@ cases.push({
 	act: ctx => foldThenQueue(ctx, 'fold then queue handoff')
 });
 
+// Closing a foldable on a live chat (owner report, 2026-11-18): the SAME page
+// goes from the inner screen to the cover screen. ChatActivity handles the
+// size change itself (configChanges), so the document is kept; onStop pauses
+// the WebView, which holds frames (rAF, scroll, ResizeObserver) until onResume
+// while the reply keeps streaming. Emulated by holding those callbacks. This
+// order did not leave a blank viewport on main d2fe0a710 either: a guard for
+// the transition, not a reproduction of the owner's report.
+function holdFramesWhilePaused() {
+	const r = (window.__render = { paused: false, rafQ: [], ros: new Set(), scrolls: new Set() });
+	const raf = window.requestAnimationFrame.bind(window), caf = window.cancelAnimationFrame.bind(window);
+	window.requestAnimationFrame = cb => { if (!r.paused) return raf(cb); r.rafQ.push(cb); return -r.rafQ.length; };
+	window.cancelAnimationFrame = id => { if (id < 0) r.rafQ[-id - 1] = null; else caf(id); };
+	const RO = window.ResizeObserver;
+	window.ResizeObserver = class extends RO {
+		constructor(cb) {
+			let self = null;
+			super((entries, obs) => { if (r.paused) r.ros.add(self); else cb(entries, obs); });
+			self = this; this.cb = cb; this.targets = new Set();
+		}
+		observe(t, o) { this.targets.add(t); return super.observe(t, o); }
+		unobserve(t) { this.targets.delete(t); return super.unobserve(t); }
+		disconnect() { this.targets.clear(); r.ros.delete(this); return super.disconnect(); }
+	};
+	document.addEventListener('scroll', e => { if (r.paused) { e.stopImmediatePropagation(); r.scrolls.add(e.target); } }, true);
+	const visibility = hidden => {
+		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
+		Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+		document.dispatchEvent(new Event('visibilitychange'));
+	};
+	r.stop = () => { visibility(true); r.paused = true; };
+	r.resume = () => {
+		visibility(false);
+		r.paused = false;
+		const queued = r.rafQ.splice(0);
+		raf(t => {
+			for (const target of r.scrolls) target.dispatchEvent(new Event('scroll'));
+			r.scrolls.clear();
+			for (const ro of [...r.ros]) ro.cb([...ro.targets].map(target => ({ target, contentRect: { width: target.clientWidth, height: target.clientHeight } })), ro);
+			r.ros.clear();
+			for (const cb of queued) cb?.(t);
+		});
+	};
+}
+
+cases.push({
+	name: 'fold-close-resume-keeps-the-live-reply-on-screen', viewports: ['fold-inner'], throttles: ['slow'],
+	async setup(ctx) {
+		const { page, status, variant } = ctx;
+		await page.addInitScript(holdFramesWhilePaused);
+		await openNewChat(ctx);
+		const token = `foldclose-${uniq()}`;
+		await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 4000 })}`);
+		await waitTurnSettled(page, { messagesAtLeast: 2, hold: 300, timeout: 120_000 });
+		await typeAndSend(page, `more ${uniq()} ${scriptTag(variant, 'long', { tps: 4000 })}`);
+		await waitTurnSettled(page, { messagesAtLeast: 4, hold: 300, timeout: 120_000 });
+		const id = await chatIdByToken(page, token);
+		await gotoApp(page, status, `${mobile ? '/mobile/' : '/'}?session=${encodeURIComponent(id)}`);
+		await waitChatOpen(page, { messagesAtLeast: 4, hold: 800 });
+	},
+	async act({ page, variant, mark, log }) {
+		await mark('a plain reply streams on the inner screen, followed');
+		await typeAndSend(page, `live ${uniq()} ${scriptTag(variant, 'long', { tps: 25 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await page.waitForTimeout(2500);
+		await page.evaluate(LOG => {
+			const w = window.__foldFrames = { frames: [], running: true };
+			const tick = () => {
+				if (!w.running) return;
+				const log = document.querySelector(LOG);
+				const box = log.getBoundingClientRect();
+				const seen = el => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+				const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+				const last = rows.at(-1)?.getBoundingClientRect();
+				w.frames.push({ w: innerWidth, top: log.scrollTop, height: log.scrollHeight, viewport: log.clientHeight,
+					blank: rows.length > 0 && !rows.some(seen) && ![...log.querySelectorAll('.tail-controls, .turn-activity')].some(seen),
+					lastTop: last ? last.top - box.top : null, lastBottom: last ? last.bottom - box.top : null,
+					streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming });
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		}, LOG);
+		await mark('close the device: the page is hidden and paused, then sized to the cover screen');
+		await page.evaluate(() => window.__render.stop());
+		await page.waitForTimeout(300);
+		await page.setViewportSize({ width: 360, height: 882 });
+		await page.waitForTimeout(1500);
+		await mark('resume the same chat on the cover screen');
+		await page.evaluate(() => window.__render.resume());
+		await page.waitForTimeout(3000);
+		const frames = (await page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames.frames; })).filter(f => f.w === 360);
+		let run = 0, longest = 0;
+		for (const f of frames) { run = f.blank ? run + 1 : 0; longest = Math.max(longest, run); }
+		const end = frames.at(-1);
+		log(`fold close ${JSON.stringify({ frames: frames.length, longest, first: frames[0], end })}`);
+		expect(frames.filter(f => f.streaming === 'true').length > 20, `the cover screen was sampled while the reply streamed (${frames.length} frames)`);
+		expect(longest === 0, `no cover-screen frame shows a blank transcript (longest blank run ${longest} frames)`);
+		expect(end.lastBottom > 8 && end.lastTop < end.viewport - 8, `the followed live reply is on screen after resume (${JSON.stringify(end)})`);
+	}
+});
+
 async function openSwitchTarget(ctx, title) {
 	const { page, variant } = ctx;
 	if (mobile && variant.viewport === 'phone') {
