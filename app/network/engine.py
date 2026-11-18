@@ -35,7 +35,7 @@ import secrets
 import threading
 import time
 import zlib
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import groupby
@@ -1953,9 +1953,26 @@ def _displaced_local(cursor, coll: policy.Collection, env: Envelope,
 def _older_stream(cursor, ctx: NetworkContext, env: Envelope) -> bool:
     """Whether ``env`` comes from an incarnation older than its origin's newest
     seen: only a restore leaves one behind (#1568)."""
-    newest = ctx.identity.incarnation if env.origin_device_id == ctx.device_id else \
-        store.highest_incarnation(cursor, env.origin_device_id)
-    return env.origin_incarnation < newest
+    if env.origin_device_id == ctx.device_id:
+        return env.origin_incarnation < ctx.identity.incarnation
+    with _copying_lock:
+        copying = max((named.get(env.origin_device_id, 0) for named in _copying), default=0)
+    return env.origin_incarnation < max(copying, store.highest_incarnation(cursor, env.origin_device_id))
+
+
+def _same_write(cursor, ctx: NetworkContext, env: Envelope) -> bool:
+    """Whether an unlabelled version of ``env``'s origin at its clock can only
+    be ``env``'s own write (#1568).
+
+    So for this device after one restore, unless it signed that version since:
+    what it writes now is labelled, and what it wrote in this incarnation
+    before labels were kept is still in its log as the record's latest op. So
+    the version is from its one earlier stream, where a clock names one write.
+    Another origin's version at that clock may come from either side of its
+    restore, and so may this device's after a second restore.
+    """
+    return (env.origin_device_id == ctx.device_id and ctx.identity.incarnation == 2
+            and not store.signed_at(cursor, ctx.device_id, 2, env.collection, env.record_id, env.clock))
 
 
 def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> bool:
@@ -1972,8 +1989,9 @@ def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> boo
     fork reached only through a copy is therefore not seen (#1792), with one
     exception in ``_apply_in_order``: an owner-ordered op from an incarnation
     older than its origin's newest seen (``_older_stream``) no longer has
-    stream order behind it, so it loses to a held version of its origin with
-    a later clock.
+    stream order behind it, so it replaces a held version of its origin only
+    with a later clock, or at the same clock when that version can only be
+    the op's own write (``_same_write``).
     """
     held_incarnation = held.get("origin_incarnation")
     return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
@@ -2051,14 +2069,19 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                                     int(existing["origin_incarnation"])) > 0
     elif coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
-        # An op from an incarnation older than the newest seen comes from
-        # across a restore, where that order is gone: it cannot replace a
-        # version of its origin with a later clock. At its own clock the held
-        # version is a copy of this very write (a copy carries no label), and
-        # the signed op applies over it as on main (#1568).
-        wins = existing is None or (env.origin_device_id == existing["origin_device_id"]
-                                    and (env.clock >= int(existing["clock"]) or not _older_stream(cursor, ctx, env))) or \
-            envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+        same = existing is not None and env.origin_device_id == existing["origin_device_id"]
+        if same and _older_stream(cursor, ctx, env):
+            # From an incarnation older than the newest seen, across a restore,
+            # where that order is gone: only a later clock replaces its
+            # origin's version. One clock can name a write on either side of
+            # the restore and a copy does not say which (#1792), so a tie keeps
+            # the version held, unless it can only be this very write (S23):
+            # the op restores what its copy left out, such as owner-only fields.
+            wins = env.clock > int(existing["clock"]) or (
+                env.clock == int(existing["clock"]) and _same_write(cursor, ctx, env))
+        else:
+            wins = existing is None or same or envelope_mod.compare(
+                env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     else:
         wins = existing is None or envelope_mod.compare(
             env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
@@ -3479,18 +3502,34 @@ def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Networ
                                (origin, int(incarnation), int(last_seq)))
 
 
-def note_incarnations(cursor, watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext) -> None:
-    """Know a copy's newest incarnation of every origin from its first page on.
+# Per state copy being applied: the newest incarnation of each origin its
+# manifest names. Read only by _older_stream, and only until the copy returns.
+_copying: List[Mapping[str, int]] = []
+_copying_lock = threading.Lock()
 
-    Its frontier waits for the last page, but rows from those incarnations
-    land earlier: an op from an older one that arrives in between must still
-    count as from across a restore (``_older_stream``, #1568). Receives nothing;
-    an origin still on its first incarnation has no older stream to tell apart.
+
+@contextmanager
+def copy_incarnations(watermarks: Mapping[str, Mapping[str, int]]):
+    """While a state copy is applied, know the incarnations it names (#1568).
+
+    Its rows land page by page, its frontier only after the last: an op from
+    an older incarnation that arrives in between must already count as from
+    across a restore, or it overwrites a row the copy just installed (S24).
+    The publisher's claim proves nothing about the origin, so it is never
+    stored: no watermark, revocation cutoff or advertised head moves, and a
+    copy that fails leaves nothing behind (S26). A zero head names no op, and
+    adopting the frontier ignores it too.
     """
-    for origin, streams in (watermarks or {}).items():
-        newest = max((int(incarnation) for incarnation in streams or {}), default=0)
-        if origin != ctx.device_id and newest > max(1, store.highest_incarnation(cursor, origin)):
-            store.set_watermark(cursor, origin, newest, 0)
+    named = {origin: max(int(incarnation) for incarnation, seq in streams.items() if int(seq) > 0)
+             for origin, streams in (watermarks or {}).items()
+             if any(int(seq) > 0 for seq in (streams or {}).values())}
+    with _copying_lock:
+        _copying.append(named)
+    try:
+        yield
+    finally:
+        with _copying_lock:
+            _copying.remove(named)
 
 
 def finish_bootstrap(*, ctx: Optional[NetworkContext] = None) -> NetworkContext:

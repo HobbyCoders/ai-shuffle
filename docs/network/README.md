@@ -235,13 +235,18 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   no incarnation, so a signed op meeting it is taken as the same stream, as
   before the upgrade (an owner-ordered row takes it; any other row keeps the
   version held on a tie), unless the op comes from an incarnation older than
-  the newest seen, which only a restore leaves (a state copy makes the
-  incarnations it names known with its first page, not only once its
-  watermarks are adopted after the last): then it does not replace the
-  device's version with a later clock, owner-ordered rows included. At its
-  own clock the version held is taken for a copy of that same write, so an
-  owner-ordered row takes the signed op, getting back what the copy left out
-  such as the owner's own fields, and any other row keeps the version held.
+  the newest seen, which only a restore leaves: then it replaces the device's
+  version only with a later clock, owner-ordered rows included. While a state
+  copy is applied, the incarnations its manifest names count as seen for this
+  check alone, from its first page until it returns, since its watermarks
+  are adopted only after the last; they reach no watermark, revocation
+  cutoff or advertised head, and a copy that fails leaves nothing behind. At
+  the op's own clock one clock can name a write on either side of the
+  restore, so the version held stays, with one exception: the device itself,
+  after its first restore, takes its own replayed op over an unlabelled
+  version at that clock that it did not sign since, as that version can only
+  be a copy of the same write, and so gets back what the copy left out such
+  as the owner's own fields.
   So two replicas can keep different values, until
   the record next changes, when all of these hold: the device signed two
   versions of the record at one clock on either side of a restore; one

@@ -1656,6 +1656,13 @@ def highest_incarnation(cursor, origin: str) -> int:
     return int(row["i"]) if row and row["i"] is not None else 0
 
 
+def signed_at(cursor, origin: str, incarnation: int, collection: str, record_id: str, clock: int) -> bool:
+    """Whether a retained op of that stream wrote the record at that clock."""
+    cursor.execute("SELECT 1 FROM sync_ops WHERE origin_device_id = %s AND incarnation = %s AND collection = %s "
+                   "AND record_id = %s AND clock = %s LIMIT 1", (origin, incarnation, collection, record_id, clock))
+    return cursor.fetchone() is not None
+
+
 def stash_pending(cursor, env: dict) -> None:
     cursor.execute(
         """INSERT INTO sync_pending (origin_device_id, incarnation, seq, envelope, received_at)

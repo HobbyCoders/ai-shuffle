@@ -536,6 +536,12 @@ def _read_page(directory: Path, index: int, expected: dict) -> dict:
 def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) -> int:
     """Apply a downloaded copy; ``on_progress(pages applied, pages in all)`` after each commit."""
     trusted = verify_manifest(manifest, publisher)
+    # Its rows land before its frontier, which waits for the last page.
+    with engine.copy_incarnations(manifest["watermarks"]):
+        return _apply(manifest, trusted, directory, publisher, on_progress=on_progress)
+
+
+def _apply(manifest: dict, trusted, directory: Path, publisher: str, *, on_progress=None) -> int:
     deferred = set(manifest.get("deferred") or ()) if manifest.get("format") == FORMAT_DEFERRED else set()
     pages = manifest["pages"]
     # Preflight every immutable page before touching records or watermarks.
@@ -577,8 +583,6 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 # Context mutations stay private until the copy is applied.
                 trusted.members = copy.deepcopy(current.members)
                 trusted.generation = current.generation
-                # With the first rows: what an older stream's op meets meanwhile.
-                engine.note_incarnations(cursor, manifest["watermarks"], ctx=trusted)
             end, items = index, 0
             while end < len(pages) and (items == 0 or items + int(pages[end]["count"]) <= APPLY_BATCH_ITEMS):
                 items += int(pages[end]["count"]) or 1
