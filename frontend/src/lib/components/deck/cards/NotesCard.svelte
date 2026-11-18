@@ -231,6 +231,7 @@
 		confirmLabel: string;
 		danger: boolean;
 		action: () => void;
+		cancel?: () => void;
 	} | null>(null);
 
 	function runPendingConfirm() {
@@ -381,7 +382,9 @@
 			pendingConfirm = {
 				title: 'Discard changes',
 				message: 'You have unsaved changes. Discard them?',
-				confirmLabel: 'Discard', danger: true, action: apply
+				confirmLabel: 'Discard', danger: true, action: apply,
+				// Kept from a Back or Forward: the browser returns to the draft's entry.
+				cancel: restoredEntryCurrent ? () => { if (current()) shellHistory.refuse(landing); } : undefined
 			};
 			return;
 		}
@@ -1012,7 +1015,7 @@
 	confirmLabel={pendingConfirm?.confirmLabel ?? 'Confirm'}
 	danger={pendingConfirm?.danger ?? false}
 	onConfirm={runPendingConfirm}
-	onCancel={() => (pendingConfirm = null)}
+	onCancel={() => { const cancel = pendingConfirm?.cancel; pendingConfirm = null; cancel?.(); }}
 />
 
 <style>

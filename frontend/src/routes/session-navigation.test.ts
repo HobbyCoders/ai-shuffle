@@ -360,17 +360,46 @@ describe('chat link history (#859)', () => {
 		await showsChild();
 	});
 
-	it('shows boot’s view on the overlay’s entry and the arrival after Settings opened from the overlay, Back and Forward', async () => {
+	it('leaves the overlay’s entry to the sheet, and shows boot’s view on the arrival after Settings opened from the overlay, Back and Forward', async () => {
 		await arriveUnderControls();
+		const overlay = chatHistory.entries[1];
 		layout.openFeaturePage('settings');
 		await waitFor(() => expect(chatHistory.entries).toHaveLength(3));
-		step(-1); await showsChild();
+		const showsSettings = async () => {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(layout.current.activeView?.type).toBe('settings');
+		};
+		// The sheet's own entry shows nothing new, as on main.
+		step(-1); await showsSettings();
 		step(-1); await showsChild();
 		step(1); await showsChild();
-		step(1);
-		await waitFor(() => expect(layout.current.activeView?.type).toBe('settings'));
+		step(1); await showsSettings();
+		step(-1); await showsSettings();
 		step(-1); await showsChild();
-		expect(places()).not.toContain('parent');
+		expect(chatHistory.entries[1]).toBe(overlay);
+		expect(places()[0]).toBe('worker-child');
+	});
+
+	it('narrow desktop with the sidebar open: a Forward before the deferred chat open wins over the Back it overtook', async () => {
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		layout.openFeaturePage('notes');
+		await waitFor(() => expect(places()).toEqual(['parent', 'notes']));
+		layout.setSidebarOverlay(true);
+		layout.setSidebarCollapsed(false);
+		const frames: FrameRequestCallback[] = [];
+		const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });
+		step(-1); // Back to the chat: its open waits a frame for the sidebar to close.
+		await new Promise((resolve) => setTimeout(resolve));
+		step(1); // Forward to Notes before that frame.
+		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
+		raf.mockRestore();
+		for (const frame of frames.splice(0)) frame(0);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(layout.current.activeView?.type).toBe('notes');
+		expect(places()).toEqual(['parent', 'notes']);
+		expect(chatHistory.index).toBe(1);
 	});
 
 	it('writes the chat this tab shows, not the shared layout’s, when the first step comes before boot settles', async () => {

@@ -5,6 +5,7 @@ import { layout } from '$lib/stores/layout.svelte';
 import { archivedChats } from '$lib/stores/archived-chats';
 import { subagentChats } from '$lib/stores/subagent-chats';
 import type { Session } from '$lib/api/client';
+import { shellHistory } from '$lib/services/app-history.svelte';
 import { get } from 'svelte/store';
 
 /** A same-origin deep link whose fallback stays in the current desktop or phone UI. */
@@ -32,8 +33,9 @@ export function backToChats(): void {
  * `reopen`: the chat is already open and this only reloads it with its row
  * (boot after a `/?session=` link). Not a navigation, so a send waiting on
  * that chat goes on (#1350). A different chat by then is opened as usual.
+ * `stillWanted`: checked again when the open is deferred a frame.
  */
-export function openSession(sessionId: string, openedSession?: Session, { reopen = false }: { reopen?: boolean } = {}): void {
+export function openSession(sessionId: string, openedSession?: Session, { reopen = false, stillWanted }: { reopen?: boolean; stillWanted?: () => boolean } = {}): void {
 	// Persistent assistant homes are intentionally absent from ordinary lists.
 	const session = openedSession ?? appData.current.sessions.find((row) => row.id === sessionId);
 	const worktreeInfo = session?.worktree_id || session?.worktree_branch || session?.branch ? {
@@ -57,7 +59,7 @@ export function openSession(sessionId: string, openedSession?: Session, { reopen
 	};
 	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {
 		layout.setSidebarCollapsed(true);
-		requestAnimationFrame(select);
+		requestAnimationFrame(() => { if (!stillWanted || stillWanted()) select(); });
 	} else {
 		select();
 	}
@@ -76,6 +78,7 @@ export function openSubagentLink(event: MouseEvent, sessionId: string): void {
  * Picking the chat already open, or opening one from New chat, adds no entry.
  */
 export function openSessionFromList(sessionId: string): void {
+	shellHistory.pick(sessionId, get(activeSession).sessionId);
 	openSession(sessionId);
 }
 
@@ -83,5 +86,6 @@ export function openSessionFromList(sessionId: string): void {
 export function openSessionLink(event: MouseEvent, sessionId: string): void {
 	if (!ordinarySessionClick(event)) return;
 	event.preventDefault();
+	shellHistory.pick(sessionId, get(activeSession).sessionId);
 	openSession(sessionId);
 }

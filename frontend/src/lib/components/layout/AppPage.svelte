@@ -31,7 +31,7 @@
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { recoveringOpening, keepOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
+	import { savedPlace, shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 	import { openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
@@ -114,7 +114,8 @@
 		if (!place) return;
 		if (place.type === 'session') {
 			if ($activeView?.type === 'session' && $activeView.sessionId === place.sessionId) return;
-			if (place.sessionId) handleOpenSession(place.sessionId);
+			// A sidebar overlay defers the open a frame: a newer Back or Forward by then wins.
+			if (place.sessionId) handleOpenSession(place.sessionId, undefined, { stillWanted: () => shellHistory.place === place });
 			else handleNewSession();
 		} else if ($activeView?.type !== place.type) layout.openFeaturePage(place.type);
 	}
@@ -138,7 +139,9 @@
 	$effect(() => {
 		const gone = $unavailableChat?.sessionId;
 		if (!gone || $activeSession.sessionId) return;
-		untrack(() => { if ($activeView?.type === 'session' && $activeView.sessionId === gone) layout.openChat(null, 'replace'); });
+		untrack(() => {
+			if ($activeView?.type === 'session' && $activeView.sessionId === gone && shellHistory.unavailable(gone)) layout.openChat(null, 'replace');
+		});
 	});
 	onDestroy(() => shellHistory.stop());
 	function dropSessionLink() {
@@ -244,7 +247,7 @@
 		// New Chat hero for the length of init and the first loads. A
 		// notification link always loads a fresh entry. An entry with a saved
 		// place was already shown: a link left on its address was read then.
-		const saved = (page.state as ShellState).shell?.place;
+		const saved = savedPlace(page.state as ShellState);
 		if (saved) dropSessionLink();
 		// The saved place is shown from the first frame, before any load can
 		// hold it back. Its chat binds like a link unless this tab's own saved
