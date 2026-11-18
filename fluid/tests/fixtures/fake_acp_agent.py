@@ -12,9 +12,11 @@ The prompt text picks the behaviour:
   ``mcpask`` asks permission first, titled ``mcp__fluid_bundled__<Tool>``.
 * ``agymcp <Tool> <json>`` — a bridged call as agy 1.5.9 sends it (seen live,
   issue #1751): titled ``Run mcp_fluid_bundled_<Tool>``, kind ``other``, and
-  it asks permission. Allowed, it runs the tool. Rejected, agy ends the turn:
-  a sibling call of its own (``Read``) fails with no text and the turn ends
-  with no message at all. ``agyquiet`` ends it at once, with no failed calls.
+  it asks permission (and says ``chose=<option>``). Allowed, it runs the
+  tool. Rejected, agy ends the turn: a sibling call of its own (``Read``)
+  fails with no text and the turn ends with no message at all. ``agyquiet``
+  ends it at once, with no failed calls; ``agyid`` asks by the call's id
+  alone, as the ACP protocol's example does.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
@@ -309,7 +311,7 @@ class Agent:
                                     "content": {"type": "text", "text": result}}]})
             await self.say(sid, "mcp said: " + result)
             return {"stopReason": "end_turn"}
-        if word in ("agymcp", "agyquiet"):
+        if word in ("agymcp", "agyquiet", "agyid"):
             _, name, args = text.split(" ", 2)
             call = {"toolCallId": "agy-1", "title": f"Run mcp_fluid_bundled_{name}", "kind": "other",
                     "status": "pending", "rawInput": json.loads(args)}
@@ -317,11 +319,13 @@ class Agent:
             sibling = {"toolCallId": "agy-2", "title": "Read notes.txt", "kind": "read", "status": "pending",
                        "rawInput": {"Path": "notes.txt", "file_path": "notes.txt"}}
             await self.update(sid, {"sessionUpdate": "tool_call", **sibling})
-            reply = await self.call("session/request_permission", {"sessionId": sid, "toolCall": call, "options": [
+            asked = {"toolCallId": "agy-1"} if word == "agyid" else call
+            reply = await self.call("session/request_permission", {"sessionId": sid, "toolCall": asked, "options": [
                 {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
                 {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]})
             outcome = (reply.get("result") or {}).get("outcome") or {}
-            if outcome.get("optionId") != "allow":
+            if outcome.get("optionId") not in ("allow", "always"):
                 # agy reads a rejection as the person saying no: every open
                 # call fails without text and the turn ends silently.
                 for tool_id in ("agy-1", "agy-2") if word == "agymcp" else ():
@@ -335,7 +339,7 @@ class Agent:
             await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "agy-2",
                                     "status": "completed", "content": [{"type": "content",
                                     "content": {"type": "text", "text": "notes"}}]})
-            await self.say(sid, "mcp said: " + result)
+            await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
         if word == "slow":
             await self.say(sid, "working")

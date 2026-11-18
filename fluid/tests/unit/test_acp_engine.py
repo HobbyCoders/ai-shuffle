@@ -257,29 +257,81 @@ async def test_a_bridged_call_titled_as_agy_titles_it_runs_as_the_registry_tool(
     d = await _driver(tmp_path, registry=_glob_registry(seen), ctx=ToolCtx(cwd=str(tmp_path)),
                       tool_policy=policy)
     try:
+        # Asked by the call's id alone, the request is the call announced.
+        await d.loop.submit(UserTurn(content='agyid Glob {"pattern": "*.md"}'))
+        ask = await d.until(PermissionRequest)
+        assert (ask.name, ask.input) == ("mcp__fluid_bundled__Glob", {"pattern": "*.md"})
+        assert judged == [("mcp__fluid_bundled__Glob", {"pattern": "*.md"})]
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        assert isinstance(await d.until(TERMINAL, timeout=60), TurnComplete)
+        judged.clear()
+        seen.clear()
+        d.events.clear()
+        # The owner says "always", but a name read off a title is only ever
+        # allowed once: the agent, not the host, picks what it remembers.
         await d.loop.submit(UserTurn(content='agymcp Glob {"pattern": "*.txt"}'))
         ask = await d.until(PermissionRequest)
         assert (ask.name, ask.input) == ("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})
         assert judged == [("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})]
-        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow_always"))
         end = await d.until(TERMINAL, timeout=60)
         assert isinstance(end, TurnComplete), end
         assert seen == [{"pattern": "*.txt"}]
-        assert "mcp said: notes.txt" in d.text()
+        assert "chose=allow mcp said: notes.txt" in d.text()
         assert [e.name for e in d.events if isinstance(e, ToolUse)] == ["mcp__fluid_bundled__Glob", "Read"]
         nodes = await d.loop.store.load_path(d.loop.session_id)
         stored = [b.name for n in nodes for b in n.message.content if isinstance(b, ToolUseBlock)]
-        assert stored[0] == "mcp__fluid_bundled__Glob"
+        assert "mcp__fluid_bundled__Glob" in stored
     finally:
         await d.close()
+
+
+async def test_a_title_only_name_is_never_remembered_by_the_agent(tmp_path: Path) -> None:
+    """Every answer the loop gives a title-only name is "allow once", in
+    Bypass too; an agent that offers only "always" hears no allow at all."""
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]),
+                   permission_mode="bypassPermissions")
+    once = {"optionId": "once", "kind": "allow_once"}
+    always = {"optionId": "always", "kind": "allow_always"}
+
+    async def answer(title: str, *options: dict) -> dict:
+        call = {"toolCallId": "c1", "title": title, "kind": "other"}
+        return (await loop._permission({"toolCall": call, "options": list(options)}))["outcome"]
+
+    assert await answer("Run mcp_fluid_bundled_Glob", always, once) == {"outcome": "selected", "optionId": "once"}
+    assert await answer("Run mcp_fluid_bundled_Glob", always) == {"outcome": "cancelled"}
+    assert await answer("mcp__fluid_bundled__Glob", always) == {"outcome": "selected", "optionId": "always"}
+
+
+def test_a_permission_request_is_judged_as_the_call_it_names(tmp_path: Path) -> None:
+    """A request's fields over those of the call already known by its id."""
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]))
+    glob, read = "Run mcp_fluid_bundled_Glob", "Read notes.txt"
+
+    def asked(announced: dict | None, request: dict) -> tuple[str, dict, bool]:
+        mapper = TurnMapper(session_id="s", turn_id="t", bridged_name=loop._bridged_name)
+        if announced is not None:
+            mapper.map_update({"sessionUpdate": "tool_call", "toolCallId": "c1", **announced})
+        return mapper.identify({"toolCallId": "c1", **request})[1:]
+
+    titled = {"title": glob, "kind": "other", "rawInput": {"pattern": "*"}}
+    assert asked(titled, {}) == ("mcp__fluid_bundled__Glob", {"pattern": "*"}, True)
+    assert asked({"kind": "other"}, titled) == ("mcp__fluid_bundled__Glob", {"pattern": "*"}, True)
+    assert asked(titled, titled) == ("mcp__fluid_bundled__Glob", {"pattern": "*"}, True)
+    assert asked(None, {}) == ("Tool", {}, False)
+    # The request wins: the owner and the policy judge what is asked.
+    assert asked({"title": read, "kind": "read"}, titled)[0] == "mcp__fluid_bundled__Glob"
+    assert asked(titled, {"title": read, "kind": "read", "rawInput": {}})[0] == "Read"
 
 
 def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp_path: Path) -> None:
     from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
 
     loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]))
-    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == "mcp__fluid_bundled__Glob"
-    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob"}) == "mcp__fluid_bundled__Glob"
+    titled = ("mcp__fluid_bundled__Glob", True)
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == titled
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob"}) == titled
+    assert loop._bridged_name({"title": "mcp__fluid_bundled__Glob"}) == ("mcp__fluid_bundled__Glob", False)
     # The agent's own shell call whose title names the tool is not that tool.
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "execute"}) is None
     assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Globber", "kind": "other"}) is None
@@ -357,7 +409,8 @@ def test_a_turn_ends_silently_on_its_last_step_only(tmp_path: Path) -> None:
             if kind == "refuse":
                 loop._note_refusal(mapper, "the permission request for {} was refused", "Read")
             elif kind == "plan":
-                mapper.map_update({"sessionUpdate": "plan", "entries": [{"content": "x", "status": "pending"}]})
+                entries = [{"content": "x", "status": "pending"}] if status != "clear" else []
+                mapper.map_update({"sessionUpdate": "plan", "entries": entries})
             elif kind == "text":
                 mapper.map_update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})
             else:
@@ -372,6 +425,8 @@ def test_a_turn_ends_silently_on_its_last_step_only(tmp_path: Path) -> None:
     assert turn("execute:failed", "other:failed") == said + "Bash failed."
     assert turn("other:failed") == said + "a tool failed."
     assert turn("refuse", "plan") is None
+    assert turn("refuse", "plan:clear") == said + "the permission request for Read was refused."
+    assert turn("plan:clear") is None
     assert turn("refuse", "read:failed", "search:completed") is None
     assert turn("search:completed") is None
     assert turn("plan") is None
@@ -379,6 +434,22 @@ def test_a_turn_ends_silently_on_its_last_step_only(tmp_path: Path) -> None:
     assert turn("refuse", "text") is None
     loop._interrupted.set()
     assert turn("refuse") is None
+
+
+def test_a_silent_end_names_only_tools_host_code_wrote(tmp_path: Path) -> None:
+    """A connected MCP server or a plugin picks its own tool names, and the
+    agent its titles: only the kind map's tools and fluid's own bundled
+    tools are repeated, whatever the registry or the bridge holds."""
+    registry = _glob_registry([])
+    schema = {"type": "object", "properties": {}}
+    for name in ("mcp__weather__get_weather", "mcp__plugin_x__do"):
+        registry.register_builtin(ToolSpec(name=name, description="x", input_schema=schema), _glob_registry)
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=registry)
+    for name in ("mcp__fluid_bundled__mcp__weather__get_weather", "mcp__fluid_bundled__mcp__plugin_x__do",
+                 "Run whatever", "mcp__fluid_bundled__Run whatever", "Glob"):
+        assert loop._plain_tool_name(name) == "a tool", name
+    for name in ("Bash", "Write", "mcp__fluid_bundled__Glob", "mcp__fluid_bundled__CallTool"):
+        assert loop._plain_tool_name(name) == name
 
 
 async def test_steer_during_a_turn_and_cancel(tmp_path: Path) -> None:

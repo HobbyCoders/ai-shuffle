@@ -84,6 +84,15 @@ PERMISSION_TIMEOUT = 900.0
 UNWATCHED_PERMISSION_TIMEOUT = 10.0
 QUESTION_TIMEOUT = 1800.0
 BUNDLED_SERVER_NAME = "fluid_bundled"
+# The only tool names a terminal error may repeat (``AcpLoop._plain_tool_name``):
+# the agent's tools in the kind map, and the bundled tools fluid defines
+# (fluid.tools.builtins, fluid.tools.mcp.call_through). Never read from the
+# registry: a connected MCP server or a plugin picks its own tool names.
+_HOST_TOOL_NAMES = frozenset({
+    *KIND_TOOL_NAMES.values(), "Write",
+    *(f"mcp__{BUNDLED_SERVER_NAME}__{name}" for name in (
+        "Glob", "Grep", "Plan", "HistorySearch", "HistoryExpand", "LoadTools", "CallTool")),
+})
 
 # Client permission mode -> the agent's ACP mode id (``AcpAgentSpec.mode_id``).
 # Bypass has no agent equivalent: the agent runs normally and the host
@@ -577,7 +586,8 @@ class AcpLoop:
     def _is_call_proxy(self, call: Mapping[str, Any]) -> bool:
         from fluid.tools.mcp.call_through import CALL_TOOL
 
-        return self.deferred is not None and self._bridged_name(call) == f"mcp__{BUNDLED_SERVER_NAME}__{CALL_TOOL}"
+        bridged = self._bridged_name(call)
+        return self.deferred is not None and bridged == (f"mcp__{BUNDLED_SERVER_NAME}__{CALL_TOOL}", False)
 
     def _unwrap_bridged(self, name: str, data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         """A ``CallTool`` call as the real tool it runs, for cards and policy.
@@ -607,13 +617,14 @@ class AcpLoop:
             return None
         return self.registry.get(tool_name[len(prefix):])
 
-    def _bridged_name(self, call: Mapping[str, Any]) -> str | None:
-        """The bridge's name for a call to one of its tools, or None.
+    def _bridged_name(self, call: Mapping[str, Any]) -> tuple[str, bool] | None:
+        """The bridge's name for a call to one of its tools, and whether it
+        came only from agy's title form (``_agy_titled``); None for others.
 
         Every name the engine gives an ACP call comes from here (through
-        ``TurnMapper.tool_name_and_input``): the transcript card, the
-        permission card, the host's policy and saved rules, and the proxy
-        checks, so they all agree.
+        ``TurnMapper.identify``): the transcript card, the permission card,
+        the host's policy and saved rules, and the proxy checks, so they all
+        agree.
         """
         title = str(call.get("title") or "")
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
@@ -626,10 +637,11 @@ class AcpLoop:
                 for spelled in (name, f"mcp__{BUNDLED_SERVER_NAME}__{name}", f"{BUNDLED_SERVER_NAME}/{name}",
                                 f"{BUNDLED_SERVER_NAME}_{name}", f"mcp_{BUNDLED_SERVER_NAME}_{name}"):
                     if text == spelled or text.startswith(spelled + " ") or text.startswith(spelled + ":"):
-                        return f"mcp__{BUNDLED_SERVER_NAME}__{name}"
+                        return f"mcp__{BUNDLED_SERVER_NAME}__{name}", False
                 if text == tail and meta:
-                    return f"mcp__{BUNDLED_SERVER_NAME}__{name}"
-        return self._agy_titled(call, served)
+                    return f"mcp__{BUNDLED_SERVER_NAME}__{name}", False
+        titled = self._agy_titled(call, served)
+        return (titled, True) if titled else None
 
     @staticmethod
     def _agy_titled(call: Mapping[str, Any], served: list[str]) -> str | None:
@@ -639,7 +651,8 @@ class AcpLoop:
         "Run mcp_fluid_bundled_Glob", and the kind none of the agent's own
         tools (a shell call's title can name a bridged tool too). Never a
         proxy: CallTool unwraps to another tool and LoadTools skips the
-        checks, which a title alone does not earn.
+        checks, which a title alone does not earn. Nor is the agent ever told
+        to remember it (``_permission``).
         """
         from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
 
@@ -1061,16 +1074,10 @@ class AcpLoop:
         phrase, tool = mapper.stalled
         return f"The agent ended its turn without a reply after {phrase.format(self._plain_tool_name(tool))}."
 
-    def _plain_tool_name(self, name: str) -> str:
-        """``name`` when the engine chose it (one of the kind map's tools, or
-        a tool the bridge serves); a title the agent wrote is never repeated."""
-        if name in KIND_TOOL_NAMES.values() or name == "Write":
-            return name
-        prefix = f"mcp__{BUNDLED_SERVER_NAME}__"
-        tail = name[len(prefix):] if name.startswith(prefix) else None
-        if tail and (tail in self._served_names() or tail in self.bridged_tools()):
-            return name
-        return "a tool"
+    @staticmethod
+    def _plain_tool_name(name: str) -> str:
+        """``name`` when host code wrote it (``_HOST_TOOL_NAMES``), else "a tool"."""
+        return name if name in _HOST_TOOL_NAMES else "a tool"
 
     @staticmethod
     def _note_refusal(mapper: TurnMapper | None, phrase: str, name: str) -> None:
@@ -1204,21 +1211,23 @@ class AcpLoop:
 
         mapper = self._mapper
         if mapper is not None:
-            name, data = mapper.tool_name_and_input(call)
             # The prompt's own tool card: start it now so the transcript
             # shows what is being asked about.
             for event in mapper.map_update({"sessionUpdate": "tool_call", **call}):
                 await self._emit(event)
-        else:
-            name, data = TurnMapper(session_id="", turn_id="", bridged_name=self._bridged_name,
-                                    unwrap_bridged=self._unwrap_bridged).tool_name_and_input(call)
-        # A CallTool call is only ever allowed once, even when the owner chose
-        # "always": the agent would remember CallTool itself and stop asking
-        # for every tool behind it. The host's saved rule keys on the real tool.
-        proxied = self._is_call_proxy(call)
+        # The request may carry only the call's id, or add to what the
+        # tool_call said: one identity for the card, the policy and a refusal.
+        call, name, data, titled = (mapper or TurnMapper(
+            session_id="", turn_id="", bridged_name=self._bridged_name, unwrap_bridged=self._unwrap_bridged,
+        )).identify(call)
+        # Allowed once only, even when the owner chose "always": for CallTool,
+        # the agent would remember CallTool itself and stop asking for every
+        # tool behind it; for a name read off a title, the agent picks what
+        # it remembers. The host's saved rule keys on the real tool.
+        once_only = titled or self._is_call_proxy(call)
 
         def allow() -> dict[str, Any]:
-            return chose("allow_once") if proxied else chose("allow_once", "allow_always")
+            return chose("allow_once") if once_only else chose("allow_once", "allow_always")
 
         if self._interrupted.is_set():
             return cancelled
@@ -1267,7 +1276,7 @@ class AcpLoop:
                 return chose("reject_once", "reject_always")
         finally:
             self._pending_permissions.pop(request_id, None)
-        if response.decision == "allow_always" and not proxied:
+        if response.decision == "allow_always" and not once_only:
             return chose("allow_always", "allow_once")
         if response.decision in ("allow", "allow_always"):
             return allow()

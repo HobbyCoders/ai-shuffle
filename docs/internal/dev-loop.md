@@ -602,7 +602,7 @@ installed, and every provider screen works without a Google account:
 - `agymcp Glob {"pattern": "*"}` calls a bundled tool the way agy 1.5.9 does
   (titled `Run mcp_fluid_bundled_Glob`, with a permission request); refused,
   it ends the turn with no reply, as agy does (`agyquiet` ends it without
-  failing its calls first);
+  failing its calls first; `agyid` asks permission by the call's id alone);
 - `/usage` answers with a quota reply.
 
 The agent's message log is `fake-agy.jsonl` in the scratch directory. Without
