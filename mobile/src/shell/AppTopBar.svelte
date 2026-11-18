@@ -233,14 +233,26 @@
 	// The drawer then slides away over the view the action opened.
 	function drawerGo<T extends unknown[]>(action: (...args: T) => void) {
 		return (...args: T) => {
-			const popping = drawerOpen && entryLive;
 			dismissDrawer();
-			if (popping) pendingTarget = () => action(...args);
-			else action(...args);
+			action(...args);
 		};
 	}
 
-	const drawerOpenFeature = drawerGo((...args: Parameters<typeof onOpenFeature>) => onOpenFeature(...args));
+	// A Settings target (a deep link into one setting) pushes its own history
+	// step. The drawer's pop above is asynchronous and would land after that
+	// step and undo it, leaving Settings on its index, so open it only once
+	// that pop is seen. Never on elapsed time: a slow pop would still undo it.
+	// Reopening the drawer, any newer navigation (dismissDrawer) or the bar
+	// going away calls a waiting open off.
+	function drawerOpenFeature(type: ViewType, itemId?: string | null) {
+		const popping = drawerOpen && entryLive;
+		dismissDrawer();
+		if (!itemId) return onOpenFeature(type);
+		if (!popping) return onOpenFeature(type, itemId);
+		// SvelteKit updates page.state some time after `popstate`, so the wait
+		// ends in the effect above, when the state no longer has our entry.
+		pendingTarget = () => onOpenFeature(type, itemId);
+	}
 	$effect(() => () => {
 		pendingTarget = null;
 	});

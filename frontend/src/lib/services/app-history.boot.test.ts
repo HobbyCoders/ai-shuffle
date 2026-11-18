@@ -141,6 +141,39 @@ it('keeps boot’s view for Back when writing it to the arrival entry was reject
  expect(shellHistory.place?.sessionId).toBe('b');
 });
 
+it('pushes a chat picked in the phone drawer after the drawer’s own Back lands, and does not take that Back for the user’s', async () => {
+ const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
+ router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
+ shellHistory.start(arrival, null);
+ pushOverlay({ mobileDrawer: true });
+ // The pick runs as the drawer closes; its history.back() lands a moment later.
+ shellHistory.destination({ type: 'session', sessionId: 'c' });
+ await settle();
+ expect(places()).toEqual(['a', 'a']);
+ expect(go(-1)).toBe(false);
+ expect(shellHistory.place?.sessionId).toBe('c');
+ await vi.waitFor(() => expect(places()).toEqual(['a', 'c']));
+ expect(router.index).toBe(1);
+ expect(router.entries.some(({ state }) => state.mobileDrawer)).toBe(false);
+ // Back is the user's again.
+ expect(go(-1)).toBe(true);
+ expect(shellHistory.place?.sessionId).toBe('a');
+});
+
+it('still pushes a drawer pick when the router never reports the drawer’s Back', async () => {
+ vi.useFakeTimers();
+ const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
+ router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
+ shellHistory.start(arrival, null);
+ pushOverlay({ mobileDrawer: true });
+ shellHistory.destination({ type: 'session', sessionId: 'c' });
+ await vi.advanceTimersByTimeAsync(500);
+ expect(router.entries).toHaveLength(2);
+ await vi.advanceTimersByTimeAsync(200);
+ expect(places()).toEqual(['a', 'a', 'c']);
+ expect(here().mobileDrawer).toBeUndefined();
+});
+
 it('keeps entries in order when a write commits late, with no timer letting a later write pass it', async () => {
  vi.useFakeTimers();
  const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };

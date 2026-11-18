@@ -425,7 +425,6 @@ describe('AppTopBar drawer lifecycle', () => {
 			page.state = {};
 			window.dispatchEvent(new PopStateEvent('popstate'));
 			await tick();
-			await tick(); // the chat pick, like a feature pick, follows the router’s completed pop
 			expect(props.onOpenSession).toHaveBeenCalledWith('s-2');
 			expect(props.onOpenFeature).toHaveBeenCalledTimes(1);
 

@@ -46,6 +46,22 @@ let settling = false;
 // The entry whose write the router rejected: it shows, but the browser never got
 // it, so selecting it again writes it again.
 let failed: string | null = null;
+// A pick from the phone drawer: the drawer's own Back (it pops its entry as it
+// closes) lands after the pick's write is queued. The write waits for it, or
+// that Back would step off the new entry, and that Back is not the user's (as
+// main's session navigation did, with the same give-up).
+let drawerPop: { end: () => void; landed: Promise<void> } | null = null;
+const DRAWER_BACK_WAIT_MS = 600;
+function drawerPopped(): Promise<void> {
+ if (drawerPop) return drawerPop.landed;
+ if (!(page.state as ShellState | undefined)?.mobileDrawer) return Promise.resolve();
+ let resolve!: () => void;
+ const landed = new Promise<void>(done => { resolve = done; });
+ const timer = setTimeout(() => end(), DRAWER_BACK_WAIT_MS);
+ const end = () => { clearTimeout(timer); if (drawerPop?.landed === landed) drawerPop = null; resolve(); };
+ drawerPop = { end, landed };
+ return landed;
+}
 export const shellHistory = {
  get restored() { return restored; },
  get place() { return current?.place; },
@@ -54,7 +70,7 @@ export const shellHistory = {
   if (state.shell) return void (restored = current = { ...state.shell });
   landing = current = { id: randomUUID(), place: viewPlace(view) };
  },
- stop() { mounted = settling = false; landing = restored = current = null; failed = null; },
+ stop() { mounted = settling = false; landing = restored = current = null; failed = null; drawerPop?.end(); },
  /**
   * The chat a fresh load's landing actually shows (this tab's restored chat
   * may differ from the shared layout snapshot). Only before the user's first
@@ -65,6 +81,10 @@ export const shellHistory = {
   if (landing.place.sessionId !== sessionId) landing = current = { id: landing.id, place: { type: 'session', sessionId } };
  },
  land(state: ShellState) {
+  if (drawerPop && !state.mobileDrawer) {
+   drawerPop.end();
+   return false;
+  }
   // Every entry of the landing, saved or not, shows its one current place.
   const entry = !state.shell || state.shell.id === landing?.id ? landing : state.shell;
   if (!mounted || !entry || entry.id === current?.id || pending.has(entry.id)) return false;
@@ -132,8 +152,10 @@ function write(place: Place, replace = false) {
 function record(entry: Entry, replace: boolean) {
  const { id } = entry;
  pending.set(id, (pending.get(id) ?? 0) + 1);
+ const popped = drawerPopped();
  writes = writes.then(async () => {
   try {
+   await popped;
    const state = page.state as ShellState;
    // A replace only refines the entry the browser is on (not after a push
    // that failed, or a Back). An entry with no place of its own is the
