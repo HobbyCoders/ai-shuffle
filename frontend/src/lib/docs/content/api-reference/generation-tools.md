@@ -404,9 +404,10 @@ character price has unknown total until text is supplied. Unsupported units
 (including tokens and compute time), unbounded dimensions or ambiguous
 duration/count parameters refuse submission rather than guess. A duration's unit
 counts only when it belongs to the field's own value: its name (`duration_seconds`),
-units on its enum values (`"5s"`), a phrase about it ("duration in seconds",
-"(seconds)") or a unit on one of its declared numbers ("4 to 30s"). Other
-mentions of seconds in its description do not count. Conditional
+units on its enum values (`"5s"`), a range of its values with a unit ("4 to 30s")
+that bounds it, or a sentence about the field that names its unit ("Duration of
+the video in seconds", "Clip length (seconds)"). Other mentions of seconds, such
+as how long rendering takes, do not count. Conditional
 pricing formulas are not inferred from arbitrary resolution names.
 
 OpenAI/xAI API-key images run only with the exact reviewed record above, priced

@@ -103,7 +103,8 @@ class FalRates:
     """Batched, cached fal rate rows keyed by the calling key (rates can be
     account-specific). A failed or malformed reply is never cached. The cache
     serves discovery only: admitting a run reads ``fresh`` so a raised rate
-    is never reserved or confirmed at its old figure."""
+    is never reserved or confirmed at its old figure. Fresh reads neither
+    use nor fill the cache; it is written only under its lock."""
 
     def __init__(self):
         self._cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
@@ -137,13 +138,15 @@ class FalRates:
             # batches on the lock.
             try:
                 async with asyncio.timeout(FRESH_READ_SECONDS):
-                    return await self._fetch(wanted, api_key, scope)
+                    return await self._fetch(wanted, api_key, scope, cache=False)
             except TimeoutError:
                 raise PricingRequestFailed(f"fal pricing did not answer within {FRESH_READ_SECONDS} s.") from None
         async with self._lock:
-            return {**found, **await self._fetch(wanted, api_key, scope)}
+            return {**found, **await self._fetch(wanted, api_key, scope, cache=True)}
 
-    async def _fetch(self, wanted, api_key, scope) -> dict[str, dict | None]:
+    async def _fetch(self, wanted, api_key, scope, *, cache: bool) -> dict[str, dict | None]:
+        """Read ``wanted`` from fal. Only listing reads (under the lock) write
+        the cache; a fresh read never does, so it cannot race a listing."""
         found: dict[str, dict | None] = {}
         async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
             queue = [wanted[i:i + BATCH] for i in range(0, len(wanted), BATCH)]
@@ -166,7 +169,7 @@ class FalRates:
                 for endpoint in chunk:
                     row = rows.get(endpoint)
                     found[endpoint] = row
-                    if row is None or rate_of(row) is not None:
+                    if cache and (row is None or rate_of(row) is not None):
                         # A listed row fal answered with no usable rate is
                         # read again next time, not remembered.
                         self._cache[(scope, endpoint)] = (stamp + (FOUND_TTL if row else MISSING_TTL), row)

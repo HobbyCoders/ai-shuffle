@@ -287,7 +287,7 @@ class Candidate:
 
 
 class Backend(Protocol):
-    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None) -> list[Candidate]: ...
+    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None, worker: str | None = None, listing_prices: bool = True) -> list[Candidate]: ...
     async def prepare(self, candidate: Candidate, options: dict, prompt: str) -> Candidate: ...
     async def reserve(self, candidate: Candidate, context: RunContext) -> bool: ...
     async def execute(self, candidate: Candidate, prompt: str, context: RunContext) -> dict: ...
@@ -542,11 +542,18 @@ class Resolver:
         if choice is None:
             choice = {"source": args.get("source"), "model": args.get("model"), "worker": args.get("worker")}
         source = normalize_source(choice.get("source") or choice.get("account"))
+
+        async def find(listing_prices):
+            found = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt,
+                                               worker=choice.get("worker"), listing_prices=listing_prices)
+            return [c for c in found if matches(c, {k: v for k, v in choice.items() if k != "source"})
+                    and (not source or source in (c.source, c.account)) and c.source not in exclude_sources]
+
+        # A named model is prepared (priced fresh) next, so it skips listing
+        # rates; a choice card needs them and lists again below.
+        named = bool((explicit or stored) and choice.get("model"))
         try:
-            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt,
-                                                    worker=choice.get("worker"))
-            candidates = [c for c in candidates if matches(c, {k: v for k, v in choice.items() if k != "source"})
-                          and (not source or source in (c.source, c.account)) and c.source not in exclude_sources]
+            candidates = await find(not named)
             if (explicit or stored) and any(c.available for c in candidates):
                 # An unreachable or old peer cannot make a named choice ambiguous
                 # when a usable candidate matches; it never runs either way.
@@ -561,6 +568,10 @@ class Resolver:
             if (not stored and not explicit) or len(candidates) != 1:
                 if context.not_the_approved_call is not None:
                     return await context.not_the_approved_call()
+                if named:
+                    candidates = await find(True)
+                    if any(c.available for c in candidates):
+                        candidates = [c for c in candidates if c.available]
                 last = context.last_for(kind)
                 if last and follow_account:
                     last = await follow_account(last)

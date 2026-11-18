@@ -241,6 +241,40 @@ async def test_admission_prices_from_a_fresh_rate_never_the_discovery_cache(back
     assert price["total"] is None and price["reason"] == "pricing_request_failed"
 
 
+async def test_a_named_run_or_quote_never_waits_on_the_listing_rate_lock(backend, monkeypatch):
+    # A catalog page holding the rate cache's lock (a slow listing) must not
+    # hold up a named run, /quote, a save-time quote or the tool's remember:
+    # each resolves its one candidate without listing rates, then prices it fresh.
+    import asyncio
+    from app.api import generation_choices
+    from app.services import fal_pricing
+    monkeypatch.delattr(backend, "fal_price")
+    def transport(request):
+        return httpx.Response(200, json={"prices": [
+            {"endpoint_id": "fake/model", "unit_price": "0.05", "unit": "image", "currency": "USD"}]})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(transport), **kw))
+    monkeypatch.setattr(backend, "reserve", AsyncMock(return_value=True))
+    monkeypatch.setattr(backend, "execute", AsyncMock(return_value={"success": True, "image_url": "/a"}))
+    fal_pricing.rates.clear()
+    choice = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "fake/model", "options": {}}
+    async with fal_pricing.rates._lock:
+        entry = (await asyncio.wait_for(backend.local_catalog("image", source="fal", model="fake/model",
+                                                              listing_prices=False), 1))[0]
+        # Schema and availability are unchanged; only the listing price is skipped.
+        assert entry.available and entry.reason is None and entry.schema["fields"]
+        assert entry.price["total"] is None
+        output = await asyncio.wait_for(Resolver(backend).generate(
+            "image", {"prompt": "tree", "source": "fal", "model": "fake/model"}, CONTEXT), 2)
+        assert output["status"] == "completed" and output["price"]["total"] == "0.05"
+        quoted = await asyncio.wait_for(generation_choices.quote_choice("image", choice, CONTEXT), 2)
+        assert quoted["ok"] and quoted["priced"] and quoted["price"]["total"] == "0.05"
+    assert fal_pricing.rates._cache == {}
+    # Discovery still lists the cached listing price.
+    listed = (await backend.local_catalog("image", source="fal", model="fake/model"))[0]
+    assert listed.price["total"] == "0.05" and fal_pricing.rates._cache
+
+
 async def test_plan_image_is_included_and_reserves_nothing(backend, monkeypatch):
     from decimal import Decimal
     from app.network import generation

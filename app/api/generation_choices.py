@@ -276,8 +276,9 @@ async def quote_choice(kind: str, choice: dict, context, prompt: str | None = No
     backend = Sources(None, context)
     prompt = (prompt or "").strip() or _QUOTE_PROMPT
     source = normalize_source(choice.get("account") or choice.get("source"))
+    # Priced fresh by prepare below; no listing rate (cache or its lock) first.
     candidates = await backend.catalog(kind, source=source, model=choice["model"], limit=1, prompt=prompt,
-                                       worker=choice.get("worker"))
+                                       worker=choice.get("worker"), listing_prices=False)
     candidates = [c for c in candidates if c.available and matches(c, {k: v for k, v in choice.items() if k != "source"})]
     if len(candidates) != 1:
         return {"ok": False, "error": "This account or model is not available right now."}

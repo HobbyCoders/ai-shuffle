@@ -116,6 +116,31 @@ async def test_peer_receiver_rechecks_options_price_budget_and_claim(monkeypatch
     assert output["result"]["success"] and execute.await_count == 2
 
 
+@pytest.mark.parametrize("operation,flag,listing", [
+    ("catalog", None, True), ("catalog", False, False), ("prepare", None, False), ("execute", None, False)])
+async def test_the_peer_skips_listing_rates_for_the_candidate_it_prices_fresh(monkeypatch, operation, flag, listing):
+    # prepare/execute price the one candidate fresh; reading listing rates first
+    # would queue admission behind a catalog page on the rate cache's lock.
+    from app.services import generation_sources
+    local = AsyncMock(return_value=[])
+    monkeypatch.setattr(generation_sources.Sources, "local_catalog", local)
+    body = {"version": peer.WIRE_VERSION, "operation": operation, "source": ENTRY.account, "kind": "image",
+            "model": ENTRY.model, **({} if flag is None else {"listing_prices": flag})}
+    if operation == "catalog":
+        await peer.handle(body, "origin-worker")
+    else:
+        with pytest.raises(ValueError, match="No unique"):
+            await peer.handle(body, "origin-worker")
+    assert local.await_args.kwargs["listing_prices"] is listing
+
+
+async def test_a_named_remote_lookup_asks_the_peer_not_to_read_listing_rates(network):
+    _, calls = network
+    await peer.catalog("image", source=ENTRY.account, model=ENTRY.model, listing_prices=False)
+    await peer.catalog("image", source=ENTRY.account)
+    assert calls[0][2]["listing_prices"] is False and "listing_prices" not in calls[1][2]
+
+
 async def test_reported_overrun_goes_to_founder_not_each_account_worker(network, monkeypatch):
     from app.network import engine, control
     monkeypatch.setattr(engine, "load_context", lambda: SimpleNamespace(founder_device_id="peer-worker", device_id="local-worker"))

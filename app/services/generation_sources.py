@@ -93,15 +93,20 @@ class Sources:
             return await run_sync(fal_credential.api_key)
         return None
 
-    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None,
+                      listing_prices=True):
+        """``listing_prices=False`` resolves a candidate that is priced fresh
+        next (prepare): no listing rate is read, so no cache or its lock."""
         here = self.local_worker()
         entries = []
         if worker in (None, here):
-            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                               listing_prices=listing_prices)
         # A request pinned to this worker never waits on peers.
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
-            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
+            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                         worker=worker, listing_prices=listing_prices))
         # Workers are execution holders, not distinct owner choices. Keep
         # different accounts/options separate, and prefer a usable local holder.
         unique = {}
@@ -111,7 +116,8 @@ class Sources:
             unique.setdefault(key, entry)
         return list(unique.values())
 
-    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
+    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None,
+                            listing_prices=True):
         from app.core import native_generation_settings as native
         from app.db import model_providers
         from app.services.fal_catalog import catalog_service
@@ -128,15 +134,21 @@ class Sources:
             models = [m for m in models if (m.endpoint_id == model if model else m.category.startswith("text-to-"))]
             models = models[:max(1, min(limit, 50))]
             from app.services import fal_pricing
-            try:
-                # One pricing request for the page; fal rate-limits per-model reads.
-                rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
-            except fal_pricing.PricingRequestFailed:
-                rows = None
+            rows = None
+            if listing_prices:
+                try:
+                    # One pricing request for the page; fal rate-limits per-model reads.
+                    rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
+                except fal_pricing.PricingRequestFailed:
+                    rows = None
             for m in models:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-                price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
+                if listing_prices:
+                    price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
+                else:
+                    # Not quoted here: prepare prices it from fal's current rate.
+                    price = dict(UNKNOWN_PRICE) if schema else fal_pricing.unknown("schema_unavailable")
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))

@@ -45,11 +45,15 @@ async def request(worker, operation, **body):
     return response
 
 
-async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+async def catalog(kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None, listing_prices=True):
     """Ask online peers (or only ``worker``) in parallel, each with a short timeout."""
+    # Sent only when off; a peer that ignores it just lists cached prices.
+    extra = {} if listing_prices else {"listing_prices": False}
+
     async def one(peer):
         try:
-            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+            response = await request(peer["device_id"], "catalog", kind=kind, source=source, model=model, query=query,
+                                     limit=limit, prompt=prompt, **extra)
         except ValueError as exc:
             # Surface old/unreachable workers rather than silently treating their
             # accounts as absent. No account identities are advertised in presence.
@@ -153,7 +157,10 @@ async def handle(body, from_device):
     limit = body.get("limit", 15)
     if type(limit) is not int or not 1 <= limit <= 50:
         raise ValueError("Generation catalog limit must be between 1 and 50.")
-    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"), limit=limit, prompt=body.get("prompt"))
+    # prepare/execute price the one candidate fresh, so they skip listing rates.
+    listing_prices = operation == "catalog" and body.get("listing_prices") is not False
+    candidates = await backend.local_catalog(kind, source=body.get("source"), model=body.get("model"), query=body.get("query"),
+                                             limit=limit, prompt=body.get("prompt"), listing_prices=listing_prices)
     if kind == "image":
         # The holding worker applies its own ChatGPT-plan image rule (#1796):
         # it never spends on a fal image its own generateImage would refuse.

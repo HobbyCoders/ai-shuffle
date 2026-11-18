@@ -123,6 +123,9 @@ def test_a_duration_naming_no_seconds_unit_stays_unknown(description):
     ({"type": "string", "default": "auto", "description": "Supports 4 to 30s"}, 30),
     ({"type": "number", "default": 5, "description": "Clip length (seconds)."}, 5),
     ({"type": "number", "default": 8, "description": "How long the audio should be, in seconds (0.5 to 180)."}, 8),
+    # minimax/music-3's real wording.
+    ({"type": "number", "default": 60, "maximum": 300, "description":
+      "Upper bound on the generated audio length in seconds. The model may stop earlier."}, 60),
 ])
 def test_a_unit_tied_to_the_field_prices(field, seconds):
     per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
@@ -131,14 +134,16 @@ def test_a_unit_tied_to_the_field_prices(field, seconds):
 
 
 @pytest.mark.parametrize("description", [
+    # 30 equals the declared maximum: a coincidental number is not a unit.
     "Clip length. Generation takes 30 seconds.",
+    "Long clips finish rendering in seconds.",
     "Generation completes in seconds.",
     "Duration. Most clips render in under 10 seconds.",
 ])
 def test_a_seconds_word_not_about_the_fields_value_stays_unknown(description):
     # A "seconds" elsewhere in the text says nothing about this field's unit.
     per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
-    field = {"type": "number", "default": 5, "maximum": 20, "description": description}
+    field = {"type": "number", "default": 5, "maximum": 30, "description": description}
     p = price(per_second, {"prompt": {"type": "string"}, "duration": field})
     assert p["status"] == "unknown" and p["reason"] == "needs_option"
 
@@ -243,6 +248,23 @@ async def test_fresh_reads_skip_the_cache_and_keys_never_share_rows(transport):
     transport((500, {}))
     with pytest.raises(fal_pricing.PricingRequestFailed):
         await rates.rows(["a"], "key-1", fresh=True)  # never answered from the cache
+
+
+async def test_a_fresh_read_never_writes_the_listing_cache(transport):
+    # A fresh read writing the cache outside its lock could be overwritten by a
+    # slower listing reply with the old rate; it now never writes the cache.
+    old = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    new = {**old, "unit_price": 2}
+    transport((200, {"prices": [new]}))
+    rates = fal_pricing.FalRates()
+    assert (await rates.rows(["a"], "key", fresh=True))["a"] == new
+    assert rates._cache == {}
+    transport((200, {"prices": [old]}))
+    await rates.rows(["a"], "key")
+    cached = dict(rates._cache)
+    transport((200, {"prices": [new]}))
+    await rates.rows(["a"], "key", fresh=True)
+    assert rates._cache == cached
 
 
 async def test_rate_limit_retries_then_failure_is_a_reason_not_a_cache(transport):

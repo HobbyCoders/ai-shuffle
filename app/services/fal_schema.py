@@ -91,14 +91,24 @@ _INPUT_UNITS = re.compile(r"(?:\d+ )?(?:frames?|input seconds?|processed seconds
 # Short side in pixels for the resolution labels fal video models declare.
 _FOLLOWS_INPUT = re.compile(r"\bmatch(?:es|ing)?\b[^.]{0,30}\b(?:input|source)\b")
 _RESOLUTION_LINES = re.compile(r"(\d{3,4})p")
-# A duration's unit, stated about the field itself ("duration in seconds",
-# "(seconds)", "Seconds of …") or on a number the field declares ("4 to 30s").
-_DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?"
-_UNIT_PHRASE = re.compile(
-    rf"\b(?:duration|length|long)\b[^.;:]{{0,40}}?\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b"
-    rf"|\(\s*(?:in\s+)?(s|{_DURATION_WORDS})\s*\)|^\s*(?:number\s+of\s+)?({_DURATION_WORDS})\b", re.I)
-_UNIT_NUMBER = re.compile(
-    rf"(?<![\d.])(\d+(?:\.\d+)?)\s*(?:(?:-|–|to|through|and|or)\s*(\d+(?:\.\d+)?)\s*)?(s|{_DURATION_WORDS})\b", re.I)
+# A duration's unit, only where the text states the field's own unit:
+# a range of its values ("4 to 30 seconds", "4-30s", "(0.5-22)s"), or a
+# sentence whose subject is the field ("Clip length (seconds)", "Duration of
+# the video in seconds", "How long the audio is, in seconds", "Number of
+# seconds ...", "Seconds of video"). A unit elsewhere ("Generation takes 30 seconds") is not.
+_DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?|hrs?|s"
+_RANGE = re.compile(
+    rf"(?<![\d.])(\d+(?:\.\d+)?)\s*({_DURATION_WORDS})?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*\)?\s*({_DURATION_WORDS})\b", re.I)
+_SUBJECT = r"(?:[\w'-]+\s+){0,4}?(?:duration|length)"
+_SUBJECT_UNIT = [
+    re.compile(rf"^{_SUBJECT}\s*\(\s*(?:in\s+)?({_DURATION_WORDS})\s*\)", re.I),
+    re.compile(rf"^(?:{_SUBJECT}\b|how\s+long\b)(?P<gap>[^.;!?]{{0,60}}?)\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+    re.compile(rf"^(?:the\s+)?(?:number\s+of\s+({_DURATION_WORDS})\b|({_DURATION_WORDS})\s+(?:of|for)\b)", re.I),
+    # The noun and its unit side by side: "... audio length in seconds".
+    re.compile(rf"\b(?:duration|length)\s+in\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+]
+# Words about how long the work takes, never about the value.
+_WORK_TIME = re.compile(r"\b(?:render\w*|process\w*|complet\w*|finish\w*|takes?|took|wait\w*|latency)\b", re.I)
 
 
 def _unit_of(word: str) -> str:
@@ -310,11 +320,8 @@ class ModelSchema:
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
         raise PricingUnknown("unsupported_unit", f"Pricing unit \"{unit}\" is not supported yet.")
 
-    def _bound(self, field: "ParamField", value):
-        """A declared number, or the field's own largest value when the model
-        chooses (``auto``/unset). None when nothing declared bounds it."""
-        if value not in (None, "", "auto", "adaptive", "default"):
-            return value, False
+    def _declared_max(self, field: "ParamField") -> Decimal | None:
+        """The field's largest value from its structure: enum, maximum."""
         candidates = []
         for item in field.enum or []:
             try:
@@ -327,16 +334,26 @@ class ModelSchema:
                 candidates.append(Decimal(str(variant["maximum"])))
         if field.maximum is not None:
             candidates.append(Decimal(str(field.maximum)))
-        if not candidates:
-            # A range stated only in prose: "Duration in seconds (0.5-30)" or
-            # "Supports 4 to 30 seconds" (a "to" range must name its unit).
-            text = field.description or ""
-            span = re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text) or re.search(
-                r"\b(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)?\s+to\s+(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)\b", text, re.I)
-            if span:
-                candidates.append(Decimal(span[2]))
         candidates = [c for c in candidates if c.is_finite() and c > 0]
-        return (max(candidates), True) if candidates else (None, True)
+        return max(candidates) if candidates else None
+
+    @staticmethod
+    def _prose_range(field: "ParamField"):
+        """A range stated in prose: unit-bearing ("4 to 30s") or a bare
+        parenthesised one ("Duration in seconds (0.5-30)")."""
+        text = field.description or ""
+        return _RANGE.search(text) or re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text)
+
+    def _bound(self, field: "ParamField", value):
+        """A declared number, or the field's own largest value when the model
+        chooses (``auto``/unset). None when nothing declared bounds it."""
+        if value not in (None, "", "auto", "adaptive", "default"):
+            return value, False
+        top = self._declared_max(field)
+        if top is None and (span := self._prose_range(field)):
+            top = Decimal(span[3] if span.re is _RANGE else span[2])
+            top = top if top.is_finite() and top > 0 else None
+        return top, True
 
     @staticmethod
     def _enum_suffix(field: "ParamField") -> str | None:
@@ -347,12 +364,12 @@ class ModelSchema:
         return units.pop() if len(units) == 1 and values and all(
             re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*[a-z]+", str(i)) for i in values) else None
 
-    def _value_units(self, field: "ParamField", name: str, bound) -> set:
-        """Units stated for this field's own value, never just nearby words:
-        (a) the field's name, (b) a unit every enum value carries, (c) a phrase
-        about the field ("duration in seconds", "(seconds)", "Seconds of …"),
-        (d) a unit on a number or range the field itself declares (default,
-        enum member, minimum/maximum, or the prose bound ``bound``)."""
+    def _value_units(self, field: "ParamField", name: str) -> set:
+        """Units declared for this field's own value, from structure only:
+        (a) the field's name; (b) a unit every enum value carries; (c) a range
+        of values with its unit that is the field's bound or agrees with its
+        declared maximum; (d) a sentence whose subject is the field and that
+        names its unit (``_SUBJECT_UNIT``). Any other unit word is ignored."""
         units = set()
         if name in ("duration_seconds", "duration_sec", "seconds"):
             units.add("s")
@@ -362,19 +379,32 @@ class ModelSchema:
             units.add("ms")
         if suffix := self._enum_suffix(field):
             units.add(_unit_of(suffix))
-        raw = ((self.input_schema or {}).get("properties") or {}).get(field.name) or {}
-        declared = set()
-        for item in [field.default, field.minimum, field.maximum, bound, *(field.enum or []),
-                     *(v.get(k) for v in [raw, *(raw.get("anyOf") or []), *(raw.get("oneOf") or [])]
-                       if isinstance(v, dict) for k in ("minimum", "maximum", "default"))]:
-            found = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*[a-z]*", str(item).strip()) if type(item) in (int, float, str, Decimal) else None
-            if found:
-                declared.add(Decimal(found[1]))
-        for text in (field.title or "", field.description or ""):
-            units.update(_unit_of(word) for groups in _UNIT_PHRASE.findall(text) for word in groups if word)
-            units.update(_unit_of(m[3]) for m in _UNIT_NUMBER.finditer(text)
-                         if {Decimal(n) for n in (m[1], m[2]) if n} & declared)
+        units.update(self._prose_units(field)[0])
         return units
+
+    def _prose_units(self, field: "ParamField") -> tuple[set, list]:
+        """Units the field's title/description declare (forms (c) and (d)
+        above) and which form matched, for the catalog audit."""
+        units, forms = set(), []
+        top = self._declared_max(field)
+        first = _RANGE.search(field.description or "")
+        for m in _RANGE.finditer(field.description or ""):
+            # The range agrees with the declared maximum or, with none, is the
+            # bound itself (the one ``_bound`` reads).
+            if (Decimal(m[3]) == top) if top is not None else m.start() == first.start():
+                units.update(_unit_of(u) for u in (m[2], m[4]) if u)
+                forms.append(("range", m[0]))
+        for text in (field.title or "", field.description or ""):
+            for sentence in re.split(r"(?<=[.;!?])\s+", text.strip()):
+                for index, form in enumerate(_SUBJECT_UNIT):
+                    if not (m := form.search(sentence)):
+                        continue
+                    if (index == 1 and _WORK_TIME.search(m["gap"])) or (index == 3 and _WORK_TIME.search(sentence)):
+                        continue
+                    units.add(_unit_of(next(g for g in reversed(m.groups()) if g)))
+                    forms.append((("subject (unit)", "subject … in unit", "number of unit / unit of",
+                                   "noun in unit")[index], m[0]))
+        return units, forms
 
     def _seconds(self, options: dict, notes: list) -> Decimal:
         fields = {f.name: f for f in self.fields}
@@ -394,7 +424,7 @@ class ModelSchema:
             match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", str(value))
             if not match:
                 continue
-            units = self._value_units(field, name, value if bounded else None)
+            units = self._value_units(field, name)
             if match[2]:
                 units.add(_unit_of(match[2]))
             # Exactly one unit, tied to this field's value; milliseconds only
