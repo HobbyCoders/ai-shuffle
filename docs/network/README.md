@@ -236,17 +236,21 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   before the upgrade (an owner-ordered row takes it; any other row keeps the
   version held on a tie), unless the op comes from an incarnation older than
   the newest seen, which only a restore leaves: then it replaces the device's
-  version only with a later clock, owner-ordered rows included. While a state
-  copy is applied, the incarnations its manifest names count as seen for this
-  check alone, from its first page until it returns, since its watermarks
-  are adopted only after the last; they reach no watermark, revocation
-  cutoff or advertised head, and a copy that fails leaves nothing behind. At
-  the op's own clock one clock can name a write on either side of the
-  restore, so the version held stays, with one exception: the device itself,
-  after its first restore, takes its own replayed op over an unlabelled
-  version at that clock that it did not sign since, as that version can only
-  be a copy of the same write, and so gets back what the copy left out such
-  as the owner's own fields.
+  version only with a later clock, owner-ordered rows included. A state
+  copy's watermarks are adopted only after its last page, and not at all if
+  it stops, while the pages it committed stand. So each version a state copy
+  installs keeps, beside it, the newest incarnation of its device that the
+  copy names, and this check counts it as seen for that row alone. It stays
+  there through a stopped or resumed copy, until a signed or local write
+  replaces the version, and covers no row the copy did not install. It is
+  the serving member's claim, not a label: it reaches no watermark,
+  revocation cutoff, retention or advertised head. At the op's own clock one
+  clock can name a write on either side of the restore, so the version held
+  stays, even on the device itself and even when the version is a copy of
+  that very op's write: nothing proves which it is (a log that no longer
+  holds the later write proves nothing, as retention prunes it). So a copy
+  of a lost write that left out the owner's own fields, such as a chat's
+  permission mode, keeps them out until the record next changes (#1792).
   So two replicas can keep different values, until
   the record next changes, when all of these hold: the device signed two
   versions of the record at one clock on either side of a restore; one

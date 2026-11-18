@@ -536,12 +536,6 @@ def _read_page(directory: Path, index: int, expected: dict) -> dict:
 def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) -> int:
     """Apply a downloaded copy; ``on_progress(pages applied, pages in all)`` after each commit."""
     trusted = verify_manifest(manifest, publisher)
-    # Its rows land before its frontier, which waits for the last page.
-    with engine.copy_incarnations(manifest["watermarks"]):
-        return _apply(manifest, trusted, directory, publisher, on_progress=on_progress)
-
-
-def _apply(manifest: dict, trusted, directory: Path, publisher: str, *, on_progress=None) -> int:
     deferred = set(manifest.get("deferred") or ()) if manifest.get("format") == FORMAT_DEFERRED else set()
     pages = manifest["pages"]
     # Preflight every immutable page before touching records or watermarks.
@@ -594,7 +588,9 @@ def _apply(manifest: dict, trusted, directory: Path, publisher: str, *, on_progr
             while index < end:
                 chunk = _read_page(directory, index, pages[index])
                 page_touched = []
-                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched)
+                # Each row keeps what the copy names, its frontier waiting for the last page.
+                applied += engine.apply_snapshot_chunk(chunk, ctx=trusted, _conn=conn, _touched=page_touched,
+                                                       watermarks=manifest["watermarks"])
                 # Provider rows by id, upserts too: a disable or new key that
                 # arrives here ends the row's running agents (an edit that
                 # changes nothing an agent holds keeps them).
