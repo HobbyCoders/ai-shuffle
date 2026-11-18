@@ -575,6 +575,149 @@ async def test_a_write_queued_before_abandonment_is_fenced(mock_db, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_reader_queued_on_the_load_lock_rechecks_verification(mock_db, monkeypatch):
+    """A reader passes the verification check, then waits for the load lock
+    (another session is loading). Meanwhile a write commits n2, loses its ack
+    and fails its read-back. The reader must not return the old head."""
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_ld")
+    await store.append("ses_ld", _node("n1", None, "root"))
+    real_append, real_load, real_row = (
+        module._append_node_sync, module._load_session_sync, module._session_row_sync)
+
+    def ack_lost(*args, **kwargs):
+        real_append(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    append_helper, append_entered, append_gate, _ = _paused(ack_lost)
+    load_entered, load_gate = threading.Event(), threading.Event()
+
+    def gated_load(session_id, *args, **kwargs):
+        if session_id == "ses_other":
+            load_entered.set()
+            load_gate.wait(5)
+        return real_load(session_id, *args, **kwargs)
+
+    down = [True]
+
+    def flaky_row(*args, **kwargs):
+        if down:
+            down.pop()
+            raise ConnectionError("database unreachable")
+        return real_row(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_append_node_sync", append_helper)
+    monkeypatch.setattr(module, "_load_session_sync", gated_load)
+    monkeypatch.setattr(module, "_session_row_sync", flaky_row)
+
+    append = asyncio.create_task(store.append("ses_ld", _node("n2", "n1", "next")))
+    await asyncio.to_thread(append_entered.wait, 5)  # past its own load check
+    other = asyncio.create_task(store.get_session("ses_other"))
+    await asyncio.to_thread(load_entered.wait, 5)  # holds the load lock
+    reader = asyncio.create_task(store.get_session("ses_ld"))
+    await asyncio.sleep(0.05)  # verified at its check, now queued on the load lock
+    append_gate.set()
+    with pytest.raises(ConnectionError):
+        await append  # committed, ack lost, read-back failed
+    load_gate.set()
+    await other
+
+    assert (await reader).head_node_id == "n2"
+    assert (await PgFluidStore().get_session("ses_ld")).head_node_id == "n2"
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_write_bounds_cancellation_and_reads_and_refuses_a_second_write(
+    mock_db, monkeypatch
+):
+    """A DB call that does not return holds nothing for longer than the bound:
+    the cancelled caller (engine close) returns, readers fail retryably, and a
+    second write is refused instead of racing the first. Once the worker
+    returns, the next read rereads the row."""
+    from app.core.provider import fluid_pg_store as module
+
+    monkeypatch.setattr(module, "_META_WAIT_SECONDS", 0.3, raising=False)
+    store = PgFluidStore()
+    await store.create_session("ses_stuck")
+    await store.append("ses_stuck", _node("n1", None, "root"))
+    helper, entered, gate, done = _paused(module._append_node_sync)
+    dispatched = []
+
+    def recorded_set_head(*args, **kwargs):
+        dispatched.append(args)
+
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+    monkeypatch.setattr(module, "_set_head_sync", recorded_set_head)
+
+    task = asyncio.create_task(store.append("ses_stuck", _node("n2", "n1", "next")))
+    await asyncio.to_thread(entered.wait, 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    waiting_reader = asyncio.create_task(store.get_session("ses_stuck"))
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.shield(task), 2)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(waiting_reader, 2)
+    assert not done.is_set()  # the worker is still stuck
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(TimeoutError):
+        await store.get_session("ses_stuck")
+    with pytest.raises(TimeoutError):
+        await store.set_head("ses_stuck", "n1")
+    assert asyncio.get_running_loop().time() - started < 1
+    assert dispatched == []
+
+    gate.set()
+    await asyncio.to_thread(done.wait, 5)
+    assert (await store.get_session("ses_stuck")).head_node_id == "n2"
+    assert (await PgFluidStore().get_session("ses_stuck")).head_node_id == "n2"
+
+
+@pytest.mark.asyncio
+async def test_a_worker_error_after_cancellation_is_not_logged_raw(mock_db, monkeypatch):
+    """The worker's error text can carry connection details; it must not reach
+    asyncio's "Future exception was never retrieved" log."""
+    import gc
+
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_quiet")
+    await store.append("ses_quiet", _node("n1", None, "root"))
+
+    def refused(*args, **kwargs):
+        raise ConnectionError("connection to server at db-host failed: password=hunter2")
+
+    helper, entered, gate, done = _paused(refused)
+    monkeypatch.setattr(module, "_append_node_sync", helper)
+    loop = asyncio.get_running_loop()
+    reported = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        task = asyncio.create_task(store.append("ses_quiet", _node("n2", "n1", "next")))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.to_thread(done.wait, 5)
+        del task
+        for _ in range(3):
+            await asyncio.sleep(0.01)
+            gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+
+    assert reported == []
+    assert (await store.get_session("ses_quiet")).head_node_id == "n1"
+
+
+@pytest.mark.asyncio
 async def test_a_read_back_never_overwrites_a_concurrent_append(mock_db, monkeypatch):
     """A failed handle write reads the row back; an append must not dispatch
     while that snapshot is held, or the snapshot replaces its head."""

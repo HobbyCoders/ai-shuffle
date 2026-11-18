@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import time
@@ -43,6 +44,7 @@ from app.core import api_user_scope, artifact_access
 from app.db import session_recall
 from app.db.async_database import run_maintenance, run_sync, run_event_write
 from app.db.base import get_db, get_turn_db, get_event_db
+from app.db.commit_deadline import COMMIT_TIMEOUT_SECONDS
 from app.db.sql_timeouts import transcript_decode_timeouts
 
 # Same Postgres-illegal code-point scrub the Claude session store applies at its
@@ -83,6 +85,25 @@ from fluid.store.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# How long a caller waits behind a session's in-flight head or handle write
+# (for the session's meta lock, or, once cancelled, for the write's worker to
+# return) before giving up. The commit deadline: past it the watchdog has cut a
+# committing socket, so a worker still running is stuck elsewhere. Only the
+# waits are bounded, not the DB call itself.
+_META_WAIT_SECONDS = COMMIT_TIMEOUT_SECONDS
+
+
+class SessionWriteInFlight(TimeoutError):
+    """An earlier write to the session has not returned yet; try again."""
+
+
+def _retrieve(future: asyncio.Future[Any]) -> None:
+    """Mark a future's exception retrieved: the worker's error text can carry
+    connection details and must not reach asyncio's "never retrieved" log."""
+    if not future.cancelled():
+        future.exception()
 
 
 def _as_dict(value: Any) -> Dict[str, Any]:
@@ -1724,6 +1745,9 @@ class PgFluidStore:
         # read-back failed reread those fields before the next use.
         self._meta_locks: Dict[str, asyncio.Lock] = {}
         self._unverified: set = set()
+        # A cancelled write's worker still running past the bound: the session
+        # is not reread (or written) until it returns.
+        self._stuck: dict[str, concurrent.futures.Future] = {}
         self._resume_trim_pending = False
         # The generation each claimed session is written under, and the sessions
         # another writer has since taken over (see the module docstring).
@@ -1787,28 +1811,45 @@ class PgFluidStore:
         # Another engine created the row after this store's claim found none.
         if session_id in self._claim_when_found:
             await self.claim_session(session_id)
-        # Set only on a loaded session, after a read-back failed.
-        if session_id in self._unverified:
-            async with self._meta_lock(session_id):
-                if session_id in self._unverified:
-                    await self._reread_row(session_id)  # raises: never the stale value
         async with self._load_lock:
             if session_id in self._loaded:
-                return session_id in self._sessions
-            data = await run_sync(_load_session_sync, session_id, include_nodes=self.cache_nodes)
-            # A failed read must be retryable; never publish a half-loaded cache.
-            if data is not None:
-                self._sessions[session_id] = data["meta"]
-                self._nodes[session_id] = data["nodes"]
-                self._node_sizes[session_id] = data["node_sizes"]
-                self._node_json_bytes[session_id] = sum(data["node_sizes"].values())
-                if self._node_json_bytes[session_id] >= 8 * 1024 * 1024:
-                    self._resume_trim_pending = True
-            self._loaded.add(session_id)
-            return data is not None
+                found = session_id in self._sessions
+            else:
+                data = await run_sync(_load_session_sync, session_id, include_nodes=self.cache_nodes)
+                # A failed read must be retryable; never publish a half-loaded cache.
+                if data is not None:
+                    self._sessions[session_id] = data["meta"]
+                    self._nodes[session_id] = data["nodes"]
+                    self._node_sizes[session_id] = data["node_sizes"]
+                    self._node_json_bytes[session_id] = sum(data["node_sizes"].values())
+                    if self._node_json_bytes[session_id] >= 8 * 1024 * 1024:
+                        self._resume_trim_pending = True
+                self._loaded.add(session_id)
+                found = data is not None
+        # Checked after the load lock, not before: a write can fail and lose its
+        # read-back while this caller waits for it. Set only on a loaded session.
+        while session_id in self._unverified:
+            async with self._meta_locked(session_id):
+                if session_id in self._unverified:
+                    await self._reread_row(session_id)  # raises: never the stale value
+        return found
 
     def _meta_lock(self, session_id: str) -> asyncio.Lock:
         return self._meta_locks.setdefault(session_id, asyncio.Lock())
+
+    @contextlib.asynccontextmanager
+    async def _meta_locked(self, session_id: str) -> AsyncIterator[None]:
+        """The session's meta lock, waited for at most ``_META_WAIT_SECONDS``."""
+        lock = self._meta_lock(session_id)
+        try:
+            await asyncio.wait_for(lock.acquire(), _META_WAIT_SECONDS)
+        except TimeoutError:
+            raise SessionWriteInFlight(
+                f"An earlier write to session {session_id} has not finished; try again") from None
+        try:
+            yield
+        finally:
+            lock.release()
 
     async def _write_meta(self, session_id: str, publish: Any, fn: Any, *args: Any, **kwargs: Any) -> None:
         """Run a write that moves the session row's head or handle.
@@ -1821,9 +1862,12 @@ class PgFluidStore:
         held until its thread returns, and a write that finished is published
         before the cancellation propagates. A write that raised may have
         committed before the connection failed, or not: the row is read back
-        instead. The caller's exception is re-raised either way.
+        instead. The caller's exception is re-raised either way. A cancelled
+        caller waits for the worker at most ``_META_WAIT_SECONDS``; past that
+        the session stays unverified and nothing rereads or writes it until
+        the worker returns.
         """
-        async with self._meta_lock(session_id):
+        async with self._meta_locked(session_id):
             if session_id in self._unverified:
                 await self._reread_row(session_id)
             # Read at dispatch: abandon_writes() may have fenced it meanwhile.
@@ -1842,7 +1886,7 @@ class PgFluidStore:
                 return result
 
             work = asyncio.ensure_future(run_sync(worker))
-            work.add_done_callback(lambda done: done.cancelled() or done.exception())
+            work.add_done_callback(_retrieve)
             try:
                 result = await asyncio.shield(work)
             except BaseException:
@@ -1851,11 +1895,20 @@ class PgFluidStore:
                 # If the loop is torn down before the worker returns, the
                 # session stays unverified and the next access rereads it.
                 self._unverified.add(session_id)
-                while not thread.done():
+                waiter = asyncio.wrap_future(thread)
+                waiter.add_done_callback(_retrieve)
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + _META_WAIT_SECONDS
+                while not thread.done() and loop.time() < deadline:
                     try:
-                        await asyncio.wait({asyncio.wrap_future(thread)})
+                        await asyncio.wait({waiter}, timeout=deadline - loop.time())
                     except asyncio.CancelledError:
                         pass  # the caller's own exception is re-raised below
+                if not thread.done():
+                    self._stuck[session_id] = thread
+                    logger.warning("A write to session %s is still running after %.0fs; "
+                                   "the session is reread once it returns", session_id, _META_WAIT_SECONDS)
+                    raise
                 if thread.exception() is not None:
                     await self._read_back(session_id)
                 else:
@@ -1880,6 +1933,12 @@ class PgFluidStore:
         Nodes and the live window are left alone; only a head the cache does
         not hold (the node a failed append may have committed) is fetched.
         """
+        stuck = self._stuck.get(session_id)
+        if stuck is not None:
+            if not stuck.done():  # it has already outlived the bound
+                raise SessionWriteInFlight(
+                    f"An earlier write to session {session_id} has not finished; try again")
+            del self._stuck[session_id]
         row = await run_sync(_session_row_sync, session_id)
         meta = self._sessions.get(session_id)
         if row is not None and meta is not None:

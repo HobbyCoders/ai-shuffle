@@ -555,11 +555,14 @@ async def test_peer_write_retry_reopens_without_duplicate_or_orphan(
             self.entered, self.release = asyncio.Event(), asyncio.Event()
             self.failed = False
             self.attempts = []
+            self.appends = []
 
         async def append(self, session_id, node):
-            if "first peer" in node.message.text() and not self.failed:
-                self.entered.set()
-                await self.release.wait()
+            if "first peer" in node.message.text():
+                self.appends.append(node)
+                if not self.failed:
+                    self.entered.set()
+                    await self.release.wait()
             await super().append(session_id, node)
 
         def _append_line(self, path, record):
@@ -595,8 +598,17 @@ async def test_peer_write_retry_reopens_without_duplicate_or_orphan(
         assert sum("second peer" in n.message.text() for n in reopened) == 1
         for previous, node in zip(reopened, reopened[1:]):
             assert node.parent_id == previous.node_id
-        assert len(store.attempts) == 2
-        assert store.attempts[0] == store.attempts[1]
+        # The engine retries the identical node. A retry of a write that had
+        # landed writes nothing again: the store finds it on disk, the same id,
+        # parent and message, and only checks the head.
+        assert len(store.appends) == 2 and store.appends[0] == store.appends[1]
+        assert len(store.attempts) == (1 if write_before_error else 2)
+        assert all(attempt == store.attempts[0] for attempt in store.attempts)
+        records = [
+            json.loads(line) for log in tmp_path.rglob("*.jsonl") for line in log.read_text().splitlines()
+            if line.strip()
+        ]
+        assert sum(r.get("t") == "node" and "first peer" in json.dumps(r) for r in records) == 1
         events = await fresh.events_since(loop.session_id, 0)
         receipts = [e for e in events if isinstance(e, SteerDelivered)]
         assert [s["id"] for e in receipts for s in e.steers] == ["p1", "p2"]
