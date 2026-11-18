@@ -102,6 +102,17 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "allowed": None,
         "disallowed": [],
     },
+    # The opt-in isolated execution profile for model-driven child processes
+    # (Bash, Monitor, the code-mode kernel); see fluid.tools.isolation and
+    # docs/security.md. "off" changes nothing.
+    "sandbox": {
+        "mode": "off",
+        "network": False,
+        "writable_roots": [],
+        "readable_roots": [],
+        "env_allow": [],
+        "protect": [],
+    },
     # Shell-command hooks ([[hooks]] entries; see docs/hooks.md). Lists from
     # every layer are concatenated, not replaced.
     "hooks": [],
@@ -476,6 +487,29 @@ def env_overrides(env: dict[str, str] | None = None) -> dict[str, Any]:
     return out
 
 
+def _project_sandbox_layer(layer: dict[str, Any]) -> dict[str, Any]:
+    """A project config layer with only the ``[sandbox]`` keys it may set.
+
+    The isolated profile lets commands write the workspace, which is where
+    project config lives; a project layer that could loosen ``[sandbox]``
+    would let one confined command switch the profile off for the next
+    session. A project may turn the profile on (``mode = "isolated"``);
+    everything else in its ``[sandbox]`` table is ignored with a warning.
+    """
+    if "sandbox" not in layer:
+        return layer
+    sandbox = layer["sandbox"]
+    if not isinstance(sandbox, dict):
+        sandbox = {"(value)": sandbox}
+    kept = {"mode": "isolated"} if sandbox.get("mode") == "isolated" else {}
+    ignored = sorted(set(sandbox) - set(kept))
+    if ignored:
+        logger.warning(
+            "ignoring [sandbox] %s from a project config: only the user and system "
+            "layers can change the isolated profile", ", ".join(ignored))
+    return {**layer, "sandbox": kept}
+
+
 def load_config(
     cwd: str | os.PathLike[str] | None = None,
     overrides: dict[str, Any] | None = None,
@@ -559,7 +593,7 @@ def load_config(
         for project_hooks_path in project_config_paths(cwd_path, "hooks.json"):
             merged = deep_merge(merged, _load_hooks_json(project_hooks_path))
     for project_toml in project_tomls:
-        merged = deep_merge(merged, project_toml)
+        merged = deep_merge(merged, _project_sandbox_layer(project_toml))
 
     merged = deep_merge(merged, env_layer)
     if overrides:
@@ -953,6 +987,19 @@ def build_engine(
         # Read by the Bash builtin; layered over the process environment for
         # the child only. Never written to os.environ.
         ctx.extra.setdefault("settings_env", child_env)
+    # The opt-in isolated execution profile ([sandbox] mode = "isolated"):
+    # Bash, Monitor and the code-mode kernel read it from here. Off (the
+    # default) leaves no key, and every spawn path stays as it was. A policy
+    # the host already put on its own ctx wins.
+    from fluid.tools.isolation import EXTRA_KEY, policy_from_config
+
+    isolation_policy = ctx.extra.get(EXTRA_KEY) or policy_from_config(config.sandbox, config.cwd)
+    if isolation_policy is not None:
+        ctx.extra.setdefault(EXTRA_KEY, isolation_policy)
+        reason = isolation_policy.unavailable_reason()
+        if reason:
+            logger.warning("isolated execution profile cannot be enforced; commands will be "
+                        "refused: %s", reason)
     _enabled_json, disabled_mcp = mcp_toggles(settings)
     # Builtin wiring that rides the tool context: the recall builtins borrow
     # the store's own optional hooks when it has them (a store with no durable
@@ -967,6 +1014,15 @@ def build_engine(
         ctx.extra.setdefault("session_view", store.session_slice)
 
     if pc.kind == "delegated_claude":
+        if isolation_policy is not None:
+            # Fail closed: the delegated CLI runs its own built-in tools in
+            # its own processes, which this profile cannot confine.
+            from fluid.tools.isolation import IsolationUnavailable
+
+            raise IsolationUnavailable(
+                "the isolated execution profile ([sandbox] mode = \"isolated\") cannot confine "
+                "a delegated_claude provider: the delegated CLI runs its own tools outside "
+                "Fluid. Use a native provider, or turn the profile off.")
         from fluid.engine.delegated import DelegatedLoop
 
         # The delegated leg gates fluid's builtins at the bundled bridge, so
@@ -978,7 +1034,7 @@ def build_engine(
 
             if hooks is None:
                 hooks = HookBus()
-            register_config_hooks(hooks, config.hooks, cwd=config.cwd)
+            register_config_hooks(hooks, config.hooks, cwd=config.cwd, isolation=isolation_policy)
         if permissions is None:
             permissions = _build_permissions(config, settings)
         if bus is None:
@@ -1046,7 +1102,7 @@ def build_engine(
 
         if hooks is None:
             hooks = HookBus()
-        register_config_hooks(hooks, config.hooks, cwd=config.cwd)
+        register_config_hooks(hooks, config.hooks, cwd=config.cwd, isolation=isolation_policy)
 
     client = provider if provider is not None else _build_provider_client(config, provider_name)
     if permissions is None:
@@ -1065,7 +1121,13 @@ def build_engine(
     if config.code_mode:
         from fluid.codemode.session import CodeModeSession
 
-        codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
+        kernel_config = None
+        if isolation_policy is not None:
+            from fluid.codemode.subprocess_kernel import KernelConfig
+
+            kernel_config = KernelConfig(isolation=isolation_policy)
+        codemode = CodeModeSession(
+            registry, config=kernel_config, skills=skills, synthesizer=synthesizer)
     elif config.continual:
         # JSON-mode leg of the learning loop: same journal file, same
         # synthesizer, fed from the engine's turn/tool seams.

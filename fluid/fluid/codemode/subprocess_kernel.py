@@ -20,8 +20,10 @@ open. Time the host spent
 waiting on a *human* is credited back, so an approval nobody answers for ten
 minutes is never mistaken for a hung tool.
 
-There is no OS-level sandbox. The in-process guards are defence in depth,
-not a trust boundary; hosts must permission-gate each Python cell.
+There is no OS-level sandbox by default. The in-process guards are defence in
+depth, not a trust boundary; hosts must permission-gate each Python cell. With
+the opt-in isolated profile (``KernelConfig.isolation``) the child starts
+under the kernel-enforced policy of :mod:`fluid.tools.isolation`.
 """
 
 from __future__ import annotations
@@ -107,6 +109,9 @@ class KernelConfig:
     # turn open until the session ends.
     host_call_timeout: float = 900.0
     python: str = field(default_factory=lambda: sys.executable)
+    # The opt-in isolated execution profile (fluid.tools.isolation.IsolationPolicy).
+    # None, the default, spawns the kernel exactly as before.
+    isolation: Any = None
 
     def boot_payload(self) -> dict:
         return {
@@ -185,12 +190,22 @@ class SubprocessKernel:
             # Own process group, so a kill reaches whatever the cell spawned
             # through an allowed route; on Windows the Job Object does this.
             spawn_kwargs["start_new_session"] = True
+        argv = [self.config.python, "-I", "-S", _RUNNER]
+        env = scrub_env(os.environ)
+        cwd = None
+        if self.config.isolation is not None:
+            # The opt-in isolated profile: the kernel starts confined by the
+            # OS (its own sources stay readable), or does not start at all.
+            argv, cwd, env = self.config.isolation.wrap(
+                argv, self.config.isolation.workspace, env,
+                readable=(os.path.dirname(_RUNNER), os.path.dirname(os.path.realpath(self.config.python))))
         self._proc = await asyncio.create_subprocess_exec(
-            self.config.python, "-I", "-S", _RUNNER,
+            *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=scrub_env(os.environ),
+            env=env,
+            cwd=cwd,
             **spawn_kwargs,
         )
         self._stderr_tail = bytearray()

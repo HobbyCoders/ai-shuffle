@@ -54,6 +54,7 @@ from fluid.store.base import new_id
 from fluid.tools import spill
 from fluid.tools.fragments import CODE_MODE_ERROR_RULE, DEPENDENCY_AWARE_BATCHING
 from fluid.tools.hardening import fence_shell_output
+from fluid.tools.isolation import IsolationUnavailable
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 CODE_MODE_SOURCE = "codemode"
@@ -512,8 +513,11 @@ class CodeModeSession:
             self._skills.signature() if self._skills is not None else (),
         )
         if self._kernel is None:
-            self._kernel = SubprocessKernel(self._config)
-            await self._kernel.start()
+            kernel = SubprocessKernel(self._config)
+            # Kept only once it started: a refused start (the isolated
+            # profile unavailable) must be retried, not reused half-made.
+            await kernel.start()
+            self._kernel = kernel
             await self._kernel.set_vfs(sources, skills)
             self._vfs_signature = signature
         elif signature != self._vfs_signature:
@@ -527,7 +531,10 @@ class CodeModeSession:
             timeout = float(input.get("timeout") or self._exec_timeout)
         except (TypeError, ValueError):
             timeout = self._exec_timeout
-        kernel = await self._ensure_kernel()
+        try:
+            kernel = await self._ensure_kernel()
+        except IsolationUnavailable as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
         if self._verification_degraded and not self._verification_degraded_reported:
             await loop._emit(HookEvent(
                 session_id=sid,

@@ -43,6 +43,7 @@ import inspect
 import re
 from typing import Any
 
+from fluid.tools import isolation
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
 from fluid.tools.fragments import (
@@ -67,6 +68,11 @@ from fluid.tools.registry import (
 #: receipt. Absent or non-positive, the prose falls back to the budget-less
 #: wording.
 BUDGET_EXTRA_KEY = "monitor_budget_seconds"
+
+#: Attribute a host spawner sets to True when it runs the command through
+#: ``isolation.policy_of(ctx).wrap(...)``. Under the isolated profile a spawner
+#: without it is refused rather than trusted to confine the command.
+ISOLATION_AWARE = "applies_isolation"
 
 
 def budget_seconds_of(value: Any) -> int | None:
@@ -482,6 +488,25 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
+    policy = isolation.policy_of(ctx)
+    if policy is not None:
+        # The isolated profile never falls back to an unconfined spawn: the
+        # host's spawner must declare that it applies the policy, and the
+        # policy must be enforceable here.
+        if not getattr(spawn, ISOLATION_AWARE, False):
+            return ToolOutcome(
+                text=(
+                    "Not run: the isolated execution profile is on, but this "
+                    "host's Monitor spawner does not apply it, so the command "
+                    "would run unconfined. Use Bash for a bounded command, or "
+                    "turn the profile off."
+                ),
+                is_error=True,
+            )
+        try:
+            policy.check()
+        except isolation.IsolationUnavailable as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
     # Same atomic detach boundary as Task(mode="background"): once the host
     # accepts the spawn, interrupting the parent turn must not cancel the
     # monitored process or lose its durable task id.

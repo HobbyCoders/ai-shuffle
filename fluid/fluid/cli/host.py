@@ -78,6 +78,7 @@ from fluid.events.ops import (
 )
 from fluid.store.base import new_id
 from fluid.context.settings_stack import layered_env
+from fluid.tools import isolation
 from fluid.tools.builtins._util import strip_ansi
 from fluid.tools.child_env import scrub_child_env
 from fluid.tools.priority import lower_process_group_priority, priority_creationflags
@@ -453,9 +454,18 @@ class CliHost:
             flags = priority_creationflags()
             if flags:
                 spawn_kwargs["creationflags"] = flags
+        argv = [*resolve_shell().argv_prefix, command]
+        policy = isolation.policy_of(ctx)
+        if policy is None:
+            env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+        else:
+            # The opt-in isolated profile, as Bash applies it; an
+            # IsolationUnavailable here means nothing was started.
+            argv, cwd, env = policy.wrap(
+                argv, cwd, scrub_child_env(),
+                overlay=layered_env(ctx.extra.get("settings_env"), base={}))
         process = await asyncio.create_subprocess_exec(
-            *resolve_shell().argv_prefix,
-            command,
+            *argv,
             cwd=cwd,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
@@ -464,8 +474,7 @@ class CliHost:
             # dev server that colourises its output makes the summary
             # unsearchable. Anything that ignores the hint gets its escapes
             # stripped as the stream is read (see _supervise).
-            env=dict(layered_env(ctx.extra.get("settings_env"), base=scrub_child_env()),
-                     NO_COLOR="1", FORCE_COLOR="0"),
+            env=dict(env, NO_COLOR="1", FORCE_COLOR="0"),
             **spawn_kwargs,
         )
         # POSIX: the new process group runs below the host's priority so a
@@ -486,6 +495,10 @@ class CliHost:
         return BackgroundTaskReceipt(
             task_id=worker.task_id, description=command, serves=serves
         )
+
+    # The Monitor builtin refuses a spawner without this under the isolated
+    # profile; this one applies the policy above.
+    monitor_spawn.applies_isolation = True  # type: ignore[attr-defined]
 
     async def _supervise(self, worker: Worker) -> None:
         process = worker.process

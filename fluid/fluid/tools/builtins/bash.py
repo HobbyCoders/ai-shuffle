@@ -13,7 +13,7 @@ import sys
 from typing import Any
 
 from fluid.context.settings_stack import layered_env
-from fluid.tools import agent_runner
+from fluid.tools import agent_runner, isolation
 from fluid.tools.builtins._util import _TRUNCATE_LIMIT, strip_ansi, truncate
 from fluid.tools.builtins.bash_risk import classify as classify_bash_risk
 from fluid.tools.builtins.bash_risk import session_scope as bash_session_scope
@@ -375,13 +375,25 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # os.environ itself is never changed. The inherited part is scrubbed of
     # host secrets first (see fluid.tools.child_env); settings env is a
     # deliberate hand-over and is layered on unchanged.
-    env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+    argv = [*resolve_shell().argv_prefix, command]
+    policy = isolation.policy_of(ctx)
+    if policy is None:
+        env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+    else:
+        # The opt-in isolated profile: an allowlisted environment and a
+        # kernel-confined child, or no child at all (fluid.tools.isolation).
+        try:
+            argv, cwd, env = policy.wrap(
+                argv, cwd, scrub_child_env(),
+                overlay=layered_env(ctx.extra.get("settings_env"), base={}))
+        except isolation.IsolationUnavailable as exc:
+            return ToolOutcome(text=str(exc), is_error=True)
     # Ask the child not to colourise; anything that ignores the hint gets
     # its escapes stripped from the captured output below.
     env.update(NO_COLOR="1", FORCE_COLOR="0")
     # Under Docker agent isolation the command starts through the spawn
     # runner as the agent account; otherwise all three come back unchanged.
-    argv, cwd, env = agent_runner.wrap([*resolve_shell().argv_prefix, command], cwd, env)
+    argv, cwd, env = agent_runner.wrap(argv, cwd, env)
     proc = await asyncio.create_subprocess_exec(
         *argv,
         # No stdin, as the description promises: a command that reads it

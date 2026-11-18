@@ -268,6 +268,69 @@ class InstructionFilesConfig:
         )
 
 
+SANDBOX_MODES = ("off", "isolated")
+
+
+def _path_list(d: dict[str, Any], key: str) -> tuple[str, ...]:
+    raw = d.get(key) or ()
+    if isinstance(raw, str) or not all(isinstance(item, str) and item for item in raw):
+        raise ValueError(f"[sandbox] {key} must be a list of non-empty strings")
+    return tuple(raw)
+
+
+@dataclass(frozen=True, kw_only=True)
+class SandboxConfig:
+    """The opt-in isolated execution profile, from ``[sandbox]``.
+
+    ``mode = "isolated"`` runs every model-driven child process (Bash, Monitor,
+    the code-mode kernel) under a kernel-enforced filesystem and network policy
+    (see :mod:`fluid.tools.isolation` and docs/security.md), and refuses to run
+    them when that policy cannot be enforced here. ``"off"``, the default,
+    changes nothing. ``network`` is enforced by seccomp (no new sockets of any
+    family) and, from Landlock ABI 4, by Landlock's TCP rules; when neither can
+    be applied the commands are refused, never run with the network open.
+    """
+
+    mode: str = "off"
+    network: bool = False
+    writable_roots: tuple[str, ...] = ()
+    readable_roots: tuple[str, ...] = ()
+    # Inherited variable names (a trailing * matches a prefix) passed to an
+    # isolated child on top of the built-in allowlist.
+    env_allow: tuple[str, ...] = ()
+    # Extra credential locations no granted root may contain.
+    protect: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> SandboxConfig:
+        if not isinstance(d, dict):
+            raise ValueError("[sandbox] must be a table")
+        mode = d.get("mode", "off")
+        if mode not in SANDBOX_MODES:
+            raise ValueError(f"invalid [sandbox] mode: {mode!r} (expected one of {SANDBOX_MODES})")
+        network = d.get("network", False)
+        if not isinstance(network, bool):
+            raise ValueError("[sandbox] network must be true or false")
+        return cls(
+            mode=mode,
+            network=network,
+            writable_roots=_path_list(d, "writable_roots"),
+            readable_roots=_path_list(d, "readable_roots"),
+            env_allow=_path_list(d, "env_allow"),
+            protect=_path_list(d, "protect"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "network": self.network,
+            "writable_roots": list(self.writable_roots),
+            "readable_roots": list(self.readable_roots),
+            "env_allow": list(self.env_allow),
+            "protect": list(self.protect),
+        }
+
+
 @dataclass(frozen=True, kw_only=True)
 class ToolsConfig:
     """Session tool restriction (ruling CE12), from ``[tools]``.
@@ -464,6 +527,8 @@ class HarnessConfig:
     # this very key can live), not imported context.
     setting_sources: tuple[str, ...] = SETTING_SOURCES
     tools: ToolsConfig = field(default_factory=ToolsConfig)
+    # The opt-in isolated execution profile (off by default).
+    sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     context: ContextConfig = field(default_factory=ContextConfig)
     # Shell-command hooks, user layer first then project layer (the loader
     # concatenates ``hooks`` lists instead of replacing them).
@@ -531,6 +596,7 @@ class HarnessConfig:
             instruction_files=InstructionFilesConfig.from_dict(d.get("instruction_files", {})),
             setting_sources=_setting_sources_from(d.get("setting_sources")),
             tools=ToolsConfig.from_dict(d.get("tools", {})),
+            sandbox=SandboxConfig.from_dict(d.get("sandbox") or {}),
             context=ContextConfig.from_dict(d.get("context", {})),
             hooks=tuple(HookConfig.from_dict(h) for h in d.get("hooks") or ()),
             cwd=d.get("cwd", "."),
@@ -613,6 +679,7 @@ class HarnessConfig:
                 "allowed": list(self.tools.allowed) if self.tools.allowed is not None else None,
                 "disallowed": list(self.tools.disallowed),
             },
+            "sandbox": self.sandbox.to_dict(),
             "context": {
                 "enabled": self.context.enabled,
                 "trim_only": self.context.trim_only,

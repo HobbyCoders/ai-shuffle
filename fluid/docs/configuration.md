@@ -247,6 +247,28 @@ in the file name, and one aimed at the folder itself counts once as
 spills are read
 back often are cutting too much.
 
+### `[sandbox]`
+
+The opt-in isolated execution profile for the processes Fluid starts for the
+model (Bash, Monitor, the code-mode kernel, `[[hooks]]` commands). Off by
+default; with it off nothing changes. What it guarantees on each platform,
+and what it does not, is in [security.md](security.md#isolated-execution-profile-opt-in).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mode` | `"off"` | `"isolated"` confines every model-driven child with Landlock and seccomp (Linux 5.13 or newer). When that cannot be enforced here, commands are refused with the reason; they never run unconfined. Other platforms have no backend yet and refuse. A `delegated_claude` provider is refused under the profile. |
+| `network` | `false` | `false` makes new sockets fail (seccomp, every address family) and, on Landlock ABI 4 (Linux 6.7), also denies TCP bind/connect through Landlock. `true` leaves the network fully open; there is no per-host allowlist. |
+| `writable_roots` | `[]` | Directories writable in addition to the session's working directory and its private home and temp directory. |
+| `readable_roots` | `[]` | Directories readable (and executable) in addition to the system directories and the Python installation. |
+| `env_allow` | `[]` | Inherited environment variable names passed to a confined child on top of the built-in allowlist (`PATH`, locale, terminal, user name); `NAME_*` matches a prefix. The settings `env` is always passed. |
+| `protect` | `[]` | Extra credential paths no root may contain, on top of the built-in list (`~/.ssh`, cloud CLI credentials, Fluid's token files, ...). |
+
+Only the system and user layers can set these keys. A project
+`.fluid/config.toml` may set `mode = "isolated"`; everything else it puts in
+`[sandbox]` is ignored with a warning, because a confined command can write
+that file. Invalid values (an unknown `mode`, a non-boolean `network`, a
+non-list root) fail config loading.
+
 ### `[context]`
 
 Knobs for tool-result trimming and the compaction ladder

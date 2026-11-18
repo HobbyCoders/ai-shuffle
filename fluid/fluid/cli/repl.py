@@ -840,8 +840,13 @@ class Repl:
             raw = Path(match.path).read_text(encoding="utf-8")
         except OSError:
             return None
-        # Plugin commands never run inline shell code (owner decision).
-        blocks = render_command_blocks(raw, arg, cwd=cwd, inline_bash=match.scope != "plugin")
+        # Plugin commands never run inline shell code (owner decision). Under
+        # the isolated execution profile none do: a command file can be
+        # written by a confined command, and this expansion runs unconfined.
+        from fluid.tools.isolation import policy_of
+
+        inline_bash = match.scope != "plugin" and policy_of(getattr(self.engine, "ctx", None)) is None
+        blocks = render_command_blocks(raw, arg, cwd=cwd, inline_bash=inline_bash)
         if len(blocks) <= 1:
             return blocks[0] if blocks else ""
         return [Text(b) for b in blocks]

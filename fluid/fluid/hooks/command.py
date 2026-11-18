@@ -45,6 +45,7 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
+from fluid.tools.isolation import IsolationUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +164,10 @@ class CommandHook:
     matcher: str | None = None
     timeout: float = DEFAULT_TIMEOUT
     cwd: str = "."
+    # The opt-in isolated execution profile (fluid.tools.isolation). A hook's
+    # stdin carries model-chosen tool input, and a project hook can be written
+    # by a confined command, so under the profile hooks run confined too.
+    isolation: Any = None
 
     @property
     def label(self) -> str:
@@ -185,6 +190,12 @@ class CommandHook:
         stdin = json.dumps(self.build_payload(event, payload), default=str).encode("utf-8")
         try:
             code, stdout, stderr = await self._run(stdin)
+        except IsolationUnavailable as exc:
+            # Fail closed: a gate that cannot run confined denies the tool
+            # rather than letting it through unchecked.
+            if event == PRE_TOOL_USE:
+                return HookDecision(action="deny", note=f"{self.label} not run: {exc}")
+            return HookDecision(warnings=(f"{self.label} not run: {exc}",))
         except TimeoutError:
             return HookDecision(
                 warnings=(f"{self.label} timed out after {self.timeout:g}s; continuing",)
@@ -205,8 +216,10 @@ class CommandHook:
             spawn_kwargs["start_new_session"] = True
         from fluid.tools import agent_runner
 
-        argv, cwd, env = agent_runner.wrap(
-            [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env())
+        argv, cwd, env = [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env()
+        if self.isolation is not None:
+            argv, cwd, env = self.isolation.wrap(argv, cwd, env)
+        argv, cwd, env = agent_runner.wrap(argv, cwd, env)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -382,7 +395,9 @@ def _object_line_starts(text: str) -> list[int]:
     return offsets
 
 
-def register_config_hooks(bus: Any, hooks: Iterable[Any], *, cwd: str = ".") -> list[CommandHook]:
+def register_config_hooks(
+    bus: Any, hooks: Iterable[Any], *, cwd: str = ".", isolation: Any = None,
+) -> list[CommandHook]:
     """Register every :class:`~fluid.config.model.HookConfig` on ``bus``.
 
     ``bus`` only needs an ``on(event, callback)`` method, so embedding hosts
@@ -397,6 +412,7 @@ def register_config_hooks(bus: Any, hooks: Iterable[Any], *, cwd: str = ".") -> 
             matcher=entry.matcher,
             timeout=float(entry.timeout),
             cwd=cwd,
+            isolation=isolation,
         )
         bus.on(hook.event, hook)
         registered.append(hook)
