@@ -1,6 +1,4 @@
-import { shellHistory } from '$lib/services/app-history.svelte';
 import { preferenceSync } from '$lib/services/preferences';
-import { platform } from '$lib/stores/platform.svelte';
 /**
  * Layout Store - Manages the sidebar + main panel layout state
  *
@@ -166,9 +164,6 @@ function _update(fn: (s: LayoutState) => LayoutState) {
 // Exported Store
 // ============================================
 
-/** Explicit navigations so far (see afterSidebarOverlay); a deferred one is stale once another follows. */
-let navigations = 0;
-
 export const layout = {
 	get current() {
 		return _state;
@@ -186,30 +181,8 @@ export const layout = {
 		_update((s) => ({ ...s, sidebarCollapsed: collapsed }));
 	},
 
-	/**
-	 * Navigate now, or after an open sidebar overlay closes (the next frame).
-	 * In the web UI a Back or Forward, or another explicit navigation, in
-	 * between supersedes it; a detail refining the page on screen does not.
-	 * The phone app runs it on that frame regardless, as on main.
-	 */
-	afterSidebarOverlay(navigate: () => void) {
-		const request = ++navigations;
-		if (!_state.sidebarOverlay || _state.sidebarCollapsed) return navigate();
-		const traversals = shellHistory.traversals;
-		_update((s) => ({ ...s, sidebarCollapsed: true }));
-		requestAnimationFrame(() => {
-			if (platform.isMobile || (request === navigations && traversals === shellHistory.traversals)) navigate();
-		});
-	},
-
-	/**
-	 * Navigate to a chat session. Boot reconciliation passes `reconcile`: the
-	 * view only moves where the shell history lets boot move it. `replace`
-	 * corrects the entry on screen instead of adding one (see shellHistory).
-	 */
-	openChat(sessionId: string | null, history: 'push' | 'reconcile' | 'replace' = 'push') {
-		if (history === 'push') navigations++;
-		if (!shellHistory.destination({ type: 'session', sessionId }, history)) return;
+	/** Navigate to a chat session */
+	openChat(sessionId: string | null) {
 		_update((s) => ({
 			...s,
 			activeView: { type: 'session', sessionId }
@@ -228,8 +201,6 @@ export const layout = {
 			type = 'settings';
 			itemId = target;
 		}
-		navigations++;
-		shellHistory.destination({ type });
 		_update((s) => ({
 			...s,
 			activeView: { type, sessionId: null, itemId: itemId ?? null }

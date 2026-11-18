@@ -17,7 +17,6 @@
 	import { ListFilter, Plus, Search } from 'lucide-svelte';
 	import BackRow from './BackRow.svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
-	import { platform } from '$lib/stores/platform.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { categoryById } from '$lib/settings/categories';
 	import { clampListWidth, readListWidth, showsOnePane } from '$lib/settings/list-width';
@@ -132,11 +131,8 @@
 	// the item on screen, not the selection, is what changes, so the detail's
 	// place is reset here too. Beside the list (split panes) none of this
 	// runs: the pane reset above handles a newly picked item.
-	// The web UI's Back from a detail to its list keeps the row selected (its
-	// shell-history entry names the list); the phone app's stack is main's.
-	const shownItem = $derived(platform.isMobile
-		? settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
-		: (settingsNav.stacked || replace) && settingsNav.view === 'page' ? null : openItem
+	const shownItem = $derived(
+		settingsNav.stacked ? (settingsNav.view === 'detail' ? (openItem ?? null) : null) : (openItem ?? null)
 	);
 	// Back puts the row it was opened from where it was on screen, so a list
 	// laid out again meanwhile (the phone turned) still shows that row; with
@@ -262,21 +258,11 @@
 	// The list and the detail swap in place, so focus has to move with them:
 	// into the detail's title, or back to the row it was opened from.
 	let lastOpen: string | null | undefined;
-	let wasSplit = false;
 	$effect(() => {
-		const current = platform.isMobile ? openItem ?? null : shownItem;
-		// Hiding a retained detail on resize isn't Back: a visible list
-		// control keeps its focus (and a search field keeps its caret).
-		const narrowedToList = wasSplit && !split && !current;
-		wasSplit = split;
+		const current = openItem ?? null;
 		const previous = lastOpen;
 		lastOpen = current;
-		if (previous === undefined || previous === current) return;
-		// Stacked detail openings have their own heading focus. On return to
-		// the list, restore the row just as the one-pane layout does.
-		const stacked = settingsNav.stacked;
-		if (platform.isMobile ? !untrack(() => replace) || stacked
-			: stacked ? current || settingsNav.view !== 'page' : !untrack(() => replace)) return;
+		if (!untrack(() => replace) || settingsNav.stacked || previous === undefined || previous === current) return;
 		void tick().then(() => {
 			const row = [...(el?.querySelectorAll<HTMLElement>('[data-settings-item]') ?? [])].find(
 				(item) => item.dataset.settingsItem === previous
@@ -287,7 +273,6 @@
 			// away). A control the reader moved to meanwhile keeps it.
 			const active = document.activeElement;
 			const lost = !active || active === document.body || !active.isConnected || !!pane?.contains(active);
-			if (!platform.isMobile && (stacked || narrowedToList) && !lost) return;
 			const target = current
 				? el?.querySelector<HTMLElement>('[data-settings-heading="detail"]')
 				: (row?.matches('[data-settings-nav-item]')
@@ -353,7 +338,7 @@
 	bind:this={el}
 	{onfocusin}
 	style:--st-list-width="{width}px"
-	data-replace={replace ? ((platform.isMobile ? openItem : shownItem) ? 'detail' : 'list') : undefined}
+	data-replace={replace ? (openItem ? 'detail' : 'list') : undefined}
 	data-narrow={narrow ? '' : undefined}
 >
 	<ListDivider bind:width {containerWidth} onchange={(w) => (preferred = w)} />
@@ -389,7 +374,7 @@
 			<ListEmptyScope>{@render list()}</ListEmptyScope>
 		</div>
 	</div>
-	<section class="st-dpane st-scroll" aria-label="Details" hidden={!platform.isMobile && replace && !!openItem && !shownItem} bind:this={pane} onscroll={onPaneScroll}>
+	<section class="st-dpane st-scroll" aria-label="Details" bind:this={pane} onscroll={onPaneScroll}>
 		<!-- A detail that is only a state ("Not found", "Loading…", no access)
 		     has no Back of its own. Where it replaces the list, this one shows
 		     (settings.css); everywhere else it is not displayed. -->

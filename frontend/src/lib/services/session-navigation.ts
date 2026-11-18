@@ -8,7 +8,6 @@ import type { Session } from '$lib/api/client';
 import { pushState, replaceState } from '$app/navigation';
 import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 import { page } from '$app/state';
-import { platform } from '$lib/stores/platform.svelte';
 import { get } from 'svelte/store';
 
 /** A same-origin deep link whose fallback stays in the current desktop or phone UI. */
@@ -59,7 +58,12 @@ export function openSession(sessionId: string, openedSession?: Session, { reopen
 		else activeSession.switchSession(...place);
 		layout.openChat(sessionId);
 	};
-	layout.afterSidebarOverlay(select);
+	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {
+		layout.setSidebarCollapsed(true);
+		requestAnimationFrame(select);
+	} else {
+		select();
+	}
 }
 
 /** Open a Task or Swarm child's transcript, known to be a subagent's chat before /live answers. */
@@ -90,8 +94,6 @@ function takeDrawerWait(): ((gaveUp?: boolean) => void) | null {
 
 /** Make a chat link one Back step: mark the current entry with the chat being left, then push the target. */
 function pushChatHistory(sessionId: string): void {
-	// The web UI's shell history records every view change, chat picks included.
-	if (!platform.isMobile) return;
 	const from = get(activeSession).sessionId;
 	if (!from || from === sessionId) return;
 	const push = (gaveUp = false) => {

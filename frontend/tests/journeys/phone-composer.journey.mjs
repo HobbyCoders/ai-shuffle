@@ -14,8 +14,6 @@
 //   new-chat-needs-agent tap Send with no agent: told why, text kept; pick one, send
 //   controls-pages       Chat controls: Project page fills the sheet; pick and remove
 //                        a project, then Runs on and back never shift the pages sideways
-//   controls-through-boot Chat controls opened and an agent picked while boot still
-//                        loads: the sheet stays open once boot reconciles, Back closes it
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	PROJECT,
@@ -23,7 +21,6 @@ import {
 	countUserRows,
 	expect,
 	gotoApp,
-	holdBootLoad,
 	openNewChat,
 	pickAgent,
 	seededChatId,
@@ -36,18 +33,8 @@ import {
 	withoutSavedAgentPick
 } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
-import { waitForBootReconciled } from './lib/boot.mjs';
 
 const PHONE_SIZES = ['phone', 'fold-cover'];
-
-/** Hold one of boot's first loads, so boot has not reconciled the view yet. */
-async function holdBoot({ page, status }) {
-	await holdBootLoad(page, '/api/v1/tags', 60_000, { releaseOnSignal: true });
-	await gotoApp(page, status);
-	await waitChat(page, { surface: 'new' });
-	expect(!(await page.evaluate(() => performance.getEntriesByName('shuffle:boot.reconciled').length > 0)), 'boot is still loading');
-}
-
 const INPUT = 'Chat input with file drop';
 
 /** The composer's box and its round buttons' geometry. */
@@ -418,40 +405,6 @@ await runJourney({
 				state = await controlsPages(page);
 				expectPagesInPlace(state, 'Project page after removing the project');
 				expectMenuFillsPage(state, 'Project page after removing the project');
-			}
-		},
-		{
-			// The composer works while the boot's first loads run, and boot then
-			// rewrites the arrival entry's place. Hold one of those loads so the
-			// sheet opens, and an agent is picked in it, before that.
-			name: 'controls-through-boot',
-			setup: holdBoot,
-			async act({ page, mark }) {
-				const dialog = page.getByRole('dialog', { name: 'Chat controls' });
-				const reconciled = () => page.evaluate(() => performance.getEntriesByName('shuffle:boot.reconciled').length > 0);
-				const hero = page.getByRole('region', { name: 'New chat' });
-
-				await mark('open Chat controls during boot');
-				await page.getByRole('button', { name: /^Chat context:/ }).tap();
-				await dialog.waitFor({ timeout: 5000 });
-				await mark('pick an agent during boot');
-				await hero.getByRole('button', { name: /^Agent:/ }).tap();
-				await page.getByRole('menu', { name: 'Agent selection' }).getByRole('button', { name: 'Dev agent', exact: true }).tap();
-				await hero.getByRole('button', { name: 'Agent: Dev agent' }).waitFor({ timeout: 5000 });
-				expect(!(await reconciled()), 'the pick happened before boot reconciled');
-				await mark('boot reconciles');
-				await page.evaluate(() => window.__journeyBootHold.release());
-				await waitForBootReconciled(page, { timeout: 10_000 });
-				// The bug: a boot history write dropped the sheet's state, which read as Back.
-				await page.waitForTimeout(500);
-				expect(await dialog.isVisible(), 'Chat controls stays open after boot reconciles');
-				expect(await hero.getByRole('button', { name: 'Agent: Dev agent' }).isVisible(), 'the picked agent shows');
-
-				await mark('Back closes Chat controls');
-				await page.goBack();
-				await dialog.waitFor({ state: 'hidden', timeout: 5000 });
-				expect(!page.url().startsWith('about:'), `Back stays in the app (${page.url()})`);
-				await waitChat(page, { surface: 'new' }, { timeout: 5000 });
 			}
 		}
 	],

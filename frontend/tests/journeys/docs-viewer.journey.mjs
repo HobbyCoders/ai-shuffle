@@ -1,11 +1,13 @@
 // Docs viewer (#1475, #1476, #1478, #1554, #1581): "On this page" is there on
 // every open and reaches a repeated heading by its own anchor; a reload reopens
-// the document and its browser Back/Forward chain; every search
+// the document; in the web UI each article picked is a browser Back step
+// (#1477) that a reload keeps, while the phone app keeps main's one detail
+// stop; every search
 // result opened marks and shows its match, a whole word before letters inside
 // another word; and a page holding the query's words together ranks first in
 // the Docs panel and in Spotlight, whose rows read as text, not Markdown.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, reloadForHistory, settleServiceWorker } from './lib/app.mjs';
+import { expect, gotoApp, settleServiceWorker } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const workspace = (page) => page.getByRole('navigation', { name: 'Workspace', exact: true });
@@ -156,15 +158,10 @@ await runJourney({
 		},
 		async act({ page, mark }) {
 			const before = await page.evaluate(() => history.length);
-			await mark('choose Start Here, which the Docs entry already shows');
+			await mark('choose Start Here, which Docs already shows');
 			await docsList(page).getByText('Start Here', { exact: true }).click();
 			await waitTitle(page, 'AI Shuffle documentation');
 			expect(await page.evaluate(() => history.length) === before, 'choosing the shown default adds no history entry');
-			await mark('Back leaves Docs');
-			await page.goBack();
-			// Docs stays docked but hidden; the page before it (the new chat) is back.
-			await page.locator('[data-view-shell="Docs"]').waitFor({ state: 'hidden' });
-			await page.getByRole('region', { name: 'New chat' }).waitFor();
 		}
 	}, {
 		name: 'desktop-article-history-and-reload',
@@ -178,27 +175,30 @@ await runJourney({
 		},
 		async act({ page, mark }) {
 			const length = await page.evaluate(() => history.length);
-			await mark('each article adds a visible Back step');
+			await mark('each article adds a Back step');
 			for (const [name, title] of [['Updates', 'Updates'], ['FAQ', 'Frequently asked questions'], ['Changelog', 'Changelog']]) {
 				await docsList(page).getByText(name, { exact: true }).click();
 				await waitTitle(page, title);
 			}
 			const after = await page.evaluate(() => history.length);
 			expect(after === length + 3, `three article steps (${length} before, ${after} after)`);
-			await mark('a reload reopens the open document');
+			await mark('Back shows the previous article');
+			await page.goBack(); await waitTitle(page, 'Frequently asked questions');
+			await mark('a reload reopens the article of the entry it is on');
 			// As settings-reload does: the new document's first paint ends this step,
 			// so the app shell coming back once it hydrates is the next step's change.
 			await page.reload({ waitUntil: 'domcontentloaded' });
 			await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
-			await mark('the reloaded page reopens the Changelog');
-			await waitTitle(page, 'Changelog', 30_000);
-			expect(await page.evaluate(() => history.length) === after, 'reload adds no entry');
-			await mark('Back and Forward still reach adjacent articles');
-			await page.goBack(); await waitTitle(page, 'Frequently asked questions');
+			await mark('the reloaded page reopens the FAQ');
+			await waitTitle(page, 'Frequently asked questions', 30_000);
+			expect(await page.evaluate(() => history.length) === after, 'the reload adds no entry');
+			await mark('Back and Forward still reach the adjacent articles');
+			await page.goBack(); await waitTitle(page, 'Updates');
+			await page.goForward(); await waitTitle(page, 'Frequently asked questions');
 			await page.goForward(); await waitTitle(page, 'Changelog');
 		}
 	}, {
-		name: 'sections-and-articles',
+		name: 'article-link-back',
 		viewports: ['desktop', 'phone'],
 		async setup({ page, status, variant }) {
 			if (variant.viewport === 'phone' && process.argv.includes('--mobile-shell')) {
@@ -210,9 +210,17 @@ await runJourney({
 			await waitTitle(page, 'Changelog');
 		},
 		async act({ page, mark }) {
-			await mark('follow an article link; one Back returns to the source article');
+			const native = new URL(page.url()).pathname.startsWith('/mobile/');
+			await mark('follow an article link');
 			await page.locator('.docs-content a[href$="/updates"]').first().click();
 			await waitTitle(page, 'Updates');
+			if (native) {
+				// The phone app keeps main's single detail stop: Back shows the list.
+				await mark('phone app: Back shows the list');
+				await page.goBack();
+				await page.locator('[data-view-shell="Docs"][data-pane="panel"]').waitFor({ timeout: 5000 });
+				return;
+			}
 			// Back and Forward restore the article; only an explicit selection resets the pane
 			// to its top. Both articles are long, so a kept offset cannot clamp to 0.
 			const pane = page.locator('.view-main-slot:has(.docs-content)');
@@ -222,41 +230,52 @@ await runJourney({
 			};
 			await pane.evaluate((el) => el.scrollTo({ top: 600 }));
 			expect(await settledTop() > 0, 'Updates was scrolled');
+			await mark('Back returns to the source article, Forward to the linked one');
 			await page.goBack(); await waitTitle(page, 'Changelog');
 			const back = await settledTop();
 			expect(back > 0, `Back does not reset the pane to its top (scrollTop=${back})`);
 			await page.goForward(); await waitTitle(page, 'Updates');
 			const forward = await settledTop();
 			expect(forward > 0, `Forward does not reset the pane to its top (scrollTop=${forward})`);
-			await mark('leave the article for Settings and Providers');
-			const menu = page.getByRole('button', { name: /^Open menu/ });
-			if (await menu.isVisible()) await menu.click();
-			else if (new URL(page.url()).pathname.startsWith('/mobile/')) {
-				// The detail Back row replaces the menu button. Swipe the drawer open.
-				const cdp = await page.context().newCDPSession(page);
-				for (const [type, x] of [['touchStart', 12], ['touchMove', 45], ['touchMove', 245], ['touchEnd', 0]]) {
-					await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: x ? [{ x, y: 350 }] : [] });
-				}
-				await cdp.detach();
-				await workspace(page).waitFor();
-			} else if (!await workspace(page).isVisible()) {
-				// A narrow desktop browser can widen without creating a history entry.
-				await page.setViewportSize({ width: 1200, height: 900 });
-			}
-			await openDestination(page, 'Settings');
-			const index = page.getByRole('navigation', { name: 'Settings', exact: true });
-			await index.getByRole('button', { name: 'Providers', exact: true }).click();
-			const heading = page.getByRole('heading', { name: 'Providers', exact: true }).first();
-			await heading.waitFor();
-			await page.goBack(); await index.waitFor();
-			await page.goBack(); await waitTitle(page, 'Updates');
-			const length = await page.evaluate(() => history.length);
-			await mark('reload the article mid-chain without dropping Forward');
-			await reloadForHistory(page, mark);
-			await waitTitle(page, 'Updates', 30000);
-			expect(await page.evaluate(() => history.length) === length, 'reload leaves stack length unchanged');
-			await page.goForward(); await index.waitFor();
-			await page.goForward(); await heading.waitFor();
+		}
+	}, {
+		// A desktop window resized across 600px: Notes' narrow detail stop (main's
+		// ViewShell entry) is live when the reader returns to Docs, whose article
+		// entry is under it. Docs never waits on that stop and never copies its marker.
+		name: 'docs-across-a-panel-detail-stop-and-resizes',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await page.setViewportSize({ width: 500, height: 900 });
+			await gotoApp(page, status);
+			await openDestination(page, 'Docs');
+			await docsList(page).getByText('Changelog', { exact: true }).click();
+			await waitTitle(page, 'Changelog');
+		},
+		async act({ page, mark }) {
+			const marker = () => page.evaluate(() => String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'));
+			await mark('widen with the article open, then open a note at 500px: Notes pushes its own stop');
+			await page.setViewportSize({ width: 1200, height: 900 });
+			await waitTitle(page, 'Changelog');
+			await workspace(page).waitFor();
+			await openDestination(page, 'Notes');
+			await page.setViewportSize({ width: 500, height: 900 });
+			await page.getByRole('button', { name: 'New note', exact: true }).first().click();
+			await page.locator('[data-view-shell="Notes"][data-pane="detail"]').waitFor();
+			expect(await marker(), 'Notes’ detail stop is on top');
+			await mark('widen and return to Docs: Notes retires its stop; Docs still shows the article');
+			await page.setViewportSize({ width: 1200, height: 900 });
+			// Let the docked sidebar return first, or the helper opens it through Chats.
+			await workspace(page).waitFor();
+			await openDestination(page, 'Docs');
+			await waitTitle(page, 'Changelog');
+			await page.waitForFunction(() => !String(history.state?.['sveltekit:metadata']?.state ?? '').includes('viewPanelDetail'));
+			await mark('narrow again: Back steps inside Docs to the list, Forward to the article');
+			await page.setViewportSize({ width: 500, height: 900 });
+			await waitTitle(page, 'Changelog');
+			await page.goBack();
+			await page.locator('[data-view-shell="Docs"][data-pane="panel"]').waitFor({ timeout: 5000 });
+			await page.goForward(); await waitTitle(page, 'Changelog');
+			expect(!(await marker()), 'no Notes marker on the Docs entry');
 		}
 	}, {
 		name: 'desktop-repeated-search',

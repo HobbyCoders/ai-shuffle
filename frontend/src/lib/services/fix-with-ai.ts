@@ -50,7 +50,12 @@ export function startFixChat(err: FixWithAiError): void {
 	activeSession.newChat();
 	activeSession.setDraft(prompt);
 
-	// On an overlay sidebar, collapse it first, then open the chat on the next
-	// frame so the layout settles (unless a newer navigation came first).
-	layout.afterSidebarOverlay(() => layout.openChat(null));
+	// Match +page.svelte: on an overlay sidebar, collapse it first, then open
+	// the chat on the next frame so the layout settles.
+	if (layout.current.sidebarOverlay && !layout.current.sidebarCollapsed) {
+		layout.setSidebarCollapsed(true);
+		requestAnimationFrame(() => layout.openChat(null));
+	} else {
+		layout.openChat(null);
+	}
 }

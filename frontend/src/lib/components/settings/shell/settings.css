@@ -151,15 +151,15 @@
  * A master/detail page with nothing selected: no empty third pane. The list
  * takes the page's centred column until something opens.
  */
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) {
 	grid-template-columns: minmax(0, 1fr);
 	justify-items: start;
 }
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-divider,
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-dpane {
 	display: none;
 }
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol {
 	width: min(100%, calc(var(--st-reading-width) + 2 * var(--st-gutter)));
 	margin-left: var(--st-frame-inset);
 	border-right: 0;
@@ -167,13 +167,13 @@
 }
 /* One column at the shared frame's left edge: heading, filter and rows share
    its one left edge, the same x as every other page title. */
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lhead {
 	padding-inline: 16px;
 }
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-page-title {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-page-title {
 	padding-left: 0;
 }
-.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane[hidden], > .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
+.settings-shell:not([data-stacked]) .st-coll:has(> .st-dpane > .st-empty-detail[data-idle]) > .st-lcol .st-lscroll {
 	padding-inline: 16px;
 }
 

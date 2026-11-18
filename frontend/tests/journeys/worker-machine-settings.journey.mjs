@@ -105,22 +105,6 @@ await runJourney({
 			await page.goBack();
 			await page.waitForFunction(() => document.querySelector('div.settings-shell[data-view]')?.getAttribute('data-view') === 'index');
 			expect(await page.getByRole('combobox', { name: 'Search settings' }).isVisible(), 'Back shows the index');
-			// Each destination and selection is its own browser entry: Back retraces
-			// the visits from setup, newest first, before it leaves the app.
-			await mark('Back restores the automation the link was followed from');
-			await page.goBack();
-			await page.getByRole('button', { name: 'Open Claude settings', exact: true }).waitFor();
-			await mark('Back restores the Automations list');
-			await page.goBack();
-			await page.getByPlaceholder('Search automations').waitFor();
-			expect(await page.getByRole('button', { name: 'Open Claude settings', exact: true }).count() === 0, 'Back closes the automation');
-			await mark('Back restores the Settings index visited before Automations');
-			await page.goBack();
-			await page.waitForFunction(() => document.querySelector('div.settings-shell[data-view]')?.getAttribute('data-view') === 'index');
-			expect(await page.getByRole('combobox', { name: 'Search settings' }).isVisible(), 'Back shows the earlier index');
-			await mark('Back restores the chat the journey started in');
-			await page.goBack();
-			await page.locator('[data-ui-state="chat"]').waitFor();
 		},
 		async verify({ page, variant }) {
 			if (variant.viewport !== 'phone') return;

@@ -1,6 +1,8 @@
 <script lang="ts">
- import { untrack } from 'svelte';
- import { shellHistory } from '$lib/services/app-history.svelte';
+ import { getContext, onMount, untrack } from 'svelte';
+ import { goto } from '$app/navigation';
+ import { page } from '$app/state';
+ import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
  import { layout } from '$lib/stores/layout.svelte';
  import { platform } from '$lib/stores/platform.svelte';
  import { ViewShell, ViewPanel, DetailPane, ListItem, ListGroupLabel, EmptyDetail } from '$lib/components/layout/view';
@@ -29,29 +31,45 @@
  // From the Markdown itself, with the renderer's anchors: present on the first
  // paint and on every reopen of the same document (#1476).
  const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
+ // The tab remembers the open document, so a reload reopens it where list and
+ // document show side by side. A phone opens on the list, as before, because
+ // opening the stacked detail on load would add ViewShell's Back entry on top
+ // of the one the reloaded page already stands on. (In the web UI a reload on
+ // an article's own entry reopens it at any width: see below.)
+ const OPEN_KEY = 'docs.open';
+ function remember(doc: string) {
+  try { sessionStorage.setItem(OPEN_KEY, doc); } catch { /* Storage blocked: a reload starts over. */ }
+ }
  function known(fullSlug: string): [string, string] | null {
   const [cat, slug] = fullSlug.split('/');
   return cat && slug && getDocBySlug(cat, slug) ? [cat, slug] : null;
  }
- // The base Docs entry is the index on a phone, Start Here on desktop.
- $effect(() => {
-  const place = shellHistory.place;
-  if (place && place.type !== 'docs') return;
-  const fullSlug = place?.doc ?? '';
-  untrack(() => {
-   if (initialItemId) return;
-   const target = known(fullSlug) ?? (!mobile && !platform.isMobile && window.innerWidth > 600
-    ? [categories[0].id, docsByCategory[categories[0].id][0].slug] : null);
-   if (!target) { activeSlug = ''; detailOpen = false; find = null; }
-   else if (activeCategory !== target[0] || activeSlug !== target[1]) display(target[0], target[1]);
-  });
+ function lastOpen(): [string, string] | null {
+  try { return known(sessionStorage.getItem(OPEN_KEY) ?? ''); } catch { return null; }
+ }
+ // Browser history, in the web UI only (#1477). Each article picked inside Docs
+ // is an entry of Docs' own: the state under it plus `docsArticle`. Docs writes
+ // nothing else, never waits on another writer, and reads only that key, only
+ // while it is on screen. The phone app keeps ViewShell's detail entry (main).
+ const ownHistory = $derived(!mobile && !platform.isMobile);
+ type DocsState = App.PageState & { docsArticle?: string; viewPanelDetail?: string };
+ const entryArticle = () => (page.state as DocsState | undefined)?.docsArticle;
+ const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
+ const onScreen = $derived(feature?.active ?? true);
+ // What a keyless entry under Docs' first step showed: Back to it shows that again.
+ let base: [string, string] | null = null;
+ onMount(() => {
+  if (activeSlug || initialItemId || !ownHistory) return;
+  // A reload on an article's own entry reopens that article, at any width.
+  const saved = known(entryArticle() ?? '');
+  if (saved) return display(saved[0], saved[1]);
+  if (window.innerWidth <= 600) return;
+  const [category, slug] = lastOpen() ?? [activeCategory, docsByCategory[activeCategory]?.[0]?.slug];
+  if (slug) selectDoc(category, slug, '', false);
  });
- function selectDoc(category: string, slug: string, query = '') {
-  // Every explicit pick reaches the history: it skips the entry it is already on,
-  // including the base entry while it shows this article (never while it shows the index).
-  const onBase = !shellHistory.place?.doc && detailOpen && activeCategory === category && activeSlug === slug;
-  shellHistory.detail('docs', { doc: onBase ? undefined : `${category}/${slug}` });
-  // Only an explicit selection opens at the top; Back and Forward keep the pane.
+ /** An explicit selection: it opens at the top, and in the web UI it is a step when `record`. */
+ function selectDoc(category: string, slug: string, query = '', record = true) {
+  if (record && ownHistory) step(`${category}/${slug}`);
   const key = ++selections;
   selectionKey = key;
   display(category, slug, query ? { query, key } : null);
@@ -62,26 +80,68 @@
   tocOpen = false;
   detailOpen = true;
   find = search;
+  remember(`${category}/${slug}`);
  }
- function backToList() {
-  if (shellHistory.place?.doc) window.history.back();
-  else detailOpen = false;
+ function step(article: string) {
+  const current = entryArticle();
+  // The article on screen, on an entry naming it or naming none (the default a
+  // wide Docs opens on): choosing it again is no step. On an entry naming
+  // another article (one a link showed in place), choosing it is a step.
+  if (detailOpen && `${activeCategory}/${activeSlug}` === article && (current ?? article) === article) return;
+  if (current === undefined) base = detailOpen && activeSlug ? [activeCategory, activeSlug] : null;
+  seen = article;
+  // A panel's Back-stop marker is that panel's alone: never copied onto Docs' entry.
+  const { viewPanelDetail: _stop, ...under } = (page.state ?? {}) as DocsState;
+  // persistState: a reload on this entry still names the article (main's pushState does not persist).
+  goto(location.href, { shallow: true, persistState: true, state: { ...under, docsArticle: article } as App.PageState })
+   .catch(() => { seen = entryArticle(); /* Router not ready: the article shows on the entry it is on. */ });
  }
- function handleSearchResult(fullSlug: string, query = '') {
-  const target = known(fullSlug);
-  if (target) selectDoc(target[0], target[1], query);
- }
+ // Back/Forward while Docs is on screen: show the article the entry names, or
+ // what the entry under Docs' first step showed. Off screen, a change is only noted.
+ let seen = untrack(entryArticle);
  $effect(() => {
-  if (!initialItemId) { consumedItemId = null; return; }
-  if (initialItemId !== consumedItemId) {
-   consumedItemId = initialItemId;
-   handleSearchResult(initialItemId);
+  const article = entryArticle();
+  const on = onScreen;
+  untrack(() => {
+   if (!ownHistory || article === seen) return;
+   seen = article;
+   if (!on) return;
+   const target = known(article ?? '') ?? base;
+   if (target) display(target[0], target[1]);
+   else { activeSlug = ''; detailOpen = false; find = null; remember(''); }
+  });
+ });
+ function backToList() {
+  // On an article's entry, Back to Docs is the browser's Back.
+  if (ownHistory && detailOpen && entryArticle() === `${activeCategory}/${activeSlug}`) {
+   history.back();
+   return;
+  }
+  detailOpen = false;
+  remember('');
+ }
+ function handleSearchResult(fullSlug: string, query = '', record = true) {
+  const target = known(fullSlug);
+  if (target) selectDoc(target[0], target[1], query, record);
+ }
+ // A link to an article: from inside Docs (one article to another) it is a step;
+ // arriving from elsewhere it shows the article on the entry already there.
+ let wasOnScreen = false;
+ $effect(() => {
+  const item = initialItemId;
+  const on = onScreen;
+  const linkedInDocs = wasOnScreen && on;
+  wasOnScreen = on;
+  if (!item) { consumedItemId = null; return; }
+  if (item !== consumedItemId) {
+   consumedItemId = item;
+   untrack(() => handleSearchResult(item, '', linkedInDocs));
    layout.clearFeatureItemId();
   }
  });
 </script>
-<!-- The web UI's shell history records each article (above); the phone app keeps ViewShell's own detail entry. -->
-<ViewShell label="Docs" manageHistory={platform.isMobile} {detailOpen} detailKey={selectionKey} onBack={backToList}>
+<!-- The web UI records articles above; the phone app keeps ViewShell's own detail entry (main). -->
+<ViewShell label="Docs" manageHistory={!ownHistory} {detailOpen} detailKey={selectionKey} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}

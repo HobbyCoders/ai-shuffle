@@ -4,8 +4,7 @@
  * warning shown and acknowledged before saving or turning it on, secrets
  * never shown back, and removing it deletes what was stored.
  */
-import { afterEach, beforeEach, expect, it, onTestFinished, vi } from 'vitest';
-import { platform } from '$lib/stores/platform.svelte';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 
 const mocks = vi.hoisted(() => ({ hydrate: vi.fn(), checkAuth: vi.fn() }));
@@ -128,8 +127,7 @@ it('picking Cloud opens the setup with the warning instead of switching the mode
 	expect(screen.getByRole('button', { name: 'Save and use for Claude' })).toHaveProperty('disabled', true);
 });
 
-it.each(['phone app', 'narrow web UI'])('saves a gateway, then Back recovers the removed setup draft to the list (%s)', async (mode) => {
-	if (mode === 'phone app') { platform.set('mobile'); onTestFinished(() => platform.set('desktop')); }
+it('saves a gateway, then phone Back recovers the removed setup draft to the list', async () => {
 	await show();
 	settingsNav.stacked = true;
 	await fireEvent.click(within(modes()).getByRole('button', { name: 'Cloud' }));
@@ -166,9 +164,7 @@ it.each(['phone app', 'narrow web UI'])('saves a gateway, then Back recovers the
 	expect(document.body.textContent).not.toContain(TOKEN);
 	expect(mocks.hydrate).toHaveBeenCalled();
 	expect(providerDrafts.get(setupItem)).toBeUndefined();
-	// The phone app follows its own Settings entries; the web UI follows its shell-history place.
-	if (mode === 'phone app') settingsNav.followHistory({ settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: setupItem });
-	else settingsNav.follow({ view: 'detail', depth: 2, category: 'providers', item: setupItem, tab: null });
+	settingsNav.followHistory({ settingsView: 'detail', settingsDepth: 2, settingsCategory: 'providers', settingsItem: setupItem });
 	await waitFor(() => expect(settingsNav.view).toBe('page'));
 	expect(settingsNav.selectedItem('providers')).toBeNull();
 	expect(screen.getByRole('group', { name: 'Claude' })).toBeTruthy();

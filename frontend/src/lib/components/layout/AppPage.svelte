@@ -31,15 +31,14 @@
 	import { appMode } from '$lib/stores/sessionMode.svelte';
 	import { recoveringOpening, keepOpening, finishOpening, pendingOpening } from '$lib/stores/session/worktree-opening';
 	import { hasComposerDraft } from '$lib/stores/session/composer-suggestion';
-	import { savedPlace, shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 	import { followChatHistory, openSession as handleOpenSession, openSessionFromList } from '$lib/services/session-navigation';
 	import { appData, profiles, projects, sessions, sessionsTagFilter } from '$lib/stores/app-data.svelte';
 
-	import { layout, activeView } from '$lib/stores/layout.svelte';
+	import { layout, activeView, sidebarCollapsed, sidebarOverlay } from '$lib/stores/layout.svelte';
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
-	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim, tabRestoreTarget } from '$lib/stores/session/session-init';
+	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
 	import { NOT_HANDLED, registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { PROJECT_PICKER_SHORTCUT, isProjectPickerKey, openProjectPicker } from '$lib/services/project-picker';
 	import { isMessageEditorKey } from '$lib/services/message-editor-key';
@@ -62,7 +61,6 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { pendingDeepLink, deepLinkSessionId as deepLinkSessionIdFrom } from '$lib/stores/pending-deep-link';
-	import { unavailableChat } from '$lib/stores/unavailable-chat';
 
 	interface Props {
 		/** Renders the app shell (sidebar/top bar chrome) around MainPanel. */
@@ -107,9 +105,7 @@
 		// authenticated adoption rejects receipts from before the navigation.
 		const follow = createdChatToFollow($activeView, $activeSession?.sessionId ?? null);
 		if (!bootReconciled && !hasBootSendClaim(getInitGeneration())) return;
-		// Adopting the created chat's id corrects New Chat's entry; it is not a
-		// navigation, so a sidebar pick waiting for its frame still goes ahead.
-		if (follow) layout.openChat(follow, 'replace');
+		if (follow) layout.openChat(follow);
 	});
 	// Back/Forward onto a chat link's history entry (breadcrumb, transcript
 	// link) reopens that chat. The first run is the page's initial state, not a step.
@@ -123,51 +119,16 @@
 		}
 		untrack(() => followChatHistory(state));
 	});
-	function showEntry() {
-		const place = shellHistory.place;
-		if (!place) return;
-		if (place.type === 'session') {
-			if ($activeView?.type === 'session' && $activeView.sessionId === place.sessionId) return;
-			if (place.sessionId) handleOpenSession(place.sessionId);
-			else handleNewSession();
-		} else if ($activeView?.type !== place.type) layout.openFeaturePage(place.type);
-	}
-	$effect(() => {
-		const state = page.state as ShellState;
-		// Show it after this effect run, as a click would: a view torn down by a
-		// change made inside an effect run reads its props' new values in its
-		// teardown (Forward from a chat to Notes: ChatAccess read a null chat).
-		untrack(() => { if (shellHistory.land(state)) queueMicrotask(showEntry); });
-	});
-	// A fresh load's landing names the chat this tab shows (loading or not):
-	// its own restored chat may not be the one in the layout snapshot other
-	// tabs share. Before init binds one, what shows is not known yet.
-	$effect(() => {
-		const { sessionId, isRestoringSession } = $activeSession;
-		if (sessionId || (!isRestoringSession && !$pendingDeepLink)) untrack(() => shellHistory.shows(sessionId ?? null));
-	});
-	// A chat on screen the server would not serve (deleted, or not this
-	// viewer's) left for New Chat. The view and its entry follow, even after
-	// boot, so that New Chat's first send is the chat a reload reopens.
-	$effect(() => {
-		const gone = $unavailableChat?.sessionId;
-		if (!gone || $activeSession.sessionId) return;
-		untrack(() => {
-			if ($activeView?.type === 'session' && $activeView.sessionId === gone && shellHistory.unavailable(gone)) layout.openChat(null, 'replace');
-		});
-	});
-	onDestroy(() => shellHistory.stop());
-	function dropSessionLink() {
-		const url = new URL(window.location.href);
-		if (!url.searchParams.has('session')) return;
-		url.searchParams.delete('session');
-		history.replaceState(history.state, '', url.pathname + url.search + url.hash);
-	}
 	function handleNewSession() {
 		navigationClaimed = true;
 		activeSession.newChat();
 
-		layout.afterSidebarOverlay(() => layout.openChat(null));
+		if ($sidebarOverlay && !$sidebarCollapsed) {
+			layout.setSidebarCollapsed(true);
+			requestAnimationFrame(() => layout.openChat(null));
+		} else {
+			layout.openChat(null);
+		}
 	}
 
 	/**
@@ -195,7 +156,14 @@
 			return;
 		}
 
-		layout.afterSidebarOverlay(() => layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId));
+		if ($sidebarOverlay && !$sidebarCollapsed) {
+			layout.setSidebarCollapsed(true);
+			requestAnimationFrame(() => {
+				layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
+			});
+		} else {
+			layout.openFeaturePage(type as Exclude<ViewType, 'session'>, itemId);
+		}
 	}
 
 
@@ -245,24 +213,11 @@
 
 		// Read a deep link before anything awaits: the chat surface shows its
 		// loading state until the linked session opens below, instead of the
-		// New Chat hero for the length of init and the first loads. A
-		// notification link always loads a fresh entry. An entry with a saved
-		// place was already shown: a link left on its address was read then.
-		const saved = savedPlace(page.state as ShellState);
-		if (saved) dropSessionLink();
-		// The saved place is shown from the first frame, before any load can
-		// hold it back. Its chat binds like a link unless this tab's own saved
-		// chat, which init restores, is that chat.
-		const savedChat = saved?.type === 'session' ? saved.sessionId ?? null : null;
-		const deepLinkSessionId = !saved ? deepLinkSessionIdFrom(window.location.search)
-			: savedChat !== tabRestoreTarget()?.sessionId ? savedChat : null;
+		// New Chat hero for the length of init and the first loads.
+		const deepLinkSessionId = deepLinkSessionIdFrom(window.location.search);
 		const note = pendingOpening();
 		const opening = !deepLinkSessionId && note?.generation === getInitGeneration() ? note : null;
 		if (!opening) recoveringOpening.set(null);
-		if (saved && !deepLinkSessionId) {
-			if (saved.type === 'session') layout.openChat(savedChat);
-			else layout.openFeaturePage(saved.type);
-		}
 		if (deepLinkSessionId) {
 			pendingDeepLink.set(deepLinkSessionId);
 			// Never a permanent spinner: if boot fails before the open, let go.
@@ -271,9 +226,6 @@
 			// last visit (often another chat) must not render meanwhile.
 			layout.openChat(deepLinkSessionId);
 		}
-		// Back, Forward and clicks already work while boot loads. A saved entry
-		// keeps its place; boot's reconcile only moves a fresh load's landing.
-		shellHistory.start(page.state, $activeView);
 
 		// The project catalog loads alongside init: a new chat's remembered
 		// project and branch resolve against it, and the composer holds a send
@@ -352,17 +304,17 @@
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
-				layout.openChat(restoredSessionId, 'reconcile');
+				layout.openChat(restoredSessionId);
 			} else if (hasDraft || changedDuringLoads || hasBootProjectPick(initGeneration)) {
 				// Do not clear a surviving draft, a first send still creating its
 				// chat, or a project picked on the new-session screen during the
 				// loads (#930), just because the layout snapshot is absent.
-				layout.openChat(null, 'reconcile');
+				layout.openChat(null);
 			} else {
 				// This is the initial landing, not a user navigation. Keep a phone
 				// drawer or header popover opened during the loads (#975, #1188).
 				activeSession.newChat({ initialLanding: true });
-				layout.openChat(null, 'reconcile');
+				layout.openChat(null);
 			}
 		} else if ($activeView.type === 'session' && currentViewSessionId === null && (restoredSessionId || layoutNewChatWon)) {
 			// Layout says "new chat" but backend has a session — the user explicitly
@@ -375,12 +327,11 @@
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			followRestoredLane();
-			layout.openChat(restoredSessionId, 'reconcile');
+			layout.openChat(restoredSessionId);
 		} else {
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
-		if (!deepLinkSessionId && !navigationClaimed) showEntry();
 		bootReconciled = true;
 		performance.mark?.('shuffle:boot.reconciled');
 		finishBootReconciliation(initGeneration);
@@ -401,7 +352,9 @@
 			if (!navigationClaimed && $activeSession.sessionId === deepLinkSessionId) {
 				handleOpenSession(deepLinkSessionId, undefined, { reopen: true });
 			}
-			dropSessionLink();
+			const url = new URL(window.location.href);
+			url.searchParams.delete('session');
+			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 			// The open has bound the session (or will on the next frame when the
 			// sidebar overlay closes first); its own loading state takes over.
 			requestAnimationFrame(() => pendingDeepLink.set(null));

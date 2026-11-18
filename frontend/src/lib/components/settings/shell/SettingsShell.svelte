@@ -24,7 +24,6 @@
 	 */
 	import { getContext, onDestroy, tick, untrack } from 'svelte';
 	import { page } from '$app/state';
-	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
@@ -90,8 +89,6 @@
 	let stackStarted = false;
 	$effect(() => {
 		const s = stacked;
-		// The phone app keeps its own Settings entries; the web UI's shell history is below.
-		if (!platform.isMobile) return;
 		untrack(() => {
 			settingsNav.stacked = s;
 			if (s && !stackStarted) {
@@ -107,30 +104,13 @@
 		});
 	});
 
-	// The web UI: Settings shows its shell-history entry; a first visit records its place.
-	$effect(() => {
-		if (platform.isMobile) return;
-		const place = shellHistory.place;
-		const narrow = stacked;
-		if (!active || (place && place.type !== 'settings')) return;
-		untrack(() => {
-			settingsNav.stacked = narrow;
-			if (place?.settings) settingsNav.follow(place.settings);
-			else {
-				const base = settingsNav.position(settingsNav.view, 0);
-				settingsNav.follow(base);
-				shellHistory.detail('settings', { settings: base }, true);
-			}
-		});
-	});
-
 	// The outgoing phone ViewShell pops its detail entry asynchronously. Track
 	// only that marker, so our own Settings pushes do not replay the target.
 	const retiringDetail = $derived((page.state as { viewPanelDetail?: string })?.viewPanelDetail);
 	// Deep links (openSettings / legacy openSettingsTab).
 	$effect(() => {
 		const raw = initialItemId;
-		if (!raw || retiringDetail || (!platform.isMobile && !active)) return;
+		if (!raw || retiringDetail) return;
 		untrack(() => {
 			const target = decodeTarget(raw);
 			settingsNav.stacked = stacked;
@@ -151,7 +131,7 @@
 			firstHistory = false;
 			return;
 		}
-		if (platform.isMobile) untrack(() => settingsNav.followHistory(state, active));
+		untrack(() => settingsNav.followHistory(state, active));
 	});
 
 	// Ctrl+K while Settings is on screen: the app's one Ctrl+K owner

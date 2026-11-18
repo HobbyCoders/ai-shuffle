@@ -45,9 +45,7 @@ async function openAgentModels(page, variant) {
 async function reopenAgentModels(page, variant) {
 	const models = page.getByRole('tab', { name: /^Models/ });
 	const row = page.locator('[data-settings-item]').filter({ hasText: 'Dev agent' }).first();
-	// On a phone the reopened agent keeps the list mounted but hidden, and its
-	// row comes first in the page: wait for whichever of the two is on screen.
-	await models.or(row).filter({ visible: true }).first().waitFor({ timeout: 90_000 });
+	await models.or(row).first().waitFor({ timeout: 90_000 });
 	if (!(await models.isVisible())) {
 		if (isPhone(variant) && !(await row.isVisible())) await showSidebar(page);
 		await row.click();

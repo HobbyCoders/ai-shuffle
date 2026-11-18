@@ -14,8 +14,6 @@
 import { get } from 'svelte/store';
 import { pushState, replaceState } from '$app/navigation';
 import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
-import { shellHistory, type SettingsPlace } from '$lib/services/app-history.svelte';
-import { platform } from '$lib/stores/platform.svelte';
 import { activeView, layout } from '$lib/stores/layout.svelte';
 import { isCategoryId, PAGE_TYPES, type CategoryId, type SettingsTarget, type SettingsView } from './types';
 
@@ -182,9 +180,7 @@ export class SettingsNavigation {
 	selected = $state<Partial<Record<CategoryId, string>>>({});
 	tabs = $state<Record<string, string>>({});
 	/** Phone-stack step. Only meaningful while `stacked`. */
-	// The web UI starts a narrow window's stack at the index; the phone app
-	// chooses its first page in startStack (#1043).
-	view = $state<SettingsView>(platform.isMobile ? 'page' : 'index');
+	view = $state<SettingsView>('page');
 	/** True when the shell shows one pane at a time (phone app or ≤600px wide). */
 	stacked = $state(false);
 	/**
@@ -254,7 +250,6 @@ export class SettingsNavigation {
 
 	setTab(category: CategoryId, item: string, tab: string): void {
 		this.tabs[tabKey(category, item)] = tab;
-		shellHistory.detail('settings', { settings: { ...shellHistory.place?.settings, ...this.position(this.view) } }, true);
 		this.persist();
 	}
 
@@ -309,13 +304,12 @@ export class SettingsNavigation {
 
 	/** In-UI back button (stacked mode). Pops the history entry it pushed. */
 	back(): void {
-		if ((this.stacked || !platform.isMobile) && this.depth > 0 && typeof history !== 'undefined') {
+		if (this.stacked && this.depth > 0 && typeof history !== 'undefined') {
 			history.back();
 			return;
 		}
 		this.view = this.view === 'detail' ? 'page' : 'index';
 		this.notePlace();
-		shellHistory.detail('settings', { settings: this.position(this.view) }, true);
 	}
 
 	/**
@@ -325,22 +319,8 @@ export class SettingsNavigation {
 	 * shows; beside the list it stays open.
 	 */
 	showList(category: CategoryId = this.category): void {
-		if (!platform.isMobile) return this.showListEntry(category);
 		if (!this.stacked && this.onePane[category]) this.clearSelection(category);
 		this.back();
-	}
-
-	/** The web UI: show the changed list without leaving a duplicate list entry behind. */
-	private showListEntry(category: CategoryId): void {
-		if (!this.stacked && !this.onePane[category]) return; // The split already shows the list.
-		const here = shellHistory.place?.settings;
-		if (here?.category === category && here.listDepth !== undefined) {
-			history.go(here.listDepth - here.depth);
-			return;
-		}
-		// A retained or directly linked detail might not have a list to pop to.
-		this.clearSelection(category);
-		shellHistory.detail('settings', { settings: this.position('page') }, true);
 	}
 
 	/** Return to the index (stacked mode), e.g. before focusing search. */
@@ -352,7 +332,6 @@ export class SettingsNavigation {
 		}
 		this.view = 'index';
 		this.notePlace();
-		shellHistory.detail('settings', { settings: this.position('index') }, true);
 	}
 
 	/**
@@ -472,22 +451,6 @@ export class SettingsNavigation {
 		this.persist();
 	}
 
-	/** The web UI: show a shell-history entry's place without pushing another step. */
-	follow(place: SettingsPlace): void {
-		this.category = place.category;
-		this.view = place.view;
-		this.depth = place.depth;
-		if (place.item) this.selected[place.category] = place.item;
-		else delete this.selected[place.category];
-		if (place.item && place.tab) this.tabs[tabKey(place.category, place.item)] = place.tab;
-	}
-
-	position(view: SettingsView, depth = this.depth): SettingsPlace {
-		const item = this.selectedItem();
-		return { category: this.category, view, depth, item,
-			tab: item ? this.tabs[tabKey(this.category, item)] ?? null : null };
-	}
-
 	consumeAnchor(): string | null {
 		const anchor = this.pendingAnchor;
 		this.pendingAnchor = null;
@@ -513,7 +476,7 @@ export class SettingsNavigation {
 		this.category = 'general';
 		this.selected = {};
 		this.tabs = {};
-		this.view = platform.isMobile ? 'page' : 'index';
+		this.view = 'page';
 		this.stacked = false;
 		this.onePane = {};
 		this.pendingAnchor = null;
@@ -536,7 +499,6 @@ export class SettingsNavigation {
 	}
 
 	private moveTo(view: SettingsView): void {
-		if (!platform.isMobile) return this.moveToEntry(view);
 		let pushed: SettingsHistoryState | null = null;
 		let landed: Promise<void> | void = undefined;
 		if (this.stacked && view !== 'index') {
@@ -560,27 +522,6 @@ export class SettingsNavigation {
 		}
 		this.view = view;
 		if (pushed) this.noteEntry(pushed, landed);
-	}
-
-	/** The web UI: every step into a page or detail is a shell-history entry. */
-	private moveToEntry(view: SettingsView): void {
-		const previous = shellHistory.place?.settings;
-		const next = this.position(view, previous?.depth ?? 0);
-		if (view === 'detail' && previous?.category === next.category) {
-			// A category entry is the list even when it remembers a selected row for split view.
-			if (previous.view === 'page') next.listDepth = previous.depth;
-			else if (previous.listDepth !== undefined) next.listDepth = previous.listDepth;
-		}
-		this.view = view;
-		// The place on screen again: the history skips it once committed, and
-		// writes it again if its push was rejected.
-		if (previous && JSON.stringify(previous) === JSON.stringify(next)) {
-			shellHistory.detail('settings', { settings: next });
-			return;
-		}
-		next.depth++;
-		this.depth = next.depth;
-		shellHistory.detail('settings', { settings: next });
 	}
 
 	private notePlace(): void {
@@ -607,7 +548,7 @@ export class SettingsNavigation {
 			if (!raw) return;
 			const data = JSON.parse(raw) as Persisted;
 			if (isCategoryId(data.category)) this.category = data.category;
-			if (platform.isMobile && (data.view === 'page' || data.view === 'detail')) {
+			if (data.view === 'page' || data.view === 'detail') {
 				this.view = data.view;
 				this.hasPlace = isCategoryId(data.category);
 			}

@@ -3,8 +3,7 @@
  * history stack stands in for SvelteKit's pushState/replaceState, and Back or
  * Forward replays an entry's state through followChatHistory, as AppPage does.
  */
-import { afterEach, beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
-import { platform } from '$lib/stores/platform.svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { writable, get } from 'svelte/store';
 import { page } from '$app/state';
 
@@ -37,7 +36,7 @@ vi.mock('$lib/stores/active-session', async () => {
 	};
 });
 vi.mock('$lib/stores/layout.svelte', () => ({
-	layout: { current: { sidebarOverlay: false, sidebarCollapsed: true }, openChat: vi.fn(), setSidebarCollapsed: vi.fn(), afterSidebarOverlay: (navigate: () => void) => navigate() }
+	layout: { current: { sidebarOverlay: false, sidebarCollapsed: true }, openChat: vi.fn(), setSidebarCollapsed: vi.fn() }
 }));
 vi.mock('$lib/stores/app-data.svelte', () => ({ appData: { current: { sessions: [] } } }));
 
@@ -57,12 +56,6 @@ beforeEach(() => {
 	active.store.set({ sessionId: null });
 });
 afterEach(() => vi.useRealTimers());
-
-
-// Main's own history tests, run as the phone app: there, shell history is inert
-// and these writers are main's, unchanged (#1477 is desktop panels only).
-beforeAll(() => platform.set('mobile'));
-afterAll(() => platform.set('desktop'));
 
 describe('sidebar chat switches and browser history (#953)', () => {
 	it('Back after a sidebar switch A → B opens A in place, Forward opens B again', () => {

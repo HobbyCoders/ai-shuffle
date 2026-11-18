@@ -3,8 +3,7 @@
  * stack stands in for SvelteKit's pushState/replaceState, and Back or Forward
  * replays an entry through both followers, as SettingsShell and AppPage do.
  */
-import { beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
-import { platform } from '$lib/stores/platform.svelte';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { writable, get } from 'svelte/store';
 import { page } from '$app/state';
 
@@ -46,8 +45,7 @@ vi.mock('$lib/stores/layout.svelte', async () => {
 		activeView: writable(null),
 		layout: {
 			current: { sidebarOverlay: false, sidebarCollapsed: true },
-			openChat: vi.fn(), setSidebarCollapsed: vi.fn(), openFeaturePage: vi.fn(), clearFeatureItemId: vi.fn(),
-			afterSidebarOverlay: (navigate: () => void) => navigate()
+			openChat: vi.fn(), setSidebarCollapsed: vi.fn(), openFeaturePage: vi.fn(), clearFeatureItemId: vi.fn()
 		}
 	};
 });
@@ -82,12 +80,6 @@ beforeEach(() => {
 	sessionStorage.clear();
 	vi.spyOn(history, 'go').mockImplementation((delta = 0) => land(delta));
 });
-
-
-// Main's own history tests, run as the phone app: there, shell history is inert
-// and these writers are main's, unchanged (#1477 is desktop panels only).
-beforeAll(() => platform.set('mobile'));
-afterAll(() => platform.set('desktop'));
 
 describe('Settings and chat in one history', () => {
 	/** Chat A, a phone-width Settings page, then a sidebar pick of chat B. */

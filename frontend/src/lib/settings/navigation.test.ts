@@ -1,5 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi, beforeAll, afterAll } from 'vitest';
-import { platform } from '$lib/stores/platform.svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const nav = vi.hoisted(() => ({ pushState: vi.fn(), replaceState: vi.fn() }));
 vi.mock('$app/navigation', () => ({ pushState: nav.pushState, replaceState: nav.replaceState, goto: vi.fn() }));
@@ -25,12 +24,6 @@ beforeEach(() => {
 	layout.openChat(null);
 });
 afterEach(() => vi.restoreAllMocks());
-
-
-// Main's own history tests, run as the phone app: there, shell history is inert
-// and these writers are main's, unchanged (#1477 is desktop panels only).
-beforeAll(() => platform.set('mobile'));
-afterAll(() => platform.set('desktop'));
 
 describe('settings targets', () => {
 	it('round-trips through encodeTarget/decodeTarget', () => {

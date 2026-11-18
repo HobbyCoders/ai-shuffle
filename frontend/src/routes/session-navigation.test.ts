@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 
@@ -20,21 +20,17 @@ vi.mock('$lib/stores/auth.svelte', () => ({
 const chatHistory = vi.hoisted(() => ({ entries: [{}] as Record<string, unknown>[], index: 0 }));
 vi.mock('$app/navigation', async (importOriginal) => {
 	const { page } = await import('$app/state');
-	const write = (state: Record<string, unknown>, replace?: boolean) => {
-		if (replace) chatHistory.entries[chatHistory.index] = state;
-		else {
-			chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
-			chatHistory.index++;
-		}
-		page.state = state;
-	};
 	return {
 		...(await importOriginal<object>()),
-		// The web UI's shell history.
-		goto: (_url: string, { state, replace }: { state: Record<string, unknown>; replace?: boolean }) => write(state, replace),
-		// The phone app's own writers (main's chat links and drawer picks).
-		pushState: (_url: string, state: Record<string, unknown>) => write(state),
-		replaceState: (_url: string, state: Record<string, unknown>) => write(state, true),
+		pushState: (_url: string, state: Record<string, unknown>) => {
+			chatHistory.entries.splice(chatHistory.index + 1, Infinity, state);
+			chatHistory.index += 1;
+			page.state = state;
+		},
+		replaceState: (_url: string, state: Record<string, unknown>) => {
+			chatHistory.entries[chatHistory.index] = state;
+			page.state = state;
+		},
 	};
 });
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
@@ -60,12 +56,8 @@ import { api, type Session } from '$lib/api/client';
 import { openSession, openSessionLink, openSubagentLink, sessionHref } from '$lib/services/session-navigation';
 import { resourceSync } from '$lib/services/resource-sync';
 import { subagentChats } from '$lib/stores/subagent-chats';
-import { markChatUnavailable } from '$lib/stores/unavailable-chat';
 import { get } from 'svelte/store';
 import { page } from '$app/state';
-import type { ShellState } from '$lib/services/app-history.svelte';
-import { platform } from '$lib/stores/platform.svelte';
-import { openSessionFromList } from '$lib/services/session-navigation';
 
 beforeEach(() => {
 	activeSession.destroy();
@@ -84,10 +76,6 @@ beforeEach(() => {
 		vi.spyOn(appData, method).mockResolvedValue(undefined);
 	}
 	history.replaceState(null, '', '/');
-	// Each test is a fresh load: no entry the last one wrote.
-	chatHistory.entries = [{}];
-	chatHistory.index = 0;
-	page.state = {};
 });
 
 afterEach(() => { cleanup(); activeSession.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -257,6 +245,12 @@ describe('chat link history (#859)', () => {
 		chatHistory.index += delta;
 		page.state = chatHistory.entries[chatHistory.index];
 	};
+	beforeEach(() => {
+		chatHistory.entries = [{}];
+		chatHistory.index = 0;
+		page.state = {};
+	});
+
 	it('makes each in-app chat link (the parent crumb) one Back step, and Forward returns', async () => {
 		render(Page);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
@@ -265,7 +259,7 @@ describe('chat link history (#859)', () => {
 		// The child's parent crumb.
 		openSessionLink(click(), 'parent');
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		await waitFor(() => expect(chatHistory.entries.map((entry) => (entry as ShellState).shell?.place.sessionId)).toEqual(['parent', 'worker-child', 'parent']));
+		expect(chatHistory.entries.map((entry) => entry.chatSession)).toEqual(['parent', 'worker-child', 'parent']);
 
 		step(-1);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
@@ -290,208 +284,5 @@ describe('chat link history (#859)', () => {
 		page.state = { ...page.state, mobileDrawer: true };
 		await Promise.resolve();
 		expect(activeSession.current.sessionId).toBe('worker-summary');
-	});
-
-	const places = () => chatHistory.entries.map((entry) => {
-		const place = (entry as ShellState).shell?.place;
-		return place?.type === 'session' ? place.sessionId : place?.type;
-	});
-	/** Holds boot before its reconcile until `release` (a slow first load). */
-	function slowBoot() {
-		let release = () => {};
-		vi.mocked(appData.loadSessions).mockReturnValue(new Promise<void>((resolve) => { release = resolve; }));
-		return () => release();
-	}
-
-	it.each([
-		['a Docs page', { type: 'docs' as const }, () => layout.current.activeView?.type === 'docs'],
-		['another chat', { type: 'session' as const, sessionId: 'worker-child' },
-			() => layout.current.activeView?.sessionId === 'worker-child' && activeSession.current.sessionId === 'worker-child'],
-	])('reloads onto the place the browser entry saved (%s) from the first frame, not the layout another tab wrote', async (_name, place, shown) => {
-		// This tab's entry was left on `place`; another tab since opened the
-		// parent chat, which rewrote the shared layout snapshot. The address
-		// still has the link this tab arrived by, read long ago.
-		chatHistory.entries = [{ shell: { id: 'saved', place } }];
-		page.state = chatHistory.entries[0];
-		history.replaceState(null, '', '/?session=parent');
-		// The sessions request is held: boot has not reconciled yet.
-		const release = slowBoot();
-		render(Page);
-		await waitFor(() => expect(shown()).toBe(true));
-		release();
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(shown()).toBe(true);
-		expect(window.location.search).toBe('');
-		expect(chatHistory.entries).toEqual([{ shell: { id: 'saved', place } }]);
-	});
-
-	it('keeps every place the user visits while boot loads, even when boot never finishes', async () => {
-		slowBoot();
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		openSession('worker-child');
-		layout.openFeaturePage('settings');
-		layout.openFeaturePage('docs');
-		await waitFor(() => expect(places()).toEqual(['parent', 'worker-child', 'settings', 'docs']));
-		step(-1); step(-1);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
-		step(-1);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-	});
-
-	/** The layout still shows the parent; this tab's chat (the authority) is the child. Chat controls open over the arrival while boot loads. */
-	async function arriveUnderControls() {
-		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'worker-child', title: 'Child', mode: 'chat', profile: 'test' }));
-		const release = slowBoot();
-		render(Page);
-		await waitFor(() => expect(layout.current.activeView?.sessionId).toBe('parent'));
-		await new Promise((resolve) => setTimeout(resolve));
-		chatHistory.entries.push({ ...page.state, mobileControls: true });
-		step(1);
-		release();
-		await waitFor(() => expect(layout.current.activeView?.sessionId).toBe('worker-child'));
-	}
-	const showsChild = async () => {
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
-		expect(activeSession.current.sessionId).toBe('worker-child');
-	};
-
-	it('shows boot’s view on the arrival entry once an overlay over it closes, so Back later returns there', async () => {
-		await arriveUnderControls();
-		step(-1); // Back closes the controls.
-		await showsChild();
-		layout.openFeaturePage('settings');
-		await waitFor(() => expect(places()).toEqual(['worker-child', 'settings']));
-		step(-1);
-		await showsChild();
-	});
-
-	it('leaves the overlay’s entry to the sheet, and shows boot’s view on the arrival after Settings opened from the overlay, Back and Forward', async () => {
-		await arriveUnderControls();
-		const overlay = chatHistory.entries[1];
-		layout.openFeaturePage('settings');
-		await waitFor(() => expect(chatHistory.entries).toHaveLength(3));
-		const showsSettings = async () => {
-			await new Promise((resolve) => setTimeout(resolve, 20));
-			expect(layout.current.activeView?.type).toBe('settings');
-		};
-		// The sheet's own entry shows nothing new, as on main.
-		step(-1); await showsSettings();
-		step(-1); await showsChild();
-		step(1); await showsChild();
-		step(1); await showsSettings();
-		step(-1); await showsSettings();
-		step(-1); await showsChild();
-		expect(chatHistory.entries[1]).toBe(overlay);
-		expect(places()[0]).toBe('worker-child');
-	});
-
-	it('narrow desktop with the sidebar open: a Forward before the deferred chat open wins over the Back it overtook', async () => {
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		layout.openFeaturePage('notes');
-		await waitFor(() => expect(places()).toEqual(['parent', 'notes']));
-		layout.setSidebarOverlay(true);
-		layout.setSidebarCollapsed(false);
-		const frames: FrameRequestCallback[] = [];
-		const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });
-		step(-1); // Back to the chat: its open waits a frame for the sidebar to close.
-		await new Promise((resolve) => setTimeout(resolve));
-		step(1); // Forward to Notes before that frame.
-		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
-		raf.mockRestore();
-		for (const frame of frames.splice(0)) frame(0);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(layout.current.activeView?.type).toBe('notes');
-		expect(places()).toEqual(['parent', 'notes']);
-		expect(chatHistory.index).toBe(1);
-	});
-
-	it('narrow desktop with the sidebar open: a Forward before the deferred New Chat open wins over the Back it overtook', async () => {
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		activeSession.newChat();
-		layout.openChat(null);
-		layout.openFeaturePage('notes');
-		await waitFor(() => expect(places()).toEqual(['parent', null, 'notes']));
-		layout.setSidebarOverlay(true);
-		layout.setSidebarCollapsed(false);
-		const frames: FrameRequestCallback[] = [];
-		const raf = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => { frames.push(callback); return frames.length; });
-		step(-1); // Back to New Chat: its open waits a frame for the sidebar to close.
-		await new Promise((resolve) => setTimeout(resolve));
-		expect(frames.length).toBeGreaterThan(0);
-		step(1); // Forward to Notes before that frame.
-		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
-		raf.mockRestore();
-		for (const frame of frames.splice(0)) frame(0);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(layout.current.activeView?.type).toBe('notes');
-		expect(places()).toEqual(['parent', null, 'notes']);
-		expect(chatHistory.index).toBe(2);
-	});
-
-	it('the phone app keeps main’s history: chat A, drawer pick B, drawer Notes, Back reaches A, Forward reopens B', async () => {
-		platform.set('mobile');
-		onTestFinished(() => platform.set('desktop'));
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		// The drawer pushes its own entry over the current one; dismissing it is history.back().
-		const openDrawer = () => { chatHistory.entries.splice(chatHistory.index + 1, Infinity, { ...page.state, mobileDrawer: true }); step(1); };
-		openDrawer();
-		openSessionFromList('worker-child');
-		step(-1);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
-		await waitFor(() => expect(chatHistory.entries).toEqual([{ chatSession: 'parent' }, { chatSession: 'worker-child' }]));
-		openDrawer();
-		layout.openFeaturePage('notes');
-		step(-1);
-		await waitFor(() => expect(layout.current.activeView?.type).toBe('notes'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		// Notes adds no entry and writes nothing onto B's: main's entries only, no shell.
-		expect(chatHistory.entries.slice(0, 2)).toEqual([{ chatSession: 'parent' }, { chatSession: 'worker-child' }]);
-		expect(chatHistory.index).toBe(1);
-		step(-1);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'parent' });
-		step(1);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
-		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
-	});
-
-	it('writes the chat this tab shows, not the shared layout’s, when the first step comes before boot settles', async () => {
-		// Another tab left the parent in the shared layout; this tab restores the child.
-		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'worker-child', title: 'Child', mode: 'chat', profile: 'test' }));
-		const release = slowBoot();
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
-		expect(layout.current.activeView?.sessionId).toBe('parent');
-		layout.openFeaturePage('settings');
-		await waitFor(() => expect(places()).toEqual(['worker-child', 'settings']));
-		release();
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(layout.current.activeView?.type).toBe('settings');
-		step(-1);
-		await showsChild();
-	});
-
-	it('follows a saved chat the server no longer has to New Chat after boot, so its first send is the chat a reload reopens', async () => {
-		chatHistory.entries = [{ shell: { id: 'saved', place: { type: 'session', sessionId: 'parent' } } }];
-		page.state = chatHistory.entries[0];
-		render(Page);
-		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		// The late answer: the session socket reports the chat gone.
-		activeSession.newChat();
-		markChatUnavailable('parent', 404);
-		await waitFor(() => expect(layout.current.activeView).toEqual({ type: 'session', sessionId: null }));
-		await waitFor(() => expect((chatHistory.entries[0] as ShellState).shell?.place).toEqual({ type: 'session', sessionId: null }));
-		// New Chat's first send created its chat: the entry follows it, no new step.
-		activeSession.switchSession('created');
-		await waitFor(() => expect(places()).toEqual(['created']));
 	});
 });
