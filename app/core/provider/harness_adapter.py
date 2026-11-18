@@ -38,7 +38,9 @@ Native legs:
   * ``max_turns`` becomes ``max_model_calls_per_turn`` (None = unlimited).
     ``env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"]`` becomes ``max_tokens``, and no other
     ``env`` key is read. ``thinking`` goes only to Claude models on the anthropic
-    lane. ``fast`` becomes ``service_tier: priority`` only on openai_responses.
+    lane. ``fast`` becomes ``service_tier: priority`` only on openai_responses,
+    and ``speed: ultrafast`` becomes ``service_tier: ultrafast`` where the row
+    offers it (else ``priority``).
   * code mode and the continual learner need an app session id and fail open to
     JSON tool calls; the prompt describes what actually started.
 
@@ -1214,7 +1216,8 @@ class HarnessAdapter(ProviderAdapter):
                 pricing=_catalog_pricing_resolver(options),
                 # Per-session fast mode. Only the OpenAI Responses lane
                 # has a wire-level expedited service: ``service_tier:
-                # priority``, merged into the request body by fluid's
+                # priority`` (``ultrafast`` for an Ultrafast chat where the
+                # row offers it), merged into the request body by fluid's
                 # ``request_extra``. The anthropic and openrouter native lanes
                 # have no equivalent knob and ignore ``fast`` entirely.
                 request_extra=request_extra or None,

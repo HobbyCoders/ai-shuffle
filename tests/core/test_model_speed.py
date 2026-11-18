@@ -104,12 +104,6 @@ def test_ultrafast_rule_per_provider(row, model, expected):
     assert ms.ultrafast_supported_for_row(row, model) is expected
 
 
-def test_fit_speed_falls_back_like_fast():
-    assert ms.fit_speed("ultrafast", fast_ok=True, ultrafast_ok=False) == "fast"
-    assert ms.fit_speed("ultrafast", fast_ok=False, ultrafast_ok=False) == "standard"
-    assert ms.fit_speed("ultrafast", fast_ok=True, ultrafast_ok=True) == "ultrafast"
-
-
 # ── wire mapping ───────────────────────────────────────────────────────────
 
 def _options(**kw):
@@ -206,6 +200,18 @@ async def test_run_settings_speed_writes_fast_and_speed(live):
     # An older client's ``fast: true`` keeps Ultrafast; ``fast: false`` is Standard.
     assert (await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True)))["speed"] == "ultrafast"
     assert (await api.apply_run_settings("s", api.RunSettingsUpdate(fast=False)))["speed"] == "standard"
+
+
+@pytest.mark.asyncio
+async def test_a_parent_hands_down_fast_never_ultrafast(live, monkeypatch):
+    state, runtime, save = live
+    monkeypatch.setattr(api, "_inherited_fast_skip", lambda session: None)
+    await api.apply_run_settings("s", api.RunSettingsUpdate(speed="ultrafast"), propagate=False)
+    result = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), inherited=True,
+                                          propagate=False)
+    assert (result["fast"], result["speed"]) == (True, "fast")
+    save.assert_called_with("s", effort="high", fast=True, speed="fast", clear_effort=False)
+    assert state.adapter._engine.request_extra["service_tier"] == "priority"
 
 
 @pytest.mark.asyncio

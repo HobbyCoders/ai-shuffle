@@ -21,11 +21,8 @@ own Codex model catalog lists the ``ultrafast`` service tier for the model
 """
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-
-logger = logging.getLogger(__name__)
 
 STANDARD = "standard"
 FAST = "fast"
@@ -72,20 +69,6 @@ def speed_fields(speed: str) -> Dict[str, Any]:
     """The ``fast``/``speed`` pair every writer stores for ``speed``."""
     speed = normalize_speed(speed) or STANDARD
     return {"fast": speed != STANDARD, "speed": speed}
-
-
-def requested_speed(fast: Any = None, speed: Any = None) -> Optional[str]:
-    """The tier a request asks for, or None when it asks for nothing.
-
-    ``speed`` wins when it is a known tier. A request from an older client
-    carries only ``fast``: on means Fast, off means Standard.
-    """
-    tier = normalize_speed(speed)
-    if tier is not None:
-        return tier
-    if fast is None:
-        return None
-    return FAST if fast else STANDARD
 
 
 def service_tier_for(speed: Any) -> Optional[str]:
@@ -203,42 +186,9 @@ def ultrafast_supported_for_row(row: Optional[Mapping[str, Any]], model_id: Opti
     return False
 
 
-def ultrafast_supported(model: Optional[str], provider_id: Optional[str]) -> bool:
-    """Whether a chat on ``model`` (bare or ``prov:`` composite) may run Ultrafast."""
-    from app.core.query_options import decode_provider_model
-
-    model = (model or "").strip()
-    if not model:
-        return False
-    decoded = decode_provider_model(model)
-    if decoded:
-        provider_id, model = decoded
-    if not provider_id:
-        return False
-    try:
-        from app.db.model_providers import resolve_model_provider
-
-        row = resolve_model_provider(provider_id)
-    except Exception:  # noqa: BLE001 — an unknown row cannot run Ultrafast
-        logger.debug("ultrafast: could not read provider %s", provider_id, exc_info=True)
-        return False
-    return ultrafast_supported_for_row(row, model)
-
-
-def fit_speed(speed: Optional[str], *, fast_ok: bool, ultrafast_ok: bool) -> str:
-    """``speed`` fitted to what a model offers: Ultrafast falls back to Fast,
-    then Standard, the way a model switch drops an unsupported Fast."""
-    speed = normalize_speed(speed) or STANDARD
-    if speed == ULTRAFAST and not ultrafast_ok:
-        speed = FAST
-    if speed == FAST and not fast_ok:
-        speed = STANDARD
-    return speed
-
-
 __all__ = [
     "STANDARD", "FAST", "ULTRAFAST", "SPEEDS", "SERVICE_TIERS", "KNOWN_SERVICE_TIERS",
-    "normalize_speed", "resolve_speed", "speed_fields", "requested_speed", "service_tier_for",
+    "normalize_speed", "resolve_speed", "speed_fields", "service_tier_for",
     "options_speed", "sanitize_service_tiers", "stored_service_tiers", "merge_service_tiers",
-    "ultrafast_supported_for_row", "ultrafast_supported", "fit_speed",
+    "ultrafast_supported_for_row",
 ]

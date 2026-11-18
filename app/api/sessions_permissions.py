@@ -167,6 +167,8 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             skip = await run_sync(_inherited_fast_skip, session)
             if skip:
                 return {"skipped": skip}
+            # On is Fast, never a tier the child's row still remembers.
+            changes["speed"] = "fast" if changes["fast"] else "standard"
         if "context_window" in changes:
             # Unlike effort, a window is connect-time state on BOTH legs. Save
             # it now, but never interrupt/reconfigure an in-flight request. The
