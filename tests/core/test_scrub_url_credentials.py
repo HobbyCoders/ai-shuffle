@@ -17,16 +17,11 @@ identical, because mangling them would corrupt ordinary transcript text.
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
 
-from app.core.pg_session_store import _scrub_pg_illegal
 from app.core.scrub import scrub_url_credentials, scrub_url_credentials_text
 
-from fluid.events.model import (
-    SubagentEvent, TextDelta, ToolUse, event_from_dict, event_to_dict,
-)
+from fluid.events.model import TextDelta, ToolUse
 from fluid.messages.content import Message, Text
 from fluid.store.base import SessionNode
 
@@ -263,17 +258,3 @@ async def test_event_log_gets_the_same_scrub(mock_db):
     assert events[0].input["code"] == "db = connect('postgres://appuser:***@db.internal:5432/appdb')"
     assert "s3cr3t" not in events[1].text
     assert events[1].text.startswith("connecting to postgres://appuser:***@")
-
-
-def test_a_lifecycle_write_id_survives_the_event_log_scrubs():
-    """A retried background-task write is matched to its earlier attempt by
-    ``write_id`` alone; a scrub that rewrote it would make a write that did
-    commit look missing, and the retry would store a second copy."""
-    write_id = uuid.uuid4().hex
-    event = SubagentEvent(
-        session_id="s", seq=3, task_id="t", kind="finished", write_id=write_id,
-        summary="connect with postgres://appuser:s3cr3t@db.internal:5432/appdb",
-    )
-    stored = _scrub_pg_illegal(scrub_url_credentials(event_to_dict(event)))
-    assert "s3cr3t" not in stored["summary"]  # the scrub did run
-    assert event_from_dict(stored).write_id == write_id

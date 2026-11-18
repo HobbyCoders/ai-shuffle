@@ -117,10 +117,6 @@ _REHYDRATE_BACKOFF_S = 0.2
 # credentials the new session must not inherit.
 _HANDOFF_TRANSCRIPT_CHARS = 60_000
 _HANDOFF_NODE_TEXT_CHARS = 2_000
-# How long close waits for a running handoff to end before the bus closes
-# (seconds): the cancelled document call's cleanup, or the creation and report
-# of a handoff past that call. Past the deadline the handoff is abandoned.
-_HANDOFF_CLOSE_WAIT_S = 10.0
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -1525,18 +1521,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
-        # A Handoff's document call: Interrupt and close cancel it. Only one
-        # handoff runs at a time.
+        # A Handoff's document call: Interrupt cancels it. Only one handoff
+        # runs at a time.
         self._handoff_call: asyncio.Task | None = None
         self._handoff_running = False
-        # Set when the running handoff ends, however it ends. Close cancels
-        # the document call, then waits on this (bounded) so a handoff past
-        # that call is reported before the bus closes.
-        self._handoff_ended: asyncio.Event | None = None
-        # The creation of a handoff past its document call, and whether close
-        # gave up waiting for it: then it is cancelled and never reported.
-        self._handoff_create: asyncio.Task | None = None
-        self._handoff_abandoned = False
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -2062,23 +2050,17 @@ class NativeLoop(BackgroundLifecycleMixin):
         intact; the new one starts small, with a fresh cacheable prefix.
 
         The document call is billed like the checkpoint side call. One handoff
-        runs at a time; a second one fails at once. Interrupt and close cancel
-        the document call, and then no session is made. That is the cutoff:
-        once the document is in hand the new session is created and reported,
-        and an Interrupt arriving after that point does not undo it. A close
-        arriving after that point waits for ``HandoffCreated`` to be published
-        before it closes the bus, up to ``_HANDOFF_CLOSE_WAIT_S``. Past that
-        deadline close abandons the handoff: its creation is cancelled and it
-        is never reported, though a session the store had already made stays
-        there, unannounced and holding only the document.
+        runs at a time; a second one, or one on a closing engine, fails at
+        once. Interrupt cancels the document call, and then no session is
+        made. That is the cutoff: once the document is in hand the new session
+        is created and reported, and an Interrupt arriving after that point
+        does not undo it.
         """
         if getattr(self, "_close_task", None) is not None:
             raise RuntimeError("handoff not created: the engine is closing")
         if self._handoff_running:
             raise RuntimeError("handoff not created: another handoff is already running")
         self._handoff_running = True
-        self._handoff_abandoned = False
-        ended = self._handoff_ended = asyncio.Event()
         try:
             meta = await self._ensure_session()
             if getattr(self, "_close_task", None) is not None:
@@ -2096,66 +2078,20 @@ class NativeLoop(BackgroundLifecycleMixin):
             finally:
                 self._handoff_call = None
 
-            create = asyncio.create_task(self._create_handoff(meta.session_id, op, content))
-            self._handoff_create = create
-            try:
-                await create
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    await await_cancelled_child(create)
-                    raise
-                raise RuntimeError(
-                    "handoff not created: the engine closed before it was reported"
-                ) from None
-            finally:
-                self._handoff_create = None
+            new_meta = await self.store.create_session(cwd=self.ctx.cwd)
+            first = SessionNode(
+                node_id=new_id("node"), parent_id=None,
+                message=Message(role="user", content=[Text(content)]),
+            )
+            await self.store.append(new_meta.session_id, first)
+            await self._emit(HandoffCreated(
+                session_id=meta.session_id,
+                new_session_id=new_meta.session_id,
+                content=content,
+                goal=op.goal,
+            ))
         finally:
             self._handoff_running = False
-            ended.set()
-
-    async def _settle_handoff_for_close(self) -> None:
-        """End a running handoff before the bus closes, within one deadline.
-
-        A handoff still in its document call is cancelled; one past it is
-        given the time to be reported. Either way the wait (the document
-        call's cleanup, which books its usage, or the creation) is bounded by
-        ``_HANDOFF_CLOSE_WAIT_S``. Past it the handoff is abandoned: both
-        steps are cancelled and it is never reported.
-        """
-        call = self._handoff_call
-        if call is not None and not call.done():
-            call.cancel()  # still in the document call: no session is made
-        ended = self._handoff_ended
-        if ended is None or ended.is_set():
-            return
-        try:
-            await asyncio.wait_for(ended.wait(), _HANDOFF_CLOSE_WAIT_S)
-        except TimeoutError:
-            self._handoff_abandoned = True
-            for step in (self._handoff_call, self._handoff_create):
-                if step is not None and not step.done():
-                    step.cancel()
-            log.warning("handoff abandoned: still running %.0fs into close",
-                        _HANDOFF_CLOSE_WAIT_S)
-
-    async def _create_handoff(self, sid: str, op: Handoff, content: str) -> None:
-        new_meta = await self.store.create_session(cwd=self.ctx.cwd)
-        first = SessionNode(
-            node_id=new_id("node"), parent_id=None,
-            message=Message(role="user", content=[Text(content)]),
-        )
-        await self.store.append(new_meta.session_id, first)
-        if self._handoff_abandoned:
-            # Close gave up on it; a store that let the cancellation pass must
-            # not report it behind the closed bus.
-            raise RuntimeError("handoff not created: the engine closed before it was reported")
-        await self._emit(HandoffCreated(
-            session_id=sid,
-            new_session_id=new_meta.session_id,
-            content=content,
-            goal=op.goal,
-        ))
 
     async def _handoff_document(self, sid: str, op: Handoff) -> str:
         """Generate the handoff document; raises when it cannot be had."""
@@ -2202,10 +2138,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 try:
                     await asyncio.shield(booking)
                 except asyncio.CancelledError:
-                    if self._handoff_abandoned:
-                        booking.cancel()  # close's deadline passed: give up
-                    else:
-                        await booking
+                    await booking
                     raise
         content = "".join(parts).strip()
         if error is not None or not content:
@@ -2308,7 +2241,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             except asyncio.CancelledError:
                 pass
         await self.cancel_checkpoint()
-        await self._settle_handoff_for_close()
         if self._booking_task is not None and not self._booking_task.done():
             # Let a deferred booking finish; anything left is reconciled from
             # the persisted Usage by the next engine for this session.

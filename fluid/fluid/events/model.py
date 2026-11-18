@@ -904,10 +904,6 @@ class SubagentEvent(Event):
     # rides the completion so a woken parent can open the report directly.
     # Optional and last so events persisted before the field existed rehydrate.
     report_path: str | None = None
-    # Names one lifecycle write attempt (a hex uuid), so a retry after a write
-    # that raised can tell whether THAT attempt was stored. Optional: older
-    # rows, and events no retry looks for, carry none.
-    write_id: str | None = None
     peer_provenance: str = "peer"
 
 
