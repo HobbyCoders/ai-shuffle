@@ -109,7 +109,7 @@ describe('AppPage initial landing', () => {
  // #371 step 5: the Assistant landing is gone; an empty start is the new-session composer.
  it('lands an owner with no layout snapshot on the new-session composer', async () => {
   views.set(null); await boot();
-  expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openChat).toHaveBeenCalledWith(null);
+  expect(mocks.newChat).toHaveBeenCalledOnce(); expect(mocks.openChat).toHaveBeenCalledWith(null, 'reconcile');
   expect(mocks.openFeaturePage).not.toHaveBeenCalled(); expect(get(activeView)).toEqual(emptyView);
  });
  it('marks only the same-surface bootstrap landing, not explicit New conversation', async () => {
@@ -160,7 +160,7 @@ describe('AppPage initial landing', () => {
  });
  it('preserves a draft even when the layout snapshot is missing', async () => {
   views.set(null); active.set({ sessionId: null, draft: 'Keep this thought', project: null });
-  await boot(); expect(mocks.openChat).toHaveBeenCalledWith(null);
+  await boot(); expect(mocks.openChat).toHaveBeenCalledWith(null, 'reconcile');
   expect(mocks.newChat).not.toHaveBeenCalled(); expect(get(active).draft).toBe('Keep this thought');
  });
  it('preserves an already selected work session', async () => {
@@ -170,7 +170,7 @@ describe('AppPage initial landing', () => {
  });
  it('restores work when no layout view is saved', async () => {
   views.set(null); active.set({ sessionId: 'work', draft: '', project: null }); await boot();
-  expect(mocks.openChat).toHaveBeenCalledWith('work'); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
+  expect(mocks.openChat).toHaveBeenCalledWith('work', 'reconcile'); expect(mocks.openFeaturePage).not.toHaveBeenCalled();
  });
  it('retains explicit new-chat intent over an older backend session snapshot', async () => {
   active.set({ sessionId: 'old-work', draft: '', project: null }); await boot();
@@ -220,7 +220,7 @@ describe('AppPage initial landing', () => {
   // The send cleared the draft and shows its message; the session id is not back yet.
   active.set({ sessionId: null, draft: '', project: null, messages: [{ role: 'user' }] } as never);
   release(); await waitFor(() => expect(mocks.initGlobalStt).toHaveBeenCalledOnce());
-  expect(mocks.newChat).not.toHaveBeenCalled(); expect(mocks.openChat).toHaveBeenCalledWith(null);
+  expect(mocks.newChat).not.toHaveBeenCalled(); expect(mocks.openChat).toHaveBeenCalledWith(null, 'reconcile');
   expect((get(active) as unknown as { messages: unknown[] }).messages).toHaveLength(1);
  });
  // #1636 review: the composer holds a send until the catalog answers, so the

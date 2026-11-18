@@ -286,4 +286,67 @@ describe('chat link history (#859)', () => {
 		await Promise.resolve();
 		expect(activeSession.current.sessionId).toBe('worker-summary');
 	});
+
+	const places = () => chatHistory.entries.map((entry) => {
+		const place = (entry as ShellState).shell?.place;
+		return place?.type === 'session' ? place.sessionId : place?.type;
+	});
+	/** Holds boot before its reconcile until `release` (a slow first load). */
+	function slowBoot() {
+		let release = () => {};
+		vi.mocked(appData.loadSessions).mockReturnValue(new Promise<void>((resolve) => { release = resolve; }));
+		return () => release();
+	}
+
+	it.each([
+		['a Docs page', { type: 'docs' as const }, () => layout.current.activeView?.type === 'docs'],
+		['another chat', { type: 'session' as const, sessionId: 'worker-child' }, () => activeSession.current.sessionId === 'worker-child'],
+	])('reloads onto the place the browser entry saved (%s), not the layout another tab wrote', async (_name, place, shown) => {
+		// This tab's entry was left on `place`; another tab since opened the
+		// parent chat, which rewrote the shared layout snapshot.
+		chatHistory.entries = [{ shell: { id: 'saved', place } }];
+		page.state = chatHistory.entries[0];
+		render(Page);
+		await waitFor(() => expect(shown()).toBe(true));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(shown()).toBe(true);
+		expect(chatHistory.entries).toEqual([{ shell: { id: 'saved', place } }]);
+	});
+
+	it('keeps every place the user visits while boot loads, even when boot never finishes', async () => {
+		slowBoot();
+		render(Page);
+		await waitFor(() => expect(places()).toEqual(['parent']));
+		openSession('worker-child');
+		layout.openFeaturePage('settings');
+		layout.openFeaturePage('docs');
+		await waitFor(() => expect(places()).toEqual(['parent', 'worker-child', 'settings', 'docs']));
+		step(-1); step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		step(-1);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+	});
+
+	it('writes boot’s correction to the arrival entry once an overlay over it closes, so Back later returns there', async () => {
+		// The layout still shows the parent; this tab's chat (the authority) is the child.
+		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'worker-child', title: 'Child', mode: 'chat', profile: 'test' }));
+		const release = slowBoot();
+		render(Page);
+		await waitFor(() => expect(places()).toEqual(['parent']));
+		// Chat controls open over the arrival while boot loads.
+		chatHistory.entries.push({ ...page.state, mobileControls: true });
+		step(1);
+		release();
+		await waitFor(() => expect(layout.current.activeView?.sessionId).toBe('worker-child'));
+		step(-1); // Back closes the controls.
+		await waitFor(() => expect(places()).toEqual(['worker-child', 'parent']));
+		expect(activeSession.current.sessionId).toBe('worker-child');
+		layout.openFeaturePage('settings');
+		await waitFor(() => expect(places()).toEqual(['worker-child', 'settings']));
+		step(-1);
+		await waitFor(() => expect(layout.current.activeView?.type).toBe('session'));
+		expect(layout.current.activeView?.sessionId).toBe('worker-child');
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(activeSession.current.sessionId).toBe('worker-child');
+	});
 });

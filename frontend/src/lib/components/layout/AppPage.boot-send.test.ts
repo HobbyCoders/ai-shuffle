@@ -215,7 +215,7 @@ it.each(['session_created', 'start'])('does not adopt a pre-navigation %s under 
 	ctx.adopt(type);
 	try {
 		await waitFor(() => expect(persistedView()).toEqual({ type: 'session', sessionId: 'created' }));
-		expect(mocks.openChat).not.toHaveBeenCalledWith('old-created');
+		expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('old-created');
 	} finally {
 		data.resolve();
 		await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
@@ -241,7 +241,7 @@ it.each(['session_created', 'start'])('keeps existing-chat navigation over a pos
 	await tick();
 	expect(get(state).sessionId).toBe('selected-existing');
 	expect(persistedView()).toEqual({ type: 'session', sessionId: 'selected-existing' });
-	expect(mocks.openChat).not.toHaveBeenCalledWith('late-created');
+	expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('late-created');
 	data.resolve();
 	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
 	expect(persistedView()).toEqual({ type: 'session', sessionId: 'selected-existing' });
@@ -267,7 +267,7 @@ it.each(['new-chat', 'other-chat', 'settings'])('keeps explicit %s intent after 
 	}
 	const intended = persistedView();
 	await tick();
-	expect(mocks.openChat).not.toHaveBeenCalledWith('created');
+	expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('created');
 	expect(persistedView()).toEqual(intended);
 	ctx.preferences.resolve(null);
 	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
@@ -284,7 +284,7 @@ it('does not follow the stale restored chat before reconciliation', async () => 
 	ctx.preferences.resolve(null);
 	await waitFor(() => expect(ctx.wsConn.activate).toHaveBeenCalledOnce());
 	await tick();
-	expect(mocks.openChat).not.toHaveBeenCalledWith('stale');
+	expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('stale');
 	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
 	data.resolve();
 	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
@@ -298,7 +298,7 @@ it.each(['session_created', 'start'])('does not follow a foreign %s even with a 
 	ctx.handlers.handleMessage({ type, session_id: 'foreign', request_id: 'another-tab' });
 	await tick();
 	expect(get(state).sessionId).toBeNull();
-	expect(mocks.openChat).not.toHaveBeenCalledWith('foreign');
+	expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('foreign');
 	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
 	ctx.preferences.resolve(null);
 	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
@@ -314,7 +314,7 @@ it.each(['session_not_found', 'user_session_deleted'])('does not persist creatio
 	ctx.handlers.handleMessage({ type, session_id: 'created' });
 	await tick();
 	expect(get(state).sessionId).toBeNull();
-	expect(mocks.openChat).not.toHaveBeenCalledWith('created');
+	expect(mocks.openChat.mock.calls.map(([id]) => id)).not.toContain('created');
 	expect(persistedView()).toEqual({ type: 'session', sessionId: null });
 	ctx.preferences.resolve(null);
 	await waitFor(() => expect(mocks.ready).toHaveBeenCalledOnce());
@@ -499,7 +499,7 @@ it.each([true, false])('keeps a project picked on the new-session screen during 
 	}
 	ctx.preferences.resolve(null);
 	await waitFor(() => expect(mocks.resolveComposerDefaultsAfterCatalog).toHaveBeenCalledOnce());
-	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith(null));
+	await waitFor(() => expect(mocks.openChat).toHaveBeenCalledWith(null, 'reconcile'));
 	if (picked) {
 		expect(mocks.newChat).not.toHaveBeenCalled();
 		expect(get(state)).toMatchObject({ sessionId: null, mode: 'code', project: 'picked-project' });

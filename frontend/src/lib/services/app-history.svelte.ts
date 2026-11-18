@@ -32,37 +32,51 @@ let restored = $state.raw<Entry | null>(null);
 let writes = Promise.resolve();
 const pending = new Set<string>();
 let mounted = false;
-// Until boot settles, a view change rewrites the first entry's place instead of
-// adding a stop: the restored or reconciled view is where the user arrived.
-let booting = false;
+// The entry this load stamped, with the state keys it carries. Null when the
+// browser already had one (a reload): that entry is where the user is.
+let arrival: { id: string; keys: string[] } | null = null;
+// Boot settled the arrival on another view while a phone overlay's entry sat
+// on top of it. The browser's arrival entry still holds the old place.
+let stale: Entry | null = null;
 export const shellHistory = {
  get restored() { return restored; },
  get place() { return current?.place; },
  get entryId() { return current?.id; },
- start(state: ShellState, view: ActiveView | null, boot = false) {
+ start(state: ShellState, view: ActiveView | null) {
   mounted = true;
-  booting = boot;
-  if (state.shell) restored = current = { ...state.shell };
-  else write(viewPlace(view), true);
+  if (state.shell) return void (restored = current = { ...state.shell });
+  write(viewPlace(view), true);
+  arrival = { id: current!.id, keys: [...Object.keys(page.state), 'shell'] };
  },
- /** Boot reconciled the view: later view changes are steps again. */
- settle(view: ActiveView | null) {
-  this.destination(view);
-  booting = false;
- },
- stop() { mounted = booting = false; restored = current = null; },
+ stop() { mounted = false; arrival = stale = restored = current = null; },
  land(state: ShellState) {
-  const entry = state.shell;
+  let entry = state.shell;
+  // An overlay over the arrival copies its old place; boot's view is the one.
+  if (stale && entry?.id === stale.id) {
+   entry = stale;
+   if (onArrival(state)) correctArrival();
+  }
   if (!mounted || !entry || entry.id === current?.id || pending.has(entry.id)) return false;
   restored = current = { ...entry };
   return true;
  },
- destination(view: ActiveView | null) {
+ /**
+  * A view change. `reconcile` is boot settling the view it restored: it only
+  * corrects the entry this load stamped, never a stop the user made since or
+  * an entry the browser restored. Anything else is the user's step.
+  */
+ destination(view: ActiveView, intent: 'push' | 'reconcile' = 'push') {
   const next = viewPlace(view);
   if (current?.place.type === next.type && current.place.sessionId === next.sessionId) return;
+  if (intent === 'reconcile') {
+   if (!arrival || current?.id !== arrival.id) return;
+   restored = null;
+   stale = current = { id: arrival.id, place: next };
+   return correctArrival();
+  }
   // Resolving a new chat into its server id is not another visible step.
   const resolving = next.type === 'session' && current?.place.type === 'session' && !current.place.sessionId;
-  write(next, booting || resolving);
+  write(next, resolving);
  },
  detail(type: ViewType, patch: Partial<Place>, replace = false) {
   if (current?.place.type !== type) return;
@@ -82,16 +96,40 @@ function viewPlace(view: ActiveView | null): Place {
 // as Back, and a new id would make Back to the entry beneath look like a move.
 function write(place: Place, replace = false) {
  if (!mounted) return;
+ // A boot correction still waiting goes onto the arrival entry first.
+ if (stale && !replace) correctArrival();
  const id = replace && current ? current.id : randomUUID();
  const entry = { id, place };
  restored = null;
  current = entry;
+ // Refining the arrival under an overlay: the waiting correction is this place.
+ if (stale?.id === id) stale = entry;
  pending.add(id);
- writes = writes.then(async () => {
+ queue(async () => {
   try {
    const kept: ShellState = replace ? { ...page.state } : {};
    delete kept.shell;
    await goto(location.href, { shallow: true, replace, persistState: true, state: { ...kept, shell: entry } as ShellState });
   } finally { pending.delete(id); }
- }).catch(error => console.warn('Could not record navigation', error));
+ });
+}
+
+/** The browser is on the arrival entry itself, not an overlay's copy of it. */
+function onArrival(state: ShellState) {
+ return !!arrival && state.shell?.id === arrival.id && Object.keys(state).every(key => arrival!.keys.includes(key));
+}
+
+// Writes boot's correction once the arrival entry is current, never onto an
+// overlay's entry: Back from the overlay must land on the corrected place.
+function correctArrival() {
+ const entry = stale;
+ queue(async () => {
+  if (!mounted || !entry || entry !== stale || !onArrival(page.state)) return;
+  stale = null;
+  await goto(location.href, { shallow: true, replace: true, persistState: true, state: { ...page.state, shell: entry } as ShellState });
+ });
+}
+
+function queue(task: () => Promise<void>) {
+ writes = writes.then(task).catch(error => console.warn('Could not record navigation', error));
 }

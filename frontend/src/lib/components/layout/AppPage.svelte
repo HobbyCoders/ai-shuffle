@@ -233,8 +233,9 @@
 		// The arrival entry gets its place now, before anything can push over
 		// it: controls opened while boot loads (Chat controls, the phone drawer)
 		// add their own entries on top, and a reload can already go Back,
-		// Forward and click. Boot then refines this entry's place (settle).
-		shellHistory.start(page.state, $activeView, !(page.state as ShellState).shell);
+		// Forward and click. A reloaded entry keeps the place it saved; only a
+		// notification link outranks it. Boot's reconcile corrects a new one.
+		shellHistory.start(deepLinkSessionId ? {} : page.state, $activeView);
 
 		// The project catalog loads alongside init: a new chat's remembered
 		// project and branch resolve against it, and the composer holds a send
@@ -313,17 +314,17 @@
 		if (!$activeView) {
 			if (restoredSessionId) {
 				followRestoredLane();
-				layout.openChat(restoredSessionId);
+				layout.openChat(restoredSessionId, 'reconcile');
 			} else if (hasDraft || changedDuringLoads || hasBootProjectPick(initGeneration)) {
 				// Do not clear a surviving draft, a first send still creating its
 				// chat, or a project picked on the new-session screen during the
 				// loads (#930), just because the layout snapshot is absent.
-				layout.openChat(null);
+				layout.openChat(null, 'reconcile');
 			} else {
 				// This is the initial landing, not a user navigation. Keep a phone
 				// drawer or header popover opened during the loads (#975, #1188).
 				activeSession.newChat({ initialLanding: true });
-				layout.openChat(null);
+				layout.openChat(null, 'reconcile');
 			}
 		} else if ($activeView.type === 'session' && currentViewSessionId === null && (restoredSessionId || layoutNewChatWon)) {
 			// Layout says "new chat" but backend has a session — the user explicitly
@@ -336,12 +337,11 @@
 		} else if ($activeView.type === 'session' && currentViewSessionId !== restoredSessionId) {
 			// Layout view and active session disagree — backend is authoritative
 			followRestoredLane();
-			layout.openChat(restoredSessionId);
+			layout.openChat(restoredSessionId, 'reconcile');
 		} else {
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
-		shellHistory.settle($activeView);
 		if (!deepLinkSessionId && !navigationClaimed) showEntry();
 		bootReconciled = true;
 		performance.mark?.('shuffle:boot.reconciled');
