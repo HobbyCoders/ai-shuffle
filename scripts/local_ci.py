@@ -52,12 +52,17 @@ MAP_PATH = Path(os.environ.get("LOCAL_CI_TEST_MAP")
                 or Path.home() / ".cache" / "ai-shuffle" / "backend-test-map.json.gz")
 # The shared worker hosts run other sessions: never more than two test workers.
 WORKERS = os.environ.get("LOCAL_CI_WORKERS", "2")
-# Hosted Windows parts only (scripts/ci/windows_parts.py): a failed pytest
-# command reruns just its failed tests once. Off everywhere else.
+# Hosted Windows parts (scripts/ci/windows_parts.py) and Linux backend shards
+# (scripts/ci/backend_shard_run.py) only: a failed pytest command reruns just
+# its failed tests once. Off everywhere else.
 RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
 MAX_RETRIED = 20
 # Tests that failed and then passed on that rerun, in this process.
 FLAKY: list[str] = []
+# The tests of those reruns that were completely clean (every phase of every
+# test passed, nothing else happened; scripts/ci/record_failures.py). A rerun
+# that skips or xfails a failed test still exits 0, and lists nothing here.
+RERUN_PASSED: list[str] = []
 
 # The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
 FAST_SUBSET = [
@@ -254,19 +259,27 @@ def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         # Ctrl-C, or SIGTERM turned into SystemExit by full --step: leave no orphans.
         kill_tree(process)
         raise
-    if returncode and failed_file is not None:
+    # Only pytest's TESTS_FAILED exit (1, on Windows too) can be retried: a
+    # signal, a crash in interpreter shutdown or any other code is a real break,
+    # even when the failed-test list was already written.
+    if returncode == 1 and failed_file is not None:
         failed = (list(dict.fromkeys(failed_file.read_text(encoding="utf-8").splitlines()))
                   if failed_file.exists() else [])
         # Nothing recorded (a collection error, a crash) or many failures: a real break.
         if failed and len(failed) <= MAX_RETRIED:
             print(f"\n{len(failed)} failed test(s); running them once more.", flush=True)
-            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False)]
+            rerun = [argv[0], "-m", "pytest", *failed, *pytest_args(argv[0], parallel=False),
+                     "-p", "scripts.ci.record_failures"]
+            passed_file = failed_file.with_name("passed.txt")
             try:
-                run(rerun, cwd=cwd, env=env, timeout=timeout, retry=False)
+                run(rerun, cwd=cwd, env={**(env or {}), "LOCAL_CI_PASSED_FILE": str(passed_file)},
+                    timeout=timeout, retry=False)
             except Failure:
                 raise Failure(f"{shown} (in {rel}) exited {returncode}; "
                               f"its {len(failed)} failed test(s) failed again") from None
             FLAKY.extend(failed)
+            if passed_file.exists():
+                RERUN_PASSED.extend(passed_file.read_text(encoding="utf-8").splitlines())
             return
     if returncode:
         raise Failure(f"{shown} (in {rel}) exited {returncode}")
