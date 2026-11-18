@@ -1010,19 +1010,24 @@ class AcpLoop:
         for event in trailing:
             await self._emit(event)
         stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
-
-        def interrupted() -> bool:
-            if failure is not None:
-                return self._interrupted.is_set()
+        # Whether the turn was interrupted is decided once, before anything is
+        # stored, so the stored marker and the terminal event agree: the
+        # partial reply of an interrupted turn is marked, and Resume steps
+        # back past it. A stop_agent reason already set wins over an
+        # interrupt; an Interrupt or a stop that lands while the reply is
+        # stored no longer changes an interrupted outcome (a stop still ends
+        # the process).
+        if self._stop_reason is not None:
+            interrupted = False
+        elif failure is not None:
+            interrupted = self._interrupted.is_set()
+        else:
             # An agent's own "cancelled" after a request it got no allow for,
             # with no reply, is that failure; _silent_end is None once the host
             # interrupted, so a host interrupt stays an interruption.
-            return (stop == "cancelled" and not self._silent_end(mapper)) or (
+            interrupted = (stop == "cancelled" and not self._silent_end(mapper)) or (
                 self._interrupted.is_set() and stop != "end_turn")
-
-        # The partial reply of an interrupted turn is marked, so Resume steps
-        # back past it and re-sends the prompt under it.
-        meta = {"interrupted": "interrupt"} if interrupted() else {}
+        meta = {"interrupted": "interrupt"} if interrupted else {}
         parent = user_node
         for role, blocks in segments:
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
@@ -1041,18 +1046,19 @@ class AcpLoop:
         stopped, self._stop_reason = self._stop_reason, None
         if stopped:
             await self._stop_process()
+        if stopped and not interrupted:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=stopped,
                                         usage=usage, cost_usd=cost))
             return
         if failure is not None:
-            if interrupted():
+            if interrupted:
                 await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id))
                 return
             if not conn.alive:
                 await self._stop_process()
             await self._emit(self._failure_event(sid, turn_id, failure, usage=usage, cost_usd=cost))
             return
-        if interrupted():
+        if interrupted:
             await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                          usage=usage, cost_usd=cost))
             return

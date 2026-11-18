@@ -352,12 +352,14 @@ class Agent:
             await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
         if word == "slowonce":
-            # ``slow`` the first time; resent (a Resume), it answers at once.
+            # ``slow`` the first time; resent (a Resume), it answers at once,
+            # also from a new process (remembered in FAKE_ACP_STATE).
             # ``slowonce tool`` runs a finished tool call before streaming.
-            if getattr(self, "slowonce_seen", False):
+            seen = os.path.join(STATE or ".", "slowonce_seen")
+            if os.path.exists(seen):
                 await self.say(sid, "resumed")
                 return {"stopReason": "end_turn"}
-            self.slowonce_seen = True
+            os.close(os.open(seen, os.O_CREAT | os.O_WRONLY))
             if text == "slowonce tool":
                 await self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": "read-1",
                                         "title": "Read notes.txt", "kind": "read", "status": "completed",

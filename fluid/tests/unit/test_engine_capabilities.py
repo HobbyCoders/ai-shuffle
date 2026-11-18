@@ -5,7 +5,7 @@ from contextlib import aclosing
 import pytest
 
 from fluid.events.model import (
-    ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
+    BlockStop, ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
     ToolResult, ToolUse, TurnComplete,
 )
 from fluid.events.ops import (
@@ -16,7 +16,7 @@ from fluid.permissions.rules import Rule
 from fluid.store.base import SessionNode
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
-from tests.unit.test_acp_engine import _driver, _received
+from tests.unit.test_acp_engine import SerializingStore, _driver, _received
 from tests.unit.test_delegated_scripted_cli import Scripted, _interruptible_turn, _tool_turn
 from tests.unit.test_native_scripted_provider import Harness, Messages, Sleep, server, tool_reply
 
@@ -62,17 +62,33 @@ async def test_native_resume_after_interrupt_reruns_the_prompt(server):
 
 
 async def test_native_refuses_fork_and_rewind_while_a_turn_runs(server):
-    server.script(Messages.text("first"), [Messages.start(), *Messages.text_block(0, "second"), Sleep(1)])
+    server.script(Messages.text("first"), Messages.text("second"))
     run = Harness(server)
     loop = run.loop
+    # Turn two is held open while its reply is being stored, so the ops below
+    # land in a running turn, not by timing.
+    storing, release = asyncio.Event(), asyncio.Event()
+    append = run.store.append
+
+    async def gated_append(session_id, node):
+        if node.message.role == "assistant" and node.message.text() == "second":
+            storing.set()
+            await release.wait()
+        await append(session_id, node)
+
+    run.store.append = gated_append
     try:
         assert isinstance((await run.turn("one"))[-1], TurnComplete)
         first_prompt = (await loop.store.load_path(loop.session_id))[0]
+        seq = loop.bus.last_seq(loop.session_id)
         await loop.submit(UserTurn(content="two"))
-        await _event(loop, TextDelta)
+        assert "second".startswith((await _event(loop, TextDelta, since=seq)).text)
+        await asyncio.wait_for(storing.wait(), 10)
+        assert loop.turn_running
         for op in (Fork(from_node_id=first_prompt.node_id), Rewind(to_node_id=first_prompt.node_id)):
             with pytest.raises(RuntimeError, match="a turn is running"):
                 await loop.submit(op)
+        release.set()
         await asyncio.wait_for(loop.wait_turn(), 10)
         path = await loop.store.load_path(loop.session_id)
         assert [n.message.text() for n in path] == ["one", "first", "two", "second"]
@@ -83,6 +99,7 @@ async def test_native_refuses_fork_and_rewind_while_a_turn_runs(server):
         await loop.submit(Fork(from_node_id=first_prompt.node_id))
         assert (await loop.store.get_session(loop.session_id)).head_node_id == first_prompt.node_id
     finally:
+        release.set()
         await run.aclose()
 
 
@@ -156,6 +173,112 @@ async def test_acp_resume_after_interrupt_resends_the_prompt(tmp_path, prompt):
         ]
         assert path[0].node_id == user.node_id
     finally:
+        await driver.close()
+
+
+class _GatedStore(SerializingStore):
+    """Holds the first node or event ``hold`` matches until ``release``, as
+    the app's PostgreSQL store can yield mid-write."""
+
+    def __init__(self, hold):
+        super().__init__()
+        self.hold, self.held, self.release = hold, asyncio.Event(), asyncio.Event()
+
+    async def _gate(self, item):
+        if not self.held.is_set() and self.hold(item):
+            self.held.set()
+            await self.release.wait()
+
+    async def append(self, session_id, node):
+        await self._gate(node)
+        await super().append(session_id, node)
+
+    async def append_event(self, session_id, event):
+        await self._gate(event)
+        await super().append_event(session_id, event)
+
+
+def _assistant_node(item):
+    return isinstance(item, SessionNode) and item.message.role == "assistant"
+
+
+async def _interrupt_then_stop(tmp_path, hold):
+    """Interrupt a streaming turn, then stop_agent while ``hold`` is held."""
+    store = _GatedStore(hold)
+    driver = await _driver(tmp_path, store=store)
+    await driver.loop.submit(UserTurn(content="slowonce"))
+    await driver.until(TextDelta, timeout=10)
+    await driver.loop.submit(Interrupt())
+    await asyncio.wait_for(store.held.wait(), 10)
+    await driver.loop.stop_agent("credential withdrawn")
+    store.release.set()
+    end = await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10)
+    await asyncio.wait_for(driver.loop.wait_turn(), 10)
+    return driver, end
+
+
+async def test_acp_stop_before_the_reply_is_stored_wins_over_interrupt(tmp_path):
+    # The stop lands before the outcome is decided (the closing BlockStop is
+    # written first): the credential error ends the turn, nothing is marked,
+    # and Resume is refused, as for any stopped turn.
+    driver, end = await _interrupt_then_stop(tmp_path, lambda item: isinstance(item, BlockStop))
+    loop = driver.loop
+    try:
+        assert isinstance(end, ErrorEvent) and end.message == "credential withdrawn"
+        _user, reply = await loop.store.load_path(loop.session_id)
+        assert reply.message.text() == "working"
+        assert not (reply.message.provider_meta or {}).get("interrupted")
+        await loop.submit(Resume())
+        end = await driver.until((ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent) and end.message.startswith("Nothing to resume")
+        assert len(_received(tmp_path, "session/prompt")) == 1
+    finally:
+        await driver.close()
+
+
+async def test_acp_stop_while_the_interrupted_reply_is_stored_keeps_it_resumable(tmp_path):
+    # The stop lands after the outcome (interrupted) was decided and stored:
+    # the process still ends, the turn ends Interrupted as its stored marker
+    # says, and Resume re-sends the prompt to a fresh process.
+    driver, end = await _interrupt_then_stop(tmp_path, _assistant_node)
+    loop = driver.loop
+    try:
+        assert isinstance(end, Interrupted)
+        user, reply = await loop.store.load_path(loop.session_id)
+        assert reply.message.text() == "working" and reply.message.provider_meta.get("interrupted")
+        await loop.submit(Resume())
+        assert isinstance(await driver.until((ErrorEvent, TurnComplete), timeout=10), TurnComplete)
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        assert [r["params"]["prompt"][0]["text"] for r in _received(tmp_path, "session/prompt")] == [
+            "slowonce", "slowonce",
+        ]
+        path = await loop.store.load_path(loop.session_id)
+        assert [(n.node_id, n.message.text()) for n in path] == [
+            (user.node_id, "slowonce"), (path[-1].node_id, "resumed"),
+        ]
+    finally:
+        await driver.close()
+
+
+async def test_acp_interrupt_while_the_reply_is_stored_does_not_change_the_outcome(tmp_path):
+    # The agent answers and exits; an Interrupt landing while that reply is
+    # stored no longer turns the agent's failure into an Interrupted event
+    # over an unmarked (so not resumable) head.
+    store = _GatedStore(_assistant_node)
+    driver = await _driver(tmp_path, store=store)
+    loop = driver.loop
+    try:
+        await loop.submit(UserTurn(content="die"))
+        await asyncio.wait_for(store.held.wait(), 10)
+        await loop.submit(Interrupt())
+        store.release.set()
+        end = await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent)
+        _user, reply = await loop.store.load_path(loop.session_id)
+        assert reply.message.text() == "bye"
+        assert not (reply.message.provider_meta or {}).get("interrupted")
+    finally:
+        store.release.set()
         await driver.close()
 
 
