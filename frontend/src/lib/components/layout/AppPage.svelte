@@ -38,7 +38,7 @@
 	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { createdChatToFollow } from './follow-created-chat';
 	import { chatChangedDuringBoot } from './boot-landing';
-	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim } from '$lib/stores/session/session-init';
+	import { finishBootReconciliation, getInitGeneration, hasBootProjectPick, hasBootSendClaim, tabRestoreTarget } from '$lib/stores/session/session-init';
 	import { NOT_HANDLED, registerShortcut, type ShortcutRegistration } from '$lib/services/keyboard';
 	import { PROJECT_PICKER_SHORTCUT, isProjectPickerKey, openProjectPicker } from '$lib/services/project-picker';
 	import { isMessageEditorKey } from '$lib/services/message-editor-key';
@@ -222,11 +222,20 @@
 		// Read a deep link before anything awaits: the chat surface shows its
 		// loading state until the linked session opens below, instead of the
 		// New Chat hero for the length of init and the first loads. A
-		// notification link always loads a fresh entry; an entry with a saved
-		// place is a reload, and a link left on its address was already read.
-		const savedEntry = !!(page.state as ShellState).shell;
-		const deepLinkSessionId = savedEntry ? null : deepLinkSessionIdFrom(window.location.search);
-		if (savedEntry) dropSessionLink();
+		// notification link always loads a fresh entry. An entry with a saved
+		// place was already shown: a link left on its address was read then.
+		const saved = (page.state as ShellState).shell?.place;
+		if (saved) dropSessionLink();
+		// The saved place is shown from the first frame, before any load can
+		// hold it back. Its chat binds like a link unless this tab's own saved
+		// chat, which init restores, is that chat.
+		const savedChat = saved?.type === 'session' ? saved.sessionId ?? null : null;
+		const deepLinkSessionId = !saved ? deepLinkSessionIdFrom(window.location.search)
+			: savedChat !== tabRestoreTarget()?.sessionId ? savedChat : null;
+		if (saved && !deepLinkSessionId) {
+			if (saved.type === 'session') layout.openChat(savedChat);
+			else layout.openFeaturePage(saved.type);
+		}
 		if (deepLinkSessionId) {
 			pendingDeepLink.set(deepLinkSessionId);
 			// Never a permanent spinner: if boot fails before the open, let go.
@@ -235,11 +244,8 @@
 			// last visit (often another chat) must not render meanwhile.
 			layout.openChat(deepLinkSessionId);
 		}
-		// The arrival entry gets its place now, before anything can push over
-		// it: controls opened while boot loads (Chat controls, the phone drawer)
-		// add their own entries on top, and a reload can already go Back,
-		// Forward and click. A reloaded entry keeps the place it saved; boot's
-		// reconcile only corrects a new one.
+		// Back, Forward and clicks already work while boot loads. A saved entry
+		// keeps its place; boot's reconcile only moves a fresh load's landing.
 		shellHistory.start(page.state, $activeView);
 
 		// The project catalog loads alongside init: a new chat's remembered

@@ -76,6 +76,10 @@ beforeEach(() => {
 		vi.spyOn(appData, method).mockResolvedValue(undefined);
 	}
 	history.replaceState(null, '', '/');
+	// Each test is a fresh load: no entry the last one wrote.
+	chatHistory.entries = [{}];
+	chatHistory.index = 0;
+	page.state = {};
 });
 
 afterEach(() => { cleanup(); activeSession.destroy(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
@@ -245,12 +249,6 @@ describe('chat link history (#859)', () => {
 		chatHistory.index += delta;
 		page.state = chatHistory.entries[chatHistory.index];
 	};
-	beforeEach(() => {
-		chatHistory.entries = [{}];
-		chatHistory.index = 0;
-		page.state = {};
-	});
-
 	it('makes each in-app chat link (the parent crumb) one Back step, and Forward returns', async () => {
 		render(Page);
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
@@ -299,16 +297,20 @@ describe('chat link history (#859)', () => {
 
 	it.each([
 		['a Docs page', { type: 'docs' as const }, () => layout.current.activeView?.type === 'docs'],
-		['another chat', { type: 'session' as const, sessionId: 'worker-child' }, () => activeSession.current.sessionId === 'worker-child'],
-	])('reloads onto the place the browser entry saved (%s), not the layout another tab wrote', async (_name, place, shown) => {
+		['another chat', { type: 'session' as const, sessionId: 'worker-child' },
+			() => layout.current.activeView?.sessionId === 'worker-child' && activeSession.current.sessionId === 'worker-child'],
+	])('reloads onto the place the browser entry saved (%s) from the first frame, not the layout another tab wrote', async (_name, place, shown) => {
 		// This tab's entry was left on `place`; another tab since opened the
 		// parent chat, which rewrote the shared layout snapshot. The address
 		// still has the link this tab arrived by, read long ago.
 		chatHistory.entries = [{ shell: { id: 'saved', place } }];
 		page.state = chatHistory.entries[0];
 		history.replaceState(null, '', '/?session=parent');
+		// The sessions request is held: boot has not reconciled yet.
+		const release = slowBoot();
 		render(Page);
 		await waitFor(() => expect(shown()).toBe(true));
+		release();
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(shown()).toBe(true);
 		expect(window.location.search).toBe('');
@@ -318,7 +320,7 @@ describe('chat link history (#859)', () => {
 	it('keeps every place the user visits while boot loads, even when boot never finishes', async () => {
 		slowBoot();
 		render(Page);
-		await waitFor(() => expect(places()).toEqual(['parent']));
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
 		openSession('worker-child');
 		layout.openFeaturePage('settings');
 		layout.openFeaturePage('docs');
@@ -329,26 +331,44 @@ describe('chat link history (#859)', () => {
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
 	});
 
-	it('writes boot’s correction to the arrival entry once an overlay over it closes, so Back later returns there', async () => {
-		// The layout still shows the parent; this tab's chat (the authority) is the child.
+	/** The layout still shows the parent; this tab's chat (the authority) is the child. Chat controls open over the arrival while boot loads. */
+	async function arriveUnderControls() {
 		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'worker-child', title: 'Child', mode: 'chat', profile: 'test' }));
 		const release = slowBoot();
 		render(Page);
-		await waitFor(() => expect(places()).toEqual(['parent']));
-		// Chat controls open over the arrival while boot loads.
+		await waitFor(() => expect(layout.current.activeView?.sessionId).toBe('parent'));
+		await new Promise((resolve) => setTimeout(resolve));
 		chatHistory.entries.push({ ...page.state, mobileControls: true });
 		step(1);
 		release();
 		await waitFor(() => expect(layout.current.activeView?.sessionId).toBe('worker-child'));
-		step(-1); // Back closes the controls.
-		await waitFor(() => expect(places()).toEqual(['worker-child', 'parent']));
+	}
+	const showsChild = async () => {
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
 		expect(activeSession.current.sessionId).toBe('worker-child');
+	};
+
+	it('shows boot’s view on the arrival entry once an overlay over it closes, so Back later returns there', async () => {
+		await arriveUnderControls();
+		step(-1); // Back closes the controls.
+		await showsChild();
 		layout.openFeaturePage('settings');
 		await waitFor(() => expect(places()).toEqual(['worker-child', 'settings']));
 		step(-1);
-		await waitFor(() => expect(layout.current.activeView?.type).toBe('session'));
-		expect(layout.current.activeView?.sessionId).toBe('worker-child');
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(activeSession.current.sessionId).toBe('worker-child');
+		await showsChild();
+	});
+
+	it('shows boot’s view on the overlay’s entry and the arrival after Settings opened from the overlay, Back and Forward', async () => {
+		await arriveUnderControls();
+		layout.openFeaturePage('settings');
+		await waitFor(() => expect(chatHistory.entries).toHaveLength(3));
+		step(-1); await showsChild();
+		step(-1); await showsChild();
+		step(1); await showsChild();
+		step(1);
+		await waitFor(() => expect(layout.current.activeView?.type).toBe('settings'));
+		step(-1); await showsChild();
+		expect(places()).not.toContain('parent');
 	});
 });

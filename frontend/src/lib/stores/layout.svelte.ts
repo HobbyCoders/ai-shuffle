@@ -182,9 +182,12 @@ export const layout = {
 		_update((s) => ({ ...s, sidebarCollapsed: collapsed }));
 	},
 
-	/** Navigate to a chat session. Boot reconciliation passes `reconcile` (see shellHistory). */
+	/**
+	 * Navigate to a chat session. Boot reconciliation passes `reconcile`: the
+	 * view only moves where the shell history lets boot move it (see shellHistory).
+	 */
 	openChat(sessionId: string | null, history: 'push' | 'reconcile' = 'push') {
-		shellHistory.destination({ type: 'session', sessionId }, history);
+		if (!shellHistory.destination({ type: 'session', sessionId }, history)) return;
 		_update((s) => ({
 			...s,
 			activeView: { type: 'session', sessionId }

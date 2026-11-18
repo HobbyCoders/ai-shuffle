@@ -452,8 +452,9 @@ describe('SettingsShell stacked mode', () => {
 		await view.rerender({ initialItemId: target });
 		await waitFor(() => expect(settingsNav.view).toBe('detail'));
 		await view.rerender({ initialItemId: undefined });
-		const places = mocks.pushState.mock.calls.map(([, state]) => state.shell.place.settings);
-		expect(places.map(p => p.view)).toEqual(['page', 'detail']);
+		// History writes are queued: wait for both steps to land.
+		const views = () => mocks.pushState.mock.calls.map(([, state]) => state.shell.place.settings.view);
+		await waitFor(() => expect(views()).toEqual(['page', 'detail']));
 		for (const platformName of ['desktop', 'mobile'] as const) { platform.set(platformName); await tick(); }
 		expect(mocks.pushState).toHaveBeenCalledTimes(2);
 		shellHistory.land(mocks.pushState.mock.calls[0][1]);
