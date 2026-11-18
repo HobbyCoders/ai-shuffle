@@ -20,46 +20,21 @@ only when:
 - there is no command substitution (``$(`` or backticks), no background ``&``,
   no subshell parentheses, and no program outside the table (so ``sudo``,
   ``xargs``, ``env cmd``, ``python`` and friends are all ``write``);
-- the shell builds no word the lexer cannot see (:func:`_hidden_expansion`):
-  outside single quotes no parameter expansion at all (``$NAME``,
-  ``"$NAME"``, ``${…}``, ``$1``, ``$_``, ``$?`` ...), no ANSI-C or locale
-  quoting (``$'-exec'``, ``$"x"``) and no brace expansion (``{-exec,rm}``).
-  Each of these turns into an option, a file name or extra words the checks
-  below never saw; single-quoted awk and sed scripts are literal;
-- every program is named bare: ``/usr/bin/grep`` or ``./cat`` is whatever
-  file sits at that path, so it is ``write``;
 - any leading ``VAR=value`` assignment names a variable in
   :data:`INERT_ENV_VARS`. Locale and colour variables cannot change what a
   program does; almost anything else can (``LD_PRELOAD``, ``GIT_EXTERNAL_DIFF``,
   ``GIT_PAGER``, ``BASH_ENV``, ``LESSOPEN`` all run a program of the caller's
   choosing), so an assignment outside the list makes the command ``write``.
 
-A read-only command whose argument names a credential file (``cat .env``) or
-a process's environment, command line or memory (``cat /proc/$PPID/environ``:
-the parent is the host, whose environment holds the provider keys) is still
-``write``; see :func:`_touches_sensitive_path`. Words are taken as the shell
-passes them, quotes removed. An unquoted glob argument (``*``, ``?``,
-``[``) asks: what it expands to is not in the text. A value attached to an
-option counts too (``date --file=.env``), and relative arguments are also
-read against the directory the command runs in (the call's ``cwd``, else the
-session's: ``cat environ`` in ``/proc/1``); when that directory has a ``..``
-component or sits under ``/proc`` or ``/dev/fd``, any relative argument
-asks. A path through ``/proc/<pid>/fd``, ``cwd``, ``root`` or ``/dev/fd``
-asks. Names are checked, not link targets: no file is looked at (this runs
-on the event loop), so ``notes.txt`` linking to ``.env`` is not caught. It
-is a preflight, not a boundary. ``echo``, ``printf`` and friends open
-nothing, so their words get only the credential-name check.
-
-A search or comparison across a directory tree prints whatever credential
-file sits in it, so it is ``write``: recursive ``grep`` (any word with a
-``-r``/``-R``/``-d`` letter, or a long option that could abbreviate
-``--recursive``, ``--dereference-recursive`` or ``--directories``), and
-``grep`` at all when ``GREP_OPTIONS`` is set (BSD grep reads options from
-it). ``rg``, ``ag``, ``ack`` and ``diff`` are not in the table: rg searches
-the tree by default and loads options (``--pre`` included) from
-``RIPGREP_CONFIG_PATH``, and ``diff`` of two directories compares the files in
-them (``diff -rN . empty`` prints every file). The built-in Grep tool is the
-tree-wide search that withholds credential files.
+A read-only command whose argument names a credential file (``cat .env``) is
+still ``write``; see :func:`_touches_sensitive_path`. A command that passes
+all of that then goes through :func:`_extra_secret_read_reason`, which can
+only turn ``safe`` into ``write``: process environment and descriptor paths,
+a credential name glued to a separator or after ``rev:``/``--opt=``,
+recursive ``grep``, ``rg``, ``diff``, two-path ``git diff``, ``file -p``,
+comments and line breaks, over-long input, and an unsure call ``cwd``. An unquoted glob argument
+counts when any file it could expand to is a credential file (``cat .env*``,
+``cat ?env``, ``cat ~/.ssh/*``).
 
 Programs with extra rules:
 
@@ -85,43 +60,36 @@ Programs with extra rules:
 - ``sort``: no ``-o``/``--output``, ``-T``/``--temporary-directory`` or
   ``--compress-program``; every letter of a short-option word counts. ``uniq``: at
   most one positional argument (the second is an output file). ``tree``: no
-  ``-o`` or ``-R``. ``file``: no ``-C``/``--compile`` and no
-  ``-p``/``--preserve-date`` (it resets the access time it read, a metadata
-  write). ``env``: no arguments (``env cmd`` runs ``cmd``).
+  ``-o`` or ``-R``. ``file``: no ``-C``/``--compile``. ``env``: no arguments
+  (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` or ``--hostname-bin`` (both
+  run a command).
 
 A banned option counts when attached (``-ofile``) or bundled (``-uo file``),
 and for programs that parse long options with getopt_long (sort, file, sed,
 date, gawk) when abbreviated to a prefix that names it unambiguously
 (``--outp=file``; ``sort --c`` is ambiguous and getopt_long refuses it).
-tree rejects abbreviations, so its long options match exactly.
+ripgrep and tree reject abbreviations, so their long options match exactly.
 Every word is scanned, ``--`` and option values included. See :func:`_no_flags`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
-  external program); any ``--output*`` argument is rejected. ``git diff``
-  asks with ``--no-index`` or two or more operands (every word after ``--``
-  is one) or a glob operand: given two paths outside the work tree (or run
-  outside a repository) it compares them as plain directories, like
-  ``diff -rN``.
+  external program); any ``--output*`` argument is rejected.
 - ``uv``/``pip``/``npm``/``pnpm``/``yarn``/``cargo``: only the informational
   subcommands in :data:`PACKAGE_MANAGER_READ_ONLY` (``uv pip list`` is handled
   by skipping the ``pip`` word).
 - ``go``: only ``go version``. ``node``: only ``--version``/``-v``.
 
 Everything is table-driven so the allowlist can grow without touching the
-parser. Program names are matched case-insensitively, with a trailing
-``.exe`` stripped.
+parser. Program names are matched on the basename (``/usr/bin/git``,
+``C:\\Program Files\\Git\\bin\\git.exe`` both count as ``git``), case-insensitive,
+with a trailing ``.exe`` stripped.
 """
 
 from __future__ import annotations
 
-import os
-import posixpath
 import re
 import shlex
 from collections.abc import Callable
-from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import Any
 
 SAFE = "safe"
@@ -227,32 +195,6 @@ def _no_flags(
 
 def _find_ok(args: list[str]) -> bool:
     return not any(a in _FIND_EXEC_FLAGS or a.startswith("-fprint") for a in args)
-
-
-# Long options that make grep descend into directories, or that could be
-# abbreviated to one (getopt_long accepts any unambiguous prefix).
-_GREP_RECURSIVE_LONG = ("--recursive", "--dereference-recursive", "--directories")
-
-
-def _grep_ok(args: list[str]) -> bool:
-    """No recursion: a tree-wide grep prints the lines of any ``.env`` in it.
-
-    Deliberately blunt so no dialect slips through: any short-option word
-    with an ``r``, ``R`` or ``d`` letter asks (``-d recurse``, ``-drec``,
-    ``-inr``, even ``-e red``), and so does any long option that is a prefix
-    of a recursion option. Every word is scanned, ``--`` included. BSD grep
-    reads extra options from ``GREP_OPTIONS``, so grep asks when it is set.
-    """
-    if os.environ.get("GREP_OPTIONS"):
-        return False
-    for a in args:
-        if a.startswith("--"):
-            name = a.split("=", 1)[0]
-            if len(name) > 2 and any(o.startswith(name) for o in _GREP_RECURSIVE_LONG):
-                return False
-        elif a.startswith("-") and any(ch in "rRd" for ch in a[1:]):
-            return False
-    return True
 
 
 # Real long options, for getopt_long abbreviation (GNU coreutils / libmagic).
@@ -760,14 +702,12 @@ def _exact(*allowed: tuple[str, ...]) -> Check:
 READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
     "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
-    "grep": _grep_ok, "egrep": _grep_ok, "fgrep": _grep_ok,
-    # No rg: it searches the whole tree unless given files, and options from
-    # its config file (RIPGREP_CONFIG_PATH) can add --pre, which runs a program.
+    "grep": None, "egrep": None, "fgrep": None,
+    # Both run a program. ripgrep rejects abbreviated long options, so exact.
+    "rg": _no_flags("--pre", "--hostname-bin"),
     "find": _find_ok,
-    # -C compiles a magic file; -p resets the access time after reading.
     "file": _no_flags(
-        "-C", "--compile", "-p", "--preserve-date",
-        takes_value="efFmP", long_options=_FILE_LONG_OPTIONS,
+        "-C", "--compile", takes_value="efFmP", long_options=_FILE_LONG_OPTIONS,
     ),
     "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
@@ -779,10 +719,7 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     # every letter of a bundle is a flag. tree has its own parser, not
     # getopt, so every word is scanned, ``--`` or not.
     "tree": _no_flags("-o", "-R"),
-    # No diff: given two directories it compares the files in them, so
-    # ``diff -rN . empty`` prints every file, .env included. cmp refuses
-    # a directory.
-    "cmp": None,
+    "diff": None, "cmp": None,
     # sort writes with -o, runs a helper with --compress-program and spills
     # into a chosen directory with -T. Which bundled letters take a value
     # differs between sorts, so every letter of a short-option word counts,
@@ -799,33 +736,9 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "jq": None,
 }
 
-def _git_diff_ok(args: list[str]) -> bool:
-    """Not the plain-directory form: ``--no-index``, or two operands.
-
-    git compares two paths as ``diff -rN`` would when one lies outside the
-    work tree or the command runs outside a repository, which the text does
-    not show; both need exactly two operands. Every word after ``--`` is an
-    operand, dashes or not, and a glob may expand to several, so one asks.
-    Option values count as operands here (``-S foo a``), which can only add
-    a prompt.
-    """
-    for a in args:
-        name = a.split("=", 1)[0]
-        if len(name) >= 5 and "--no-index".startswith(name):
-            return False
-    if "--" in args:
-        cut = args.index("--")
-        operands = [a for a in args[:cut] if not a.startswith("-")] + args[cut + 1:]
-    else:
-        operands = [a for a in args if not a.startswith("-")]
-    if any(ch in a for a in operands for ch in "*?["):
-        return False
-    return len(operands) < 2
-
-
 # git subcommand → check over the subcommand's own arguments.
 GIT_READ_ONLY: dict[str, Check | None] = {
-    "status": None, "log": None, "diff": _git_diff_ok, "show": None,
+    "status": None, "log": None, "diff": None, "show": None,
     "rev-parse": None, "ls-files": None, "blame": None, "describe": None,
     "branch": lambda args: all(
         a in ("-a", "-r", "--list", "-l", "--show-current", "-v", "-vv") for a in args
@@ -898,72 +811,6 @@ def _lex(line: str) -> list[str] | None:
         return None
 
 
-_WORD_END = frozenset(" \t\r\n;&|<>()")
-
-
-def _brace_expands(command: str, i: int) -> bool:
-    """True when the unquoted ``{`` at ``i`` could open a brace expansion.
-
-    Any ``,`` or ``..`` later in the same word counts, quoted or not; a
-    quoted comma does not split, so that only adds a prompt.
-    """
-    quote = ""
-    i += 1
-    while i < len(command):
-        ch = command[i]
-        if quote:
-            if ch == quote:
-                quote = ""
-        elif ch == "\\":
-            i += 1
-        elif ch in "'\"":
-            quote = ch
-        elif ch in _WORD_END:
-            return False
-        if ch == "," or command.startswith("..", i):
-            return True
-        i += 1
-    return False
-
-
-def _hidden_expansion(command: str) -> bool:
-    """True when the shell would build a word the classifier cannot see.
-
-    The per-program checks read the words as written, but the shell expands
-    ``$X`` / ``"$X"`` / ``${X:--exec}`` to whatever the variable holds (an
-    option, a path, several words), ``$'-exec'`` to ``-exec``, and
-    ``{-exec,rm}`` to two words: ``find . ${X:--exec} rm {} +`` runs ``rm``.
-    So outside single quotes any parameter expansion (``$NAME``, ``${…}``,
-    ``$1``, ``$@``, ``$?``, ``$$``, ``$[…]``), ANSI-C or locale quoting, and an
-    unquoted brace expansion refuse the fast path. Single-quoted text is
-    literal, so awk and sed scripts keep their ``$1``.
-    """
-    quote = ""
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = ""
-        elif ch == "\\":
-            i += 1  # the next character is literal
-        elif ch == '"':
-            quote = "" if quote else '"'
-        elif ch == "'" and not quote:
-            quote = "'"
-        elif ch == "{" and not quote and _brace_expands(command, i):
-            return True
-        elif ch == "$":
-            nxt = command[i + 1:i + 2]
-            if nxt in ("'", '"'):
-                if not quote:
-                    return True  # $'…' / $"…"; inside "…" the $ is literal
-            elif nxt and (nxt == "_" or nxt.isalnum() or nxt in "{@*#?-$![("):
-                return True
-        i += 1
-    return False
-
-
 def _simple_command_ok(tokens: list[str]) -> bool:
     # Leading VAR=value assignments pass only for inert variables; a bare
     # assignment is not a command.
@@ -972,10 +819,6 @@ def _simple_command_ok(tokens: list[str]) -> bool:
             return False
         tokens = tokens[1:]
     if not tokens:
-        return False
-    # Only a bare name runs the program the table means: ``./grep`` or
-    # ``/tmp/x/cat`` is whatever file sits there, whatever its basename.
-    if "/" in tokens[0] or "\\" in tokens[0]:
         return False
     program = _program_name(tokens[0])
     if program not in READ_ONLY_PROGRAMS:
@@ -989,8 +832,6 @@ def is_read_only(command: str) -> bool:
     if not command or not command.strip():
         return False
     if "$(" in command or "`" in command:
-        return False
-    if _hidden_expansion(command):
         return False
     for line in command.splitlines():
         line = re.sub(r"(?<!\S)2>&1(?!\S)", " ", line)
@@ -1187,6 +1028,20 @@ _GLOB_CHARS = frozenset("*?[{")
 _BRACE_RE = re.compile(r"\{([^{}]*)\}")
 
 
+def _has_unquoted_glob(raw: str) -> bool:
+    """True when a raw (still-quoted) token has a glob or brace outside quotes."""
+    quote: str | None = None
+    for ch in raw:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch in _GLOB_CHARS:
+            return True
+    return False
+
+
 def _expand_braces(pattern: str, limit: int = 64) -> list[str] | None:
     """Innermost-first brace expansion; None when it cannot be done."""
     out = [pattern]
@@ -1235,236 +1090,242 @@ def _glob_could_name_sensitive_path(pattern: str) -> bool:
     return False
 
 
-_SHELL_PARAMETER = re.compile(r"\$(\{[^}]*\}?|[A-Za-z0-9_]+|.)?")
-
-
-def _could_name_process_secret(path: str) -> bool:
-    """True when ``path`` could be a process's environ, cmdline or mem file.
-
-    Matched on the last component alone, wherever the directory part points:
-    ``/proc/$PPID/environ``, ``/proc/self/task/1/environ`` and
-    ``/dev/fd/../../1/environ`` (``/dev/fd`` is ``/proc/self/fd``) all reach a
-    process, and the shell resolves ``..`` after symlinks, so the directory
-    spelling proves nothing. A word without a ``/`` is a pattern or a file
-    in the working directory, not a /proc path. Globs, braces and ``$NAME``
-    in the last component count as wildcards (``/proc/self/e*``,
-    ``/proc/1/{environ,x}``, ``/proc/1/$F``).
-    """
-    from fluid.tools.hardening import SENSITIVE_PROCESS_FILES
-
-    normalized = path.replace("\\", "/").rstrip("/")
-    if "/" not in normalized:
-        return False
-    last = _SHELL_PARAMETER.sub("*", normalized.rsplit("/", 1)[-1].lower())
-    alternatives = _expand_braces(last)
-    if alternatives is None:
-        # Unbalanced (the shell keeps it literal: awk's ``'{print $1/2}'``)
-        # or too many to list: braces and commas as wildcards over-match.
-        alternatives = [re.sub(r"[{},]", "*", last)]
-    return any(
-        fnmatchcase(name, alt) for alt in alternatives for name in SENSITIVE_PROCESS_FILES
-    )
-
-
-# Programs that never open their operands: ``echo "progress/mem"`` prints
-# text. Their words get only the credential-name check (as before the /proc
-# rules existed), not those.
-_NO_FILE_OPERANDS = frozenset({"echo", "printf", "true", "false", "basename", "dirname"})
-# Paths that reach a file through another process's descriptor or directory
-# (``/proc/1/fd/3``, ``/proc/1/cwd/x``, ``/dev/fd/3``). Where they point
-# depends on the process reading them, so they ask.
-_INDIRECTION_GLOBS = tuple(
-    f"*/proc/*/{d}/*" for d in ("fd", "fdinfo", "cwd", "root", "map_files")
-) + ("*/dev/fd/*",)
-_OPERATOR_CHARS = frozenset(";&|()<>\n")
-
-
-@dataclass(frozen=True)
-class _Word:
-    """One shell word after quote removal, with what was unquoted in it."""
-
-    text: str
-    glob: bool  # an unquoted * ? or [: the shell expands it
-    brace: bool  # an unquoted {
-
-
-def _shell_words(command: str) -> list[_Word | None] | None:
-    """The words the shell passes, with None for each operator run.
-
-    Follows sh quoting for the subset :func:`is_read_only` lets through (no
-    expansions, no substitutions): single quotes are literal, a backslash
-    escapes the next character (inside double quotes only ``$``, a backquote,
-    ``"``, ``\\`` and a newline), and an unquoted newline or any of
-    ``;&|()<>`` separates, so ``"example folder"/a.txt`` is one word. A ``#``
-    stays an ordinary character, which can only add words to check. None
-    (ask) when a quote is left open or an unquoted backslash escapes a blank
-    or ends a line: quote such names instead.
-    """
-    out: list[_Word | None] = []
-    chars: list[str] = []
-    glob = brace = started = False
-    quote = ""
-
-    def end() -> None:
-        nonlocal chars, glob, brace, started
-        if started:
-            out.append(_Word("".join(chars), glob, brace))
-        chars, glob, brace, started = [], False, False, False
-
-    i, n = 0, len(command)
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = ""
-            else:
-                chars.append(ch)
-        elif quote == '"':
-            if ch == '"':
-                quote = ""
-            elif ch == "\\" and command[i + 1:i + 2] in ("$", "`", '"', "\\", "\n"):
-                i += 1
-                if command[i] != "\n":
-                    chars.append(command[i])
-            else:
-                chars.append(ch)
-        elif ch == "\\":
-            i += 1
-            if i >= n or command[i] in " \t\r\n":
-                return None  # an escaped blank or line join: ask, as main did
-            chars.append(command[i])
-            started = True
-        elif ch in "'\"":
-            quote, started = ch, True
-        elif ch in " \t\r":
-            end()
-        elif ch in _OPERATOR_CHARS:
-            end()
-            if out and out[-1] is not None:
-                out.append(None)
-        else:
-            glob = glob or ch in "*?["
-            brace = brace or ch == "{"
-            chars.append(ch)
-            started = True
-        i += 1
-    if quote:
-        return None
-    end()
-    return out
-
-
-def _through_indirection(path: str) -> bool:
-    lowered = "/" + path.replace("\\", "/").lower().rstrip("/") + "/"
-    return any(fnmatchcase(lowered, g) for g in _INDIRECTION_GLOBS)
-
-
-def _unsure_cwd(cwd: str) -> bool:
-    """True when names relative to ``cwd`` cannot be judged by spelling.
-
-    A ``..`` component resolves after symlinks, so the directory it lands in
-    is not the one the text shows; under ``/proc`` or ``/dev/fd`` a relative
-    name reaches another process's files.
-    """
-    lowered = cwd.replace("\\", "/").lower().rstrip("/")
-    if ".." in lowered.split("/"):
-        return True
-    return any(lowered == d or lowered.startswith(d + "/") for d in ("/proc", "/dev/fd"))
-
-
-def _touches_sensitive_path(command: str, bases: list[str] | None = None) -> bool:
-    """True when any argument could name a credential file (``cat .env`` etc.).
+def _touches_sensitive_path(command: str) -> bool:
+    """True when any argument names a credential file (``cat .env`` etc.).
 
     A read-only command is still an exfiltration read when its target is a
-    credential file or a process's environment, so it must not sail under the
-    on_write policy. Only the text is read: no file is looked at, so a link
-    named ``notes.txt`` that points at ``.env`` is not caught (a known gap).
+    credential file, so it must not sail under the on_write policy. Best-effort
+    shlex tokenization; a command we cannot tokenize was already rejected by
+    the read-only classifier.
 
-    Each word is taken as the shell passes it (:func:`_shell_words`). An
-    unquoted glob asks: what it matches is not in the text. Otherwise the
-    word is checked as written and with ``..`` folded, at every suffix of an
-    option word (``--file=.env``, ``-f.env``), after a ``:`` (``git show
-    HEAD:.env``) and joined to each of ``bases`` (``cat environ`` run in
-    ``/proc/1``). A path through a descriptor or another process's directory
-    asks, and so does any relative word when a base is unsure
-    (:func:`_unsure_cwd`). Words given to :data:`_NO_FILE_OPERANDS` programs
-    are text, not paths: they get the credential-name check alone.
+    Tokens are lexed with their quotes kept so an unquoted glob (``.env*``,
+    ``?env``, ``.{env,bashrc}``) can be told apart from a quoted regex
+    (``'foo.*'``): the shell expands the former after the classifier has seen
+    it, so it counts when any file it could match is sensitive.
     """
-    words = _shell_words(command)
-    if words is None:
-        return True
-    bases = [b.replace("\\", "/") for b in bases or []]
-    unsure = any(_unsure_cwd(b) for b in bases)
-    text = False
-    at_program = True
-    for word in words:
-        if word is None:
-            text, at_program = False, True
-            continue
-        if at_program and not _ENV_ASSIGNMENT.match(word.text):
-            at_program = False
-            name = word.text
-            text = "/" not in name and "\\" not in name and _program_name(name) in _NO_FILE_OPERANDS
-        elif _word_names_secret(word, bases, text=text, unsure=unsure):
-            return True
-    return False
-
-
-def _word_names_secret(word: _Word, bases: list[str], *, text: bool, unsure: bool) -> bool:
-    """True when one word could name a secret; ``text`` for a word printed, not opened."""
     from fluid.tools.hardening import is_sensitive_path
 
-    literal = word.text
-    if not text:
-        if word.glob:
+    lex = shlex.shlex(command, posix=False)
+    lex.whitespace_split = True
+    try:
+        raw_tokens = list(lex)
+    except ValueError:
+        return False
+    for raw in raw_tokens[1:]:
+        if raw.startswith("-"):
+            continue
+        try:
+            literal = " ".join(shlex.split(raw))
+        except ValueError:
             return True
-        if unsure and not literal.startswith(("/", "~")):
+        if is_sensitive_path(literal):
             return True
-    if literal.startswith("-"):
-        paths = [literal[k:] for k in range(len(literal))]
-    else:
-        paths = [literal]
-    # git's <rev>:<path> (``git show HEAD:.env``) names a file too.
-    paths += [p.split(":", 1)[1] for p in paths if ":" in p]
-    spelled = list(paths)
-    paths += [posixpath.join(base, p) for base in bases for p in spelled]
-    paths += [posixpath.normpath(p) for p in list(paths) if p]
-    for path in paths:
-        if text:
-            if is_sensitive_path(path):
-                return True
-        elif (
-            is_sensitive_path(path)
-            or _could_name_process_secret(path)
-            or _through_indirection(path)
-        ):
-            return True
-        if (word.glob or word.brace) and _glob_could_name_sensitive_path(path):
+        if _has_unquoted_glob(raw) and _glob_could_name_sensitive_path(literal):
             return True
     return False
+
+
+# ─── extra secret-read checks (ask-only) ──────────────────────────────────────
+#
+# These run only after the checks above have called a command safe, and can
+# only turn that into an ask. Each is a plain substring or token test over the
+# same shlex split :func:`_touches_sensitive_path` uses, so a disagreement
+# between parsers can cost a prompt but never approve a command. Linear work,
+# no filesystem access (this runs on the event loop).
+
+_MAX_COMMAND_CHARS = 4096
+_MAX_WORDS = 512
+_MAX_TOKEN_CHARS = 1024
+# A process's environment, arguments and auxiliary vector: asked for wherever
+# the name appears, with or without ``/proc``.
+_PROCESS_SECRET_NAMES = ("environ", "cmdline", "auxv")
+# Next to ``/proc`` (or ``proc/``), these reach memory, descriptors, another
+# process's directories, or a spelling the text does not show.
+_PROC_COMPANIONS = (
+    "mem", "maps", "/fd", "fd/", "/cwd", "cwd/", "/root", "root/", "/task",
+    "$", "*", "?", "[", "{", "'", '"', "\\",
+)
+_DEVICE_INDIRECTION = ("/dev/fd", "/dev/std")  # /dev/stdin, /dev/stdout ...
+_GREP_PROGRAMS = frozenset({"grep", "egrep", "fgrep", "zgrep"})
+_RIPGREP_PROGRAMS = frozenset({"rg", "ripgrep"})
+_GREP_RECURSIVE_LONG = ("--recursive", "--dereference-recursive", "--directories")
+_GIT_DIFF_RISKY = ("--no-i", "--ext", "--textc")  # --no-index, --ext-diff, --textconv
+_PIECE_SPLIT = re.compile(r"([|;&()<>])")
+_EXPANSION_CHARS = frozenset("*?[{$")
+
+
+def _plain(piece: str) -> str:
+    """A piece with quote and escape characters dropped, for name tests."""
+    return piece.replace("'", "").replace('"', "").replace("\\", "")
+
+
+def _single_quoted_literal(token: str) -> bool:
+    return len(token) > 1 and token[0] == token[-1] == "'" and "'" not in token[1:-1]
+
+
+def _segments(tokens: list[str]) -> list[list[str]]:
+    """Simple commands from the raw tokens, split at any shell punctuation.
+
+    A pure-digit word right before a redirection (``2>&1``) is dropped.
+    """
+    pieces: list[str] = []
+    for token in tokens:
+        pieces.extend(p for p in _PIECE_SPLIT.split(token) if p)
+    segments: list[list[str]] = [[]]
+    for k, piece in enumerate(pieces):
+        if _PIECE_SPLIT.fullmatch(piece):
+            if segments[-1]:
+                segments.append([])
+        elif not (piece.isdigit() and k + 1 < len(pieces) and pieces[k + 1] in "<>"):
+            segments[-1].append(_plain(piece))
+    return [seg for seg in segments if seg]
+
+
+def _grep_recurses(words: list[str]) -> bool:
+    for k, word in enumerate(words):
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if len(name) > 2 and any(o.startswith(name) for o in _GREP_RECURSIVE_LONG):
+                return True
+        elif word.startswith("-") and ("r" in word or "R" in word):
+            return True
+        if "recurse" in word or (word.startswith("-d") and k + 1 < len(words)
+                                 and words[k + 1] == "recurse"):
+            return True
+    return False
+
+
+def _git_diff_risky(words: list[str]) -> bool:
+    operands = 0
+    after_dashes = False
+    for word in words:
+        if not after_dashes:
+            if word == "--":
+                after_dashes = True
+                continue
+            if word.startswith(_GIT_DIFF_RISKY):
+                return True
+            if word.startswith("-"):
+                continue
+        if ".." not in word:
+            operands += 1
+    return operands >= 2
+
+
+def _segment_reason(words: list[str]) -> str | None:
+    names = [_program_name(w) if w else "" for w in words]
+    if any(n in _RIPGREP_PROGRAMS for n in names):
+        return "ripgrep searches a tree and reads config the classifier never sees"
+    if any(n in _GREP_PROGRAMS for n in names) and _grep_recurses(words):
+        return "recursive grep prints credential files the Grep tool withholds"
+    first = next((n for w, n in zip(words, names) if not _ENV_ASSIGNMENT.match(w)), "")
+    if first == "diff":
+        return "diff compares every file in two directories"
+    if "git" in names:
+        start = names.index("git")
+        for k in range(start + 1, len(words)):
+            if words[k] in ("diff", "difftool"):
+                if _git_diff_risky(words[k + 1:]):
+                    return "git diff of two paths or --no-index compares plain files"
+                break
+    if "file" in names:
+        rest = words[names.index("file") + 1:]
+        if any(w.startswith("--p") or (w.startswith("-") and not w.startswith("--")
+                                       and "p" in w) for w in rest):
+            return "file -p (--preserve-date) rewrites file times"
+    return None
+
+
+def _cwd_reason(cwd: Any) -> str | None:
+    if cwd is None or cwd == "":
+        return None
+    if not isinstance(cwd, str):
+        return "the call's cwd is not a string"
+    forward = cwd.replace("\\", "/")
+    if not (forward.startswith("/") or re.match(r"[A-Za-z]:/", forward)):
+        return "a relative cwd is resolved differently by the check and the spawn"
+    parts = [p for p in forward.lower().split("/") if p not in ("", ".")]
+    if ".." in parts:
+        return "a cwd with .. lands where the text does not show"
+    if parts[:1] in (["proc"], ["dev"]):
+        return "a cwd under /proc or /dev reaches process files"
+    return None
+
+
+def _extra_secret_read_reason(command: str, call_cwd: Any = None) -> str | None:
+    """Why a command main calls safe should still ask, or None. Ask-only."""
+    if len(command) > _MAX_COMMAND_CHARS or len(command.split()) > _MAX_WORDS:
+        return "the command is too long to check"
+    if "#" in command or "\n" in command or "\r" in command:
+        return "comments and line breaks are read differently by shlex and the shell"
+    reason = _cwd_reason(call_cwd)
+    if reason:
+        return reason
+    lex = shlex.shlex(command, posix=False)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+        literals = [" ".join(shlex.split(t)) for t in tokens]
+    except ValueError:
+        return "the command does not tokenize"
+    if any(len(t) > _MAX_TOKEN_CHARS for t in tokens):
+        return "an argument is too long to check"
+    for text in (command.lower(), " ".join(literals).lower()):
+        if any(name in text for name in _PROCESS_SECRET_NAMES):
+            return "names a process's environment or arguments"
+        if any(d in text for d in _DEVICE_INDIRECTION):
+            return "reads through a descriptor"
+        if ("/proc" in text or "proc/" in text) and any(c in text for c in _PROC_COMPANIONS):
+            return "reads process files under /proc"
+    for token in tokens:
+        if _single_quoted_literal(token):
+            continue  # nothing in it expands
+        if "/" not in token or not _EXPANSION_CHARS.intersection(token):
+            continue
+        if "$" in token:
+            return "a path built from a parameter expansion"
+        if any(_EXPANSION_CHARS.intersection(part) for part in token.split("/")[:-1]):
+            return "a glob or brace in a directory part of a path"
+    from fluid.tools.hardening import is_sensitive_path
+
+    for token in tokens:
+        if _single_quoted_literal(token):
+            continue  # the shell splits nothing inside; main checked the literal
+        glob = _has_unquoted_glob(token)
+        for piece in _PIECE_SPLIT.split(token):
+            # A word ends at a glued separator (``cat .env;``), and a
+            # ``rev:path`` or ``--opt=path`` value names a file too.
+            word = _plain(piece)
+            names = [word]
+            if ":" in word:
+                names.append(word.split(":", 1)[1])
+            if word.startswith("-") and "=" in word:
+                names.append(word.split("=", 1)[1])
+            for name in names:
+                if is_sensitive_path(name) or (glob and _glob_could_name_sensitive_path(name)):
+                    return "names a credential file"
+    for words in _segments(tokens):
+        reason = _segment_reason(words)
+        if reason:
+            return reason
+    return None
 
 
 def classify(input: dict[str, Any]) -> str:
     """Effective risk of one Bash tool input: ``safe`` or ``write``.
 
-    The Bash tool runs in the call's ``cwd``, else the session's, which
-    :meth:`ToolSpec.effective_risk` passes under ``SESSION_CWD_KEY``; relative
-    names are checked against it. Pure text work: no file is opened or
-    stat'ed, because this runs on the event loop.
+    The read-only verdict and credential-name check come first; a ``safe``
+    result then has to pass :func:`_extra_secret_read_reason`, which can only
+    turn it into ``write``.
     """
-    from fluid.tools.registry import SESSION_CWD_KEY
-
     command = input.get("command")
     if not isinstance(command, str):
         return WRITE
+    if len(command) > _MAX_COMMAND_CHARS or len(command.split()) > _MAX_WORDS:
+        return WRITE  # bounded work on the event loop, before any parsing
     if not is_read_only(command):
         return WRITE
-    call = input.get("cwd")
-    call = call if isinstance(call, str) and call else None
-    session = input.get(SESSION_CWD_KEY)
-    session = session if isinstance(session, str) and session else None
-    bases = [b for b in (call or session,) if b]
-    if call and session:
-        bases.append(posixpath.join(session.replace("\\", "/"), call.replace("\\", "/")))
     # Read-only, but targeting a credential file → keep the prompt.
-    return WRITE if _touches_sensitive_path(command, bases) else SAFE
+    if _touches_sensitive_path(command):
+        return WRITE
+    return WRITE if _extra_secret_read_reason(command, input.get("cwd")) else SAFE

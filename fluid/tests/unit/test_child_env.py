@@ -100,29 +100,6 @@ async def test_real_cli_monitor_worker_python_env_only_with_settings_overlay(mon
     assert json.loads(worker.output()) == (deliberate if overlay else dict.fromkeys(names))
 
 
-def test_grep_options_is_never_inherited_or_layered() -> None:
-    """GREP_OPTIONS=-r would make a grep the Bash classifier judged plain recursive."""
-    from fluid.context.settings_stack import layered_env
-
-    source = {"PATH": "/bin", "GREP_OPTIONS": "-r", "grep_options": "-r", PASSTHROUGH_ENV: "GREP_OPTIONS"}
-    env = scrub_child_env(source)
-    assert "GREP_OPTIONS" not in env and "grep_options" not in env
-    assert env["PATH"] == "/bin"
-    layered = layered_env({"GREP_OPTIONS": "-r", "LANG": "C"}, base=env)
-    assert "GREP_OPTIONS" not in layered and layered["LANG"] == "C"
-
-
-async def test_real_bash_never_sees_grep_options(monkeypatch, tmp_path):
-    monkeypatch.setenv("GREP_OPTIONS", "-r")
-    script = tmp_path / "grep_options_probe.py"
-    script.write_text("import os\nprint(repr(os.environ.get('GREP_OPTIONS')))\n")
-    for settings_env in ({}, {"GREP_OPTIONS": "-r"}):
-        ctx = ToolCtx(cwd=str(tmp_path), extra={"settings_env": settings_env})
-        out = await bash_handler({"command": f'"{sys.executable}" "{script}"'}, ctx)
-        assert not out.is_error, out.text
-        assert out.text.strip() == "None"
-
-
 def test_delegated_and_kernel_children_drop_worker_python_env(monkeypatch):
     from fluid.codemode.subprocess_kernel import scrub_env
 

@@ -75,43 +75,28 @@ model *reads* framing tokens even when they can't structurally escape.
 - **Sensitive-file rules**: under any policy except `never_ask`, default
   ask-before-touching rules cover credential files (`.env` and variants, SSH
   keys, `*.pem`/`*.p12`/`*.pfx`, `.netrc`, `.npmrc`, `.pypirc`,
-  `.git-credentials`, `~/.aws/credentials`) and a process's `environ`,
-  `cmdline` and `mem` under `/proc` (the host's own environment holds the
-  provider keys) for `Read`/`Edit`/`Write`/`Grep`/`Glob`. They are prepended before user rules, so one
+  `.git-credentials`, `~/.aws/credentials`) for `Read`/`Edit`/`Write`/
+  `Grep`/`Glob`. They are prepended before user rules, so one
   `[[permission.rules]]` allow overrides them; `.env.example`-style templates
   are exempt. `permission.protect_sensitive_files = false` disables the set.
 - The **Bash risk classifier** demotes an otherwise read-only command to
   `write` (→ prompts under `on_write`) when any argument names a credential
-  file or a process's `environ`/`cmdline`/`mem` — `cat .env` and
-  `cat /proc/1/environ` do not sail under the read-only fast path. This
-  includes a value attached to an option (`--file=.env`), a `<rev>:<path>`
-  (`git show HEAD:.env`), `self`/`thread-self`/task paths and `..` in a
-  `/proc` path, and a relative name under the directory the command runs in
-  (the call's `cwd`, else the session's). Each argument is checked as the
-  shell passes it, quotes removed (`"my dir"/.env` is one path), and
-  `.env.example`-style templates stay exempt (`cat .env.example; echo x` is
-  `safe`). An unquoted glob (`*`, `?`, `[`) asks, since what it matches is
-  not in the text; so does a path through a descriptor or another process's
-  directory (`/proc/<pid>/fd`, `/proc/<pid>/cwd`, `/proc/<pid>/root`,
-  `/dev/fd`), and any relative argument when that directory has a `..`
-  component or sits under `/proc` or `/dev/fd`. Names are checked, not link
-  targets: the classifier looks at no file (it runs on the event loop, where
-  a hung mount would stall the worker), so `cat notes.txt` stays `safe` when
-  `notes.txt` is a link to `.env`. This is a preflight, not a boundary.
-  Shell searches that walk a tree prompt too, because they print credential
-  files that the Grep tool would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`, `--recursive`),
-  `rg` (it is recursive by default and reads options such as `--pre` from
-  `RIPGREP_CONFIG_PATH`), `diff` (two directories compare every file in them)
-  and `git diff` with `--no-index` or two operands (outside a repository it
-  compares two plain directories; every word after `--` counts, and a glob
-  operand asks; `git diff A..B` stays read-only). `GREP_OPTIONS` never
-  reaches a Bash or Monitor child, inherited or from settings `env`, since it
-  would add options the classifier never saw. Any parameter expansion
-  outside single quotes (`$HOME`, `"$F"`, `${X:-…}`, `$1`), `$'…'` quoting
-  and brace expansion prompt, because the classifier judges the words as
-  written; single-quoted awk and sed scripts are literal and stay read-only.
-  A program named by a path (`/usr/bin/grep`, `./cat`) prompts: only a bare
-  name runs the program the allowlist means.
+  file — `cat .env` does not sail under the read-only fast path. A command
+  that passes that check still asks when any of these extra rules matches
+  (they can only add prompts): the command is over 4,096 characters or 512
+  words, or an argument over 1,024 characters; it contains `#`, a newline or a carriage return; it
+  mentions `environ`, `cmdline` or `auxv`, or `/dev/fd` or `/dev/std*`, or
+  mentions `/proc` together with `mem`, `maps`, `fd`, `cwd`, `root`, `task`,
+  a quote, a backslash, `$` or a glob or brace character; an argument with a
+  `/` uses `$` or has a glob or brace before its last `/`; it runs a
+  recursive `grep` (`-r`, `-R`, bundles such as `-rn`, `--recursive`,
+  `--dereference-recursive`, `-d recurse`, `--directories=…`, anywhere on
+  the line), `rg`, `diff`, `git diff` with `--no-index`, `--ext-diff`,
+  `--textconv` or two operands not joined by `..` (every word after `--`
+  counts), or `file -p`/`--preserve-date`; or the call's `cwd` is relative,
+  has a `..` part, or is under `/proc` or `/dev`. This is a name-based
+  preflight, not a sandbox: link targets, what a glob matches and paths
+  relative to the session directory are not resolved (#1778).
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,

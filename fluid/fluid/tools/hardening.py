@@ -160,14 +160,6 @@ SENSITIVE_PATH_SUFFIXES: tuple[str, ...] = (
 SENSITIVE_DIR_NAMES: tuple[str, ...] = (
     ".credential-keys", "chrome-profile",
 )
-# A process's environment (the host's provider API keys), command line and
-# memory: /proc/<pid>/environ, /proc/self/environ, /proc/<pid>/task/<tid>/...
-# ("*" crosses "/"). The Read tool runs inside the host process, so
-# /proc/self/environ there is the host's own environment.
-SENSITIVE_PROCESS_FILES: tuple[str, ...] = ("environ", "cmdline", "mem")
-SENSITIVE_PROC_GLOBS: tuple[str, ...] = tuple(
-    f"*/proc/*/{name}" for name in SENSITIVE_PROCESS_FILES
-)
 # The running AI Shuffle code inside its container. Reading it is fine; an
 # agent editing it gains persistence across restarts, so writes always ask.
 PROTECTED_WRITE_PREFIXES: tuple[str, ...] = (
@@ -181,7 +173,7 @@ SENSITIVE_EXCEPTIONS = frozenset({".env.example", ".env.sample", ".env.template"
 
 def is_sensitive_path(path: str) -> bool:
     """True when ``path`` names a file that exists to hold credentials."""
-    from fnmatch import fnmatch, fnmatchcase
+    from fnmatch import fnmatch
 
     normalized = str(path).replace("\\", "/").rstrip("/")
     basename = normalized.rsplit("/", 1)[-1]
@@ -194,8 +186,6 @@ def is_sensitive_path(path: str) -> bool:
         lowered.endswith(suffix) or lowered == suffix.lstrip("/")
         for suffix in SENSITIVE_PATH_SUFFIXES
     ):
-        return True
-    if any(fnmatchcase(lowered, pattern) for pattern in SENSITIVE_PROC_GLOBS):
         return True
     components = lowered.split("/")
     return any(name in components for name in SENSITIVE_DIR_NAMES)

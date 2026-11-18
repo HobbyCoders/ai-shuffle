@@ -585,7 +585,6 @@ def _sensitive_file_rules():
         SENSITIVE_DIR_NAMES,
         SENSITIVE_EXCEPTIONS,
         SENSITIVE_PATH_SUFFIXES,
-        SENSITIVE_PROC_GLOBS,
     )
 
     # "*" prefixes make basename globs match directory-qualified inputs too
@@ -596,9 +595,6 @@ def _sensitive_file_rules():
     ]
     for name in SENSITIVE_DIR_NAMES:
         globs.extend((f"{name}/*", f"*/{name}/*", f"*/{name}", name))
-    # Matched against the resolved path too, so /dev/fd/../environ and a
-    # symlink into /proc reach these.
-    globs.extend(SENSITIVE_PROC_GLOBS)
     field_by_tool = {
         "Read": "file_path", "Edit": "file_path", "Write": "file_path",
         "Grep": "path", "Glob": "path",

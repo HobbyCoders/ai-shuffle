@@ -40,6 +40,8 @@ SAFE_COMMANDS = [
     "cat file.txt",
     'cat "a b.txt"',
     r"cat C:\Users\dev\notes.txt",  # Windows path as an argument
+    r'"C:\Program Files\Git\bin\git.exe" status',  # quoted Windows program path
+    "/usr/bin/grep -n pattern src/app.py",
     "git status --short",
     "git status",
     "git log --oneline -10",
@@ -108,6 +110,8 @@ SAFE_COMMANDS = [
     "sed -n 's/one/two/p' file.txt",
     "grep 'foo.*bar' file.txt",  # quoted regex, not a glob
     "grep -n 'a.*' src/app.py",
+    "grep foo *.py",  # glob that cannot reach a credential file
+    "ls *.log",
 ]
 
 WRITE_COMMANDS = [
@@ -218,6 +222,7 @@ def test_everything_else_is_write(command: str) -> None:
         "cat .env?",
         "cat ?env",
         "cat .en[v]",
+        "cat .{env,bashrc}",
         "cat config/.env*",
         "cat ~/.ssh/*",
         "head /root/.aws/*",
@@ -344,9 +349,7 @@ STILL_SAFE = [
     "date --version",
     "date --resolution",
     # s with # or ; as its delimiter (handy when the pattern has slashes).
-    "sed -n 's#a/b#c#p' f",
     "sed -n 's;a/b;c;gp' f",
-    "sed -n 's#/usr#/opt#p;$p' f",
 ]
 
 
@@ -469,325 +472,233 @@ def test_awk_posix_options_stay_safe(command: str) -> None:
     assert is_read_only(command), command
 
 
-# A process's environment holds the host's provider keys: Bash runs under
-# ``sh -c`` from the host, so ``$PPID`` is the host process.
-PROCESS_SECRET_READS = [
-    "cat /proc/$PPID/environ",
+# ─── extra secret-read checks: ask-only ───────────────────────────────────────
+# Each command here passes the read-only table and the credential-name check
+# (main calls it safe); the extra checks turn it into an ask.
+EXTRA_ASKS = [
+    # Process environment, arguments, memory and descriptors.
     "cat /proc/self/environ",
-    "head -c 100 /proc/$PPID/environ",
-    "cat /proc/thread-self/environ",
+    "cat /proc/$PPID/environ",
     'cat "/proc/$PPID/environ"',
-    "cat '/proc/1/environ'",
+    "head -c 100 /proc/1/environ",
+    "cat /proc/thread-self/environ",
+    "cat /proc/1/task/1/environ",
     "cat /proc/*/environ",
-    "cat /proc/self/e*",
-    "cat /proc/1/{environ,status}",
-    "cat /proc/1/$F",
-    "cat /proc/self/task/12/environ",
-    "cat /proc/self/../1/environ",
-    "cat /dev/fd/../environ",  # /dev/fd is /proc/self/fd
-    "cat /proc/self/cmdline",
-    "tail -c 64 /proc/1/mem",
-    "tr '\\0' '\\n' < /proc/self/environ",
-    "sort /proc/1/ENVIRON",
-    "date --file=/proc/self/environ",  # a value attached to an option
-    "grep -f/proc/self/environ x.py",
-]
-
-
-@pytest.mark.parametrize("command", PROCESS_SECRET_READS)
-def test_process_environment_reads_ask(command: str) -> None:
-    assert classify({"command": command}) == "write"
-
-
-def test_relative_reads_are_checked_against_cwd() -> None:
-    assert classify({"command": "cat environ", "cwd": "/proc/1"}) == "write"
-    assert classify({"command": "cat config", "cwd": "/root/.ssh"}) == "write"
-    assert classify({"command": "cat README.md", "cwd": "/repo"}) == "safe"
-
-
-# Searches and comparisons across a tree print any credential file in it, which
-# the Grep tool would withhold.
-TREE_READS = [
+    "cat /proc/1/env''iron",
+    "cat /pr''oc/1/environ",
+    "cat /pr\\oc/1/cmdline",
+    "cat /proc/1/cmdline",
+    "cat /proc/1/mem",
+    "cat /proc/self/maps",
+    "cat /proc/self/auxv",
+    "cat /proc/self/fd/3",
+    "cat /proc/1/cwd/notes.txt",
+    "cat /proc/1/root/srv/app/notes.txt",
+    "cat /proc/self/../1/mem",
+    "cat /proc/1/e*",
+    "cat /dev/fd/3",
+    "cat /dev/stdin",
+    "cat /pr?c/1/mem",
+    "cat /p*/self/mem",
+    "cat /[p]roc/1/mem",
+    "cat /pr{o,}c/1/mem",
+    "cat /pr${PWD:0:0}oc/1/mem",
+    "true /proc/1/mem; cat $_",
+    "LANG=/proc/1/mem cat $LANG",
+    "LANG=/pr''oc/1/m''em cat $LANG",
+    "cat environ",
+    # A credential name main's split missed.
+    "cat .env; echo literal",
+    "cat .env;echo literal",
+    "cat .env|head -5",
+    "cat .env&&true",
+    "git show HEAD:.env",
+    "grep --file=.env x",
+    "cat ~/.ssh/id_rsa;true",
+    # Tree-wide searches.
     "grep -r API_KEY .",
-    "grep -rn API_KEY",
-    "grep -R pattern lib",
-    "grep -inr x src",
-    "grep -d recurse KEY .",
-    "grep -drecurse KEY .",
-    "grep --directories=recurse KEY .",
-    "grep --dir=recurse KEY .",
-    "grep --recursive KEY .",
-    "grep --rec KEY .",
-    "grep --dereference-recursive KEY .",
-    "grep -- -r x",  # every word is scanned
-    "egrep -r KEY .",
-    "fgrep -R KEY .",
-    "cat x | grep -r KEY .",
-    "rg API_KEY",  # recursive by default
-    "rg foo file.py",  # RIPGREP_CONFIG_PATH options (--pre) apply to any rg
-    "rg --no-config -n foo src",
+    "grep -R API_KEY .",
+    "grep -rn TODO src",
+    "grep -nR TODO src",
+    "grep -ri key .",
+    "grep --recursive key .",
+    "grep --rec key .",
+    "grep --dereference-recursive key .",
+    "grep --directories=recurse key .",
+    "grep --directories recurse key .",
+    "grep --dir=recurse key .",
+    "grep -d recurse key .",
+    "grep -drecurse key .",
+    "grep key . -r",  # GNU reads options after operands
+    "grep -n key . --recursive",
+    "egrep -r key .",
+    "fgrep -r key .",
+    "/usr/bin/grep -r pattern src",
+    "grep -rn 'permission denied' fluid | head -20",
+    "cat a.txt | grep -r x .",
+    "rg TODO",
+    "rg -n foo src",
+    "rg --files",
+    "rg foo file.py",
+    "rg -o foo src",
     "rg --pre-glob '*.pdf' foo",
-    "diff -rN . /tmp/empty",
-    "diff a b",  # two directories compare every file in them
-    "git diff --no-index /tmp/empty .",
-    "git diff --no-ind /tmp/empty .",
-    "git diff ../empty .",  # outside the work tree: an implicit --no-index
+    "rg --pr=x foo",
+    "diff a.txt b.txt",
+    "diff -r dir1 dir2",
+    "git diff a b",
+    "git diff HEAD~1 HEAD",
     "git diff main feature",
-    "git diff -- a b",
-    "git diff -- -a -b",  # after -- every word is a path, dashes or not
-    "git diff -- a -b",
-    "git diff d*",  # one word, two directories once the shell expands it
-    "git show HEAD:.env",  # <rev>:<path> names a credential file
+    "git diff --no-index a b",
+    "git diff --no-ind a",
+    "git diff --ext-diff",
+    "git diff --textconv HEAD",
+    "git diff HEAD -- a.py b.py",
+    "git diff HEAD -- a.py",  # every word after -- counts
+    "git -C repo diff a b",
+    "git --no-pager diff a b",
+    # Issue #1808: file -p rewrites access times.
+    "file -p notes.txt",
+    "file -bp notes.txt",
+    "file --preserve-date notes.txt",
+    "file --pres notes.txt",
+    # Comments and line breaks: shlex and the shell disagree on them.
+    "echo ok # '\ncat .env\necho ok # '",
+    "grep FLUID_SYNTHETIC file#name -r .",
+    "echo hi # explanation",
+    "sed -n 's#a/b#c#p' f",
+    "cat a.txt\ncat b.txt",
+    "cat a.txt\rcat b.txt",
+    # A path built from an expansion or with a glob in a directory part.
+    "ls $HOME/x",
+    'cat "$HOME/notes"',
+    "ls */x.py",
+    "ls src/*/x.py",
 ]
 
 
-@pytest.mark.parametrize("command", TREE_READS)
-def test_tree_wide_reads_ask(command: str) -> None:
+@pytest.mark.parametrize("command", EXTRA_ASKS)
+def test_extra_secret_read_checks_ask(command: str) -> None:
     assert classify({"command": command}) == "write"
 
 
-def test_grep_asks_when_grep_options_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GREP_OPTIONS", "-r")
-    assert classify({"command": "grep foo file.py"}) == "write"
-    monkeypatch.delenv("GREP_OPTIONS")
-    assert classify({"command": "grep foo file.py"}) == "safe"
-
-
-@pytest.mark.parametrize("command", [
-    "file -p x", "file --preserve-date x", "file --pre x", "file -bp x",
-])
-def test_file_preserve_date_asks(command: str) -> None:
-    """libmagic's preserve-date resets the access time: a metadata write (#1808)."""
-    assert classify({"command": command}) == "write"
-
-
-# Words the shell builds after the classifier has looked: each becomes an
-# option or file name the checks never saw. ``find . ${X:--exec} rm {} +``
-# runs rm under bash.
-HIDDEN_EXPANSIONS = [
-    "find . ${X:--exec} rm {} +",
-    "find . $'-exec' rm {} +",
-    'find . $"-delete"',
-    "find . {-exec,rm} {} +",
-    "echo -exec; find . -o $_ rm {} +",
-    "cat ${X:-.env}",
-    "sort ${X:--o} out in",
-    "uniq a{,.out}",  # one word becomes two: uniq writes its second operand
-    "cat .{env,bashrc}",
-    "echo ${#X}",
-    "echo $1",
-    "echo $@",
-    "echo $$",
-    "echo $BASH_COMMAND",
-    # Any parameter outside single quotes: its value is unseen (an option,
-    # a path, several words).
-    "echo $HOME",
-    "echo ${HOME}",
-    'ls "$HOME"',
-    "echo $PWD",
-    'cat "$F"',
-    "grep -n x $DIR",
-    "$CMD",
-    '"$GREP" x f',
-    'echo "a${X}b"',
-    "echo hi | grep $P",
-]
-
-
-@pytest.mark.parametrize("command", HIDDEN_EXPANSIONS)
-def test_hidden_shell_expansions_ask(command: str) -> None:
-    assert not is_read_only(command), command
-    assert classify({"command": command}) == "write"
-
-
-STILL_SAFE_AFTER_SECRET_CHECKS = [
-    "grep foo file.py",
-    "grep -n 'def main' app/main.py",
-    "grep -in error log.txt",
-    "grep -c mem file.txt",
-    "grep -e foo -e bar f.txt",
-    "grep -v '^#' config.ini",
-    "cat a | grep b",
-    "git diff",
-    "git diff HEAD~1",
-    "git diff --stat",
-    "git diff main...HEAD",
-    "git diff HEAD~1..HEAD",
-    "git diff -- app/main.py",
+# Forms that stay safe next to the rules above.
+EXTRA_STILL_SAFE = [
     "cat /proc/cpuinfo",
-    "cat /proc/self/status",
-    "head -c 200 /proc/self/maps",
-    "grep environ notes.txt",  # a pattern, not a /proc path
-    "cat environ",  # a file in the working directory
-    "awk '{print ($1+$2)/2}' f",
-    "awk '{gsub(/foo/, \"bar\"); print}' f",
-    "echo {}",
-    "echo a,b",
-    "sed -n '$p' f",
-    "grep 'foo$' f",
-    'grep "foo$" f',  # $ before the closing quote is literal
-    "echo 'cost: $HOME'",
-    "git diff -- app/main.py",
-    'echo "progress/mem"',  # echo prints its words; it opens nothing
-    "printf '%s\\n' progress/mem /proc/1/fd/3",
-    "file -b x",
-    "cat .env.example",
+    "cat /proc/version",
+    "ls /proc",
+    "grep -n TODO src/app.py",
+    "grep -c x a.txt b.txt",
+    "grep -i -n -w main app.go",
+    "grep -e foo -v app.py",
+    "grep --color=never x f.py",
+    "grep -d skip x f.py",
+    "git diff",
+    "git diff HEAD",
+    "git diff HEAD~1..HEAD",
+    "git diff origin/main...HEAD",
+    "git diff --stat HEAD",
+    "git diff HEAD 2>&1",
+    "git diff HEAD | head -5",
+    "git log -p -n 3",
+    "cmp a.txt b.txt",
+    "file notes.txt",
+    "file -b notes.txt",
+    "echo $HOME",
+    "echo \"$PATH\"",
+    "ls src/*.py",
+    "wc -l src/*.py",
+    "ls src/{a,b}.py",
+    "awk '{print $1/2}' data.txt",
+    "awk '{print ($1+$2)/2}' data.txt",
+    "sed -n 's/a\\/b/c/p' f",
+    "ls -la ~",
+    "cat ~/.bashrc",
+    'cat "a b.txt"',
+    "cat README.md; echo done",
+    "git show HEAD:README.md",
+    "grep --color=auto x f.py",
 ]
 
 
-@pytest.mark.parametrize("command", STILL_SAFE_AFTER_SECRET_CHECKS)
-def test_everyday_reads_stay_safe_after_secret_checks(command: str) -> None:
+@pytest.mark.parametrize("command", EXTRA_STILL_SAFE)
+def test_everyday_reads_stay_safe_next_to_the_extra_checks(command: str) -> None:
     assert classify({"command": command}) == "safe"
 
 
-# A program named by a path is whatever file is there, whatever its basename.
-@pytest.mark.parametrize("command", [
-    "/usr/bin/grep -n pattern src/app.py",
-    "./cat f",
-    "bin/ls",
-    r'"C:\Program Files\Git\bin\git.exe" status',
-    r"C:\Windows\cat x",
+@pytest.mark.parametrize("cwd", [
+    "src", "./src", "..", "a/../b", "/repo/../x", "/proc", "/proc/1", "/PROC/self",
+    "//proc/1", "/./proc", "/dev/fd", "/dev", 7,
 ])
-def test_programs_named_by_a_path_ask(command: str) -> None:
-    assert classify({"command": command}) == "write"
+def test_an_unsure_call_cwd_asks(cwd: object) -> None:
+    assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
 
 
-# Descriptor and per-process directory links point wherever the reading
-# process has them; they ask rather than get resolved.
-@pytest.mark.parametrize("command", [
-    "cat /proc/self/fd/3",
-    "cat /proc/1/task/2/fd/0",
-    "cat /dev/fd/3",
-    "ls /dev/fd/",
-    "ls /proc/self/fd",
-    "cat /proc/1/cwd/notes.txt",
-    "cat /proc/self/root/home/u/notes.txt",
-    "cat /proc/1/fdinfo/3",
-    "cat /proc/1/map_files/7f-80",
-    "cat /proc/*/cwd/x",
-    "cat /proc/1/cwd/../x",
-])
-def test_descriptor_and_process_directory_paths_ask(command: str) -> None:
-    assert classify({"command": command}) == "write"
+@pytest.mark.parametrize("cwd", [None, "", "/srv/repo", "/home/u/proj", "C:\\Users\\dev\\proj", "/devices"])
+def test_an_absolute_call_cwd_keeps_the_verdict(cwd: object) -> None:
+    assert classify({"command": "cat README.md", "cwd": cwd}) == "safe"
 
 
-def test_descriptor_paths_relative_to_cwd_ask() -> None:
-    assert classify({"command": "cat fd/3", "cwd": "/proc/1"}) == "write"
-    assert classify({"command": "cat cwd/x", "cwd": "/proc/self"}) == "write"
+def test_the_extra_checks_never_make_a_command_safer() -> None:
+    """For every input, head is main's verdict or an ask: never safer."""
+    import itertools
+
+    from fluid.tools.builtins import bash_risk
+
+    def main_verdict(command: str) -> str:
+        if not bash_risk.is_read_only(command):
+            return "write"
+        return "write" if bash_risk._touches_sensitive_path(command) else "safe"
+
+    atoms = (".env", ".env.example;", "/proc/self/environ", "src/*.py", "-r", "--",
+             "$HOME/x", "file#name", "HEAD:.env", "'x/y'")
+    verbs = ("cat", "echo", "grep -n x", "grep -r x", "rg x", "git diff", "diff",
+             "ls", "file -p", "awk 1", "sed -n 1p", "rm", "python")
+    tails = ("", "; cat .env", " # note\ncat .env", " 2>&1")
+    cwds = (None, "src")
+    for verb, a, b, tail, cwd in itertools.product(verbs, atoms, atoms, tails, cwds):
+        command = f"{verb} {a} {b}{tail}"
+        head = classify({"command": command, "cwd": cwd})
+        assert head in (main_verdict(command), "write"), (command, cwd)
 
 
-def test_names_are_checked_not_link_targets(tmp_path) -> None:
-    """No file is looked at (this runs on the event loop): a link named
-    ``notes.txt`` to ``.env`` is a known gap, and a glob asks unexpanded."""
-    (tmp_path / ".env").write_text("TOKEN=x\n")
-    (tmp_path / "notes.txt").symlink_to(".env")
-    cwd = str(tmp_path)
-    assert classify({"command": "cat notes.txt", "cwd": cwd}) == "safe"
-    for command in ("cat no*", "cat n?tes.txt", "ls [n]otes.txt", "cat *.md",
-                    "grep foo *.py", "ls *.log"):
-        assert classify({"command": command, "cwd": cwd}) == "write", command
+def test_long_input_is_bounded() -> None:
+    import time
+
+    for command in ("cat -" + "q" * 4096, "cat -" + "q" * 2048, "cat " + "a/" * 2000,
+                    "echo " + "a " * 600, "grep " + "-e x " * 800):
+        start = time.perf_counter()
+        assert classify({"command": command}) == "write"
+        assert time.perf_counter() - start < 0.05, command[:20]
 
 
 def test_classification_touches_no_file(monkeypatch) -> None:
+    """Calls ``classify`` directly, so a swallowed exception cannot hide a hit."""
     import builtins
     import glob as globmod
     import os
 
-    def boom(*_a, **_k):
-        raise AssertionError("classifier touched the filesystem")
+    hits: list[str] = []
 
-    for mod, names in ((os.path, ("realpath", "exists", "lexists", "isdir")),
+    def tripwire(name: str):
+        def record(*_a, **_k):
+            hits.append(name)
+            raise OSError(name)
+        return record
+
+    for mod, names in ((os.path, ("realpath", "exists", "lexists", "isdir", "isfile")),
                        (os, ("stat", "lstat", "listdir", "scandir", "readlink")),
                        (globmod, ("glob", "iglob"))):
         for name in names:
-            monkeypatch.setattr(mod, name, boom)
-    monkeypatch.setattr(builtins, "open", boom)
-    for command in ("cat notes.txt", "cat *.py", "ls ~/x", "grep a f", "cat ../x/.env"):
-        BASH_SPEC.effective_risk({"command": command}, cwd="/srv/work")
-
-
-@pytest.mark.parametrize("command", [
-    'cat "example folder"/ordinary.txt',
-    "cat 'example folder'/ordinary.txt",
-    'grep -n "a b" "src/my file.py"',
-])
-def test_a_quoted_operand_is_one_path(command: str) -> None:
-    assert classify({"command": command}) == "safe"
-
-
-@pytest.mark.parametrize("command", [
-    "cat example\\ folder/ordinary.txt",
-    "echo a\\ b",
-    "cat a.txt \\\nb.txt",
-    "cat a.txt \\",
-])
-def test_an_escaped_blank_asks(command: str) -> None:
-    # Bluntly, as main did: quote a name with a space in it instead.
-    assert classify({"command": command}) == "write"
-
-
-@pytest.mark.parametrize("command", [
-    'cat "example folder"/.env',
-    "cat 'a b'/proc/../.env",
-    'cat /"proc"/1/"environ"',
-    "cat /proc/1/env''iron",
-])
-def test_quote_pieces_join_into_the_path_the_shell_passes(command: str) -> None:
-    assert classify({"command": command}) == "write"
-
-
-@pytest.mark.parametrize("cwd", ["/repo/../x", "..", "a/../b", "/proc", "/proc/1", "/dev/fd"])
-def test_relative_operands_ask_under_an_unsure_cwd(cwd: str) -> None:
-    assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
-    assert BASH_SPEC.effective_risk({"command": "cat README.md"}, cwd=cwd) == "write"
-    # Absolute operands are judged by their own text.
-    assert classify({"command": "cat /etc/hostname", "cwd": cwd}) == "safe"
-    assert classify({"command": "pwd", "cwd": cwd}) == "safe"
-    # Bluntly, every relative word counts, subcommands included.
-    assert classify({"command": "git status", "cwd": cwd}) == "write"
-
-
-def test_a_relative_call_cwd_joins_the_session_cwd() -> None:
-    assert BASH_SPEC.effective_risk(
-        {"command": "cat environ", "cwd": "1"}, cwd="/proc"
-    ) == "write"
-    assert BASH_SPEC.effective_risk(
-        {"command": "cat README.md", "cwd": "src"}, cwd="/repo"
-    ) == "safe"
-
-
-def test_the_model_cannot_supply_the_session_cwd() -> None:
-    from fluid.tools.registry import SESSION_CWD_KEY
-
-    # A model-supplied key is dropped; the real session cwd wins.
-    spoof = {"command": "cat environ", SESSION_CWD_KEY: "/srv"}
-    assert BASH_SPEC.effective_risk(spoof, cwd="/proc/1") == "write"
-    seen: list[dict] = []
-    probe = type(BASH_SPEC)(
-        name="Probe", description="", input_schema={}, risk="write",
-        classify_risk=lambda i: seen.append(i) or "safe",
-    )
-    probe.effective_risk({"command": "x", SESSION_CWD_KEY: "/attacker"})
-    assert SESSION_CWD_KEY not in seen[-1]
-
-
-def test_a_template_after_a_separator_is_judged_as_a_template() -> None:
-    # Main split ``.env.example;`` as one word and asked; ``;`` ends the
-    # word, so the .env.example template exception now applies.
-    assert classify({"command": "cat .env.example; echo literal"}) == "safe"
-    assert classify({"command": "cat .env; echo literal"}) == "write"
-
-
-@pytest.mark.parametrize("command", [
-    "echo .env",  # printed text still gets the credential-name check
-    "printf x .env*",
-    "echo /proc/1/environ",
-    "cat x\\;echo .env",  # one word to the shell: cat reads .env
-    "echo hi; cat /proc/1/mem",
-    "echo hi\ncat /proc/1/mem",
-])
-def test_text_only_programs_do_not_shield_other_words(command: str) -> None:
-    assert classify({"command": command}) == "write"
+            monkeypatch.setattr(mod, name, tripwire(name))
+    monkeypatch.setattr(builtins, "open", tripwire("open"))
+    verdicts = {command: classify({"command": command, "cwd": "/srv/repo"})
+                for command in ("cat notes.txt", "cat *.py", "ls ~/x", "grep -n a f",
+                                "cat /proc/1/environ", "grep -r x .", "git diff a b")}
+    assert hits == []
+    assert verdicts == {
+        "cat notes.txt": "safe", "cat *.py": "safe", "ls ~/x": "safe", "grep -n a f": "safe",
+        "cat /proc/1/environ": "write", "grep -r x .": "write", "git diff a b": "write",
+    }
 
 
 def test_classify_without_command_is_write() -> None:
