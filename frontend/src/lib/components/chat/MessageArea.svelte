@@ -256,7 +256,7 @@
 	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
 	let handoffSlotPx = $state(0);
 	// The held slot's blank above its bubbles that no reserve counts (queueSlotExtent).
-	let handoffPainted = false, heldBlankPx = 0;
+	let handoffPainted = false, heldBlankPx = 0, handoffHold = 0;
 	let presentedTailError: string | null = null;
 	// The banner a failed turn raised steps aside while its own transcript error
 	// row says the same words (#1341); one with an action (Fork here) stays.
@@ -1352,8 +1352,7 @@
 		const pendingHeight = queueSlotExtent();
 		const errorHeight = tailErrorRef?.getBoundingClientRect().height ?? 0;
 		const height = Math.max(pendingHeight, errorHeight > 0 ? tailErrorOffsetPx + errorHeight : 0);
-		const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
-		return height > 0 ? height + MIN_TRANSCRIPT_TAIL_RESERVE + gap : 0;
+		return height > 0 ? height + MIN_TRANSCRIPT_TAIL_RESERVE + rowGapPx() : 0;
 	}
 
 	/**
@@ -1372,6 +1371,14 @@
 		if (!box) return 0;
 		const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
 		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
+		// An error owns the slot's painted height, not its blank: it reserves only
+		// what is docked now (none of an empty slot), and a docked bubble that
+		// grows (a narrower column wraps it) keeps the banner above it.
+		if (tailQueueSlotPx && !handoffSlotPx) {
+			const docked = box.height - blank;
+			if (docked > 0 && presentedTailError) tailErrorOffsetPx = Math.max(tailErrorOffsetPx, docked + rowGapPx());
+			return docked;
+		}
 		// A bubble sent into the hold docks in its blank; an unheld slot has none.
 		if (blank < heldBlankPx) heldBlankPx = blank;
 		// Stop and its not-sent rows keep where they left the reader (#1066); a
@@ -1379,12 +1386,21 @@
 		if (row && blank > heldBlankPx && handoffSlotPx && handoffPainted && tailQueueSlotPx === handoffSlotPx
 			&& !presentedTailError && shouldAutoScroll && !windowShifting && !$activeSession.stopRequestedTurnId
 			&& !restingOnNotSentRows(notSentHold.messages)) {
-			if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - (blank - heldBlankPx));
+			freeHeldBlank(blank - heldBlankPx);
 			heldBlankPx = blank;
-			// The browser clamps scrollTop as the reserve shrinks; that is not the reader.
-			markProgrammaticScrollSettling();
 		}
 		return box.height - (tailQueueSlotPx ? heldBlankPx : 0);
+	}
+
+	/** Stop reserving px of a held slot's blank: the followed floor gives it up once. */
+	function freeHeldBlank(px: number) {
+		if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - px);
+		// The browser clamps scrollTop as the reserve shrinks; that is not the reader.
+		markProgrammaticScrollSettling();
+	}
+
+	function rowGapPx(): number {
+		return chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
 	}
 
 	function transcriptContentEnd(): number {
@@ -1398,7 +1414,10 @@
 		// Call room stays held after hangup so the transcript does not move.
 		// Use that same room for both control placement and the followed edge.
 		const callRoom = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).getPropertyValue('--call-dock-reserve')) || 0 : 0;
-		const controls = [tailControlsRef, tailErrorRef].filter((el): el is HTMLDivElement => !!el && el.getBoundingClientRect().height > 0);
+		// An error-owned slot with no bubble left is not a visible control.
+		const emptySlot = !!tailQueueSlotPx && !handoffSlotPx && !tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
+		const controls = [tailControlsRef, tailErrorRef].filter((el): el is HTMLDivElement =>
+			!!el && el.getBoundingClientRect().height > 0 && !(el === tailControlsRef && emptySlot));
 		if (controls.length) {
 			// The error was read above the queue. Keep that trailing slot in the
 			// followed edge after Stop removes its bubbles; following only the
@@ -2229,6 +2248,21 @@
 		};
 	});
 
+	// A docked bubble that grows under a shown banner (a narrower column wraps
+	// it) lifts the banner before that paint (queueSlotExtent), then the reserve.
+	$effect(() => {
+		const list = pendingMessages.length && bannerError ? tailControlsRef?.querySelector('.pending-messages') : null;
+		if (!list) return;
+		const observer = new ResizeObserver(() => {
+			if (!presentedTailError || handoffSlotPx) return;
+			queueSlotExtent();
+			if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
+			else scheduleLatestTurnTailRefresh();
+		});
+		observer.observe(list);
+		return () => observer.disconnect();
+	});
+
 	// A browser clamp belongs to the render that caused it, not to the reader.
 	// Protect terminal/queue/row-boundary commits before the DOM can shrink.
 	// Otherwise handleScroll can release following before a post-render observer
@@ -2240,6 +2274,7 @@
 	let handoffMark: QueueHandoffMark | null = null;
 	$effect.pre(() => {
 		const s = $activeSession;
+		let takeoverBlank = 0;
 		const sendContext = s.sessionId ?? '';
 		if (sendContext !== tailSendContext) {
 			tailSendContext = sendContext;
@@ -2267,20 +2302,24 @@
 		// steps aside for the turn's own Error row (#1341), dequeue must still
 		// leave the queue slot's geometry alone.
 		if (s.error && !presentedTailError) {
-			const pendingHeight = tailControlsRef?.getBoundingClientRect().height ?? 0;
-			const gap = chatColumnRef ? parseFloat(getComputedStyle(chatColumnRef).rowGap) || 0 : 0;
+			const box = tailControlsRef?.getBoundingClientRect();
+			const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
 			// Queue auto-handoff may clear/enrich the same failure before Stop.
 			// Its already-painted slot belongs to this reading context, not to the
-			// next error string or the queue's now-empty height. A handoff's blank
-			// the reserve already gave back is not part of it.
-			if (!untrack(() => handoffSlotPx)) heldBlankPx = 0;
-			const docked = pendingHeight - (untrack(() => tailQueueSlotPx) ? heldBlankPx : 0);
-			tailErrorOffsetPx = docked > 0 ? docked + gap : 0;
+			// next error string or the queue's now-empty height. The banner goes
+			// above the bubbles docked now; a handoff hold's blank is not theirs.
+			const docked = box && row ? box.bottom - row.getBoundingClientRect().top : 0;
+			tailErrorOffsetPx = docked > 0 ? docked + rowGapPx() : 0;
+			// A live hold's blank is no longer reserved (freed after the floor capture below).
+			if (untrack(() => handoffSlotPx) && shouldAutoScroll && !windowShifting) takeoverBlank = Math.max(0, (box?.height ?? 0) - docked - heldBlankPx);
 			// The queue and error are one already-presented slot. Keep its outer
 			// geometry too: dequeue can coincide with transcript growth/follow,
 			// otherwise the bottom-docked wrapper shrinks in that same paint.
-			tailQueueSlotPx = pendingHeight;
+			// The error takes the slot over: the handoff hold ends here.
+			tailQueueSlotPx = box?.height ?? 0;
 			handoffSlotPx = 0;
+			handoffHold++;
+			heldBlankPx = 0;
 			presentedTailError = s.error;
 		}
 		// A queued prompt's row can land in the same commit its bubble leaves
@@ -2297,10 +2336,13 @@
 				handoffSlotPx = pendingHeight;
 				handoffPainted = false;
 				heldBlankPx = 0;
+				// A later hold (even at the same height) or an error owns readiness now.
+				const hold = ++handoffHold;
 				requestAnimationFrame(() => requestAnimationFrame(() => {
+					if (hold !== handoffHold || !handoffSlotPx) return;
 					handoffPainted = true;
 					// A turn can end with the handoff; give back what fits now.
-					if (handoffSlotPx !== pendingHeight || !shouldAutoScroll) return;
+					if (!shouldAutoScroll) return;
 					if (currentTurnAnchorId) void maintainCurrentTurnAnchor();
 					else refreshLatestTurnTailReserve();
 				}));
@@ -2312,12 +2354,14 @@
 			followedFloorContext = { sessionId: s.sessionId };
 		}
 		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${bannerError}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
-		if (boundary === layoutBoundary) return;
+		const unchanged = boundary === layoutBoundary;
 		layoutBoundary = boundary;
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
-		if (resetFloor || !untrack(() => isMounted && shouldAutoScroll) || !containerRef) return;
+		const follow = !unchanged && !resetFloor && untrack(() => isMounted && shouldAutoScroll) && !!containerRef;
 		const beforeTop = untrack(() => lastKnownScrollTop);
-		followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
+		if (follow && containerRef) followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
+		if (takeoverBlank) freeHeldBlank(takeoverBlank);
+		if (!follow) return;
 		const sessionId = s.sessionId;
 		const version = untrack(() => windowShiftVersion);
 		const context = followedFloorContext;

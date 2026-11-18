@@ -9,7 +9,9 @@ import {
 	SLOW_REPLY,
 	api,
 	chatIdByToken,
+	ERROR_ROW_PROBE,
 	countUserRows,
+	errorRow,
 	expect,
 	holdBootLoad,
 	openFromSidebar,
@@ -243,6 +245,126 @@ export const journey = {
 				expectEachOnce(await done(), needles, log);
 			}
 		},
+		...[
+			// A queued prompt's error takes over the slot its handoff was holding
+			// (#1623). Three ways in, each sampled on every painted frame:
+			//   queued-error-row-leaves-no-blank  a queued prompt really fails
+			//     (HTTP 500); the banner steps aside for its inline Error row
+			//     (#1341) and the last bubble leaves under it.
+			//   queued-banner-at-handoff  a banner arrives the moment a queued
+			//     prompt lands, before the hold has given its blank back.
+			//   queued-banner-after-give-back  a banner arrives once the reply has
+			//     streamed past the handoff; on a phone the column then narrows,
+			//     so the long docked bubble wraps taller under the banner.
+			// The banner cases inject one turn-less server error frame (as an
+			// unreachable worker sends) into the real chat socket: no turn's
+			// Error row repeats it, so the banner stays and its placement shows.
+			// Whenever a banner shows it is on screen and clear of every docked
+			// bubble; once the queue is empty no blank is left under the reply.
+			{ name: 'queued-error-row-leaves-no-blank', failing: true },
+			{ name: 'queued-banner-at-handoff', inject: 0 },
+			{ name: 'queued-banner-after-give-back', inject: 1500, narrow: true }
+		].map(({ name, failing = false, inject = null, narrow = false }) => ({
+			name,
+			async setup(ctx) {
+				// Pass the chat socket through untouched, keeping a handle to speak as the server.
+				ctx.chat = { socket: null };
+				await ctx.page.routeWebSocket(/\/api\/v1\/ws\/chat/, (ws) => { ws.connectToServer(); ctx.chat.socket = ws; });
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act(ctx) {
+				const { page, mark, variant, log } = ctx;
+				const BANNER = `Worker unreachable ${uniq()}`;
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
+				await page.evaluate((landing) => {
+					const p = (window.__tailProbe = { started: performance.now(), frames: [], landed: null, running: true });
+					// Read each frame as painted: after rAF, layout and resize observers ran.
+					const afterPaint = new MessageChannel();
+					const rect = (el) => el?.getBoundingClientRect().toJSON();
+					const next = () => requestAnimationFrame(() => { p.width = innerWidth; afterPaint.port2.postMessage(0); });
+					const sample = () => {
+						if (!p.running) return;
+						// A resize that landed after this frame's rAF is not painted yet:
+						// reading now forces a layout its resize observers never saw.
+						if (innerWidth !== p.width) return next();
+						const t = Math.round(performance.now() - p.started);
+						const banner = rect(document.querySelector('.tail-error'));
+						if (p.landed === null && [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(landing))) p.landed = t;
+						p.frames.push({ t, viewport: rect(document.querySelector('.msg-scroll')), banner: banner?.height > 0 ? banner : null,
+							rows: [...document.querySelectorAll('.tail-controls .userrow')].map(rect) });
+						next();
+					};
+					afterPaint.port1.onmessage = sample;
+					next();
+				}, needles[0]);
+				await mark('queue three prompts, the second long enough to wrap');
+				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, failing ? 'error-500' : 'slow', failing ? { latency_ms: 0 } : { tps: 8 })}`);
+				await quickSend(page, `queued ${needles[1]} a longer prompt that wraps across several lines in the docked queue bubble `
+					+ `so that narrowing the column makes it taller ${scriptTag(variant, 'slow', { tps: 8 })}`);
+				await quickSend(page, `queued ${needles[2]} ${scriptTag(variant, 'long', { tps: 2000 })}`);
+				let narrowed = false;
+				if (failing) {
+					await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 120_000 });
+				} else {
+					await page.waitForFunction((n) => [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(n)),
+						needles[0], { timeout: 120_000, polling: 'raf' });
+					if (inject) await page.waitForTimeout(inject);
+					await mark('a turn-less error arrives from the server');
+					ctx.chat.socket.send(JSON.stringify({ type: 'error', message: BANNER }));
+					await page.locator('.tail-error').filter({ hasText: BANNER }).waitFor({ timeout: 10_000 });
+				}
+				if (narrow && variant.viewport === 'phone'
+					&& await page.locator('.pending-messages [role="article"]').filter({ hasText: needles[1] }).count()) {
+					await mark('narrow the column while the long bubble is docked');
+					await page.setViewportSize({ width: 330, height: page.viewportSize().height });
+					narrowed = true;
+				}
+				await page.waitForFunction((needles) => needles.every((n) =>
+					[...document.querySelectorAll('[data-user-turn-id]')].some((el) => (el.textContent || '').includes(n)))
+					&& !document.querySelector('.pending-messages [role="article"]'), needles, { timeout: 180_000 });
+				await waitTurnSettled(page, { hold: 1500, timeout: 120_000 });
+				const probe = await page.evaluate(() => { const p = window.__tailProbe; p.running = false; return p; });
+				const shown = probe.frames.filter((f) => f.banner);
+				const docked = shown.filter((f) => f.rows.length);
+				log(`${name}: ${JSON.stringify({ frames: probe.frames.length, landed: probe.landed, bannerFrames: shown.length,
+					bannerWithBubbles: docked.length, narrowed, firstBanner: shown[0], lastWithBubbles: docked.at(-1) })}`);
+				if (!failing) expect(docked.length > 0, 'the banner was sampled above docked bubbles');
+				for (const f of shown) {
+					expect(f.banner.top >= f.viewport.top - 1 && f.banner.bottom <= f.viewport.bottom + 1,
+						`the banner is on screen at ${f.t}ms (${JSON.stringify({ banner: f.banner, viewport: f.viewport })})`);
+					for (const row of f.rows) expect(f.banner.bottom <= row.top + 1 || f.banner.top >= row.bottom - 1,
+						`the banner clears every docked bubble at ${f.t}ms (${JSON.stringify({ banner: f.banner, row })})`);
+				}
+				// The long reply fills the view: its tail is the 24px reserve plus any banner.
+				const end = await page.evaluate((probe) => {
+					const pane = document.querySelector('.msg-scroll');
+					const column = pane.querySelector('.chat-column');
+					const tailError = document.querySelector('.tail-error');
+					const banner = tailError?.getBoundingClientRect().height ?? 0;
+					return { padding: parseFloat(getComputedStyle(column).paddingBottom), gap: parseFloat(getComputedStyle(column).rowGap) || 0, banner,
+						offset: banner ? parseFloat(getComputedStyle(tailError).getPropertyValue('--error-tail-offset')) || 0 : 0,
+						errorRows: [...document.querySelectorAll(probe.rows)].filter((d) =>
+							[...d.querySelectorAll(':scope > summary > span')].some((s) => s.textContent.trim() === probe.title)).length,
+						gapBelowReply: pane.getBoundingClientRect().bottom - document.querySelector('.transcript-tail-spacer').getBoundingClientRect().top };
+				}, ERROR_ROW_PROBE);
+				log(`settled tail: ${JSON.stringify(end)}`);
+				if (failing) expect(end.errorRows === 1, 'the failed prompt keeps its inline Error row as the record');
+				// A banner still shown keeps the place it stood (as on main) until it
+				// is dismissed or the next send: above the bubbles that were docked,
+				// never above a handoff hold's blank.
+				const stack = Math.max(0, ...docked.map((f) => f.rows.at(-1).bottom - f.rows[0].top));
+				if (end.banner) expect(end.offset <= stack + end.gap + 1, `the banner stands above the docked bubbles only (${JSON.stringify({ stack, ...end })})`);
+				// Under a banner the reply ends a tail and a gap above it; the controls sit 24px up.
+				const room = 24 + (end.banner ? 24 + end.offset + end.banner + end.gap : 0);
+				expect(end.padding <= room + 1 && end.gapBelowReply <= room + 1,
+					`no stale blank is left under the reply once the last bubble left (${JSON.stringify(end)})`);
+			}
+		})),
 		{
 			// #1052 "rapid start": the second message goes out the moment the first
 			// shows as streaming, before any reply prose (the turn is still starting).

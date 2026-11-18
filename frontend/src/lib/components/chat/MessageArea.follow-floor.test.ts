@@ -55,7 +55,7 @@ function probe() {
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
 		let followedViewportEnd = 0, followedFloorContext = null;
 		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
-		let handoffPainted = false, heldBlankPx = 0;
+		let handoffPainted = false, heldBlankPx = 0, handoffHold = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
@@ -64,8 +64,13 @@ function probe() {
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
 		// Painted height: the queue's own height, or the slot holding it open.
 		const painted = () => Math.max(env.pendingHeight, tailQueueSlotPx);
-		const tailControlsRef = { getBoundingClientRect: () => ({ height: painted() }) }, chatColumnRef = {};
-		const getComputedStyle = () => ({ rowGap: String(env.gap) });
+		// The queue's bubbles dock at the slot's bottom; an empty queue docks none.
+		const row = { getBoundingClientRect: () => ({ top: painted() - env.pendingHeight }) };
+		const tailControlsRef = {
+			getBoundingClientRect: () => ({ top: 0, bottom: painted(), height: painted() }),
+			querySelector: () => env.pendingHeight > 0 ? { firstElementChild: row } : null
+		}, chatColumnRef = {};
+		const getComputedStyle = () => ({ rowGap: String(env.gap) }), rowGapPx = () => env.gap;
 		const activeSession = {}, get = () => env.session;
 		const liveActiveSession = { clearError: () => { env.session = { ...env.session, error: null }; } };
 		const untrack = fn => fn();

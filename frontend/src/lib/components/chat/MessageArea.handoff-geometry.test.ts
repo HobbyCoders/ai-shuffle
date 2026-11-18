@@ -40,7 +40,7 @@ type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; l
 function view(layout: Layout, anchored: boolean) {
 	const store: Record<string, unknown> = {
 		...autoScroll, landedFromQueue, layout, anchored,
-		handoffPainted: false, heldBlankPx: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
+		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
 		document: { getElementById: () => anchorEl },
 		getComputedStyle: () => ({ rowGap: String(ROW_GAP), marginTop: '0', marginBottom: '0', getPropertyValue: () => '0' }),
 	};
@@ -314,5 +314,59 @@ describe('queue handoff hold geometry', () => {
 			expect(v.read().padding).toBe(settledReserve([80, 80]));
 			expect(v.read().replyEnd).toBe(layout.clientHeight - settledReserve([80, 80]));
 		});
+
+		it('keeps the banner above a docked bubble that wraps taller after it', async () => {
+			const { layout, v } = await givenBack();
+			await v.update(turn(5, 2, 'CLI error'));
+			// A narrower column wraps the first bubble onto more lines.
+			layout.bubbles = [128, 80];
+			await v.resize(400); await v.frame();
+			const { banner, bubblesTop } = v.read();
+			expect(banner.bottom).toBeLessThanOrEqual(bubblesTop - ROW_GAP);
+			expect(banner.top).toBeGreaterThanOrEqual(0);
+		});
+
+		it('reserves nothing for an emptied slot while the banner steps aside for its Error row', async () => {
+			const { layout, v } = await givenBack();
+			layout.banner = 0;
+			await v.update(turn(5, 2, 'CLI error'));
+			await v.update(turn(6, 0, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = []; });
+			// The next turn's reply consumes the space the leaving bubble read in.
+			await v.grow(200);
+			// No bubble and no banner: the reply ends where an unqueued turn's would.
+			expect(v.read().padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+			expect(v.read().replyEnd).toBe(layout.clientHeight - autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+		});
+	});
+
+	it('puts an error that lands before the give-back pass on screen, above the docked bubble (390x400)', async () => {
+		const { layout, v } = await streamingTurn(400);
+		await dequeue(v, layout, 5, [80]);
+		layout.banner = 60;
+		await v.update(turn(5, 1, 'CLI error'));
+		const { banner, bubblesTop } = v.read();
+		expect(banner.bottom).toBe(bubblesTop - ROW_GAP);
+		expect(banner.top).toBeGreaterThanOrEqual(0);
+		// Its reserve is the bubble and banner on screen now, not the hold's blank.
+		const reserve = settledReserve([80]) + ROW_GAP + 60;
+		expect(v.read()).toMatchObject({ padding: reserve, replyEnd: layout.clientHeight - reserve });
+		await v.grow(20);
+		expect(v.read()).toMatchObject({ padding: reserve, replyEnd: layout.clientHeight - reserve });
+	});
+
+	it('lets no frame of an older hold mark a newer hold painted', async () => {
+		const { layout, v } = await streamingTurn();
+		await dequeue(v, layout, 5, [80, 80, 80]);
+		await v.frame();
+		// Two sends grow the queue past the held slot; the next prompt lands.
+		await v.update(turn(5, 5), () => { layout.bubbles = [80, 80, 80, 80, 80]; });
+		await dequeue(v, layout, 6, [80, 80, 80, 80]);
+		const painted = v.read();
+		// The older hold's second frame runs before the newer hold has painted.
+		await v.frame();
+		await v.grow(5);
+		expect(v.read()).toMatchObject({ slotTop: painted.slotTop, padding: painted.padding });
+		await v.frame(); await v.grow(5);
+		expect(v.read()).toMatchObject({ slotTop: painted.slotTop, padding: settledReserve([80, 80, 80, 80]) });
 	});
 });
