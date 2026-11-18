@@ -1934,28 +1934,42 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     return changed
 
 
-def _versus_held(clock: int, origin: str, incarnation: int, held: Mapping[str, Any]) -> int:
-    """``envelope.compare`` of a signed op against the version held.
+def _displaced_local(cursor, coll: policy.Collection, env: Envelope,
+                     plaintext: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The local row a winning op replaces, redacted, unless it says the same."""
+    local_row = _read_row(cursor, coll, env.record_id)
+    if local_row is None:
+        return None
+    try:
+        local_plain = serialize_row(coll, local_row, cursor=cursor)
+    except ApplyError:
+        return None
+    incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
+    if local_plain is None or content_hash(coll, local_plain) == incoming_hash:
+        return None
+    return redact_secrets(local_plain)
 
-    The incarnation decides only an exact (clock, origin) tie (#1568), and
-    only a signed op carries one: a version is labelled when it is written or
-    applied from its op, never from a state copy (which proves nothing about
-    the origin) and never inferred. A tie with an unlabelled version (stored
-    before labels were kept, or from a copy) keeps it, as before labels existed.
-    """
-    if clock == int(held["clock"]) and origin == held["origin_device_id"] and held.get("origin_incarnation") is None:
-        return 0
-    return envelope_mod.compare(clock, origin, int(held["clock"]), held["origin_device_id"],
-                                incarnation, int(held.get("origin_incarnation") or 0))
+
+def _older_stream(cursor, ctx: NetworkContext, env: Envelope) -> bool:
+    """Whether ``env`` comes from an incarnation older than its origin's newest
+    seen: only a restore leaves one behind (#1568)."""
+    newest = ctx.identity.incarnation if env.origin_device_id == ctx.device_id else \
+        store.highest_incarnation(cursor, env.origin_device_id)
+    return env.origin_incarnation < newest
 
 
 def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> bool:
     """Whether the held version is the same device's from another incarnation.
 
     Those are two writes on either side of a restore, not one stream moving
-    on, so the one that loses is kept as a conflict like any other device's.
-    A version with no recorded incarnation is taken as the same stream, as
-    before labels were kept: never a conflict on a guess.
+    on: they order by (clock, origin, incarnation) on every replica alike, and
+    the one that loses is kept as a conflict like any other device's (#1568).
+    Only a signed op carries an incarnation; a version is labelled when it is
+    written or applied from its op, never from a state copy (which proves
+    nothing about the origin) and never inferred. A version with no label
+    (stored before labels were kept, or from a copy) is taken as the same
+    stream, so everything else orders exactly as before labels existed. A
+    fork reached only through a copy is therefore not seen (#1792).
     """
     held_incarnation = held.get("origin_incarnation")
     return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
@@ -2024,13 +2038,23 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
     replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
-    # Every replica picks the same winner from what travels with the op:
-    # (clock, origin), then the incarnation on an exact tie. A device's clock
-    # rises with every op it signs, so for its own versions this is its stream
-    # order, owner-ordered rows included. Across incarnations (a restore forks
-    # the stream) the replicas still agree, which no stream-order rule can
-    # promise (#1568).
-    wins = existing is None or _versus_held(env.clock, env.origin_device_id, env.origin_incarnation, existing) > 0
+    fork = existing is not None and _restore_fork(env.origin_device_id, env.origin_incarnation, existing)
+    if fork:
+        # Across a restore the stream order is gone: every replica picks the
+        # same winner from (clock, origin, incarnation) instead (#1568).
+        wins = envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]),
+                                    existing["origin_device_id"], env.origin_incarnation,
+                                    int(existing["origin_incarnation"])) > 0
+    elif coll.mode == policy.MODE_OWNER_ORDERED:
+        # Owner-ordered: the owner's stream order is the order. No clock race.
+        # An op from an incarnation older than the newest seen comes from
+        # across a restore, where that order is gone: (clock, origin) decides.
+        wins = existing is None or (env.origin_device_id == existing["origin_device_id"]
+                                    and not _older_stream(cursor, ctx, env)) or \
+            envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
+    else:
+        wins = existing is None or envelope_mod.compare(
+            env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
@@ -2065,28 +2089,24 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     if env.collection == "membership":
         _apply_membership(cursor, ctx, plaintext)
 
-    # Keep the local loser (a concurrent local edit) for the conflicts list:
-    # another device's version, or this device's from the other side of a
-    # restore fork. A newer op of the same stream simply supersedes its own.
-    # A fork's displaced deletion is kept too, as the state-copy path keeps it.
-    # Read now, before the row is replaced; recorded only once this op has
-    # materialized: a refused upsert (_KeepObservation) displaced nothing.
+    # Keep the local loser (a concurrent local edit) for the conflicts list.
+    if existing is not None and existing["origin_device_id"] != env.origin_device_id and not bool(existing["deleted"]):
+        local_loser = _displaced_local(cursor, coll, env, plaintext)
+        if local_loser is not None:
+            store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
+                               losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
+                               losing_record=local_loser, winning_clock=env.clock,
+                               winning_device_id=env.origin_device_id)
+    # This device's own version from the other side of a restore fork is a
+    # loser too, a displaced deletion included (as the state-copy path keeps
+    # it). Read now, before the row is replaced; recorded only once this op
+    # has materialized: a refused upsert (_KeepObservation) displaced nothing.
     losing_record = None
-    fork = existing is not None and _restore_fork(env.origin_device_id, env.origin_incarnation, existing)
     if fork and bool(existing["deleted"]):
         if env.op == OP_UPSERT:
             losing_record = {"_deleted": True}
-    elif existing is not None and not bool(existing["deleted"]) and (
-            existing["origin_device_id"] != env.origin_device_id or fork):
-        local_row = _read_row(cursor, coll, env.record_id)
-        if local_row is not None:
-            try:
-                local_plain = serialize_row(coll, local_row, cursor=cursor)
-            except ApplyError:
-                local_plain = None
-            incoming_hash = content_hash(coll, plaintext) if env.op == OP_UPSERT else ""
-            if local_plain is not None and content_hash(coll, local_plain) != incoming_hash:
-                losing_record = redact_secrets(local_plain)
+    elif fork:
+        losing_record = _displaced_local(cursor, coll, env, plaintext)
 
     refresh_billing = False
     if env.op == OP_DELETE:

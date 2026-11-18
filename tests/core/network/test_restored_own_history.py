@@ -799,3 +799,134 @@ def test_a_refused_replay_keeps_no_conflict_for_the_deletion_it_could_not_undo(w
         # B's renames that lost to the deletion are kept; the deletion is no loser.
         assert [conflict for conflict in store.list_conflicts() if conflict["record_id"] == "chat"
                 and conflict["losing_record"] == {"_deleted": True}] == []
+
+
+# ---------------------------------------------------------------------------
+# No restore on either side: the outcome is main's (review S22)
+# ---------------------------------------------------------------------------
+
+def test_a_signed_chat_update_repairs_an_earlier_projected_copy(workers):
+    """Review S22, no restore: B links its chat to P, which A lacks, so A's
+    copy has no project. C commits that copy before B's op: the op is B's own
+    stream moving on and applies, as on main, so C ends in P."""
+    a, b, c = _network(workers, "a", "b", "c")
+    for worker in (b, c):
+        with worker.active():
+            database.create_project(project_id="p", name="p", description=None, path="/srv/p")
+    _session(b, "chat", title="t", events=0)
+    _converge([a, b, c])
+    b.sql("UPDATE sessions SET project_id = 'p' WHERE id = 'chat'")
+    with b.active():
+        engine.scan_all()
+    _exchange(b, a)
+    assert _chat_project(a) is None  # A's mirror dropped it
+    _state_copy(a, c, "sessions")
+    assert _chat_project(c) is None and _chat_incarnation(c) is None
+    _exchange(a, c)  # B's signed op, relayed
+    assert _chat_project(c) == "p"
+
+
+
+def test_an_older_incarnation_op_does_not_replace_a_newer_copied_chat(workers):
+    """Across a restore stream order is gone even with no label to compare: C
+    takes B's post-restore chat from A's copy, with its watermarks, then gets
+    B's earlier pre-restore rename relayed. It is older by clock and loses,
+    as on every replica that holds the labelled version."""
+    a, b, c = _network(workers, "a", "b", "c")
+    _session(b, "chat", title="t", events=0)
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    _rename(b, "lost-0")
+    _exchange(b, a)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    _rename(b, "new")
+    _exchange(b, a)
+    assert _sweep_value(a, "sessions") == "new"
+    _state_copy(a, c, "sessions")
+    assert _sweep_value(c, "sessions") == "new" and _chat_incarnation(c) is None
+    with c.active(), get_db() as conn:  # adopted with the copy, as a snapshot does
+        store.set_watermark(conn.cursor(), b.device_id, 2, _streams(a, b.device_id)["2"])
+    _exchange(a, c)  # B's incarnation-1 rename, relayed
+    assert _sweep_value(c, "sessions") == "new"
+    _converge([a, b, c])
+    assert _sweep_value(a, "sessions") == _sweep_value(b, "sessions") == _sweep_value(c, "sessions") == "new"
+
+
+def _sweep_value(worker, collection):
+    if collection == "sessions":
+        with worker.active():
+            return database.get_session("chat")["title"]
+    return owner_pref(worker, "theme")
+
+
+def _sweep_record(worker, collection):
+    record_id = "chat" if collection == "sessions" else _theme_id(worker)
+    return record_id, worker.sql("SELECT * FROM sync_records WHERE collection = ? AND record_id = ?",
+                                 (collection, record_id))[0]
+
+
+@pytest.mark.parametrize("collection", ["sessions", "user_preferences"])
+@pytest.mark.parametrize("copy_first", [True, False], ids=["copy-first", "op-first"])
+@pytest.mark.parametrize("labelled", [True, False], ids=["labelled", "unlabelled"])
+@pytest.mark.parametrize("same_origin", [True, False], ids=["same-origin", "other-origin"])
+@pytest.mark.parametrize("copy_ahead", [0, 1], ids=["tie", "copy-ahead"])
+def test_without_a_restore_the_outcome_is_mains(workers, collection, copy_first, labelled, same_origin, copy_ahead):
+    """With no restore fork on either side, the outcome equals main's. B signs
+    "op" at clock K; a copy says "copy" at K (an exact tie) or K+1, from B or
+    from A. The held version is labelled with B's only incarnation, or has no
+    label (a legacy row, or one a copy installed). Main's rules: an owner-
+    ordered op of the held version's origin applies; any other op, and every
+    copy, needs a higher (clock, origin) to win; a loser of another origin, or
+    a losing op, is kept as a conflict. The sweep passes on main's engine."""
+    a, b, c = _network(workers, "a", "b", "c")
+    if collection == "sessions":
+        _session(b, "chat", title="v0", events=0)
+    else:
+        set_owner_pref(b, "theme", "v0")
+    _converge([a, b, c])
+    if collection == "sessions":
+        _rename(b, "op")
+    else:
+        set_owner_pref(b, "theme", "op")
+    coll = engine.policy.collection(collection)
+    with b.active(), get_db() as conn:
+        cursor = conn.cursor()
+        record_id, _ = _sweep_record(b, collection)
+        item = engine.snapshot_item(cursor, coll, store.get_record(cursor, collection, record_id))
+    key = "title" if collection == "sessions" else "value"
+    origin = b if same_origin else a
+    k = int(item["clock"])
+    item = {**item, "clock": k + copy_ahead, "origin_device_id": origin.device_id,
+            "record": {**item["record"], key: "copy"}}
+
+    def copy():
+        with c.active(), get_db() as conn:
+            engine.apply_snapshot_items(conn.cursor(), coll, [item], ctx=engine.context())
+
+    def label():
+        c.sql("UPDATE sync_records SET origin_incarnation = ? WHERE collection = ? AND record_id = ?",
+              (1 if labelled else None, collection, record_id))
+
+    if copy_first:
+        copy()
+        label()
+        _exchange(b, c)
+    else:
+        _exchange(b, c)
+        label()
+        copy()
+
+    ahead = not copy_ahead and b.device_id > origin.device_id  # (K, B) outranks the copy
+    if copy_first:
+        op_wins = ahead or (same_origin and coll.mode == engine.policy.MODE_OWNER_ORDERED)
+        conflicts = 1 if (not same_origin or not op_wins) else 0
+        expected = "op" if op_wins else "copy"
+    else:
+        conflicts = 0 if same_origin else 1
+        expected = "op" if ahead or (same_origin and not copy_ahead) else "copy"
+    assert _sweep_value(c, collection) == expected
+    with c.active():
+        # Losers from K on: a copy from A also displaces v0 first, as on main.
+        assert len([conflict for conflict in store.list_conflicts() if conflict["record_id"] == record_id
+                    and conflict["losing_clock"] >= k]) == conflicts

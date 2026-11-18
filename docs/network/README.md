@@ -95,7 +95,7 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
    origin past its `last_seq_accepted` (and in an incarnation older than the
    newest one seen), order per stream (holes wait in `sync_pending`; an active
    member's older incarnation is an ordinary stream), decrypt, last-writer-wins
-   on (clock, device id) for every collection and every origin, materialize
+   on (clock, device id), materialize
    into the domain table, keep the loser in `sync_conflicts` for 30 days
    (columns encrypted at rest are stored as `<secret>`, never in plaintext),
    advance the watermark. All in one transaction per envelope.
@@ -211,35 +211,41 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   re-imports them. Its current incarnation is never sent back. Only a worker
   that advertises the `own-history-reimport` capability gets them; an older
   worker is served as before. Other members accept and relay those older
-  streams too. Every replica orders the device's versions by (clock, device
-  id), as it does any other's, so all of them agree whichever stream carried
-  a version. The restore can leave two of the device's versions with the same
-  clock, one from each side of it: when a signed op meets the version held at
-  that exact (clock, device id), the later incarnation wins, and the stored
-  version keeps the incarnation of the op that wrote it for that. The one
-  loss: a write the device makes after the restore but before it hears of a
-  later version it signed before the restore has a lower clock and loses to
-  that version on every replica, as any concurrent write would. Whichever of
-  the device's two incarnations loses to a signed op is kept as a conflict,
-  as another device's would be. Members on an older build still refuse an
-  older incarnation once they have seen a newer one and keep the first
-  version on a tie, so until they update they can disagree in those cases.
+  streams too. Within one incarnation nothing changes: with no restore on
+  either side, every version is applied exactly as before. Across a restore
+  the device's stream order is gone, so a signed op meeting the device's
+  version from its other incarnation orders by (clock, device id), as any
+  other device's would, owner-ordered rows included, and all replicas agree
+  whichever stream carried a version. The restore can leave two of the
+  device's versions with the same clock, one from each side of it: at that
+  exact (clock, device id) the later incarnation wins, and the stored version
+  keeps the incarnation of the op that wrote it for that. The one loss: a
+  write the device makes after the restore but before it hears of a later
+  version it signed before the restore has a lower clock and loses to that
+  version on every replica, as any concurrent write would. Whichever of the
+  device's two incarnations loses to a signed op is kept as a conflict, as
+  another device's would be. Members on an older build still refuse an older
+  incarnation once they have seen a newer one, so until they update they can
+  disagree in those cases.
   Only a signed op carries an incarnation. A state copy or transcript copy is
   the serving member's claim, not the device's signature, and a member may
   store less than was signed (a chat whose project it lacks loses it), so a
-  copy carries none and sets none. A copy that ties the version held is
-  skipped, as before the upgrade; a version a copy installs, like one stored
-  before the upgrade, has no incarnation, and a signed op that ties it keeps
-  it. So two replicas can keep different values, until the record next
-  changes, when all of these hold: the device signed two versions of the
-  record at one clock on either side of a restore; one replica holds the
-  later incarnation's and another the earlier one's, or either from a copy;
-  and the later one reaches the second replica only by a state copy (whose
-  watermarks then stop the signed op being sent), or reaches it as a signed
-  op after that replica installed its version from a copy. Origin proofs in
-  copies would close this (#1792). Nor is a version replaced across a
-  restore kept as a conflict when it has no incarnation: nothing says which
-  side of the restore it came from.
+  copy carries none and sets none, and it orders exactly as before the
+  upgrade. A version a copy installs, like one stored before the upgrade, has
+  no incarnation, so a signed op meeting it is taken as the same stream, as
+  before the upgrade (an owner-ordered row takes it; any other row keeps the
+  version held on a tie), unless the op comes from an incarnation older than
+  the newest seen, which only a restore leaves: then (clock, device id)
+  decides and the version held keeps a tie. So two replicas can keep different values, until
+  the record next changes, when all of these hold: the device signed two
+  versions of the record at one clock on either side of a restore; one
+  replica holds the later incarnation's version and another holds the earlier
+  one's, either of them from a copy; and the later one reaches the second
+  replica only by a state copy (whose watermarks then stop the signed op being
+  sent), or reaches it as a signed op after that replica installed its version
+  from a copy. Origin proofs in copies would close this (#1792). Nor is a
+  version replaced across a restore kept as a conflict when it has no
+  incarnation: nothing says which side of the restore it came from.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement
