@@ -142,8 +142,8 @@ class Transport:
 
     def __call__(self, request):
         self.requests.append(request)
-        status, body = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
-        return httpx.Response(status, json=body)
+        status, body, *headers = self.replies.pop(0) if len(self.replies) > 1 else self.replies[0]
+        return httpx.Response(status, json=body, headers=headers[0] if headers else None)
 
 
 @pytest.fixture
@@ -182,3 +182,18 @@ async def test_rate_limit_retries_then_failure_is_a_reason_not_a_cache(transport
     with pytest.raises(fal_pricing.PricingRequestFailed):
         await rates.rows(["b"], "key")
     assert ("b" not in {endpoint for _scope, endpoint in rates._cache})
+
+
+async def test_a_long_retry_after_fails_fast_and_keeps_known_rows(transport):
+    row = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    t = transport((200, {"prices": [row]}), (429, {}, {"retry-after": "42"}))
+    rates = fal_pricing.FalRates()
+    await rates.rows(["a"], "key")
+    with pytest.raises(fal_pricing.PricingRequestFailed):
+        await rates.rows(["a", "b"], "key")
+    assert len(t.requests) == 2  # no retries against a 42 s window
+    with pytest.raises(fal_pricing.PricingRequestFailed):
+        await rates.rows(["c"], "key")
+    assert len(t.requests) == 2  # still blocked: no request at all
+    assert await rates.rows(["a"], "key") == {"a": row}  # cached rows still answer
+    assert rates.cached(["a", "b"], "key") == {"a": row}

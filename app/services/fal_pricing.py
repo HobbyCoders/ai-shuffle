@@ -101,6 +101,9 @@ class FalRates:
 
     def __init__(self):
         self._cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
+        # fal allows about ten price reads a minute, then answers 429 with a
+        # Retry-After of tens of seconds: until then, fail at once, not slowly.
+        self._blocked: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
     @staticmethod
@@ -109,6 +112,13 @@ class FalRates:
 
     def clear(self):
         self._cache.clear()
+        self._blocked.clear()
+
+    def cached(self, endpoint_ids, api_key: str | None) -> dict[str, dict | None]:
+        """The rows already known, without asking fal."""
+        scope, now = self._scope(api_key), time.time()
+        hits = {e: self._cache.get((scope, e)) for e in endpoint_ids}
+        return {e: hit[1] for e, hit in hits.items() if hit and hit[0] > now}
 
     async def rows(self, endpoint_ids, api_key: str | None) -> dict[str, dict | None]:
         """``{endpoint: row or None}``; None means fal lists no price.
@@ -125,6 +135,8 @@ class FalRates:
                 wanted.append(endpoint)
         if not wanted:
             return found
+        if self._blocked.get(scope, 0) > now:
+            raise PricingRequestFailed("fal pricing is rate limited for now.")
         async with self._lock:
             async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
                 queue = [wanted[i:i + BATCH] for i in range(0, len(wanted), BATCH)]
@@ -139,6 +151,9 @@ class FalRates:
                         continue
                     if response.status_code == 404:
                         rows = {}
+                    elif response.status_code == 429:
+                        self._blocked[scope] = time.time() + _retry_after(response)
+                        raise PricingRequestFailed("fal pricing is rate limited for now.")
                     elif response.status_code != 200:
                         raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")
                     else:
@@ -163,11 +178,18 @@ class FalRates:
                                             headers={"Authorization": "Key " + (api_key or "")})
             except httpx.HTTPError:
                 raise PricingRequestFailed("fal pricing could not be reached.") from None
-            if response.status_code != 429 or attempt == 3:
+            if response.status_code != 429 or attempt == 3 or _retry_after(response) > 2:
                 return response
             await asyncio.sleep(delay)
             delay *= 2
         return response
+
+
+def _retry_after(response) -> float:
+    try:
+        return min(max(float(response.headers.get("retry-after", "")), 0.0), 120.0)
+    except ValueError:
+        return 0.0
 
 
 rates = FalRates()

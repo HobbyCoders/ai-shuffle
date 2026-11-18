@@ -147,15 +147,16 @@ class Sources:
                 return [], 0, {}
         models = await self.fal_models(kind, operation=operation, query=query)
         page = models[offset:offset + limit]
+        ids, key = [m.endpoint_id for m in page], await self.fal_key()
         try:
-            rows = await fal_pricing.rates.rows([m.endpoint_id for m in page], await self.fal_key())
+            rows = await fal_pricing.rates.rows(ids, key)
         except fal_pricing.PricingRequestFailed:
-            rows = None
+            rows = fal_pricing.rates.cached(ids, key)  # keep what is known
         entries, details = [], {}
         for m in page:
             schema = schema_service.peek(m.endpoint_id)
             options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-            if rows is None:
+            if m.endpoint_id not in rows:
                 price = fal_pricing.unknown("pricing_request_failed")
             elif schema is None:
                 price = fal_pricing.price_from_row(rows.get(m.endpoint_id), None, {}, None)

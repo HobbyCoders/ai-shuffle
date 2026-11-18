@@ -106,6 +106,20 @@ def test_unpriced_rows_say_why_and_are_never_free(client):
     assert all(r["price"]["total"] is None for r in rows.values())
 
 
+def test_a_rate_limited_page_keeps_known_rates(client, monkeypatch):
+    from app.services import fal_pricing
+
+    async def limited(endpoints, key):
+        raise fal_pricing.PricingRequestFailed("fal pricing is rate limited for now.")
+    monkeypatch.setattr(fal_pricing.rates, "rows", limited)
+    monkeypatch.setattr(fal_pricing.rates, "cached", lambda endpoints, key: {"fal-ai/t2v-a": ROW})
+    rows = {m["model"]: m for m in client.get("/api/v1/generation/models/video").json()["models"]}
+    assert rows["fal-ai/t2v-a"]["price"]["reason"] == "not_quoted"
+    assert rows["fal-ai/t2v-a"]["price"]["rate"] == {"amount": "0.1", "unit": "second"}
+    assert rows["fal-ai/t2v-b"]["price"]["reason"] == "pricing_request_failed"
+    assert all(r["status"] == "unpriced" and r["price"]["total"] is None for r in rows.values())
+
+
 def test_cached_schema_rows_carry_a_real_price(client):
     from app.services.fal_schema import schema_service
     schema = ModelSchema("fal-ai/t2v-a", [ParamField("prompt", is_primary_text=True, required=True),
