@@ -43,10 +43,11 @@ internal class ChatTransfers(
         const val CHOOSE_MS = 5 * 60_000L
         const val STALL_MS = 2 * 60_000L
         const val STALL_CHECK_MS = 10_000L
-        // chat-downloads.js serializes `type` then `id` first, so the ID is read from a
-        // bounded prefix and even a message too large to parse gets its own rejection.
-        private val PREFIX = Regex("^\\{\"type\":\"[a-z]{1,16}\",\"id\":\"([a-zA-Z0-9-]{1,80})\"")
-        fun messageId(raw: String): String? = PREFIX.find(raw.take(128))?.groupValues?.get(1)
+        private val ID = Regex("[a-zA-Z0-9-]{1,80}")
+        // A message too large to parse still gets its own rejection when a bounded prefix
+        // names its ID first or right after `type` (chat-downloads.js sends type, then id).
+        private val PREFIX = Regex("^\\{(?:\"type\":\"[a-z]{1,16}\",)?\"id\":\"([a-zA-Z0-9-]{1,80})\"")
+        private fun prefixId(raw: String): String? = PREFIX.find(raw.take(128))?.groupValues?.get(1)
     }
 
     private class Transfer(val id: String, val page: Int, val size: Long, val url: String?, val reply: ((Boolean) -> Unit)?) {
@@ -90,12 +91,13 @@ internal class ChatTransfers(
 
     /** A message from the authorized page. Every request with a readable ID gets an answer for that ID only. */
     fun receive(raw: String, post: (String) -> Unit) {
-        val id = messageId(raw)
+        // A message within the size limit is parsed once and gives its ID in any key order.
+        val parsed = if (raw.length <= ChatDownloadPolicy.MAX_MESSAGE) runCatching { JSONObject(raw) }.getOrNull() else null
+        val id = parsed?.optString("id")?.takeIf(ID::matches) ?: prefixId(raw)
         fun reply(ok: Boolean) { if (id != null) runCatching { post(JSONObject().put("id", id).put("ok", ok).toString()) } }
         try {
-            require(id != null && raw.length <= ChatDownloadPolicy.MAX_MESSAGE)
-            val message = JSONObject(raw)
-            require(message.getString("id") == id)
+            val message = requireNotNull(parsed)
+            require(id != null && message.optString("id") == id)
             when (message.getString("type")) {
                 "begin", "url" -> {
                     if (active != null || chooserOpen) { status("Finish the current download first."); reply(false); return }

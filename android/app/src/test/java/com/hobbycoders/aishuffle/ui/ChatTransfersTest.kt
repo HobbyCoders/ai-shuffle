@@ -295,6 +295,27 @@ class ChatTransfersTest {
         assertEquals(listOf(true), replies("a1"))
     }
 
+    @Test fun requestsAreAnsweredWhateverTheirKeyOrder() {
+        // The minified release smoke test's envelope: `id` before `type`, and no save to finish.
+        send("{\"id\":\"release-smoke\",\"type\":\"finish\",\"sequence\":0}")
+        assertEquals(listOf(false), replies("release-smoke"))
+
+        startStream("a1")
+        send("{\"name\":\"x.zip\",\"type\":\"url\",\"url\":\"$base/f\",\"id\":\"r1\"}")
+        assertEquals(listOf(false), replies("r1"))
+        send("{\"id\":\"r2\",\"type\":\"url\",\"url\":\"$base/" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\"}")
+        assertEquals(listOf(false), replies("r2"))
+        send("{\"type\":\"url\",\"url\":\"$base/" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\",\"id\":\"r3\"}")
+        assertTrue(replies("r3").isEmpty())
+        assertEquals(3, replies.size)
+        assertFalse(worker.call!!.isCanceled())
+
+        chunk(5)
+        worker.steps.put(Step.End)
+        settle("reply") { replies("a1").isNotEmpty() }
+        assertEquals(listOf(true), replies("a1"))
+    }
+
     @Test fun oversizedMessageForTheActiveSaveEndsIt() {
         startStream("a1")
         send("{\"type\":\"chunk\",\"id\":\"a1\",\"data\":\"" + "x".repeat(ChatDownloadPolicy.MAX_MESSAGE) + "\"}")

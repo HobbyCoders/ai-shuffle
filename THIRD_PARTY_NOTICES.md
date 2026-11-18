@@ -744,6 +744,7 @@ Direct app and test dependencies declared in `android/app/build.gradle.kts` are 
 | junit:junit | 4.13.2 | EPL-1.0 | https://repo.maven.apache.org/maven2/junit/junit/4.13.2/junit-4.13.2.pom |
 | net.openid:appauth | 0.11.1 | Apache-2.0 | https://repo.maven.apache.org/maven2/net/openid/appauth/0.11.1/appauth-0.11.1.pom |
 | org.jetbrains.kotlinx:kotlinx-coroutines-android | 1.7.3 | Apache-2.0 | https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-android/1.7.3/kotlinx-coroutines-android-1.7.3.pom |
+| org.jetbrains.kotlinx:kotlinx-coroutines-test | 1.7.3 | Apache-2.0 | https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-test/1.7.3/kotlinx-coroutines-test-1.7.3.pom |
 | org.json:json | 20240303 | Public domain | https://repo.maven.apache.org/maven2/org/json/json/20240303/json-20240303.pom |
 | org.robolectric:robolectric | 4.16.1 | MIT | https://repo.maven.apache.org/maven2/org/robolectric/robolectric/4.16.1/robolectric-4.16.1.pom |
 
