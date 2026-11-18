@@ -1,7 +1,7 @@
 """Owner-routed live run settings; never interrupt or reconnect a turn."""
 import asyncio
 import logging
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -25,6 +25,10 @@ class RunSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]] = None
     fast: Optional[StrictBool] = None
+    # The speed tier (app/core/model_speed.py). Wins over ``fast`` and sets it;
+    # a request with only ``fast`` (an older client) keeps an Ultrafast tier
+    # when it turns fast on, and turning it off is Standard.
+    speed: Optional[Literal["standard", "fast", "ultrafast"]] = None
     context_window: Optional[int] = Field(None, strict=True, gt=0)
 
 
@@ -132,7 +136,7 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *,
     reload or another device can say so too.
     """
     result = await _apply_run_settings(session_id, body, inherited=inherited)
-    if propagate and "fast" in body.model_fields_set and "skipped" not in result:
+    if propagate and ({"fast", "speed"} & body.model_fields_set) and "skipped" not in result:
         _start_propagation(session_id, bool(result["fast"]))
     return result
 
@@ -145,14 +149,20 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     from app.core.provider.types import SessionOptions
     from app.db.model_providers import resolve_model_provider
 
+    from app.core.model_speed import resolve_speed
+
     changes = body.model_dump(exclude_unset=True)
-    if not changes or ("fast" in changes and changes["fast"] is None):
-        raise ValueError("Provide effort, a boolean fast setting, or a context_window")
+    if not changes or ("fast" in changes and changes["fast"] is None) or (
+            "speed" in changes and changes["speed"] is None):
+        raise ValueError("Provide effort, a boolean fast setting, a speed, or a context_window")
+    if "speed" in changes:
+        changes["fast"] = changes["speed"] != "standard"
     lock = _locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = await run_sync(control._require_owned, session_id)
         if inherited:
             if set(changes) != {"fast"}:
+                # Ultrafast is never inherited: a parent hands down Fast on/off.
                 raise ValueError("A parent hands down only fast mode")
             skip = await run_sync(_inherited_fast_skip, session)
             if skip:
@@ -178,9 +188,14 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         options = getattr(state.adapter, "_options", None) if connected else None
         old = {"effort": options.effort if options else session.get("effort"),
                "fast": bool(options.fast if options else session.get("fast"))}
+        old["speed"] = resolve_speed(old["fast"], getattr(options, "speed", None) if options else session.get("speed"))
+        if "fast" in changes and "speed" not in changes:
+            # Only ``fast`` (an older client, or a parent): on keeps Ultrafast.
+            changes["speed"] = resolve_speed(changes["fast"], old["speed"])
         selected = {**old, **changes}
+        selected["speed"] = resolve_speed(selected["fast"], selected["speed"])
         if connected:
-            selected = await state.adapter.set_run_settings(**selected)
+            selected = {"speed": selected["speed"], **await state.adapter.set_run_settings(**selected)}
             if get_session_pool().peek(session_id) is not state or not state.is_connected:
                 raise RuntimeError("Session connection changed before the setting was confirmed")
         else:
@@ -196,6 +211,11 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
                 raise ValueError("This model does not support the selected effort level")
             if selected["fast"] and route not in ("delegated", "openai_responses"):
                 raise ValueError("Fast mode is not supported by this provider")
+            if selected["speed"] == "ultrafast":
+                from app.core.model_speed import ultrafast_supported_for_row
+
+                if route != "openai_responses" or not ultrafast_supported_for_row(provider, model):
+                    raise ValueError("Ultrafast is not available for this model")
             selected["effort"] = effort
         stored = selected
         # The owner's own pick on a subagent pins it: a parent's later toggle
@@ -217,6 +237,7 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
+            state.connect_options.aih_speed = selected["speed"]
         waiting = fast_waiting_turn(session_id)
         return {**selected, "fast_applies_turn": waiting} if waiting else selected
 
@@ -309,6 +330,31 @@ async def handle_run_settings(body: dict, from_device: str) -> dict:
     return result
 
 
+def _older_owner_refused_speed(exc: Exception) -> bool:
+    """Did an owner that predates ``speed`` refuse the field?"""
+    text = str(exc).lower()
+    return "speed" in text and ("extra" in text or "not permitted" in text)
+
+
+async def _call_owner_run_settings(owner: Any, session_id: str, changes: dict) -> dict:
+    """``run-settings`` on the worker that runs the chat.
+
+    A ``speed`` pick also sends the ``fast`` it implies. An owner older than
+    ``speed`` refuses the field, so it is asked again with ``fast`` alone: it
+    runs an Ultrafast pick on Fast rather than failing the change.
+    """
+    if changes.get("speed") is not None:
+        changes = {**changes, "fast": changes["speed"] != "standard"}
+    try:
+        return await control.call(owner, "run-settings", {"session_id": session_id, **changes})
+    except (control.ControlRefused, ValueError) as exc:
+        if "speed" not in changes or not _older_owner_refused_speed(exc):
+            raise
+        logger.info("Owner of %s predates the speed setting; sending fast only", session_id)
+        legacy = {key: value for key, value in changes.items() if key != "speed"}
+        return await control.call(owner, "run-settings", {"session_id": session_id, **legacy})
+
+
 @router.put("/{session_id}/run-settings")
 async def update_run_settings(
     request: Request, session_id: str, body: RunSettingsUpdate,
@@ -318,9 +364,7 @@ async def update_run_settings(
     owner = await run_sync(control.owner_of, session)
     try:
         if owner is not None:
-            result = await control.call(owner, "run-settings", {
-                "session_id": session_id, **body.model_dump(exclude_unset=True),
-            })
+            result = await _call_owner_run_settings(owner, session_id, body.model_dump(exclude_unset=True))
         else:
             result = await apply_run_settings(session_id, body)
     except (control.ControlRefused, ValueError) as exc:

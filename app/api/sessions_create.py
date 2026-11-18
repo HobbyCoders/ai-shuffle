@@ -156,6 +156,7 @@ async def create_empty_session(
                 permission_mode=overrides.get("permission_mode"),
                 context_window=window,
                 fast=overrides.get("fast"),
+                speed=overrides.get("speed"),
                 mode=mode,
                 target_instance_id=target,
                 _conn=txn,
@@ -266,7 +267,7 @@ async def _create_on_owner(session_id: str, request: Request, *, api_user_id: Op
         "model": overrides.get("model"), "effort": overrides.get("effort"),
         "permission_mode": overrides.get("permission_mode"),
         "context_window": row.get("context_window"),
-        "fast": overrides.get("fast"), "mode": mode,
+        "fast": overrides.get("fast"), "speed": overrides.get("speed"), "mode": mode,
         "hidden": bool(row.get("hidden")),
         # Who started it; the worker that runs it labels it (#1877).
         "provenance_owner": (principal or {}).get("owner"),

@@ -85,7 +85,7 @@ async def test_no_live_adapter_has_no_notice(monkeypatch):
     monkeypatch.setattr("app.core.model_effort.normalize_effort", lambda effort, *a, **k: effort)
     monkeypatch.setattr(db, "set_session_run_binding", MagicMock())
     answer = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True), propagate=False)
-    assert answer == {"effort": "high", "fast": True}
+    assert answer == {"effort": "high", "fast": True, "speed": "fast"}
 
 
 @pytest.mark.asyncio
@@ -327,3 +327,13 @@ def test_cooldown_is_a_temporary_rate_limit():
 @pytest.mark.parametrize("bad", [None, "2", -1, True, 1.5])
 def test_a_malformed_count_is_not_a_request(bad):
     assert fast_outcome_note({"fast_calls": bad, "standard_calls": bad})["outcome"] == "unknown"
+
+
+def test_an_ultrafast_outcome_carries_its_tier_to_the_app():
+    adapter = HarnessAdapter()
+    [message] = adapter._translate(FastModeOutcome(
+        session_id="s", turn_id="t", requested=True, requested_at_end=True, ultrafast_calls=2,
+        speed="ultrafast", speed_at_end="ultrafast"))
+    assert message.data["ultrafast_calls"] == 2
+    assert (message.data["speed"], message.data["speed_at_end"]) == ("ultrafast", "ultrafast")
+    assert fast_outcome_note(message.data)["content"] == "Ran on Ultrafast."

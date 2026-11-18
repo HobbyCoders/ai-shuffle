@@ -516,6 +516,11 @@ class ResponsesStreamNormalizer:
         served = response.get("model")
         if isinstance(served, str) and served:
             payload["served_model"] = served
+        # The service tier that served the call (``priority`` for Fast,
+        # ``ultrafast``, ``default``...): what the speed outcome counts.
+        tier = response.get("service_tier")
+        if isinstance(tier, str) and tier:
+            payload["service_tier"] = tier
         return [StreamChunk("usage", payload), StreamChunk("message_stop", {})]
 
     def _open(

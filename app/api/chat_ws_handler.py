@@ -1623,6 +1623,7 @@ class ChatWebSocketHandler:
                         permission_mode=(overrides or {}).get("permission_mode"),
                         context_window=create_window,
                         fast=(overrides or {}).get("fast"),
+                        speed=(overrides or {}).get("speed"),
                         # The composer's sidepanel mode is likewise settled at
                         # birth — 'code' persists as NULL, the same as every
                         # session written before modes existed.
@@ -1664,7 +1665,8 @@ class ChatWebSocketHandler:
                             "model": (overrides or {}).get("model"), "effort": (overrides or {}).get("effort"),
                             "permission_mode": (overrides or {}).get("permission_mode"),
                             "context_window": create_window,
-                            "fast": (overrides or {}).get("fast"), "mode": session_mode,
+                            "fast": (overrides or {}).get("fast"), "speed": (overrides or {}).get("speed"),
+                            "mode": session_mode,
                             "hidden": disposable_test,
                             # Who started it, recorded above; the worker that
                             # runs it labels it at creation (#1877).

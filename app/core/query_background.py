@@ -839,6 +839,7 @@ async def _start_background_turn(
                 effort=overrides.get("effort"),
                 permission_mode=overrides.get("permission_mode"),
                 fast=overrides.get("fast"),
+                speed=overrides.get("speed"),
                 workspace_project_ids=overrides.get("workspace_project_ids"),
             )
             if overrides.get("context_window"):

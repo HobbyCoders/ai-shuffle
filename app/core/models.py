@@ -440,6 +440,9 @@ class Session(SessionBase):
     # NULL (never picked) runs standard — left uncoalesced so the
     # client can tell "never picked" from an explicit off.
     fast: Optional[bool] = None
+    # Speed tier refining ``fast``: 'standard' | 'fast' | 'ultrafast'
+    # (app/core/model_speed.py). NULL = the tier ``fast`` alone implies.
+    speed: Optional[str] = None
     # Away mode (app/core/away_mode.py): questions get recommended defaults,
     # approval prompts are deferred. NULL/False = the owner is present.
     away_mode: Optional[bool] = None
@@ -653,6 +656,9 @@ class QueryOverrides(BaseModel):
     # Fast mode for this turn. True asks the leg for its expedited
     # service, False explicitly turns it off, None defers to the session row.
     fast: Optional[bool] = None
+    # Speed tier for this turn: 'standard' | 'fast' | 'ultrafast'. Wins over
+    # ``fast`` when set; older clients send only ``fast``.
+    speed: Optional[Literal["standard", "fast", "ultrafast"]] = None
 
 
 class QueryRequest(BaseModel):

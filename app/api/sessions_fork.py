@@ -47,6 +47,7 @@ def _fork_inherited_fields(original_session: dict) -> dict:
         "permission_mode": original_session.get("permission_mode"),
         "context_window": original_session.get("context_window"),
         "fast": original_session.get("fast"),
+        "speed": original_session.get("speed"),
         "worktree_id": original_session.get("worktree_id"),
         "worktree_branch": original_session.get("worktree_branch"),
         "worktree_path": original_session.get("worktree_path"),

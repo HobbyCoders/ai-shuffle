@@ -957,7 +957,7 @@ async def _sessions(body: Dict[str, Any], from_device: str) -> Dict[str, Any]:
     if not session_id:
         raise ValueError("session.id is required")
     allowed = {"profile_id", "project_v2_id", "title", "model", "effort", "permission_mode",
-               "context_window", "fast", "mode", "hidden"}
+               "context_window", "fast", "speed", "mode", "hidden"}
     fields = {k: v for k, v in session.items() if k in allowed}
     profile_id = fields.pop("profile_id", None) or "default"
     # The session keeps the API key that started it on the member (api_users
@@ -1206,7 +1206,8 @@ def fork_here(session_id: str, *, title: Optional[str] = None, api_user_id: Opti
             title=title or f"{original.get('title') or 'Session'} (forked)", api_user_id=api_user_id,
             parent_session_id=session_id, is_active=True, model=original.get("model"),
             effort=original.get("effort"), permission_mode=original.get("permission_mode"),
-            context_window=original.get("context_window"), fast=original.get("fast"), mode=original.get("mode"),
+            context_window=original.get("context_window"), fast=original.get("fast"), speed=original.get("speed"),
+            mode=original.get("mode"),
             _conn=txn)
         if creator:
             from app.db import mobile_tool_identity

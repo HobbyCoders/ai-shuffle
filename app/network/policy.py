@@ -441,7 +441,10 @@ _register(Collection(
 
 def _materialize_session_questions(record: Dict[str, Any]) -> Dict[str, Any]:
     # An older owner's full catalog row cannot retain a newer peer's stale mark.
-    return {"last_assistant_question_seq": None, "last_assistant_question_epoch": None, **record}
+    # The same holds for ``speed``: an owner that only knows ``fast`` runs the
+    # chat on Fast, so its row clears a tier it never published.
+    return {"last_assistant_question_seq": None, "last_assistant_question_epoch": None, "speed": None,
+            **record}
 
 
 _register(Collection(
@@ -455,15 +458,19 @@ _register(Collection(
             "mode", "hidden", "is_worker", "pr_number", "pr_url", "pr_state", "pull_requests", "work_ms",
             "work_started_at", "last_user_message_at", "last_user_message_seq", "last_user_message_epoch",
             "last_assistant_question_seq", "last_assistant_question_epoch", "away_mode", "provenance_owner", "fast_pinned",
-            "push_attention_state"),
+            "push_attention_state", "speed"),
     json_fields=("placement", "workspace_project_ids", "pull_requests", "push_attention_state"),
     mode=MODE_OWNER_ORDERED, resource="sessions", priority=90,
     materialize_hook=_materialize_session_questions,
+    # ``speed`` (Standard/Fast/Ultrafast) refines ``fast``; older builds read
+    # only ``fast``, which is on for Ultrafast too, so they run it on Fast.
+    late_fields=("speed",),
     local_fields=("instance_id", "sdk_session_id", "worktree_id", "worktree_branch", "worktree_path",
                   "cloud_branch", "working_set_ref", "context_usage_json", "v2_stream",
                   "workspace_facts"),
     scan_skip=("context_usage_json", "workspace_facts"),
-    notes="Session catalog. Owner-ordered: only the owner device publishes."))
+    notes="Session catalog. Owner-ordered: only the owner device publishes. speed (standard|fast|ultrafast) "
+          "is optional and refines fast; an older owner's row omits it, which clears it."))
 
 _register(Collection(
     name="session_runtime", table="network_session_runtime", keys=("session_id",),

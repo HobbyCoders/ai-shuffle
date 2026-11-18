@@ -63,7 +63,10 @@ def test_codex_refresh_repairs_v1_null_despite_missing_curated_model(
             assert entry["reasoning_capabilities"] == {"version": 1,
                 "effort_levels": ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if ultra else []),
                 "default_effort": default}
-        assert after["models_json"][-2:] == before["models_json"][-2:]
+        # The curated model the catalog no longer lists keeps its entry; a
+        # listed one also records the catalog's speed tiers (none here).
+        assert after["models_json"][-2] == before["models_json"][-2]
+        assert after["models_json"][-1] == {**before["models_json"][-1], "service_tiers": []}
         # Coalesced refreshes must also report the successful partial repair.
         assert authenticated_client.post(ROOT + "/refresh-capabilities", json={
             "provider_ids": [PROVIDER_ID]}).json() == response.json()
@@ -151,9 +154,11 @@ class TestLiveCatalogs:
         assert body["source"] == "upstream"
         assert body["models"] == [
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
-             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
+             "service_tiers": []},
             {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra",
-             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
+             "service_tiers": []},
         ]
         assert captured["url"].startswith(
             "https://chatgpt.com/backend-api/codex/models"
@@ -229,6 +234,7 @@ class TestLiveCatalogs:
                     "default_effort": "low",
                 },
                 "context_window": 272000,
+                "service_tiers": [],
             },
             {
                 "id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "context_window": 1_000_000,
@@ -236,6 +242,7 @@ class TestLiveCatalogs:
                     "version": 1, "effort_levels": ["medium", "xhigh"],
                     "default_effort": "xhigh",
                 },
+                "service_tiers": [],
             },
         ]
 
@@ -287,7 +294,8 @@ class TestLiveCatalogs:
         assert resp.status_code == 200, resp.text
         assert resp.json()["models"] == [
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
-             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None}},
+             "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
+             "service_tiers": []},
         ]
         assert calls["n"] == 2
 

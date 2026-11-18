@@ -1144,12 +1144,15 @@ async def _ask_owner(session_id: str, profile_id: Optional[str], *, model: str,
 # ---------------------------------------------------------------------------
 
 def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = None,
-                       context_window: Any = None, fast: Any = None) -> Dict[str, Any]:
+                       context_window: Any = None, fast: Any = None,
+                       speed: Any = None) -> Dict[str, Any]:
     """The inherited run settings that still apply to ``model``.
 
     Effort is fitted to the nearest supported level. Unsupported context
     windows and fast mode are dropped instead of sending a setting the
-    provider would reject. The context window is the user's Standard cap or
+    provider would reject; ``speed`` (the tier refining ``fast``) falls back
+    from Ultrafast to Fast where the model has no Ultrafast. The context
+    window is the user's Standard cap or
     Extended choice, so it is first fitted to the new model the way a Task
     worker's is (a GPT 272K "standard" becomes Claude's 200K).
     """
@@ -1167,7 +1170,15 @@ def settings_for_model(model: str, provider_id: Optional[str], *, effort: Any = 
     route = _decide_provider_kind(SessionOptions(
         model=bare, extra={"provider_id": provider_id} if provider_id else {}))
     window = worker_context_window(context_window, provider_id, bare)
+    from app.core.model_speed import FAST, ULTRAFAST, resolve_speed, ultrafast_supported_for_row
+
+    fast_ok = route in ("delegated", "openai_responses")
+    tier = resolve_speed(fast if fast_ok else None, speed)
+    if tier == ULTRAFAST and not (route == "openai_responses"
+                                   and ultrafast_supported_for_row(provider, bare)):
+        tier = FAST
     return {
+        "speed": tier if fast else None,
         "effort": clamp_effort(effort, bare, provider, route=route),
         "context_window": (window if window
                            and is_offered_context_window(window, bare, provider) else None),

@@ -141,6 +141,7 @@ from fluid.events.model import (
     DelegatedDiagnostic,
     ErrorEvent,
     Event,
+    FastModeOutcome,
     HandoffCreated,
     HookEvent,
     Interrupted,
@@ -622,6 +623,42 @@ def _is_context_overflow(message: str, status: int | None = None) -> bool:
 # size: "The image you provided requires 38025 patches after processing,
 # exceeding the limit of 30000", or an undecodable image source.
 _PAYLOAD_IMAGE_MARKERS = ("image", "patches")
+
+
+#: The ``service_tier`` value of OpenAI's Ultrafast tier, and the markers of a
+#: refusal of it (the tier is gated by model, plan and API eligibility).
+ULTRAFAST_TIER = "ultrafast"
+_SERVICE_TIER_MARKERS = ("ultrafast", "service_tier", "service tier")
+#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast,
+#: anything else the response names is standard speed.
+_REPORTED_TIERS = {"ultrafast": "ultrafast", "priority": "fast"}
+
+
+def _is_ultrafast_rejection(message: str, status: int | None = None) -> bool:
+    """Did the provider refuse the Ultrafast service tier itself?
+
+    A client error (not a rate limit or an overload) whose message names the
+    tier or ``service_tier``. A refusal like this repeats on every request, so
+    the turn carries on at standard speed instead of failing.
+    """
+    lowered = (message or "").lower()
+    if not any(marker in lowered for marker in _SERVICE_TIER_MARKERS):
+        return False
+    if status is not None:
+        return 400 <= int(status) < 500 and int(status) != 429
+    return "rate limit" not in lowered and "rate_limit" not in lowered
+
+
+def _reported_speed(requested_tier: Any, reported_tier: Any) -> str:
+    """``ultrafast``/``fast``/``standard``/``unknown`` for one finished call.
+
+    The response's own ``service_tier`` wins; a response that names none
+    leaves the call unknown rather than assuming the requested tier.
+    """
+    del requested_tier  # what was asked never decides what ran
+    if isinstance(reported_tier, str) and reported_tier:
+        return _REPORTED_TIERS.get(reported_tier.lower(), "standard")
+    return "unknown"
 
 
 def _is_payload_rejection(message: str, status: int | None = None) -> bool:
@@ -1356,6 +1393,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # paying a doomed call per turn (see _agent_loop; the strip itself is
         # strip_opaque_reasoning).
         self._encrypted_reasoning_poisoned = False
+        # Ultrafast, per turn: the provider refused the tier (every later
+        # request of the turn runs standard), the tier each call reported, and
+        # whether the turn asked for Ultrafast at its start. Reset per turn.
+        self._turn_ultrafast_refused = False
+        self._turn_speed_calls: dict[str, int] = {}
+        self._turn_speed_at_start = "standard"
         # Nested-instruction injection: instruction-file paths already injected
         # this session (each nested AGENTS-family file enters context once).
         self._nested_injected: set[str] = set()
@@ -3963,6 +4006,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         parent = user_node
         num_calls = 0
         self._turn_model_calls = 0
+        self._turn_ultrafast_refused = False
+        self._turn_speed_calls = {}
+        self._turn_speed_at_start = self._requested_speed()
         # A run of misses is only interesting inside one turn: the gap between
         # turns is user time, and a cache that expired over it is ordinary.
         self._unexplained_misses = 0
@@ -4458,6 +4504,23 @@ class NativeLoop(BackgroundLifecycleMixin):
                         return
                     continue
                 if (
+                    not self._turn_ultrafast_refused
+                    and self.request_extra.get("service_tier") == ULTRAFAST_TIER
+                    and _is_ultrafast_rejection(result.error_message or "", result.error_status)
+                ):
+                    # The account or model has no Ultrafast (a plan without it,
+                    # a model outside it, API eligibility). Every retry would
+                    # fail the same way, so the rest of the turn runs at
+                    # standard speed and the turn's outcome says why.
+                    self._turn_ultrafast_refused = True
+                    await self._emit(ProviderRetry(
+                        session_id=sid, turn_id=turn_id,
+                        attempt=1, max_attempts=1,
+                        reason="Ultrafast isn't available for this account or model; retrying on Standard",
+                        delay_seconds=0.0, model=self.model,
+                    ))
+                    continue
+                if (
                     not self._encrypted_reasoning_poisoned
                     and result.error_message
                     and "invalid_encrypted_content" in result.error_message
@@ -4881,6 +4944,9 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._pending_steers.clear()
         # Cost rides its own TurnComplete field; keep the usage dict token-shaped.
         cost_total = total_usage.pop("cost_usd", None)
+        speed_outcome = self._speed_outcome(sid, turn_id)
+        if speed_outcome is not None:
+            await self._emit(speed_outcome)
         await self._emit_terminal_with_park(TurnComplete(
             session_id=sid, node_id=parent.node_id, turn_id=turn_id,
             stop_reason=final_stop or "end_turn", num_model_calls=num_calls,
@@ -5191,8 +5257,56 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=plan.breakpoints,
             # Per-provider cache-affinity key first, host passthrough on top
             # so the host's keys win.
-            extra={**self._affinity_keys(sticky), **routing, **self.request_extra},
+            extra=self._request_extra_for_call(sticky, routing),
             wire_state=wire_state,
+        )
+
+    def _request_extra_for_call(self, sticky: bool, routing: dict[str, Any]) -> dict[str, Any]:
+        """A request's ``extra``: affinity keys, routing, then the host's keys.
+
+        After the provider refused Ultrafast this turn, its ``service_tier``
+        is left out (standard speed) until the turn ends. Any other tier the
+        host sets mid-turn, such as Fast, still applies.
+        """
+        extra = {**self._affinity_keys(sticky), **routing, **self.request_extra}
+        if self._turn_ultrafast_refused and extra.get("service_tier") == ULTRAFAST_TIER:
+            extra.pop("service_tier")
+        return extra
+
+    def _note_call_speed(self, request: ProviderRequest, reported_tier: Any) -> None:
+        """Count how a finished main call ran, for the turn's speed outcome."""
+        speed = _reported_speed((request.extra or {}).get("service_tier"), reported_tier)
+        self._turn_speed_calls[speed] = self._turn_speed_calls.get(speed, 0) + 1
+
+    def _requested_speed(self) -> str:
+        """The tier the host asks for now: ``ultrafast``, ``fast`` or ``standard``."""
+        tier = self.request_extra.get("service_tier")
+        return _REPORTED_TIERS.get(tier, "standard") if isinstance(tier, str) else "standard"
+
+    def _speed_outcome(self, sid: str, turn_id: str) -> FastModeOutcome | None:
+        """The turn's :class:`FastModeOutcome` when it asked for Ultrafast.
+
+        Only a turn that asked for Ultrafast at its start or end reports one
+        here: a Fast or standard turn on this lane has nothing to explain.
+        ``speed``/``speed_at_end`` name the tier asked for at the turn's start
+        and end; ``disabled_reason`` is ``ultrafast_unavailable`` when the
+        provider refused it.
+        """
+        start, end = self._turn_speed_at_start, self._requested_speed()
+        if ULTRAFAST_TIER not in (start, end):
+            return None
+        calls = self._turn_speed_calls
+        return FastModeOutcome(
+            session_id=sid, turn_id=turn_id,
+            requested=start != "standard",
+            requested_at_end=end != "standard",
+            fast_calls=calls.get("fast", 0),
+            standard_calls=calls.get("standard", 0),
+            unknown_calls=calls.get("unknown", 0),
+            ultrafast_calls=calls.get("ultrafast", 0),
+            speed=start,
+            speed_at_end=end,
+            disabled_reason="ultrafast_unavailable" if self._turn_ultrafast_refused else None,
         )
 
     def _wire_state(self, role: str) -> WireState | None:
@@ -5756,6 +5870,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if isinstance(late_served, str) and late_served:
                     served_model = late_served
                     await self._note_served_model(sid, turn_id, request.model, late_served)
+                if payload.get("stop_reason"):
+                    # A finished call; the Responses lane names the tier it ran on.
+                    self._note_call_speed(request, payload.get("service_tier"))
             elif chunk.kind == "error":
                 if payload.get("transport_failure"):
                     usage_totals["transport_failure"] = payload["transport_failure"]

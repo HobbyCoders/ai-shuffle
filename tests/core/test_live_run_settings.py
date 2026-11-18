@@ -44,10 +44,10 @@ def live(monkeypatch):
 @pytest.mark.asyncio
 async def test_live_sparse_picks_update_engine_binding_and_active_turn(live):
     state, runtime, save = live
-    for changes, expected in [({"effort": "low"}, {"effort": "low", "fast": False}),
-                              ({"fast": True}, {"effort": "low", "fast": True}),
-                              ({"fast": False}, {"effort": "low", "fast": False}),
-                              ({"effort": None}, {"effort": None, "fast": False})]:
+    for changes, expected in [({"effort": "low"}, {"effort": "low", "fast": False, "speed": "standard"}),
+                              ({"fast": True}, {"effort": "low", "fast": True, "speed": "fast"}),
+                              ({"fast": False}, {"effort": "low", "fast": False, "speed": "standard"}),
+                              ({"effort": None}, {"effort": None, "fast": False, "speed": "standard"})]:
         assert await api.apply_run_settings("s", api.RunSettingsUpdate(**changes)) == expected
         assert state.adapter._engine.effort == expected["effort"]
         assert state.connect_options.effort == expected["effort"]
@@ -55,7 +55,7 @@ async def test_live_sparse_picks_update_engine_binding_and_active_turn(live):
         assert runtime.turn["overrides"] == expected
         assert state.is_streaming
     assert state.adapter._engine.request_extra == {"keep": 1}
-    save.assert_called_with("s", effort=None, fast=False, clear_effort=True)
+    save.assert_called_with("s", effort=None, fast=False, speed="standard", clear_effort=True)
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_http_validation_and_remote_owner_routing(live, monkeypatch):
         assert (await client.put(url, json={"effort": "bogus"})).status_code == 422
         assert (await client.put(url, json={})).status_code == 409
         assert (await client.put(url, json={"fast": None})).status_code == 409
-        assert (await client.put(url, json={"fast": True})).json() == {"effort": "high", "fast": True}
+        assert (await client.put(url, json={"fast": True})).json() == {"effort": "high", "fast": True, "speed": "fast"}
     monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
     remote = AsyncMock(return_value={"effort": "low", "fast": False})
     monkeypatch.setattr(api.control, "call", remote)
@@ -159,7 +159,8 @@ async def test_idle_session_and_explicit_default_persist_without_spawning(mock_d
     db.set_session_run_binding("idle-knobs", effort="high")
     db.set_session_run_binding("idle-knobs", fast=True)
     assert db.get_session("idle-knobs")["effort"] == "high"
-    assert await api.apply_run_settings("idle-knobs", api.RunSettingsUpdate(fast=True)) == {"effort": "high", "fast": True}
+    assert await api.apply_run_settings("idle-knobs", api.RunSettingsUpdate(fast=True)) == {"effort": "high", "fast": True,
+                                                                                         "speed": "fast"}
 
 
 @pytest.mark.asyncio

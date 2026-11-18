@@ -372,6 +372,9 @@ def create_postgres_schema(cursor: Any) -> None:
             -- chat; a parent's fast-mode toggle skips it. NULL/FALSE =
             -- follows its parent.
             fast_pinned BOOLEAN,
+            -- Speed tier refining ``fast``: standard | fast | ultrafast.
+            -- NULL = the tier ``fast`` alone implies (app/core/model_speed.py).
+            speed TEXT,
             -- Snooze: when a settled (is_active = FALSE) chat returns to
             -- Active on its own. NULL = not snoozed. Projected from the shared
             -- membership record (network_session_active.snoozed_until).

@@ -1416,6 +1416,8 @@ class HarnessAdapter(ProviderAdapter):
             # Per-session fast mode, stamped by query_options as
             # ``aih_fast`` (override for this turn, else the session row).
             fast=getattr(sdk_options, "aih_fast", None),
+            # The speed tier refining it (``aih_speed``, same source).
+            speed=getattr(sdk_options, "aih_speed", None),
             # Profile scope filter (user/project/local). Native legs map it
             # onto fluid's setting_sources (see _fluid_setting_sources); the
             # delegated leg already carries it to the CLI. None = every scope.
@@ -4341,8 +4343,13 @@ class HarnessAdapter(ProviderAdapter):
             self._engine.request_extra = request_extra
         self._record_applied("model", requested)
 
-    async def set_run_settings(self, *, effort: Optional[str], fast: bool) -> dict:
-        """Apply a session's effort and Fast mode without restarting a live turn.
+    async def set_run_settings(self, *, effort: Optional[str], fast: bool,
+                               speed: Optional[str] = None) -> dict:
+        """Apply a session's effort and speed without restarting a live turn.
+
+        ``speed`` (``standard``/``fast``/``ultrafast``) refines ``fast``; None
+        means the tier ``fast`` alone implies. Ultrafast exists only on the
+        OpenAI Responses lane for a model the bound row offers it on.
 
         When it lands depends on the lane:
 
@@ -4361,6 +4368,15 @@ class HarnessAdapter(ProviderAdapter):
             raise ValueError("This model does not support the selected effort level")
         if fast and not (self._is_delegated or self._provider_kind == "openai_responses"):
             raise ValueError("Fast mode is not supported by this provider")
+        from app.core.model_speed import ULTRAFAST, resolve_speed
+
+        tier = resolve_speed(fast, speed)
+        if tier == ULTRAFAST and (
+            self._is_delegated
+            or self._provider_kind != "openai_responses"
+            or not await run_sync(_ultrafast_ok, self._options, None)
+        ):
+            raise ValueError("Ultrafast is not available for this model")
         if self._is_delegated:
             engine, options = self._engine, self._options
             await engine.set_run_settings(effort=normalized, fast=fast)
@@ -4370,19 +4386,24 @@ class HarnessAdapter(ProviderAdapter):
             # A request already in flight retains its parameters. The next
             # request builder reads these attributes, including within a turn.
             self._engine.effort = normalized
+            from app.core.model_speed import service_tier_for
+
             extra = dict(self._engine.request_extra)
             extra.pop("service_tier", None)
-            if fast:
-                extra["service_tier"] = "priority"
+            service_tier = service_tier_for(tier)
+            if service_tier:
+                extra["service_tier"] = service_tier
             self._engine.request_extra = extra
         self._options.effort = normalized
         self._options.fast = fast
+        self._options.speed = tier
         self._record_applied("effort", normalized)
         self._record_applied("aih_fast", fast)
+        self._record_applied("aih_speed", tier)
         ctx = getattr(self._engine, "ctx", None)
         if ctx is not None:
             ctx.extra["app_caller_effort"] = normalized
-        return {"effort": normalized, "fast": fast}
+        return {"effort": normalized, "fast": fast, "speed": tier}
 
     def fast_waits_for_next_turn(self) -> bool:
         """True when a running turn's speed differs from the Fast setting.
@@ -4625,6 +4646,10 @@ class HarnessAdapter(ProviderAdapter):
             getattr(new_options, "fast", None)
         ):
             return True
+        from app.core.model_speed import options_speed
+
+        if options_speed(old) != options_speed(new_options):
+            return True
         # Resolved provider binding: mirrors
         # ``session_pool.requires_reconnect``. The engine and its credentials are
         # built once in ``connect()`` from this id, so a cross-provider switch
@@ -4710,7 +4735,7 @@ class HarnessAdapter(ProviderAdapter):
         if cls == "FastModeOutcome":
             # How the turn's requests really ran; query_engine turns it into a
             # persisted ``fast_outcome`` note.
-            return [SystemMessage(subtype="fast_outcome", data={
+            data = {
                 "requested": bool(getattr(event, "requested", False)),
                 "requested_at_end": bool(getattr(event, "requested_at_end", False)),
                 "fast_calls": getattr(event, "fast_calls", 0),
@@ -4718,7 +4743,16 @@ class HarnessAdapter(ProviderAdapter):
                 "unknown_calls": getattr(event, "unknown_calls", 0),
                 "state": getattr(event, "state", None),
                 "disabled_reason": getattr(event, "disabled_reason", None),
-            })]
+            }
+            if getattr(event, "speed", None) or getattr(event, "speed_at_end", None):
+                # An Ultrafast turn: which tier was asked for and how many
+                # calls really ran on it.
+                data.update(
+                    ultrafast_calls=getattr(event, "ultrafast_calls", 0),
+                    speed=getattr(event, "speed", None),
+                    speed_at_end=getattr(event, "speed_at_end", None),
+                )
+            return [SystemMessage(subtype="fast_outcome", data=data)]
 
         if cls == "GuardrailBlocked":
             # A provider safety check declined a call and the person (or the
@@ -9874,12 +9908,39 @@ def _native_request_extra(kind: Optional[str], options: SessionOptions, model: O
     from app.core.local_model_settings import local_request_extra
 
     if kind == "openai_responses":
-        return {"service_tier": "priority"} if getattr(options, "fast", None) else {}
+        return _openai_speed_extra(options, model)
     if kind != "openrouter":
         return {}
     provider_id = (options.extra or {}).get("provider_id")
     row = _lookup_provider_row(provider_id) if provider_id else None
     return local_request_extra(row, model if model is not None else options.model)
+
+
+def _ultrafast_ok(options: SessionOptions, model: Optional[str] = None) -> bool:
+    """Whether the bound row offers Ultrafast for ``model`` (blocking: DB read)."""
+    from app.core.model_speed import ultrafast_supported_for_row
+
+    provider_id = (options.extra or {}).get("provider_id")
+    row = _lookup_provider_row(str(provider_id)) if provider_id else None
+    return ultrafast_supported_for_row(row, model if model is not None else options.model)
+
+
+def _openai_speed_extra(options: SessionOptions, model: Optional[str] = None) -> dict:
+    """The ``service_tier`` an OpenAI Responses request carries for the chat's speed.
+
+    Fast is ``priority``; Ultrafast is ``ultrafast`` when the bound row offers
+    it for the model (its own Codex catalog for a ChatGPT sign-in, the
+    documented models for an API key), else Fast's ``priority``; Standard
+    sends none. Blocking (a DB read for Ultrafast): call through run_sync.
+    """
+    from app.core.model_speed import FAST, ULTRAFAST, options_speed, service_tier_for
+
+    speed = options_speed(options)
+    if speed == ULTRAFAST and not _ultrafast_ok(options, model):
+        logger.info("ultrafast: not offered for %s on this provider; sending Fast", model or options.model)
+        speed = FAST
+    tier = service_tier_for(speed)
+    return {"service_tier": tier} if tier else {}
 
 
 def _openrouter_pricing(options: SessionOptions) -> Dict[str, Dict[str, float]]:

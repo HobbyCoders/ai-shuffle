@@ -123,6 +123,9 @@ class SessionRow(TypedDict):
     # Per-session fast mode: TRUE asks the leg for its expedited service,
     # NULL/FALSE runs standard.
     fast: Optional[bool]
+    # Speed tier refining ``fast`` (app/core/model_speed.py): ``ultrafast``
+    # with ``fast`` TRUE runs Ultrafast; anything else follows ``fast``.
+    speed: Optional[str]
     # Sidepanel mode: NULL for a 'code' session (the full agentic surface, and
     # every row predating this column), 'chat' for the web-only chat surface,
     # 'voice' for an OpenAI Realtime call. See
@@ -557,6 +560,7 @@ def create_session(
     permission_ceiling: Optional[str] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    speed: Optional[str] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
     is_worker: bool = False,
@@ -610,6 +614,8 @@ def create_session(
             the selected model/provider's registered default.
         fast: Fast mode chosen for this session, or ``None`` to leave the
             row unbound (the session runs at standard speed).
+        speed: The speed tier (``standard``/``fast``/``ultrafast``); when set it
+            decides ``fast`` too. See :mod:`app.core.model_speed`.
         mode: Sidepanel mode for this session — ``'chat'`` for the web-only
             chat surface, ``'voice'`` for an OpenAI Realtime voice call,
             ``'code'``/``None`` for the ordinary agentic surface.
@@ -676,6 +682,11 @@ def create_session(
     if selected_context_window is not None and selected_context_window <= 0:
         selected_context_window = None
     selected_fast = None if fast is None else bool(fast)
+    from app.core.model_speed import normalize_speed
+
+    selected_speed = normalize_speed(speed)
+    if selected_speed is not None:
+        selected_fast = selected_speed != "standard"
     if resolved_provider_id is None and selected_model:
         from app.core.query_options import decode_provider_model
 
@@ -710,8 +721,8 @@ def create_session(
             owner_device_id = _runners.self_device_id()
     except Exception:  # noqa: BLE001 — stamping is best-effort; NULL means "this worker"
         owner_device_id = None
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "permission_ceiling", "context_window", "fast", "mode", "hidden", "is_worker"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_permission_ceiling, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "permission_ceiling", "context_window", "fast", "speed", "mode", "hidden", "is_worker"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_permission_ceiling, selected_context_window, selected_fast, selected_speed, resolved_mode, hidden, bool(is_worker)]
     if voice_config is not None:
         columns.append("voice_config")
         params.append(json.dumps(voice_config))
@@ -990,6 +1001,7 @@ def set_session_run_binding(
     clear_effort: bool = False,
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
+    speed: Optional[str] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session.
 
@@ -1047,7 +1059,20 @@ def set_session_run_binding(
         values.append(clean_context_window)
     # Boolean binding: False is a real pick ("turn fast mode off"), so it
     # must reach the row. Only an absent field (None) is a no-op.
-    if fast is not None:
+    # ``speed`` is the tier this build picks; it writes ``fast`` with it so an
+    # older reader of ``fast`` alone runs Ultrafast on Fast. A caller with only
+    # ``fast`` (an older client) leaves ``speed`` alone: ``fast`` off is
+    # Standard whatever it says.
+    from app.core.model_speed import normalize_speed, speed_fields
+
+    clean_speed = normalize_speed(speed)
+    if clean_speed is not None:
+        fields = speed_fields(clean_speed)
+        updates.append(f"fast = {_ph}")
+        values.append(fields["fast"])
+        updates.append(f"speed = {_ph}")
+        values.append(fields["speed"])
+    elif fast is not None:
         updates.append(f"fast = {_ph}")
         values.append(bool(fast))
     # Away mode is boolean the same way: False is "the owner is back".

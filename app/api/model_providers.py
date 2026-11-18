@@ -635,12 +635,46 @@ def _with_context_windows(
     return result
 
 
+def _keep_stored_service_tiers(
+    models: Optional[List[Any]], stored: Optional[List[Any]],
+) -> List[Any]:
+    """``models`` with ``service_tiers`` kept from the saved entries.
+
+    The tiers come from the account's own catalog fetch: a model already saved
+    keeps its stored tiers whatever a client sends. A model new to the row
+    takes the tiers the settings page fetched with it, re-sanitized to known
+    ids (the next catalog fetch replaces them either way).
+    """
+    from app.core.model_speed import stored_service_tiers
+
+    saved = {entry.get("id"): entry.get("service_tiers") for entry in stored or []
+             if isinstance(entry, dict) and isinstance(entry.get("service_tiers"), list)}
+    result: List[Any] = []
+    for entry in models or []:
+        if not isinstance(entry, dict):
+            result.append(entry)
+            continue
+        updated = {k: v for k, v in entry.items() if k != "service_tiers"}
+        tiers = saved[entry["id"]] if entry.get("id") in saved else stored_service_tiers(entry)
+        if tiers is not None:
+            updated["service_tiers"] = tiers
+        result.append(updated)
+    return result
+
+
 def _parse_models_response(
     payload: Any,
     *,
     provider_type: Optional[str] = None,
+    service_tiers: bool = False,
 ) -> List[Dict[str, Any]]:
     """Normalize an upstream ``/models`` body into ``[{id, label}]``.
+
+    ``service_tiers`` (the Codex catalog only) keeps each model's known service
+    tier ids (``service_tiers: [{id}]`` and the deprecated
+    ``additional_speed_tiers``) as ``service_tiers: ["priority", ...]``, and
+    ``[]`` for a model that lists none. The account's own catalog is what says
+    whether its plan has Ultrafast.
 
     Handles OpenAI-style ``{"data": [{"id": ...}]}``, Codex-style
     ``{"models": [{"slug": ...}]}`` (also ``id`` / ``model``), and a bare list
@@ -728,6 +762,12 @@ def _parse_models_response(
                         "default_effort": official["default_effort"],
                     }}
             model.update(metadata)
+            if service_tiers:
+                from app.core.model_speed import sanitize_service_tiers
+
+                # Stored even when empty: a fetched catalog's answer, so the
+                # registry stops asking for a refresh (``speed_tiers_stale``).
+                model["service_tiers"] = sanitize_service_tiers(entry) or []
         models.append(model)
         if len(models) >= _FETCH_MODELS_CAP:
             break
@@ -897,7 +937,7 @@ async def _fetch_codex_models(
     except Exception as e:  # noqa: BLE001 — malformed upstream body
         raise UpstreamModelsError("invalid_json") from e
     models = _parse_models_response(
-        _codex_visible_payload(payload), provider_type="chatgpt"
+        _codex_visible_payload(payload), provider_type="chatgpt", service_tiers=True,
     )
     if on_success:
         on_success(access_token, account_id)
@@ -1085,7 +1125,7 @@ async def create_provider(body: ModelProviderCreate, token: str = Depends(requir
             auth_token=encrypted_token,
             models=_with_context_windows(
                 {"provider_type": body.provider_type, "auth_mode": auth_mode},
-                model_modality.split_media_models(models)[0],
+                _keep_stored_service_tiers(model_modality.split_media_models(models)[0], None),
             ),
             default_model=body.default_model,
             small_fast_model=body.small_fast_model,
@@ -1168,7 +1208,7 @@ async def update_provider(
         # how media ids got into models_json in the first place.
         models, _ = model_modality.split_media_models(body.models)
         updates["models_json"] = _with_context_windows(
-            {**existing, **updates}, models,
+            {**existing, **updates}, _keep_stored_service_tiers(models, previous_models),
         )
     if body.default_model is not None:
         updates["default_model"] = body.default_model
@@ -1380,6 +1420,9 @@ async def _refresh_provider_capabilities(provider_id: str) -> bool:
                     updated["reasoning_capabilities"] = existing
                 merged.append(updated)
             merged = _with_context_windows(current, merged, response.models)
+            from app.core.model_speed import merge_service_tiers
+
+            merged = merge_service_tiers(merged, response.models)
             changed = merged != (current.get("models_json") or [])
             if changed:
                 saved = await run_sync(db.update_model_provider, provider_id,
@@ -1602,6 +1645,12 @@ async def _fetch_models(provider_id: str, *, backfill_context: bool = True) -> F
     if backfill_context:
         stored = row.get("models_json") or []
         merged = _with_context_windows(row, stored, models)
+        # The account's own catalog decides the speed tiers each saved model
+        # offers (a plan change can take Ultrafast away), so they are refreshed
+        # on every fetch, not only filled when missing.
+        from app.core.model_speed import merge_service_tiers
+
+        merged = merge_service_tiers(merged, models)
         if merged != stored:
             await run_sync(
                 db.update_model_provider, provider_id, models_json=merged,
