@@ -650,7 +650,8 @@ def workflows(ctx: Context) -> None:
          "tests/scripts/test_owner_publication_policy.py", "tests/scripts/test_edge_publication_gate.py",
          "tests/scripts/test_local_ci.py", "tests/scripts/test_local_ci_preflight.py",
          "tests/scripts/test_local_ci_stages.py", "tests/scripts/test_security_gate.py",
-         "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_cloud_split.py"])
+         "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_npm_audit_gate.py",
+         "tests/scripts/test_cloud_split.py"])
 
 
 def android_play(ctx: Context) -> None:
@@ -742,7 +743,9 @@ SUITES = [
                         "tests/scripts/test_edge_publication_gate.py", "tests/scripts/test_local_ci*.py", "scripts/local_ci*.py",
                         ".githooks/*", ".gitleaks.toml", "scripts/secret_scan.py", "scripts/dependency_audit.py",
                         "scripts/pip_audit_retry.py", "scripts/verification_evidence.py",
-                        "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_security_gate.py"],
+                        "scripts/npm_audit_gate.py", "scripts/npm_audit_exceptions.json",
+                        "tests/scripts/test_pip_audit_retry.py", "tests/scripts/test_npm_audit_gate.py",
+                        "tests/scripts/test_security_gate.py"],
           workflows, "Workflow and publication policy tests"),
     Suite("update-reach", ["Dockerfile", "entrypoint.sh", "docker/*", "requirements*", "desktop/src/main/*",
                            "desktop/scripts/*", "desktop/build/*", "desktop/electron-builder.yml",
