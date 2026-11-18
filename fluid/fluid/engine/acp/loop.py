@@ -924,12 +924,15 @@ class AcpLoop:
             if isinstance(op, Resume):
                 # Retry: send the unanswered prompt at the head again.
                 head = await self.store.get_node(sid, meta.head_node_id) if meta.head_node_id else None
-                # A reply cut off by an error or an Interrupt is not an answer
-                # (as in native.py). Every node an interrupted turn stored
-                # carries the marker (tool results included), so step back
-                # past all of them to the prompt.
-                while (head is not None and head.parent_id
-                       and (head.message.provider_meta or {}).get("interrupted")):
+                # A reply cut off by an Interrupt is not an answer: the last
+                # node an interrupted turn stored names its prompt, written
+                # only once every node of the turn is stored.
+                resume_from = (head.message.provider_meta or {}).get("resume_node_id") if head else None
+                if resume_from:
+                    head = await self.store.get_node(sid, resume_from)
+                elif (head is not None and head.message.role == "assistant" and head.parent_id
+                        and (head.message.provider_meta or {}).get("interrupted")):
+                    # A reply cut off by an error is not an answer (as in native.py).
                     head = await self.store.get_node(sid, head.parent_id)
                 if head is None or head.message.role != "user":
                     await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
@@ -1010,13 +1013,12 @@ class AcpLoop:
         for event in trailing:
             await self._emit(event)
         stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
-        # Whether the turn was interrupted is decided once, before anything is
-        # stored, so the stored marker and the terminal event agree: the
-        # partial reply of an interrupted turn is marked, and Resume steps
-        # back past it. A stop_agent reason already set wins over an
-        # interrupt; an Interrupt or a stop that lands while the reply is
-        # stored no longer changes an interrupted outcome (a stop still ends
-        # the process).
+        # How the turn ended is decided once, before anything is stored, so
+        # the stored marker and the terminal event agree; nothing below reads
+        # the interrupt flag again. A stop_agent reason already set wins over
+        # an interrupt; an Interrupt or a stop that lands while the reply is
+        # stored no longer changes the outcome (a stop still ends the process).
+        silent = self._silent_end(mapper)
         if self._stop_reason is not None:
             interrupted = False
         elif failure is not None:
@@ -1025,14 +1027,18 @@ class AcpLoop:
             # An agent's own "cancelled" after a request it got no allow for,
             # with no reply, is that failure; _silent_end is None once the host
             # interrupted, so a host interrupt stays an interruption.
-            interrupted = (stop == "cancelled" and not self._silent_end(mapper)) or (
+            interrupted = (stop == "cancelled" and not silent) or (
                 self._interrupted.is_set() and stop != "end_turn")
-        meta = {"interrupted": "interrupt"} if interrupted else {}
         parent = user_node
-        for role, blocks in segments:
+        for i, (role, blocks) in enumerate(segments):
+            # The last node of an interrupted turn is marked and names the
+            # prompt, so Resume re-sends it. Only that node: if a write fails
+            # first, the head stays unmarked and Resume refuses it.
+            meta = ({"interrupted": "interrupt", "resume_node_id": user_node.node_id}
+                    if interrupted and i == len(segments) - 1 else {})
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
                                message=Message(role="assistant" if role == "assistant" else "user", content=blocks,
-                                               provider_meta=dict(meta)))
+                                               provider_meta=meta))
             await self.store.append(sid, node)
             parent = node
         usage, cost = self._usage(result, mapper)
@@ -1072,7 +1078,6 @@ class AcpLoop:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                         message="The agent refused this request.", usage=usage, cost_usd=cost))
             return
-        silent = self._silent_end(mapper)
         if silent:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=silent,
                                         usage=usage, cost_usd=cost))

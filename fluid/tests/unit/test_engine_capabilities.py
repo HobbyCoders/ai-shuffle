@@ -16,7 +16,7 @@ from fluid.permissions.rules import Rule
 from fluid.store.base import SessionNode
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
-from tests.unit.test_acp_engine import SerializingStore, _driver, _received
+from tests.unit.test_acp_engine import SerializingStore, _driver, _glob_registry, _received
 from tests.unit.test_delegated_scripted_cli import Scripted, _interruptible_turn, _tool_turn
 from tests.unit.test_native_scripted_provider import Harness, Messages, Sleep, server, tool_reply
 
@@ -160,7 +160,9 @@ async def test_acp_resume_after_interrupt_resends_the_prompt(tmp_path, prompt):
         assert kept[-1].message.text() == "working"
         # With a tool call: assistant call, tool result, assistant text.
         assert len(kept) == (3 if "tool" in prompt else 1)
-        assert all(node.message.provider_meta.get("interrupted") for node in kept)
+        # Only the turn's last node is marked, naming the prompt to re-send.
+        assert kept[-1].message.provider_meta == {"interrupted": "interrupt", "resume_node_id": user.node_id}
+        assert not any(node.message.provider_meta for node in kept[:-1])
         await loop.submit(Resume())
         assert isinstance(await driver.until((ErrorEvent, TurnComplete), timeout=10), TurnComplete)
         await asyncio.wait_for(loop.wait_turn(), 10)
@@ -279,6 +281,81 @@ async def test_acp_interrupt_while_the_reply_is_stored_does_not_change_the_outco
         assert not (reply.message.provider_meta or {}).get("interrupted")
     finally:
         store.release.set()
+        await driver.close()
+
+
+def _reply_node(item):
+    """A node the turn stores after its prompt: assistant, or tool results."""
+    return isinstance(item, SessionNode) and (
+        item.message.role == "assistant" or any(not isinstance(b, Text) for b in item.message.content))
+
+
+REFUSED = ("The agent ended its turn without a reply after mcp__fluid_bundled__Glob "
+           "was refused by the session's tool rules.")
+
+
+async def _deny(name, data):
+    return f"Tool '{name}' may not run"
+
+
+@pytest.mark.parametrize("late", ["interrupt", "close"])
+@pytest.mark.parametrize("prompt", ['agycancelled Glob {"pattern": "*"}', 'agyquiet Glob {"pattern": "*"}'])
+async def test_acp_late_stop_keeps_a_silent_refusal_a_failure(tmp_path, late, prompt):
+    # The agent ends with no reply after a refused call ("cancelled" or
+    # "end_turn"). A Stop or a close landing while that turn is stored does
+    # not hide the failure: it was decided before the write.
+    store = _GatedStore(_reply_node)
+    driver = await _driver(tmp_path, store=store, registry=_glob_registry([]),
+                           ctx=ToolCtx(cwd=str(tmp_path)), tool_policy=_deny)
+    closing = None
+    try:
+        await driver.loop.submit(UserTurn(content=prompt))
+        await asyncio.wait_for(store.held.wait(), 10)
+        if late == "interrupt":
+            await driver.loop.submit(Interrupt())
+        else:
+            closing = asyncio.create_task(driver.loop.aclose())
+            while not driver.loop._closed:
+                await asyncio.sleep(0)
+        store.release.set()
+        end = await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent) and end.message == REFUSED
+    finally:
+        store.release.set()
+        if closing is not None:
+            await closing
+        await driver.close()
+
+
+async def test_acp_failed_write_of_an_interrupted_turn_is_not_resumable(tmp_path):
+    # The interrupted turn's second node fails to store: the turn ends on an
+    # error and the head it left (unmarked) is not offered to Resume.
+    class FailingStore(SerializingStore):
+        appended = 0
+
+        async def append(self, session_id, node):
+            if _reply_node(node):
+                self.appended += 1
+                if self.appended == 2:
+                    raise RuntimeError("database went away")
+            await super().append(session_id, node)
+
+    driver = await _driver(tmp_path, store=FailingStore())
+    loop = driver.loop
+    try:
+        await loop.submit(UserTurn(content="slowonce tool"))
+        await driver.until(TextDelta, timeout=10)
+        await loop.submit(Interrupt())
+        end = await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent) and "database went away" in end.message
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        _user, head = await loop.store.load_path(loop.session_id)
+        assert head.message.role == "assistant" and not head.message.provider_meta
+        await loop.submit(Resume())
+        end = await driver.until((ErrorEvent, TurnComplete), timeout=10)
+        assert isinstance(end, ErrorEvent) and end.message.startswith("Nothing to resume")
+        assert len(_received(tmp_path, "session/prompt")) == 1
+    finally:
         await driver.close()
 
 
