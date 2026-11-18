@@ -21,18 +21,24 @@ const observerStart = 'const observer = new MutationObserver(() => {';
 const observer = between(observerStart, 'observer.observe(chatColumnRef');
 const resizeStart = 'resizeObserver = new ResizeObserver((entries) => {';
 const resize = between(resizeStart, 'resizeObserver.observe(containerRef);');
+// The effect that re-measures once the reader follows again (shouldAutoScroll turns true).
+const followStart = '$effect(() => {\n\t\tif (!shouldAutoScroll) return;';
+const follow = between(followStart, '\t// A browser clamp belongs');
 const code = transformSync([
 	between('\tfunction tailControlsExtent(', '\t/**\n\t * Where a stopped turn'),
 	between("\tlet layoutBoundary = '';", '\t// Rendered geometry has one lifecycle'),
 	between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view'),
 	`const onMutation = () => {${observer.slice(observerStart.length, observer.lastIndexOf('});'))}};`,
-	`const onResize = (entries) => {${resize.slice(resizeStart.length, resize.lastIndexOf('});'))}};`
+	`const onResize = (entries) => {${resize.slice(resizeStart.length, resize.lastIndexOf('});'))}};`,
+	`const onFollow = () => {${follow.slice('$effect(() => {'.length, follow.lastIndexOf('});'))}};`
 ].join('\n'), { loader: 'ts' }).code;
 
 const ROW_GAP = 18, BUBBLE_GAP = 12, BOTTOM = 24;
 type Layout = {
 	clientHeight: number; scrollTop: number; proseEnd: number; anchorTop: number;
 	bubbles: number[]; banner: number; width?: number;
+	/** The window paged the latest prompt out of the mounted rows. */
+	unmounted?: boolean;
 };
 type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; liveTurnId: string | null;
 	error: string | null; queuedMessages: { id: string }[]; stopRequestedTurnId?: string | null };
@@ -41,7 +47,8 @@ function view(layout: Layout, anchored: boolean) {
 	const store: Record<string, unknown> = {
 		...autoScroll, landedFromQueue, layout, anchored,
 		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, tailErrorBaselinePx: 0, tailErrorWidthPx: 0, tailErrorDockedPx: 0, tailErrorPaintedDockedPx: 0, tailErrorDockedAt: '', handoffExcessFreed: false, transcriptChangedSinceFrame: false,
-		document: { getElementById: () => anchorEl },
+		document: { getElementById: () => (layout.unmounted ? null : anchorEl) },
+		liveActiveSession: { clearError: () => {} },
 		getComputedStyle: () => ({ rowGap: String(ROW_GAP), marginTop: '0', marginBottom: '0', getPropertyValue: () => '0' }),
 	};
 	// A name only some revisions declare (or a no-op side channel) resolves here.
@@ -149,7 +156,13 @@ function view(layout: Layout, anchored: boolean) {
 				for (let i = 0; i < 6; i++) await Promise.resolve();
 			},
 			/** The reader scrolls by px (negative: up), which sets following as handleScroll would. */
-			scroll(px) { layout.scrollTop += px; clamp(); lastKnownScrollTop = layout.scrollTop; shouldAutoScroll = px >= 0; },
+			scroll(px) {
+				const was = shouldAutoScroll;
+				layout.scrollTop += px; clamp(); lastKnownScrollTop = layout.scrollTop; shouldAutoScroll = px >= 0;
+				if (!was && shouldAutoScroll) onFollow();
+			},
+			/** The banner's dismiss button. */
+			dismiss() { dismissTailError(); },
 			start(id) { startCurrentTurnAnchor(id, true); },
 			async place() { await maintainCurrentTurnAnchor(true); commit(); },
 			read: () => ({
@@ -164,6 +177,7 @@ function view(layout: Layout, anchored: boolean) {
 		frame(): Promise<void>;
 		resize(height: number): Promise<void>;
 		scroll(px: number): void;
+		dismiss(): void;
 		start(id: string): void;
 		place(): Promise<void>;
 		read(): { padding: number; reserve: number; scrollTop: number; slotTop: number; bubblesTop: number; slotBottom: number;
@@ -420,8 +434,6 @@ describe('queue handoff hold geometry', () => {
 				expect(followed.padding).toBe(bannerReserve(followed.errorOffset));
 				expect(followed.banner.top).toBeGreaterThanOrEqual(0);
 				expect(followed.banner.bottom).toBeLessThanOrEqual(layout.clientHeight);
-				// In the app, following again is what asks for that pass (wiring).
-				expect(source).toMatch(/if \(!shouldAutoScroll\) return;\s*untrack\(\(\) => \{\s*if \(!presentedTailError \|\| handoffSlotPx\) return;\s*if \(currentTurnAnchorId\) scheduleCurrentTurnAnchorMaintenance\(\);\s*else scheduleLatestTurnTailRefresh\(\);/);
 			});
 
 			/** A settled error over one queued bubble, its banner shown or stepped aside for its Error row. */
@@ -539,6 +551,50 @@ describe('queue handoff hold geometry', () => {
 				await v.update(turn(4, 0, 'CLI error'), () => { layout.banner = 0; layout.proseEnd += 40; });
 				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
 				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd + 40 });
+			});
+
+			// A long turn pages its own prompt out (#1747): the passive pass has no
+			// prompt-first room to compute, but a reader who is not following still
+			// keeps their place.
+			it('spends no more than the room below a reader when the last bubble goes with the prompt paged out (S21)', async () => {
+				const { layout, v } = await settledError(false, 0, [80]);
+				layout.unmounted = true;
+				await v.grow(0);
+				const room = 90;
+				v.scroll(-room);
+				const away = v.read();
+				expect(away.padding - autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE).toBeGreaterThan(room);
+				await withdraw(v, layout, []);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd, padding: away.padding - room });
+				// A follower gets the no-prompt room, as before: what a reader who never left has.
+				v.scroll(layout.proseEnd);
+				for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+				const stayed = await settledError(false, 0, [80]);
+				stayed.layout.unmounted = true;
+				await withdraw(stayed.v, stayed.layout, []);
+				for (let i = 0; i < 3; i++) { await stayed.v.frame(); await stayed.v.grow(0); }
+				expect(v.read().padding).toBe(stayed.v.read().padding);
+			});
+
+			// Dismissing the banner leaves no tail control to ask for a reserve pass,
+			// and a settled reply changes nothing else: following again must.
+			it('gives back the reserve a dismissed banner left once the reader follows again (S22)', async () => {
+				const { layout, v } = await settledError(false, 60, []);
+				v.scroll(-40);
+				const away = v.read();
+				v.dismiss();
+				await v.update(turn(4, 0));
+				for (let i = 0; i < 3; i++) await v.frame();
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, replyEnd: away.replyEnd });
+				expect(v.read().padding).toBeGreaterThan(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+				// Up a little, then back down to the physical bottom: no layout change in between.
+				v.scroll(-30);
+				v.scroll(layout.proseEnd);
+				for (let i = 0; i < 3; i++) await v.frame();
+				const followed = v.read();
+				expect(followed.padding).toBe(autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+				expect(followed.scrollTop).toBe(layout.proseEnd + followed.padding - layout.clientHeight);
 			});
 
 			it('keeps the detached reserve through zero geometry, and drops it on a session switch (S18)', async () => {

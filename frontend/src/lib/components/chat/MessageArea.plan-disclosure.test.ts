@@ -41,7 +41,7 @@ function reserveFixture({ earlierTurn = false, clientHeight = 693, contentEnd = 
   tailSpacerRef: document.createElement('div'), currentTurnAnchorId: null as string | null,
   latestTurnTailPx: initialReserve, transcript: { latestUserTurnId: 'latest-user' },
   MIN_TRANSCRIPT_TAIL_RESERVE: 24, turnAnchorId: (id: string) => id,
-  transcriptContentEnd: () => contentEnd, readingFloorReserve: () => 0,
+  transcriptContentEnd: () => contentEnd, readingFloorReserve: () => 0, shouldAutoScroll: true,
   tailControlsExtent: () => controlsExtent, resolveAnchoredTailReserve,
   disengageAutoScroll: vi.fn()
  };
@@ -110,6 +110,15 @@ describe('passive reserve without a mounted latest prompt', () => {
   document.getElementById('latest-user')!.remove();
   f.scope.readingFloorReserve = () => 300;
   expect(f.owner.latestTurnTailNow()).toBe(24);
+ });
+ it('holds a reader who is not following at their own viewport end', () => {
+  const f = reserveFixture({ controlsExtent: 135 });
+  document.getElementById('latest-user')!.remove();
+  f.scope.shouldAutoScroll = false;
+  f.scope.readingFloorReserve = () => 300;
+  expect(f.owner.latestTurnTailNow()).toBe(300);
+  f.scope.readingFloorReserve = () => 0;
+  expect(f.owner.latestTurnTailNow()).toBe(24 + 135);
  });
 });
 

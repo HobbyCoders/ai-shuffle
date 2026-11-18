@@ -1485,8 +1485,11 @@
 
 	/**
 	 * The least reserve either reserve pass may apply: room below the prose up to
-	 * the viewport end the reader is owed. Both passes take the max of this and
-	 * what they compute, after the controls, gaps and breathing room are added.
+	 * the viewport end the reader is owed. Every reserve pass takes the max of this
+	 * and what it computes, after the controls, gaps and breathing room are added:
+	 * the anchored pass, the passive one, and the passive one's no-prompt fallback
+	 * for a reader who is not following. Other writers only grow the reserve or
+	 * hand it between the two (cancelCurrentTurnAnchor), never below this.
 	 *
 	 * A followed reader is owed the viewport end the boundary effect captured:
 	 * dequeue and its delivered user row are separate commits, so the read viewport
@@ -1616,8 +1619,10 @@
 			// No prompt is mounted: none yet, or the window paged it out. Without
 			// its anchor there is no prompt-first room to calculate, but queued and
 			// error controls dock in this reserve and still need it; without them
-			// the queue grows up over the rows above it.
-			return MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
+			// the queue grows up over the rows above it. A follower gets just that
+			// (#1747); a reader who is not following keeps their place, as below.
+			const room = MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
+			return shouldAutoScroll ? room : Math.max(readingFloorReserve(), room);
 		}
 		const containerBox = containerRef.getBoundingClientRect();
 		const anchorTop = containerRef.scrollTop + anchor.getBoundingClientRect().top - containerBox.top;
@@ -2333,12 +2338,15 @@
 		return () => observer.disconnect();
 	});
 
-	// A banner lift kept while the reader was away is given back once they
-	// follow again (placeErrorBanner): re-measure in a reserve pass.
+	// What a reader who was away kept (the floor that held their place, and a
+	// banner lift; see readingFloorReserve and placeErrorBanner) is given back once
+	// they follow again: re-measure in a reserve pass. A dismissed banner or a
+	// drained queue leaves no tail control to ask for it. A handoff hold gives
+	// its blank back itself, after its paint.
 	$effect(() => {
 		if (!shouldAutoScroll) return;
 		untrack(() => {
-			if (!presentedTailError || handoffSlotPx) return;
+			if (handoffSlotPx) return;
 			if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
 			else scheduleLatestTurnTailRefresh();
 		});

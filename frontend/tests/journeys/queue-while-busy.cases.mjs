@@ -378,7 +378,14 @@ export const journey = {
 					`no stale blank is left under the reply once the last bubble left (${JSON.stringify(end)})`);
 			}
 		})),
-		{
+		// Only a phone's composer grows enough, when the long prompt comes back to
+		// it, to move the layout above it; on desktop that step designs no move.
+		...((base) => [
+			{ ...base, viewports: ['phone'],
+				expectShift: [{ step: 'unsend the docked bubble', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.06,
+					reason: 'unsend puts the prompt back in the phone composer, which wraps it taller (the layer above it moves with it); the DOM click is not a recorded input' }] },
+			{ ...base, viewports: ['desktop'] }
+		])({
 			// #1623: a reader who scrolled away from a queue under an inline Error row
 			// is not moved by it. A queued prompt fails (HTTP 500) and the next one
 			// starts: the failure keeps the queue's slot (a queued start does not clear
@@ -390,8 +397,6 @@ export const journey = {
 			// the bubble is tall but nearer than the reserve it frees, they unsend it:
 			// no painted frame moves their scroll position.
 			name: 'detached-reader-keeps-place-under-error-row',
-			expectShift: [{ step: 'unsend the docked bubble', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.06,
-				reason: 'unsend puts the prompt back in the composer, which grows (the layer above it moves with it); the DOM click is not a recorded input' }],
 			async setup(ctx) {
 				await openStopChat(ctx);
 				await ctx.page.waitForTimeout(800);
@@ -499,7 +504,7 @@ export const journey = {
 				await stopButton(page).click();
 				await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
 			}
-		},
+		}),
 		{
 			// #1052 "rapid start": the second message goes out the moment the first
 			// shows as streaming, before any reply prose (the turn is still starting).
