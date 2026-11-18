@@ -1142,7 +1142,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         codemode: CodeModeSession | None = None,
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
-        max_concurrent_tools: int = 8,
+        max_concurrent_tools: int = 1,
         max_continuations_per_turn: int = 3,
         turn_watchdog_seconds: float | None = DEFAULT_TURN_WATCHDOG_SECONDS,
         tool_arg_guard: ToolArgStreamGuard | None = None,
@@ -4816,7 +4816,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                             tu["arg_error"] = _explain_truncation(
                                 tu["arg_error"], result.stop_reason
                             )
-                        await self._prefetch(result.tool_uses[i:])
+                        await self._prefetch(result.tool_uses, i)
                         blocks.append(
                             await self._dispatch_tool_interruptible(sid, turn_id, tu)
                         )
@@ -6088,51 +6088,67 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
-    async def _prefetch(self, rest: list[dict[str, Any]]) -> None:
-        """Start the fetch (``ToolSpec.fetch``) of the consecutive eligible
-        calls from ``rest[0]`` on, up to ``max_concurrent_tools`` at once.
+    async def _prefetch(self, tool_uses: list[dict[str, Any]], at: int) -> None:
+        """Start the early fetch (``ToolRegistry.fetch_of``) of the consecutive
+        eligible calls from ``tool_uses[at]`` on, up to ``max_concurrent_tools``.
 
-        Only the fetch runs early. Each call still goes through its gate,
-        hooks, bookkeeping, publish and store when the serial loop reaches it,
-        and its handler takes the early result only if the gate allowed exactly
-        that input without a prompt (``_gated_call``). A call is eligible when
-        its tool opts in, permissions allow it without asking and no PreToolUse
-        or PostToolUse hook could act on it, all checked without side effects.
-        Early fetches of calls already behind the loop are cancelled here.
+        Only the fetch runs early, and it writes nothing (``early_fetch``).
+        Each call still goes through its gate, hooks, bookkeeping, publish and
+        store when the serial loop reaches it, and its handler takes the early
+        result only if the gate allowed exactly that input without a prompt
+        (``_gated_call``). Eligible, checked without side effects on the same
+        raw input the gate sees: the tool registered a fetch, permissions allow
+        the call without asking, no PreToolUse or PostToolUse hook could act on
+        it, it repeats no call the repeat guard could count it against, and it
+        cannot see the spill folder. Fetches of calls the loop has passed are
+        cancelled; once the turn is interrupted, all are, and none start.
+        A cancelled fetch running in a worker thread finishes there unseen.
         """
-        live = {tu["tool_use_id"] for tu in rest}
+        rest = tool_uses[at:]
+        live = set() if self._interrupted.is_set() else {tu["tool_use_id"] for tu in rest}
         stale = [k for k in self._prefetches if k not in live]
         await _cancel_and_join(self._prefetches.pop(k)[1] for k in stale)
-        if self.max_concurrent_tools <= 1 or self.registry is None:
+        if not live or self.max_concurrent_tools <= 1 or self.registry is None:
             return
+        from fluid.permissions.engine import _input_hash
         from fluid.tools.hardening import coerce_args
+        from fluid.tools.registry import early_fetch
+        from fluid.tools.spill import may_see_spills
 
+        def key(tu: dict[str, Any]) -> Any:
+            return (tu["name"], _input_hash(tu["input"]))
+
+        seen = {key(tu) for tu in tool_uses[:at] if isinstance(tu.get("input"), dict)}
+        if self.permissions is not None:
+            seen.add(getattr(self.permissions, "_last_key", None))  # the guard's streak
         for tu in rest:
             if len(self._prefetches) >= self.max_concurrent_tools:
                 return
-            name, tool_use_id = tu["name"], tu["tool_use_id"]
-            if tool_use_id in self._prefetches:
-                continue
-            spec = self.registry.get(name)
+            name, tool_use_id, raw = tu["name"], tu["tool_use_id"], tu.get("input")
+            spec, fetch = self.registry.get(name), self.registry.fetch_of(name)
             if (
-                spec is None or spec.fetch is None or tu.get("arg_error")
-                or not isinstance(tu.get("input"), dict) or not self._tool_permitted(name)
+                spec is None or fetch is None or tu.get("arg_error")
+                or not isinstance(raw, dict) or not self._tool_permitted(name)
+                or key(tu) in seen or may_see_spills(name, raw, self.ctx)
                 or (self.hooks is not None and (
                     self.hooks.may_act(PRE_TOOL_USE, name)
                     or self.hooks.may_act(POST_TOOL_USE, name)
                 ))
+                or (self.permissions is not None and (
+                    self.permissions.decide(spec, raw, cwd=self.ctx.cwd).decision != "allow"
+                ))
             ):
                 return
+            seen.add(key(tu))
+            if tool_use_id in self._prefetches:
+                continue
             try:
-                input = coerce_args(tu["input"], spec.input_schema)
+                input = coerce_args(raw, spec.input_schema)  # what dispatch will pass
             except Exception:  # noqa: BLE001 — the serial step reports it
                 return
-            if (
-                self.permissions is not None
-                and self.permissions.decide(spec, input, cwd=self.ctx.cwd).decision != "allow"
-            ):
-                return
-            self._prefetches[tool_use_id] = (input, asyncio.create_task(spec.fetch(input, self.ctx)))
+            self._prefetches[tool_use_id] = (
+                input, asyncio.create_task(early_fetch(fetch, input, self.ctx)),
+            )
 
     async def _dispatch_tool_interruptible(
         self, sid: str, turn_id: str, tu: dict[str, Any]

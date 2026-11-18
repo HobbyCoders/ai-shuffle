@@ -112,7 +112,6 @@ SPEC = ToolSpec(
         "required": ["file_path"],
     },
     risk="safe",
-    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -227,13 +226,17 @@ def _load(
 
 async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> Any:
     """``_load`` in a worker thread, with no session bookkeeping
-    (``ToolSpec.fetch``): the read and window ledgers, repeat detection and
+    (the registered ``FETCH``): the read and window ledgers, repeat detection and
     the view record are all written by the handler, at the call's own turn."""
     return await asyncio.to_thread(_load, input, ctx)
 
 
+
+FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
+
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    path, outcome, page = await fetch_once(_fetch, input, ctx)
+    # Without an early fetch, _load runs inline: main's timing, no await.
+    path, outcome, page = await fetch_once(_fetch, input, ctx, inline=_load)
     if outcome is not None:
         if not outcome.is_error:  # only an image read reaches here unfailed
             ctx.read_files.add(str(path))

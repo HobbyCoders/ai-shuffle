@@ -78,7 +78,8 @@ def register_builtins(registry: ToolRegistry) -> None:
             mod.SPECS if hasattr(mod, "SPECS") else ((mod.SPEC, mod.handler),)
         )
         for spec, handler in pairs:
-            registry.register_builtin(spec, handler)
+            # FETCH: the handler's early-fetchable first half (register_builtin).
+            registry.register_builtin(spec, handler, fetch=None if hasattr(mod, "SPECS") else getattr(mod, "FETCH", None))
 
 
 def effective_surface(

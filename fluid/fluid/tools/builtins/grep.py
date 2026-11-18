@@ -119,7 +119,6 @@ SPEC = ToolSpec(
         "required": ["pattern"],
     },
     risk="safe",
-    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -145,7 +144,7 @@ def _search_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[str, Path, Any, b
 
 
 async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    """The search itself: no session bookkeeping (``ToolSpec.fetch``)."""
+    """The search itself: no session bookkeeping (the registered ``FETCH``)."""
     pattern, root, glob, no_ignore, limit = _search_args(input, ctx)
 
     # Check the root before shelling out: ripgrep reports a missing directory as
@@ -167,6 +166,9 @@ async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         return await _ripgrep(rg, pattern, root, glob, no_ignore, limit, ctx)
     return await asyncio.to_thread(_pure_python_grep, pattern, root, glob, limit, ctx)
 
+
+
+FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     outcome = await fetch_once(_fetch, input, ctx)

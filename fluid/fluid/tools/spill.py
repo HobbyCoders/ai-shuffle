@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.state import project_state_root, safe_key, scratch_dir
-from fluid.tools.registry import ToolCtx
+from fluid.tools.registry import ToolCtx, deferred_writes
 
 _log = logging.getLogger(__name__)
 
@@ -70,6 +70,12 @@ def write_spill(text: str, *, ctx: ToolCtx | None, tool: str) -> Path | None:
     # (the marker stays byte-stable for the prompt cache and repeat detection).
     digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
     path = directory / f"{_SAFE_TOOL.sub('_', tool) or 'tool'}-{digest}.txt"
+    pending = deferred_writes.get()
+    if pending is not None:
+        # An early fetch (registry.early_fetch): name the file now, write it
+        # and count it at the call's own turn.
+        pending.append(lambda: write_spill(text, ctx=ctx, tool=tool))
+        return path
     try:
         directory.mkdir(parents=True, exist_ok=True)
         if not path.is_file():
@@ -178,6 +184,30 @@ def _bump(ctx: ToolCtx | None, bucket: str, key: str) -> None:
 
 # Reader tool -> the input key holding the path it reads or searches.
 _READERS = {"Read": "file_path", "Grep": "path", "Glob": "path"}
+
+
+def may_see_spills(name: str, input: Any, ctx: ToolCtx | None) -> bool:
+    """Could this Read, Grep or Glob see this session's spill folder? True
+    when its path (Grep and Glob default to the cwd) is the folder, inside it
+    or contains it, or cannot be resolved (other tools: False). Such a call is never fetched early:
+    an earlier call of the same reply may still write a spill file there."""
+    key = _READERS.get(name)
+    directory = spill_dir(ctx)
+    if key is None or directory is None:
+        return False
+    raw = input.get(key) if isinstance(input, dict) else None
+    if not raw and name != "Read":
+        raw = ctx.cwd
+    if not isinstance(raw, str):
+        return True
+    try:
+        target = Path(raw)
+        if not target.is_absolute():
+            target = Path(ctx.cwd) / target
+        target, root = target.resolve(), directory.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return True
+    return target.is_relative_to(root) or root.is_relative_to(target)
 
 
 def note_access(name: str, input: Any, ctx: ToolCtx | None) -> None:

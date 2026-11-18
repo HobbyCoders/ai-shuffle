@@ -504,6 +504,10 @@ class Settings(BaseSettings):
     fluid_external_call_timeout_seconds: int = 330
     # PR 2: migrate this area-owned legacy behaviour field.
     fluid_turn_watchdog_seconds: int = 900
+    # Read, Grep and Glob calls of one native reply fluid may fetch at once
+    # (fluid's ``max_concurrent_tools``; 1 = none early). Env:
+    # FLUID_MAX_CONCURRENT_TOOLS, the same variable the fluid CLI reads.
+    fluid_max_concurrent_tools: int = 1
     # HTTP bounds on every native provider client the app builds (seconds;
     # see harness_adapter._provider_timeout_kwargs; defaults match fluid's).
     # Longest silence between two reads of a model response.

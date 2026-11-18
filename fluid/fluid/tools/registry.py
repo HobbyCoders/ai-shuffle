@@ -49,29 +49,55 @@ current_call_in_cell: ContextVar[bool] = ContextVar(
     "fluid_current_call_in_cell", default=False,
 )
 
-# The native loop's early run of this call's ``ToolSpec.fetch``: a list holding
-# one ``(input, task)`` pair, emptied by the first ``fetch_once``.
+# The native loop's early run of this call's fetch (register_builtin's
+# ``fetch``): a list holding one ``(input, task)`` pair, emptied by the first
+# ``fetch_once``. The task is ``early_fetch``'s.
 prefetched: ContextVar[list[tuple[dict[str, Any], asyncio.Task[Any]]] | None] = ContextVar(
     "fluid_prefetched", default=None,
 )
+# Inside an early fetch, the writes it would make (spill files and their
+# counters), held as callables for the call's own turn; None everywhere else.
+deferred_writes: ContextVar[list[Callable[[], Any]] | None] = ContextVar(
+    "fluid_deferred_writes", default=None,
+)
+
+
+async def early_fetch(fetch: Fetch, input: dict[str, Any], ctx: ToolCtx) -> tuple[Any, list]:
+    """Run ``fetch`` ahead of its call's turn: its result and the writes it
+    deferred. Nothing is written here, so a fetch that is cancelled or dropped
+    leaves no trace. Cancelling the task does not stop work already in a
+    worker thread (``asyncio.to_thread``); that thread runs to its end, and
+    since its writes are only deferred, it cannot write anything either."""
+    writes: list[Callable[[], Any]] = []
+    token = deferred_writes.set(writes)
+    try:
+        return await fetch(input, ctx), writes
+    finally:
+        deferred_writes.reset(token)
 
 
 async def fetch_once(
-    fetch: Callable[[dict[str, Any], ToolCtx], Awaitable[Any]],
-    input: dict[str, Any], ctx: ToolCtx,
+    fetch: Fetch, input: dict[str, Any], ctx: ToolCtx,
+    *, inline: Callable[[dict[str, Any], ToolCtx], Any] | None = None,
 ) -> Any:
-    """``await fetch(input, ctx)``, or the early run of it the native loop
-    started for this call. The early run is used only when it had exactly this
-    input; otherwise it is cancelled and the fetch runs here. Either way its
-    exception surfaces here, at the call's own turn."""
+    """The handler's fetch: the early run the native loop started for this
+    call, or the fetch itself. The early run is used only when it had exactly
+    this input and its deferred writes succeed now; otherwise it is dropped and
+    the fetch runs here. Either way its exception surfaces here, at the call's
+    own turn. Without an early run, ``inline`` (the fetch's synchronous body)
+    runs in place, so the call keeps the handler's exact timing."""
     held = prefetched.get()
     if held:
         early_input, task = held.pop()
         if early_input == input:
-            return await task
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-    return await fetch(input, ctx)
+            result, writes = await task
+            written = [write() for write in writes]  # each attempted
+            if None not in written:
+                return result
+        else:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    return inline(input, ctx) if inline is not None else await fetch(input, ctx)
 
 # Seconds left before the code-mode kernel cancels the host call being served
 # (its per-call ceiling, human wait credited), or None outside one. The kernel
@@ -86,6 +112,8 @@ current_call_time_left: ContextVar[Callable[[], float] | None] = ContextVar(
 # A local (builtin/inproc) handler: takes the parsed input and the tool context,
 # returns anything ``_normalize`` understands (ToolOutcome | str | SDK dict).
 Handler = Callable[[dict[str, Any], "ToolCtx"], Awaitable[Any]]
+# A handler's side-effect-free first half (register_builtin's ``fetch``).
+Fetch = Callable[[dict[str, Any], "ToolCtx"], Awaitable[Any]]
 
 _RISK_ORDER = {"safe": 0, "write": 1, "destructive": 2}
 
@@ -212,14 +240,6 @@ class ToolSpec:
     # Retired compatibility aliases remain callable with normal permissions,
     # but are never advertised to a new model context.
     discoverable: bool = True
-    # Optional side-effect-free first half of the handler (its file or network
-    # work, no session bookkeeping), taken by the handler through
-    # ``fetch_once``. Setting it lets the native loop start it early for the
-    # consecutive calls of a reply (NativeLoop._prefetch); only a tool whose
-    # fetch cannot write and reads no state an earlier call changes may opt in.
-    fetch: Callable[[dict[str, Any], ToolCtx], Awaitable[Any]] | None = field(
-        default=None, compare=False, repr=False
-    )
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""
@@ -365,6 +385,10 @@ class _Entry:
     # (only read when ``has_call_timeout``); None means unbounded.
     has_call_timeout: bool = False
     call_timeout: float | None = None
+    # The side-effect-free first half of ``handler`` (register_builtin's
+    # ``fetch``); bound to this registration, so a replacement handler never
+    # inherits it.
+    fetch: Fetch | None = None
 
 
 def _normalize(result: Any) -> ToolOutcome:
@@ -477,10 +501,25 @@ class ToolRegistry:
 
     # ─── Registration ────────────────────────────────────────────────────
 
-    def register_builtin(self, spec: ToolSpec, handler: Handler) -> None:
-        """Register a bare-named builtin (Read/Edit/Bash/...). Always loaded."""
-        self._entries[spec.name] = _Entry(spec=spec, handler=handler)
+    def register_builtin(
+        self, spec: ToolSpec, handler: Handler, *, fetch: Fetch | None = None,
+    ) -> None:
+        """Register a bare-named builtin (Read/Edit/Bash/...). Always loaded.
+
+        ``fetch`` is the handler's own side-effect-free first half (its file
+        work, no session bookkeeping and no writes), which the handler takes
+        through ``fetch_once``. Passing it lets the native loop start it early
+        for the consecutive calls of a reply (NativeLoop._prefetch). It belongs
+        to this handler: re-registering the name without it, as every
+        replacement handler does, leaves the tool with no early fetch.
+        """
+        self._entries[spec.name] = _Entry(spec=spec, handler=handler, fetch=fetch)
         self._loaded.add(spec.name)
+
+    def fetch_of(self, name: str) -> Fetch | None:
+        """The early fetch registered with ``name``'s handler, if any."""
+        entry = self._entries.get(name)
+        return entry.fetch if entry is not None else None
 
     def register_inproc(
         self,

@@ -1,7 +1,7 @@
 """Early fetch of a reply's reads and searches (NativeLoop._prefetch).
 
-Only a tool's ``ToolSpec.fetch`` runs early; each call still settles in call
-order on the serial path. Overlap is shown by rendezvous, never by timing.
+Only a handler's registered fetch runs early, and it writes nothing; each call
+still settles in call order on the serial path. Overlap is shown by rendezvous, never by timing.
 """
 
 from __future__ import annotations
@@ -91,9 +91,9 @@ class _Probes:
 
     def register(self, registry: ToolRegistry) -> ToolRegistry:
         registry.register_builtin(
-            ToolSpec(name="Probe", description="read", risk="safe", fetch=self.fetch,
+            ToolSpec(name="Probe", description="read", risk="safe",
                      input_schema={"type": "object", "properties": {}}),
-            lambda input, ctx: fetch_once(self.fetch, input, ctx),
+            lambda input, ctx: fetch_once(self.fetch, input, ctx), fetch=self.fetch,
         )
         return registry
 
@@ -193,26 +193,56 @@ async def test_exit_mid_reply_discards_early_fetches(how) -> None:
     assert loop._prefetches == {}
 
 
-async def test_call_the_gate_prompts_for_does_not_use_its_early_fetch() -> None:
-    """The third identical call trips the doom-loop prompt, which the dry
-    check cannot foresee: after approval its fetch runs again, on base."""
-    probes, store = _Probes(), MemoryStore()
-    sid = (await store.create_session()).session_id
-    loop = _loop(_Provider(_reply(*[(c, "Probe", {"id": "same"}) for c in ("c1", "c2", "c3")])),
-                 probes.register(ToolRegistry()), 4, policy="on_write", store=store, sid=sid)
+async def _approving(loop: NativeLoop, sid: str) -> list[str]:
+    """Run the turn, allowing each permission prompt; the prompted call ids."""
+    asked: list[str] = []
 
     async def approve() -> None:
         async for event in loop.bus.subscribe(sid):
             if isinstance(event, PermissionRequest):
+                asked.append(event.tool_use_id)
                 await loop.submit(RespondPermission(request_id=event.request_id,
                                                     decision="allow"))
-                return
 
     watcher = asyncio.create_task(approve())
-    await _turn(loop)
-    await asyncio.wait_for(watcher, _HANG)
-    assert [r.output for r in _results(loop)] == [
-        "probe same run1", "probe same run2", "probe same run4"]
+    try:
+        await _turn(loop)
+    finally:
+        watcher.cancel()
+    return asked
+
+
+async def test_call_the_gate_prompts_for_does_not_use_its_early_fetch() -> None:
+    """The policy turns to always-ask after b's fetch started (a mode switch
+    mid-reply): b's gate prompts, so its early result is dropped and, after
+    approval, the fetch runs again on the base path."""
+    probes, store = _Probes(), MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(_Provider(_reply(("a", "Probe", {"id": "a", "meet": "go"}),
+                                  ("b", "Probe", {"id": "b"}))),
+                 probes.register(ToolRegistry()), 4, store=store, sid=sid)
+
+    async def switch() -> None:
+        await asyncio.wait_for(probes.ev("b").wait(), _HANG)
+        loop.permissions.approval_policy = "always_ask"
+        probes.ev("go").set()
+
+    switcher = asyncio.create_task(switch())
+    assert await _approving(loop, sid) == ["b"]
+    await switcher
+    assert [r.output for r in _results(loop)] == ["probe a run1", "probe b run3"]
+
+
+async def test_repeated_calls_are_not_fetched_early() -> None:
+    """The repeat guard asks on the third identical call; a call it could
+    count is never fetched before its gate (P4), so no prompt follows a read."""
+    probes, store = _Probes(), MemoryStore()
+    sid = (await store.create_session()).session_id
+    loop = _loop(_Provider(_reply(*[(c, "Probe", {"id": "same"}) for c in ("c1", "c2", "c3")])),
+                 probes.register(ToolRegistry()), 4, policy="on_write", store=store, sid=sid)
+    assert await _approving(loop, sid) == ["c3"]
+    assert probes.log == ["start same", "end same"] * 3
+    assert [r.output for r in _results(loop)] == [f"probe same run{n}" for n in (1, 2, 3)]
 
 
 async def test_failing_fetch_surfaces_at_its_own_position() -> None:
@@ -269,3 +299,242 @@ async def test_a_hook_matching_the_tool_keeps_it_serial(tool) -> None:
     await _turn(loop)
     serial = ["start a", "end a", "start b", "end b"]
     assert (probes.log == serial) == (tool == "Probe")
+
+
+def _spy_load(monkeypatch) -> list[str]:
+    """Record each file Read's ``_load`` opens (inline or early)."""
+    loaded: list[str] = []
+    real = read_tool._load
+    monkeypatch.setattr(read_tool, "_load", lambda i, c: (loaded.append(i["file_path"]),
+                                                          real(i, c))[1])
+    return loaded
+
+
+async def test_a_replacement_handler_does_not_inherit_the_fetch(tmp_path, monkeypatch) -> None:
+    """The app's Chat lane swaps Read's handler for an upload broker exactly
+    like this (``register_builtin(replace(spec, ...), broker)``): the broker's
+    own checks must run before any file is opened (P1)."""
+    from dataclasses import replace
+
+    (tmp_path / "f.txt").write_text("hello\n")
+    loaded = _spy_load(monkeypatch)
+    registry = ToolRegistry()
+    register_builtins(registry)
+
+    async def broker(input, ctx):
+        return ToolOutcome(text="refused: not an upload", is_error=True)
+
+    registry.register_builtin(replace(read_tool.SPEC, name="Read"), broker)
+    assert registry.fetch_of("Read") is None and registry.fetch_of("Grep") is not None
+    loop = _loop(_Provider(_reply(("r1", "Read", {"file_path": "f.txt"}),
+                                  ("r2", "Read", {"file_path": "f.txt", "offset": 1}))),
+                 registry, 4, tmp_path=tmp_path)
+    await _turn(loop)
+    assert loaded == []
+    assert [r.output for r in _results(loop)] == ["refused: not an upload"] * 2
+
+
+async def test_look_ahead_authorizes_the_raw_input_the_gate_sees(tmp_path, monkeypatch) -> None:
+    """A deny rule on ``offset: "01"`` matches the raw call but not its
+    coerced ``1``: the call is denied and its file never opened (P4)."""
+    from fluid.permissions.rules import Rule
+
+    (tmp_path / "f.txt").write_text("hello\n")
+    loaded = _spy_load(monkeypatch)
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(_reply(("r", "Read", {"file_path": "f.txt", "offset": "01"}))),
+                 registry, 4, policy="on_write", tmp_path=tmp_path)
+    loop.permissions.rules = [Rule(tool="Read", decision="deny", input_globs={"offset": "01"})]
+    await _turn(loop)
+    assert loaded == []
+    assert _results(loop)[0].is_error
+
+
+def _glob_world(tmp_path):
+    """A tree whose full Glob listing is over the spill cap, and the loop's
+    state root, so spills land under ``tmp_path / "state"``."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    for n in range(400):
+        (tree / f"{'x' * 60}-{n:04}.txt").write_text("")
+    return tree, tmp_path / "state"
+
+
+def _with_state(loop: NativeLoop, state) -> NativeLoop:
+    loop.ctx.extra["harness_state_root"] = str(state)
+    return loop
+
+
+async def test_a_discarded_glob_writes_no_spill(tmp_path) -> None:
+    """The oversized Glob's fetch has finished (its worker thread included)
+    when the interrupt drops it: no spill file, no counter (P3)."""
+    tree, state = _glob_world(tmp_path)
+    probes, store = _Probes(), MemoryStore()
+    sid = (await store.create_session()).session_id
+    registry = probes.register(ToolRegistry())
+    register_builtins(registry)
+    loop = _with_state(_loop(_Provider(_reply(
+        ("a", "Probe", {"id": "a", "hold": True}),
+        ("l", "Glob", {"pattern": "*.txt", "path": str(tree), "limit": 1000}),
+    )), registry, 4, store=store, sid=sid), state)
+    await loop.submit(UserTurn(content="go"))
+    await _until(lambda: "l" in loop._prefetches and loop._prefetches["l"][1].done())
+    assert "saved to" in loop._prefetches["l"][1].result()[0].text  # it was oversized
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), _HANG)
+    assert not state.exists() or not any(p.is_file() for p in state.rglob("*"))
+
+
+async def test_an_early_glob_writes_its_spill_at_its_turn(tmp_path) -> None:
+    """Used, the early Glob's result and spill file are main's."""
+    async def run(limit: int, root) -> tuple[str, list]:
+        tree, state = _glob_world(root)
+        store = MemoryStore()
+        sid = (await store.create_session()).session_id
+        registry = ToolRegistry()
+        register_builtins(registry)
+        loop = _with_state(_loop(_Provider(_reply(
+            ("g", "Glob", {"pattern": "*-0000.txt", "path": str(tree)}),
+            ("l", "Glob", {"pattern": "*.txt", "path": str(tree), "limit": 1000}),
+        )), registry, limit, store=store, sid=sid), state)
+        await _turn(loop)
+        out = _results(loop)[1].output.replace(str(root), "<root>").replace(sid, "<sid>")
+        stats = [json.loads(p.read_text())["spilled"] for p in state.rglob("spill-stats/*")]
+        return out, sorted(p.name for p in state.rglob("tool-output/*")), stats
+
+    (tmp_path / "1").mkdir()
+    (tmp_path / "4").mkdir()
+    serial, early = await run(1, tmp_path / "1"), await run(4, tmp_path / "4")
+    assert early == serial and "saved to" in early[0] and early[1]
+    assert early[2] == [{"Glob": 1}]
+
+
+async def test_a_search_that_can_see_the_spill_folder_is_not_fetched_early(tmp_path) -> None:
+    from fluid.tools.spill import spill_dir
+
+    registry = ToolRegistry()
+    register_builtins(registry)
+    loop = _loop(_Provider(), registry, 4, tmp_path=tmp_path)
+    loop.ctx.session_id = "s1"
+    loop.ctx.extra["harness_state_root"] = str(tmp_path / "state")
+    spills = spill_dir(loop.ctx)
+    calls = [{"tool_use_id": t, "name": n, "input": i} for t, n, i in (
+        ("g1", "Grep", {"pattern": "x", "path": str(tmp_path / "src")}),
+        ("g2", "Glob", {"pattern": "*", "path": str(spills.parent.parent)}),
+        ("g3", "Grep", {"pattern": "y", "path": str(tmp_path / "src")}),
+    )]
+    await loop._prefetch(calls, 0)
+    try:
+        assert list(loop._prefetches) == ["g1"]  # g2 contains the folder; g3 is past it
+    finally:
+        await loop._prefetch([], 0)
+
+
+async def test_no_fetch_starts_after_an_interrupt(tmp_path, monkeypatch) -> None:
+    """``Read, Bash, Read, Read``, interrupted during the first Read: the
+    trailing Reads get main's cancellation results and are never opened (P5)."""
+    import threading
+
+    for f in "abc":
+        (tmp_path / f"{f}.txt").write_text(f"{f}\n")
+    release, loaded = threading.Event(), []
+    real = read_tool._load
+
+    def slow(i, c):
+        loaded.append(i["file_path"])
+        if i["file_path"] == "a.txt":
+            release.wait(_HANG)
+        return real(i, c)
+
+    monkeypatch.setattr(read_tool, "_load", slow)
+
+    async def run(limit: int) -> list:
+        loaded.clear()
+        release.clear()
+        registry = ToolRegistry()
+        register_builtins(registry)
+        loop = _loop(_Provider(_reply(
+            ("r1", "Read", {"file_path": "a.txt"}), ("b", "Bash", {"command": "echo hi"}),
+            ("r2", "Read", {"file_path": "b.txt"}), ("r3", "Read", {"file_path": "c.txt"}),
+        )), registry, limit, tmp_path=tmp_path)
+        await loop.submit(UserTurn(content="go"))
+        if limit == 1:  # the inline Read holds the event loop until released
+            release.set()
+        else:
+            await _until(lambda: loaded == ["a.txt"])
+        await loop.submit(Interrupt())
+        release.set()
+        await asyncio.wait_for(loop.wait_turn(), _HANG)
+        return [(r.tool_use_id, r.output) for r in _results(loop)]
+
+    early = await run(4)
+    assert loaded == ["a.txt"]
+    assert [o for _, o in early] == ["Tool execution cancelled: the turn was interrupted."] * 4
+
+
+_PNG = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJ"
+        "RU5ErkJggg==")
+
+
+async def _steer_lands_on(tmp_path, monkeypatch, limit: int, during: str) -> list[str]:
+    """Which results carry a steer queued while the image Read ``during``
+    its load or its conditioning (``Read i.png, Read t.txt``)."""
+    import base64
+
+    import fluid.engine.native as native
+    from fluid.events.ops import Steer
+
+    (tmp_path / "i.png").write_bytes(base64.b64decode(_PNG))
+    (tmp_path / "t.txt").write_text("t\n")
+    aloop, holder = asyncio.get_running_loop(), {}
+
+    def queue_steer_soon(real):
+        def wrapped(*args):
+            if not holder.get("sent"):
+                holder["sent"] = True
+                aloop.call_soon_threadsafe(lambda: asyncio.ensure_future(
+                    holder["loop"].submit(Steer(text="steer-q1", id="q1"))))
+            return real(*args)
+        return wrapped
+
+    if during == "load":
+        monkeypatch.setattr(read_tool, "_read_image", queue_steer_soon(read_tool._read_image))
+    else:
+        monkeypatch.setattr(native, "condition_image", queue_steer_soon(native.condition_image))
+    registry = ToolRegistry()
+    register_builtins(registry)
+    kwargs = {} if limit == 1 else {"max_concurrent_tools": limit}
+    loop = NativeLoop(provider=_Provider(_reply(("i", "Read", {"file_path": "i.png"}),
+                                                ("t", "Read", {"file_path": "t.txt"}))),
+                      store=MemoryStore(), model="claude-sonnet-5", registry=registry,
+                      permissions=PermissionEngine("never_ask"), **kwargs)
+    loop.ctx.cwd = str(tmp_path)
+    holder["loop"] = loop
+    await _turn(loop)
+    return [r.tool_use_id for r in _results(loop) if "steer-q1" in r.output]
+
+
+@pytest.mark.parametrize("during", ["load", "conditioning"])
+async def test_steer_placement_around_an_image_read(tmp_path, monkeypatch, during) -> None:
+    """At limit 1 the Read is main's inline path, so a steer queued during the
+    image load or its conditioning rides the next result, as on main (P6).
+    Fetched early, the load runs before the call's turn, so a steer queued
+    then rides the image result itself; conditioning is unchanged."""
+    assert await _steer_lands_on(tmp_path, monkeypatch, 1, during) == ["t"]
+    early = await _steer_lands_on(tmp_path, monkeypatch, 4, during)
+    assert early == (["i"] if during == "load" else ["t"])
+
+
+@pytest.mark.parametrize(("delegated", "limit", "claimed"), [
+    (False, 1, False), (False, 4, True), (True, 4, False),
+])
+def test_prompt_claims_early_fetch_only_when_the_native_loop_does_it(delegated, limit, claimed):
+    from fluid.cli.prompt import PromptProfile, compose_base_prompt
+
+    prompt = compose_base_prompt(PromptProfile(
+        tools=frozenset({"Read", "Grep", "Glob", "Bash"}), model="claude",
+        delegated=delegated, concurrent_tools=limit > 1))
+    assert "Make independent tool calls in the same reply" in prompt
+    assert ("Reads and searches (Read, Grep, Glob) among them may be fetched concurrently"
+            in prompt) == claimed

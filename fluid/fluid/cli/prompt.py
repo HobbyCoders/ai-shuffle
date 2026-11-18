@@ -519,7 +519,7 @@ class PromptProfile:
     extra_guidance: tuple[str, ...] = ()
     # The native loop may fetch a reply's reads and searches early, at once
     # (``max_concurrent_tools`` above 1, NativeLoop._prefetch).
-    concurrent_tools: bool = True
+    concurrent_tools: bool = False
 
 
 def profile_for(
@@ -710,11 +710,11 @@ def _tools_section(p: PromptProfile) -> str | None:
         # parallelism to ask for. The concurrency claim is the native loop's
         # (NativeLoop._prefetch); under the delegated leg the claude CLI
         # decides, so it is absent there, and when max_concurrent_tools is 1.
-        reads = bool(t & {"Read", "Grep", "Glob", "WebSearch"})
+        reads = bool(t & {"Read", "Grep", "Glob"})
         how = (
             "" if p.delegated or not p.concurrent_tools or not reads else
-            " Reads and searches among them may be fetched concurrently; results "
-            "still arrive in call order."
+            " Reads and searches (Read, Grep, Glob) among them may be fetched "
+            "concurrently; results still arrive in call order."
         )
         bullets.append(
             "- Make independent tool calls in the same reply; serialize only when "

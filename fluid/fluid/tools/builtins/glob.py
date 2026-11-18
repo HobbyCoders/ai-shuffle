@@ -89,7 +89,6 @@ SPEC = ToolSpec(
         "required": ["pattern"],
     },
     risk="safe",
-    fetch=lambda input, ctx: _fetch(input, ctx),
 )
 
 
@@ -112,10 +111,13 @@ def _list_args(input: dict[str, Any], ctx: ToolCtx) -> tuple[Path, int]:
 
 
 async def _fetch(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    """The listing itself: no session bookkeeping (``ToolSpec.fetch``)."""
+    """The listing itself: no session bookkeeping (the registered ``FETCH``)."""
     root, limit = _list_args(input, ctx)
     return await asyncio.to_thread(_glob, input["pattern"], root, limit, shutil.which("rg"), ctx)
 
+
+
+FETCH = _fetch  # early-fetchable by the native loop (register_builtin's fetch)
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     outcome = await fetch_once(_fetch, input, ctx)

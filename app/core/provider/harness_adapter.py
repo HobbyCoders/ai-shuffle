@@ -1234,6 +1234,7 @@ class HarnessAdapter(ProviderAdapter):
                 # instead of dying silently. Passed only when the vendored
                 # fluid has the seam.
                 **_loop_bound_kwargs(),
+                max_concurrent_tools=_max_concurrent_tools(),
                 # Native legs have no Claude Code preset — they always run the
                 # fluid-compiled prompt: the profile's configured prompt as the
                 # base (a preset-shaped profile has none) with the append text
@@ -6567,6 +6568,19 @@ def _loop_bound_kwargs(loop_cls: Any = None) -> Dict[str, Any]:
         return {}
     seconds = float(getattr(settings, "fluid_turn_watchdog_seconds", 900) or 900)
     return {"turn_watchdog_seconds": seconds}
+
+
+def _max_concurrent_tools() -> int:
+    """fluid's ``max_concurrent_tools`` for :class:`NativeLoop` (1 = off).
+
+    Env: FLUID_MAX_CONCURRENT_TOOLS, as for the fluid CLI.
+    """
+    from app.core.config import settings
+
+    try:
+        return max(1, int(getattr(settings, "fluid_max_concurrent_tools", 1) or 1))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _fluid_setting_sources(options: Any) -> Optional[tuple]:
