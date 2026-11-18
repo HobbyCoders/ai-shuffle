@@ -48,16 +48,17 @@
  });
  function selectDoc(category: string, slug: string, query = '') {
   if (!detailOpen || activeCategory !== category || activeSlug !== slug) shellHistory.detail('docs', { doc: `${category}/${slug}` });
-  display(category, slug, query);
+  // Only an explicit selection opens at the top; Back and Forward keep the pane.
+  const key = ++selections;
+  selectionKey = key;
+  display(category, slug, query ? { query, key } : null);
  }
- function display(category: string, slug: string, query = '') {
+ function display(category: string, slug: string, search: typeof find = null) {
   activeCategory = category;
   activeSlug = slug;
   tocOpen = false;
   detailOpen = true;
-  const key = ++selections;
-  selectionKey = key;
-  find = query ? { query, key } : null;
+  find = search;
  }
  function backToList() {
   if (shellHistory.place?.doc) window.history.back();

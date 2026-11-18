@@ -193,8 +193,21 @@ await runJourney({
 			await mark('follow an article link; one Back returns to the source article');
 			await page.locator('.docs-content a[href$="/updates"]').first().click();
 			await waitTitle(page, 'Updates');
+			// Back and Forward restore the article; only an explicit selection resets the pane
+			// to its top. Both articles are long, so a kept offset cannot clamp to 0.
+			const pane = page.locator('.view-main-slot:has(.docs-content)');
+			const settledTop = async () => {
+				await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+				return pane.evaluate((el) => el.scrollTop);
+			};
+			await pane.evaluate((el) => el.scrollTo({ top: 600 }));
+			expect(await settledTop() > 0, 'Updates was scrolled');
 			await page.goBack(); await waitTitle(page, 'Changelog');
+			const back = await settledTop();
+			expect(back > 0, `Back does not reset the pane to its top (scrollTop=${back})`);
 			await page.goForward(); await waitTitle(page, 'Updates');
+			const forward = await settledTop();
+			expect(forward > 0, `Forward does not reset the pane to its top (scrollTop=${forward})`);
 			await mark('leave the article for Settings and Providers');
 			const menu = page.getByRole('button', { name: /^Open menu/ });
 			if (await menu.isVisible()) await menu.click();
