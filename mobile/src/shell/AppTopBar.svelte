@@ -29,7 +29,8 @@
 	 */
 	import { tick, untrack, type Snippet } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { shellHistory } from '$lib/services/app-history.svelte';
+	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { page } from '$app/state';
 	import { ChevronLeft, Menu, Mic, X } from 'lucide-svelte';
 	import { phonePanelActions } from '$lib/components/layout/view/ViewPanel.svelte';
@@ -174,9 +175,11 @@
 	let pendingTarget: (() => void) | null = null;
 
 	function pushDrawerEntry() {
-		// Pushed during boot too. With no app around the bar (tests) nothing is
-		// recorded and Back just won't close it.
-		shellHistory.overlay({ mobileDrawer: true });
+		try {
+			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileDrawer: true }));
+		} catch {
+			// Router not ready (early boot, tests): Back just won't close it.
+		}
 	}
 
 	function popDrawerEntry() {
@@ -189,7 +192,6 @@
 		const inHistory = !!page.state?.mobileDrawer;
 		untrack(() => {
 			if (inHistory) {
-				mounted = drawerOpen = true;
 				entryLive = true;
 				return;
 			}
@@ -238,7 +240,7 @@
 		};
 	}
 
-	const drawerOpenFeature = drawerGo(onOpenFeature);
+	const drawerOpenFeature = drawerGo((...args: Parameters<typeof onOpenFeature>) => onOpenFeature(...args));
 	$effect(() => () => {
 		pendingTarget = null;
 	});

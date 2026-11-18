@@ -47,8 +47,8 @@
 	 */
 	import { tick, untrack } from 'svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
-	import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
-	import { randomUUID } from '$lib/utils/id';
+	import { pushState } from '$app/navigation';
+	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 	import { page } from '$app/state';
 	import {
 		ChevronDown, ChevronLeft, ChevronRight, Download, FilePen, Globe, Hand, Lightbulb, LoaderCircle, Lock,
@@ -334,7 +334,7 @@
 		if (pageName === 'main') return;
 		if (pageEntry && !closingPanel) {
 			pageEntry = false;
-			if (!fromHistory) retireEntries(pageToken);
+			if (!fromHistory && page.state?.mobileControlsPage) history.back();
 		}
 		const from = pageName;
 		dismissHostedMenus();
@@ -435,38 +435,15 @@
 	let historyEntry = false;
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
-	/** Each entry's own id: the list's (or a direct page's), and a page's over the list. */
-	let listToken: string | undefined;
-	let pageToken: string | undefined;
-	/** Entries this panel is backing off: their landings on the way are no Forward. */
-	const retiring = new Set<string>();
 
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
-		const token = (pageToken = randomUUID());
-		pageEntry = shellHistory.overlay(
-			{ mobileControls: true, mobileControlsPage: target, mobileControlsId: token, mobileControlsList: listToken },
-			() => { if (pageToken === token) pageEntry = false; }
-		);
-	}
-
-	function recordPanelEntry() {
-		const token = (listToken = randomUUID());
-		// No app around this panel (a component test): Back closes it instead.
-		historyEntry = shellHistory.overlay(
-			{ mobileControls: true, mobileControlsId: token, mobileControlsPage: direct ? pageName : undefined },
-			() => { if (listToken === token) historyEntry = pageEntry = false; }
-		);
-	}
-
-	/** Back off these entries once they committed, never over one this panel did not push. */
-	function retireEntries(...tokens: (string | undefined)[]) {
-		const own = tokens.filter((token): token is string => !!token);
-		for (const token of own) retiring.add(token);
-		const owned = (id: string | undefined) => !!id && own.includes(id);
-		void shellHistory
-			.retire((state) => (owned(state.mobileControlsId) ? 1 + Number(owned(state.mobileControlsList)) : 0))
-			.then(() => { for (const token of own) retiring.delete(token); });
+		try {
+			ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true, mobileControlsPage: target }));
+			pageEntry = true;
+		} catch {
+			// Router not ready (tests): Back closes the panel instead.
+		}
 	}
 
 	$effect(() => {
@@ -480,7 +457,14 @@
 				rendered = true;
 				picker = null;
 				void focusPanel();
-				if (!historyEntry) recordPanelEntry();
+				if (!historyEntry) {
+					try {
+						ignoreRouterNotReady(pushState('', { ...(page.state ?? {}), mobileControls: true }));
+						historyEntry = true;
+					} catch {
+						// Router not ready (tests): Back just won't close the panel.
+					}
+				}
 				void tick().then(() => {
 					if (bodyRef && pageName === 'main') bodyRef.scrollTop = 0;
 				});
@@ -505,7 +489,8 @@
 				}
 				if (historyEntry) {
 					historyEntry = false;
-					retireEntries(pageEntry ? pageToken : undefined, listToken);
+					// Pop the page's entry too, so no dead Back press is left behind.
+					if (page.state?.mobileControls) history.go(pageEntry && page.state?.mobileControlsPage ? -2 : -1);
 				}
 				pageEntry = false;
 			}
@@ -517,27 +502,20 @@
 		clearTimeout(renderTimer);
 	});
 
-	// Reconstruct the panel from the landed entry, including a Forward during its close slide.
+	// Android Back on a page pops that page's entry: return to the list.
 	$effect(() => {
-		const state = page.state as ShellState;
-		const { mobileControls, mobileControlsPage, mobileControlsId, mobileControlsList } = state;
+		const pageInHistory = !!page.state?.mobileControlsPage;
 		untrack(() => {
-			// Shell writes land in order after the call that queued them: one queued
-			// before the panel's entry is no Back.
-			if (shellHistory.superseded(state)) return;
-			if (mobileControlsId && retiring.has(mobileControlsId)) return;
-			if (mobileControls) {
-				historyEntry = true;
-				closingPanel = false;
-				direct = !!mobileControlsPage && !mobileControlsList;
-				pageEntry = !!mobileControlsPage && !direct;
-				listToken = mobileControlsList ?? mobileControlsId;
-				pageToken = pageEntry ? mobileControlsId : undefined;
-				if (mobileControlsPage) setPage(mobileControlsPage as Page);
-				else if (pageName !== 'main') backToMain(true);
-				if (!open) requestOpen(true);
-			} else if (historyEntry && open) {
-				historyEntry = pageEntry = false;
+			if (!pageInHistory && pageEntry && open) backToMain(true);
+		});
+	});
+
+	// Android Back pops the entry the panel pushed: close without popping again.
+	$effect(() => {
+		const inHistory = !!page.state?.mobileControls;
+		untrack(() => {
+			if (!inHistory && historyEntry && open) {
+				historyEntry = false;
 				closePanel();
 			}
 		});

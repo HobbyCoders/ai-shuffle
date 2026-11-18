@@ -204,11 +204,6 @@
 	onMount(async () => {
 		// The root layout owns auth routing and delays this mount until verified.
 		if (!$isAuthenticated) return;
-		// Overlays opened while boot loads (Chat controls, the phone drawer) own a Back entry at once.
-		shellHistory.arm();
-		// Reloaded controls can already accept Back, Forward and clicks while the
-		// boot requests are pending. Their existing entry must already have an owner.
-		if ((page.state as ShellState).shell) shellHistory.start(page.state, $activeView);
 		// Navigation origin includes auth + JS loading. This is bootstrap settled,
 		// not proof that a restored transcript or all feature panels are ready.
 		// Bounded, content-free milestones cover boots whose paint sample is
@@ -229,7 +224,17 @@
 			// Show the linked chat from the first frame. The view saved by the
 			// last visit (often another chat) must not render meanwhile.
 			layout.openChat(deepLinkSessionId);
+			// The link is read: drop it from the URL before the first history
+			// write, so no entry (nor a reload of one) replays it.
+			const url = new URL(window.location.href);
+			url.searchParams.delete('session');
+			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 		}
+		// The arrival entry gets its place now, before anything can push over
+		// it: controls opened while boot loads (Chat controls, the phone drawer)
+		// add their own entries on top, and a reload can already go Back,
+		// Forward and click. Boot then refines this entry's place (settle).
+		shellHistory.start(page.state, $activeView, !(page.state as ShellState).shell);
 
 		// The project catalog loads alongside init: a new chat's remembered
 		// project and branch resolve against it, and the composer holds a send
@@ -336,7 +341,7 @@
 			// Layout and the restored session already agree (the ordinary reload).
 			followRestoredLane();
 		}
-		if (!shellHistory.place) shellHistory.start(page.state, $activeView);
+		shellHistory.settle($activeView);
 		if (!deepLinkSessionId && !navigationClaimed) showEntry();
 		bootReconciled = true;
 		performance.mark?.('shuffle:boot.reconciled');
@@ -344,8 +349,8 @@
 
 		// Deep-link: the Android shell opens `/?session=<id>` when a notification
 		// is tapped. Open that session explicitly — it outranks the restored
-		// session above (it's a fresh user intent) — then strip the param so a
-		// refresh doesn't re-trigger it. Shared-DB cluster sessions appear in
+		// session above (it's a fresh user intent). The param left the URL at
+		// mount, so a refresh doesn't re-trigger it. Shared-DB cluster sessions appear in
 		// $sessions on every install, so handleOpenSession resolves them and (when
 		// the session is owned by another device) relays exactly like a click in
 		// the Sessions board.
@@ -358,9 +363,6 @@
 			if (!navigationClaimed && $activeSession.sessionId === deepLinkSessionId) {
 				handleOpenSession(deepLinkSessionId, undefined, { reopen: true });
 			}
-			const url = new URL(window.location.href);
-			url.searchParams.delete('session');
-			history.replaceState(history.state, '', url.pathname + url.search + url.hash);
 			// The open has bound the session (or will on the next frame when the
 			// sidebar overlay closes first); its own loading state takes over.
 			requestAnimationFrame(() => pendingDeepLink.set(null));

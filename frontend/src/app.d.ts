@@ -13,10 +13,6 @@ declare global {
 			mobileControls?: boolean;
 			/** The Chat controls page (Model, Agent…) whose own Back entry is on the stack. */
 			mobileControlsPage?: string;
-			/** This Chat controls entry's own identity. */
-			mobileControlsId?: string;
-			/** Nested page only: identity of the controls-list entry immediately below it. */
-			mobileControlsList?: string;
 			mobileDrawer?: boolean;
 		}
 		// interface Platform {}

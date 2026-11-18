@@ -193,13 +193,14 @@ describe('Swarm session navigation through the actual active-session store', () 
 		history.replaceState(null, '', '/?session=worker-child');
 		render(Page);
 		// The link is bound at init, before the first loads, so the saved
-		// parent never shows; its lane follows once the deep link is handled
-		// (the param is stripped then).
+		// parent never shows; its lane follows once the deep link is handled.
+		// The param leaves the URL as soon as it is read, before any history
+		// entry is written, so no entry (or its reload) replays it.
 		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
 		expect(layout.current.activeView).toEqual({ type: 'session', sessionId: 'worker-child' });
-		await waitFor(() => expect(window.location.search).toBe(''));
+		expect(window.location.search).toBe('');
+		await waitFor(() => expect(appMode.current).toBe('code'));
 		expect(activeSession.current.sessionId).toBe('worker-child');
-		expect(appMode.current).toBe('code');
 		expect(feedController.start).toHaveBeenLastCalledWith('worker-child');
 	});
 

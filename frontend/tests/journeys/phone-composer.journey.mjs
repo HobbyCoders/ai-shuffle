@@ -17,9 +17,9 @@
 //   controls-through-boot Chat controls opened and an agent picked while boot still
 //                        loads: the sheet stays open once boot reconciles, Back closes it
 //   controls-back-before-boot Chat controls opened while boot loads owns its Back entry
-//                        at once: Back closes it before boot finishes, Forward reopens it
+//                        at once: Back closes it before boot finishes, and boot adds no stop
 //   controls-page-through-boot a controls page entered while boot loads: list and page
-//                        each keep their entry through boot, for Back and Forward
+//                        each keep their entry through boot, Back returns page → list → closed
 import { fakeAiTag, runJourney } from './runner.mjs';
 import {
 	PROJECT,
@@ -44,7 +44,7 @@ import { waitForBootReconciled } from './lib/boot.mjs';
 
 const PHONE_SIZES = ['phone', 'fold-cover'];
 
-/** Hold one of boot's first loads, so the shell history has not started yet. */
+/** Hold one of boot's first loads, so boot has not reconciled the view yet. */
 async function holdBoot({ page, status }) {
 	await holdBootLoad(page, '/api/v1/tags', 60_000, { releaseOnSignal: true });
 	await gotoApp(page, status);
@@ -454,9 +454,9 @@ await runJourney({
 			}
 		},
 		{
-			// The composer works while the boot's first loads run, and the shell
-			// history starts only when boot reconciles. Hold one of those loads
-			// so the sheet opens, and an agent is picked in it, before that.
+			// The composer works while the boot's first loads run, and boot then
+			// rewrites the arrival entry's place. Hold one of those loads so the
+			// sheet opens, and an agent is picked in it, before that.
 			name: 'controls-through-boot',
 			setup: holdBoot,
 			async act({ page, mark }) {
@@ -478,7 +478,7 @@ await runJourney({
 
 				await mark('boot reconciles');
 				await release();
-				// The bug: the shell history's start read as Back, and the sheet closed.
+				// The bug: boot's shell history write dropped the sheet's state, which read as Back.
 				await page.waitForTimeout(500);
 				expect(await dialog.isVisible(), 'Chat controls stays open after boot reconciles');
 				expect(await hero.getByRole('button', { name: 'Agent: Dev agent' }).isVisible(), 'the picked agent shows');
@@ -514,13 +514,7 @@ await runJourney({
 				await page.waitForTimeout(500);
 				expect(!(await dialog.isVisible()), 'Chat controls stays closed after boot reconciles');
 				await expectEntries(page, { index: before.index, length: before.length + 1 }, 'boot adds no Back stop');
-
-				await mark('Forward reopens Chat controls, Back closes it');
-				await page.goForward();
-				await dialog.waitFor({ timeout: 5000 });
-				await page.goBack();
-				await dialog.waitFor({ state: 'hidden', timeout: 5000 });
-				expect(!page.url().startsWith('about:'), `Back stays in the app (${page.url()})`);
+				expect(!page.url().startsWith('about:'), `still in the app (${page.url()})`);
 				await waitChat(page, { surface: 'new' }, { timeout: 5000 });
 			}
 		},
@@ -548,16 +542,13 @@ await runJourney({
 				await onPage('usage');
 				await expectEntries(page, { index: before.index + 2, length: before.length + 2 }, 'boot adds no Back stop under the page');
 
-				await mark('Back to the list, Forward to the page');
+				await mark('Back to the list');
 				await page.goBack();
 				await onPage('main');
 				expect(await sheet.isVisible(), 'Back from the page keeps Chat controls open on its list');
-				await page.goForward();
-				await onPage('usage');
+				await expectEntries(page, { index: before.index + 1, length: before.length + 2 }, 'Back from the page lands on the list entry');
 
-				await mark('Back twice closes Chat controls');
-				await page.goBack();
-				await onPage('main');
+				await mark('Back again closes Chat controls');
 				await page.goBack();
 				await sheet.waitFor({ state: 'hidden', timeout: 5000 });
 				expect(!page.url().startsWith('about:'), `Back stays in the app (${page.url()})`);
