@@ -3574,10 +3574,25 @@ async def test_delegated_context_block_matches_the_recall_tools_the_session_offe
     )
     system = _CapturingLoop.captured["system"]
     assert (registry.get("HistoryExpand") is not None) is (mod and compaction)
-    spelled = ha._spell_bundled(ha.CONTEXT_BLOCK, ("HistoryExpand", "HistorySearch"))
+    history = ("HistoryExpand", "HistorySearch")
+    spelled = ha._spell_bundled(ha.CONTEXT_BLOCK_DELEGATED_RECALL, history)
     assert (spelled in system) is recall
+    # Never the native wording: a CLI that could not load the mod compacts
+    # on its own and its summary names no refs.
+    assert ha._spell_bundled(ha.CONTEXT_BLOCK, history) not in system
     assert (ha.CONTEXT_BLOCK_NO_RECALL in system) is not recall
     assert system.count("# Context window") == 1
+
+
+def test_native_context_block_is_unchanged():
+    """The native leg keeps CONTEXT_BLOCK byte for byte (its refs always come
+    from fluid's own compaction); only the claude leg rewords it."""
+    import app.core.provider.harness_adapter as ha
+
+    options = SessionOptions(model="fable", system_prompt="BASE")
+    blocks = ha._app_guidance_blocks(options, leg="native", permitted=None)
+    assert ha.CONTEXT_BLOCK in blocks
+    assert ha.CONTEXT_BLOCK_DELEGATED_RECALL not in blocks
 
 
 def _assert_unique_headings(system):

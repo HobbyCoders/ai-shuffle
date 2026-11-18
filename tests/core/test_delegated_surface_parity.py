@@ -503,6 +503,27 @@ def test_browser_guidance_follows_the_servers_route(tmp_path, monkeypatch, leg, 
             assert "mcp__browser__" not in text
 
 
+@pytest.mark.parametrize("entry,named", [
+    (BROWSER, True),
+    ({"type": "stdio", "command": "node"}, True),
+    ({"type": "http", "url": "http://127.0.0.1:9/mcp"}, False),
+    ({"transport": "sse", "url": "http://127.0.0.1:9/sse"}, False),
+    ({"type": "http"}, False),  # no url: acp_server_entry drops it
+])
+def test_agent_connected_browser_is_named_only_for_stdio(tmp_path, entry, named):
+    """Handed to an ACP agent, a server reaches it only in a transport the agent
+    advertises after initialize; stdio is the one every agent takes, so only a
+    stdio browser entry (as ``acp_server_entry`` classifies it) is named."""
+    from fluid.tools.registry import ToolRegistry
+
+    options = _options(tmp_path, {"browser": entry})
+    text = _verification(ha._app_guidance_blocks(
+        options, leg="antigravity", registry=ToolRegistry(), host_servers=set(),
+    ))
+    assert ("one browser_navigate and one" in text) is named
+    assert (UNAVAILABLE in text) is not named
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("logs,expected", [
     (["GetAppLogs", "GetAppErrors"],

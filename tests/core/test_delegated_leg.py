@@ -260,6 +260,28 @@ class _KwargsLoop:
 
 
 @pytest.mark.asyncio
+async def test_prompt_and_mcp_config_share_one_server_map(monkeypatch, tmp_path):
+    """Connect reads the CLI's server map once: the browser guidance frozen in
+    the prompt names the servers ``--mcp-config`` connects, even when a plugin
+    server is toggled between two reads."""
+    browser = {"browser": {"command": "browser-mcp"}}
+    reads = []
+
+    def _servers(options):
+        reads.append(options)
+        return dict(browser) if len(reads) == 1 else {}
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
+    monkeypatch.setattr(ha, "_delegated_external_mcp_servers", _servers)
+    await ha.HarnessAdapter().connect(_preset_options(tmp_path))
+    captured = _KwargsLoop.captured
+    assert len(reads) == 1
+    assert captured["mcp_servers"] == browser
+    assert "mcp__browser__browser_navigate" in captured["system"]
+
+
+@pytest.mark.asyncio
 async def test_both_legs_get_the_adapters_hook_bus(monkeypatch, tmp_path):
     """One bus per adapter, handed to whichever loop the connect builds, so a
     callback on ``adapter.hooks`` observes either leg."""

@@ -724,6 +724,14 @@ class HarnessAdapter(ProviderAdapter):
                 self._registry, claude_mod=claude_mod_on,
                 claude_mod_compaction=claude_compaction_on,
             )
+            # ONLY external transports. The raw map also holds type='sdk'
+            # entries wrapping live in-proc Server instances, and the
+            # delegated leg JSON-serializes this map into its --mcp-config
+            # file -> TypeError("Object of type Server is not JSON
+            # serializable") and a failed spawn. Read once: the prompt's
+            # browser guidance and --mcp-config must name the same servers
+            # (plugin servers can change between two reads).
+            delegated_servers = await run_sync(_delegated_external_mcp_servers, options)
             if one_shot:
                 # DelegatedLoop(one_shot=True) passes an empty --system-prompt.
                 delegated_system = None
@@ -736,6 +744,7 @@ class HarnessAdapter(ProviderAdapter):
                 delegated_system = await run_sync(
                     self._compile_prompt, system, append_system, options,
                     self._worker_identity, self._workspace_card, self._registry,
+                    delegated_servers,
                 )
                 delegated_append = None
             # Resolving the CLI stats PATH entries on disk. A missing CLI
@@ -791,12 +800,8 @@ class HarnessAdapter(ProviderAdapter):
                     getattr(options, "include_partial_messages", False)
                     or _extra_opt(options, "partial", False)
                 ),
-                # ONLY external transports. The raw map also holds type='sdk'
-                # entries wrapping live in-proc Server instances, and the
-                # delegated leg JSON-serializes this map into its --mcp-config
-                # file -> TypeError("Object of type Server is not JSON
-                # serializable") and a failed spawn.
-                mcp_servers=await run_sync(_delegated_external_mcp_servers, options),
+                # Resolved once above: the prompt names exactly these servers.
+                mcp_servers=delegated_servers,
                 cwd=options.cwd,
                 env=cli_env,
                 add_dirs=list(options.add_dirs) if options.add_dirs else None,
@@ -5508,6 +5513,7 @@ class HarnessAdapter(ProviderAdapter):
         wired: Optional[frozenset] = None,
         workspace_card: Optional[str] = None,
         worker: Optional[str] = None,
+        external_servers: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Run the fluid prompt compiler, keeping the labeled sections.
 
@@ -5682,6 +5688,7 @@ class HarnessAdapter(ProviderAdapter):
                 options, leg="native" if native else "claude",
                 permitted=permitted, registry=registry,
                 commit_attribution=commit_attribution,
+                external_servers=external_servers,
             ):
                 sections.append(PromptSection(kind="extra", text=block))
             if code_mode:
@@ -5731,6 +5738,7 @@ class HarnessAdapter(ProviderAdapter):
         worker: Optional[str] = None,
         workspace_card: Optional[str] = None,
         registry: Any = None,
+        external_servers: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """Run the fluid prompt compiler over the app's system-prompt parts.
 
@@ -5740,7 +5748,8 @@ class HarnessAdapter(ProviderAdapter):
         block, as on the native leg. The compiler adds fluid's own gathering:
         instruction files, skills index, environment. ``workspace_card`` is
         slotted as on the native leg. ``registry`` is the session's, whose
-        bridged tools decide the app's blocks. Never raises — a compiler
+        bridged tools decide the app's blocks. ``external_servers`` is the
+        ``--mcp-config`` map connect resolved (None: resolve it here). Never raises — a compiler
         failure falls back to the pre-compiler string so a session can
         always start.
 
@@ -5751,6 +5760,7 @@ class HarnessAdapter(ProviderAdapter):
         compiled = HarnessAdapter._compile_prompt_sections(
             system, append_system, options, native=False, worker=worker,
             workspace_card=workspace_card, registry=registry,
+            external_servers=external_servers,
         )
         if compiled is None:
             return system if system is not None else append_system
@@ -8118,6 +8128,16 @@ CONTEXT_BLOCK = """# Context window
 - HistoryExpand(node) returns that node's original text verbatim, and HistorySearch finds earlier text; recover a value that way rather than reconstructing it from memory or re-running the command.
 - The latest user message outranks any digest."""
 
+# The claude leg's note when it offers the recall tools. There a digest names
+# a fluid ref only when the spawn loaded the mod; a CLI that could not (older
+# than the mod, a staging error) compacts on its own and its summary carries
+# none, while HistorySearch still finds the stored text. So no claim that
+# every digest names a ref.
+CONTEXT_BLOCK_DELEGATED_RECALL = """# Context window
+- Old tool results and old turns may appear as placeholders or digests.
+- When one names a `node_…` ref, HistoryExpand(node) returns that node's original text verbatim; otherwise HistorySearch finds earlier text and returns refs HistoryExpand accepts. Recover a value that way rather than reconstructing it from memory or re-running the command; if neither finds it, say that it was trimmed.
+- The latest user message outranks any digest."""
+
 # The same note for a surface without the recall tools: compaction still
 # happens, but the model must not be told to call tools it does not have.
 CONTEXT_BLOCK_NO_RECALL = """# Context window
@@ -8381,6 +8401,7 @@ _VERIFICATION_BROWSER_TOOLS = (
 
 def _delegated_browser_prefix(
     options: SessionOptions, leg: str, registry: Any, host_servers: Any = (),
+    external_servers: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """How a delegated agent names the browser server's verification tools,
     or None when the session does not offer all of them.
@@ -8389,13 +8410,16 @@ def _delegated_browser_prefix(
 
     * claude leg: the CLI connects every server in
       ``_delegated_external_mcp_servers`` (profile servers, plus owner-approved
-      plugin servers on the unrestricted code lane) and lists their tools as
+      plugin servers on the unrestricted code lane; ``external_servers``, the
+      map connect resolved once for ``--mcp-config``) and lists their tools as
       ``mcp__browser__<tool>``.
     * Antigravity, connected host-side (``host_servers``): the tools sit on the
       app registry and are run through the bridge's CallTool by registry name,
       ``mcp__browser__<tool>``, so the bridge must serve them.
     * Antigravity, handed to the agent (the profile's server map): the agent
-      names them by leaf (``""`` prefix).
+      names them by leaf (``""`` prefix), for a stdio entry only. The agent
+      gets another transport only if it advertises it, which is known after
+      initialize; ``agy acp`` advertises none.
 
     In every route the session's tool surface must permit each tool.
     """
@@ -8404,17 +8428,28 @@ def _delegated_browser_prefix(
     if permit is not None and not all(permit(name) for name in qualified):
         return None
     if leg == "claude":
-        return "mcp__browser__" if "browser" in _delegated_external_mcp_servers(options) else None
+        if external_servers is None:
+            external_servers = _delegated_external_mcp_servers(options)
+        return "mcp__browser__" if "browser" in external_servers else None
     if "browser" in (host_servers or ()):
         try:
             names = {spec.name for spec in registry.list_tools(loaded_only=False)}
         except Exception:  # noqa: BLE001 — a prompt block never fails a connect
             names = set()
         return "mcp__browser__" if set(qualified) <= names else None
-    if (options.extra or {}).get("assistant_proactive") is None and (
-        "browser" in _external_mcp_servers(options.mcp_servers)
-    ):
-        return ""
+    server = (
+        _external_mcp_servers(options.mcp_servers).get("browser")
+        if (options.extra or {}).get("assistant_proactive") is None else None
+    )
+    if isinstance(server, dict):
+        from fluid.engine.acp.loop import acp_server_entry
+
+        # The loop passes the agent a server only in a transport the agent
+        # advertises, learned after initialize (later than this prompt).
+        # Every ACP agent takes stdio, so only a stdio entry is certain.
+        entry = acp_server_entry("browser", server)
+        if entry is not None and entry.get("type", "stdio") == "stdio":
+            return ""
     return None
 
 
@@ -8426,6 +8461,7 @@ def _app_guidance_blocks(
     registry: Any = None,
     commit_attribution: bool = True,
     host_servers: Any = (),
+    external_servers: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """The app's guidance blocks, one composition for every leg.
 
@@ -8458,13 +8494,17 @@ def _app_guidance_blocks(
     * Context window: HistoryExpand and HistorySearch exist on the claude leg
       only when its compaction runs through the mod (registered at connect,
       before this compile, by ``register_recall_tools``), so the block names
-      them only when the registry and surface offer both.
+      them only when the registry and surface offer both, and in wording
+      (``CONTEXT_BLOCK_DELEGATED_RECALL``) that stays true when the spawn
+      could not load the mod and the CLI's own summary names no refs.
+      Antigravity never registers them, so it gets the no-recall note.
     * Verification: the browser tools are named as the session's route for
       the ``browser`` server spells them (``_delegated_browser_prefix``:
       ``mcp__browser__…`` on the claude leg and through Antigravity's
       CallTool, the leaf name when Antigravity's agent connects the server),
       and only the app log tools the bridge serves are given as examples.
-      ``host_servers`` is the set connected host-side on Antigravity.
+      ``host_servers`` is the set connected host-side on Antigravity;
+      ``external_servers`` the claude leg's ``--mcp-config`` map.
 
     Fixed at connect (no per-turn input), so the prefix stays byte-stable.
     """
@@ -8492,7 +8532,8 @@ def _app_guidance_blocks(
         offered = _delegated_offered(options, registry)
         history = ("HistoryExpand", "HistorySearch")
         blocks.append(
-            _spell_bundled(CONTEXT_BLOCK, history) if all(offered(t) for t in history)
+            _spell_bundled(CONTEXT_BLOCK_DELEGATED_RECALL, history)
+            if all(offered(t) for t in history)
             else CONTEXT_BLOCK_NO_RECALL
         )
     # Model-family and learned guidance follow the model, whatever the leg.
@@ -8554,7 +8595,9 @@ def _app_guidance_blocks(
         if native:
             blocks.append(_verification_section(permitted))
         else:
-            prefix = _delegated_browser_prefix(options, leg, registry, host_servers)
+            prefix = _delegated_browser_prefix(
+                options, leg, registry, host_servers, external_servers
+            )
             text = _verification_section(None if prefix is not None else frozenset())
             if prefix:
                 text = re.sub(
