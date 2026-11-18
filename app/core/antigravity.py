@@ -1657,13 +1657,30 @@ _RESET_KEYS = ("reset_time", "resetTime", "resets_at", "resetsAt", "reset_at")
 _NAME_KEYS = ("window", "name", "label", "model", "type", "id")
 
 
-def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
-    """Windows from a ``/usage`` JSON reply, or None when it is not understood.
+def _grouped_usage_buckets(payload: Mapping[str, Any]) -> list[tuple[Mapping[str, Any], str, str]]:
+    command = payload.get("command")
+    data = command.get("data") if isinstance(command, Mapping) else None
+    groups = data.get("groups") if isinstance(data, Mapping) else None
+    candidates = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, Mapping):
+            continue
+        name, buckets = group.get("name"), group.get("buckets")
+        if not isinstance(name, str) or not name or not isinstance(buckets, list):
+            continue
+        for bucket in buckets:
+            if not isinstance(bucket, Mapping):
+                continue
+            bucket_id, window = bucket.get("id"), bucket.get("window")
+            if not isinstance(bucket_id, str) or not bucket_id or not isinstance(window, str) or not window:
+                continue
+            period = "5-hour" if window == "5h" else window
+            candidates.append((bucket, bucket_id, f"{name}, {period}"))
+    return candidates
 
-    The shape is unverified against a signed-in binary (community reports
-    describe a remaining fraction and a reset time per window). Anything that
-    does not look like that answers None, which the UI shows as unavailable.
-    """
+
+def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
+    """Windows from a ``/usage`` reply, or None when it is not understood."""
     if not isinstance(payload, Mapping) or payload.get("status") == "ERROR":
         return None
     candidates: List[Mapping[str, Any]] = []
@@ -1681,20 +1698,26 @@ def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
             for child in value[:50]:
                 walk(child, depth + 1)
 
-    walk({k: v for k, v in payload.items() if k != "usage"})
+    grouped = _grouped_usage_buckets(payload)
+    if not grouped:
+        # Older, guessed shape. Never count the top-level token usage object.
+        walk({k: v for k, v in payload.items() if k != "usage"})
+        for index, item in enumerate(candidates):
+            name = next((item[k] for k in _NAME_KEYS if isinstance(item.get(k), str) and item[k]), "")
+            slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(index)
+            grouped.append((item, slug, name))
+
     windows = []
-    for index, item in enumerate(candidates):
+    for item, bucket_id, label in grouped:
         fraction = next((item.get(k) for k in _FRACTION_KEYS if k in item), None)
         if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
             continue
         if not 0 <= float(fraction) <= 1:
             continue
-        name = next((str(item[k]) for k in _NAME_KEYS if isinstance(item.get(k), str) and item[k]), "")
-        slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(index)
         reset = next((item.get(k) for k in _RESET_KEYS if item.get(k) not in (None, "")), None)
         windows.append({
-            "type": f"antigravity_{slug}",
-            "label": name or None,
+            "type": f"antigravity_{bucket_id}",
+            "label": label or None,
             "utilization": round((1 - float(fraction)) * 100, 2),
             "resets_at": str(int(reset)) if isinstance(reset, (int, float)) and not isinstance(reset, bool)
             else (str(reset) if reset is not None else None),

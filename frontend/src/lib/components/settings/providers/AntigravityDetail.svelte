@@ -265,7 +265,7 @@
 			<RowGroup title="Quota" id="providers-antigravity-usage">
 				{#if usageWindows.length}
 					{#each usageWindows as w (w.type)}
-						<SettingRow label={windowLabel(w.type)} hint={usageState === 'fresh' ? undefined : 'Last reading'}>
+						<SettingRow label={windowLabel(w.type, w.label)} hint={usageState === 'fresh' ? undefined : 'Last reading'}>
 							<ValueText tone="fg" value={`${Math.max(0, Math.round(100 - w.utilization))}% left`} />
 						</SettingRow>
 					{/each}

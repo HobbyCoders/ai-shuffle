@@ -551,7 +551,7 @@
 	): RowSlot[] {
 		return withBaseline(windows, providerBaselineWindows(pb, showsRemaining, noFiveHourLimit), (w) => {
 			const display = providerWindowPercent(w, nowMs, showsRemaining);
-			return { type: w.type, label: windowLabel(w.type), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
+			return { type: w.type, label: windowLabel(w.type, w.label), pct: display.pct, severity: display.severity, resetText: resetText(w, nowMs) };
 		});
 	}
 
@@ -1695,6 +1695,12 @@
 		display: flex;
 		flex-direction: column;
 		gap: 4px;
+	}
+
+	/* Grouped quota labels may wrap; keep each reset and percentage together. */
+	.popover-row .row-label {
+		white-space: normal;
+		overflow-wrap: anywhere;
 	}
 
 	.row-label {

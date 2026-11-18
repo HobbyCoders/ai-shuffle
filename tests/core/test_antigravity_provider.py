@@ -2102,7 +2102,46 @@ def test_this_worker_advertises_the_capability():
 
 # --- /usage ---------------------------------------------------------------------
 
-def test_usage_parses_the_reported_shape():
+def test_usage_parses_grouped_agent_buckets():
+    # agy 1.5.9's /usage envelope (#1752); redacted reset times filled in.
+    windows = ag.normalize_usage({
+        "status": "SUCCESS",
+        "response": "Quota limits",
+        "usage": {"input_tokens": 0},
+        "command": {"name": "usage", "data": {"groups": [
+            {"name": "Gemini Models", "buckets": [
+                {"id": "gemini-weekly", "name": "Weekly Limit Remaining", "window": "weekly",
+                 "remaining_fraction": 1, "reset_time": "2026-11-25T01:04:13Z"},
+                {"id": "gemini-5h", "name": "Five Hour Limit Remaining", "window": "5h",
+                 "remaining_fraction": 1, "reset_time": "2026-11-18T06:04:13Z"},
+            ]},
+            {"name": "Claude and GPT models", "buckets": [
+                {"id": "3p-weekly", "window": "weekly",
+                 "remaining_fraction": 1, "reset_time": "2026-11-24T20:00:00Z"},
+                {"id": "3p-5h", "window": "5h",
+                 "remaining_fraction": 1, "reset_time": "2026-11-18T05:00:00Z"},
+            ]},
+            {"name": "Gemini 4 Argon", "buckets": [
+                {"id": "gemini-argon-wtu-weekly", "name": "Gemini 4 Argon Weekly Limit",
+                 "window": "weekly", "remaining_fraction": 0.9898, "reset_time": "2026-11-25T00:00:00Z"},
+            ]},
+        ]}},
+    })
+    assert windows == [
+        {"type": "antigravity_gemini-weekly", "label": "Gemini Models, weekly",
+         "utilization": 0.0, "resets_at": "2026-11-25T01:04:13Z"},
+        {"type": "antigravity_gemini-5h", "label": "Gemini Models, 5-hour",
+         "utilization": 0.0, "resets_at": "2026-11-18T06:04:13Z"},
+        {"type": "antigravity_3p-weekly", "label": "Claude and GPT models, weekly",
+         "utilization": 0.0, "resets_at": "2026-11-24T20:00:00Z"},
+        {"type": "antigravity_3p-5h", "label": "Claude and GPT models, 5-hour",
+         "utilization": 0.0, "resets_at": "2026-11-18T05:00:00Z"},
+        {"type": "antigravity_gemini-argon-wtu-weekly", "label": "Gemini 4 Argon, weekly",
+         "utilization": 1.02, "resets_at": "2026-11-25T00:00:00Z"},
+    ]
+
+
+def test_usage_parses_the_guessed_shape():
     windows = ag.normalize_usage({"status": "OK", "quotas": [
         {"model": "gemini-3.1-pro", "remainingFraction": 0.75, "resetTime": "2026-11-12T10:00:00Z"}]})
     assert windows == [{"type": "antigravity_gemini_3_1_pro", "label": "gemini-3.1-pro",
@@ -2111,6 +2150,7 @@ def test_usage_parses_the_reported_shape():
 
 @pytest.mark.parametrize("payload", [
     None, [], "text", {"status": "ERROR", "error": {"message": "Authentication required"}},
+    {"status": "ERROR", "quotas": [{"remaining_fraction": 0.5}]},
     {"quotas": [{"remainingFraction": 7}]}, {"quotas": [{"remainingFraction": "half"}]},
     {"usage": {"remaining": 0.5}}, {"status": "OK"},
 ])
