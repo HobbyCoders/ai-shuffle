@@ -30,7 +30,7 @@ function between(start: string, end: string) {
 	return source.slice(from, to);
 }
 const transaction = between("let layoutBoundary = '';", '// Rendered geometry has one lifecycle').replace(': QueueHandoffMark | null', '');
-const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
+const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replaceAll('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
 const handoffRelease = between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view')
@@ -53,7 +53,7 @@ function probe() {
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
-		let followedViewportEnd = 0, followedFloorContext = null;
+		let followedViewportEnd = 0, followedProseEnd = 0, followedFloorContext = null;
 		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
 		let handoffPainted = false, heldBlankPx = 0, handoffHold = 0;
 		let windowShifting = false, windowShiftVersion = 0;
@@ -399,6 +399,30 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		p.run();
 		expect(p.floor()).toBe(0);
 		expect(p.reserve()).toBe(0);
+	});
+
+	it('holds the room below the captured prose, not prose that shrinks under the follower', () => {
+		// A live work run folds into one label when new prose starts: the prose
+		// above a follower shrinks by more than the 600px view. Holding that shrink
+		// kept scrollTop on the old end and left the whole viewport blank.
+		const p = probe();
+		p.env.proseEnd = 5560;
+		captureLongFloor(p);
+		expect(p.reserve()).toBe(40);
+		p.env.proseEnd = 5560 - 900;
+		expect(p.reserve()).toBe(40);
+		// The browser clamps to the shorter transcript; the next boundary must not
+		// recapture the shrink against the ratcheted floor.
+		p.env.scrollTop = 5000 - 900;
+		p.env.session = session('long', 4); p.run();
+		expect(p.floor()).toBe(5600);
+		expect(p.reserve()).toBe(40);
+		// Growth (a delivered row landing after its bubble left) still consumes it.
+		p.env.proseEnd = 5590;
+		expect(p.reserve()).toBe(10);
+		// A reader who is not following is still owed their own viewport end.
+		p.env.follows = false; p.env.proseEnd = 100; p.run();
+		expect(p.reserve()).toBe(500);
 	});
 
 	it('clears the floor without recapturing old coordinates when the transcript is cleared', () => {

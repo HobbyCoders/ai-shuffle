@@ -65,7 +65,7 @@ function view(layout: Layout, anchored: boolean) {
 	const anchorEl = { getBoundingClientRect: () => ({ top: layout.anchorTop - layout.scrollTop }), compareDocumentPosition: () => 0 };
 	return new Function('scope', `with (scope) {
 		let $activeSession = null, lastKnownScrollTop = 0, bannerError = null;
-		let followedViewportEnd = 0, followedFloorContext = null, presentedTailError = null, tailErrorOffsetPx = 0;
+		let followedViewportEnd = 0, followedProseEnd = 0, followedFloorContext = null, presentedTailError = null, tailErrorOffsetPx = 0;
 		let tailQueueSlotPx = 0, handoffSlotPx = 0;
 		let tailReservePx = MIN_TRANSCRIPT_TAIL_RESERVE, latestTurnTailPx = MIN_TRANSCRIPT_TAIL_RESERVE;
 		let windowShifting = false, windowShiftVersion = 0, isMounted = true, shouldAutoScroll = true;

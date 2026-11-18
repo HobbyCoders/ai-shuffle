@@ -4,7 +4,7 @@
 // produced by real UI sends through the devloop's fake providers; the long
 // error/Stop case specifically requires the seeded Claude Code CLI project.
 import { writeFileSync } from 'node:fs';
-import { ERROR_ROW_PROBE, SEEDED, api, composer, errorRow, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated, waitTurnSettled } from './lib/app.mjs';
+import { ERROR_ROW_PROBE, PROJECT, SEEDED, api, chatIdByToken, composer, errorRow, expect, gotoApp, openFromSidebar, openNewChat, openPopup, pick, pickAccess, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobile = process.argv.includes('--mobile-shell');
@@ -878,6 +878,76 @@ cases.push({
 		expect(geometry.padding <= geometry.viewport + 1, 'short chat reserve belongs to its viewport, not the outgoing scroll offset');
 		expect(geometry.top <= geometry.viewport, 'the incoming short chat does not inherit the outgoing long scroll offset');
 		expect(geometry.rowBottom > geometry.viewportTop && geometry.rowTop < geometry.viewportBottom, 'the short completed answer remains on screen, not above blank padding');
+	}
+});
+
+// A follower's live work run folds into one label when new prose starts, so the
+// prose above the reader shrinks by more than a phone viewport mid-stream. The
+// followed floor held that shrink as padding: scrollTop stayed on the old end and
+// the whole transcript sat above a blank view, Stop live and the scrollbar near
+// the bottom. Every painted frame must keep transcript content on screen.
+cases.push({
+	name: 'live-run-fold-keeps-the-stream-on-screen', viewports: ['phone'], throttles: ['slow'],
+	async setup(ctx) {
+		const { page, status, variant } = ctx;
+		// Bash needs a project chat; Bypass is picked in the shared UI (the phone
+		// sheet's picker stays open), then the chat reopens in the real /mobile/.
+		await openNewChat(ctx, { project: PROJECT });
+		await pickAccess(page, 'Bypass');
+		const token = `fold-history-${uniq()}`;
+		await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 400 })}`);
+		await waitTurnSettled(page, { hold: 500, timeout: 120_000 });
+		if (prefix(variant) !== '/') {
+			const id = await chatIdByToken(page, token);
+			await gotoApp(page, status, `${prefix(variant)}?session=${encodeURIComponent(id)}`);
+			await waitChatOpen(page, { messagesAtLeast: 2, hold: 800 });
+		}
+	},
+	async act({ page, variant, mark, log }) {
+		await page.evaluate(() => {
+			const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null };
+			const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+			const sample = () => {
+				if (!watch.running) return;
+				const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+				const spacer = log?.querySelector('.transcript-tail-spacer');
+				if (log && spacer && document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true') {
+					const box = log.getBoundingClientRect();
+					const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+					const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')];
+					watch.streaming++;
+					// The prose end in scroll coordinates: proves the fold really shrank it.
+					const proseEnd = log.scrollTop + spacer.getBoundingClientRect().top - box.top;
+					if (watch.lastProseEnd !== null) watch.proseDrop = Math.max(watch.proseDrop, watch.lastProseEnd - proseEnd);
+					watch.lastProseEnd = proseEnd;
+					if (rows.length && !rows.some(el => visible(el, box)) && !controls.some(el => visible(el, box))) {
+						watch.run++;
+						watch.longest = Math.max(watch.longest, watch.run);
+						if (watch.blank.length < 5) watch.blank.push({ scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight, viewport: log.clientHeight,
+							padding: getComputedStyle(log.querySelector('.chat-column')).paddingBottom, lastRowBottom: Math.round(rows.at(-1).getBoundingClientRect().bottom - box.top) });
+					} else watch.run = 0;
+				}
+				watch.frames++;
+				requestAnimationFrame(sample);
+			};
+			requestAnimationFrame(sample);
+		});
+		await mark('a long flat tool run folds above the follower as new prose streams');
+		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await waitTurnSettled(page, { hold: 800, timeout: 120_000 });
+		const watch = await page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames; });
+		const viewport = await page.locator(LOG).evaluate(el => el.clientHeight);
+		log(`live run fold ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length, longest: watch.longest, blank: watch.blank })}`);
+		expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
+		expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
+		expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
+		const settled = await page.locator(LOG).evaluate(el => {
+			const box = el.getBoundingClientRect();
+			const last = [...el.querySelectorAll('.chat-column > [data-transcript-key]')].at(-1).getBoundingClientRect();
+			return { rowTop: last.top - box.top, rowBottom: last.bottom - box.top, viewport: el.clientHeight };
+		});
+		expect(settled.rowBottom > 8 && settled.rowTop < settled.viewport - 8, `the settled reply stays on screen (${JSON.stringify(settled)})`);
 	}
 });
 

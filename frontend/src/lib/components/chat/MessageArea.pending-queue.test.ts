@@ -41,7 +41,7 @@ describe('MessageArea pending-queue wiring (#524)', () => {
 		const make = new Function('createQueuedPromptTracker', transpile(`
 			let $activeSession; let pre;
 			// TypeScript 6 emits strict code: every binding the slices assign must exist.
-			let shouldAutoScroll = false, pendingScrollToBottom = false, followedViewportEnd = 0;
+			let shouldAutoScroll = false, pendingScrollToBottom = false, followedViewportEnd = 0, followedProseEnd = 0;
 			const cancelCurrentTurnAnchor = () => {};
 			${release}
 			const $effect = { pre: (callback) => { pre = callback; } };
