@@ -737,10 +737,18 @@ class CodeModeSession:
             await _finish(reply)
             return reply
 
-        result = await kernel.exec(
-            code, timeout=timeout, on_host_call=_host_call,
-            host_wait_credit=human_wait.seconds,
-        )
+        try:
+            result = await kernel.exec(
+                code, timeout=timeout, on_host_call=_host_call,
+                host_wait_credit=human_wait.seconds,
+            )
+        except IsolationUnavailable as exc:
+            # A restart the isolated profile refused (the kernel died and the
+            # launcher could not confine its replacement): reported like a
+            # refused first start. The last checkpoint is kept, and the next
+            # cell tries the start again.
+            return ToolOutcome(text=f"{exc} The last namespace checkpoint is kept for the next cell.",
+                               is_error=True)
         self._record_cell(code, result, called_tools)
 
         parts: list[str] = []

@@ -272,10 +272,24 @@ SANDBOX_MODES = ("off", "isolated")
 
 
 def _path_list(d: dict[str, Any], key: str) -> tuple[str, ...]:
-    raw = d.get(key) or ()
-    if isinstance(raw, str) or not all(isinstance(item, str) and item for item in raw):
+    raw = d.get(key, ())
+    # A list (or a tuple from code), never a table: a mapping iterates as
+    # its keys and a string as its characters.
+    if not isinstance(raw, (list, tuple)) or not all(isinstance(item, str) and item for item in raw):
         raise ValueError(f"[sandbox] {key} must be a list of non-empty strings")
     return tuple(raw)
+
+
+def _no_device_roots(key: str, roots: tuple[str, ...]) -> tuple[str, ...]:
+    import posixpath
+
+    for root in roots:
+        folded = posixpath.normpath(root)
+        if folded == "/dev" or folded.startswith("/dev/"):
+            raise ValueError(
+                f"[sandbox] {key} cannot include {root}: device nodes are reachable only "
+                "through the profile's fixed device list (/dev/null, /dev/zero, /dev/urandom, ...)")
+    return roots
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -314,8 +328,8 @@ class SandboxConfig:
         return cls(
             mode=mode,
             network=network,
-            writable_roots=_path_list(d, "writable_roots"),
-            readable_roots=_path_list(d, "readable_roots"),
+            writable_roots=_no_device_roots("writable_roots", _path_list(d, "writable_roots")),
+            readable_roots=_no_device_roots("readable_roots", _path_list(d, "readable_roots")),
             env_allow=_path_list(d, "env_allow"),
             protect=_path_list(d, "protect"),
         )

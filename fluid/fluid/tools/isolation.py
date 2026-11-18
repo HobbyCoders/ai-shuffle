@@ -4,7 +4,7 @@ Off by default. With ``[sandbox] mode = "isolated"`` every process Fluid starts
 to run a command the model chose (a Bash call, a Monitor command, the code-mode
 kernel) goes through a small launcher first:
 
-    python -I -S isolation.py --rw DIR ... --ro DIR ... --net off|on -- COMMAND...
+    python -I -S COPY --env FILE --ack FILE --rw DIR ... --ro DIR ... --net off|on -- COMMAND...
 
 The launcher asks the kernel to confine itself, then replaces itself with
 ``COMMAND``. On Linux the confinement is Landlock (filesystem access rules,
@@ -13,6 +13,15 @@ sockets when the network is off, and io_uring, which could open them behind
 seccomp's back). Both are inherited across ``exec`` and ``fork`` and cannot be
 lifted by the confined process. Any step that fails stops the command with
 exit status 126 before it runs; nothing runs half-confined.
+
+The launcher itself starts with an empty environment that Fluid builds: the
+command's environment (settings ``env`` included, which a project controls)
+is data in the ``--env`` file and is installed only by the final ``execve``,
+after confinement. Once Landlock and seccomp are in place the launcher writes
+one byte to the ``--ack`` file (opened before confinement, closed before
+``exec``, in a directory no confined process can open). A spawn site that
+finds no ack knows the command never ran, whatever the process printed or
+exited with.
 
 The policy is an allowlist:
 
@@ -32,8 +41,9 @@ its own sandbox, and from ABI 6 from signalling one.
 The script part is stdlib only and runs with ``-I -S`` (nothing from the
 working directory, the user site or ``PYTHON*`` variables is loaded). The
 importable part is what spawn sites call: :func:`policy_of` reads the policy a
-session carries in ``ToolCtx.extra["isolation"]``, :meth:`IsolationPolicy.wrap`
-rewrites ``(argv, cwd, env)`` or raises :class:`IsolationUnavailable`.
+session carries in ``ToolCtx.extra["isolation"]``, :meth:`IsolationPolicy.launch`
+returns a :class:`Launch` (the command line, and the ack to check once the
+process is done) or raises :class:`IsolationUnavailable`.
 
 A backend is per platform (:func:`backend`); only Linux has one today. A
 macOS Seatbelt backend would implement the same two methods.
@@ -50,6 +60,13 @@ SCRIPT = os.path.abspath(__file__)
 EXTRA_KEY = "isolation"
 #: The prefix of every refusal the launcher prints.
 REFUSAL_PREFIX = "fluid isolation refused"
+#: Set on a tool context by the engine factory: the policy it resolved, so a
+#: later change to ``extra["isolation"]`` is refused instead of half applied.
+BOUND_KEY = "isolation_bound"
+#: The byte the launcher writes to its ack file once it is confined.
+ACK = b"\x01"
+#: The whole environment the launcher process starts with.
+LAUNCHER_ENV: dict[str, str] = {}
 
 # --- Landlock (include/uapi/linux/landlock.h) --------------------------------
 
@@ -145,6 +162,11 @@ SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_ALLOW = 0x7FFF0000
 _EPERM = 1
 _EACCES = 13
+AF_UNIX = 1
+SOCK_STREAM = 1
+SOCK_SEQPACKET = 5
+SOCK_NONBLOCK = 0o4000
+SOCK_CLOEXEC = 0o2000000
 
 #: Per architecture: the audit arch value seccomp reports, and syscall numbers
 #: (arch/x86/entry/syscalls/syscall_64.tbl and scripts/syscall.tbl).
@@ -153,10 +175,10 @@ _EACCES = 13
 #: form, including setxattrat/removexattrat (Linux 6.13).
 SECCOMP_ARCHES = {
     "x86_64": {"audit": 0xC000003E, "x32": True,
-               "socket": 41, "truncate": 76, "io_uring": (425, 426, 427),
+               "socket": 41, "socketpair": 53, "truncate": 76, "io_uring": (425, 426, 427),
                "metadata": (92, 93, 94, 260, 188, 189, 190, 197, 198, 199, 463, 466)},
     "aarch64": {"audit": 0xC00000B7, "x32": False,
-                "socket": 198, "truncate": 45, "io_uring": (425, 426, 427),
+                "socket": 198, "socketpair": 199, "truncate": 45, "io_uring": (425, 426, 427),
                 "metadata": (54, 55, 5, 6, 7, 14, 15, 16, 463, 466)},
 }
 
@@ -181,9 +203,14 @@ def seccomp_program(arch: str, *, block_network: bool, block_truncate: bool) -> 
     always fail with ``EPERM`` (what an unprivileged chown returns, which
     tools such as ``cp -p`` and ``tar`` already tolerate); the other blocked
     calls fail with ``EACCES``; everything else is allowed.
+
+    With the network off, ``socketpair`` is allowed only for ``AF_UNIX``
+    stream and seqpacket pairs (asyncio and most runtimes need those). A
+    datagram pair is refused: ``sendto`` with an address on one reaches any
+    pathname datagram socket, inside the sandbox or not.
     """
     spec = SECCOMP_ARCHES[arch]
-    ld_w_abs, jeq_k, jge_k, ret_k = 0x20, 0x15, 0x35, 0x06
+    ld_w_abs, jeq_k, jge_k, ret_k, and_k = 0x20, 0x15, 0x35, 0x06, 0x54
     deny = SECCOMP_RET_ERRNO | _EACCES
     blocked: list[tuple[int, int]] = [(nr, SECCOMP_RET_ERRNO | _EPERM) for nr in spec["metadata"]]
     if block_network:
@@ -200,6 +227,20 @@ def seccomp_program(arch: str, *, block_network: bool, block_truncate: bool) -> 
         prog += [(jge_k, 0, 1, 0x40000000), (ret_k, 0, 0, SECCOMP_RET_KILL_PROCESS)]
     for nr, verdict in blocked:
         prog += [(jeq_k, 0, 1, nr), (ret_k, 0, 0, verdict)]
+    if block_network:
+        # seccomp_data.args[i] is a u64 at 16 + 8*i; both arches are little
+        # endian and the kernel reads domain and type as int, so the low word.
+        prog += [
+            (jeq_k, 0, 8, spec["socketpair"]),  # not socketpair: to the final allow
+            (ld_w_abs, 0, 0, 16),  # domain
+            (jeq_k, 1, 0, AF_UNIX),
+            (ret_k, 0, 0, deny),
+            (ld_w_abs, 0, 0, 24),  # type
+            (and_k, 0, 0, ~(SOCK_NONBLOCK | SOCK_CLOEXEC) & 0xFFFFFFFF),
+            (jeq_k, 2, 0, SOCK_STREAM),
+            (jeq_k, 1, 0, SOCK_SEQPACKET),
+            (ret_k, 0, 0, deny),
+        ]
     prog.append((ret_k, 0, 0, SECCOMP_RET_ALLOW))
     return prog
 
@@ -291,31 +332,39 @@ ENV_ALLOW = ("PATH", "LANG", "LANGUAGE", "LC_*", "TERM", "TZ", "USER", "LOGNAME"
              "COLUMNS", "LINES", "NO_COLOR", "FORCE_COLOR", "PWD")
 
 
-#: Variables the dynamic loader, libc or the interpreter act on while the
-#: launcher itself starts, before it is confined (an ``LD_PRELOAD`` from a
-#: workspace settings file would otherwise run unconfined). They travel under
-#: this prefix and are restored only for the confined command.
-HELD_PREFIX = "FLUID_ISOLATION_HELD_"
-_LOADER_NAMES = frozenset({
-    "GCONV_PATH", "GETCONF_DIR", "GLIBC_TUNABLES", "HOSTALIASES", "LOCALDOMAIN", "LOCPATH",
-    "MALLOC_TRACE", "NIS_PATH", "NLSPATH", "RESOLV_HOST_CONF", "RES_OPTIONS", "TZDIR",
-})
+# The command's environment travels to the launcher as data, never as the
+# launcher's own environment: the dynamic loader, libc and CPython's path
+# setup (PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ are read even under -I)
+# act on variables before anything is confined.
 
 
-def _loader_sensitive(name: str) -> bool:
-    upper = name.upper()
-    return upper.startswith(("LD_", "MALLOC_")) or upper in _LOADER_NAMES
+def encode_env(env: dict[str, str]) -> bytes:
+    """``NAME=value`` entries, each NUL-terminated (UTF-8, surrogateescape)."""
+    out = bytearray()
+    for name, value in env.items():
+        key, val = name.encode("utf-8", "surrogateescape"), value.encode("utf-8", "surrogateescape")
+        if not key or b"=" in key or b"\0" in key or b"\0" in val:
+            raise ValueError(f"environment variable {name!r} cannot be passed to a command")
+        out += key + b"=" + val + b"\0"
+    return bytes(out)
 
 
-def hold_loader_env(env: dict[str, str]) -> dict[str, str]:
-    return {(HELD_PREFIX + k if _loader_sensitive(k) else k): v
-            for k, v in env.items() if not k.startswith(HELD_PREFIX)}
+def decode_env(data: bytes) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for entry in data.split(b"\0"):
+        if not entry:
+            continue
+        key, sep, val = entry.partition(b"=")
+        if not sep or not key:
+            raise ValueError("malformed environment file")
+        env[key.decode("utf-8", "surrogateescape")] = val.decode("utf-8", "surrogateescape")
+    return env
 
 
-def release_loader_env(env: dict[str, str]) -> dict[str, str]:
-    out = {k: v for k, v in env.items() if not _loader_sensitive(k) and not k.startswith(HELD_PREFIX)}
-    out.update({k[len(HELD_PREFIX):]: v for k, v in env.items() if k.startswith(HELD_PREFIX)})
-    return out
+def read_env_file(path: str) -> dict[str, str]:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as handle:
+        return decode_env(handle.read())
 
 
 def _real(path: str) -> str:
@@ -334,6 +383,11 @@ def _contains(root: str, path: str) -> bool:
 
 def _overlaps(a: str, b: str) -> bool:
     return _contains(a, b) or _contains(b, a)
+
+
+def is_device_path(path: str) -> bool:
+    """``/dev`` or anything under it, after ``..`` is folded."""
+    return _contains("/dev", os.path.normpath(path))
 
 
 # --- What runs before confinement ---------------------------------------------
@@ -385,36 +439,51 @@ def launcher_script() -> str:
     return _launcher_copy
 
 
+class _Unverifiable(Exception):
+    pass
+
+
 def boot_paths() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """``(trees, files)`` read before the launcher confines itself."""
+    """``(trees, files)`` read before the launcher confines itself, each both
+    as named and as its real target (a loader directory may be a link).
+    Raises :class:`_Unverifiable` for a layout this cannot pin down."""
     import sysconfig
 
-    trees = [os.path.dirname(launcher_script()), *_LOADER_TREES]
+    named = [os.path.dirname(launcher_script()), *_LOADER_TREES]
     stdlib = sysconfig.get_path("stdlib")
-    if stdlib:
-        trees.append(os.path.realpath(stdlib))
+    if not stdlib or not os.path.isdir(stdlib):
+        raise _Unverifiable(f"the interpreter's standard library ({stdlib!r}) is not a directory")
+    named.append(stdlib)
     try:
         import _ctypes
 
-        trees.append(os.path.dirname(os.path.realpath(_ctypes.__file__)))
+        named.append(os.path.dirname(_ctypes.__file__))
     except (ImportError, AttributeError):  # pragma: no cover - builtin _ctypes
         pass
-    trees.append(os.path.realpath(os.path.join(sys.base_prefix, "lib")))
-    files = [LAUNCH_PYTHON]
-    if LAUNCH_PYTHON:
-        bindir = os.path.dirname(LAUNCH_PYTHON)
-        files += [os.path.join(bindir, "pyvenv.cfg"), os.path.join(os.path.dirname(bindir), "pyvenv.cfg")]
+    named.append(os.path.join(sys.base_prefix, "lib"))
+    trees: list[str] = []
+    for tree in named:
+        trees += [os.path.abspath(tree), os.path.realpath(tree)]
+    if not LAUNCH_PYTHON or not os.path.isfile(LAUNCH_PYTHON) or os.path.islink(LAUNCH_PYTHON):
+        raise _Unverifiable(f"the launcher's interpreter {LAUNCH_PYTHON!r} is not a regular file")
+    bindir = os.path.dirname(LAUNCH_PYTHON)
+    files = [LAUNCH_PYTHON, os.path.join(bindir, "pyvenv.cfg"),
+             os.path.join(os.path.dirname(bindir), "pyvenv.cfg")]
     return tuple(dict.fromkeys(trees)), tuple(files)
 
 
 def boot_problem(writable: tuple[str, ...]) -> str | None:
     """Why ``writable`` would let a confined command change what the next
-    launch runs before confinement, or None."""
+    launch runs before confinement, or None. ``writable`` holds real paths;
+    the trees are compared both as named and by their real targets."""
     if not LAUNCH_PYTHON:
         return "there is no Python interpreter to run the isolation launcher with"
     if not LAUNCHER_SOURCE:
         return "the isolation launcher's source could not be read"
-    trees, files = boot_paths()
+    try:
+        trees, files = boot_paths()
+    except _Unverifiable as exc:
+        return f"what the isolation launcher loads before it is confined cannot be verified: {exc}"
     for root in writable:
         for tree in trees:
             if _overlaps(root, tree):
@@ -429,16 +498,60 @@ def boot_problem(writable: tuple[str, ...]) -> str | None:
     return None
 
 
-def launcher_failure(code: int | None, stderr: str) -> str | None:
-    """The launcher's own refusal, told apart from the command's exit status.
+def _private_file(prefix: str, data: bytes = b"") -> str:
+    """A new 0600 file beside the launcher copy: outside every granted root,
+    so no confined process can open it."""
+    import tempfile
 
-    Exit 126 with the refusal prefix on stderr means confinement failed and
-    the command never ran. A command that prints the same thing itself only
-    makes a caller stricter."""
-    text = (stderr or "").lstrip()
-    if code == REFUSED and text.startswith(REFUSAL_PREFIX):
-        return text.splitlines()[0]
-    return None
+    fd, path = tempfile.mkstemp(prefix=prefix, dir=os.path.dirname(launcher_script()))
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    return path
+
+
+class Launch:
+    """One confined spawn: the command line to start, and the ack to read
+    once the process has exited (or been given up on).
+
+    Spawn sites call :meth:`finish` exactly when they are done with the
+    process: True means the launcher confined itself and handed over to the
+    command; False means the command never ran, whatever the process
+    printed or exited with."""
+
+    def __init__(self, argv: list[str], cwd: str | None, env: dict[str, str],
+                 env_path: str, ack_path: str) -> None:
+        self.argv, self.cwd, self.env = argv, cwd, env
+        self.env_path, self.ack_path = env_path, ack_path
+        self._acked: bool | None = None
+
+    def acked(self) -> bool:
+        if self._acked is not None:
+            return self._acked
+        try:
+            with open(self.ack_path, "rb") as handle:
+                return handle.read(len(ACK) + 1) == ACK
+        except OSError:
+            return False
+
+    def finish(self) -> bool:
+        """Read the ack, then remove both files. Idempotent."""
+        if self._acked is None:
+            self._acked = self.acked()
+            for path in (self.env_path, self.ack_path):
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        return self._acked
+
+    @staticmethod
+    def not_run(output: str, what: str = "the command") -> str:
+        """The "not run" message for a launch that was not acknowledged, with
+        the launcher's own refusal when it printed one."""
+        line = next((ln.strip() for ln in (output or "").splitlines()
+                     if ln.strip().startswith(REFUSAL_PREFIX)), "")
+        reason = line or "the isolation launcher stopped before it confirmed confinement"
+        return f"Not run: the isolated execution profile could not confine {what} ({reason})."
 
 
 def _env_allowed(name: str, allow: tuple[str, ...]) -> bool:
@@ -470,9 +583,9 @@ class LinuxLandlock:
             return "seccomp filters are unavailable in this kernel"
         return None
 
-    def prefix(self, writable: tuple[str, ...], readable: tuple[str, ...], network: bool,
-               protect: tuple[str, ...] = ()) -> list[str]:
-        argv = [LAUNCH_PYTHON, "-I", "-S", launcher_script()]
+    def prefix(self, writable: tuple[str, ...], readable: tuple[str, ...], network: bool, *,
+               protect: tuple[str, ...] = (), env_file: str, ack_file: str) -> list[str]:
+        argv = [LAUNCH_PYTHON, "-I", "-S", launcher_script(), "--env", env_file, "--ack", ack_file]
         for root in writable:
             argv += ["--rw", root]
         for root in readable:
@@ -494,7 +607,7 @@ class Unsupported:
         return (f"the isolated profile has no backend for {self.platform} yet "
                 "(Linux with Landlock only)")
 
-    def prefix(self, writable, readable, network, protect=()) -> list[str]:  # pragma: no cover - never reached
+    def prefix(self, writable, readable, network, **_files) -> list[str]:  # pragma: no cover - never reached
         raise IsolationUnavailable(self.unavailable_reason(network))
 
 
@@ -544,6 +657,9 @@ class IsolationPolicy:
         for root in (*writable, *self._readable(extra)):
             if root == "/":
                 return "the filesystem root cannot be granted"
+            if is_device_path(root):
+                return (f"{root} cannot be granted: device nodes are reachable only through the "
+                        "profile's fixed device list (/dev/null, /dev/zero, /dev/urandom, ...)")
             for secret in self.protected:
                 if not os.path.lexists(secret):
                     continue
@@ -616,20 +732,35 @@ class IsolationPolicy:
         out.update(HOME=home, TMPDIR=tmp, TMP=tmp, TEMP=tmp)
         return out
 
-    def wrap(self, argv: list[str], cwd: str | None, env: dict[str, str] | None, *,
-             overlay: dict[str, str] | None = None,
-             readable: tuple[str, ...] = ()) -> tuple[list[str], str | None, dict[str, str]]:
-        """``(argv, cwd, env)`` for a confined child, or :class:`IsolationUnavailable`.
+    def launch(self, argv: list[str], cwd: str | None, env: dict[str, str] | None, *,
+               overlay: dict[str, str] | None = None, readable: tuple[str, ...] = ()) -> Launch:
+        """A confined spawn of ``argv``, or :class:`IsolationUnavailable`.
 
+        ``env`` is filtered to the allowlist and ``overlay`` (the settings
+        env) layered on top; the result is what the *command* gets, written
+        to a private file the launcher installs after confinement. The
+        returned :attr:`Launch.env` is the launcher's own, empty one.
         ``readable`` adds read-only roots for this spawn only (the code-mode
-        kernel's own sources); they pass the same checks as configured roots."""
+        kernel's own sources); they pass the same checks as configured roots.
+        The caller must call :meth:`Launch.finish` when done with the process."""
         readable = tuple(_real(p) for p in readable)
         self.check(readable)
-        env = hold_loader_env(self.child_env(env, overlay))
+        command_env = self.child_env(env, overlay)
+        from fluid.tools import agent_runner
+
+        if agent_runner.enabled():
+            # What agent_runner.wrap drops from a command's environment; the
+            # runner only sees the launcher's empty one now.
+            command_env = {k: v for k, v in command_env.items()
+                           if not agent_runner.is_app_secret(k) and not k.upper().startswith("SHUFFLE_AGENT_")}
+        env_path = _private_file("env-", encode_env(command_env))
+        ack_path = _private_file("ack-")
         writable = (*self._writable_base(), self.private_dir())
         read = self._readable(readable)
-        prefix = self.backend.prefix(writable, read, self.network, protect=self.protected)
-        return [*prefix, *[os.fspath(a) for a in argv]], cwd, env
+        prefix = self.backend.prefix(writable, read, self.network, protect=self.protected,
+                                     env_file=env_path, ack_file=ack_path)
+        return Launch([*prefix, *[os.fspath(a) for a in argv]], cwd, dict(LAUNCHER_ENV),
+                      env_path, ack_path)
 
     def for_session(self) -> IsolationPolicy:
         """The same policy for another session (a Task or Swarm worker): the
@@ -645,11 +776,48 @@ class IsolationPolicy:
                 f"network {'on' if self.network else 'off'}")
 
 
+class _Binding:
+    """What the engine factory resolved (a policy, or None for off)."""
+
+    __slots__ = ("policy",)
+
+    def __init__(self, policy: IsolationPolicy | None) -> None:
+        self.policy = policy
+
+
+CHANGED_AFTER_BUILD = (
+    "Not run: ToolCtx.extra[\"isolation\"] was changed after this engine was built, so its "
+    "commands, hooks and code-mode kernel would no longer share one policy. A host must put "
+    "the policy on the context before build_engine; changing it later is not supported.")
+
+
+def resolve_policy(injected, configured: IsolationPolicy | None) -> IsolationPolicy | None:
+    """The one policy an engine runs under: the host's when it injected one,
+    else the configured one. A host value of None never turns a configured
+    profile off (config wins toward the safer setting)."""
+    return injected if isinstance(injected, IsolationPolicy) else configured
+
+
+def bind(ctx, policy: IsolationPolicy | None) -> None:
+    """Put the resolved policy on ``ctx`` and record it, so every spawn site
+    reads the same object and a later change is refused (:func:`policy_of`)."""
+    if policy is not None:
+        ctx.extra[EXTRA_KEY] = policy
+    ctx.extra[BOUND_KEY] = _Binding(policy)
+
+
 def policy_of(ctx) -> IsolationPolicy | None:
-    """The isolated profile a tool context carries, or None (the default)."""
+    """The isolated profile a tool context carries, or None (the default).
+
+    Raises :class:`IsolationUnavailable` when the context was bound by the
+    engine factory and ``extra["isolation"]`` no longer holds that policy."""
     extra = getattr(ctx, "extra", None) or {}
     policy = extra.get(EXTRA_KEY)
-    return policy if isinstance(policy, IsolationPolicy) else None
+    policy = policy if isinstance(policy, IsolationPolicy) else None
+    binding = extra.get(BOUND_KEY)
+    if isinstance(binding, _Binding) and binding.policy is not policy:
+        raise IsolationUnavailable(CHANGED_AFTER_BUILD)
+    return policy
 
 
 def policy_from_config(sandbox, cwd: str) -> IsolationPolicy | None:
@@ -669,10 +837,11 @@ class Refused(Exception):
     pass
 
 
-def _parse(args: list[str]) -> tuple[list[str], list[str], bool, list[str], list[str]]:
+def _parse(args: list[str]) -> tuple[list[str], list[str], bool, list[str], list[str], dict[str, str]]:
     rw: list[str] = []
     ro: list[str] = []
     protect: list[str] = []
+    files: dict[str, str] = {}
     network: bool | None = None
     index = 0
     while index < len(args) and args[index] != "--":
@@ -688,6 +857,8 @@ def _parse(args: list[str]) -> tuple[list[str], list[str], bool, list[str], list
             protect.append(value)
         elif flag == "--net" and value in ("on", "off"):
             network = value == "on"
+        elif flag in ("--env", "--ack") and flag not in files:
+            files[flag] = value
         else:
             raise Refused(f"unexpected argument {flag!r}")
         index += 2
@@ -696,10 +867,12 @@ def _parse(args: list[str]) -> tuple[list[str], list[str], bool, list[str], list
         raise Refused("no --net policy")
     if not command:
         raise Refused("no command")
-    for path in (*rw, *ro, *protect):
+    if set(files) != {"--env", "--ack"}:
+        raise Refused("no --env and --ack files")
+    for path in (*rw, *ro, *protect, *files.values()):
         if not os.path.isabs(path):
             raise Refused(f"{path!r} is not an absolute path")
-    return rw, ro, network, command, protect
+    return rw, ro, network, command, protect, files
 
 
 def _identity(st) -> tuple[int, int]:
@@ -748,6 +921,8 @@ def opened_problem(fd: int, path: str, locations: set, around: set) -> str | Non
         return f"could not confirm what {path} resolves to: {exc.strerror}"
     if actual != path:
         return f"{path} resolved to {actual} when opened; a granted root must not be a link"
+    if is_device_path(actual):
+        return f"{path} cannot be granted: device nodes are reachable only through the fixed device list"
     st = os.fstat(fd)
     ident = _identity(st)
     if ident == _identity(os.stat("/")):
@@ -893,9 +1068,24 @@ def main(args: list[str] | None = None) -> int:
     try:
         if not sys.platform.startswith("linux"):
             raise Refused(f"no isolation backend for {sys.platform}")
-        rw, ro, network, command, protect = _parse(args)
+        rw, ro, network, command, protect, files = _parse(args)
+        # Both files sit beside the launcher copy, outside every root, so they
+        # are opened now: once confined this process could not open them.
+        ack = os.open(files["--ack"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            env = read_env_file(files["--env"])
+        except ValueError as exc:
+            raise Refused(str(exc)) from exc
+        try:
+            os.unlink(files["--env"])  # the parent removes it too; sooner is better
+        except OSError:
+            pass
         abi = apply_landlock(rw, ro, network, protect)
         apply_seccomp(machine(), block_network=not network, block_truncate=abi < 3)
+        # The positive acknowledgement: confined, about to run the command.
+        if os.write(ack, ACK) != len(ACK):
+            raise Refused("could not write the confinement acknowledgement")
+        os.close(ack)
         try:
             limit = os.sysconf("SC_OPEN_MAX")
         except (ValueError, OSError):
@@ -905,7 +1095,7 @@ def main(args: list[str] | None = None) -> int:
         sys.stderr.write(f"{REFUSAL_PREFIX}: {exc}\n")
         return REFUSED
     try:
-        os.execvpe(command[0], command, release_loader_env(dict(os.environ)))
+        os.execvpe(command[0], command, env)
     except OSError as exc:
         sys.stderr.write(f"fluid isolation: {command[0]}: {exc.strerror or exc}\n")
         return 127

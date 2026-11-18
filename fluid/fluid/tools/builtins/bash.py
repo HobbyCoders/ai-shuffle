@@ -376,35 +376,44 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # host secrets first (see fluid.tools.child_env); settings env is a
     # deliberate hand-over and is layered on unchanged.
     argv = [*resolve_shell().argv_prefix, command]
-    policy = isolation.policy_of(ctx)
-    if policy is None:
-        env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
-    else:
-        # The opt-in isolated profile: an allowlisted environment and a
-        # kernel-confined child, or no child at all (fluid.tools.isolation).
-        try:
-            argv, cwd, env = policy.wrap(
+    launch = None
+    try:
+        policy = isolation.policy_of(ctx)
+        if policy is not None:
+            # The opt-in isolated profile: an allowlisted environment and a
+            # kernel-confined child, or no child at all (fluid.tools.isolation).
+            launch = policy.launch(
                 argv, cwd, scrub_child_env(),
-                overlay=layered_env(ctx.extra.get("settings_env"), base={}))
-        except isolation.IsolationUnavailable as exc:
-            return ToolOutcome(text=str(exc), is_error=True)
-    # Ask the child not to colourise; anything that ignores the hint gets
-    # its escapes stripped from the captured output below.
-    env.update(NO_COLOR="1", FORCE_COLOR="0")
+                overlay={**layered_env(ctx.extra.get("settings_env"), base={}),
+                         "NO_COLOR": "1", "FORCE_COLOR": "0"})
+    except isolation.IsolationUnavailable as exc:
+        return ToolOutcome(text=str(exc), is_error=True)
+    if launch is None:
+        env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+        # Ask the child not to colourise; anything that ignores the hint gets
+        # its escapes stripped from the captured output below.
+        env.update(NO_COLOR="1", FORCE_COLOR="0")
+    else:
+        argv, cwd, env = launch.argv, launch.cwd, launch.env
     # Under Docker agent isolation the command starts through the spawn
     # runner as the agent account; otherwise all three come back unchanged.
     argv, cwd, env = agent_runner.wrap(argv, cwd, env)
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        # No stdin, as the description promises: a command that reads it
-        # gets EOF instead of the user's next keystrokes.
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=cwd,
-        env=env,
-        **_spawn_kwargs(),
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            # No stdin, as the description promises: a command that reads it
+            # gets EOF instead of the user's next keystrokes.
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=cwd,
+            env=env,
+            **_spawn_kwargs(),
+        )
+    except BaseException:
+        if launch is not None:
+            launch.finish()
+        raise
     # Below the host's priority so a test run or build cannot starve the
     # host's event loop; it still gets all idle CPU. No-op on Windows (the
     # creationflags above do it there) and when FLUID_CHILD_NICE=0.
@@ -425,6 +434,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
             await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
+        if launch is not None and not launch.finish():
+            return ToolOutcome(text=launch.not_run(_render(capture, ctx)), is_error=True)
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
@@ -455,14 +466,14 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # cancellation) must not orphan a live process either.
         if proc.returncode is None:
             await kill_tree(proc)
+        if launch is not None:
+            launch.finish()
     text = _render(capture, ctx)
     code = proc.returncode or 0
-    if policy is not None:
-        refused = isolation.launcher_failure(code, text)
-        if refused:
-            # Confinement failed after the probe passed: the command never ran.
-            return ToolOutcome(text=f"Not run: the isolated execution profile could not confine "
-                                    f"the command ({refused}).", is_error=True)
+    if launch is not None and not launch.finish():
+        # No acknowledgement from the launcher: confinement failed after the
+        # probe passed, and the command never ran.
+        return ToolOutcome(text=launch.not_run(text), is_error=True)
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what
         # happened: a silent success and a silent failure read identically, and

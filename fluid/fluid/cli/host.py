@@ -155,6 +155,9 @@ class Worker:
     swarm_launch: Any = None
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
+    # The isolated profile's launch record (fluid.tools.isolation.Launch):
+    # without its ack the command never ran.
+    launch: Any = None
     worker_session_id: str | None = None
     status: str = "running"  # running | finished | failed | cancelled
     summary: str | None = None
@@ -455,28 +458,36 @@ class CliHost:
             if flags:
                 spawn_kwargs["creationflags"] = flags
         argv = [*resolve_shell().argv_prefix, command]
+        # Same hint Bash gives its children: a monitored test runner or dev
+        # server that colourises its output makes the summary unsearchable.
+        # Anything that ignores the hint gets its escapes stripped as the
+        # stream is read (see _supervise).
+        no_color = {"NO_COLOR": "1", "FORCE_COLOR": "0"}
         policy = isolation.policy_of(ctx)
+        launch = None
         if policy is None:
-            env = layered_env(ctx.extra.get("settings_env"), base=scrub_child_env())
+            env = dict(layered_env(ctx.extra.get("settings_env"), base=scrub_child_env()), **no_color)
         else:
             # The opt-in isolated profile, as Bash applies it; an
             # IsolationUnavailable here means nothing was started.
-            argv, cwd, env = policy.wrap(
+            launch = policy.launch(
                 argv, cwd, scrub_child_env(),
-                overlay=layered_env(ctx.extra.get("settings_env"), base={}))
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=cwd,
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            # Same hint Bash gives its children: a monitored test runner or
-            # dev server that colourises its output makes the summary
-            # unsearchable. Anything that ignores the hint gets its escapes
-            # stripped as the stream is read (see _supervise).
-            env=dict(env, NO_COLOR="1", FORCE_COLOR="0"),
-            **spawn_kwargs,
-        )
+                overlay={**layered_env(ctx.extra.get("settings_env"), base={}), **no_color})
+            argv, cwd, env = launch.argv, launch.cwd, launch.env
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=cwd,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                **spawn_kwargs,
+            )
+        except BaseException:
+            if launch is not None:
+                launch.finish()
+            raise
         # POSIX: the new process group runs below the host's priority so a
         # monitored test run cannot starve the host's event loop.
         lower_process_group_priority(process.pid)
@@ -487,6 +498,7 @@ class CliHost:
             description=command,
             process=process,
             serves=serves,
+            launch=launch,
         )
         self.workers[worker.task_id] = worker
         worker.task = asyncio.create_task(
@@ -521,6 +533,14 @@ class CliHost:
             raise
         except Exception as exc:  # noqa: BLE001
             await self._report(worker, "failed", f"monitor failed: {exc}\n{worker.output()}")
+            return
+        finally:
+            if worker.launch is not None:
+                worker.launch.finish()
+        if worker.launch is not None and not worker.launch.finish():
+            # No acknowledgement: the launcher could not confine the command,
+            # which never ran (whatever it exited with).
+            await self._report(worker, "failed", worker.launch.not_run(worker.output()))
             return
         if worker.status == "cancelled":
             worker.summary = _monitor_summary(worker, code, cancelled=True)

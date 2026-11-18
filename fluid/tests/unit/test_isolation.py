@@ -132,7 +132,6 @@ async def test_bash_spawn_is_unchanged_when_off(tmp_path, monkeypatch):
     assert not out.is_error and "plain" in out.text
     assert seen["argv"] == [*resolve_shell().argv_prefix, "echo plain"]
     assert seen["env"].get("FLUID_TEST_PASSTHROUGH") == "kept"
-    assert not any(k.startswith(isolation.HELD_PREFIX) for k in seen["env"])
 
 
 # --- config ------------------------------------------------------------------------
@@ -145,6 +144,28 @@ def test_config_validation():
     for bad in ({"mode": "strict"}, {"network": "off"}, {"writable_roots": "/srv"}, {"protect": [""]}):
         with pytest.raises(ValueError):
             SandboxConfig.from_dict(bad)
+
+
+def test_root_lists_must_be_lists_of_strings():
+    # P7: a TOML inline table iterates as its keys, so it must not pass as a list.
+    for bad in ({"writable_roots": {"/shared": False}}, {"readable_roots": {}}, {"writable_roots": 5},
+                {"env_allow": {"X": 1}}, {"protect": True}, {"readable_roots": ["/srv", 3]}):
+        with pytest.raises(ValueError, match="list of non-empty strings"):
+            SandboxConfig.from_dict(bad)
+    assert SandboxConfig.from_dict({"writable_roots": []}).writable_roots == ()
+
+
+def test_device_paths_cannot_be_granted(tmp_path):
+    # P5: the device list is a guarantee, so no configured or per-spawn root reaches /dev.
+    for key in ("writable_roots", "readable_roots"):
+        for root in ("/dev", "/dev/shm", "/dev/null", "/dev/../dev/shm"):
+            with pytest.raises(ValueError, match="/dev"):
+                SandboxConfig.from_dict({key: [root]})
+    policy = _policy(tmp_path, writable_roots=("/dev/shm",), backend_impl=_StubBackend())
+    assert "device" in (policy.unavailable_reason() or "")
+    plain = _policy(tmp_path, backend_impl=_StubBackend())
+    with pytest.raises(isolation.IsolationUnavailable, match="device"):
+        plain.launch(["true"], None, {}, readable=("/dev",))
 
 
 def test_project_layer_can_only_turn_the_profile_on():
@@ -173,14 +194,74 @@ def test_child_env_is_an_allowlist(tmp_path):
     assert env["HOME"].startswith(policy.private_dir()) and env["TMPDIR"].startswith(policy.private_dir())
 
 
-def test_loader_variables_are_held_until_the_launcher_is_confined():
-    held = isolation.hold_loader_env({"LD_PRELOAD": "/ws/evil.so", "GCONV_PATH": "/ws", "PATH": "/bin"})
-    assert "LD_PRELOAD" not in held and "GCONV_PATH" not in held
-    assert held[isolation.HELD_PREFIX + "LD_PRELOAD"] == "/ws/evil.so"
-    # A variable smuggled under the hold prefix is dropped, never promoted.
-    assert isolation.HELD_PREFIX + "X" not in isolation.hold_loader_env({isolation.HELD_PREFIX + "X": "1"})
-    assert isolation.release_loader_env(held) == {"LD_PRELOAD": "/ws/evil.so", "GCONV_PATH": "/ws",
-                                                  "PATH": "/bin"}
+def test_the_command_env_travels_as_data_and_the_launcher_starts_clean(tmp_path):
+    # P1: the launcher process gets only the environment Fluid builds; the
+    # command's own (settings env included) is a file it installs after confinement.
+    policy = _policy(tmp_path, backend_impl=_StubBackend())
+    launch = policy.launch(["true"], None, {"PATH": "/bin", "PYTHONPATH": "/ws"},
+                           overlay={"LD_PRELOAD": "/ws/evil.so", "PYTHONEXECUTABLE": "/ws/python",
+                                    "__PYVENV_LAUNCHER__": "/ws/python", "GCONV_PATH": "/ws"})
+    try:
+        assert launch.env == isolation.LAUNCHER_ENV == {}
+        command_env = isolation.read_env_file(launch.env_path)
+        assert command_env["LD_PRELOAD"] == "/ws/evil.so" and command_env["PYTHONEXECUTABLE"] == "/ws/python"
+        assert command_env["PATH"] == "/bin" and "PYTHONPATH" not in command_env
+        assert command_env["HOME"].startswith(policy.private_dir())
+        side = os.path.dirname(isolation.launcher_script())
+        assert os.path.dirname(launch.env_path) == os.path.dirname(launch.ack_path) == side
+        assert os.stat(launch.env_path).st_mode & 0o777 == 0o600
+    finally:
+        assert launch.finish() is False  # nothing acknowledged
+    assert not os.path.exists(launch.env_path) and not os.path.exists(launch.ack_path)
+    # Round trip, including names and values that are not ASCII.
+    env = {"A": "1", "B": "x=y", "C": "", "Ü": "\u00e9\udcff"}
+    assert isolation.decode_env(isolation.encode_env(env)) == env
+
+
+def _plant_python(workspace):
+    """A pyvenv.cfg and stdlib in the workspace whose ``encodings`` package
+    (imported first by every interpreter start) records that it ran."""
+    ver = "python%d.%d" % sys.version_info[:2]
+    os.makedirs(os.path.join(workspace, "bin"))
+    os.makedirs(os.path.join(workspace, "lib", ver, "encodings"))
+    with open(os.path.join(workspace, "bin", "pyvenv.cfg"), "w") as handle:
+        handle.write(f"home = {workspace}/bin\n")
+    open(os.path.join(workspace, "lib", ver, "os.py"), "w").close()
+    marker = os.path.join(workspace, "PLANTED-CODE-RAN")
+    with open(os.path.join(workspace, "lib", ver, "encodings", "__init__.py"), "w") as handle:
+        handle.write(f"import posix\nposix.write(posix.open({marker!r}, posix.O_WRONLY | posix.O_CREAT, 0o600), b'1')\n")
+    return os.path.join(workspace, "bin", "python3"), marker
+
+
+@pytest.mark.skipif(not LINUX, reason="the launcher is Linux only")
+def test_project_env_never_reaches_the_launchers_startup(tmp_path):
+    # P1: PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ steer CPython's path setup
+    # even under -I -S. From a project's settings env they must not reach the
+    # launcher's own interpreter, which runs before anything is confined.
+    policy = _policy(tmp_path, backend_impl=_ProbedLandlock())
+    fake, marker = _plant_python(policy.workspace)
+    launch = policy.launch(["true"], None, {}, overlay={"PYTHONEXECUTABLE": fake, "__PYVENV_LAUNCHER__": fake})
+    try:
+        proc = subprocess.run(launch.argv, env=launch.env, capture_output=True, text=True, timeout=60,
+                              check=False)
+    finally:
+        confirmed = launch.finish()
+    assert not os.path.exists(marker), proc.stderr
+    # Here the launcher either confined itself and ran `true`, or refused
+    # (no Landlock): both mean its interpreter started from the real stdlib.
+    assert (proc.returncode == 0 and confirmed) or isolation.REFUSAL_PREFIX in proc.stderr, proc.stderr
+
+
+def test_a_loader_dir_whose_real_target_is_writable_is_refused(tmp_path, monkeypatch):
+    # P1: loader directories compare by their real targets, not their names.
+    policy = _policy(tmp_path, backend_impl=_StubBackend())
+    target = os.path.join(policy.workspace, "lib")
+    os.makedirs(target)
+    link = tmp_path / "linked-lib"
+    link.symlink_to(target)
+    monkeypatch.setattr(isolation, "_LOADER_TREES", (*isolation._LOADER_TREES, str(link)))
+    reason = policy.unavailable_reason() or ""
+    assert "cannot be writable" in reason and target in reason, reason
 
 
 def test_a_root_holding_credentials_is_refused(tmp_path):
@@ -191,7 +272,7 @@ def test_a_root_holding_credentials_is_refused(tmp_path):
     reason = policy.unavailable_reason()
     assert reason and ".ssh" in reason
     with pytest.raises(isolation.IsolationUnavailable):
-        policy.wrap(["true"], str(home), {})
+        policy.launch(["true"], str(home), {})
     root = isolation.IsolationPolicy(workspace="/", home=str(home), backend_impl=_StubBackend())
     assert "filesystem root" in (root.unavailable_reason() or "")
 
@@ -202,7 +283,7 @@ class _StubBackend:
     def unavailable_reason(self, network):
         return None
 
-    def prefix(self, writable, readable, network, protect=()):
+    def prefix(self, writable, readable, network, *, protect=(), env_file, ack_file):
         return ["launcher", *[f"rw={p}" for p in writable], f"net={network}", "--"]
 
 
@@ -227,8 +308,39 @@ class _RefusingLauncher:
     def unavailable_reason(self, network):
         return None
 
-    def prefix(self, writable, readable, network, protect=()):
+    def prefix(self, writable, readable, network, *, protect=(), env_file, ack_file):
         return [sys.executable, "-I", "-c", _REFUSE]
+
+
+#: Speaks the launcher's protocol (the command env from the file, the ack
+#: after "confinement", then exec) without confining anything, so the way
+#: spawn sites read the ack can be checked on machines without Landlock.
+_FAKE_LAUNCHER = r"""
+import os, sys, time
+env_file, ack_file, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+command = sys.argv[sys.argv.index("--") + 1:]
+with open(env_file, "rb") as handle:
+    entries = [e.partition(b"=") for e in handle.read().split(b"\0") if e]
+env = {os.fsdecode(k): os.fsdecode(v) for k, _, v in entries}
+time.sleep(delay)
+fd = os.open(ack_file, os.O_WRONLY)
+os.write(fd, b"\x01")
+os.close(fd)
+os.execvpe(command[0], command, env)
+"""
+
+
+class _FakeLauncher:
+    name = "fake"
+
+    def __init__(self, delay: float = 0.0) -> None:
+        self.delay = delay
+
+    def unavailable_reason(self, network):
+        return None
+
+    def prefix(self, writable, readable, network, *, protect=(), env_file, ack_file):
+        return [sys.executable, "-I", "-S", "-c", _FAKE_LAUNCHER, env_file, ack_file, str(self.delay), "--"]
 
 
 # S1: nothing that runs before confinement may be writable by a confined command.
@@ -240,7 +352,9 @@ def test_launcher_runs_from_a_private_copy_outside_every_root(tmp_path):
     source_dir = os.path.dirname(isolation.SCRIPT)
     policy = isolation.IsolationPolicy(workspace=source_dir, home=str(tmp_path / "home"),
                                        backend_impl=_ProbedLandlock())
-    argv, _cwd, _env = policy.wrap(["true"], None, {})
+    launch = policy.launch(["true"], None, {})
+    launch.finish()
+    argv = launch.argv
     script = argv[3]
     assert argv[0] == isolation.LAUNCH_PYTHON == os.path.realpath(isolation.LAUNCH_PYTHON)
     assert argv[1:3] == ["-I", "-S"] and script == isolation.launcher_script()
@@ -260,7 +374,7 @@ def test_a_writable_interpreter_stdlib_or_launcher_is_refused(tmp_path):
         reason = policy.unavailable_reason() or ""
         assert "cannot be writable" in reason, (root, reason)
         with pytest.raises(isolation.IsolationUnavailable):
-            policy.wrap(["true"], None, {})
+            policy.launch(["true"], None, {})
 
 
 # S2: the workspace never comes from a project file.
@@ -295,7 +409,7 @@ def test_a_root_inside_a_credential_location_is_refused(tmp_path):
     plain = _policy(tmp_path, home=str(home), backend_impl=_StubBackend())
     assert plain.unavailable_reason() is None
     with pytest.raises(isolation.IsolationUnavailable, match="credential location"):
-        plain.wrap(["true"], None, {}, readable=(str(inner),))
+        plain.launch(["true"], None, {}, readable=(str(inner),))
 
 
 @pytest.mark.skipif(not LINUX, reason="the launcher's O_PATH checks are Linux only")
@@ -357,10 +471,106 @@ def test_newer_landlock_abis_are_handled_or_refused():
 # S6: a launcher that refuses after the probe passed is not a command exit.
 
 
-def test_launcher_failure_needs_both_the_status_and_the_message():
-    assert isolation.launcher_failure(126, "fluid isolation refused: x\n") == "fluid isolation refused: x"
-    assert isolation.launcher_failure(126, "sh: ./tool: Permission denied") is None
-    assert isolation.launcher_failure(1, "fluid isolation refused: x") is None
+async def test_a_command_that_prints_the_refusal_marker_after_the_ack_ran(tmp_path):
+    # P3: only the launcher's ack says "confined and started"; what the
+    # command prints, or its exit status, never turns a run into "not run".
+    policy = _policy(tmp_path, backend_impl=_FakeLauncher())
+    out = await _bash(policy, "echo \"$FLUID_TEST_MARK\"; echo 'fluid isolation refused: fake' >&2; exit 126")
+    assert not out.text.startswith("Not run"), out.text
+    assert "fluid isolation refused: fake" in out.text and "126" in out.text, out.text
+
+
+async def test_a_hook_runs_only_after_the_ack(tmp_path):
+    from fluid.hooks.command import CommandHook
+
+    marker = tmp_path / "hook-ran"
+    policy = _policy(tmp_path, backend_impl=_FakeLauncher())
+    ok = CommandHook(event="PreToolUse", command=f"touch {marker}", cwd=str(tmp_path), isolation=policy)
+    decision = await ok("PreToolUse", {"name": "Edit", "input": {}})
+    assert marker.exists() and (decision is None or decision.action != "deny"), decision
+    # A hook that ran and exited 126 with the marker is an ordinary exit status.
+    mimic = CommandHook(event="PreToolUse", command="echo 'fluid isolation refused: x' >&2; exit 126",
+                        cwd=str(tmp_path), isolation=policy)
+    decision = await mimic("PreToolUse", {"name": "Edit", "input": {}})
+    assert decision is not None and decision.action != "deny", decision
+    assert any("exited with code 126" in w for w in decision.warnings), decision
+
+
+async def test_a_hook_gate_denies_when_the_launcher_times_out_before_confinement(tmp_path):
+    from fluid.hooks.command import CommandHook
+
+    marker = tmp_path / "hook-ran"
+    policy = _policy(tmp_path, backend_impl=_FakeLauncher(delay=30))
+    pre = CommandHook(event="PreToolUse", command=f"touch {marker}", cwd=str(tmp_path), timeout=1,
+                      isolation=policy)
+    decision = await pre("PreToolUse", {"name": "Edit", "input": {}})
+    assert decision is not None and decision.action == "deny", decision
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(not LINUX, reason="the launcher is Linux only")
+async def test_a_hook_gate_denies_when_the_launcher_copy_is_unreadable(tmp_path, monkeypatch):
+    # P3: Python exits before it can print the refusal (an earlier confined
+    # command used the chmod gap on the private copy, say); no ack, so deny.
+    import shutil
+    import tempfile
+
+    from fluid.hooks.command import CommandHook
+
+    holder = tempfile.mkdtemp(prefix="fluid-test-launcher-")
+    copy = os.path.join(holder, "fluid_isolation_launcher.py")
+    shutil.copyfile(isolation.SCRIPT, copy)
+    os.chmod(copy, 0)
+    monkeypatch.setattr(isolation, "_launcher_copy", copy)
+    marker = tmp_path / "hook-ran"
+    try:
+        policy = _policy(tmp_path, backend_impl=_ProbedLandlock())
+        assert policy.unavailable_reason() is None
+        pre = CommandHook(event="PreToolUse", command=f"touch {marker}", cwd=str(tmp_path), isolation=policy)
+        decision = await pre("PreToolUse", {"name": "Edit", "input": {}})
+    finally:
+        os.chmod(copy, 0o600)
+        shutil.rmtree(holder, ignore_errors=True)
+    assert decision is not None and decision.action == "deny", decision
+    # Denied for the missing ack, not because Python's exit status 2 happens
+    # to mean "block" in the hook protocol.
+    assert "not run" in (decision.note or "") and "confirmed confinement" in decision.note, decision
+    assert not marker.exists()
+
+
+async def test_monitor_reports_whether_the_launch_was_confirmed(tmp_path, monkeypatch):
+    from fluid.cli.host import CliHost
+
+    reports = []
+    host = CliHost(config=None, store=None)
+
+    async def record(worker, status, summary):
+        reports.append((status, summary))
+
+    monkeypatch.setattr(host, "_report", record)
+    for backend_impl in (_RefusingLauncher(), _FakeLauncher()):
+        await host.monitor_spawn({"command": "echo monitored"},
+                                 _ctx(_policy(tmp_path, backend_impl=backend_impl)))
+        worker = list(host.workers.values())[-1]
+        await worker.task
+    (refused_status, refused), (ran_status, ran) = reports
+    assert refused_status == "failed" and refused.startswith("Not run") and "restrict_self" in refused
+    assert ran_status == "finished" and "monitored" in ran and not ran.startswith("Not run")
+
+
+async def test_code_mode_kernel_starts_once_the_launcher_acks(tmp_path):
+    from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
+
+    kernel = SubprocessKernel(KernelConfig(isolation=_policy(tmp_path, backend_impl=_FakeLauncher())))
+    await kernel.start()
+    try:
+        async def no_tools(*_args, **_kwargs):
+            raise AssertionError("no tool calls expected")
+
+        result = await kernel.exec("6 * 7", timeout=10, on_host_call=no_tools)
+        assert result.error is None and result.value_repr == "42", result.error
+    finally:
+        await kernel.stop()
 
 
 async def test_a_hook_whose_launcher_refuses_denies_the_tool(tmp_path):
@@ -391,28 +601,74 @@ async def test_code_mode_kernel_reports_a_launcher_refusal(tmp_path):
     try:
         with pytest.raises(isolation.IsolationUnavailable, match="restrict_self"):
             await kernel.start()
+        assert kernel._proc.returncode is not None  # nothing left running
     finally:
         await kernel.stop()
+
+
+class _MiniLoop:
+    """The minimal ``loop`` surface ``CodeModeSession.run_python`` reads."""
+
+    def __init__(self, registry) -> None:
+        from fluid.permissions.engine import PermissionEngine
+
+        self.registry = registry
+        self.ctx = ToolCtx()
+        self.hooks = None
+        self.permissions = PermissionEngine("never_ask")
+
+    async def _emit(self, event) -> None:
+        pass
+
+
+async def test_a_refused_kernel_restart_is_a_not_run_result_and_keeps_the_checkpoint(tmp_path):
+    # P6: the restart path reports a refusal the way the first start does.
+    from fluid.codemode.session import CodeModeSession
+    from fluid.codemode.subprocess_kernel import KernelConfig
+    from fluid.tools.registry import ToolRegistry
+
+    policy = _policy(tmp_path, backend_impl=_FakeLauncher())
+    registry = ToolRegistry()
+    session = CodeModeSession(registry, config=KernelConfig(isolation=policy))
+    loop = _MiniLoop(registry)
+
+    async def run(code):
+        return await session.run_python(sid="s", turn_id="t", input={"code": code, "timeout": 20}, loop=loop)
+
+    try:
+        first = await run("x = 41")
+        assert not first.is_error, first.text
+        await session._kernel._kill()  # the kernel dies between cells
+        policy.backend = _RefusingLauncher()
+        refused = await run("x + 1")
+        assert refused.is_error and refused.text.startswith("Not run") and "restrict_self" in refused.text
+        policy.backend = _FakeLauncher()
+        again = await run("x + 1")
+        assert not again.is_error and "42" in again.text, again.text
+    finally:
+        await session.aclose()
 
 
 # S8: Task and Swarm workers inherit the effective policy.
 
 
 async def test_a_worker_inherits_the_parent_policy_with_its_own_private_dir(tmp_path):
-    from fluid.cli.config import host_of, make_engine
-    from fluid.cli.host import Worker
-    from fluid.config.loader import BUILTIN_DEFAULTS, deep_merge
+    from fluid.cli.host import CliHost, Worker
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
 
     from tests.unit.test_tool_loop import ScriptedProvider
 
     store = MemoryStore()
     meta = await store.create_session()
     config = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)}))
-    engine = make_engine(config, store, provider=ScriptedProvider([]), session_id=meta.session_id)
-    # Config leaves the profile off; the host opted in on the parent's ctx.
+    # Config leaves the profile off; the host opts in on the ctx before the build.
     policy = _policy(tmp_path, backend_impl=_StubBackend())
-    engine.ctx.extra[isolation.EXTRA_KEY] = policy
-    host = host_of(engine)
+    provider = ScriptedProvider([])
+    engine = build_engine(config, store, provider=provider, session_id=meta.session_id,
+                          ctx=ToolCtx(extra={isolation.EXTRA_KEY: policy}))
+    assert isolation.policy_of(engine.ctx) is policy
+    host = CliHost(config, store, provider=provider)
+    host.attach(engine)
     child = None
     try:
         child = await host._build_child(None, Worker(task_id="t", kind="task", description="d"))
@@ -463,12 +719,53 @@ async def test_a_cancelled_kernel_start_stops_the_process(monkeypatch):
     assert made and made[0].stopped and sess._kernel is None
 
 
-def test_wrap_builds_the_launcher_command(tmp_path):
+def test_launch_builds_the_launcher_command(tmp_path):
     policy = _policy(tmp_path, writable_roots=(str(tmp_path / "extra"),), backend_impl=_StubBackend())
-    argv, cwd, env = policy.wrap(["sh", "-c", "true"], "/x", {"PATH": "/bin", "SECRET_TOKEN": "t"})
-    assert argv[0] == "launcher" and argv[-3:] == ["sh", "-c", "true"]
-    assert f"rw={policy.workspace}" in argv and f"rw={tmp_path / 'extra'}" in argv
-    assert "net=False" in argv and cwd == "/x" and "SECRET_TOKEN" not in env
+    launch = policy.launch(["sh", "-c", "true"], "/x", {"PATH": "/bin", "SECRET_TOKEN": "t"})
+    try:
+        argv = launch.argv
+        assert argv[0] == "launcher" and argv[-3:] == ["sh", "-c", "true"]
+        assert f"rw={policy.workspace}" in argv and f"rw={tmp_path / 'extra'}" in argv
+        assert "net=False" in argv and launch.cwd == "/x" and launch.env == {}
+        assert "SECRET_TOKEN" not in isolation.read_env_file(launch.env_path)
+    finally:
+        launch.finish()
+
+
+# P4: one policy per engine, resolved before the build.
+
+
+def test_a_host_none_does_not_turn_a_configured_profile_off(tmp_path):
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
+
+    on = deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path), "code_mode": True,
+                                       "sandbox": {"mode": "isolated"},
+                                       "hooks": [{"event": "PreToolUse", "command": "true"}]})
+    engine = build_engine(HarnessConfig.from_dict(on), MemoryStore(), provider=_FakeProvider(),
+                          ctx=ToolCtx(extra={isolation.EXTRA_KEY: None}))
+    policy = isolation.policy_of(engine.ctx)
+    assert isinstance(policy, isolation.IsolationPolicy)
+    assert engine._codemode._config.isolation is policy
+    hooks = [h for hs in engine.hooks._hooks.values() for h in hs if hasattr(h, "isolation")]
+    assert hooks and all(h.isolation is policy for h in hooks)
+
+
+async def test_a_policy_changed_after_the_build_is_refused(tmp_path):
+    from fluid.config.loader import BUILTIN_DEFAULTS, build_engine, deep_merge
+
+    marker = tmp_path / "ran"
+    off = deep_merge(BUILTIN_DEFAULTS, {"cwd": str(tmp_path)})
+    engine = build_engine(HarnessConfig.from_dict(off), MemoryStore(), provider=_FakeProvider())
+    assert isolation.policy_of(engine.ctx) is None
+    engine.ctx.extra[isolation.EXTRA_KEY] = _policy(tmp_path, backend_impl=_FakeLauncher())
+    out = await bash_handler({"command": f"touch {marker}"}, engine.ctx)
+    assert out.is_error and "changed after this engine was built" in out.text, out.text
+    assert not marker.exists()
+    on = deep_merge(off, {"sandbox": {"mode": "isolated"}})
+    engine = build_engine(HarnessConfig.from_dict(on), MemoryStore(), provider=_FakeProvider())
+    engine.ctx.extra.pop(isolation.EXTRA_KEY)  # removing it is a change too
+    with pytest.raises(isolation.IsolationUnavailable, match="changed after"):
+        isolation.policy_of(engine.ctx)
 
 
 def test_seccomp_program_shape():
@@ -575,11 +872,16 @@ def test_launcher_refuses_when_landlock_is_unusable(tmp_path):
     probe = ("import sys; sys.path.insert(0, sys.argv[1]); import isolation\n"
              "isolation.MAX_ABI = 0\n"
              "sys.exit(isolation.main(sys.argv[2:]))\n")
+    env_file, ack_file = tmp_path / "env", tmp_path / "ack"
+    env_file.write_bytes(b"PATH=/usr/bin:/bin\0")
+    ack_file.write_bytes(b"")
     proc = subprocess.run(
         [sys.executable, "-I", "-c", probe, os.path.dirname(isolation.SCRIPT),
-         "--rw", str(tmp_path), "--net", "on", "--", "touch", str(marker)],
+         "--env", str(env_file), "--ack", str(ack_file),
+         "--rw", str(tmp_path / "ws"), "--net", "on", "--", "touch", str(marker)],
         capture_output=True, text=True, timeout=30, check=False)
     assert proc.returncode == isolation.REFUSED, proc.stderr
+    assert ack_file.read_bytes() == b""  # refused before confinement: no ack
     assert isolation.REFUSAL_PREFIX in proc.stderr and not marker.exists()
     assert ("newer than" in proc.stderr) == bool(ABI), proc.stderr
 
@@ -654,6 +956,57 @@ def test_seccomp_blocks_ownership_and_xattr_changes_in_a_child(tmp_path):
     for name in ("chown", "lchown", "setxattr", "removexattr"):
         assert f"{name} blocked" in lines, (name, proc.stdout, proc.stderr)
     assert "chmod still works" in lines, proc.stderr
+
+
+_SOCKETPAIRS = (
+    "import os, socket, sys; sys.path.insert(0, sys.argv[1]); import isolation\n"
+    "isolation.apply_seccomp(isolation.machine(), block_network=True, block_truncate=False)\n"
+    "def attempt(name, kind):\n"
+    "    try:\n        a, b = socket.socketpair(socket.AF_UNIX, kind)\n"
+    "    except PermissionError:\n        print(name, 'blocked')\n"
+    "    else:\n        a.send(b'x'); print(name, 'works' if b.recv(1) == b'x' else 'BROKEN')\n"
+    "attempt('stream', socket.SOCK_STREAM)\n"
+    "attempt('stream-cloexec-nonblock', socket.SOCK_STREAM | socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK)\n"
+    "attempt('seqpacket', socket.SOCK_SEQPACKET)\n"
+    "attempt('dgram', socket.SOCK_DGRAM)\n"
+    "attempt('dgram-cloexec', socket.SOCK_DGRAM | socket.SOCK_CLOEXEC)\n"
+    "import asyncio; asyncio.run(asyncio.sleep(0)); print('asyncio works')\n"
+)
+
+
+@needs_seccomp
+def test_seccomp_allows_stream_socketpairs_only_with_the_network_off():
+    # P2: a datagram pair can sendto() any pathname datagram socket, so with
+    # the network off only AF_UNIX stream and seqpacket pairs are allowed.
+    proc = subprocess.run([sys.executable, "-I", "-c", _SOCKETPAIRS, os.path.dirname(isolation.SCRIPT)],
+                          capture_output=True, text=True, timeout=30, check=False)
+    lines = proc.stdout.split("\n")
+    for name, verdict in (("stream", "works"), ("stream-cloexec-nonblock", "works"),
+                          ("seqpacket", "works"), ("dgram", "blocked"), ("dgram-cloexec", "blocked")):
+        assert f"{name} {verdict}" in lines, (name, proc.stdout, proc.stderr)
+    assert "asyncio works" in lines, proc.stderr
+
+
+@needs_landlock
+async def test_network_off_blocks_a_datagram_socketpair_to_an_outside_listener(tmp_path):
+    # P2, end to end: a pathname datagram listener outside the workspace.
+    path = str(tmp_path / "outside.sock")
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    listener.bind(path)
+    listener.setblocking(False)
+    probe = (f"{sys.executable} -I -c \"import socket\n"
+             f"try:\n a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)\n"
+             f"except PermissionError:\n print('socketpair blocked')\n"
+             f"else:\n a.sendto(b'escaped', {path!r}); print('SENT')\n"
+             f"s, t = socket.socketpair(); s.send(b'y'); print('stream', t.recv(1).decode())\"")
+    try:
+        out = await _bash(_policy(tmp_path, network=False), probe)
+        with pytest.raises(BlockingIOError):
+            listener.recv(64)
+    finally:
+        listener.close()
+    assert "socketpair blocked" in out.text and "SENT" not in out.text, out.text
+    assert "stream y" in out.text, out.text
 
 
 @needs_landlock
@@ -756,6 +1109,7 @@ async def test_monitor_command_runs_confined(tmp_path, monkeypatch):
     (worker,) = host.workers.values()
     out = (await worker.process.stdout.read()).decode()
     await worker.process.wait()
+    assert worker.launch.finish(), out  # the launcher acked before the command ran
     assert "TOPSECRET" not in out and "end" in out, out
     assert not (tmp_path / "escaped").exists()
 

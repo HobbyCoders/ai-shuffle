@@ -70,7 +70,7 @@ from fluid.tools.registry import (
 BUDGET_EXTRA_KEY = "monitor_budget_seconds"
 
 #: Attribute a host spawner sets to True when it runs the command through
-#: ``isolation.policy_of(ctx).wrap(...)``. Under the isolated profile a spawner
+#: ``isolation.policy_of(ctx).launch(...)``. Under the isolated profile a spawner
 #: without it is refused rather than trusted to confine the command.
 ISOLATION_AWARE = "applies_isolation"
 

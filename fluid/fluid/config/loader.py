@@ -1000,15 +1000,20 @@ def build_engine(
         # Read by the Bash builtin; layered over the process environment for
         # the child only. Never written to os.environ.
         ctx.extra.setdefault("settings_env", child_env)
-    # The opt-in isolated execution profile ([sandbox] mode = "isolated"):
-    # Bash, Monitor and the code-mode kernel read it from here. Off (the
-    # default) leaves no key, and every spawn path stays as it was. A policy
-    # the host already put on its own ctx wins.
-    from fluid.tools.isolation import EXTRA_KEY, policy_from_config
+    # The opt-in isolated execution profile ([sandbox] mode = "isolated"),
+    # resolved once here: this one object goes on the ctx (Bash, Monitor,
+    # Task and Swarm workers read it there), to the command hooks and to the
+    # code-mode kernel. A policy the host put on its ctx before this call
+    # wins; a host None never turns a configured profile off. Off (the
+    # default) leaves only the record that nothing was set, so a policy a
+    # host adds after the build is refused rather than half applied.
+    from fluid.tools import isolation as _isolation
 
-    isolation_policy = ctx.extra.get(EXTRA_KEY) or policy_from_config(config.sandbox, config.cwd)
+    isolation_policy = _isolation.resolve_policy(
+        ctx.extra.get(_isolation.EXTRA_KEY),
+        _isolation.policy_from_config(config.sandbox, config.cwd))
+    _isolation.bind(ctx, isolation_policy)
     if isolation_policy is not None:
-        ctx.extra.setdefault(EXTRA_KEY, isolation_policy)
         reason = isolation_policy.unavailable_reason()
         if reason:
             logger.warning("isolated execution profile cannot be enforced; commands will be "

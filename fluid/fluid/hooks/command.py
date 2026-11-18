@@ -45,7 +45,7 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.isolation import IsolationUnavailable, launcher_failure
+from fluid.tools.isolation import IsolationUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -214,42 +214,48 @@ class CommandHook:
         if os.name != "nt":
             # Own process group so a timeout can kill the whole tree.
             spawn_kwargs["start_new_session"] = True
+        argv, cwd, env = [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env()
+        if self.isolation is None:
+            return await self._spawn(argv, cwd, env, stdin, spawn_kwargs)
+        # The isolated profile: the hook ran only if the launcher acknowledged
+        # confinement. Without the ack (any exit, a timeout, a failure to
+        # start or to talk to it) it never ran, and __call__ fails closed.
+        launch = self.isolation.launch(argv, cwd, env)
+        stderr = ""
+        try:
+            code, out, stderr = await self._spawn(launch.argv, launch.cwd, launch.env, stdin, spawn_kwargs)
+        except asyncio.CancelledError:
+            launch.finish()
+            raise
+        except BaseException as exc:
+            if launch.finish():
+                raise  # the hook ran, then timed out or failed: as before
+            raise IsolationUnavailable(launch.not_run(stderr, "the hook").removeprefix("Not run: ")
+                                       + f" [{type(exc).__name__}]") from exc
+        if not launch.finish():
+            raise IsolationUnavailable(launch.not_run(stderr, "the hook").removeprefix("Not run: "))
+        return code, out, stderr
+
+    async def _spawn(self, argv, cwd, env, stdin: bytes, spawn_kwargs) -> tuple[int, str, str]:
         from fluid.tools import agent_runner
 
-        argv, cwd, env = [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env()
-        if self.isolation is not None:
-            argv, cwd, env = self.isolation.wrap(argv, cwd, env)
         argv, cwd, env = agent_runner.wrap(argv, cwd, env)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                **spawn_kwargs,
-                env=env,
-            )
-        except OSError as exc:
-            if self.isolation is not None:
-                # The isolation launcher itself did not start.
-                raise IsolationUnavailable(f"the isolation launcher could not start: {exc}") from exc
-            raise
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            **spawn_kwargs,
+            env=env,
+        )
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), self.timeout)
         except TimeoutError:
             await _kill_tree(proc)
             raise
         code = proc.returncode or 0
-        stderr = err.decode("utf-8", errors="replace")
-        if self.isolation is not None:
-            # Confinement failed after the probe passed (a container that
-            # refuses landlock_restrict_self, say): the hook never ran, which
-            # is not the same as the hook exiting 126.
-            refused = launcher_failure(code, stderr)
-            if refused:
-                raise IsolationUnavailable(refused)
-        return code, out.decode("utf-8", errors="replace"), stderr
+        return code, out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
 
     def interpret(self, event: str, code: int, stdout: str, stderr: str) -> HookDecision:
         """Map an exit code plus its streams onto a :class:`HookDecision`.

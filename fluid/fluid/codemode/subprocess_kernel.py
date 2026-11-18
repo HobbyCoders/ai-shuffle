@@ -29,6 +29,7 @@ under the kernel-enforced policy of :mod:`fluid.tools.isolation`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -194,21 +195,28 @@ class SubprocessKernel:
         argv = [self.config.python, "-I", "-S", _RUNNER]
         env = scrub_env(os.environ)
         cwd = None
+        launch = None
         if self.config.isolation is not None:
             # The opt-in isolated profile: the kernel starts confined by the
             # OS (its own sources stay readable), or does not start at all.
-            argv, cwd, env = self.config.isolation.wrap(
+            launch = self.config.isolation.launch(
                 argv, self.config.isolation.workspace, env,
                 readable=(os.path.dirname(_RUNNER), os.path.dirname(os.path.realpath(self.config.python))))
-        self._proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=cwd,
-            **spawn_kwargs,
-        )
+            argv, cwd, env = launch.argv, launch.cwd, launch.env
+        try:
+            self._proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                cwd=cwd,
+                **spawn_kwargs,
+            )
+        except BaseException:
+            if launch is not None:
+                launch.finish()
+            raise
         self._stderr_tail = bytearray()
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(self._proc), name="fluid-kernel-stderr"
@@ -221,34 +229,39 @@ class SubprocessKernel:
             )
         self._nonce = secrets.token_hex(16)
         boot_config = {**self.config.boot_payload(), "nonce": self._nonce}
-        if self.config.isolation is None:
+        if launch is None:
             await self._send({"kind": "boot", "config": boot_config})
             await self._read_frame()  # {"kind": "ready"}
         else:
+            # The launcher writes its ack before it execs the kernel, so a
+            # kernel that reached ``ready`` has one; without it the kernel
+            # never ran confined, whatever came down the pipe.
             try:
                 await self._send({"kind": "boot", "config": boot_config})
                 await self._read_frame()  # {"kind": "ready"}
-            except (OSError, asyncio.IncompleteReadError) as exc:
-                refused = await self._launcher_refusal()
-                if refused:
-                    raise IsolationUnavailable(refused) from exc
+            except asyncio.CancelledError:
+                launch.finish()
                 raise
+            except Exception as exc:
+                if launch.finish():
+                    raise
+                raise IsolationUnavailable(await self._not_run(launch)) from exc
+            if not launch.finish():
+                raise IsolationUnavailable(await self._not_run(launch))
         self._ever_started = True
         if self._vfs_sources or self._skill_sources:
             await self._send_vfs()
 
-    async def _launcher_refusal(self) -> str | None:
-        """The isolation launcher's refusal when the kernel died before
-        ``ready`` because confinement failed (exit 126 plus its message)."""
-        from fluid.tools.isolation import launcher_failure
-
+    async def _not_run(self, launch) -> str:
+        """The "not run" message for a kernel the launcher never confirmed,
+        with the launcher's own refusal when it printed one."""
         proc = self._proc
-        try:
-            code = await asyncio.wait_for(proc.wait(), 5)
+        with contextlib.suppress(TimeoutError, ProcessLookupError):
+            if proc.returncode is None:
+                proc.kill()
+            await asyncio.wait_for(proc.wait(), 5)
             await asyncio.wait_for(self._stderr_task, 5)
-        except TimeoutError:
-            return None
-        return launcher_failure(code, self._stderr_tail.decode("utf-8", errors="replace"))
+        return launch.not_run(self._stderr_tail.decode("utf-8", errors="replace"), "the code-mode kernel")
 
     async def _send_vfs(self) -> None:
         await self._send({

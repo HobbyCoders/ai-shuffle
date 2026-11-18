@@ -188,9 +188,18 @@ model's reach. The launcher script is never run from where Fluid is installed
 (a source checkout or editable install may be the workspace): Fluid reads its
 source once at import and runs a read-only copy from a private temporary
 directory outside every granted root. It runs under the real interpreter
-binary, not a virtualenv link. A configuration that would make that
-interpreter, its standard library, the loader's directories (`/etc`, `/lib*`,
-`/usr/lib*`) or the launcher copy writable is refused.
+binary, not a virtualenv link, with an empty environment that Fluid builds
+itself: nothing inherited and nothing from the settings `env`, so no
+`PYTHON*`, `__PYVENV_LAUNCHER__` or `LD_*` variable can change what it loads.
+The command's own environment travels as data, in a private file beside the
+launcher copy that the launcher reads and deletes; it is installed with
+`execve` only after Landlock and seccomp are applied. A configuration that
+would make the interpreter, its standard library, the loader's directories
+(`/etc`, `/lib*`, `/usr/lib*`) or the launcher copy writable is refused. The
+check compares resolved real paths on both sides, so a loader directory that
+is a link into a writable root is caught, and a layout it cannot verify (an
+interpreter that is not a regular file, a missing standard library) is
+refused too.
 
 **What it covers.**
 
@@ -207,12 +216,21 @@ interpreter, its standard library, the loader's directories (`/etc`, `/lib*`,
 | The ACP leg (`fluid.engine.acp`, used for Antigravity) | **not covered**: the external agent runs its own tools in its own process, and the app builds that loop outside `build_engine` |
 | MCP stdio servers, Grep's ripgrep, git probes for the prompt, provider sign-in helpers | **not covered**: these run commands chosen by the owner's config or by Fluid, not the model, and many need the network or the home directory |
 
-When confinement fails after the startup probe passed (for example a
-container that allows the probe but denies `landlock_restrict_self`), the
-launcher exits 126 with a `fluid isolation refused:` message and the command
-never runs. Bash, hooks and the code-mode kernel report that as "not run",
-not as the command's exit status, and a PreToolUse hook denies the call. A
-Monitor command shows the same message and exit status in its output.
+Whether the command ran is decided by a positive acknowledgement, not by
+its output or exit status. After Landlock and seccomp are applied, the
+launcher writes one byte to a private acknowledgement file that it opened
+before confining itself, closes it, and only then `exec`s the command. The
+file sits in the launcher's private directory, which no confined process can
+open, and its descriptor is closed before the `exec`, so the command can
+neither write the byte nor fake it by printing. When confinement fails after
+the startup probe passed (for example a container that allows the probe but
+denies `landlock_restrict_self`), when the launcher cannot be read, or when it
+times out or dies before confining itself, no byte arrives: Bash, Monitor and
+the code-mode kernel report "not run" with the launcher's message, and a
+PreToolUse hook denies the call (other hook events log a warning). A command
+that ran after the acknowledgement is reported as having run, whatever it
+prints. A refused code-mode kernel restart is a "not run" result too, and the
+last namespace checkpoint is kept.
 
 **Guaranteed on Linux with Landlock (kernel 5.13 or newer, ABI up to 12):**
 
@@ -222,7 +240,9 @@ Monitor command shows the same message and exit status in its output.
 - Device nodes: only `/dev/null`, `/dev/full` and `/dev/tty` (read and write)
   and `/dev/zero`, `/dev/random` and `/dev/urandom` (read) can be opened.
   `/dev/shm` and every other node are not reachable, and device ioctls are
-  denied from ABI 5.
+  denied from ABI 5. `/dev` and anything under it cannot be added as a
+  writable or readable root (config loading fails, and a per-spawn root is
+  refused).
 - Reads and execution are limited to the system directories (`/usr`, `/bin`,
   `/lib*`, `/etc`, `/opt`, `/proc`, `/sys`), the Python installation,
   `readable_roots` and the writable roots. The rest of the home directory,
@@ -249,16 +269,20 @@ Monitor command shows the same message and exit status in its output.
 - The environment is an allowlist: `PATH`, locale, terminal and user-name
   variables, `env_allow`, and the session's settings `env` (a deliberate
   hand-over). API keys, tokens and connection strings in the host environment
-  are not passed on. Loader variables (`LD_PRELOAD`, `GCONV_PATH`, ...) from the
-  settings `env` apply only to the confined command, never to the launcher.
+  are not passed on. The launcher itself starts with an empty environment;
+  loader variables (`LD_PRELOAD`, `GCONV_PATH`, `PYTHON*`, ...) from the
+  settings `env` reach only the confined command, after confinement.
 - `network = false`: the seccomp filter makes `socket(2)` fail with `EACCES`
   for every address family, Unix sockets included, and blocks io_uring. On
   Landlock ABI 4 (kernel 6.7) TCP bind and connect are also denied by
   Landlock, and from ABI 10 UDP bind, connect and send. Existing sockets are
   not inherited (the launcher closes every descriptor above stderr).
-  `socketpair(2)` is deliberately left open: it only makes a connected pair
-  inside the process (tools use it for their own pipes) and reaches nothing
-  outside.
+  `socketpair(2)` is allowed only for `AF_UNIX` with type `SOCK_STREAM` or
+  `SOCK_SEQPACKET` (with or without `SOCK_NONBLOCK`/`SOCK_CLOEXEC`), which
+  asyncio and other runtimes need for their own pipes; a stream pair reaches
+  nothing outside the process. Datagram pairs and every other family fail
+  with `EACCES`, because an unconnected datagram socket could `sendto()` any
+  pathname datagram socket on the machine.
 - Fail closed: when the profile is on and cannot be enforced (not Linux, a
   kernel without Landlock or with it disabled at boot, a Landlock ABI newer
   than 12 that this backend has not been reviewed against, a container
@@ -272,12 +296,16 @@ Monitor command shows the same message and exit status in its output.
 - Other platforms. macOS and Windows have no backend yet; with the profile on,
   every command is refused. The backend interface (`unavailable_reason`,
   `prefix`) is built so that a Seatbelt backend can be added.
-- Permission bits and timestamps outside the writable roots. Landlock does
+- Permission bits and timestamps outside the writable roots. A confined
+  command can change the permission bits and the timestamps of any file the
+  same user owns outside the roots, wherever it can reach the file by path
+  (read-only roots and system directories included). That means it can make
+  such a file unreadable, or make a private file world-readable. Landlock does
   not mediate `chmod` or `utimensat`, and blocking them with seccomp would
-  also break `chmod +x` in the workspace. So a confined command can still
-  change the mode or the timestamps of any file the user owns that it can
-  reach by path, including in read-only roots. It cannot change the file's
-  contents, owner or extended attributes.
+  also break `chmod +x` in the workspace. Closing this needs the command to
+  run as a separate user id, or to see a read-only view of the file system
+  (a mount namespace); this profile does neither. It cannot change the
+  file's contents, owner or extended attributes.
 - Hard links and bind mounts made *before* the session. Landlock grants
   follow the file system object, not its name: a hard link inside the
   workspace to a file elsewhere, made earlier by something unconfined, is
@@ -303,18 +331,27 @@ Monitor command shows the same message and exit status in its output.
   it there.
 - The app's own host-side spawners (its Monitor spawner, terminals, its own
   hook runner, its MCP Bash) are outside this harness. A host opts in by
-  putting the policy on `ToolCtx.extra["isolation"]` (or passing `[sandbox]`
-  in the config it builds) and wrapping its spawns with
-  `IsolationPolicy.wrap`. A Monitor spawner declares that by setting
-  `applies_isolation = True` on itself; until then the profile refuses Monitor
-  rather than trusting it.
+  passing `[sandbox]` in the config it builds, or by putting the policy on
+  `ToolCtx.extra["isolation"]` of the context it passes to `build_engine`,
+  and by starting its spawns through `IsolationPolicy.launch` (checking
+  `Launch.finish()` for the acknowledgement). A Monitor spawner declares
+  that by setting `applies_isolation = True` on itself; until then the
+  profile refuses Monitor rather than trusting it.
+- The policy is resolved once, when the engine is built, and that one object
+  reaches Bash, Monitor, hooks, the code-mode kernel and workers. A host's
+  policy wins over the config; a host value of `None` does not turn off a
+  profile the config asks for. Changing or removing
+  `ToolCtx.extra["isolation"]` after the build is not supported: Bash,
+  Monitor and workers then refuse to run anything with an error, rather than
+  applying the change to some spawn sites and not others.
 
 **Checking a machine.** `python -c "from fluid.tools import isolation;
 print(isolation.landlock_abi())"` prints the ABI, or `0` and the reason. The
 enforcement tests in `tests/unit/test_isolation.py` attack the policy from
 inside a confined child: writing outside the workspace, reading a planted
-secret, reading the exec-time environment of a separate process, and
-connecting to a local listener. They skip, naming the reason, where Landlock
+secret, reading the exec-time environment of a separate process,
+connecting to a local listener, and reaching a datagram listener through a
+socketpair. They skip, naming the reason, where Landlock
 is unavailable, and fail instead of skipping on GitHub Actions Linux.
 
 ## Override reference
