@@ -24,6 +24,7 @@ from app.core.provider.fluid_tool_bridge import ACP_LOADED_TOOLS, BRIDGE_DEFER_E
 from app.core.provider.types import SessionOptions
 from tests.core.test_antigravity_provider import _create, client, fake_agy  # noqa: F401
 from tests.core.test_delegated_bridge_tiers import _isolated, _servers  # noqa: F401
+from tests.core.test_delegated_leg import SEARCH_SURFACES, assert_search_guidance_matches
 
 ROOT = Path(__file__).resolve().parents[2]
 FAKE_MCP = str(ROOT / "fluid" / "tests" / "fixtures" / "fake_mcp_server.py")
@@ -173,6 +174,39 @@ async def test_external_servers_connect_host_side_and_run_through_call_tool(
         from fluid.events.model import ToolUse
         assert [e.name for e in events if isinstance(e, ToolUse)] == [
             "mcp__fluid_bundled__mcp__weather__get_weather"]
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+
+
+def _headings(blocks):
+    return [block.splitlines()[0] for block in blocks]
+
+
+@pytest.mark.asyncio
+async def test_the_append_carries_the_same_app_blocks_as_the_claude_leg(
+        tmp_path, client, monkeypatch):  # noqa: F811
+    """``agy acp`` takes only an append, so the app's guidance rides it: the
+    same blocks the claude leg's --system-prompt gets, each once, plus the
+    attribution block the claude CLI renders from --settings instead."""
+    from fluid.context.steering import PROMPT_BLOCK as STEERING
+
+    adapter = await _connected(tmp_path, client, monkeypatch)
+    engine = adapter._engine
+    try:
+        append = engine.system_append
+        registry = adapter._registry
+        options = adapter._options
+        ours = ha._app_guidance_blocks(options, leg="antigravity", registry=registry)
+        claude = ha._app_guidance_blocks(options, leg="claude", registry=registry)
+        assert _headings(ours) == ["# Attribution", *_headings(claude)]
+        for block in ours:
+            assert append.count(block) == 1, block.splitlines()[0]
+        for block in (STEERING, ha.SAFETY_BLOCK):
+            assert append.count(block) == 1
+        assert append.count("Be brief.") == 1
+        headings = [line for line in append.splitlines() if line.startswith("# ")]
+        assert len(headings) == len(set(headings)), headings
     finally:
         await engine.aclose()
         await adapter._registry.aclose()
@@ -539,3 +573,35 @@ def test_only_a_tool_the_acp_bridge_serves_passes_by_its_bare_name(tmp_path):
     chat.tool_allowlist.append("Read")
     chat_policy = ha._delegated_tool_policy(chat, None, [], bridged=lambda tool: False)
     assert "not enabled" in chat_policy(read, {}, unmapped_kind=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defer", [True, False])
+@pytest.mark.parametrize("surface", SEARCH_SURFACES)
+async def test_search_guidance_names_only_what_the_acp_bridge_serves(
+        tmp_path, client, monkeypatch, surface, defer):  # noqa: F811
+    """The Antigravity leg registers the bundled Glob and Grep on every OS, and
+    its bridge filter applies the CLI-shaped deny list, so a surface ticking
+    ``mcp__fluid_bundled__Glob`` gets no search tool and one ticking ``Glob``
+    gets Glob alone. The append must not promise more."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    # Deferral needs ToolSearch on the surface (_acp_bridge_deferral).
+    tools = [*surface, "ToolSearch"] if defer else list(surface)
+    adapter = await _connected(tmp_path, client, monkeypatch, tool_allowlist=tools)
+    engine = adapter._engine
+    try:
+        assert (engine.deferred is not None) is defer
+        bridged, deferred = set(engine.bridged_tools()), set(engine.deferred_tools())
+        assert defer or not deferred
+        served = {tool for tool in ("Glob", "Grep") if tool in bridged | deferred}
+        # Each served search tool sits on the tier deferral puts it on.
+        for tool in served:
+            assert (tool in bridged) is (not defer or tool in ACP_LOADED_TOOLS), tool
+        assert served == ({"Glob"} if "Glob" in surface else set())
+        assert_search_guidance_matches(engine.system_append, served)
+    finally:
+        await engine.aclose()
+        await adapter._registry.aclose()
+        cli_tool_surface.reset_cli_tools()

@@ -25,6 +25,7 @@ import pytest
 
 import app.core.provider.harness_adapter as ha
 from app.core.provider.types import SessionOptions
+from tests.test_harness_adapter import FILE_RULE_OPENING
 
 FAKE = (
     Path(__file__).resolve().parents[2]
@@ -177,13 +178,15 @@ def test_warm_cache_does_not_wall_the_cli_spellings_of_picked_tools(tmp_path):
 async def test_guidance_describes_the_picked_app_tools(tmp_path, builtins_server):
     options = _options(tmp_path, {"builtins": builtins_server}, surface=PICKED)
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
-    blocks = ha._delegated_guidance_blocks(options, registry)
+    blocks = ha._app_guidance_blocks(options, leg="claude", registry=registry)
     [app_tools] = [b for b in blocks if b.startswith("# App tools on this session")]
     assert "Task" in app_tools and "Monitor" in app_tools
-    assert "__Remember" in app_tools and "__Recall" in app_tools
-    assert ha._MEMORY_BLOCK_CORE in blocks
+    # The memory block calls the picked tools by the names the CLI lists.
+    [memory] = [b for b in blocks if b.startswith("# Durable memory")]
+    assert "mcp__fluid_bundled__mcp__builtins__Remember" in memory
+    assert "mcp__fluid_bundled__mcp__builtins__Recall" in memory
     # PICKED has no Edit: the block would forbid the only permitted way to edit.
-    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(blocks)
+    assert FILE_RULE_OPENING not in "\n\n".join(blocks)
 
 
 def test_unrestricted_sessions_are_unchanged(tmp_path):
@@ -295,7 +298,7 @@ async def test_app_tools_note_names_the_stand_ins(tmp_path, builtins_server):
     options = _options(tmp_path, {"builtins": builtins_server})
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
     [app_tools] = [
-        b for b in ha._delegated_guidance_blocks(options, registry)
+        b for b in ha._delegated_tool_blocks(options, registry)
         if b.startswith("# App tools on this session")
     ]
     assert "__RemoteTrigger and __NotifyDevices" in app_tools
@@ -385,7 +388,7 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
     assert not permit("mcp__builtins__Remember")
     assert permit("mcp__builtins__Recall")
     # No permitted shell is left, so the Bash-vs-dedicated-tools block is moot.
-    assert ha.DELEGATED_TOOL_USE_BLOCK not in "\n\n".join(ha._delegated_guidance_blocks(options, None))
+    assert FILE_RULE_OPENING not in "\n\n".join(ha._delegated_tool_blocks(options, None))
 
     loop = _loop(options)
     assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
@@ -401,19 +404,19 @@ def test_blocklist_reaches_the_cli_spellings_of_blocked_tools(tmp_path):
 async def test_blocked_bridged_tool_is_absent_from_prompt(tmp_path, builtins_server, blocked):
     options = _options(tmp_path, {"builtins": builtins_server})
     registry = await ha.HarnessAdapter()._build_registry(options, native=False)
-    original = ha._delegated_append_text("APPEND", options, registry) or ""
+    original = ha.HarnessAdapter._compile_prompt(None, "APPEND", options, registry=registry) or ""
     assert "__Remember" in original
-    assert ha._MEMORY_BLOCK_CORE in original
+    assert "# Durable memory" in original
     options.disallowed_tools = [blocked]
     loop = _loop(options, registry)
     try:
         assert registry.get("mcp__builtins__Remember") is not None
         assert not loop._bridge_tool_permitted("mcp__builtins__Remember")
         assert loop._bridge_tool_permitted("mcp__builtins__Recall")
-        text = ha._delegated_append_text("APPEND", options, registry) or ""
+        text = ha.HarnessAdapter._compile_prompt(None, "APPEND", options, registry=registry) or ""
         assert "__Remember" not in text
         assert "__ListAgents" in text  # unrelated app tools remain advertised
-        assert ha._MEMORY_BLOCK_CORE not in text
+        assert "# Durable memory" not in text
     finally:
         await loop.aclose()
 
@@ -444,3 +447,99 @@ def test_seed_walls_every_built_in_production_announced(tmp_path):
     assert set(ANNOUNCED) <= set(KNOWN_CLI_TOOLS)
     denied = set(ha._delegated_disallowed(_options(tmp_path, surface=["Read"])))
     assert {"DesignSync", "ReportFindings"} <= denied
+
+
+def _verification(blocks):
+    [block] = [b for b in blocks if b.startswith("# Verification\n")]
+    return block
+
+
+UNAVAILABLE = "The browser verification surface is unavailable"
+BROWSER = {"command": "node", "args": ["browser-mcp.js"]}
+
+
+@pytest.mark.parametrize("leg,route,surface,expected", [
+    ("claude", "profile", None, "mcp__browser__browser_navigate"),
+    ("claude", "plugin", None, "mcp__browser__browser_navigate"),
+    # Plugin servers join only the unrestricted code lane.
+    ("claude", "plugin", ["Read", "Edit"] + [f"mcp__browser__{t}" for t in ha._VERIFICATION_BROWSER_TOOLS], None),
+    ("claude", "none", None, None),
+    ("claude", "profile", ["Read", "Edit"], None),  # surface withholds the browser
+    ("antigravity", "host", None, "mcp__browser__browser_navigate"),
+    ("antigravity", "agent", None, "browser_navigate"),
+    ("antigravity", "none", None, None),
+    ("antigravity", "host", ["Read", "Edit"], None),
+])
+def test_browser_guidance_follows_the_servers_route(tmp_path, monkeypatch, leg, route, surface, expected):
+    """The Verification block names the browser tools as the route connect
+    picks spells them, and calls the surface unavailable only when it is."""
+    from fluid.tools.registry import ToolRegistry, ToolSpec
+
+    async def handler(args, ctx):
+        return None
+
+    monkeypatch.setattr(
+        ha, "_fluid_plugin_servers",
+        lambda options, *, delegated: {"browser": BROWSER} if route == "plugin" else {},
+    )
+    servers = {"browser": BROWSER} if route in ("profile", "agent", "host") else {}
+    options = _options(tmp_path, servers, surface=surface)
+    registry = ToolRegistry()
+    if route == "host":
+        for tool in ha._VERIFICATION_BROWSER_TOOLS:
+            registry.register_builtin(
+                ToolSpec(name=f"mcp__browser__{tool}", description=tool, input_schema={}), handler,
+            )
+    text = _verification(ha._app_guidance_blocks(
+        options, leg=leg, registry=registry,
+        host_servers={"browser"} if route == "host" else set(),
+    ))
+    if expected is None:
+        assert UNAVAILABLE in text
+        assert "browser_navigate" not in text
+    else:
+        assert UNAVAILABLE not in text
+        assert f"one {expected} and one" in text
+        if not expected.startswith("mcp__"):
+            assert "mcp__browser__" not in text
+
+
+@pytest.mark.parametrize("entry,named", [
+    (BROWSER, True),
+    ({"type": "stdio", "command": "node"}, True),
+    ({"type": "http", "url": "http://127.0.0.1:9/mcp"}, False),
+    ({"transport": "sse", "url": "http://127.0.0.1:9/sse"}, False),
+    ({"type": "http"}, False),  # no url: acp_server_entry drops it
+])
+def test_agent_connected_browser_is_named_only_for_stdio(tmp_path, entry, named):
+    """Handed to an ACP agent, a server reaches it only in a transport the agent
+    advertises after initialize; stdio is the one every agent takes, so only a
+    stdio browser entry (as ``acp_server_entry`` classifies it) is named."""
+    from fluid.tools.registry import ToolRegistry
+
+    options = _options(tmp_path, {"browser": entry})
+    text = _verification(ha._app_guidance_blocks(
+        options, leg="antigravity", registry=ToolRegistry(), host_servers=set(),
+    ))
+    assert ("one browser_navigate and one" in text) is named
+    assert (UNAVAILABLE in text) is not named
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("logs,expected", [
+    (["GetAppLogs", "GetAppErrors"],
+     "(mcp__fluid_bundled__mcp__builtins__GetAppLogs, "
+     "mcp__fluid_bundled__mcp__builtins__GetAppErrors, a probe, a metric)"),
+    (["GetAppErrors"], "(mcp__fluid_bundled__mcp__builtins__GetAppErrors, a probe, a metric)"),
+    ([], "(a probe, a metric)"),
+])
+async def test_verification_names_only_the_log_tools_the_bridge_serves(
+    tmp_path, builtins_server, logs, expected,
+):
+    options = _options(tmp_path, {"builtins": builtins_server}, surface=["Read", "Edit", *logs])
+    registry = await ha.HarnessAdapter()._build_registry(options, native=False)
+    assert registry.get("mcp__builtins__GetAppLogs") is not None
+    text = _verification(ha._app_guidance_blocks(options, leg="claude", registry=registry))
+    assert f"needs a measurement {expected} before" in text
+    for tool in {"GetAppLogs", "GetAppErrors"} - set(logs):
+        assert tool not in text

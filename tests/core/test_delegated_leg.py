@@ -1,5 +1,5 @@
-"""The delegated Claude leg: Claude Code's preset prompt with the app's text
-appended (decision D6)."""
+"""The delegated Claude leg: the app's compiled prompt replaces Claude Code's
+for every profile shape, with the same app blocks as the native leg."""
 
 from __future__ import annotations
 
@@ -103,26 +103,31 @@ async def _run_turn(adapter, text: str) -> ResultMessage:
     raise AssertionError("turn ended without a result")
 
 
-def test_delegated_append_carries_the_app_guidance(tmp_path):
-    """Memory, recall and the gh note ride the appended text, named the way
+def _claude_prompt(options, registry) -> str:
+    """The claude CLI's --system-prompt, from the real compile path."""
+    system, append = ha._system_parts(options.system_prompt)
+    return ha.HarnessAdapter._compile_prompt(system, append, options, registry=registry)
+
+
+def test_delegated_prompt_carries_the_app_guidance(tmp_path):
+    """Memory, recall and the gh note ride the compiled prompt, named the way
     the CLI sees the bridged tools; fluid's Note/Ledger sentence does not,
     because the delegated leg has neither tool."""
-    text = ha._delegated_append_text(
-        "APPEND TEXT",
-        _preset_options(tmp_path, github_connected=True),
-        _memory_registry(),
+    text = _claude_prompt(
+        _preset_options(tmp_path, github_connected=True), _memory_registry(),
     )
-    assert text.startswith("APPEND TEXT")
-    assert "# App tools on this session" in text
-    for tool in _BRIDGED:
-        assert f"__{tool}" in text
-    assert ha.RECALL_BLOCK in text
-    assert ha._MEMORY_BLOCK_CORE in text
+    assert "APPEND TEXT" in text
+    # Forget is named by the per-turn memory reminder, not the prompt (same
+    # as the native leg).
+    for tool in ("Remember", "Recall", "SessionSearch", "SessionView"):
+        assert f"mcp__fluid_bundled__mcp__builtins__{tool}" in text
+    assert ha._spell_bundled(ha.RECALL_BLOCK, ha._DELEGATED_RECALL_TOOLS) in text
+    assert ha._spell_bundled(ha._MEMORY_BLOCK_CORE, ha._DELEGATED_MEMORY_TOOLS) in text
     assert "Note and Ledger" not in text
     assert ha.GITHUB_BLOCK in text
 
 
-def test_delegated_append_names_the_apps_task_and_background_tools(tmp_path):
+def test_delegated_prompt_names_the_apps_task_and_background_tools(tmp_path):
     """The prompt's Task and Monitor are the app's bridged tools on this leg;
     the CLI's own tools of those names are banned there."""
 
@@ -135,41 +140,44 @@ def test_delegated_append_names_the_apps_task_and_background_tools(tmp_path):
             ToolSpec(name=f"mcp__builtins__{tool}", description=tool, input_schema={}),
             handler,
         )
-    text = ha._delegated_append_text("APPEND TEXT", _preset_options(tmp_path), registry)
+    text = _claude_prompt(_preset_options(tmp_path), registry)
     assert "# App tools on this session" in text
     assert "__Task, __Monitor, __TaskStop" in text
     assert "__TaskOutput" not in text  # not registered, so not named
     assert all(name in ha.DELEGATED_BANNED_TOOLS for name in ("Task", "Monitor", "TaskStop"))
 
 
-def test_delegated_append_drops_guidance_for_tools_off_the_surface(tmp_path):
+def test_delegated_prompt_drops_guidance_for_tools_off_the_surface(tmp_path):
     """Ruling T9 on this leg too: no block describes a tool the session
     cannot call."""
+    from fluid.context.steering import PROMPT_BLOCK as STEERING
+
     options = _preset_options(tmp_path, github_connected=True)
     options.tool_allowlist = ["Read"]
-    text = ha._delegated_append_text("APPEND TEXT", options, _memory_registry())
-    # Incoming peer work is independent of the receiver's outgoing tool surface.
-    from fluid.context.peer import PROMPT_BLOCK
-    # The batching rule names no tool, so it rides every surface.
+    blocks = ha._app_guidance_blocks(options, leg="claude", registry=_memory_registry())
+    # The batching rule names no tool, so it rides every surface; steering,
+    # safety and the context rules name no tool the session lacks.
     batching = ha.DELEGATED_TOOL_USE_HEADER + ha.DELEGATED_BATCHING_RULE
-    assert text == "APPEND TEXT\n\n" + PROMPT_BLOCK + "\n\n" + batching
+    assert blocks == [STEERING, ha.SAFETY_BLOCK, ha.CONTEXT_BLOCK_NO_RECALL, batching]
 
 
-def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path):
+def test_batching_rule_follows_the_file_tool_rule_on_a_code_session(tmp_path, monkeypatch):
+    # A CLI known to carry its own Glob and Grep, which this surface leaves on.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
     options = _preset_options(tmp_path)
-    blocks = ha._delegated_guidance_blocks(options, _memory_registry())
+    blocks = ha._delegated_tool_blocks(options, _memory_registry())
     assert blocks[0] == f"{ha.DELEGATED_TOOL_USE_BLOCK}\n{ha.DELEGATED_BATCHING_RULE}"
     # The file-tool rule already says to search with Glob and Grep.
     assert "rather than find/grep through Bash" not in "\n".join(blocks)
 
 
 @pytest.mark.asyncio
-async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_path):
-    """The appended prompt is part of the CLI's cached prefix, so it must not
-    change between turns. Two turns, with a CLI restart between them so the
-    second one builds its argv again, must send the same bytes. The text
-    rides a file (``--append-system-prompt-file``), so each spawn's file
-    contents are what must match."""
+async def test_delegated_prompt_is_byte_identical_across_turns(monkeypatch, tmp_path):
+    """The compiled prompt is the CLI's cached prefix, so it must not change
+    between turns. Two turns, with a CLI restart between them so the second
+    one builds its argv again, must send the same bytes. The text rides a
+    file (``--system-prompt-file``), so each spawn's file contents are what
+    must match. A preset profile no longer appends to Claude Code's prompt."""
     import fluid.engine.delegated as delegated_mod
 
     class _FileLoop(_ArgvLoop):
@@ -179,7 +187,7 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
 
         def _build_argv(self):
             argv = super()._build_argv()
-            path = _flag(argv, "--append-system-prompt-file")
+            path = _flag(argv, "--system-prompt-file")
             type(self).prompt_bytes.append(Path(path).read_bytes() if path else None)
             return argv
 
@@ -205,12 +213,14 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
 
     assert not first.is_error and not second.is_error
     assert len(_ArgvLoop.argvs) == 2
-    assert all(_flag(argv, "--append-system-prompt") is None for argv in _ArgvLoop.argvs)
+    assert all(_flag(argv, "--system-prompt") is None for argv in _ArgvLoop.argvs)
     appends = _FileLoop.prompt_bytes
     assert len(appends) == 2 and appends[0]
     assert appends[0] == appends[1]
+    assert b"APPEND TEXT" in appends[0]
     assert all(
-        _flag(argv, "--system-prompt") is None and _flag(argv, "--system-prompt-file") is None
+        _flag(argv, "--append-system-prompt") is None
+        and _flag(argv, "--append-system-prompt-file") is None
         for argv in _ArgvLoop.argvs
     )
     # The second spawn resumed the same CLI conversation.
@@ -223,7 +233,7 @@ async def test_delegated_append_is_byte_identical_across_turns(monkeypatch, tmp_
         _preset_options(tmp_path, registry=_memory_registry(), github_connected=True)
     )
     try:
-        rebuilt = again.engine.append_system_prompt
+        rebuilt = again.engine.system
     finally:
         await again.disconnect()
     assert rebuilt.encode("utf-8") == appends[0]
@@ -249,6 +259,62 @@ class _KwargsLoop:
 
     async def aclose(self):
         pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_time_rule_arrives_exactly_once(monkeypatch, tmp_path, fallback):
+    """The relative-time rule reaches the model once per session: in the
+    compiled prompt's environment section, or, when the compile fell back to
+    the raw profile text (a manifest the compiler cannot read), in the host
+    turn note and the internal wake note instead."""
+    from fluid.context.time_awareness import RELATIVE_TIME_RULE
+    from fluid.messages import Text
+    from fluid.tools.time_context import delegated_wake_time
+
+    if fallback:
+        (tmp_path / "package.json").write_text('{"scripts": true}', encoding="utf-8")
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    clock = {"zone": "UTC"}
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(_preset_options(tmp_path))
+    try:
+        system = adapter.engine.system
+        assert adapter.engine.append_system_prompt is None
+        assert ("# Environment" not in system) is fallback
+        monkeypatch.setattr(adapter, "_time_context", lambda source=None: clock)
+        adapter.engine.ctx.extra["time_context"] = lambda source: clock
+        turn_note = adapter._env_note()
+        woken = delegated_wake_time([Text("wake up")], adapter.engine.ctx.extra, "wakeup")
+        wake_note = "".join(block.text for block in woken if isinstance(block, Text))
+        assert "Current time:" in turn_note and "Current time:" in wake_note
+        assert system.count(RELATIVE_TIME_RULE) == (0 if fallback else 1)
+        assert turn_note.count(RELATIVE_TIME_RULE) == (1 if fallback else 0)
+        assert wake_note.count(RELATIVE_TIME_RULE) == (1 if fallback else 0)
+    finally:
+        await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_prompt_and_mcp_config_share_one_server_map(monkeypatch, tmp_path):
+    """Connect reads the CLI's server map once: the browser guidance frozen in
+    the prompt names the servers ``--mcp-config`` connects, even when a plugin
+    server is toggled between two reads."""
+    browser = {"browser": {"command": "browser-mcp"}}
+    reads = []
+
+    def _servers(options):
+        reads.append(options)
+        return dict(browser) if len(reads) == 1 else {}
+
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    monkeypatch.setattr(ha, "DelegatedLoop", _KwargsLoop)
+    monkeypatch.setattr(ha, "_delegated_external_mcp_servers", _servers)
+    await ha.HarnessAdapter().connect(_preset_options(tmp_path))
+    captured = _KwargsLoop.captured
+    assert len(reads) == 1
+    assert captured["mcp_servers"] == browser
+    assert "mcp__browser__browser_navigate" in captured["system"]
 
 
 @pytest.mark.asyncio
@@ -412,9 +478,8 @@ async def _sent_user_turn(adapter, monkeypatch, text="do the thing", *, source="
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("full_replace", [True, False])
 @pytest.mark.parametrize("source", ["user", "queue"])
-async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, full_replace, source):
+async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_path, source):
     """A custom (plain-string) prompt replaces Claude Code's preset, and with
     it the CLI's own date and git facts; the compiled prompt holds only the
     session-stable environment. So every user turn carries today's date and
@@ -422,10 +487,8 @@ async def test_custom_prompt_user_turn_carries_date_and_branch(monkeypatch, tmp_
     the retired inject_env_details switch)."""
     import subprocess
 
-    from app.core.config import settings
     from app.core.environment import TURN_ENV_HEADER
 
-    monkeypatch.setattr(settings, "prompt_full_replace", full_replace)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     repo = _git_repo(tmp_path, "feature-turn")
     adapter = ha.HarnessAdapter()
@@ -829,3 +892,161 @@ def test_a_pinned_window_mismatch_is_shown_on_the_session():
     assert adapter._translate(diagnostic(
         "compaction_restoration", complete=False, sections=[],
     )) == []
+
+
+# ─── Search guidance follows what the leg can actually call ─────────────────
+
+# Allow-only surfaces with Bash, Read and Edit (so the file-tool rule is
+# written) and one search tool, under the bundled spelling or the bare one.
+SEARCH_SURFACES = [
+    ["Bash", "Read", "Edit", "mcp__fluid_bundled__Glob"],
+    ["Bash", "Read", "Edit", "Glob"],
+]
+
+
+def assert_search_guidance_matches(prompt: str, served: set) -> None:
+    """The "# Tool use" rule names exactly the search tools ``served`` holds,
+    forbids shell search only where one of them covers it, and the prompt
+    names no bundled search tool the bridge withholds."""
+    import re
+
+    rule = prompt.split("# Tool use on this session\n", 1)[1].split("\n# ", 1)[0]
+    dedicated, _, rest = rule.partition("Keep Bash")
+    named = {tool for tool in ("Glob", "Grep") if re.search(rf"\b{tool}\b", dedicated)}
+    assert named == served, rule
+    forbidden = rest.split("Do not", 1)[1].split("This holds", 1)[0]
+    assert bool(re.search(r"\bfind\b", forbidden)) == ("Glob" in served), rule
+    assert bool(re.search(r"\bgrep\b", forbidden)) == ("Grep" in served), rule
+    for tool in {"Glob", "Grep"} - served:
+        assert f"mcp__fluid_bundled__{tool}" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface", SEARCH_SURFACES)
+async def test_search_guidance_names_only_what_the_claude_leg_can_call(
+    monkeypatch, tmp_path, surface,
+):
+    """The CLI's deny list walls the bare names an allow-only surface does not
+    tick, and the bridge reads that list against its own Glob and Grep, so
+    ticking ``mcp__fluid_bundled__Glob`` serves no search tool at all and
+    ticking ``Glob`` serves Glob alone. The prompt says the same."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    # A CLI that may lack its own search: the bundled copies register.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: False)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    options = SessionOptions(
+        model="fable", system_prompt="CUSTOM AGENT PROMPT", cwd=str(tmp_path),
+        tool_allowlist=list(surface), extra={"session_mode": "code"},
+    )
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        engine = adapter.engine
+        assert {"Glob", "Grep"} <= {s.name for s in engine.registry.list_tools(loaded_only=False)}
+        served = {tool for tool in ("Glob", "Grep") if engine._bridge_tool_permitted(tool)}
+        # Neither the CLI's own copy nor the bundled one is callable unless
+        # its bare name is ticked: the deny list walls both.
+        cli_denied = {tool for tool in ("Glob", "Grep") if tool in engine.disallowed_tools}
+        assert served == {"Glob", "Grep"} - cli_denied
+        assert served == ({"Glob"} if "Glob" in surface else set())
+        assert_search_guidance_matches(engine.system, served)
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
+
+
+async def _custom_connect(monkeypatch, tmp_path, *, allow=None, deny=None, **extra):
+    """A custom Claude code profile, connected the way the app connects it,
+    on Windows (the CLI ships its own Glob and Grep)."""
+    from app.core import cli_tool_surface
+
+    cli_tool_surface.reset_cli_tools()
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    options = SessionOptions(
+        model="fable", system_prompt="CUSTOM AGENT PROMPT", cwd=str(tmp_path),
+        tool_allowlist=allow, disallowed_tools=deny,
+        extra={"session_mode": "code", **extra},
+    )
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    return adapter
+
+
+def _bash_denied(engine) -> bool:
+    from app.core.tool_access import matches_any
+
+    return matches_any("Bash", engine.disallowed_tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow, deny, ruled", [
+    (["PowerShell", "Read", "Edit", "Glob"], None, False),
+    (["mcp__fluid_bundled__PowerShell", "Read", "Edit", "Glob"], None, False),
+    (None, ["Bash*"], False),
+    (["Bash", "Read", "Edit", "Glob"], None, True),
+    (None, None, True),
+])
+async def test_custom_profile_file_rule_needs_bash_past_the_deny_list(
+    monkeypatch, tmp_path, allow, deny, ruled,
+):
+    """The file rule says to keep Bash for builds and git. A surface that
+    ticks only PowerShell (in either spelling), or a ``Bash*`` block that
+    leaves PowerShell, keeps the CLI's Bash on the deny list, so a custom
+    profile's compiled prompt must not carry it."""
+    from app.core import cli_tool_surface
+    from tests.test_harness_adapter import FILE_RULE_OPENING
+
+    adapter = await _custom_connect(monkeypatch, tmp_path, allow=allow, deny=deny)
+    try:
+        engine = adapter.engine
+        assert engine.system.startswith("CUSTOM AGENT PROMPT")
+        assert _bash_denied(engine) is not ruled
+        assert (FILE_RULE_OPENING in engine.system) is ruled
+        assert "# Tool use on this session" in engine.system
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell, gh", [
+    ("mcp__fluid_bundled__Bash", False),
+    ("Bash", True),
+])
+async def test_custom_profile_github_block_needs_bash_past_the_deny_list(
+    monkeypatch, tmp_path, shell, gh,
+):
+    """The GitHub block says to use gh in Bash. The bundled spelling passes
+    the surface predicate, but the CLI's bare Bash stays on its deny list."""
+    from app.core import cli_tool_surface
+
+    adapter = await _custom_connect(
+        monkeypatch, tmp_path, allow=[shell, "Read", "Edit", "Glob"], github_connected=True,
+    )
+    try:
+        engine = adapter.engine
+        assert _bash_denied(engine) is not gh
+        assert ("use it in Bash" in engine.system) is gh
+        assert (ha.GITHUB_BLOCK in engine.system) is gh
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
+
+
+@pytest.mark.parametrize("deny, callable_", [
+    (None, True),
+    (["PowerShell"], True),
+    (["Bash"], False),
+    (["Bash*"], False),
+    (["B?sh"], False),
+    (["Bash(git push:*)"], False),
+    (["*"], False),
+])
+def test_claude_bash_callable_reads_the_deny_list_conservatively(deny, callable_):
+    """Any deny entry whose tool part could match Bash counts, a scoped
+    ``Bash(...)`` rule included."""
+    options = SessionOptions(model="fable", disallowed_tools=deny, extra={"session_mode": "code"})
+    assert ha._claude_bash_callable(options, None) is callable_

@@ -429,6 +429,26 @@ def claude_mod_enabled(env: dict[str, str] | None = None) -> bool:
     return raw is None or raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def register_recall_tools(registry: Any, *, claude_mod: bool, claude_mod_compaction: bool) -> bool:
+    """Register HistoryExpand and HistorySearch for a session whose compaction
+    runs through the mod; return whether the session offers them.
+
+    Decided from the two switches alone, at construction, never at spawn: a
+    host fixes its system prompt from this same registry (the bridge lists
+    from it) before the CLI starts, and the answer must not move between
+    respawns. The tools read fluid's own store (``HistoryRecall``), so they
+    still work when a spawn cannot load the mod (older CLI, staging error)
+    and the CLI compacts on its own.
+    """
+    if registry is None or not (claude_mod and claude_mod_compaction):
+        return False
+    from fluid.tools.builtins import history_expand, history_search
+    for tool in (history_expand, history_search):
+        if registry.get(tool.SPEC.name) is None:
+            registry.register_builtin(tool.SPEC, tool.handler)
+    return True
+
+
 def _stage_claude_mod(tmpdir: str) -> str:
     """Copy the shipped mod into ``tmpdir`` (once) and return the copy's path.
 
@@ -1199,6 +1219,10 @@ class DelegatedLoop(BackgroundLifecycleMixin):
         # the environment for it. A spawn without the mod (older CLI, mod
         # off) compacts on the CLI's own, the same as off.
         self.claude_mod_compaction = bool(claude_mod_compaction)
+        register_recall_tools(
+            registry, claude_mod=self.claude_mod,
+            claude_mod_compaction=self.claude_mod_compaction,
+        )
         self._compaction_route = False
         # The model's context window when the host knows it: what Fluid's
         # compaction sizes its target and its recency tail against.
@@ -2039,12 +2063,6 @@ class DelegatedLoop(BackgroundLifecycleMixin):
             return []
         self._claude_mod_dir = path
         self._claude_mod_state = "requested"
-        # Only a spawn that can load the compaction hook needs recall tools.
-        if self.claude_mod_compaction and self.registry is not None:
-            from fluid.tools.builtins import history_expand, history_search
-            for tool in (history_expand, history_search):
-                if self.registry.get(tool.SPEC.name) is None:
-                    self.registry.register_builtin(tool.SPEC, tool.handler)
         return ["--plugin-dir", path]
 
     def _check_claude_mod(self, mapper: StreamJsonMapper) -> None:

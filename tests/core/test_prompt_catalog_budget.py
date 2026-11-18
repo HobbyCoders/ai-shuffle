@@ -71,9 +71,17 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # own. Remeasured with scripts/measure_prompt_catalog.py on 2026-11-15:
 # pre-Plan full 136,345 -> 135,468, eager 53,138 -> 52,253. Delegated budgets
 # unchanged (the section is native-only).
+# Uniform prompt (Nov 2026, owner decision): the claude CLI leg now runs the
+# compiled prompt as --system-prompt for a preset-shape profile too, replacing
+# Claude Code's own prompt, with the same app blocks as the native leg
+# (attribution aside: the CLI renders it from --settings). The fixture now
+# measures that compile instead of the old append: 14,877 -> 21,324, the
+# steering, safety, context-window, planning, model-family, recall and
+# verification blocks the leg lacked. Claude Code's own prompt, which this
+# replaces, was never in the measured number. Native budgets unchanged.
 MEASURED_FULL = 135_468
 MEASURED_EAGER = 52_253
-MEASURED_DELEGATED_APPEND = 14_877
+MEASURED_DELEGATED_APPEND = 21_324
 MEASURED_DELEGATED_LOADED_TOOLS = 7_327
 
 

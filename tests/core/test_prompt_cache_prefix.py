@@ -171,11 +171,11 @@ async def test_send_query_appends_the_volatile_context(
         cwd=str(tmp_path),
         extra={"app_session_id": memory_session_id},
     )
-    # A delegated leg whose custom prompt replaced Claude Code's preset: the
-    # one shape where the adapter owns the per-turn date and branch.
+    # A delegated leg whose compiled prompt replaced Claude Code's and carries
+    # the time rule: the adapter owns the per-turn date and branch.
     subprocess.run(["git", "init", "-q", "-b", "claude/one", str(tmp_path)], check=True)
     adapter._is_delegated = True
-    adapter._delegated_replaces_preset = True
+    adapter._time_rule_in_prompt = True
     engine = _RecordingEngine()
     adapter._engine = engine
 
