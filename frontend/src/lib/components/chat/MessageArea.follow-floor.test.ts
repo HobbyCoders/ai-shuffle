@@ -33,6 +33,8 @@ const transaction = between("let layoutBoundary = '';", '// Rendered geometry ha
 const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replace('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
+const handoffRelease = between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view')
+	.replace(': number | null', '');
 
 type Session = Pick<ActiveSessionState, 'sessionId' | 'messages' | 'isStreaming' | 'liveTurnId' | 'error' | 'queuedMessages' | 'localSendIntent'>;
 const session = (id: string, count = 2): Session => ({ sessionId: id, messages: Array(count).fill({}), isStreaming: false, liveTurnId: null, error: null, queuedMessages: [] });
@@ -46,34 +48,48 @@ function probe() {
 	const env = {
 		session: session('long'), scrollTop: 5000, proseEnd: 200,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
+		frames: [] as (() => void)[], restingRows: false,
 		landedFromQueue, visibleTurnError
 	};
 	const create = new Function('env', `
 		let $activeSession = env.session, lastKnownScrollTop = env.scrollTop;
 		let followedViewportEnd = 0, followedFloorContext = null;
-		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0;
+		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
+		let handoffPainted = false, heldBlankPx = 0, handoffHold = 0;
 		let windowShifting = false, windowShiftVersion = 0;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
 		const clearJumpRevealTimer = () => {};
 		const containerRef = { clientHeight: 600, scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }) };
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
-		const tailControlsRef = { getBoundingClientRect: () => ({ height: env.pendingHeight }) }, chatColumnRef = {};
-		const getComputedStyle = () => ({ rowGap: String(env.gap) });
+		// Painted height: the queue's own height, or the slot holding it open.
+		const painted = () => Math.max(env.pendingHeight, tailQueueSlotPx);
+		// The queue's bubbles dock at the slot's bottom; an empty queue docks none.
+		const row = { getBoundingClientRect: () => ({ top: painted() - env.pendingHeight }) };
+		const tailControlsRef = {
+			getBoundingClientRect: () => ({ top: 0, bottom: painted(), height: painted() }),
+			querySelector: () => env.pendingHeight > 0 ? { firstElementChild: row } : null
+		}, chatColumnRef = {};
+		const getComputedStyle = () => ({ rowGap: String(env.gap) }), rowGapPx = () => env.gap;
 		const activeSession = {}, get = () => env.session;
 		const liveActiveSession = { clearError: () => { env.session = { ...env.session, error: null }; } };
 		const untrack = fn => fn();
 		const tick = () => new Promise(resolve => env.ticks.push(resolve));
-		const requestAnimationFrame = fn => { fn(); return 0; };
+		const requestAnimationFrame = fn => { env.frames.push(fn); return env.frames.length; };
 		const maintainCurrentTurnAnchor = () => env.calls.push('anchor');
 		const followGrowthNow = () => env.calls.push('follow');
+		const refreshLatestTurnTailReserve = () => env.calls.push('reserve');
+		const markProgrammaticScrollSettling = () => env.calls.push('settle');
+		const pendingMessages = { get length() { return $activeSession.queuedMessages?.length ?? 0; } };
+		const notSentHold = { messages: [] }, restingOnNotSentRows = () => env.restingRows;
 		const landedFromQueue = env.landedFromQueue;
 		let bannerError = null;
-		let effect;
-		const $effect = { pre: fn => { effect = fn; } };
+		const effects = [];
+		const $effect = { pre: fn => { effects.push(fn); } };
 		${reserve}
 		${transaction}
 		${beginTurn}
+		${handoffRelease}
 		return {
 			start: fromQueue => startCurrentTurnAnchor('next', fromQueue),
 			dismiss: () => dismissTailError(),
@@ -83,20 +99,34 @@ function probe() {
 				bannerError = env.visibleTurnError($activeSession);
 				lastKnownScrollTop = env.scrollTop;
 				shouldAutoScroll = env.follows;
-				cleanup = effect();
+				// Both pre-render effects, in source order, as one commit.
+				cleanup = effects[0]();
+				effects.slice(1).forEach(fn => fn());
 			},
 			shift() { windowShiftVersion++; ${beginShift} },
 			endShift() { windowShifting = false; },
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
 			queueSlot: () => tailQueueSlotPx,
+			handoffSlot: () => handoffSlotPx,
 			errorOffset: () => tailErrorOffsetPx,
 			presentedError: () => presentedTailError,
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
-	return { env, ...state, render() { state.run(); tail.style.minHeight = renderSlotStyle(state.queueSlot()); return tail; }, async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); } };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const settle = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
+	return {
+		env, ...state,
+		render() { state.run(); tail.style.minHeight = renderSlotStyle(state.queueSlot()); return tail; },
+		async flush() { env.ticks.splice(0).forEach(resolve => resolve()); await Promise.resolve(); env.frames.splice(0).forEach(fn => fn()); },
+		/** One animation frame, then the microtasks (Svelte ticks included) that run before its paint. */
+		async frame() {
+			env.frames.splice(0).forEach(fn => fn());
+			for (let i = 0; i < 4; i++) { await settle(); env.ticks.splice(0).forEach(resolve => resolve()); }
+			await settle();
+		}
+	};
 }
 
 /** The real sender owns intent publication; this adapter only records its updates. */
@@ -244,6 +274,95 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		expect(p.queueSlot()).toBe(fromQueue ? 164.9375 : 0);
 	});
 
+	describe('queue handoff hold', () => {
+		const queued = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `q${i}` })) as unknown as Session['queuedMessages'];
+		const turn = (messages: number, queue: number) => ({ ...session('long', messages), isStreaming: true, queuedMessages: queued(queue) });
+		/** A queued prompt's row lands in the same commit its bubble leaves, painted at `painted`px. */
+		function handoff(painted: number, queue = 3) {
+			const p = probe();
+			p.env.session = turn(18, queue); p.render();
+			p.env.pendingHeight = painted;
+			p.env.session = turn(19, queue - 1);
+			expect(p.render().style.minHeight).toBe(`${painted}px`);
+			return p;
+		}
+		const paint = async (p: ReturnType<typeof probe>) => { await p.frame(); await p.frame(); };
+
+		it('holds the slot past the handoff frames until the last bubble leaves, in one commit', async () => {
+			const p = handoff(650, 3);
+			p.env.pendingHeight = 80;
+			p.env.session = turn(20, 1);
+			await paint(p);
+			expect(p.render().style.minHeight).toBe('650px');
+			p.env.pendingHeight = 0;
+			p.env.session = turn(21, 0);
+			expect(p.render().style.minHeight).toBe('0px');
+			expect(p.handoffSlot()).toBe(0);
+		});
+
+		it('keeps a live hold through a queued send in the middle of it', async () => {
+			const p = handoff(300, 2);
+			p.env.pendingHeight = 80;
+			const producer = senderSnapshots(p.env.session);
+			const snapshots = await producer.send();
+			expect(snapshots.some(s => s.localSendIntent)).toBe(true);
+			for (const snapshot of snapshots) {
+				p.env.session = snapshot;
+				expect(p.render().style.minHeight).toBe('300px');
+			}
+			expect(p.handoffSlot()).toBe(300);
+		});
+
+		it('ends the hold when an error takes the slot over', async () => {
+			const p = handoff(300, 2);
+			p.env.session = { ...p.env.session, error: 'CLI error' }; p.run();
+			expect(p.queueSlot()).toBe(300);
+			expect(p.handoffSlot()).toBe(0);
+			p.env.pendingHeight = 0;
+			p.env.session = { ...turn(20, 0), error: 'CLI error' };
+			expect(p.render().style.minHeight).toBe('300px');
+			await paint(p);
+			expect(p.queueSlot()).toBe(300);
+		});
+
+		it.each(['switch', 'fresh turn'] as const)('ends the hold on a %s', action => {
+			const p = handoff(300, 2);
+			if (action === 'switch') { p.env.session = session('other'); p.run(); }
+			else p.start(false);
+			expect(p.queueSlot()).toBe(0);
+			expect(p.handoffSlot()).toBe(0);
+		});
+	});
+
+	describe('handoff slot release', () => {
+		const release = source.slice(source.indexOf("\t// Give a queue handoff's held slot back"));
+		const body = release.slice(0, release.indexOf('\n\t});\n') + 5);
+		function harness(pending: number, slot: number, held: number, error: string | null = null) {
+			return new Function('pendingCount', 'slot', 'held', 'error', `
+				let tailQueueSlotPx = slot, handoffSlotPx = held, presentedTailError = error, effect;
+				const pendingMessages = { length: pendingCount };
+				const untrack = fn => fn();
+				const $effect = { pre: fn => { effect = fn; } };
+				${body}
+				effect();
+				return { slot: tailQueueSlotPx, held: handoffSlotPx };
+			`)(pending, slot, held, error) as { slot: number; held: number };
+		}
+
+		it('keeps the slot while any bubble is docked under it', () => {
+			expect(harness(1, 176.828125, 176.828125)).toEqual({ slot: 176.828125, held: 176.828125 });
+		});
+
+		it('gives the slot back once the queue below it is empty', () => {
+			expect(harness(0, 176.828125, 176.828125)).toEqual({ slot: 0, held: 0 });
+		});
+
+		it('leaves a slot that now belongs to an error or a newer measurement alone', () => {
+			expect(harness(0, 176.828125, 176.828125, 'CLI error')).toEqual({ slot: 176.828125, held: 0 });
+			expect(harness(0, 120.71875, 176.828125)).toEqual({ slot: 120.71875, held: 0 });
+		});
+	});
+
 	it('releases both slots when the reader dismisses the error', () => {
 		const p = probe(); p.run();
 		p.env.pendingHeight = 164.9375;
@@ -352,7 +471,7 @@ function maintenanceAcrossShift() {
 	const env = { top: 5000, writes: [] as number[], ticks: [] as (() => void)[] };
 	const result = new Function('env', 'root', `
 		let containerRef = root, tailSpacerRef = {}, currentTurnAnchorId = 'user';
-		let windowShiftVersion = 0, windowShifting = false, tailReservePx = 0, shouldAutoScroll = true;
+		let windowShiftVersion = 0, windowShifting = false, tailReservePx = 0, latestTurnTailPx = 0, shouldAutoScroll = true;
 		Object.defineProperty(root, 'scrollTop', { get: () => env.top });
 		Object.defineProperty(root, 'clientHeight', { value: 600 });
 		root.getBoundingClientRect = () => ({ top: 52 });

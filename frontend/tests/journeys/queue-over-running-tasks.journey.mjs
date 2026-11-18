@@ -69,37 +69,44 @@ function watchTail(page, ms) {
 	}), { ms, taskRow: TASK_ROW });
 }
 
+/**
+ * An open, idle long turn: a reply past the mounted-content budget, then a
+ * two-minute Monitor and a one-minute Bash. The running-task row shows and the
+ * turn's own prompt is no longer mounted.
+ */
+async function openIdleLongTurn(ctx) {
+	await openNewChat(ctx, { project: PROJECT });
+	// Shell tools need a project; Bypass so the job starts without approvals.
+	await pickAccess(ctx.page, 'Bypass');
+	await ctx.page.waitForTimeout(800);
+	await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
+	await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
+	// Unrecorded: the running-task row moves as tool rows land above it on
+	// a phone, a move of its own that predates and is apart from this case.
+	const { page, variant } = ctx;
+	const job = `job tok-${uniq()}`;
+	// A reply past the mounted-content budget, then a two-minute Monitor and
+	// a one-minute Bash: the turn stays open and idle, the task row shows,
+	// and the turn's prompt is no longer mounted.
+	await typeAndSend(page, `${job} ${scriptTag(variant, 'tool-background-heavy', { tps: 4000, latency_ms: 0 })}`);
+	await page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle').waitFor({ timeout: 60_000 });
+	await page.getByText('Waiting on it. Meanwhile', { exact: false }).last().waitFor({ timeout: 60_000 });
+	await waitChat(page, { streaming: 'true' }, { timeout: 30_000 });
+	// Queue only once the turn sits idle: a late row or task-row change
+	// would move the queue, which is not this bug.
+	await waitIdle(page);
+	const promptMounted = await page.evaluate((job) => [...document.querySelectorAll('[data-user-turn-id]')]
+		.some((el) => el.textContent.includes(job)), job);
+	expect(!promptMounted, 'the open turn\'s prompt is outside the mounted rows, or this case proves nothing');
+	expect(await page.locator(TASK_ROW).count() === 1, 'the running-task row is in the transcript');
+}
+
 await runJourney({
 	name: 'queue-over-running-tasks',
 	cases: [{
 		name: 'queued-bubble-below-running-tasks-when-the-prompt-is-unmounted',
 		viewports: [...DEFAULT_VIEWPORTS, 'fold-inner'],
-		async setup(ctx) {
-			await openNewChat(ctx, { project: PROJECT });
-			// Shell tools need a project; Bypass so the job starts without approvals.
-			await pickAccess(ctx.page, 'Bypass');
-			await ctx.page.waitForTimeout(800);
-			await typeAndSend(ctx.page, `history tok-${uniq()} ${scriptTag(ctx.variant, 'long', { tps: 400 })}`);
-			await waitTurnSettled(ctx.page, { text: 'Here is a long answer', messagesAtLeast: 2, timeout: 90_000 });
-			// Unrecorded: the running-task row moves as tool rows land above it on
-			// a phone, a move of its own that predates and is apart from this case.
-			const { page, variant } = ctx;
-			const job = `job tok-${uniq()}`;
-			// A reply past the mounted-content budget, then a two-minute Monitor and
-			// a one-minute Bash: the turn stays open and idle, the task row shows,
-			// and the turn's prompt is no longer mounted.
-			await typeAndSend(page, `${job} ${scriptTag(variant, 'tool-background-heavy', { tps: 4000, latency_ms: 0 })}`);
-			await page.locator('[data-ui-mount="MessageArea"]').getByTestId('tasks-toggle').waitFor({ timeout: 60_000 });
-			await page.getByText('Waiting on it. Meanwhile', { exact: false }).last().waitFor({ timeout: 60_000 });
-			await waitChat(page, { streaming: 'true' }, { timeout: 30_000 });
-			// Queue only once the turn sits idle: a late row or task-row change
-			// would move the queue, which is not this bug.
-			await waitIdle(page);
-			const promptMounted = await page.evaluate((job) => [...document.querySelectorAll('[data-user-turn-id]')]
-				.some((el) => el.textContent.includes(job)), job);
-			expect(!promptMounted, 'the open turn\'s prompt is outside the mounted rows, or this case proves nothing');
-			expect(await page.locator(TASK_ROW).count() === 1, 'the running-task row is in the transcript');
-		},
+		setup: openIdleLongTurn,
 		async act({ page, mark, log }) {
 			await mark('queue a two-line message');
 			const queued = `tok-${uniq()}`;
@@ -127,6 +134,73 @@ await runJourney({
 				expect(after.rowBottom !== null && after.rowBottom > 0, `the running-task row is still on screen after widening, not scrolled off above blank room: ${JSON.stringify(after)}`);
 				expect(after.queueTop >= after.rowBottom - 0.5, `the queued bubble stays below the running-task row after widening: ${JSON.stringify(after)}`);
 			}
+			await stopEverything(page);
+			await page.waitForFunction((sel) => document.querySelector(sel) === null, TASK_ROW, { timeout: 15_000 });
+			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
+		}
+	}, {
+		// #1623: with the prompt paged out the room under the transcript has no
+		// prompt-first part, only the queue's. A reader who scrolled up, with the
+		// bottom further below them than the bubble is tall but nearer than all the
+		// room it frees, unsends the queued message: no painted frame moves them.
+		// One line, so the composer it goes back to does not grow.
+		name: 'detached-reader-keeps-place-when-the-prompt-is-unmounted',
+		setup: openIdleLongTurn,
+		async act({ page, mark, log }) {
+			const queued = `tok-${uniq()}`;
+			const bubble = page.locator('.pending-messages [data-queue-confirmed="true"]').filter({ hasText: queued });
+			const geometry = () => page.evaluate(() => {
+				const pane = document.querySelector('.msg-scroll');
+				const queue = document.querySelector('.pending-messages [role="article"]');
+				const column = queue?.closest('.chat-column') ?? document.querySelector('[data-ui-mount="MessageArea"] .chat-column');
+				return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+					reserve: column ? parseFloat(getComputedStyle(column).paddingBottom) : 0,
+					docked: queue?.getBoundingClientRect().height ?? 0 };
+			});
+			await mark('queue a one-line message');
+			await typeAndSend(page, `queued ${queued}`);
+			await bubble.waitFor({ timeout: 30_000 });
+			await waitIdle(page);
+			const settled = await geometry();
+			log(`settled: ${JSON.stringify(settled)}`);
+			expect(settled.docked > 0 && settled.reserve > settled.docked + 40, `the queue makes the room under the transcript (${settled.reserve}px for a ${settled.docked}px bubble)`);
+
+			await mark('scroll up a little');
+			const [min, max] = [settled.docked + 8, settled.reserve - 24 - 8];
+			await page.locator('.msg-scroll').hover();
+			for (let i = 0; i < 30; i++) {
+				const { below } = await geometry();
+				if (below >= min && below <= max) break;
+				await page.mouse.wheel(0, Math.max(-600, Math.min(600, below - (min + max) / 2)));
+				await page.waitForTimeout(120);
+			}
+			await page.waitForTimeout(400);
+			const near = await geometry();
+			expect(near.below >= min && near.below <= max, `the reader scrolled ${min}-${max}px above the bottom (${JSON.stringify(near)})`);
+			const promptMounted = await page.evaluate(() => [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes('job tok-')));
+			expect(!promptMounted, 'the open turn\'s prompt is still outside the mounted rows, or this case proves nothing');
+
+			await page.evaluate(() => {
+				const pane = document.querySelector('.msg-scroll');
+				const p = (window.__scrollProbe = { tops: [], running: true });
+				const next = () => requestAnimationFrame(() => { if (!p.running) return; p.tops.push(pane.scrollTop); next(); });
+				next();
+			});
+			await mark('unsend the queued message');
+			// A DOM click: Playwright's own click would scroll the button into view first.
+			await bubble.getByRole('button', { name: 'Unsend message and edit it' }).evaluate((b) => b.click());
+			await bubble.waitFor({ state: 'detached', timeout: 5000 });
+			await page.waitForTimeout(1500);
+			const tops = await page.evaluate(() => { const p = window.__scrollProbe; p.running = false; return p.tops; });
+			const moved = tops.filter((t) => Math.abs(t - near.top) > 1);
+			const after = await geometry();
+			log(`detached withdraw: ${JSON.stringify({ near, frames: tops.length, moved: moved.slice(0, 5), after })}`);
+			expect(tops.length > 10, 'frames were sampled through the withdrawal');
+			expect(after.reserve < near.reserve - 1, `the withdrawal gave room back (${near.reserve}px -> ${after.reserve}px)`);
+			expect(moved.length === 0, `no painted frame moved the reader (${near.top} -> ${JSON.stringify(moved.slice(0, 5))})`);
+		},
+		// Unrecorded: Stop moves the layout on its own.
+		async verify({ page }) {
 			await stopEverything(page);
 			await page.waitForFunction((sel) => document.querySelector(sel) === null, TASK_ROW, { timeout: 15_000 });
 			await waitChat(page, { streaming: 'false' }, { timeout: 15_000 });
