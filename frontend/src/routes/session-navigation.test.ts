@@ -55,6 +55,7 @@ import { api, type Session } from '$lib/api/client';
 import { openSession, openSessionLink, openSubagentLink, sessionHref } from '$lib/services/session-navigation';
 import { resourceSync } from '$lib/services/resource-sync';
 import { subagentChats } from '$lib/stores/subagent-chats';
+import { markChatUnavailable } from '$lib/stores/unavailable-chat';
 import { get } from 'svelte/store';
 import { page } from '$app/state';
 import type { ShellState } from '$lib/services/app-history.svelte';
@@ -370,5 +371,37 @@ describe('chat link history (#859)', () => {
 		await waitFor(() => expect(layout.current.activeView?.type).toBe('settings'));
 		step(-1); await showsChild();
 		expect(places()).not.toContain('parent');
+	});
+
+	it('writes the chat this tab shows, not the shared layout’s, when the first step comes before boot settles', async () => {
+		// Another tab left the parent in the shared layout; this tab restores the child.
+		sessionStorage.setItem(TAB_ACTIVE_SESSION_KEY, JSON.stringify({ sessionId: 'worker-child', title: 'Child', mode: 'chat', profile: 'test' }));
+		const release = slowBoot();
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('worker-child'));
+		expect(layout.current.activeView?.sessionId).toBe('parent');
+		layout.openFeaturePage('settings');
+		await waitFor(() => expect(places()).toEqual(['worker-child', 'settings']));
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(layout.current.activeView?.type).toBe('settings');
+		step(-1);
+		await showsChild();
+	});
+
+	it('follows a saved chat the server no longer has to New Chat after boot, so its first send is the chat a reload reopens', async () => {
+		chatHistory.entries = [{ shell: { id: 'saved', place: { type: 'session', sessionId: 'parent' } } }];
+		page.state = chatHistory.entries[0];
+		render(Page);
+		await waitFor(() => expect(activeSession.current.sessionId).toBe('parent'));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		// The late answer: the session socket reports the chat gone.
+		activeSession.newChat();
+		markChatUnavailable('parent', 404);
+		await waitFor(() => expect(layout.current.activeView).toEqual({ type: 'session', sessionId: null }));
+		await waitFor(() => expect((chatHistory.entries[0] as ShellState).shell?.place).toEqual({ type: 'session', sessionId: null }));
+		// New Chat's first send created its chat: the entry follows it, no new step.
+		activeSession.switchSession('created');
+		await waitFor(() => expect(places()).toEqual(['created']));
 	});
 });

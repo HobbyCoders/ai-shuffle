@@ -1,26 +1,31 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { page } from '$app/state';
 import { shellHistory, type ShellState } from './app-history.svelte';
+import type { ActiveView } from '$lib/stores/layout.svelte';
 
 // A router that keeps page state the way SvelteKit does: a shallow goto with
 // persistState survives a reload, while an overlay's pushState (Chat controls,
 // the drawer) does not. A landed write also becomes page.state, and AppPage's
 // page.state effect runs before the navigation resolves.
-type Outcome = 'reject' | 'hang';
+// `slow` is Kit's shape stretched out: route resolution before the native
+// history write, then page.state published, then the navigation settling.
 const router = vi.hoisted(() => ({
  entries: [] as { state: ShellState; persisted: boolean }[], index: 0,
  onState: null as ((state: ShellState) => void) | null,
- outcomes: [] as ('reject' | 'hang' | null)[]
+ outcomes: [] as ('reject' | 'slow' | null)[]
 }));
 vi.mock('$app/navigation', () => ({ goto: async (_url: string, options: { replace: boolean; persistState: boolean; state: ShellState }) => {
  const outcome = router.outcomes.shift();
+ const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, outcome === 'slow' ? ms : 0));
  if (outcome === 'reject') throw new Error('Cannot call goto(...) before router is initialized');
+ if (outcome === 'slow') await wait(3000);
  const entry = { state: options.state, persisted: options.persistState };
  if (options.replace) router.entries[router.index] = entry;
  else router.entries.splice(++router.index, Infinity, entry);
+ if (outcome === 'slow') await wait(500);
  page.state = options.state;
  router.onState?.(options.state);
- if (outcome === 'hang') await new Promise(() => {});
+ if (outcome === 'slow') await wait(500);
 } }));
 const here = () => router.entries[router.index].state;
 const places = () => router.entries.map(({ state }) => state.shell?.place.sessionId ?? state.shell?.place.type);
@@ -36,7 +41,7 @@ function go(delta: number) {
  return shellHistory.land(here());
 }
 /** A reload on the current entry; the layout snapshot still holds `view`. */
-function reload(view: { type: 'session'; sessionId: string }) {
+function reload(view: ActiveView) {
  shellHistory.stop();
  router.entries = router.entries.map(entry => entry.persisted ? entry : { state: {}, persisted: false });
  page.state = here();
@@ -136,16 +141,90 @@ it('keeps boot’s view for Back when writing it to the arrival entry was reject
  expect(shellHistory.place?.sessionId).toBe('b');
 });
 
-it('lets later writes through when one never settles', async () => {
+it('keeps entries in order when a write commits late, with no timer letting a later write pass it', async () => {
  vi.useFakeTimers();
  const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
  router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
  shellHistory.start(arrival, null);
- router.outcomes = ['hang'];
+ router.outcomes = ['slow'];
  shellHistory.destination({ type: 'settings' });
+ shellHistory.detail('settings', { panel: 'general' }, true);
  shellHistory.destination({ type: 'docs' });
+ // Route resolution still holds the Settings write: nothing else has gone ahead.
+ await vi.advanceTimersByTimeAsync(2500);
+ expect(places()).toEqual(['a']);
  await vi.advanceTimersByTimeAsync(5000);
  expect(places()).toEqual(['a', 'settings', 'docs']);
+ expect(router.entries[1].state.shell?.place.panel).toBe('general');
+});
+
+it('writes a destination again when its push was rejected, and never twice once it landed', async () => {
+ const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'session', sessionId: 'a' } } };
+ router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
+ shellHistory.start(arrival, null);
+ router.outcomes = ['reject'];
+ shellHistory.destination({ type: 'settings' });
+ await settle();
+ expect(places()).toEqual(['a']);
+ // The router is writable again: selecting Settings again records it.
+ shellHistory.destination({ type: 'settings' });
+ await vi.waitFor(() => expect(places()).toEqual(['a', 'settings']));
+ shellHistory.destination({ type: 'settings' });
+ await settle();
+ expect(places()).toEqual(['a', 'settings']);
+});
+
+it('after a step from an overlay and a reload there, Back shows the landing on the overlay’s entry and the one beneath', async () => {
+ await arriveUnderOverlay();
+ shellHistory.destination({ type: 'settings' });
+ await vi.waitFor(() => expect(router.entries).toHaveLength(3));
+ await settle();
+ // The overlay's own flags stay on its entry, as on main.
+ expect(router.entries[1].state.mobileControls).toBe(true);
+ reload({ type: 'settings' });
+ expect(go(-1)).toBe(true);
+ expect(shellHistory.place?.sessionId).toBe('b');
+ go(-1);
+ expect(shellHistory.place?.sessionId).toBe('b');
+ go(1);
+ expect(shellHistory.place?.sessionId).toBe('b');
+ go(1);
+ expect(shellHistory.place?.type).toBe('settings');
+});
+
+it('restores a fresh load’s chat after a reload on the first step taken from it (desktop, no overlay)', async () => {
+ shellHistory.start({}, { type: 'session', sessionId: 'a' });
+ await settle();
+ shellHistory.destination({ type: 'docs' });
+ await vi.waitFor(() => expect(places()).toEqual(['a', 'docs']));
+ reload({ type: 'docs' });
+ go(-1);
+ expect(shellHistory.place?.sessionId).toBe('a');
+ go(1);
+ expect(shellHistory.place?.type).toBe('docs');
+});
+
+it('writes the chat this tab shows as the landing, not the shared layout’s, and never moves the step the user chose', async () => {
+ // The shared layout snapshot names a; this tab restored and shows b.
+ shellHistory.start({}, { type: 'session', sessionId: 'a' });
+ shellHistory.shows('b');
+ shellHistory.destination({ type: 'settings' });
+ shellHistory.shows('c');
+ await vi.waitFor(() => expect(places()).toEqual(['b', 'settings']));
+ expect(shellHistory.place?.type).toBe('settings');
+ go(-1);
+ expect(shellHistory.place?.sessionId).toBe('b');
+});
+
+it('corrects the saved entry on screen to New Chat once its chat proved unavailable, so a first send refines it', async () => {
+ const saved: ShellState = { shell: { id: 'saved', place: { type: 'session', sessionId: 'deleted' } } };
+ router.entries[0] = { state: saved, persisted: true }; page.state = saved;
+ shellHistory.start(saved, { type: 'session', sessionId: 'deleted' });
+ shellHistory.destination({ type: 'session', sessionId: null }, 'replace');
+ await vi.waitFor(() => expect(here().shell?.place).toEqual({ type: 'session', sessionId: null }));
+ expect(router.entries).toHaveLength(1);
+ shellHistory.destination({ type: 'session', sessionId: 'created' });
+ await vi.waitFor(() => expect(places()).toEqual(['created']));
 });
 
 it('does not land boot’s view over a step the user took while it was being written', async () => {

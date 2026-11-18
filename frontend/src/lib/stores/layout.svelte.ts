@@ -184,9 +184,10 @@ export const layout = {
 
 	/**
 	 * Navigate to a chat session. Boot reconciliation passes `reconcile`: the
-	 * view only moves where the shell history lets boot move it (see shellHistory).
+	 * view only moves where the shell history lets boot move it. `replace`
+	 * corrects the entry on screen instead of adding one (see shellHistory).
 	 */
-	openChat(sessionId: string | null, history: 'push' | 'reconcile' = 'push') {
+	openChat(sessionId: string | null, history: 'push' | 'reconcile' | 'replace' = 'push') {
 		if (!shellHistory.destination({ type: 'session', sessionId }, history)) return;
 		_update((s) => ({
 			...s,

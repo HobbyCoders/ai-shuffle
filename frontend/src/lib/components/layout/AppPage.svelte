@@ -61,6 +61,7 @@
 	import SpotlightSearch from '$lib/components/SpotlightSearch.svelte';
 	import { initGlobalStt } from '$lib/services/globalStt';
 	import { pendingDeepLink, deepLinkSessionId as deepLinkSessionIdFrom } from '$lib/stores/pending-deep-link';
+	import { unavailableChat } from '$lib/stores/unavailable-chat';
 
 	interface Props {
 		/** Renders the app shell (sidebar/top bar chrome) around MainPanel. */
@@ -119,6 +120,21 @@
 	$effect(() => {
 		const state = page.state as ShellState;
 		untrack(() => { if (shellHistory.land(state)) showEntry(); });
+	});
+	// A fresh load's landing names the chat this tab shows (loading or not):
+	// its own restored chat may not be the one in the layout snapshot other
+	// tabs share. Before init binds one, what shows is not known yet.
+	$effect(() => {
+		const { sessionId, isRestoringSession } = $activeSession;
+		if (sessionId || (!isRestoringSession && !$pendingDeepLink)) untrack(() => shellHistory.shows(sessionId ?? null));
+	});
+	// A chat on screen the server would not serve (deleted, or not this
+	// viewer's) left for New Chat. The view and its entry follow, even after
+	// boot, so that New Chat's first send is the chat a reload reopens.
+	$effect(() => {
+		const gone = $unavailableChat?.sessionId;
+		if (!gone || $activeSession.sessionId) return;
+		untrack(() => { if ($activeView?.type === 'session' && $activeView.sessionId === gone) layout.openChat(null, 'replace'); });
 	});
 	onDestroy(() => shellHistory.stop());
 	function dropSessionLink() {

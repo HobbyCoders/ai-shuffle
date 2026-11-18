@@ -43,9 +43,9 @@ let landing: Entry | null = null;
 // No step (a push, Back or Forward) taken since mount: boot may still settle
 // what the entry this load started on shows.
 let settling = false;
-// A write's history entry exists before Kit's navigation tail settles; a tail
-// that never settles must not hold back every later write.
-const WRITE_SETTLE_MS = 2000;
+// The entry whose write the router rejected: it shows, but the browser never got
+// it, so selecting it again writes it again.
+let failed: string | null = null;
 export const shellHistory = {
  get restored() { return restored; },
  get place() { return current?.place; },
@@ -54,7 +54,16 @@ export const shellHistory = {
   if (state.shell) return void (restored = current = { ...state.shell });
   landing = current = { id: randomUUID(), place: viewPlace(view) };
  },
- stop() { mounted = settling = false; landing = restored = current = null; },
+ stop() { mounted = settling = false; landing = restored = current = null; failed = null; },
+ /**
+  * The chat a fresh load's landing actually shows (this tab's restored chat
+  * may differ from the shared layout snapshot). Only before the user's first
+  * step: after it, the landing is written and every step is the user's.
+  */
+ shows(sessionId: string | null) {
+  if (!settling || !landing || current?.id !== landing.id || landing.place.type !== 'session') return;
+  if (landing.place.sessionId !== sessionId) landing = current = { id: landing.id, place: { type: 'session', sessionId } };
+ },
  land(state: ShellState) {
   // Every entry of the landing, saved or not, shows its one current place.
   const entry = !state.shell || state.shell.id === landing?.id ? landing : state.shell;
@@ -67,11 +76,12 @@ export const shellHistory = {
   * A view change; false when declined. `reconcile` is boot settling the view
   * it restored, only before the user's first step and never in the browser's
   * entry: a saved place is shown from mount, so boot only moves it when it
-  * could not be restored (a deleted chat). Anything else is the user's step.
+  * could not be restored (a deleted chat). `replace` corrects the entry on
+  * screen after its chat proved unavailable. Anything else is the user's step.
   */
- destination(view: ActiveView, intent: 'push' | 'reconcile' = 'push') {
+ destination(view: ActiveView, intent: 'push' | 'reconcile' | 'replace' = 'push') {
   const next = viewPlace(view);
-  if (current?.place.type === next.type && current.place.sessionId === next.sessionId) return true;
+  if (current?.place.type === next.type && current.place.sessionId === next.sessionId && current.id !== failed) return true;
   if (intent === 'reconcile') {
    if (!settling || !current) return false;
    restored = null;
@@ -81,7 +91,7 @@ export const shellHistory = {
   }
   // Resolving a new chat into its server id is not another visible step.
   const resolving = next.type === 'session' && current?.place.type === 'session' && !current.place.sessionId;
-  write(next, resolving);
+  write(next, intent === 'replace' || (resolving && current?.id !== failed));
   return true;
  },
  detail(type: ViewType, patch: Partial<Place>, replace = false) {
@@ -123,21 +133,28 @@ function record(entry: Entry, replace: boolean) {
  const { id } = entry;
  pending.set(id, (pending.get(id) ?? 0) + 1);
  writes = writes.then(async () => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
    const state = page.state as ShellState;
    // A replace only refines the entry the browser is on (not after a push
-   // that failed, or a Back). The landing is never written as an overlay's copy.
-   if (replace && (state.shell?.id ?? (Object.keys(state).length ? null : landing?.id)) !== id) return;
+   // that failed, or a Back). An entry with no place of its own is the
+   // landing's: the arrival, or a phone overlay pushed over it before it was
+   // written, which keeps its own flags.
+   if (replace && (state.shell?.id ?? landing?.id) !== id) return;
    const kept: ShellState = replace ? { ...state } : {};
    delete kept.shell;
-   const written = Promise.resolve(goto(location.href, { shallow: true, replace, persistState: true, state: { ...kept, shell: entry } as ShellState }))
-    .catch(error => console.warn('Could not record navigation', error));
-   await Promise.race([written, new Promise(resolve => { timer = setTimeout(resolve, WRITE_SETTLE_MS); })]);
+   // Kit's shallow goto settles a few ticks after its native history write
+   // (no load, and no reroute or onNavigate hook here), so the next write
+   // reads the entry this one made. No timer: one that let a later write
+   // pass before this one committed would reorder the entries.
+   await goto(location.href, { shallow: true, replace, persistState: true, state: { ...kept, shell: entry } as ShellState });
+   if (failed === id) failed = null;
+  } catch (error) {
+   // A refining replace that failed leaves its entry in place, as it was.
+   if (!replace) failed = id;
+   console.warn('Could not record navigation', error);
   } finally {
-   clearTimeout(timer);
    const left = (pending.get(id) ?? 1) - 1;
    if (left) pending.set(id, left); else pending.delete(id);
   }
- }).catch(error => console.warn('Could not record navigation', error));
+ });
 }
