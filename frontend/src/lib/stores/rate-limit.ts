@@ -457,7 +457,7 @@ function _displayPct(value: number): number {
  * never come — Claude's weekly Fable bucket is reported only on Fable turns)
  * describes the new one.
  */
-export function windowRolledOver(w: Pick<UsageWindow, 'resets_at'>, nowMs: number): boolean {
+export function windowRolledOver(w: { resets_at?: string | null }, nowMs: number): boolean {
 	const resetMs = parseResetMs(w.resets_at);
 	return resetMs != null && resetMs <= nowMs;
 }
@@ -512,7 +512,7 @@ export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
 }
 
 /** Remaining quota from a used-quota report; full once the window has reset. */
-export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
+export function remainingFromUsedPct(w: { utilization: number; resets_at?: string | null }, nowMs: number): number {
 	if (windowRolledOver(w, nowMs)) return 100;
 	return _displayPct(100 - _clampPct(w.utilization));
 }
