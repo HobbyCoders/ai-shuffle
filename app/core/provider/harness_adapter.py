@@ -8776,11 +8776,6 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any, *, leg: str =
             file_rule = DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH[callable_search[0]]
         else:
             file_rule = DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
-    # The rules name Bash; a surface that offers only PowerShell gets its name
-    # (blocking Bash also blocks PowerShell, never the other way round).
-    shell = "Bash" if permitted("Bash") or not permitted("PowerShell") else "PowerShell"
-    if file_rule and shell != "Bash":
-        file_rule = file_rule.replace("Bash", shell)
     # The batching rule rides every session, with the file-tool rule when
     # there is one.
     blocks.append(
@@ -8794,10 +8789,10 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any, *, leg: str =
         own = _joined(search)
         verb = "are" if len(search) > 1 else "is"
         # A file-tool rule already names every callable search tool.
-        commands = "/".join({"Glob": "find", "Grep": "grep"}[tool] for tool in search)
+        shell = "/".join({"Glob": "find", "Grep": "grep"}[tool] for tool in search)
         prefer = (
             "" if file_rule
-            else f"Search files with {own} rather than {commands} through {shell}. "
+            else f"Search files with {own} rather than {shell} through Bash. "
         )
         notes.append(
             f"{prefer}If Claude Code's own {own} {verb} not in your tool list, use "

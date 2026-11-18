@@ -2267,7 +2267,7 @@ def test_delegated_tool_use_block_leaves_search_to_bash_without_grep_or_glob(cli
 
 
 # Every variant of the delegated file-tool rule (full, one search tool, no
-# search tool, under either shell) opens with this.
+# search tool) opens with this.
 FILE_RULE_OPENING = "# Tool use on this session\nUse Claude Code's dedicated tools for file work:"
 
 
@@ -2285,35 +2285,6 @@ def test_every_file_rule_variant_opens_the_same_way():
     for rule in (DELEGATED_TOOL_USE_BLOCK, DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
                  *DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH.values()):
         assert rule.startswith(FILE_RULE_OPENING)
-
-
-@pytest.mark.parametrize("shells, named", [
-    (["PowerShell"], "PowerShell"),
-    (["Bash"], "Bash"),
-    (["Bash", "PowerShell"], "Bash"),
-])
-@pytest.mark.parametrize("search", [["Glob"], []])
-def test_delegated_tool_use_block_names_the_shell_the_leg_offers(
-    cli_ships_search, shells, named, search,
-):
-    """Blocking Bash also blocks PowerShell but not the other way round, so a
-    surface ticking only PowerShell walls the CLI's Bash while the file rule
-    still applies through PowerShell: the rule must name PowerShell there."""
-    from app.core.provider.harness_adapter import (
-        DELEGATED_TOOL_USE_BLOCK_NO_SEARCH,
-        DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH,
-        _delegated_disallowed,
-        _delegated_tool_blocks,
-    )
-
-    options = SessionOptions(model="opus", tool_allowlist=[*shells, "Read", "Edit", *search])
-    assert ("Bash" in _delegated_disallowed(options)) is (named != "Bash")
-    rule = _delegated_tool_blocks(options, None)[0].split("\nBatch independent", 1)[0]
-    base = DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH["Glob"] if search else DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
-    assert rule == base.replace("Bash", named)
-    assert f"Keep {named} for" in rule and rule.endswith(f"file work through {named}.")
-    if named != "Bash":
-        assert "Bash" not in rule
 
 
 def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools(cli_ships_search):
