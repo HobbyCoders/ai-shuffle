@@ -71,3 +71,20 @@ def test_skip_approval_cannot_bypass_gate():
     needs["changes"] = {"result": "success", "outputs": {"full_backend": "false"}}
     with pytest.raises(ValueError):
         check_gate(needs, [], "head")
+
+
+def test_failed_shard_tests_count_only_with_their_passing_rerun():
+    needs, receipts = healthy_gate()
+    receipts[2]["failed"] = ["tests/core/test_x.py::test_a", "tests/core/test_y.py::test_b[1]"]
+    with pytest.raises(ValueError, match="shard 3 has failed tests without a passing rerun"):
+        check_gate(needs, receipts, "head")
+    receipts[2]["rerun_passed"] = ["tests/core/test_x.py::test_a"]
+    with pytest.raises(ValueError, match="without a passing rerun"):
+        check_gate(needs, receipts, "head")
+    receipts[2]["rerun_passed"] = "tests/core/test_x.py::test_a"
+    with pytest.raises(ValueError, match="without a passing rerun"):
+        check_gate(needs, receipts, "head")
+    receipts[2]["rerun_passed"] = list(reversed(receipts[2]["failed"]))
+    check_gate(needs, receipts, "head")
+    receipts[0]["failed"] = []
+    check_gate(needs, receipts, "head")

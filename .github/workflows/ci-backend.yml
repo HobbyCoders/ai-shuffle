@@ -96,8 +96,14 @@ jobs:
         # *_postgres.py and test_pg_session_store*.py files stay collected
         # here; they skip without ALLOW_REAL_PG=1 and run in the PostgreSQL
         # safety step.
+        # backend_shard_run.py reruns only the failed tests, once (the hosted
+        # Windows parts' retry). Tests that pass then pass the shard and are
+        # listed as flaky in the job summary; one that fails twice, a
+        # collection error or more than 20 failures fails it. The receipt
+        # counts only with the rerun's pass recorded on it (backend_gate.py).
         run: |
-          python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
+          python scripts/ci/backend_shard_run.py -- \
+            python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
               tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
               --deselect=tests/test_scan_blocking_db.py \
               --ignore=tests/core/test_container_runtime.py \

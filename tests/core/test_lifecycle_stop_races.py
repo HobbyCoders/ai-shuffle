@@ -151,12 +151,38 @@ async def test_runtime_stop_during_startup_never_connects_provider(monkeypatch, 
 
 
 async def test_parked_worker_obeys_absolute_deadline(worker_env, mock_db, monkeypatch):
+    # #1748: the setup before the cap starts runs on executor threads, which a
+    # busy runner can slow by seconds. So the outer budget only catches a
+    # worker that is never stopped (a park loop that ignores or renews the
+    # cap waits forever), and the stop time is measured from the cap's start.
     monkeypatch.setattr(pa, "_worker_still_working", lambda sid: True)
+    loop = asyncio.get_running_loop()
+    caps, stopped_at = [], []
+
+    class RecordedCap(pa._WallCap):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            caps.append(self)
+
+    stop = pa._stop_wedged_worker
+
+    async def timed_stop(session_id):
+        stopped_at.append(loop.time())
+        await stop(session_id)
+
+    monkeypatch.setattr(pa, "_WallCap", RecordedCap)
+    monkeypatch.setattr(pa, "_stop_wedged_worker", timed_stop)
     outcome = await asyncio.wait_for(pa.dispatch_worker(
-        parent_session_id="parent", profile_id="p1", prompt="fixture", max_wall_seconds=.03), 1)
+        parent_session_id="parent", profile_id="p1", prompt="fixture", max_wall_seconds=.03), 30)
     assert not outcome.ok
     assert outcome.error
     assert worker_env.tm.interrupts == [(outcome.session_id, "stop")]
+    assert len(caps) == 1 and caps[0].seconds == pytest.approx(.03)
+    assert len(stopped_at) == 1
+    # Never before the cap; soon after it (the park loop sleeps only up to the
+    # deadline), with headroom for a loaded runner's scheduling delay.
+    after_start = stopped_at[0] - caps[0].started
+    assert caps[0].seconds - 1e-6 <= after_start < 5, after_start
 
 
 async def test_abandonment_awaits_owned_shell_stop_and_skips_agents(monkeypatch):

@@ -570,10 +570,23 @@ Full coverage runs four `ubuntu-24.04` shards with two xdist workers apiece and
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
 proves exact union, no duplicates and no empty shard. Workers must agree on the
-collection and assignment. Successful controllers also verify executed node IDs,
-then upload per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
+collection and assignment. Controllers also verify executed node IDs, then upload
+per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
 still run with their stronger real-environment prerequisites. The legacy dispatch
 input remains accepted; shard parallelism is fixed at two workers.
+
+A shard whose tests fail reruns only those tests, once, serially
+(`scripts/ci/backend_shard_run.py`, the same `local_ci.run` retry with
+`LOCAL_CI_RETRY_FAILED=1` as the hosted Windows parts). Tests that pass the
+second time pass the shard but are listed under "Flaky tests (failed once, passed
+on a rerun)" in the job summary and as `Flaky test` warnings, so they still get
+fixed. A test that fails again, a collection error, more than 20 failed tests or
+an interrupted run fails the shard. The receipt of a complete run that had failed
+tests lists them under `failed`; after a passing rerun the runner records exactly
+those tests under `rerun_passed`, and the gate refuses a receipt whose failed
+tests have no recorded passing rerun. The first run's JUnit file and
+`--durations` report keep its failures; the rerun's result is in the job log.
+`backend-security` and `backend-contracts` keep a single attempt.
 
 `backend-security` always runs the blocking-DB guard,
 required root/real-account isolation, real PostgreSQL pool/transaction cases,
@@ -610,7 +623,8 @@ The stable `Backend tests` gate uses `if: always()` and depends on all shards,
 contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
 succeed and all four successful shard receipts. Failed, cancelled, missing or
 skipped jobs, missing/duplicate receipts, inconsistent collection/partition
-digests and incomplete counts all fail closed. No classifier output can approve
+digests, incomplete counts and failed tests without a recorded passing rerun all
+fail closed. No classifier output can approve
 a skipped job.
 
 `tests/backend-durations.json` is versioned scheduling data, never execution

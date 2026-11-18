@@ -52,8 +52,9 @@ MAP_PATH = Path(os.environ.get("LOCAL_CI_TEST_MAP")
                 or Path.home() / ".cache" / "ai-shuffle" / "backend-test-map.json.gz")
 # The shared worker hosts run other sessions: never more than two test workers.
 WORKERS = os.environ.get("LOCAL_CI_WORKERS", "2")
-# Hosted Windows parts only (scripts/ci/windows_parts.py): a failed pytest
-# command reruns just its failed tests once. Off everywhere else.
+# Hosted Windows parts (scripts/ci/windows_parts.py) and Linux backend shards
+# (scripts/ci/backend_shard_run.py) only: a failed pytest command reruns just
+# its failed tests once. Off everywhere else.
 RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
 MAX_RETRIED = 20
 # Tests that failed and then passed on that rerun, in this process.
