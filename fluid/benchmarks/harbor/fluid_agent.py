@@ -7,6 +7,13 @@ Python 3.12), and drives ``fluid run`` in one-shot mode with
 ``--approval-policy never_ask`` — the analog of
 ``claude -p --dangerously-skip-permissions``.
 
+The default Harbor setup does not protect the metrics file from tool writes.
+The file is separate from the transcript, but Fluid and its Bash tool run
+with the same user identity by default. It contains normalized engine
+counters, not raw provider measurements. OpenRouter Chat Completions and
+OpenAI Responses can turn a missing provider counter into zero. The JSONL
+keeps estimate flags when the engine event supplies them.
+
 Usage (from the repo root; see benchmarks/harbor/README.md for the full
 comparison protocol):
 
@@ -27,8 +34,10 @@ repo root.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
+import json
+import math
 import os
-import re
 import shlex
 from pathlib import Path
 from typing import override
@@ -50,17 +59,8 @@ _PROVIDERS = {
 }
 
 _CONTAINER_LOG = "/logs/agent/fluid.txt"
-
-# fluid's REPL renders one line per model call and one terminal line per turn:
-#   [usage] in=123 out=45 cache_read=6789 cache_write=100 hit_rate=0.98
-#   [done] stop=end_turn calls=7 cost=$0.0123
-# cache_write (cache-creation tokens) is optional so logs from older fluid
-# builds that did not print it still parse.
-_USAGE_RE = re.compile(
-    r"\[usage\] in=(\d+) out=(\d+) cache_read=(\d+)"
-    r"(?: cache_write=(\d+))? hit_rate=([\d.]+)"
-)
-_DONE_RE = re.compile(r"\[done\] stop=(\S+) calls=(\d+)(?: cost=\$([\d.]+))?")
+_METRICS_FILE = "fluid-usage.jsonl"
+_CONTAINER_METRICS = f"/logs/agent/{_METRICS_FILE}"
 
 
 class FluidAgent(BaseInstalledAgent):
@@ -179,6 +179,7 @@ class FluidAgent(BaseInstalledAgent):
                 f"--provider {fluid_provider} "
                 f"--model {shlex.quote(model)} "
                 "--approval-policy never_ask "
+                f"--usage-jsonl {_CONTAINER_METRICS} "
                 f"{extra_flags}"
                 f"{shlex.quote(instruction)} "
                 f"2>&1 | stdbuf -oL tee {_CONTAINER_LOG}"
@@ -188,47 +189,97 @@ class FluidAgent(BaseInstalledAgent):
 
     @override
     def populate_context_post_run(self, context: AgentContext) -> None:
-        log = self._find_log()
-        if log is None:
-            self.logger.warning("fluid.txt log not found; no metrics reported")
+        metrics = self.logs_dir / "agent" / _METRICS_FILE
+        if not metrics.is_file():
+            # Some Harbor integrations pass the agent log directory itself.
+            metrics = self.logs_dir / _METRICS_FILE
+        if not metrics.is_file():
+            self.logger.warning("fluid-usage.jsonl not found; no metrics reported")
             return
-        text = log.read_text(errors="replace")
 
-        input_total = cache_read_total = cache_write_total = output_total = 0
-        for match in _USAGE_RE.finditer(text):
-            input_total += int(match.group(1))
-            output_total += int(match.group(2))
-            cache_read_total += int(match.group(3))
-            if match.group(4) is not None:
-                cache_write_total += int(match.group(4))
+        token_fields = (
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
+        )
 
-        num_calls: int | None = None
-        cost: float | None = None
-        done = None
-        for done in _DONE_RE.finditer(text):
-            pass  # keep the last [done] line
-        if done is not None:
-            num_calls = int(done.group(2))
-            if done.group(3) is not None:
-                cost = float(done.group(3))
+        def read_counts(data: object) -> dict[str, int]:
+            if not isinstance(data, dict):
+                raise ValueError("expected token counters")
+            counts = {key: data[key] for key in token_fields if key in data}
+            if any(type(n) is not int or n < 0 for n in counts.values()):
+                raise ValueError("invalid token count")
+            return counts
 
-        prompt_total = input_total + cache_read_total + cache_write_total
-        if prompt_total or output_total:
-            # n_input_tokens is the full prompt total: uncached input plus
-            # cache reads plus cache-creation (cache_write) tokens.
+        def read_charge(n: object, usd: object) -> tuple[int | None, float | None]:
+            if n is not None and (type(n) is not int or n < 0):
+                raise ValueError("invalid model call count")
+            if usd is not None and (
+                type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0
+            ):
+                raise ValueError("invalid cost")
+            return n, usd
+
+        per_call: dict[str | int, Counter[str]] = defaultdict(Counter)
+        outside_turn_totals: Counter[str] = Counter()
+        outside_turn_charges: list[tuple[int | None, float | None]] = []
+        terminal: dict[str | int, dict[str, int]] = {}
+        by_turn: dict[str | int, tuple[int | None, float | None]] = {}
+        stop_reason: str | None = None
+        with metrics.open(encoding="utf-8", errors="replace") as stream:
+            for i, line in enumerate(stream, 1):
+                try:
+                    record = json.loads(line)
+                    if not isinstance(record, dict):
+                        raise ValueError("expected a record")
+                    turn_id = record.get("turn_id")
+                    turn = turn_id if isinstance(turn_id, str) else i
+                    if record.get("type") == "usage":
+                        counts = read_counts(record)
+                        if record.get("outside_turn_totals") is True:
+                            outside_turn_charges.append(read_charge(
+                                record.get("num_model_calls"), record.get("cost_usd"),
+                            ))
+                            outside_turn_totals.update(counts)
+                        else:
+                            per_call[turn].update(counts)
+                    elif record.get("type") == "status":
+                        reason = record["stop_reason"]
+                        if not isinstance(reason, str):
+                            raise ValueError("invalid stop reason")
+                        charge = read_charge(record["num_model_calls"], record["cost_usd"])
+                        counts = read_counts(record.get("usage", {}))
+                        stop_reason = reason
+                        # Some failures emit both ErrorEvent and TurnComplete.
+                        # Keep a single terminal snapshot for each turn.
+                        terminal[turn] = counts
+                        by_turn[turn] = charge
+                except (ValueError, KeyError, OverflowError):
+                    # A killed process can leave a partial final line.
+                    self.logger.warning(f"Ignoring invalid fluid usage record on line {i}")
+
+        totals = outside_turn_totals.copy()
+        for turn in per_call.keys() | terminal.keys():
+            # Terminal counters include calls that may not have emitted a
+            # record (e.g. truncated and retried). Use per-call sums only for
+            # counters the terminal did not report, or for unfinished turns.
+            totals.update({**per_call.get(turn, {}), **terminal.get(turn, {})})
+        cache_read = totals.get("cache_read_tokens")
+        prompt_counts = [
+            totals[key] for key in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
+            if key in totals
+        ]
+        prompt_total = sum(prompt_counts) if prompt_counts else None
+        if prompt_total is not None:
             context.n_input_tokens = prompt_total
-            context.n_cache_tokens = cache_read_total
-            context.n_output_tokens = output_total
-        context.cost_usd = cost
+        if cache_read is not None:
+            context.n_cache_tokens = cache_read
+        if "output_tokens" in totals:
+            context.n_output_tokens = totals["output_tokens"]
+        charges = [*by_turn.values(), *outside_turn_charges]
+        calls = [n for n, _ in charges if n is not None]
+        costs = [usd for _, usd in charges if usd is not None]
+        context.cost_usd = sum(costs) if costs else None
         context.metadata = {
-            "num_model_calls": num_calls,
-            "cache_hit_rate": (
-                cache_read_total / prompt_total if prompt_total else None
-            ),
+            "num_model_calls": sum(calls) if calls else None,
+            "cache_hit_rate": cache_read / prompt_total if prompt_total and cache_read is not None else None,
+            "stop_reason": stop_reason,
         }
-
-    def _find_log(self) -> Path | None:
-        candidate = self.logs_dir / "agent" / "fluid.txt"
-        if candidate.is_file():
-            return candidate
-        return next(self.logs_dir.rglob("fluid.txt"), None)

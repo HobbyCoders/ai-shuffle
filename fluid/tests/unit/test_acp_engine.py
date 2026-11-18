@@ -20,6 +20,7 @@ import pytest
 
 from fluid.engine.acp.antigravity import AntigravitySpec, offered_models, split_model_id
 from fluid.engine.acp.loop import AcpLoop
+from fluid.engine.acp.mapping import TurnMapper
 from fluid.events.model import (
     ErrorEvent,
     Interrupted,
@@ -37,6 +38,7 @@ from fluid.events.model import (
 from fluid.events.ops import (
     AgentMessage, Interrupt, RespondPermission, RespondQuestion, Resume, SetModel, SetPermissionMode, Steer, UserTurn,
 )
+from fluid.messages.content import ToolUseBlock
 from fluid.store.base import MemoryStore
 from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
@@ -227,6 +229,233 @@ async def test_host_tools_reach_the_agent_over_the_bundled_bridge(tmp_path: Path
         assert "not listed" in d.text()
     finally:
         await d.close()
+
+
+def _glob_registry(seen: list[dict]) -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def glob(args: dict, ctx: ToolCtx) -> ToolOutcome:
+        seen.append(args)
+        return ToolOutcome(text="notes.txt")
+
+    schema = {"type": "object", "properties": {"pattern": {"type": "string"}}}
+    registry.register_builtin(ToolSpec(name="Glob", description="glob", input_schema=schema), glob)
+    return registry
+
+
+async def test_a_bridged_call_titled_as_agy_titles_it_runs_as_the_registry_tool(tmp_path: Path) -> None:
+    """agy 1.5.9 titles a bridged call "Run mcp_fluid_bundled_Glob" with a kind
+    outside the kind map (#1751). Its card, the policy and the transcript all
+    name the registry tool, so a policy that serves Glob lets it run."""
+    seen: list[dict] = []
+    judged: list[tuple[str, dict]] = []
+
+    async def policy(name: str, data: dict) -> str | None:
+        judged.append((name, data))
+        return None if name == "mcp__fluid_bundled__Glob" else f"Tool '{name}' is not enabled in this profile"
+
+    d = await _driver(tmp_path, registry=_glob_registry(seen), ctx=ToolCtx(cwd=str(tmp_path)),
+                      tool_policy=policy)
+    try:
+        # The owner says "always", but a name read off a title is only ever
+        # allowed once: the agent, not the host, picks what it remembers.
+        await d.loop.submit(UserTurn(content='agymcp Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        assert (ask.name, ask.input) == ("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})
+        assert judged == [("mcp__fluid_bundled__Glob", {"pattern": "*.txt"})]
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow_always"))
+        end = await d.until(TERMINAL, timeout=60)
+        assert isinstance(end, TurnComplete), end
+        assert seen == [{"pattern": "*.txt"}]
+        assert "chose=allow mcp said: notes.txt" in d.text()
+        assert [e.name for e in d.events if isinstance(e, ToolUse)] == ["mcp__fluid_bundled__Glob", "Read"]
+        nodes = await d.loop.store.load_path(d.loop.session_id)
+        stored = [b.name for n in nodes for b in n.message.content if isinstance(b, ToolUseBlock)]
+        assert stored[0] == "mcp__fluid_bundled__Glob"
+        # A request carrying only the call's id is judged by itself: an
+        # unknown tool, refused on this surface, and the silent end that
+        # follows names "a tool", never the call announced before it.
+        judged.clear()
+        end = await d.turn('agyid Glob {"pattern": "*.md"}')
+        assert judged == [("Tool", {})]
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after a tool was refused "
+                               "by the session's tool rules.")
+    finally:
+        await d.close()
+
+
+async def test_a_title_only_name_is_never_remembered_by_the_agent(tmp_path: Path) -> None:
+    """Every answer the loop gives a title-only name is "allow once", in
+    Bypass too; an agent that offers only "always" hears no allow at all."""
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]),
+                   permission_mode="bypassPermissions")
+    once = {"optionId": "once", "kind": "allow_once"}
+    always = {"optionId": "always", "kind": "allow_always"}
+
+    async def answer(title: str, *options: dict) -> dict:
+        call = {"toolCallId": "c1", "title": title, "kind": "other"}
+        return (await loop._permission({"toolCall": call, "options": list(options)}))["outcome"]
+
+    assert await answer("Run mcp_fluid_bundled_Glob", always, once) == {"outcome": "selected", "optionId": "once"}
+    assert await answer("Run mcp_fluid_bundled_Glob", always) == {"outcome": "cancelled"}
+    assert await answer("mcp__fluid_bundled__Glob", always) == {"outcome": "selected", "optionId": "always"}
+
+
+def test_only_a_call_outside_the_agents_own_kinds_takes_the_verb_titled_form(tmp_path: Path) -> None:
+    from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
+
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=_glob_registry([]))
+    titled = ("mcp__fluid_bundled__Glob", True)
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": "other"}) == titled
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob"}) == titled
+    assert loop._bridged_name({"title": "mcp__fluid_bundled__Glob"}) == ("mcp__fluid_bundled__Glob", False)
+    # agy's title form is never one of the agent's own kinds (a shell call's
+    # title can name a bridged tool); the older forms ignore the kind, as before.
+    for kind in ("execute", "search"):
+        assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Glob", "kind": kind}) is None, kind
+        assert loop._bridged_name({"title": "mcp__fluid_bundled__Glob", "kind": kind}) == (
+            "mcp__fluid_bundled__Glob", False)
+    assert loop._bridged_name({"title": "Run mcp_fluid_bundled_Globber", "kind": "other"}) is None
+    # The whole title, exactly: one verb and the tool, nothing after it.
+    for title in ("Run mcp_fluid_bundled_Glob now", "Run mcp_fluid_bundled_Glob: x", "Run  mcp_fluid_bundled_Glob",
+                  "Run Glob", "Run 2 mcp_fluid_bundled_Glob"):
+        assert loop._bridged_name({"title": title, "kind": "other"}) is None, title
+    # A title alone never earns the proxies: CallTool unwraps to another
+    # tool, LoadTools skips the checks.
+    loop.deferred = lambda name: name == "Glob"
+    for proxy in (CALL_TOOL, LOAD_TOOL):
+        for title in (f"Run mcp_fluid_bundled_{proxy}", f"Explain {proxy}: what it does"):
+            call = {"title": title, "kind": "other", "rawInput": {"name": "Glob", "input": {}}}
+            assert loop._bridged_name(call) is None, title
+            assert not loop._is_call_proxy(call)
+
+
+async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: Path) -> None:
+    """agy ends its turn on a rejected permission: siblings fail, no reply.
+    That is a failed turn with the host's own reason, never a completed one
+    (a delegate's parent got an empty report as a finished task, #1751)."""
+
+    async def policy(name: str, data: dict) -> str | None:
+        # A host denial can quote the call's input (the checkout lock does).
+        return f"Tool '{name}' may not run {data}"
+
+    d = await _driver(tmp_path, registry=_glob_registry([]), ctx=ToolCtx(cwd=str(tmp_path)),
+                      tool_policy=policy)
+    try:
+        end = await d.turn('agymcp Glob {"pattern": "secret-*.txt"}')
+        assert isinstance(end, ErrorEvent), end
+        # A fixed phrase and the resolved name: never the denial's text.
+        assert end.message == ("The agent ended its turn without a reply after mcp__fluid_bundled__Glob "
+                               "was refused by the session's tool rules.")
+        assert not [e for e in d.events if isinstance(e, TurnComplete)]
+        # The transcript still holds what happened.
+        results = [(r.name, r.is_error) for r in d.events if isinstance(r, ToolResult)]
+        assert results == [("mcp__fluid_bundled__Glob", True), ("Read", True)]
+        # The owner's own "no" ends it the same way, in words the host chose.
+        d.loop.tool_policy = None
+        await d.loop.submit(UserTurn(content='agymcp Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob was refused.")
+        # A refusal is the last step even when no call is marked failed.
+        await d.loop.submit(UserTurn(content='agyquiet Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob was refused.")
+        # Allowed, but the agent offers only "always", which a title-only
+        # name never gets: no allow reached the agent, so the same failure.
+        await d.loop.submit(UserTurn(content='agyalways Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob could not be allowed.")
+        # The same when the agent itself stops "cancelled": the host did not
+        # interrupt, so this is that failure, not an interruption.
+        await d.loop.submit(UserTurn(content='agycancelled Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob could not be allowed.")
+        # A host interrupt after a refusal stays an interruption.
+        await d.loop.submit(UserTurn(content='agyhold Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        await d.loop.submit(Interrupt())
+        assert isinstance(await d.until(TERMINAL), Interrupted)
+        # A refused call the agent then answers about is an ordinary turn.
+        await d.loop.submit(UserTurn(content="tool"))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="deny"))
+        assert isinstance(await d.until(TERMINAL), TurnComplete)
+    finally:
+        await d.close()
+
+
+def test_a_turn_ends_silently_on_its_last_step_only(tmp_path: Path) -> None:
+    """The reason is the turn's last step: a later completed tool or plan
+    recovers it, a later failure names that tool, and the calls one refusal
+    fails keep the refusal. Text anywhere, or an interrupt, is no failure."""
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path))
+
+    def turn(*steps: str) -> str | None:
+        mapper = TurnMapper(session_id="s", turn_id="t")
+        for n, step in enumerate(steps):
+            kind, _, status = step.partition(":")
+            if kind == "refuse":
+                loop._note_refusal(mapper, "the permission request for {} was refused", "Read")
+            elif kind == "plan":
+                entries = [{"content": "x", "status": "pending"}] if status != "clear" else []
+                mapper.map_update({"sessionUpdate": "plan", "entries": entries})
+            elif kind == "text":
+                mapper.map_update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hi"}})
+            else:
+                call = {"toolCallId": f"c{n}", "title": "secret title", "kind": kind}
+                mapper.map_update({"sessionUpdate": "tool_call", **call, "status": "pending"})
+                mapper.map_update({"sessionUpdate": "tool_call_update", "toolCallId": f"c{n}", "status": status})
+        return loop._silent_end(mapper)
+
+    said = "The agent ended its turn without a reply after "
+    assert turn("refuse", "read:failed", "execute:failed") == said + "the permission request for Read was refused."
+    assert turn("refuse", "search:completed", "execute:failed") == said + "Bash failed."
+    assert turn("execute:failed", "other:failed") == said + "Bash failed."
+    assert turn("other:failed") == said + "a tool failed."
+    assert turn("refuse", "plan") is None
+    assert turn("refuse", "plan:clear") == said + "the permission request for Read was refused."
+    assert turn("plan:clear") is None
+    assert turn("refuse", "read:failed", "search:completed") is None
+    assert turn("search:completed") is None
+    assert turn("plan") is None
+    assert turn("text", "execute:failed") is None
+    assert turn("refuse", "text") is None
+    loop._interrupted.set()
+    assert turn("refuse") is None
+
+
+def test_a_silent_end_names_only_tools_host_code_wrote(tmp_path: Path) -> None:
+    """A connected MCP server or a plugin picks its own tool names, and the
+    agent its titles: only the kind map's tools and fluid's own bundled
+    tools are repeated, whatever the registry or the bridge holds."""
+    registry = _glob_registry([])
+    schema = {"type": "object", "properties": {}}
+    for name in ("mcp__weather__get_weather", "mcp__plugin_x__do"):
+        registry.register_builtin(ToolSpec(name=name, description="x", input_schema=schema), _glob_registry)
+    loop = AcpLoop(store=MemoryStore(), spec=_spec(tmp_path), cwd=str(tmp_path), registry=registry)
+    for name in ("mcp__fluid_bundled__mcp__weather__get_weather", "mcp__fluid_bundled__mcp__plugin_x__do",
+                 "Run whatever", "mcp__fluid_bundled__Run whatever", "Glob"):
+        assert loop._plain_tool_name(name) == "a tool", name
+    for name in ("Bash", "Write", "mcp__fluid_bundled__Glob", "mcp__fluid_bundled__CallTool"):
+        assert loop._plain_tool_name(name) == name
 
 
 async def test_steer_during_a_turn_and_cancel(tmp_path: Path) -> None:

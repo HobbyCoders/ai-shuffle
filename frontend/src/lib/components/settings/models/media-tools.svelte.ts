@@ -371,10 +371,10 @@ export class MediaTools {
 				'settings'
 			);
 			if (!this.isCurrent()) return true;
-			// The pick is kept either way; "Saved" alone must not imply unattended runs can use it.
+			// Remembered only once priced; "Saved" alone must not imply unattended runs can use it.
 			if (saved?.warning) {
 				notify.warning(saved.warning, {
-					title: `Remembered ${model.display_name || model.endpoint_id}`,
+					title: `${saved.remembered === false ? 'Not remembered' : 'Remembered'} ${model.display_name || model.endpoint_id}`,
 					category: 'generation-choice'
 				});
 			} else flashSaved();

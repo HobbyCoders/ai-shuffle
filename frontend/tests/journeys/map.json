@@ -71,6 +71,22 @@
 	],
 	"rules": [
 		{
+			"why": "Antigravity's grouped quota reply passes through the real parser and usage API to its ordered meters",
+			"journeys": ["antigravity-usage"],
+			"globs": [
+				"frontend/tests/journeys/antigravity-usage.journey.mjs",
+				"scripts/devloop/fake_agy.py",
+				"scripts/devloop/seed.py",
+				"app/core/antigravity.py",
+				"app/core/provider_usage.py",
+				"app/api/usage.py",
+				"frontend/src/lib/stores/rate-limit.ts",
+				"frontend/src/lib/components/chat/ContextUsageBar.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte",
+				"frontend/src/lib/components/settings/providers/AntigravityDetail.svelte"
+			]
+		},
+		{
 			"why": "the Away for all chats switch, its always-on band and the per-chat control it locks: real taps, a real layout and a second browser are what these depend on",
 			"journeys": [
 				"away-all-chats"
@@ -692,6 +708,19 @@
 				"frontend/src/lib/components/layout/RunsOnPicker*",
 				"frontend/src/lib/components/GroupedSelector*",
 				"frontend/src/lib/components/ui/**"
+			]
+		},
+		{
+			"why": "recover an interrupted auto-worktree opening by its exact receipt without resending",
+			"journeys": ["auto-worktree-reload"],
+			"globs": [
+				"frontend/tests/journeys/auto-worktree-reload.journey.mjs",
+				"frontend/src/lib/stores/session/worktree-opening.ts",
+				"frontend/src/lib/stores/session/message-sender.ts",
+				"frontend/src/lib/components/layout/OpeningRecovery.svelte",
+				"frontend/src/lib/components/layout/AppPage.svelte",
+				"frontend/src/lib/components/layout/ChatView.svelte",
+				"app/api/sessions_worktree.py"
 			]
 		},
 		{

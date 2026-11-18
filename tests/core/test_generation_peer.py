@@ -107,9 +107,38 @@ async def test_peer_receiver_rechecks_options_price_budget_and_claim(monkeypatch
     output = await peer.handle(body, "origin-worker")
     assert output["result"]["success"]
     execute.assert_awaited_once()
-    with pytest.raises(ValueError, match="price changed"):
-        await peer.handle({**body, "price": {**PRICE, "total": "0"}}, "origin-worker")
+    for changed in ("0", "0.04", "0.06"):
+        with pytest.raises(ValueError, match="price changed"):
+            await peer.handle({**body, "price": {**PRICE, "total": changed}}, "origin-worker")
     execute.assert_awaited_once()
+    # The same money written differently ("0.050") is the same price.
+    output = await peer.handle({**body, "price": {**PRICE, "amount": "0.050", "total": "0.0500"}}, "origin-worker")
+    assert output["result"]["success"] and execute.await_count == 2
+
+
+@pytest.mark.parametrize("operation,flag,listing", [
+    ("catalog", None, True), ("catalog", False, False), ("prepare", None, False), ("execute", None, False)])
+async def test_the_peer_skips_listing_rates_for_the_candidate_it_prices_fresh(monkeypatch, operation, flag, listing):
+    # prepare/execute price the one candidate fresh; reading listing rates first
+    # would queue admission behind a catalog page on the rate cache's lock.
+    from app.services import generation_sources
+    local = AsyncMock(return_value=[])
+    monkeypatch.setattr(generation_sources.Sources, "local_catalog", local)
+    body = {"version": peer.WIRE_VERSION, "operation": operation, "source": ENTRY.account, "kind": "image",
+            "model": ENTRY.model, **({} if flag is None else {"listing_prices": flag})}
+    if operation == "catalog":
+        await peer.handle(body, "origin-worker")
+    else:
+        with pytest.raises(ValueError, match="No unique"):
+            await peer.handle(body, "origin-worker")
+    assert local.await_args.kwargs["listing_prices"] is listing
+
+
+async def test_a_named_remote_lookup_asks_the_peer_not_to_read_listing_rates(network):
+    _, calls = network
+    await peer.catalog("image", source=ENTRY.account, model=ENTRY.model, listing_prices=False)
+    await peer.catalog("image", source=ENTRY.account)
+    assert calls[0][2]["listing_prices"] is False and "listing_prices" not in calls[1][2]
 
 
 async def test_reported_overrun_goes_to_founder_not_each_account_worker(network, monkeypatch):
@@ -171,3 +200,48 @@ async def test_one_malformed_peer_reply_marks_only_that_peer_unavailable(monkeyp
     entries = await peer.catalog("image")
     assert [(c.worker, c.available) for c in entries] == [("p1", False), ("p2", True)]
     assert "nothing from it was used" in entries[0].reason
+
+
+async def test_holding_worker_serves_pages_for_an_operation(monkeypatch):
+    from app.services import generation_sources
+    from app.mcp.node_worker import NodeWorker
+    from app.network import runners
+    fal = Candidate("fal", "fal-ai", "peer-worker", "fal-ai/i2v", "video", False, options={}, price=PRICE)
+    monkeypatch.setattr(runners, "self_device_id", lambda: "peer-worker")
+    page = AsyncMock(return_value=([fal], 9, {"fal-ai/i2v": {"name": "I2V"}}))
+    monkeypatch.setattr(generation_sources.Sources, "fal_page", page)
+    monkeypatch.setattr(NodeWorker, "shutdown", AsyncMock())
+    body = {"version": peer.WIRE_VERSION, "operation": "catalog", "kind": "video", "source": "fal",
+            "media_operation": "image-to-video", "page": {"offset": 20, "limit": 20}, "query": "kling"}
+    output = await peer.handle(body, "origin-worker")
+    assert output["page"] == {"total": 9, "offset": 20, "details": {"fal-ai/i2v": {"name": "I2V"}}, "serves": True}
+    assert output["media_operation"] == "image-to-video"
+    assert page.await_args.kwargs == {"operation": "image-to-video", "query": "kling", "offset": 20, "limit": 20}
+    # A worker without fal for this kind says so instead of sending an empty page.
+    page.return_value = None
+    output = await peer.handle(body, "origin-worker")
+    assert output["page"] == {"total": 0, "offset": 20, "details": {}, "serves": False} and output["candidates"] == []
+    page.return_value = ([], 0, {})
+    assert (await peer.handle(body, "origin-worker"))["page"]["serves"] is True
+    with pytest.raises(ValueError, match="Unknown generation operation"):
+        await peer.handle({**body, "media_operation": "rm -rf"}, "origin-worker")
+    with pytest.raises(ValueError, match="page"):
+        await peer.handle({**body, "page": {"offset": -1, "limit": 20}}, "origin-worker")
+
+
+async def test_older_peer_text_rows_are_not_offered_for_another_operation(monkeypatch):
+    from app.network import runners
+    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": "p1", "online": True}])
+    fal = asdict(Candidate("fal", "fal-ai", "p1", "fal-ai/t2v", "video", False, price=PRICE))
+    plan = asdict(replace(ENTRY, worker="p1", kind="video"))
+    sent = []
+
+    async def old_peer(worker, operation, **body):
+        sent.append(body)
+        return {"version": peer.WIRE_VERSION, "candidates": [fal, plan]}  # no media_operation echo
+    monkeypatch.setattr(peer, "request", old_peer)
+    assert await peer.catalog("video", operation="image-to-video") == []
+    assert sent[-1]["media_operation"] == "image-to-video"
+    # Its text rows still serve a text call, and a named model of any category.
+    assert [c.source for c in await peer.catalog("video")] == ["fal", "chatgpt"]
+    assert len(await peer.catalog("video", operation="image-to-video", model="fal-ai/t2v")) == 2

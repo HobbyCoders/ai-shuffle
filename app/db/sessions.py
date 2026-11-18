@@ -123,6 +123,9 @@ class SessionRow(TypedDict):
     # Per-session fast mode: TRUE asks the leg for its expedited service,
     # NULL/FALSE runs standard.
     fast: Optional[bool]
+    # Speed tier refining ``fast`` (app/core/model_speed.py): ``ultrafast``
+    # with ``fast`` TRUE runs Ultrafast; anything else follows ``fast``.
+    speed: Optional[str]
     # Sidepanel mode: NULL for a 'code' session (the full agentic surface, and
     # every row predating this column), 'chat' for the web-only chat surface,
     # 'voice' for an OpenAI Realtime call. See
@@ -557,6 +560,7 @@ def create_session(
     permission_ceiling: Optional[str] = None,
     context_window: Optional[int] = None,
     fast: Optional[bool] = None,
+    speed: Optional[str] = None,
     mode: Optional[str] = None,
     hidden: bool = False,
     is_worker: bool = False,
@@ -610,6 +614,8 @@ def create_session(
             the selected model/provider's registered default.
         fast: Fast mode chosen for this session, or ``None`` to leave the
             row unbound (the session runs at standard speed).
+        speed: The speed tier (``standard``/``fast``/``ultrafast``); when set it
+            decides ``fast`` too. See :mod:`app.core.model_speed`.
         mode: Sidepanel mode for this session — ``'chat'`` for the web-only
             chat surface, ``'voice'`` for an OpenAI Realtime voice call,
             ``'code'``/``None`` for the ordinary agentic surface.
@@ -675,7 +681,10 @@ def create_session(
         selected_context_window = None
     if selected_context_window is not None and selected_context_window <= 0:
         selected_context_window = None
-    selected_fast = None if fast is None else bool(fast)
+    from app.core.model_speed import stored_pair
+
+    _pair = stored_pair(fast, speed)
+    selected_fast, selected_speed = _pair["fast"], _pair["speed"]
     if resolved_provider_id is None and selected_model:
         from app.core.query_options import decode_provider_model
 
@@ -710,8 +719,8 @@ def create_session(
             owner_device_id = _runners.self_device_id()
     except Exception:  # noqa: BLE001 — stamping is best-effort; NULL means "this worker"
         owner_device_id = None
-    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "permission_ceiling", "context_window", "fast", "mode", "hidden", "is_worker"]
-    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_permission_ceiling, selected_context_window, selected_fast, resolved_mode, hidden, bool(is_worker)]
+    columns = ["id", "profile_id", "project_id", "project_v2_id", "title", "api_user_id", "parent_session_id", "fork_point_message_index", "worktree_id", "worktree_branch", "worktree_path", "automation_id", "instance_id", "owner_device_id", "is_active", "v2_stream", "created_at", "updated_at", "provider_id", "model", "effort", "permission_mode", "permission_ceiling", "context_window", "fast", "speed", "mode", "hidden", "is_worker"]
+    params = [session_id, profile_id, project_id, project_v2_id, title, api_user_id, parent_session_id, fork_point_message_index, worktree_id, worktree_branch, worktree_path, automation_id, instance_id, owner_device_id, is_active, True, now, now, resolved_provider_id, selected_model, selected_effort, selected_permission_mode, selected_permission_ceiling, selected_context_window, selected_fast, selected_speed, resolved_mode, hidden, bool(is_worker)]
     if voice_config is not None:
         columns.append("voice_config")
         params.append(json.dumps(voice_config))
@@ -990,6 +999,7 @@ def set_session_run_binding(
     clear_effort: bool = False,
     away_mode: Optional[bool] = None,
     fast_pinned: Optional[bool] = None,
+    speed: Optional[str] = None,
 ) -> None:
     """Persist the run binding a turn actually used onto its session.
 
@@ -1047,9 +1057,25 @@ def set_session_run_binding(
         values.append(clean_context_window)
     # Boolean binding: False is a real pick ("turn fast mode off"), so it
     # must reach the row. Only an absent field (None) is a no-op.
-    if fast is not None:
-        updates.append(f"fast = {_ph}")
-        values.append(bool(fast))
+    # ``speed`` and ``fast`` are stored as one agreeing pair
+    # (app/core/model_speed.stored_pair): a ``speed`` pick writes the ``fast``
+    # it implies, and ``fast`` alone (an older client) is normalized against
+    # the row's current pair inside the UPDATE itself (the right-hand side
+    # reads the old values), so no read races a concurrent write.
+    from app.core.model_speed import normalize_speed, stored_pair
+
+    speed_pick = normalize_speed(speed)
+    if speed_pick is not None:
+        pair = stored_pair(speed=speed_pick)
+        updates += [f"fast = {_ph}", f"speed = {_ph}"]
+        values += [pair["fast"], pair["speed"]]
+    elif fast:
+        updates += [f"fast = {_ph}",
+                    "speed = CASE WHEN fast AND speed = 'ultrafast' THEN 'ultrafast' ELSE 'fast' END"]
+        values.append(True)
+    elif fast is not None:
+        updates += [f"fast = {_ph}", f"speed = {_ph}"]
+        values += [False, "standard"]
     # Away mode is boolean the same way: False is "the owner is back".
     if away_mode is not None:
         updates.append(f"away_mode = {_ph}")
@@ -1096,8 +1122,18 @@ def patch_voice_session_context(session_id: str, changes: Dict[str, Any]) -> Non
         raise ValueError("Unsupported voice context field")
     if not changes:
         return
+    kept = []
+    if changes.get("fast") is True:
+        # The fast-only rule (model_speed.stored_pair), read in the UPDATE: an
+        # attached chat keeps a stored Ultrafast; a voice row runs Fast at most.
+        kept = ["speed = CASE WHEN COALESCE(mode, '') <> 'voice' AND fast "
+                "AND speed = 'ultrafast' THEN 'ultrafast' ELSE 'fast' END"]
+    elif "fast" in changes:
+        from app.core.model_speed import stored_pair
+
+        changes = {**changes, **stored_pair(changes["fast"])}
     placeholder = ph()
-    assignments = ", ".join(f"{field} = {placeholder}" for field in changes)
+    assignments = ", ".join([f"{field} = {placeholder}" for field in changes] + kept)
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(

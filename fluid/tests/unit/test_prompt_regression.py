@@ -543,14 +543,14 @@ def test_unwired_capabilities_drop_their_prose(tmp_path) -> None:
 
 
 def test_code_mode_prompt_drops_the_bullets_the_addendum_contradicts() -> None:
-    """PRM-7: reply-level parallelism, re-Read after a failed Edit and "the
+    """PRM-7: reply-level batching, re-Read after a failed Edit and "the
     user saw the tool call" describe the JSON surface; under code mode the
     addendum owns those stories."""
     from fluid.cli.prompt import PromptProfile, compose_base_prompt
 
     json_mode = compose_base_prompt(PromptProfile(model="claude"))
     code_mode = compose_base_prompt(PromptProfile(model="claude", code_mode=True))
-    for phrase in ("Make independent tool calls in the same reply", "re-Read the file"):
+    for phrase in ("Put independent tool calls in one reply", "re-Read the file"):
         assert phrase in json_mode and phrase not in code_mode
     assert "The user saw the tool call" in json_mode
     assert "The user saw the cell run" in code_mode

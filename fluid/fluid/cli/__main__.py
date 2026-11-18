@@ -25,9 +25,11 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
-from typing import Any
+from pathlib import Path
+from typing import Any, TextIO
 
 from fluid.cli.config import (
     format_sessions,
@@ -52,6 +54,8 @@ from fluid.cli.repl import (
 )
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
+from fluid.events import ErrorEvent, Event, Interrupted, TurnComplete, Usage
+from fluid.events.bus import EventBus
 from fluid.store.base import SessionLocked
 
 
@@ -80,6 +84,100 @@ def _resolve_config(args: argparse.Namespace) -> HarnessConfig:
 # ─── one-shot run (testable seam) ────────────────────────────────────────────
 
 
+_TOKEN_KEYS = {
+    "input_tokens": ("input_tokens", "prompt_tokens"),
+    "output_tokens": ("output_tokens", "completion_tokens"),
+    "cache_read_tokens": ("cache_read_input_tokens", "cache_read_tokens"),
+    "cache_creation_tokens": ("cache_creation_input_tokens", "cache_creation_tokens"),
+}
+_ACP_TOKEN_KEYS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_tokens": "cachedReadTokens",
+    "cache_creation_tokens": "cachedWriteTokens",
+}
+
+
+def _reported_tokens(usage: dict[str, Any]) -> dict[str, int]:
+    counts = {}
+    for field, keys in _TOKEN_KEYS.items():
+        for key in keys:
+            value = usage.get(key)
+            if type(value) is int and value >= 0:
+                counts[field] = value
+                break
+    return counts
+
+
+def _write_usage_event(out: TextIO, event: Event) -> None:
+    """Write normalized engine counters and any estimate flags carried by the event."""
+    if isinstance(event, Usage):
+        # Usage fields default to zero when the engine has no counters. Raw
+        # keys distinguish that default from an engine counter, but provider
+        # normalizers can already have filled missing wire fields with zero.
+        counts = _reported_tokens(event.raw)
+        acp = event.raw.get("acp_usage")
+        for field, wire_key in _ACP_TOKEN_KEYS.items():
+            count = getattr(event, field)
+            wire_count = acp.get(wire_key) if isinstance(acp, dict) else None
+            if count > 0 or (type(wire_count) in (int, float) and wire_count == 0):
+                counts.setdefault(field, count)
+        # Background checkpoints are not included in terminal accounting.
+        outside_turn = event.raw.get("auxiliary_background") is True
+        if not counts and not outside_turn:
+            return
+        record = {
+            "type": "usage",
+            "turn_id": event.turn_id,
+            "outside_turn_totals": outside_turn,
+            **counts,
+        }
+        if outside_turn:
+            record.update(num_model_calls=1, cost_usd=event.raw.get("cost_usd"))
+        provenance = event.raw
+    elif isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
+        record = {
+            "type": "status",
+            "turn_id": event.turn_id,
+            "stop_reason": (
+                event.stop_reason if isinstance(event, TurnComplete)
+                else "interrupted" if isinstance(event, Interrupted) else "error"
+            ),
+            "num_model_calls": event.num_model_calls,
+            "cost_usd": event.cost_usd,
+            "usage": _reported_tokens(event.usage),
+        }
+        provenance = event.usage
+    else:
+        return
+    for flag in ("input_tokens_estimated", "output_tokens_estimated", "usage_estimated", "cost_from_table"):
+        if provenance.get(flag) is True:
+            record[flag] = True
+    out.write(json.dumps(record) + "\n")
+    out.flush()
+
+
+class _UsageEventBus(EventBus):
+    """Export new parent-session accounting once, even during engine close."""
+
+    def __init__(self, session_id: str, out: TextIO) -> None:
+        super().__init__()
+        self._usage_session_id = session_id
+        self._usage_out = out
+        self.write_error: OSError | None = None
+
+    async def publish(self, event: Event) -> Event:
+        published = await super().publish(event)
+        if published.session_id == self._usage_session_id and self.write_error is None:
+            try:
+                _write_usage_event(self._usage_out, published)
+            except OSError as exc:
+                # Surface export failure to the CLI without disrupting the
+                # turn or preventing durable persistence of this event.
+                self.write_error = exc
+        return published
+
+
 async def run_once(
     config: HarnessConfig,
     store,
@@ -89,17 +187,21 @@ async def run_once(
     out=None,
     on_permission=auto_deny,
     session_id: str | None = None,
+    usage_out: TextIO | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
 
     ``provider`` injects a ProviderClient (offline test hook); when omitted the
     engine is built from ``config`` (real provider). ``session_id`` resumes an
-    existing session instead of creating a fresh one.
+    existing session instead of creating a fresh one. ``usage_out`` receives
+    normalized engine accounting separately from the console transcript, through
+    engine close. Some provider normalizers fill missing counters with zeros.
     """
     out = out or sys.stdout
     meta = await open_session(store, session_id, cwd=config.cwd)
+    usage_bus = _UsageEventBus(meta.session_id, usage_out) if usage_out is not None else None
     engine = make_engine(
-        config, store, provider=provider,
+        config, store, provider=provider, bus=usage_bus,
         session_id=meta.session_id, permission_responder=on_permission,
     )
     host = host_of(engine)
@@ -131,6 +233,8 @@ async def run_once(
         if host is not None:
             await host.aclose()
         await _close_and_flush_learning(engine, meta.session_id, out)
+    if usage_bus is not None and usage_bus.write_error is not None:
+        raise usage_bus.write_error
     if sigints:
         return SIGINT_EXIT_CODE
     return 0 if stop != "error" else 1
@@ -246,6 +350,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="one-shot: run a single prompt and exit")
     _add_common(p_run)
+    p_run.add_argument(
+        "--usage-jsonl", type=Path, metavar="PATH",
+        help="write usage and turn status as JSON lines to PATH (replaces existing file)",
+    )
     p_run.add_argument("prompt", help="the prompt to run")
 
     p_sessions = sub.add_parser("sessions", help="list persisted sessions")
@@ -462,10 +570,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session_id = _resume_target(args, store_dir)
         if args.command == "run":
-            return asyncio.run(run_once(
-                config, store, args.prompt, session_id=session_id,
-                on_permission=tty_permission_responder(),
-            ))
+            with (args.usage_jsonl.open("w", encoding="utf-8")
+                  if args.usage_jsonl is not None else nullcontext()) as usage_out:
+                return asyncio.run(run_once(
+                    config, store, args.prompt, session_id=session_id,
+                    on_permission=tty_permission_responder(), usage_out=usage_out,
+                ))
         if args.command == "chat":
             return asyncio.run(
                 chat_session(config, store, use_tui=args.tui, session_id=session_id)

@@ -44,6 +44,8 @@ export {
 	isPresetModel,
 	getClaudeContextWindow,
 	isFastModeCapable,
+	isUltrafastCapable,
+	ultrafastBilling,
 	getProviderContextWindow,
 	getModelLabel,
 	getModelFamily,

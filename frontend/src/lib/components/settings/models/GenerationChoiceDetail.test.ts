@@ -103,6 +103,22 @@ describe('GenerationChoiceDetail', () => {
 		expect(screen.getByRole('button', { name: 'Ask every time' })).toBeTruthy();
 	});
 
+	it('says a refused Remember was not remembered, without a "Remembered" prefix', async () => {
+		const refused = 'This choice has no verified price. It was not remembered and is used for this pick only.';
+		render(GenerationChoiceDetail, { props: { kind: 'image' } });
+		mocks.put.mockImplementation(async (_url: string, body: { choice: GenerationChoice }) => ({
+			kind: 'image',
+			choice: { ...body.choice, origin: 'settings' },
+			remembered: false,
+			...UNPRICED,
+			warning: refused
+		}));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Remember' }));
+		await waitFor(() => expect(screen.getByText(refused)).toBeTruthy());
+		expect(banner()).toBeNull();
+		expect(generationChoices.remembered.image?.model).toBe('fal-ai/flux/dev');
+	});
+
 	it('clears the Remember warning when the choice is forgotten', async () => {
 		render(GenerationChoiceDetail, { props: { kind: 'image' } });
 		mocks.put.mockImplementation(async (_url: string, body: { choice: GenerationChoice }) => ({

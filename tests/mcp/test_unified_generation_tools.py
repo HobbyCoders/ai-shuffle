@@ -155,6 +155,17 @@ async def test_guard_refusals_never_fall_back(monkeypatch, why):
     assert not any(c[0] == "execute" for c in backend.calls) or why == "chat"
 
 
+@pytest.mark.parametrize("name,kind,operation", [
+    ("generateImage", "image", "text-to-image"), ("generateVideo", "video", "text-to-video"),
+    ("generateAudio", "audio", "text-to-audio"), ("textTo3D", "3d", "text-to-3d"),
+])
+async def test_choice_card_names_the_operation_its_models_must_fit(monkeypatch, name, kind, operation):
+    entries = [replace(candidate(), kind=kind), replace(candidate(account="b"), kind=kind)]
+    tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE, names=(name,))
+    output = payload(await tools[name].handler({"prompt": "tree"}))
+    assert output["status"] == "choose" and output["operation"] == operation
+
+
 async def test_chat_mode_has_no_settings_default(monkeypatch):
     tools, backend, legacy = lane_tools(monkeypatch, [candidate(), candidate(account="b")], replace(INTERACTIVE, chat_mode=True))
     assert payload(await tools["generateImage"].handler({"prompt": "tree"}))["status"] == "choose"
@@ -216,6 +227,47 @@ async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(
     output = payload(await tools["generateImage"].handler({"prompt": "tree", **entry.choice()}))
     assert output["status"] == "completed" and output["price"] == INCLUDED_PRICE
     assert [call[0] for call in backend.calls] == ["prepare", "reserve", "execute"]
+    legacy.assert_not_awaited()
+
+
+XAI_PRICE = {"currency": "USD", "unit": "image", "amount": "0.02", "total": "0.02", "status": "estimated"}
+
+
+@pytest.mark.parametrize("source,model,sibling,price", [
+    # A SuperGrok plan model (Included).
+    ("supergrok", "grok-imagine-image-pro", "grok-imagine-image", None),
+    # An xAI API account (priced per image), the case shown live in the devloop.
+    ("xai", "grok-imagine-image", "grok-imagine-image-pro", XAI_PRICE),
+])
+async def test_a_native_model_picked_from_all_models_reaches_the_resolver_exactly(monkeypatch, source, model, sibling, price):
+    # The card's reply for a native model browsed under "All models"
+    # (GenerationChoiceCard.test.ts pins the same JSON): the guard runs that
+    # account, worker and model with those options, not a neighbour.
+    from app.core.generation_resolver import INCLUDED_PRICE
+    def native(account, name, worker):
+        return replace(candidate(source=source, account=account, model=name),
+                       worker=worker, price=dict(price or INCLUDED_PRICE))
+    entries = [
+        native("acct-1", sibling, "worker-b"),
+        native("acct-1", model, "worker-b"),
+        native("acct-2", model, "worker-c"),
+        candidate(model="fal-ai/flux/dev"),
+    ]
+    tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE)
+    seen = []
+    prepare = backend.prepare
+
+    async def recording(c, options, prompt):
+        seen.append((c.source, c.account, c.worker, c.model, options))
+        return await prepare(c, options, prompt)
+
+    backend.prepare = recording
+    reply = {"source": "acct-1", "model": model, "worker": "worker-b", "options": {"size": "1k"}}
+    output = payload(await tools["generateImage"].handler({"prompt": "a lighthouse at dusk", **reply}))
+    assert output["status"] == "completed", output
+    assert seen == [(source, "acct-1", "worker-b", model, {"size": "1k"})]
+    assert output["choice"]["model"] == model and output["choice"]["worker"] == "worker-b"
+    assert output["choice"]["account"] == "acct-1"
     legacy.assert_not_awaited()
 
 

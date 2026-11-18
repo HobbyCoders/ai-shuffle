@@ -335,3 +335,32 @@ async def test_two_calls_can_ask_at_once() -> None:
     finally:
         server.close()
         await server.wait_closed()
+
+
+async def test_the_proxies_keep_their_rules_whatever_kind_the_agent_gives_them(tmp_path: Path) -> None:
+    """A proxy named by its canonical title is the proxy for any kind, as
+    before #1751: LoadTools skips the policy, and CallTool is judged as the
+    real tool it runs and only ever allowed once."""
+    judged: list[str] = []
+
+    def policy(name: str, data: dict) -> None:
+        judged.append(name)
+
+    d = await _deferred_driver(tmp_path, [], tool_policy=policy)
+    d.loop.permission_mode = "bypassPermissions"
+    offered = [{"optionId": "always", "kind": "allow_always"}, {"optionId": "once", "kind": "allow_once"}]
+    try:
+        for kind in ("other", "fetch", "execute", "read"):
+            load = {"toolCallId": "l", "title": f"mcp__fluid_bundled__{LOAD_TOOL}", "kind": kind,
+                    "rawInput": {"names": ["Echo"]}}
+            answer = await d.loop._permission({"toolCall": load, "options": offered})
+            assert answer["outcome"]["outcome"] == "selected", (kind, answer)
+            assert judged == [], kind
+            call = {"toolCallId": "c", "title": f"mcp__fluid_bundled__{CALL_TOOL}", "kind": kind,
+                    "rawInput": {"name": "Echo", "input": {"text": "x"}}}
+            answer = await d.loop._permission({"toolCall": call, "options": offered})
+            assert answer["outcome"] == {"outcome": "selected", "optionId": "once"}, kind
+            assert judged == ["mcp__fluid_bundled__Echo"], kind
+            judged.clear()
+    finally:
+        await d.close()

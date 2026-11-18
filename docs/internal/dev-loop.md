@@ -617,6 +617,12 @@ installed, and every provider screen works without a Google account:
 - personal sign-in prints a fake `accounts.google.com` link and accepts any
   code;
 - a chat message containing "tool" runs a tool call with a permission prompt;
+- `agymcp Glob {"pattern": "*"}` calls a bundled tool the way agy 1.5.9 does
+  (titled `Run mcp_fluid_bundled_Glob`, with a permission request); refused,
+  it ends the turn with no reply, as agy does (`agyquiet` ends it without
+  failing its calls first; `agyid` asks permission by the call's id alone;
+  `agyalways` and `agycancelled` offer only "Always allow", the second then
+  stopping with `cancelled`; `agyhold` waits for the session to be cancelled);
 - `/usage` answers with a quota reply.
 
 The agent's message log is `fake-agy.jsonl` in the scratch directory. Without
@@ -685,12 +691,15 @@ ready it prints one line, `DEVLOOP_READY {"status": ..., "ui": ..., "pid":
 ready, no access link, a failed seed) prints `DEVLOOP_FAILED {..., "error":
 ...}`, tears down and exits 1.
 
-`python -m scripts.devloop.ci journeys [--shard I/N] [--out DIR] [--build]`
+`python -m scripts.devloop.ci journeys [--shard I/N] [--only NAMES] [--out DIR] [--build]`
 is what CI runs: it starts `up --ci` as its own child (so the instance's
 parent lease is the driver), waits for the ready line and `status`, runs the
-journeys, then `down`. With one shard it runs
-`frontend/tests/journeys/run-all.mjs` when there is one, else every
-`*.journey.mjs`; with N shards it splits the journey files by measured
+journeys, then `down`. It adds `--fake-antigravity` when this shard runs
+`antigravity-usage`. An unfiltered, single-shard run uses
+`frontend/tests/journeys/run-all.mjs` if present; enable the same fixture for
+hand runs of that aggregate that include `antigravity-usage`. A run with
+`--only` executes just the selected files, even with one shard. With N shards
+it splits the journey files by measured
 hosted runtime from `scripts/devloop/journey_weights.json` when the current
 `--list` case count matches the recorded inventory. Unmeasured files or changed
 case counts automatically use a conservative case-count estimate (the global

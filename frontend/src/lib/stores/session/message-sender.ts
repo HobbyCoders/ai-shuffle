@@ -25,9 +25,10 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
-import { composerPreferences } from '../composer-preferences';
+import { composerPreferences, composerSpeed } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
+import { keepOpening, finishOpening, pendingOpening, recoveringOpening } from './worktree-opening';
 import { claimBootSend, releaseBootSend, getInitGeneration } from './session-init';
 import { retireSends, runWithSend, sendRunIn, stillPressedOn } from './send-run';
 import { ANY_CHAT, createSendOrder, type SendLane, type SendReservation, type SendTurn } from './send-order';
@@ -345,6 +346,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// `true` — so turning fast mode off never reached the CLI. `false` is a
 		// real pick and has to travel; an unhydrated placeholder is not one.
 		if (binding.fast !== undefined) overrides.fast = binding.fast;
+		if (binding.speed !== undefined) overrides.speed = binding.speed;
 		const contextWindow = contextWindowOverride(_state);
 		if (contextWindow != null) {
 			overrides.context_window = contextWindow;
@@ -1255,6 +1257,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
 			const fastModeSnap = _state.fastMode;
+			const speedSnap = composerSpeed(_state);
 			const contextWindowSnap = contextWindowOverride(_state);
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
@@ -1263,6 +1266,9 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			// id: its text names the checkout's copy of each upload, not the staging
 			// path this row shows, so a text match cannot find it (#1351).
 			const clientMessageId = newLocalPendingId();
+			const opening = { id: clientMessageId, project: projectId, shared: projectV2Id, generation: getInitGeneration(), prompt, paths: pendingUploadPaths };
+			keepOpening(opening);
+			let awaitingCreate = false;
 
 			claimNewSessionWorker();
 			const creationGen = internal.worktreeCreationGeneration;
@@ -1279,6 +1285,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
 			// Explicit boolean, same reason as buildOverrides above.
 			overridesPayload.fast = fastModeSnap;
+			overridesPayload.speed = speedSnap;
 			if (contextWindowSnap != null) overridesPayload.context_window = contextWindowSnap;
 
 			update(s => {
@@ -1327,6 +1334,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}));
 				}
 
+				awaitingCreate = true;
+				if (pendingOpening()?.id === clientMessageId) keepOpening({ ...opening, dispatched: true });
 				const postCreate = (name: string) => api.post<{
 					session_id: string; branch_name: string;
 					base_branch: string; worktree_path: string; status: string;
@@ -1366,6 +1375,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					}
 					response = await postCreate(retryName);
 				}
+				if (!response?.session_id) throw new Error('No opening session receipt');
+				awaitingCreate = false;
 
 				if (response.session_id) creation?.made(response.session_id);
 				// The pick is spent once the session row carries the ownership —
@@ -1492,6 +1503,28 @@ export function createMessageSender(deps: MessageSenderDeps) {
 				if (!sent) update(s => ({ ...s, messages: s.messages.filter(m => m.id !== userMsgId) }));
 				return sent;
 			} catch (error) {
+				const status = (error as {status?: number})?.status;
+				// Transport loss or a server error is not proof of refusal. Retain
+				// the exact attempt; do not give its words back to ordinary Send.
+				if (awaitingCreate && ![400, 401, 403, 404, 409, 422, 429].includes(status ?? 0)) {
+					if (creationGen === internal.worktreeCreationGeneration && pendingOpening()?.id === opening.id) {
+						// Keep the same transcript and editor until the receipt resolves.
+						// The feed reconciles this pending row by clientMessageId.
+						recoveringOpening.set({ note: { ...opening, dispatched: true }, ready: true, adopt: id => {
+							if (creationGen !== internal.worktreeCreationGeneration) return;
+							creation?.made(id);
+							update(s => ({ ...s, sessionId: id, selectedWorktreeBranch: s.worktreeBranch,
+								title: deriveSessionTitle(prompt, pendingUploadPaths), deviceIntent: null,
+								activeTasks: [], isCreatingWorktree: false, ...OPTIMISTIC_STREAMING_ON, error: null }));
+							persistSession();
+							feedController.start(id);
+							appData.loadSessions();
+							appData.loadApiUserSessions();
+						} });
+					}
+					return true;
+				}
+				awaitingCreate = false;
 				// User navigation guard — don't surface errors in a session
 				// the user already left.
 				if (creationGen !== internal.worktreeCreationGeneration) return true;
@@ -1509,6 +1542,8 @@ export function createMessageSender(deps: MessageSenderDeps) {
 					messages: s.messages.filter(m => m.id !== userMsgId),
 				}));
 				return false;
+			} finally {
+				if (!awaitingCreate) finishOpening(clientMessageId);
 			}
 		},
 

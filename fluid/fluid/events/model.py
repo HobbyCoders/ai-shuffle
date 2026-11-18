@@ -667,6 +667,15 @@ class FastModeOutcome(Event):
     ``fast_mode_state`` and ``fast_mode_disabled_reason``, verbatim. The reason
     says why Fast cannot serve right now, not why a given request ran standard,
     and a chat with Fast off is told one as well.
+
+    The native OpenAI Responses lane publishes one for a turn that asked for
+    Ultrafast (``service_tier: ultrafast``), counting each call by the
+    ``service_tier`` its response reported: ``ultrafast_calls`` next to the
+    Fast and standard counts. ``speed`` and ``speed_at_end`` name the tier asked
+    for at the turn's start and end (``standard``, ``fast`` or ``ultrafast``;
+    None from the delegated lane), and ``disabled_reason`` is
+    ``ultrafast_unavailable`` when the provider refused the tier and the rest
+    of the turn ran at standard speed.
     """
 
     requested: bool
@@ -676,6 +685,9 @@ class FastModeOutcome(Event):
     unknown_calls: int = 0
     state: str | None = None
     disabled_reason: str | None = None
+    ultrafast_calls: int = 0
+    speed: str | None = None
+    speed_at_end: str | None = None
 
 
 #: ``GuardrailBlocked.outcome`` values.
@@ -919,10 +931,14 @@ class ContinualUpdate(Event):
 class AssistantTextSanitized(Event):
     """Model-authored control lookalikes were quoted before storage/replay.
 
-    Visible, nonterminal diagnostic. Never carries the original model text.
+    Visible, nonterminal diagnostic, emitted at most once per turn. Never
+    carries the original model text.
     """
 
-    message: str = "Model-authored control markers were quoted; no host message was delivered."
+    message: str = (
+        "The model wrote text that looks like a host control marker. It is shown "
+        "as a quote, so it cannot pass as a real host message."
+    )
 
 
 @dataclass(frozen=True, kw_only=True)

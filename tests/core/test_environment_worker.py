@@ -271,7 +271,7 @@ async def test_delegated_connect_sends_this_workers_name_and_a_move_sends_the_ne
     monkeypatch, isolated_home, tmp_path
 ):
     """End to end through connect on the delegated (Claude CLI) leg: the
-    appended prompt the CLI receives names the worker, identical across a CLI
+    compiled prompt the CLI receives names the worker, identical across a CLI
     restart, and a reconnect on another worker (a move) names that one."""
     import fluid.engine.delegated as delegated_mod
     from fluid.engine.delegated import DelegatedLoop
@@ -283,7 +283,7 @@ async def test_delegated_connect_sends_this_workers_name_and_a_move_sends_the_ne
 
         def _build_argv(self):
             argv = super()._build_argv()
-            flag = "--append-system-prompt-file"
+            flag = "--system-prompt-file"
             path = argv[argv.index(flag) + 1] if flag in argv else None
             type(self).prompts.append(Path(path).read_text() if path else None)
             return argv
@@ -328,6 +328,6 @@ async def test_delegated_connect_sends_this_workers_name_and_a_move_sends_the_ne
         await again.disconnect()
 
     first, second, after_move = _FileLoop.prompts
-    assert "# Worker\n" + WORKER in first
+    assert WORKER in first
     assert first == second
     assert moved in after_move and "Worker: ServerWorker" not in after_move

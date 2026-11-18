@@ -661,6 +661,7 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             instance.database, instance.stopped = database, stopped
             instance.data["guardian"] = guardian
             instance.data["claude_cli"] = claude_cli or {"mode": "none"}
+            instance.data["fake_antigravity"] = args.fake_antigravity
             control_host = (instance.browser if not ipaddress.ip_address(str(args.fake_voice_host)).is_loopback
                             else "127.0.0.1")
             instance.data["fake_voice"] = {

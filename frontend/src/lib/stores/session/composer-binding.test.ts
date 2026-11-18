@@ -536,10 +536,10 @@ describe('a send that waits for the socket (#418 review)', () => {
 describe('composer-binding helpers', () => {
 	it('restore: row beats a missing cache; nothing known means unhydrated placeholders', () => {
 		expect(restoreComposerBinding(null, { profile_id: 'a', permission_mode: 'auto', fast: true })).toEqual({
-			profile: 'a', permissionModeOverride: 'auto', fastMode: true, bindingUnhydrated: {}, bindingPicks: {},
+			profile: 'a', permissionModeOverride: 'auto', fastMode: true, ultrafastMode: false, bindingUnhydrated: {}, bindingPicks: {},
 		});
 		expect(restoreComposerBinding(null, null)).toEqual({
-			profile: '', permissionModeOverride: null, fastMode: false,
+			profile: '', permissionModeOverride: null, fastMode: false, ultrafastMode: false,
 			bindingUnhydrated: { profile: true, permission: true, fast: true }, bindingPicks: {},
 		});
 	});
@@ -559,7 +559,7 @@ describe('composer-binding helpers', () => {
 		const current = { profile: '', permissionModeOverride: null, fastMode: false, bindingUnhydrated: { ...ALL_BINDING_UNHYDRATED }, bindingPicks: {} };
 		const initial = { profile: '', permissionModeOverride: null, fastMode: false };
 		expect(liveComposerBindingPatch({ profile_id: 'w', permission_mode: 'plan', fast: true }, current, initial, normalizePermissionMode)).toEqual({
-			profile: 'w', permissionModeOverride: 'default', fastMode: true, bindingUnhydrated: {},
+			profile: 'w', permissionModeOverride: 'default', fastMode: true, ultrafastMode: false, bindingUnhydrated: {},
 		});
 		expect(liveComposerBindingPatch({ fast: true }, { ...current, fastMode: true }, initial, normalizePermissionMode)).toEqual({});
 		expect(liveComposerBindingPatch({ profile_id: 'w' }, { ...current, profile: 'mine', bindingPicks: { profile: true } }, { ...initial, profile: 'mine' }, normalizePermissionMode)).toEqual({});
@@ -567,8 +567,42 @@ describe('composer-binding helpers', () => {
 
 	it('send: a new compose always sends its picks; an open chat omits unhydrated ones', () => {
 		const state = { sessionId: null, profile: 'a', permissionModeOverride: 'auto', fastMode: false, bindingUnhydrated: { ...ALL_BINDING_UNHYDRATED } };
-		expect(sendableComposerBinding(state)).toEqual({ profile: 'a', permissionMode: 'auto', fast: false });
-		expect(sendableComposerBinding({ ...state, sessionId: 's' })).toEqual({ profile: undefined, permissionMode: undefined, fast: undefined });
-		expect(sendableComposerBinding({ ...state, sessionId: 's', bindingUnhydrated: {} })).toEqual({ profile: 'a', permissionMode: 'auto', fast: false });
+		expect(sendableComposerBinding(state)).toEqual({ profile: 'a', permissionMode: 'auto', fast: false, speed: 'standard' });
+		expect(sendableComposerBinding({ ...state, sessionId: 's' })).toEqual({ profile: undefined, permissionMode: undefined, fast: undefined, speed: undefined });
+		expect(sendableComposerBinding({ ...state, sessionId: 's', bindingUnhydrated: {} })).toEqual({ profile: 'a', permissionMode: 'auto', fast: false, speed: 'standard' });
+	});
+});
+
+describe('Ultrafast rides with Fast (older peers know only `fast`)', () => {
+	it('restore: a row reporting the tier is Ultrafast; one without it (an older worker) is Fast', () => {
+		expect(restoreComposerBinding(null, { profile_id: 'a', fast: true, speed: 'ultrafast' }).ultrafastMode).toBe(true);
+		expect(restoreComposerBinding(null, { profile_id: 'a', fast: true }).ultrafastMode).toBe(false);
+		// An older writer turned Fast off: Standard whatever the tier says.
+		expect(restoreComposerBinding(null, { profile_id: 'a', fast: false, speed: 'ultrafast' })).toMatchObject({ fastMode: false, ultrafastMode: false });
+	});
+
+	it('cache: the refinement round-trips with Fast and never outlives it', () => {
+		const cache = cacheComposerBinding({ profile: 'a', permissionModeOverride: null, fastMode: true, ultrafastMode: true });
+		expect(restoreComposerBinding(cache, null).ultrafastMode).toBe(true);
+		const off = cacheComposerBinding({ profile: 'a', permissionModeOverride: null, fastMode: false, ultrafastMode: true });
+		expect(off.ultrafastMode).toBe(false);
+	});
+
+	it('live patch: takes the tier from a newer worker and reads an older one as Fast', () => {
+		const current = { profile: 'a', permissionModeOverride: null, fastMode: false, bindingUnhydrated: { fast: true as const }, bindingPicks: {} };
+		const initial = { profile: 'a', permissionModeOverride: null, fastMode: false };
+		expect(liveComposerBindingPatch({ fast: true, speed: 'ultrafast' }, current, initial, normalizePermissionMode))
+			.toMatchObject({ fastMode: true, ultrafastMode: true });
+		expect(liveComposerBindingPatch({ fast: true }, current, initial, normalizePermissionMode))
+			.toMatchObject({ fastMode: true, ultrafastMode: false });
+		// An Ultrafast pick made while /live was in flight stands.
+		expect(liveComposerBindingPatch({ fast: true }, { ...current, fastMode: true, ultrafastMode: true }, initial, normalizePermissionMode)).toEqual({});
+	});
+
+	it('send: the tier travels beside `fast`, which an older worker reads alone', () => {
+		const state = { sessionId: 's', profile: 'a', permissionModeOverride: null, fastMode: true, ultrafastMode: true, bindingUnhydrated: {} };
+		expect(sendableComposerBinding(state)).toMatchObject({ fast: true, speed: 'ultrafast' });
+		expect(sendableComposerBinding({ ...state, ultrafastMode: false })).toMatchObject({ fast: true, speed: 'fast' });
+		expect(sendableComposerBinding({ ...state, fastMode: false })).toMatchObject({ fast: false, speed: 'standard' });
 	});
 });
