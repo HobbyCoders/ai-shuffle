@@ -6942,6 +6942,22 @@ def _delegated_bridge_filter(options: SessionOptions, registry: Any):
     return lambda name: _bridged_tool_permitted(name, surface, blocked)
 
 
+def _claude_bash_callable(options: SessionOptions, registry: Any) -> bool:
+    """Whether the claude CLI's own Bash survives the deny list it is handed.
+
+    Prompt text that tells the model to use Bash is written on the claude leg
+    only when this holds. ``_delegated_disallowed`` is the CLI's
+    ``--disallowed-tools``; an entry walls Bash when ``matches_any`` (exact
+    name or fnmatch, what the PreToolUse policy applies) matches it, judged
+    on the tool part before any ``(`` so a scoped rule such as ``Bash(git:*)``
+    counts too: conservative, since such a rule may leave other commands.
+    """
+    from app.core.tool_access import matches_any
+
+    denied = _delegated_disallowed(options, registry)
+    return not matches_any("Bash", [str(entry).split("(", 1)[0] for entry in denied])
+
+
 def _bridged_tool_permitted(name: str, surface: Optional[list], blocked: Optional[list]) -> bool:
     """Whether fluid's bundled bridge would serve a tool under these lists.
 
@@ -8696,10 +8712,13 @@ def _app_guidance_blocks(
 
         def permits(name: str) -> bool:
             return delegated_permit is None or delegated_permit(name)
-    if (options.extra or {}).get("github_connected") and permits("Bash"):
+    if (options.extra or {}).get("github_connected") and permits("Bash") and (
+        leg != "claude" or _claude_bash_callable(options, registry)
+    ):
         # The install's gh CLI is signed in. Gated on Bash: a block about a
         # command-line tool would describe something a Bash-less agent
-        # cannot call.
+        # cannot call. On the claude leg that is the CLI's bare Bash, which
+        # the deny list can wall while the surface ticks a bundled spelling.
         blocks.append(GITHUB_BLOCK)
     lane = (options.extra or {}).get("session_mode") or "code"
     if lane == "code" and (permits("Edit") or permits("Write")):
@@ -8779,7 +8798,7 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any, *, leg: str =
     # The rule tells the model to keep Bash for builds and git; on the claude
     # leg a surface can qualify through PowerShell alone while the deny list
     # walls Bash, so it is written only where Bash survives that list.
-    if file_rule and leg == "claude" and "Bash" in _delegated_disallowed(options, registry):
+    if file_rule and leg == "claude" and not _claude_bash_callable(options, registry):
         file_rule = None
     # The batching rule rides every session, with the file-tool rule when
     # there is one.

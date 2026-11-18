@@ -957,37 +957,96 @@ async def test_search_guidance_names_only_what_the_claude_leg_can_call(
         cli_tool_surface.reset_cli_tools()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("shell, ruled", [
-    ("PowerShell", False),
-    ("mcp__fluid_bundled__PowerShell", False),
-    ("Bash", True),
-])
-async def test_custom_profile_file_rule_needs_bash_past_the_deny_list(
-    monkeypatch, tmp_path, shell, ruled,
-):
-    """The file rule says to keep Bash for builds and git. A surface that
-    ticks only PowerShell (in either spelling) leaves the CLI's Bash on the
-    deny list, so a custom profile's compiled prompt must not carry it."""
+async def _custom_connect(monkeypatch, tmp_path, *, allow=None, deny=None, **extra):
+    """A custom Claude code profile, connected the way the app connects it,
+    on Windows (the CLI ships its own Glob and Grep)."""
     from app.core import cli_tool_surface
-    from tests.test_harness_adapter import FILE_RULE_OPENING
 
     cli_tool_surface.reset_cli_tools()
-    # As on Windows, where the CLI ships its own Glob and Grep.
     monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
     monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
     options = SessionOptions(
         model="fable", system_prompt="CUSTOM AGENT PROMPT", cwd=str(tmp_path),
-        tool_allowlist=[shell, "Read", "Edit", "Glob"], extra={"session_mode": "code"},
+        tool_allowlist=allow, disallowed_tools=deny,
+        extra={"session_mode": "code", **extra},
     )
     adapter = ha.HarnessAdapter()
     await adapter.connect(options)
+    return adapter
+
+
+def _bash_denied(engine) -> bool:
+    from app.core.tool_access import matches_any
+
+    return matches_any("Bash", engine.disallowed_tools)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow, deny, ruled", [
+    (["PowerShell", "Read", "Edit", "Glob"], None, False),
+    (["mcp__fluid_bundled__PowerShell", "Read", "Edit", "Glob"], None, False),
+    (None, ["Bash*"], False),
+    (["Bash", "Read", "Edit", "Glob"], None, True),
+    (None, None, True),
+])
+async def test_custom_profile_file_rule_needs_bash_past_the_deny_list(
+    monkeypatch, tmp_path, allow, deny, ruled,
+):
+    """The file rule says to keep Bash for builds and git. A surface that
+    ticks only PowerShell (in either spelling), or a ``Bash*`` block that
+    leaves PowerShell, keeps the CLI's Bash on the deny list, so a custom
+    profile's compiled prompt must not carry it."""
+    from app.core import cli_tool_surface
+    from tests.test_harness_adapter import FILE_RULE_OPENING
+
+    adapter = await _custom_connect(monkeypatch, tmp_path, allow=allow, deny=deny)
     try:
         engine = adapter.engine
         assert engine.system.startswith("CUSTOM AGENT PROMPT")
-        assert ("Bash" in engine.disallowed_tools) is not ruled
+        assert _bash_denied(engine) is not ruled
         assert (FILE_RULE_OPENING in engine.system) is ruled
         assert "# Tool use on this session" in engine.system
     finally:
         await adapter.disconnect()
         cli_tool_surface.reset_cli_tools()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell, gh", [
+    ("mcp__fluid_bundled__Bash", False),
+    ("Bash", True),
+])
+async def test_custom_profile_github_block_needs_bash_past_the_deny_list(
+    monkeypatch, tmp_path, shell, gh,
+):
+    """The GitHub block says to use gh in Bash. The bundled spelling passes
+    the surface predicate, but the CLI's bare Bash stays on its deny list."""
+    from app.core import cli_tool_surface
+
+    adapter = await _custom_connect(
+        monkeypatch, tmp_path, allow=[shell, "Read", "Edit", "Glob"], github_connected=True,
+    )
+    try:
+        engine = adapter.engine
+        assert _bash_denied(engine) is not gh
+        assert ("use it in Bash" in engine.system) is gh
+        assert (ha.GITHUB_BLOCK in engine.system) is gh
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
+
+
+@pytest.mark.parametrize("deny, callable_", [
+    (None, True),
+    (["PowerShell"], True),
+    (["Bash"], False),
+    (["Bash*"], False),
+    (["B?sh"], False),
+    (["Bash(git push:*)"], False),
+    (["*"], False),
+])
+def test_claude_bash_callable_reads_the_deny_list_conservatively(deny, callable_):
+    """Any deny entry whose tool part could match Bash counts, a scoped
+    ``Bash(...)`` rule included."""
+    options = SessionOptions(model="fable", disallowed_tools=deny, extra={"session_mode": "code"})
+    assert ha._claude_bash_callable(options, None) is callable_
