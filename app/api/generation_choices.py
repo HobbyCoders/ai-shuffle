@@ -90,16 +90,25 @@ async def list_choices(request: Request, token: str = Depends(require_auth)) -> 
 @router.put("/choices/{kind}")
 async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
                       token: str = Depends(require_preference_write)) -> dict:
-    """Record a pick as the last choice and, with ``remember``, reuse it next time."""
+    """Record a pick as the last choice and, with ``remember``, reuse it next time.
+
+    A pick is remembered only after a successful server-side quote priced it;
+    otherwise it is kept as the last choice (this pick only) and says why.
+    """
     _kind(kind)
+    quoted = await _save_time_quote(kind, body.choice, request, token)
+    remember = body.remember and quoted["priced"]
     try:
         choice = await run_sync(lambda: generation_choices.save(
             _identity(request), kind, body.choice.model_dump(exclude_none=True),
-            remember=body.remember, origin=body.origin))
+            remember=remember, origin=body.origin))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    return {"kind": kind, "choice": choice, "remembered": body.remember,
-            **await _save_time_quote(kind, body.choice, request, token)}
+    if body.remember and not remember:
+        why = (quoted["quote_error"] or "This choice is unavailable right now.") \
+            if quoted["unattended_skip_reason"] == "stored_choice_unavailable" else "This choice has no verified price."
+        quoted["warning"] = f"{why} It was not remembered and is used for this pick only."
+    return {"kind": kind, "choice": choice, "remembered": remember, **quoted}
 
 
 async def _save_time_quote(kind: str, choice: ChoiceBody, request: Request, token: str) -> dict:

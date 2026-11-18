@@ -8,6 +8,7 @@ import pytest
 
 from app.core import generation_resolver
 from app.core.generation_resolver import Candidate, Resolver, RunContext, UNKNOWN_PRICE
+from app.services import fal_pricing
 
 UNPRICED = {**UNKNOWN_PRICE, "reason": "billed_by_usage", "detail": "fal bills this model by what each run uses.",
             "rate": {"amount": "0.30", "unit": "seconds"}}
@@ -18,6 +19,7 @@ class Backend:
         self.entry = Candidate("fal", "fal", worker, "vendor/model", "video", True, price=dict(price))
         self.calls = []
         self.cap = True
+        self.reprice = None  # fal's price on a later (post-approval) read
 
     def local_worker(self):
         return "here"
@@ -26,6 +28,9 @@ class Backend:
         return [self.entry]
 
     async def prepare(self, c, options, prompt):
+        self.calls.append(("prepare", c.model))
+        if self.reprice is not None and any(call[0] == "prepare" for call in self.calls[:-1]):
+            return replace(c, options=options, price=dict(self.reprice))
         return replace(c, options=options)
 
     async def reserve(self, c, context):
@@ -52,14 +57,15 @@ async def test_owner_approves_one_run_and_one_unit_is_reserved():
     output = await Resolver(backend).generate("video", ARGS, chat(asked))
     assert output["status"] == "completed" and output["unpriced_approved"] is True
     assert output["price"]["status"] == "unknown" and output["price"]["total"] is None
-    assert backend.calls == [("reserve", Decimal("0.30")), ("execute", "vendor/model")]
+    assert [c for c in backend.calls if c[0] != "prepare"] == [("reserve", Decimal("0.30")), ("execute", "vendor/model")]
     asked.assert_awaited_once()
 
 
 async def test_declined_or_capped_runs_nothing():
     backend = Backend()
     output = await Resolver(backend).generate("video", ARGS, chat(AsyncMock(return_value="No.")))
-    assert output["status"] == "refused" and output["reason"] == "declined" and backend.calls == []
+    assert output["status"] == "refused" and output["reason"] == "declined"
+    assert {c[0] for c in backend.calls} == {"prepare"}
     backend.cap = False
     output = await Resolver(backend).generate("video", ARGS, chat(AsyncMock(return_value=None)))
     assert output["reason"] == "daily_cap" and ("execute", "vendor/model") not in backend.calls
@@ -81,11 +87,34 @@ async def test_every_other_context_still_refuses(case, monkeypatch):
     if case == "flag_off":
         monkeypatch.setattr(generation_resolver, "INTERACTIVE_UNPRICED_APPROVAL", False)
     output = await Resolver(backend).generate("video", args, context)
-    assert output["status"] in ("refused", "skipped") and backend.calls == []
+    assert output["status"] in ("refused", "skipped") and {c[0] for c in backend.calls} <= {"prepare"}
     assert output["reason"] in ("price_unavailable", "stored_choice_unpriced")
     asked.assert_not_awaited()
     if output["reason"] == "price_unavailable":
         assert "bills this model by what each run uses" in output["error"]
+
+
+@pytest.mark.parametrize("reason", sorted(fal_pricing.REASONS))
+async def test_only_an_unknown_quantity_at_an_applicable_rate_is_approvable(reason):
+    # rate_not_listed (e.g. Seedance at 4k) shows a rate that does not apply to
+    # the picked options; missing/failed rates and unreadable units have none.
+    backend, asked = Backend({**UNPRICED, "reason": reason}), AsyncMock(return_value=None)
+    output = await Resolver(backend).generate("video", ARGS, chat(asked))
+    approvable = reason in {"billed_by_usage", "depends_on_input", "needs_option", "length_not_declared"}
+    assert (reason in generation_resolver.UNPRICED_APPROVABLE_REASONS) is approvable
+    assert (output["status"] == "completed") is approvable and bool(asked.await_count) is approvable
+    if not approvable:
+        assert output["reason"] == "price_unavailable" and ("execute", "vendor/model") not in backend.calls
+
+
+@pytest.mark.parametrize("later", [{**UNPRICED, "rate": {"amount": "3.00", "unit": "seconds"}},
+                                   {"currency": "USD", "unit": "video", "amount": "5", "total": "5", "status": "estimated"}])
+async def test_a_price_change_while_waiting_for_approval_is_requoted_not_submitted(later):
+    backend, asked = Backend(), AsyncMock(return_value=None)
+    backend.reprice = later
+    output = await Resolver(backend).generate("video", ARGS, chat(asked))
+    assert output["status"] == "refused" and output["reason"] == "price_changed" and output["price"] == later
+    assert not any(c[0] in ("reserve", "execute") for c in backend.calls)
 
 
 def test_permission_prompt_states_the_rate_and_no_bound():

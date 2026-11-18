@@ -304,6 +304,22 @@ describe('GenerationChoiceCard', () => {
 		expect((screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement).disabled).toBe(true);
 	});
 
+	it('cannot approve a rate that does not apply to the picked options (4k)', async () => {
+		const notListed = {
+			...UNKNOWN_PRICE_FIXTURE,
+			reason: 'rate_not_listed',
+			detail: 'fal lists no token rate for 4k.',
+			rate: { amount: '0.0214', unit: '1000 tokens' }
+		};
+		mocks.post.mockImplementation(async (_url: string, body: { choice: { options: Record<string, unknown> } }) => ({
+			ok: true, priced: false, options: body.choice.options, price: notListed
+		}));
+		card({ options: [{ ...FAL, price: notListed }] });
+		expect(await screen.findByText(/fal lists no token rate for 4k\. It cannot run/)).toBeTruthy();
+		expect(screen.queryByTestId('gcc-unbounded')).toBeNull();
+		expect((screen.getByRole('button', { name: 'Use this' }) as HTMLButtonElement).disabled).toBe(true);
+	});
+
 	it('warns before an above-threshold price', () => {
 		card({ options: [{ ...FAL, price: { ...PRICE, amount: '0.25', total: '0.25' } }] });
 		expect(screen.getByText(/ask again before spending/)).toBeTruthy();
@@ -370,7 +386,8 @@ function saveReplies(quote: Record<string, unknown>) {
 	mocks.put.mockImplementation(async (_url: string, body: { choice: object; remember: boolean; origin: string }) => ({
 		kind: 'image',
 		choice: { ...body.choice, origin: body.origin },
-		remembered: body.remember,
+		// The server remembers a pick only once its quote priced it.
+		remembered: body.remember && quote.priced === true,
 		...quote
 	}));
 }
@@ -396,7 +413,7 @@ describe('GenerationChoiceCard save-time quote', () => {
 		await fireEvent.click(screen.getAllByRole('radio')[1]);
 		await fireEvent.click(screen.getByRole('button', { name: 'Use this' }));
 		const alert = await screen.findByRole('alert');
-		expect(alert.textContent).toContain('Saved and remembered:');
+		expect(alert.textContent).toContain('Saved as your last choice:');
 		expect(alert.textContent).toContain('SuperGrok · Grok Imagine Image');
 		expect(alert.textContent).toContain('No verified price');
 		expect(alert.textContent).toContain(SAVED_UNPRICED.warning);
@@ -406,7 +423,7 @@ describe('GenerationChoiceCard save-time quote', () => {
 		expect(screen.getAllByRole('radio')).toHaveLength(3);
 		expect(mocks.send).toHaveBeenCalledOnce();
 		expect(mocks.post).not.toHaveBeenCalled();
-		expect(generationChoices.remembered.image?.model).toBe('grok-imagine-image');
+		expect(generationChoices.remembered.image).toBeUndefined();
 		await fireEvent.click(screen.getByRole('button', { name: 'Hide' }));
 		expect(screen.getByRole('heading', { name: 'Using SuperGrok · Grok Imagine Image' })).toBeTruthy();
 		expect(document.querySelector('.gcc-sub')?.textContent).toContain('Unknown');
@@ -457,14 +474,14 @@ describe('GenerationChoiceCard save-time quote', () => {
 		expect(screen.queryByRole('alert')).toBeNull();
 	});
 
-	it('warns in Settings when the remembered pick has no verified price', async () => {
+	it('says in Settings that a pick with no verified price was not remembered', async () => {
 		saveReplies(SAVED_UNPRICED);
 		card({ variant: 'settings', answeredBy: undefined, toolId: '' });
 		await fireEvent.click(screen.getByRole('button', { name: /Remember this/ }));
 		const alert = await screen.findByRole('alert');
-		expect(alert.textContent).toContain('Remembered:');
+		expect(alert.textContent).toContain('Not remembered:');
 		expect(alert.textContent).toContain(SAVED_UNPRICED.warning);
-		expect(generationChoices.remembered.image?.model).toBe('fal-ai/flux/dev');
+		expect(generationChoices.remembered.image).toBeUndefined();
 	});
 
 	it('shows a handed-off pin warning, and nothing for a staged pick', async () => {

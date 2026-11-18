@@ -898,7 +898,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.append(search_models)
 
-    @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run unattended; in chat the user may approve one run. Unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
+    @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run unattended; in chat the user may approve one run if fal's rate applies. Unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},

@@ -68,6 +68,13 @@ def test_auto_duration_bounded_by_declared_maximum_and_prose_range():
     assert Decimal(price(per_second, numeric, {"duration": 5})["total"]) == Decimal("0.28") * 5
     prose = {"prompt": {"type": "string"}, "duration": {"type": "number", "description": "Duration in seconds (0.5-22)"}}
     assert Decimal(price(per_second, prose)["total"]) == Decimal("0.28") * 22
+    # No enum and no numeric maximum: only the unit-bearing "to" range bounds it.
+    words = {"prompt": {"type": "string"}, "duration": {"type": "string", "default": "auto", "description": DURATION_DESC}}
+    p = price(per_second, words)
+    assert Decimal(p["total"]) == Decimal("0.28") * 30 and "30 s" in p["basis"]
+    unitless = {"prompt": {"type": "string"}, "duration": {"type": "string", "default": "auto",
+                                                         "description": "Length: anything from 4 to 30."}}
+    assert price(per_second, unitless)["status"] == "unknown"
 
 
 def test_millisecond_and_block_units():
@@ -95,12 +102,24 @@ def test_frame_count_models_price_frames_over_the_slower_frame_rate():
     assert price(per_second, wan, {"frames_per_second": 60})["total"] == p["total"]
 
 
-def test_bare_duration_is_seconds_and_input_matched_length_depends_on_input():
+@pytest.mark.parametrize("description", ["The duration of the audio to generate.", "Desired length in hours.",
+                                         "Length in milliseconds.", ""])
+def test_a_duration_naming_no_seconds_unit_stays_unknown(description):
+    # fal-ai/mmaudio-v2 and heygen-video declare no unit; "1" hour must never
+    # reserve one second (#757 left these unknown on purpose).
     per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
-    mmaudio = {"prompt": {"type": "string"},
-               "duration": {"type": "number", "default": 8, "minimum": 1, "maximum": 30,
-                            "description": "The duration of the audio to generate."}}
-    assert Decimal(price(per_second, mmaudio)["total"]) == Decimal("0.008")
+    field = {"type": "number", "default": 1, "minimum": 1, "maximum": 30, "description": description}
+    p = price(per_second, {"prompt": {"type": "string"}, "duration": field})
+    assert p["status"] == "unknown" and p["total"] is None and p["reason"] == "needs_option"
+    # A unit on the value or in the field's name is stated, so it prices.
+    clip = {"type": "string", "enum": ["5s", "10s"], "default": "5s", "description": "Duration of the generated video."}
+    assert Decimal(price(per_second, {"prompt": {"type": "string"}, "duration": clip})["total"]) == Decimal("0.005")
+    named = {"type": "number", "default": 6, "maximum": 30}
+    assert Decimal(price(per_second, {"prompt": {"type": "string"}, "duration_seconds": named})["total"]) == Decimal("0.006")
+
+
+def test_input_matched_length_depends_on_input():
+    per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
     edit = {"prompt": {"type": "string"}, "video_url": {"type": "string"},
             "duration": {"type": "integer", "enum": [0, 2, 5, 10], "default": 0,
                          "description": "Output video duration in seconds. Default 0 means match input video duration."}}
@@ -171,6 +190,34 @@ async def test_rates_batch_cache_and_split_a_404_batch(transport):
     assert [r.url.params.get_list("endpoint_id") for r in t.requests] == [["a", "retired"], ["a"], ["retired"]]
     await rates.rows(["a", "retired"], "key")
     assert len(t.requests) == 3  # both answers cached
+
+
+@pytest.mark.parametrize("body", [{}, {"prices": None}, {"prices": [{"unit_price": 1}]}, {"prices": "x"}, ["a"]])
+async def test_a_malformed_200_reply_is_a_failed_read_and_never_cached(transport, body):
+    t = transport((200, body))
+    rates = fal_pricing.FalRates()
+    with pytest.raises(fal_pricing.PricingRequestFailed):
+        await rates.rows(["a"], "key")
+    assert rates._cache == {}
+    row = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    transport((200, {"prices": [row]}))
+    assert (await rates.rows(["a"], "key"))["a"] == row
+
+
+async def test_fresh_reads_skip_the_cache_and_keys_never_share_rows(transport):
+    row = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    t = transport((200, {"prices": [row]}))
+    rates = fal_pricing.FalRates()
+    await rates.rows(["a"], "key-1")
+    await rates.rows(["a"], "key-1")
+    assert len(t.requests) == 1
+    await rates.rows(["a"], "key-2")  # another fal account never reads key-1's rows
+    assert len(t.requests) == 2
+    await rates.rows(["a"], "key-1", fresh=True)
+    assert len(t.requests) == 3
+    transport((500, {}))
+    with pytest.raises(fal_pricing.PricingRequestFailed):
+        await rates.rows(["a"], "key-1", fresh=True)  # never answered from the cache
 
 
 async def test_rate_limit_retries_then_failure_is_a_reason_not_a_cache(transport):

@@ -163,7 +163,7 @@ async def test_fal_declared_options_reach_price_and_execution_identically(backen
     output = await Resolver(backend).generate("image", {"prompt": "tree", "source": "fal", "model": entry.model,
         "options": {"num_images": 2, "size": "wide"}}, CONTEXT)
     assert output["status"] == "completed"
-    backend.fal_price.assert_awaited_with("fake/model", {"num_images": 2, "size": "wide"}, prompt="tree")
+    backend.fal_price.assert_awaited_with("fake/model", {"num_images": 2, "size": "wide"}, prompt="tree", fresh=True)
     backend.node.call.assert_awaited_once_with("runFalModel", {"endpoint_id": "fake/model", "output_type": "image",
         "input": {"prompt": "tree", "num_images": 2, "size": "wide"}})
 
@@ -218,6 +218,27 @@ async def test_flat_fal_prices_count_canonical_options_and_unknown_is_not_zero(b
     price = await backend.fal_price("fake/model", {})
     assert {k: price[k] for k in UNKNOWN_PRICE} == UNKNOWN_PRICE
     assert price["reason"] == "needs_option" and price["rate"] == {"amount": "0.05", "unit": "megapixel"}
+
+
+async def test_admission_prices_from_a_fresh_rate_never_the_discovery_cache(backend, monkeypatch):
+    # Discovery cached $0.05; fal then raised the rate to $0.50. Preparing a run
+    # (cap, confirmation, the peer's equality check) must see $0.50, and a
+    # failed read at admission is unknown, never the cached figure.
+    monkeypatch.delattr(backend, "fal_price")
+    reply = {"status": 200, "unit_price": "0.05"}
+    def transport(request):
+        row = {"endpoint_id": "fake/model", "unit_price": reply["unit_price"], "unit": "image", "currency": "USD"}
+        return httpx.Response(reply["status"], json={"prices": [row]})
+    original = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(transport), **kw))
+    entry = (await backend.local_catalog("image", source="fal", model="fake/model"))[0]
+    assert entry.price["total"] == "0.05"
+    reply["unit_price"] = "0.50"
+    assert (await backend.local_catalog("image", source="fal", model="fake/model"))[0].price["total"] == "0.05"
+    assert (await backend.prepare(entry, {}, "tree")).price["total"] == "0.50"
+    reply["status"] = 500
+    price = (await backend.prepare(entry, {}, "tree")).price
+    assert price["total"] is None and price["reason"] == "pricing_request_failed"
 
 
 async def test_plan_image_is_included_and_reserves_nothing(backend, monkeypatch):

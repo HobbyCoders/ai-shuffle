@@ -96,7 +96,9 @@ def price_from_row(row: dict | None, schema, options: dict | None, prompt: str |
 
 class FalRates:
     """Batched, cached fal rate rows keyed by the calling key (rates can be
-    account-specific). A failed request is never cached."""
+    account-specific). A failed or malformed reply is never cached. The cache
+    serves discovery only: admitting a run reads ``fresh`` so a raised rate
+    is never reserved or confirmed at its old figure."""
 
     def __init__(self):
         self._cache: dict[tuple[str, str], tuple[float, dict | None]] = {}
@@ -109,15 +111,16 @@ class FalRates:
     def clear(self):
         self._cache.clear()
 
-    async def rows(self, endpoint_ids, api_key: str | None) -> dict[str, dict | None]:
+    async def rows(self, endpoint_ids, api_key: str | None, *, fresh: bool = False) -> dict[str, dict | None]:
         """``{endpoint: row or None}``; None means fal lists no price.
-        Raises :class:`PricingRequestFailed` when fal could not be read."""
+        Raises :class:`PricingRequestFailed` when fal could not be read;
+        with ``fresh`` that is never answered from the cache."""
         scope = self._scope(api_key)
         now = time.time()
         found: dict[str, dict | None] = {}
         wanted = []
         for endpoint in dict.fromkeys(e for e in endpoint_ids if isinstance(e, str) and e):
-            cached = self._cache.get((scope, endpoint))
+            cached = None if fresh else self._cache.get((scope, endpoint))
             if cached and cached[0] > now:
                 found[endpoint] = cached[1]
             else:
@@ -141,17 +144,29 @@ class FalRates:
                     elif response.status_code != 200:
                         raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")
                     else:
-                        try:
-                            rows = {r["endpoint_id"]: r for r in response.json().get("prices", [])
-                                    if isinstance(r, dict) and isinstance(r.get("endpoint_id"), str)}
-                        except (ValueError, AttributeError):
-                            raise PricingRequestFailed("fal pricing returned an unreadable reply.") from None
+                        rows = self._parse(response)
                     stamp = time.time()
                     for endpoint in chunk:
                         row = rows.get(endpoint)
-                        self._cache[(scope, endpoint)] = (stamp + (FOUND_TTL if row else MISSING_TTL), row)
                         found[endpoint] = row
+                        if row is None or rate_of(row) is not None:
+                            # A listed row fal answered with no usable rate is
+                            # read again next time, not remembered.
+                            self._cache[(scope, endpoint)] = (stamp + (FOUND_TTL if row else MISSING_TTL), row)
         return found
+
+    @staticmethod
+    def _parse(response) -> dict[str, dict]:
+        """A 200 reply must be ``{"prices": [row, ...]}``; anything else is a
+        failed read (uncached), never "fal lists no price"."""
+        try:
+            prices = response.json().get("prices")
+        except (ValueError, AttributeError):
+            prices = None
+        if not isinstance(prices, list) or not all(
+                isinstance(r, dict) and isinstance(r.get("endpoint_id"), str) for r in prices):
+            raise PricingRequestFailed("fal pricing returned an unreadable reply.")
+        return {r["endpoint_id"]: r for r in prices}
 
     @staticmethod
     async def _get(client, chunk, api_key):

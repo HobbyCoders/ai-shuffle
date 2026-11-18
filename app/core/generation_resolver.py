@@ -43,6 +43,12 @@ UNREADABLE_CHOOSE_MESSAGE = (" The user's saved generation choices could not be 
 # total cannot be bounded, after seeing fal's raw rate. Unattended runs, remote
 # workers and clients without a prompt keep refusing. Set False to remove it.
 INTERACTIVE_UNPRICED_APPROVAL = True
+# The unknown-price reasons it covers: fal's listed rate applies to the picked
+# options and only the quantity is unknown. Never a missing, failed or
+# inapplicable rate (no_pricing_row, pricing_request_failed, rate_not_listed),
+# an unreadable unit (unsupported_unit), unvalidated options
+# (schema_unavailable, invalid_options) or a prompt-priced call (needs_prompt).
+UNPRICED_APPROVABLE_REASONS = frozenset({"billed_by_usage", "depends_on_input", "needs_option", "length_not_declared"})
 # Validates saved options alone when a remembered choice fails to prepare.
 _NEUTRAL_PROMPT = "A preview of this choice."
 # The chat shows a ``choose`` result as a choice card; the pick arrives as the
@@ -362,11 +368,27 @@ class Resolver:
             return False
         return True
 
+    async def _price_changed(self, kind, candidate, prompt) -> dict | None:
+        """After the owner approved a fal price on the prompt, read fal's rate
+        again; a different price is re-quoted (refused), never submitted."""
+        if candidate.source != "fal":
+            return None
+        try:
+            again = await self.backend.prepare(candidate, candidate.options, prompt)
+        except ValueError as exc:
+            return result("refused", price=candidate.price, reason="invalid_request", error=str(exc))
+        if again.price == candidate.price:
+            return None
+        return result("refused", price=again.price, reason="price_changed", kind=kind, choice=candidate.choice(),
+                      error="fal's price changed while waiting for approval; nothing was submitted. Ask again for the new price.")
+
     def _may_ask_unpriced(self, candidate, context) -> bool:
         """INTERACTIVE_UNPRICED_APPROVAL applies: see its comment."""
         local = getattr(self.backend, "local_worker", None)
-        rate = (candidate.price or {}).get("rate")
+        price = candidate.price or {}
+        rate = price.get("rate")
         return (INTERACTIVE_UNPRICED_APPROVAL and not context.unattended and context.spend_prompt is not None
+                and price.get("reason") in UNPRICED_APPROVABLE_REASONS
                 and candidate.source == "fal" and isinstance(rate, dict) and local is not None
                 and hasattr(self.backend, "reserve_amount") and candidate.worker == local())
 
@@ -386,6 +408,8 @@ class Resolver:
         if declined is not None:
             return result("refused", price=candidate.price, reason="declined", kind=kind,
                           choice=candidate.choice(), error=declined)
+        if (changed := await self._price_changed(kind, candidate, prompt)) is not None:
+            return changed
         try:
             reserved = await self.backend.reserve_amount(Decimal(str(candidate.price["rate"]["amount"])))
         except (ValueError, InvalidOperation, KeyError) as exc:
@@ -616,6 +640,8 @@ class Resolver:
                     if declined is not None:
                         return result("refused", price=candidate.price, reason="declined", kind=kind,
                                       choice=candidate.choice(), error=declined)
+                    if (changed := await self._price_changed(kind, candidate, prompt)) is not None:
+                        return changed
                     approved = True
                 if not approved:
                     if len(self._confirmations) >= 256:

@@ -186,17 +186,18 @@ class Sources:
                                          available=False, reason=capability.get("reason") or "No verified media schema is available for this account."))
         return entries
 
-    async def fal_price(self, model, options, *, prompt=None, rows=None):
+    async def fal_price(self, model, options, *, prompt=None, rows=None, fresh=False):
         """Read declared provider rates and resolve quantities with its schema.
 
         ``rows`` is an already fetched ``{endpoint: row}`` batch (a catalog
-        page); otherwise this endpoint's row is read through the shared cache.
+        page); otherwise this endpoint's row is read through the shared cache,
+        or from fal itself when ``fresh`` (admission: a failed read is unknown).
         """
         from app.services import fal_pricing
         from app.services.fal_schema import schema_service
         try:
-            if rows is None or model not in rows:
-                rows = await fal_pricing.rates.rows([model], await self.fal_key())
+            if fresh or rows is None or model not in rows:
+                rows = await fal_pricing.rates.rows([model], await self.fal_key(), fresh=fresh)
             schema = await schema_service.get_schema(model, await self.fal_key())
             return fal_pricing.price_from_row(rows.get(model), schema, options, prompt)
         except fal_pricing.PricingRequestFailed as exc:
@@ -220,7 +221,10 @@ class Sources:
                             and not chat_mode_read_permitted("Read", {"file_path": value})):
                         raise ValueError("Chat generation may read local media only from chat uploads.")
             values.pop(schema.primary_text_field)
-            return replace(candidate, options=values, price=await self.fal_price(candidate.model, values, prompt=prompt))
+            # Prepared prices admit runs (cap, confirmation, the peer's
+            # price-equality check), so they come from fal's current rate.
+            return replace(candidate, options=values,
+                           price=await self.fal_price(candidate.model, values, prompt=prompt, fresh=True))
         from app.core import native_generation_settings as native
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")

@@ -311,12 +311,24 @@ class ModelSchema:
         if field.maximum is not None:
             candidates.append(Decimal(str(field.maximum)))
         if not candidates:
-            # A range stated only in prose, e.g. "Duration in seconds (0.5-30)".
-            span = re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", field.description or "")
+            # A range stated only in prose: "Duration in seconds (0.5-30)" or
+            # "Supports 4 to 30 seconds" (a "to" range must name its unit).
+            text = field.description or ""
+            span = re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text) or re.search(
+                r"\b(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)?\s+to\s+(\d+(?:\.\d+)?)\s*(?:s|secs?|seconds?)\b", text, re.I)
             if span:
                 candidates.append(Decimal(span[2]))
         candidates = [c for c in candidates if c.is_finite() and c > 0]
         return (max(candidates), True) if candidates else (None, True)
+
+    @staticmethod
+    def _enum_suffix(field: "ParamField") -> str | None:
+        """The unit every numeric enum value carries (``"5s"``, ``"10s"``)."""
+        units = {m[1] for item in field.enum or []
+                 if (m := re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*(s|sec|seconds?|m|min|minutes?)", str(item)))}
+        values = [i for i in field.enum or [] if str(i) not in ("auto", "adaptive", "default")]
+        return units.pop() if len(units) == 1 and values and all(
+            re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*[a-z]+", str(i)) for i in values) else None
 
     def _seconds(self, options: dict, notes: list) -> Decimal:
         fields = {f.name: f for f in self.fields}
@@ -336,7 +348,7 @@ class ModelSchema:
             match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", str(value))
             if not match:
                 continue
-            suffix = match[2]
+            suffix = match[2] or self._enum_suffix(field)
             if name.endswith("_ms") and not suffix:
                 # Named in milliseconds by the model itself.
                 seconds = Decimal(match[1]) / 1000
@@ -345,18 +357,17 @@ class ModelSchema:
                         notes.append(f"length up to {seconds.normalize():f} s (the model picks it)")
                     durations.append(seconds)
                 continue
+            # The unit must be stated: on the value, in the field's name or in
+            # its own words. A "duration" that names none (or names hours or
+            # milliseconds) is not guessed, so its price stays unknown.
+            words = set(re.findall(r"[a-z]+", re.sub(r"\b(?:frames?|fps)\s+per\s+second\b", " ", declaration)))
             if suffix:
                 in_minutes = suffix.startswith("m")
-            elif "millisecond" in declaration:
+            elif words & {"millisecond", "milliseconds", "ms", "hour", "hours"}:
                 continue
-            elif "minute" in declaration:
+            elif name == "duration_minutes" or words & {"minute", "minutes"}:
                 in_minutes = True
-            elif "second" in declaration or (
-                    name in ("duration", "duration_seconds", "duration_sec", "seconds")
-                    and (field.description or field.minimum is not None or field.maximum is not None)):
-                # fal states lengths in seconds; a described or bounded plain
-                # "duration" naming no unit is seconds too (minutes and
-                # milliseconds say so). A bare undeclared field is not guessed.
+            elif name in ("duration_seconds", "duration_sec", "seconds") or words & {"second", "seconds", "sec", "secs"}:
                 in_minutes = False
             else:
                 continue
@@ -414,16 +425,15 @@ class ModelSchema:
         fields = {f.name: f for f in self.fields}
         if "resolution" not in fields or not any(n in fields for n in ("duration", "duration_seconds")):
             raise PricingUnknown("unsupported_unit", "Token pricing is only understood for video with a declared resolution and length.")
-        if self._has_media_input(options, "video") or str(options.get("task", "")).casefold() in ("editing", "extension"):
-            raise PricingUnknown("depends_on_input", "Input video length is billed too and is not known in advance.")
         resolution = options.get("resolution") or fields["resolution"].default
         label = str(resolution or "").strip().casefold()
         lines = _RESOLUTION_LINES.fullmatch(label)
         lines = Decimal(lines[1]) if lines else {"2k": Decimal(1440), "4k": Decimal(2160)}.get(label)
-        if lines is None:
-            raise PricingUnknown("needs_option", f"No token price is listed for resolution {resolution}.")
-        if lines > _TOKEN_MAX_LINES:
+        # Whether the rate applies is settled before anything about the input.
+        if lines is None or lines > _TOKEN_MAX_LINES:
             raise PricingUnknown("rate_not_listed", f"fal lists no token rate for {resolution}.")
+        if self._has_media_input(options, "video") or str(options.get("task", "")).casefold() in ("editing", "extension"):
+            raise PricingUnknown("depends_on_input", "Input video length is billed too and is not known in advance.")
         ratio = None
         aspect = options.get("aspect_ratio")
         parsed = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", str(aspect or ""))
