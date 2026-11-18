@@ -148,6 +148,37 @@ unknown amounts are null, never zero. Native account-disabled routes remain
 visible with their verified combination and price but `available: false`.
 Ordinary API users see only their own permitted sources, not owner accounts.
 Catalog lookup submits no generation; a quote/admission must still recheck cost.
+An optional `operation` (it needs `kind`) limits fal entries to that operation.
+
+### Provider and model listing
+
+The model picker lists in two steps, for one kind and one operation. Operations
+are `text-to-image`, `edit-image`, `reference-to-image`, `text-to-video`,
+`image-to-video`, `reference-to-video`, `extend-video`, `text-to-audio`,
+`audio-to-audio`, `text-to-3d` and `image-to-3d`; each belongs to one kind and one
+generate tool, and the default is the kind's text operation. An unknown operation,
+or one of another kind, is a `422`.
+
+`GET /api/v1/generation/providers/{kind}?operation=` returns `kind`, `operation`,
+`operation_label` and `providers`. Each provider has `source`, `account`,
+`workers`, `available`, `reason` and `native`; fal adds `model_count` when it is
+available. Accounts are merged across your workers. Unavailable ones stay listed
+with their reason: fal without a key, fal while images use the ChatGPT plan, or a
+worker that needs an update. Plan accounts only generate from a prompt, so they are
+not offered for edit, reference, extend or image-to operations.
+
+`GET /api/v1/generation/models/{kind}` returns one page of one provider's models.
+Parameters are `source` (default `fal`, or an account), `operation`, `query`
+(server-side search on the model ID, name and description), `offset` and `limit`
+(1–50, default 20). The response has `models`, `total`, `offset`, `limit` and
+`has_more`. Rows are catalog entries plus fal's `name`, `category` and
+`description`, and a `status`. A page reads fal's rates in one batch and no
+schemas, so a fal row is `unpriced` with `price.reason: "not_quoted"` and the raw
+`price.rate` until its schema is cached; then it carries a real price. A model fal
+has no rate for keeps its own reason (for example `no_pricing_row`). When fal's
+pricing service is rate limited, the page keeps rates it already knows and marks
+the rest `pricing_request_failed`. Unknown totals are null, never zero. On the
+owner's worker without a local fal key, fal pages come from a worker that has one.
 
 `PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
 (`source` or `account`, `model`, optional `worker`, `options`).
@@ -313,6 +344,15 @@ in view. A collapsed chat card still says unattended runs will skip the pick.
 and `POST /api/v1/generation/quote` validates options against the model's
 declared schema and prices them, with nothing reserved or submitted. Settings,
 Default models shows and changes the remembered choice per kind.
+
+The chat choice card opens on the agent's recommended options and your saved or
+last pick, so the common case is one click. **All models** opens the same
+provider, then model, then options picker that Settings, Default models and the
+automation job picker use. Pick a provider, search or page its models for the
+operation the tool call needs, then set the model's declared options. The price
+is quoted again with `/quote` as options change. Models without a known price
+show "Unknown" with fal's reason; the remember, threshold and daily-limit rules
+above apply unchanged.
 
 ## Confirmation contract
 
