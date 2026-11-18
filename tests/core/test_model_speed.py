@@ -1,4 +1,5 @@
 """Ultrafast speed tier: representation, gating, wire mapping, sync and notes."""
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -486,19 +487,16 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
     ineligible one Fast, a pinned one keeps its own, a remote one is asked."""
     from app.core.model_override import ultrafast_supported
 
-    # A worker's own list holds the workers it dispatched; real rows give it
-    # that (test_a_worker_in_the_middle_finds_the_workers_it_dispatched).
-    children = {"parent": [{"id": "able"}, {"id": "unable"},
-                           {"id": "pinned", "fast": True, "speed": "fast"}, {"id": "remote"}],
-                "able": [{"id": "grandchild"}], "pinned": [{"id": "pinned-child"}]}
-    rows = {"able": {"model": "gpt-6.2-sol", "provider_id": "oa"},
+    rows = {"parent": {"tier": "ultrafast"},
+            "able": {"model": "gpt-6.2-sol", "provider_id": "oa"},
             "pinned-child": {"model": "gpt-6.2-sol", "provider_id": "oa"},
             "grandchild": {"model": "gpt-6.2-sol", "provider_id": "oa"},
             "unable": {"model": "gpt-6-luna", "provider_id": "oa"},
-            "pinned": {"model": "gpt-6.2-sol", "provider_id": "oa", "fast_pinned": True},
+            "pinned": {"model": "gpt-6.2-sol", "provider_id": "oa", "fast_pinned": True, "tier": "fast"},
             "remote": {"model": "gpt-6.2-sol", "provider_id": "oa"}}
-    monkeypatch.setattr(db, "list_worker_children", lambda sid: children.get(sid, []))
-    monkeypatch.setattr(api.control, "owner_of", lambda child: "peer" if child["id"] == "remote" else None)
+    applied, remote = _tree(monkeypatch, rows, {
+        "parent": ["able", "unable", "pinned", "remote"],
+        "able": ["grandchild"], "pinned": ["pinned-child"]})
     monkeypatch.setattr("app.core.model_override.fast_mode_supported", lambda model, provider: True)
     # The real Ultrafast rule for an OpenAI API-key row.
     monkeypatch.setattr("app.db.model_providers.resolve_model_provider", lambda pid: {
@@ -506,26 +504,7 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
     monkeypatch.setattr("app.core.provider.harness_adapter._lookup_provider_row_shape",
                         lambda pid: ("openai", None, None))
     assert ultrafast_supported("gpt-6.2-sol", "oa") and not ultrafast_supported("gpt-6-luna", "oa")
-    applied, remote = {}, []
-
-    async def apply(sid, body, *, inherited, propagate):
-        assert inherited and not propagate
-        session = {"id": sid, **rows[sid]}
-        skip = api._inherited_fast_skip(session)
-        if skip:
-            return {"skipped": skip}
-        tier = api._inherited_tier(session, body.speed)
-        applied[sid] = tier
-        return {"effort": "high", "fast": tier != "standard", "speed": tier}
-
-    async def call(owner, action, body):
-        remote.append((owner, action, body))
-        return {"effort": "high", "fast": True, "speed": body.get("speed")}
-
-    monkeypatch.setattr(api, "apply_run_settings", apply)
-    monkeypatch.setattr(api.control, "call", call)
-    monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
-    await api.propagate_fast("parent", True, speed="ultrafast")
+    await api.propagate_fast("parent")
     # The pinned one's own workers follow it, not the parent.
     assert applied == {"able": "ultrafast", "grandchild": "ultrafast", "unable": "fast",
                        "pinned-child": "fast"}
@@ -533,64 +512,173 @@ async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subag
         "session_id": "remote", "fast": True, "inherited": True, "speed": "ultrafast"})]
 
 
-def test_a_worker_in_the_middle_finds_the_workers_it_dispatched(mock_db):
-    """A nested worker records the root as its parent; the worker that
-    dispatched it finds it through its own task row, and comes first."""
+def _tree(monkeypatch, rows, children):
+    """A delegation tree in memory: ``rows`` by id (``tier`` is what each runs
+    now), ``children`` the workers each dispatched. Returns what each local
+    worker was handed and what was sent to the remote one's owner."""
+    applied, remote = {}, []
+
+    async def apply(sid, body, *, inherited, propagate):
+        assert inherited and not propagate
+        session = {"id": sid, "is_worker": True, **rows[sid]}
+        skip = api._inherited_fast_skip(session)
+        if skip:
+            return {"skipped": skip}
+        tier = api._inherited_tier(session, body.speed)
+        applied[sid] = rows[sid]["tier"] = tier
+        return {"effort": "high", "fast": tier != "standard", "speed": tier}
+
+    async def call(owner, action, body):
+        remote.append((owner, action, body))
+        return {"effort": "high", "fast": True, "speed": body.get("speed")}
+
+    monkeypatch.setattr(db, "list_worker_children",
+                        lambda sid: [{"id": c, **rows[c]} for c in children.get(sid, [])])
+    monkeypatch.setattr(db, "get_session",
+                        lambda sid: {"id": sid, "is_worker": sid != "parent", **rows[sid]})
+    monkeypatch.setattr("app.core.provider_agent._caller_speed",
+                        lambda session, live_only: session.get("tier"))
+    monkeypatch.setattr(api.control, "owner_of", lambda child: "peer" if child["id"] == "remote" else None)
+    monkeypatch.setattr(api, "apply_run_settings", apply)
+    monkeypatch.setattr(api.control, "call", call)
+    monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
+    return applied, remote
+
+
+@pytest.mark.asyncio
+async def test_a_worker_without_fast_hands_its_own_workers_standard(monkeypatch, mock_db):
+    """Root Ultrafast; a middle worker whose model has no Fast dispatched a
+    Fast-capable worker. That worker follows the middle one (Standard), not
+    the root, whose routing row it also carries."""
+    from app.db import background_tasks
+    from app.db.sessions import create_session
+
+    create_session("root", None, fast=True, speed="ultrafast")
+    create_session("middle", None, parent_session_id="root", is_worker=True, model="no-fast")
+    create_session("nested", None, parent_session_id="root", is_worker=True, model="gpt-6.2-sol")
+    for owner, task in (("root", "middle"), ("root", "nested"), ("middle", "nested")):
+        _task_row(background_tasks, owner, task)
+    monkeypatch.setattr("app.core.model_override.fast_mode_supported",
+                        lambda model, provider: model != "no-fast")
+    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: True)
+    monkeypatch.setattr(api.control, "owner_of", lambda child: None)
+    applied = {}
+
+    async def apply(sid, body, *, inherited, propagate):
+        session = db.get_session(sid)
+        skip = api._inherited_fast_skip(session)
+        if skip:
+            return {"skipped": skip}
+        applied[sid] = tier = api._inherited_tier(session, body.speed)
+        db.set_session_run_binding(sid, fast=tier != "standard", speed=tier)
+        return {"effort": None, "fast": tier != "standard", "speed": tier}
+
+    monkeypatch.setattr(api, "apply_run_settings", apply)
+    await api.propagate_fast("root")
+    assert applied == {"nested": "standard"}
+
+
+def _task_row(background_tasks, owner, task, **fields):
+    background_tasks.upsert_background_task({
+        "session_id": owner, "task_id": task, "kind": "agent", "tool_use_id": task,
+        "status": "running", "title": task,
+        "started_at": "2026-11-18T00:00:00Z", "updated_at": "2026-11-18T00:00:00Z", **fields})
+
+
+def test_a_worker_is_listed_only_under_the_session_that_dispatched_it(mock_db):
+    """A nested worker's routing parent is the root; it is the middle
+    worker's, which holds its assignment row. A worker from before those rows
+    is its routing parent's. A sibling that resumed a finished worker with
+    ``SendMessage`` holds a reporting row, which is no dispatch."""
     from app.db import background_tasks
     from app.db.sessions import create_session
 
     create_session("root", None)
-    for sid in ("nested", "middle"):
+    for sid in ("nested", "middle", "sibling", "legacy"):
         create_session(sid, None, parent_session_id="root", is_worker=True)
-    for owner, task in (("root", "nested"), ("middle", "nested"), ("root", "middle")):
-        background_tasks.upsert_background_task({
-            "session_id": owner, "task_id": task, "kind": "agent", "tool_use_id": task,
-            "status": "running", "title": task,
-            "started_at": "2026-11-18T00:00:00Z", "updated_at": "2026-11-18T00:00:00Z"})
+    for owner, task in (("root", "nested"), ("middle", "nested"), ("root", "middle"), ("root", "sibling")):
+        _task_row(background_tasks, owner, task)
+    _task_row(background_tasks, "sibling", "middle", assignment_owner=False)
     assert [row["id"] for row in db.list_worker_children("middle")] == ["nested"]
-    assert [row["id"] for row in db.list_worker_children("root")] == ["middle", "nested"]
+    assert {row["id"] for row in db.list_worker_children("root")} == {"middle", "sibling", "legacy"}
+    assert db.list_worker_children("sibling") == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("switch_while_landing", [False, True])
-async def test_two_parent_switches_in_a_row_leave_the_child_on_the_later(monkeypatch, switch_while_landing):
-    """Ultrafast then Fast: the hand-down of Ultrafast lands last, or lands
-    while Fast is picked; the child ends on Fast, as the parent runs."""
-    current = {"parent": "ultrafast" if switch_while_landing else "fast"}
-    applied = []
+async def test_interleaved_fan_outs_end_on_the_parents_latest_tier(monkeypatch):
+    """The parent switches three times while hand-downs are still landing.
+    One parent's hand-downs land one at a time, each with the tier the parent
+    runs when it starts, so the child ends on the last switch."""
+    rows = {"parent": {"tier": "fast"}, "child": {"model": "m", "tier": "standard"}}
+    _tree(monkeypatch, rows, {"parent": ["child"]})
+    monkeypatch.setattr("app.core.model_override.fast_mode_supported", lambda model, provider: True)
+    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: True)
+    real_apply, gates, landing = api.apply_run_settings, [], []
 
-    async def apply(sid, body, *, inherited, propagate):
-        applied.append(body.speed)
-        current["parent"] = "fast"
-        return {"effort": "high", "fast": body.speed != "standard", "speed": body.speed}
+    async def gated(sid, body, **kwargs):
+        gate = asyncio.Event()
+        gates.append(gate)
+        landing.append(sid)
+        try:
+            await gate.wait()
+            return await real_apply(sid, body, **kwargs)
+        finally:
+            landing.remove(sid)
 
-    monkeypatch.setattr(db, "list_worker_children", lambda sid: [{"id": "child"}] if sid == "parent" else [])
-    monkeypatch.setattr(api.control, "owner_of", lambda child: None)
-    monkeypatch.setattr(api, "apply_run_settings", apply)
-    monkeypatch.setattr(api, "_current_tier", lambda sid: current.get(sid))
-    monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
-    await api.propagate_fast("parent", True, speed="ultrafast")
-    assert applied[-1] == "fast"
+    monkeypatch.setattr(api, "apply_run_settings", gated)
+    fan_outs = []
+
+    async def settle():
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def switch(tier):
+        rows["parent"]["tier"] = tier
+        fan_outs.append(asyncio.create_task(api.propagate_fast("parent")))
+        await settle()
+        assert len(landing) <= 1
+
+    await switch("fast")
+    for tier in ("ultrafast", "standard", "fast"):
+        await switch(tier)
+        gates.pop(0).set()
+        await settle()
+    while not all(task.done() for task in fan_outs):
+        for gate in gates[::-1]:  # the newest first: no order to lean on
+            gate.set()
+        gates.clear()
+        await settle()
+    assert rows["child"]["tier"] == rows["parent"]["tier"] == "fast"
 
 
 @pytest.mark.asyncio
-async def test_a_handed_down_tier_reaches_the_turns_the_child_has_waiting(live, mock_db, monkeypatch):
-    """The parent queued the child's first turn on Fast and then picked
-    Ultrafast: that turn runs Ultrafast. A pair sent in the child's chat stays."""
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_a_queued_turn_the_parent_started_runs_on_the_tier_it_has_when_claimed(mock_db, pinned):
+    """The parent queued the worker's first turn on Fast, then switched to
+    Ultrafast: the turn runs Ultrafast. The person's own queued pick in the
+    worker's chat stays theirs; a pinned worker runs its own pick; and an
+    ordinary chat's queued turns are never rewritten."""
     from app.db import turns as turns_db
     from app.db.sessions import create_session
 
-    create_session("s", None)
-    pair = {"fast": True, "speed": "fast"}
-    started = turns_db.enqueue_turn("s", "provider_agent", prompt="go", overrides=dict(pair))
-    sent = turns_db.enqueue_turn("s", "user", prompt="mine", overrides=dict(pair))
-    monkeypatch.setattr(api, "_inherited_fast_skip", lambda session: None)
-    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: True)
-    await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True, speed="ultrafast"),
-                                 inherited=True, propagate=False)
-    waiting = {turn["id"]: turn["overrides"] for turn in turns_db.get_queued_turns("s")}
-    assert waiting[started["id"]] == {"fast": True, "speed": "ultrafast"}
-    assert waiting[sent["id"]] == pair
+    pair, mine = {"fast": True, "speed": "fast"}, {"fast": False, "speed": "standard"}
+    create_session("w", None, is_worker=True, parent_session_id="root", fast=True, speed="fast")
+    create_session("chat", None, fast=True, speed="fast")
+    started = turns_db.enqueue_turn("w", "provider_agent", prompt="go", overrides=dict(pair))
+    sent = turns_db.enqueue_turn("w", "user", prompt="mine", overrides=dict(mine))
+    plain = turns_db.enqueue_turn("chat", "agent_message", prompt="hi", overrides=dict(pair))
+    # Saved by the hand-down, or the owner's pin in the worker's own chat.
+    new = {"fast": True, "speed": "ultrafast"}
+    db.set_session_run_binding("w", **new, **({"fast_pinned": True} if pinned else {}))
+    db.set_session_run_binding("chat", fast=True, speed="ultrafast")
+
+    claimed = turns_db.start_turn(started["id"], None, "runner")
+    assert {k: claimed["overrides"][k] for k in pair} == new
+    turns_db.settle_turn(started["id"], "completed")
+    claimed = turns_db.start_turn(sent["id"], None, "runner")
+    assert {k: claimed["overrides"][k] for k in mine} == mine
+    claimed = turns_db.start_turn(plain["id"], None, "runner")
+    assert {k: claimed["overrides"][k] for k in pair} == pair
 
 
 @pytest.mark.asyncio

@@ -990,15 +990,17 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         # default: approvals cannot travel back here, so no chat's remote
         # start runs in Away mode on the receiver.
         body["assistant_work"] = False
-    from app.core.model_effort import resolve_child_effort, resolve_child_speed
-    # Older peers only fit the transmitted flag to their model; send the
-    # owner's resolved pick so a saved off cannot become a paid fast child.
-    # ``speed`` refines it for a peer that reads it; an older one ignores it
-    # and runs Ultrafast on Fast. Unfitted: the receiver fits it to its own
-    # copy of the row, which may offer Ultrafast where this copy does not.
+    from app.core.model_effort import resolve_child_effort, resolve_child_fast, resolve_child_speed
+    # ``speed`` is for a peer that reads it. Unfitted: that receiver fits it to
+    # its own copy of the row, which may offer Ultrafast where this copy does
+    # not. An older peer ignores it and may trust ``fast`` as sent (its model
+    # mapper checks only the route), so ``fast`` is the owner's resolved pick
+    # fitted here, as before ``speed``: a saved off or a model without Fast
+    # never becomes a paid fast child there.
     body["speed"] = resolve_child_speed(body["model"], body["provider_id"], parent=parent_speed,
                                         caller=sender, profile_id=sender["profile_id"], fit=False)
-    body["fast"] = speed_is_fast(body["speed"])
+    body["fast"] = resolve_child_fast(body["model"], body["provider_id"], parent=body["fast"],
+                                      caller=sender, profile_id=sender["profile_id"])
     body["effort_explicit"] = data.get("effort") is not None
     body["effort"] = resolve_child_effort(body["model"], body["provider_id"], explicit=data.get("effort"),
                                           parent=overrides.get("effort", sender.get("effort")), caller=sender)

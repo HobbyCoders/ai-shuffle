@@ -227,6 +227,23 @@ async def test_remote_start_fast_pick_survives_mixed_versions(
         assert turn["overrides"].get("fast", False) is expected
 
 
+async def test_an_older_receiver_is_never_sent_fast_for_a_model_without_it(workers, monkeypatch, kicks):
+    """A receiver older than ``speed`` may persist ``fast`` as sent (its model
+    mapper checks only the route), so the sender fits ``fast`` to the model
+    as it did before ``speed``. ``speed`` still travels unfitted."""
+    from app.core import model_override, preference_identity
+    a, b, _ = network(workers, monkeypatch)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: False)
+    sent = _capture_starts(monkeypatch)
+    with b.active():
+        database.set_session_run_binding("caller", model="opus", fast=True, speed="fast")
+        result = await start(ARGS)
+        assert not result.is_error, result.text
+    [body] = sent
+    assert not body["fast"] and body["speed"] == "fast"
+
+
 def _patch_receiver(monkeypatch, receiver_worker, old_receiver):
     """Make ``receiver_worker`` resolve like a release older than model picks
     and inherited speed: it fits only the ``fast`` flag it was sent."""

@@ -105,28 +105,6 @@ def _inherited_tier(session: dict, tier: str) -> str:
     return tier
 
 
-def _refit_queued_speed(session_id: str, pair: dict) -> None:
-    """Give a subagent's waiting turns the tier it was just handed. Blocking.
-
-    A turn's own pair wins over the session's when it runs (``query_options``).
-    A turn its parent queued, or a message bound to the worker's own turn,
-    carries the tier inherited when it was queued, so it takes the new one. A
-    pair the person sent in the subagent's own chat stays theirs.
-    """
-    from app.core.turn_manager import _BINDING_SOURCES, VOICE_DELEGATION, WORKER_BOUND
-    from app.db import turns as turns_db
-
-    for turn in turns_db.get_queued_turns(session_id):
-        overrides = turn.get("overrides") or {}
-        payload = turn.get("payload") or {}
-        if overrides.get("fast") is None and not overrides.get("speed"):
-            continue
-        if turn.get("source") in _BINDING_SOURCES and not (
-                payload.get(WORKER_BOUND) or payload.get(VOICE_DELEGATION)):
-            continue
-        turns_db.set_queued_turn_overrides(turn["id"], {**overrides, **pair})
-
-
 async def _hand_down_remote(owner: Any, child_id: str, tier: str) -> Any:
     """Hand ``tier`` to a subagent another worker runs.
 
@@ -148,93 +126,89 @@ async def _hand_down_remote(owner: Any, child_id: str, tier: str) -> Any:
         return await control.call(owner, "run-settings", body)
 
 
-async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = None, *,
-                         speed: Optional[str] = None) -> None:
-    """Hand a speed change down to the session's subagents.
-
-    ``speed`` is the parent's tier (``fast`` alone means Fast or Standard).
-    Every delegated worker under ``session_id`` takes it, fitted to what it
-    can run (:func:`_inherited_tier`), except one the owner pinned in its own
-    chat and one whose model has no fast mode. A worker in the middle of a
-    turn finishes that turn at the speed it began with and says so in its own
-    chat; the answer to the parent's toggle speaks only for the parent. A
-    worker run by another worker gets it through that worker's
-    ``run-settings`` action, which hands it on to its own subagents there.
-    Never raises: a subagent that cannot take the change keeps its setting.
-    """
-    from app.core.model_speed import normalize_speed, resolve_speed
-
-    tier = normalize_speed(speed) or resolve_speed(fast)
-    seen = _seen if _seen is not None else {session_id}
-    try:
-        children = await run_sync(database.list_worker_children, session_id)
-    except Exception:  # noqa: BLE001 — the parent's own change stands
-        logger.warning("Could not list the subagents of %s for fast mode", session_id, exc_info=True)
-        return
-    for child in children:
-        child_id = child.get("id")
-        if not child_id or child_id in seen:
-            continue
-        seen.add(child_id)
-        try:
-            await _hand_down(session_id, child, tier, seen)
-        except Exception:  # noqa: BLE001 — one subagent never blocks the rest
-            logger.info("Speed was not handed to subagent %s of %s", child_id, session_id,
-                        exc_info=True)
-
-
-#: How often one subagent is handed its parent's tier while the parent keeps switching.
-_HAND_DOWN_TRIES = 3
+#: One hand-down at a time per parent (held weakly, like ``settings_lock``).
+_propagation_locks = WeakValueDictionary()
 
 
 def _current_tier(session_id: str) -> Optional[str]:
-    """The tier ``session_id`` runs now: its live turn's, else its binding's. Blocking."""
+    """The tier ``session_id`` hands its subagents now. Blocking.
+
+    Its live turn's, else its binding's (``provider_agent._caller_speed``). A
+    worker whose model has no Fast hands down Standard, whatever its row says.
+    """
+    from app.core.model_override import fast_mode_supported
+    from app.core.model_speed import STANDARD
     from app.core.provider_agent import _caller_speed
 
-    return _caller_speed(database.get_session(session_id), live_only=True)
+    session = database.get_session(session_id) or {}
+    if session.get("is_worker") and not fast_mode_supported(
+            _session_model(session), session.get("provider_id")):
+        return STANDARD
+    return _caller_speed(session, live_only=True)
 
 
-async def _hand_down(parent_id: str, child: dict, tier: str, seen: set) -> None:
-    """Hand ``parent_id``'s tier to one subagent, then on to that subagent's own.
+async def propagate_fast(session_id: str, fast: bool = False, _seen: Optional[set] = None, *,
+                         speed: Optional[str] = None) -> None:
+    """Hand a speed change down to the subagents ``session_id`` dispatched.
 
-    The tier is read from the parent when it is handed down, not when the
-    hand-down began (``tier`` is the fallback), and read again once it has
-    landed: two switches in a row handed down at once leave every subagent
-    on the later one, whichever hand-down finishes last.
+    Each one takes ``session_id``'s tier as it stands when this hand-down
+    holds the parent's lock (``fast``/``speed`` only if it cannot be read),
+    fitted to what it can run (:func:`_inherited_tier`), except one the owner
+    pinned in its own chat and one whose model has no fast mode. Then each
+    local subagent hands its own tier on to the workers it dispatched, the
+    same way. Hand-downs of one parent run one at a time and read its tier
+    under the lock, so the last one to run hands down the last switch, and a
+    worker is only ever written by the session that dispatched it.
+
+    A worker in the middle of a turn finishes that turn at the speed it began
+    with and says so in its own chat; its queued turns take the new tier when
+    they start (``turns._session_bound_overrides``). A worker run by another
+    worker gets it through that worker's ``run-settings`` action, which hands
+    it on to its own subagents there. Never raises: a subagent that cannot take
+    the change keeps its setting.
     """
-    child_id = child["id"]
-    owner = await run_sync(control.owner_of, child)
+    from app.core.model_speed import normalize_speed, resolve_speed
 
-    async def parent_tier() -> str:
+    seen = _seen if _seen is not None else {session_id}
+    local = []
+    async with _propagation_locks.setdefault(session_id, asyncio.Lock()):
         try:
-            return await run_sync(_current_tier, parent_id) or tier
-        except Exception:  # noqa: BLE001 — the tier the hand-down began with
-            logger.debug("Could not read the speed of %s", parent_id, exc_info=True)
-            return tier
-
-    handed, result = await parent_tier(), None
-    for _ in range(_HAND_DOWN_TRIES):
-        if owner is not None:
-            await _hand_down_remote(owner, child_id, handed)
-        else:
-            result = await apply_run_settings(
-                child_id, RunSettingsUpdate(fast=handed != "standard", speed=handed),
-                inherited=True, propagate=False)
-            if "skipped" in result:
-                if result["skipped"] == "pinned":
-                    # The workers it dispatched follow its speed, not this one.
-                    await propagate_fast(child_id, bool(child.get("fast")), seen,
-                                         speed=child.get("speed"))
-                return
-        latest = await parent_tier()
-        if latest == handed:
-            break
-        handed = latest
-    if result is not None:
-        # Its own subagents take the tier it now runs, as one it started now
-        # would (``provider_agent._caller_speed``). A remote one's owner hands
-        # it on there.
-        await propagate_fast(child_id, bool(result["fast"]), seen, speed=result.get("speed"))
+            children = await run_sync(database.list_worker_children, session_id)
+        except Exception:  # noqa: BLE001 — the parent's own change stands
+            logger.warning("Could not list the subagents of %s for speed", session_id, exc_info=True)
+            return
+        if not children:
+            return
+        try:
+            tier = await run_sync(_current_tier, session_id)
+        except Exception:  # noqa: BLE001 — the tier the hand-down was asked for
+            logger.debug("Could not read the speed of %s", session_id, exc_info=True)
+            tier = None
+        tier = tier or normalize_speed(speed) or resolve_speed(fast)
+        for child in children:
+            child_id = child.get("id")
+            if not child_id or child_id in seen:
+                continue
+            seen.add(child_id)
+            try:
+                owner = await run_sync(control.owner_of, child)
+                if owner is not None:
+                    # Its owner hands it on to that subagent's own workers.
+                    await _hand_down_remote(owner, child_id, tier)
+                    continue
+                result = await apply_run_settings(
+                    child_id, RunSettingsUpdate(fast=tier != "standard", speed=tier),
+                    inherited=True, propagate=False)
+                # Pinned or without Fast, it hands down what it runs.
+                local.append((child_id, result.get("speed")
+                              or resolve_speed(child.get("fast"), child.get("speed"))))
+            except Exception:  # noqa: BLE001 — one subagent never blocks the rest
+                logger.info("Speed was not handed to subagent %s of %s", child_id, session_id,
+                            exc_info=True)
+    # Outside this parent's lock: each reads its own tier under its own lock,
+    # so the order these land in does not matter.
+    for child_id, child_tier in local:
+        await propagate_fast(child_id, _seen=seen, speed=child_tier)
 
 
 def _start_propagation(session_id: str, fast: bool, speed: Optional[str] = None) -> None:
@@ -377,9 +351,6 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
             turn_overrides = {**(runtime.turn.get("overrides") or {}), **selected}
             runtime.turn["overrides"] = turn_overrides
             await _store_live_overrides(session_id, runtime)
-        if inherited:
-            await run_sync(_refit_queued_speed, session_id,
-                           {"fast": selected["fast"], "speed": selected["speed"]})
         if connected and state.connect_options is not None:
             state.connect_options.effort = selected["effort"]
             state.connect_options.aih_fast = selected["fast"]
