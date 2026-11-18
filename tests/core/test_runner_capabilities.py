@@ -38,7 +38,7 @@ def test_shape_has_all_keys_and_types() -> None:
     assert isinstance(caps["provider_kinds"], list)
     assert type(caps["scoped_task_stop"]) is int and caps["scoped_task_stop"] == 1
     assert type(caps["session_plan"]) is int and caps["session_plan"] == 1
-    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 7
+    assert caps["remote_task"] == rc.REMOTE_TASK_VERSION == 8
     assert caps["start_session_permissions"] == rc.START_SESSION_PERMISSIONS_VERSION == 1
     assert caps["move_wakes"] == rc.MOVE_WAKES_VERSION == 3
     assert caps["handoff_poll"] == 1

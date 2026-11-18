@@ -883,7 +883,7 @@ def _start_overrides(overrides, plan, mapped):
     """The new chat's first-turn overrides for a switched model: the caller's,
     with model and run settings replaced so the turn cannot rebind back."""
     result = {key: value for key, value in overrides.items()
-              if key not in ("model", "provider", "effort", "context_window", "fast")}
+              if key not in ("model", "provider", "effort", "context_window", "fast", "speed")}
     result["model"] = plan["model"]
     result.update({key: value for key, value in mapped.items() if value is not None})
     return result
@@ -962,8 +962,9 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         "permission_mode": permission_mode,
         "context_window": sender.get("context_window"),
     }
-    from app.core.provider_agent import _caller_fast
-    body["fast"] = _caller_fast(sender)
+    from app.core.provider_agent import _caller_speed, speed_is_fast
+    parent_speed = _caller_speed(sender)
+    body["fast"] = speed_is_fast(parent_speed)
     if model_plan:
         from app.core import model_override
         mapped = model_override.settings_for_model(
@@ -989,11 +990,14 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         # default: approvals cannot travel back here, so no chat's remote
         # start runs in Away mode on the receiver.
         body["assistant_work"] = False
-    from app.core.model_effort import resolve_child_effort, resolve_child_fast
+    from app.core.model_effort import resolve_child_effort, resolve_child_speed
     # Older peers only fit the transmitted flag to their model; send the
     # owner's resolved pick so a saved off cannot become a paid fast child.
-    body["fast"] = resolve_child_fast(body["model"], body["provider_id"], parent=body["fast"],
-                                      caller=sender, profile_id=sender["profile_id"])
+    # ``speed`` refines it for a peer that reads it (which fits it again to
+    # its own row); an older one ignores it and runs Ultrafast on Fast.
+    body["speed"] = resolve_child_speed(body["model"], body["provider_id"], parent=parent_speed,
+                                        caller=sender, profile_id=sender["profile_id"])
+    body["fast"] = speed_is_fast(body["speed"])
     body["effort_explicit"] = data.get("effort") is not None
     body["effort"] = resolve_child_effort(body["model"], body["provider_id"], explicit=data.get("effort"),
                                           parent=overrides.get("effort", sender.get("effort")), caller=sender)
@@ -1113,6 +1117,10 @@ def accept_remote_start(body, from_device, *, readback_only=False):
     fast = body.get("fast")
     if fast is not None and not isinstance(fast, bool):
         raise ValueError("Invalid fast")
+    from app.core.model_speed import normalize_speed, resolve_speed
+    speed = body.get("speed")
+    if speed is not None and normalize_speed(speed) is None:
+        raise ValueError("Invalid speed")
     provider_id = body.get("provider_id") if isinstance(body.get("provider_id"), str) else None
     worker_name = member.name or from_device
 
@@ -1158,8 +1166,14 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         raise ValueError("Invalid effort_explicit")
     effort = resolve_child_effort(model, provider_id,
                                   explicit=effort if effort_explicit else None, parent=effort)
-    from app.core.model_effort import resolve_child_fast
-    fast = resolve_child_fast(model, provider_id, parent=fast, profile_id=profile_id)
+    from app.core.model_effort import resolve_child_speed
+    from app.core.provider_agent import speed_is_fast
+    # The sender's tier (an older sender sends only ``fast``: Fast at most),
+    # fitted again to what this worker's own row can run.
+    parent_speed = (resolve_speed(fast, speed) if fast is not None
+                    else normalize_speed(speed) if speed is not None else None)
+    speed = resolve_child_speed(model, provider_id, parent=parent_speed, profile_id=profile_id)
+    fast = speed_is_fast(speed)
     payload = {
         "orchestration_depth": depth, "orchestration_sender": sender_session,
         "orchestration_fingerprint": fingerprint, "orchestration_remote_origin": from_device,
@@ -1178,8 +1192,8 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         payload["orchestration_report_device"] = from_device
     overrides = {key: value for key, value in (("model", model), ("effort", effort),
                                                 ("permission_mode", permission_mode)) if value}
-    if fast is not None:
-        overrides["fast"] = fast
+    if speed is not None:
+        overrides.update(fast=fast, speed=speed)
     checkout = (_start_checkout({"project_v2_id": project_v2_id, "profile_id": profile_id}, session_id,
                                 named_project=True) if project_v2_id else None)
     with _UnusedCheckout(checkout) as unused, transaction() as conn:
@@ -1188,7 +1202,7 @@ def accept_remote_start(body, from_device, *, readback_only=False):
             is_active=True, provider_id=provider_id,
             derive_provider_from_profile=provider_id is None and choice is None,
             model=model, effort=effort, permission_mode=permission_mode,
-            context_window=context_window, fast=fast,
+            context_window=context_window, fast=fast, speed=speed,
             worktree_path=checkout.path if checkout else None,
             worktree_branch=checkout.branch if checkout else None, _conn=conn)
         if checkout:
@@ -1599,7 +1613,7 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
     Runs in the caller's transaction; returns ``(row, first_turn_overrides)``.
     """
     from app.db import mobile_tool_identity, sessions
-    from app.core.provider_agent import _caller_fast
+    from app.core.provider_agent import _caller_speed, speed_is_fast
     cursor = conn.cursor()
     workspace = dict(workspace)
     if checkout is not None:
@@ -1608,7 +1622,9 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
     run = {"provider_id": sender.get("provider_id"),
            "model": overrides.get("model") or sender.get("model"),
            "effort": overrides.get("effort", sender.get("effort")),
-           "context_window": sender.get("context_window"), "fast": _caller_fast(sender)}
+           "context_window": sender.get("context_window")}
+    parent_speed = _caller_speed(sender)
+    run["fast"] = speed_is_fast(parent_speed)
     if not run["model"] and runtime_model:
         from app.core.query_options import decode_provider_model
         decoded = decode_provider_model(runtime_model)
@@ -1624,17 +1640,20 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
         run.update(provider_id=plan["provider_id"], model=plan["model"], **mapped)
         overrides = _start_overrides(overrides, plan, mapped)
         payload["model_override"] = _override_record(plan)
-    from app.core.model_effort import resolve_child_effort, resolve_child_fast
+    from app.core.model_effort import resolve_child_effort, resolve_child_speed
     run["effort"] = resolve_child_effort(run["model"], run["provider_id"],
                                          explicit=explicit_effort, parent=parent_effort, caller=sender)
-    run["fast"] = resolve_child_fast(run["model"], run["provider_id"], parent=run["fast"],
-                                     caller=sender, profile_id=sender["profile_id"])
+    # The owner's pick for the new chat's model, else the caller's tier as it
+    # stands now, fitted to what the new chat's row can run.
+    run["speed"] = resolve_child_speed(run["model"], run["provider_id"], parent=parent_speed,
+                                       caller=sender, profile_id=sender["profile_id"])
+    run["fast"] = speed_is_fast(run["speed"])
     # The new chat runs where its own row binds it, never in a cwd
     # copied from the caller's turn.
-    overrides = {**{k: v for k, v in overrides.items() if k not in ("fast", "cwd")},
+    overrides = {**{k: v for k, v in overrides.items() if k not in ("fast", "speed", "cwd")},
                  "effort": run["effort"]}
-    if run["fast"] is not None:
-        overrides["fast"] = run["fast"]
+    if run["speed"] is not None:
+        overrides.update(fast=run["fast"], speed=run["speed"])
     if note:
         # A caller that was itself started in a checkout carries that note on
         # its overrides; it describes the caller's folder, not this chat's.
@@ -1646,7 +1665,7 @@ def _create_started_chat(conn, sender, *, new_id, title, overrides, started_mode
         provider_id=run["provider_id"], derive_provider_from_profile=False,
         model=run["model"], effort=run["effort"],
         permission_mode=started_mode,
-        context_window=run["context_window"], fast=run["fast"],
+        context_window=run["context_window"], fast=run["fast"], speed=run["speed"],
         mode=mode, _conn=conn, **workspace,
     )
     if checkout is not None:

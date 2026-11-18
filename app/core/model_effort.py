@@ -340,6 +340,47 @@ def resolve_child_effort(model: str | None, provider_id: str | None, *,
     return clamp_effort(selected, bare, provider, route=route)
 
 
+def resolve_child_speed(model: str | None, provider_id: str | None, *, parent: Any = None,
+                        caller: Mapping[str, Any] | None = None,
+                        profile_id: str | None = None) -> str | None:
+    """The owner's last speed pick for the child's model, else the parent's tier.
+
+    The pick is the composer's two records: ``modelFast`` (on/off) refined by
+    ``modelSpeed`` (``"ultrafast"`` or a clear). ``parent`` is a tier
+    (``standard``/``fast``/``ultrafast``) or None. The result is fitted like
+    any inherited tier (:func:`app.core.provider_agent.worker_speed`): never
+    above what the child's provider row and model can run. A child with no
+    model of its own uses its agent's.
+    """
+    import logging
+    from app.core.model_speed import FAST, STANDARD, ULTRAFAST, normalize_speed
+    from app.core.provider_agent import worker_speed
+    from app.core.query_options import decode_provider_model
+
+    decoded = decode_provider_model(model) if model else None
+    bare = decoded[1] if decoded else model
+    provider_id = decoded[0] if decoded else provider_id
+    lookup = bare
+    if not lookup and profile_id:
+        try:
+            from app.db import database
+            lookup = ((database.get_profile(profile_id) or {}).get("config") or {}).get("model")
+        except Exception:
+            lookup = None
+    selected = normalize_speed(parent)
+    if lookup:
+        try:
+            found, saved = _saved_model_preference(fast_preference_key(lookup), caller)
+            if found and isinstance(saved, bool):
+                selected = STANDARD
+                if saved:
+                    _, tier = _saved_model_preference(speed_preference_key(lookup), caller)
+                    selected = ULTRAFAST if tier == ULTRAFAST else FAST
+        except Exception:
+            logging.getLogger(__name__).warning("Could not read model speed preference; inheriting caller speed", exc_info=True)
+    return worker_speed(selected, provider_id, bare, profile_id)
+
+
 def resolve_child_fast(model: str | None, provider_id: str | None, *, parent: Any = None,
                        caller: Mapping[str, Any] | None = None,
                        profile_id: str | None = None) -> bool | None:
@@ -348,6 +389,7 @@ def resolve_child_fast(model: str | None, provider_id: str | None, *, parent: An
     The result is fitted like any inherited fast mode
     (:func:`app.core.provider_agent.worker_fast`): on only where the child's
     model supports it. A child with no model of its own uses its agent's.
+    Callers that carry the tier use :func:`resolve_child_speed`.
     """
     import logging
     from app.core.provider_agent import worker_fast

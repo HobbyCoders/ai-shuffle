@@ -181,7 +181,9 @@ def _detect_claude_cli_signed_in() -> bool:
 # fetches its own origin/default before choosing between that tip and caller HEAD.
 # Version 7 adds target-only projects and explicit sender chat-ceiling opt-in;
 # released v6 workers do not understand these fields and must refuse, not fall back.
-REMOTE_TASK_VERSION = 7
+# Version 8 accepts the optional ``speed`` start field (the caller's Ultrafast
+# tier refining ``fast``); an older target gets ``fast`` alone (Fast at most).
+REMOTE_TASK_VERSION = 8
 # Remote StartSession separates report delivery from legacy assistant Away handling.
 START_SESSION_PERMISSIONS_VERSION = 1
 

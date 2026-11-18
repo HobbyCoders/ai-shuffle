@@ -138,6 +138,38 @@ async def test_local_start_session_uses_child_model_fast_pick(mock_db, monkeypat
     assert turn["overrides"].get("fast", False) is expected
 
 
+@pytest.mark.parametrize("source", ["binding", "live"])
+@pytest.mark.parametrize("model,expected", [
+    # A real OpenAI API-key row: Ultrafast only on the documented models.
+    ("prov:oa:gpt-6.2-sol", "ultrafast"),
+    ("prov:oa:gpt-6-luna", "fast"),
+])
+async def test_local_start_session_hands_down_the_callers_ultrafast(mock_db, monkeypatch, source, model, expected):
+    from app.core import preference_identity
+    database.create_model_provider(
+        provider_id="oa", name="OpenAI", provider_type="openai", base_url="https://api.openai.com/v1",
+        models=[{"id": "gpt-6.2-sol"}, {"id": "gpt-6-luna"}], enabled=True)
+    database.create_profile("agent", "Agent", None, {"model": model})
+    monkeypatch.setattr(orch, "_principal", lambda sid: None)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    chat("caller")
+    if source == "binding":
+        database.set_session_run_binding("caller", model=model, fast=True, speed="ultrafast")
+    else:
+        # The owner switched to Ultrafast during the running turn.
+        database.set_session_run_binding("caller", model=model, fast=True, speed="fast")
+        live = turns.enqueue_turn("caller", "user", prompt="Continue", profile_id="agent",
+                                  overrides={"model": model, "fast": True, "speed": "ultrafast"})
+        assert turns.start_turn(live["id"])
+    outcome = await call("caller", "start", start_args())
+    assert not outcome.is_error, outcome.text
+    result = json.loads(outcome.text)
+    row = database.get_session(result["session_id"])
+    turn = turns.get_turn(result["turn_id"])
+    assert (bool(row["fast"]), row["speed"]) == (True, expected)
+    assert (turn["overrides"]["fast"], turn["overrides"]["speed"]) == (True, expected)
+
+
 async def test_api_chat_cannot_name_a_project(mock_db, monkeypatch):
     database.create_profile("agent", "Agent", None, {"model": "sonnet"})
     monkeypatch.setattr(orch, "_principal", lambda sid: None)

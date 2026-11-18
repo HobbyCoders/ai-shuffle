@@ -211,24 +211,8 @@ async def test_remote_start_fast_pick_survives_mixed_versions(
         with worker.active():
             if saved is not None:
                 database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
-    resolve = model_effort.resolve_child_fast
-
-    def receiver(model, provider, *, parent=None, caller=None, profile_id=None):
-        if old_receiver and engine.context().device_id == a.device_id:
-            # Pre-PR StartSession fits fast but does not consult model picks.
-            return provider_agent.worker_fast(parent, provider, model, profile_id)
-        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
-
-    monkeypatch.setattr(model_effort, "resolve_child_fast", receiver)
-    real_call = control.call
-    sent = []
-
-    async def capture(device_id, action, body, **kwargs):
-        if action == orch.REMOTE_ACTION:
-            sent.append(dict(body))
-        return await real_call(device_id, action, body, **kwargs)
-
-    monkeypatch.setattr(control, "call", capture)
+    _patch_receiver(monkeypatch, a, old_receiver)
+    sent = _capture_starts(monkeypatch)
     with b.active():
         database.set_session_run_binding("caller", model="opus", fast=parent)
         result = await start(ARGS)
@@ -241,6 +225,66 @@ async def test_remote_start_fast_pick_survives_mixed_versions(
         [turn] = agent_turns(child)
         assert bool(row["fast"]) is expected
         assert turn["overrides"].get("fast", False) is expected
+
+
+def _patch_receiver(monkeypatch, receiver_worker, old_receiver):
+    """Make ``receiver_worker`` resolve like a release older than model picks
+    and inherited speed: it fits only the ``fast`` flag it was sent."""
+    from app.core import model_effort, provider_agent
+    resolve = model_effort.resolve_child_speed
+
+    def receiver(model, provider, *, parent=None, caller=None, profile_id=None):
+        if old_receiver and engine.context().device_id == receiver_worker.device_id:
+            flag = None if parent is None else ("standard" if parent == "standard" else "fast")
+            return provider_agent.worker_speed(flag, provider, model, profile_id)
+        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
+
+    monkeypatch.setattr(model_effort, "resolve_child_speed", receiver)
+
+
+def _capture_starts(monkeypatch):
+    real_call = control.call
+    sent = []
+
+    async def capture(device_id, action, body, **kwargs):
+        if action == orch.REMOTE_ACTION:
+            sent.append(dict(body))
+        return await real_call(device_id, action, body, **kwargs)
+
+    monkeypatch.setattr(control, "call", capture)
+    return sent
+
+
+@pytest.mark.parametrize("old_receiver,eligible,expected", [
+    (False, True, "ultrafast"),
+    # The receiver fits the tier to its own row: Fast where it has none.
+    (False, False, "fast"),
+    # A receiver older than ``speed`` ignores it and runs Fast.
+    (True, True, "fast"),
+])
+async def test_remote_start_hands_down_the_callers_ultrafast(
+        workers, monkeypatch, kicks, old_receiver, eligible, expected):
+    from app.core import model_override, preference_identity
+    a, b, _ = network(workers, monkeypatch)
+    monkeypatch.setattr(preference_identity, "principal_preference_identity", lambda p: ("account", "owner"))
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+    # The sender's row offers Ultrafast; the receiver's per ``eligible``.
+    monkeypatch.setattr(model_override, "ultrafast_supported",
+                        lambda model, provider: engine.context().device_id == b.device_id or eligible)
+    _patch_receiver(monkeypatch, a, old_receiver)
+    sent = _capture_starts(monkeypatch)
+    with b.active():
+        database.set_session_run_binding("caller", model="opus", fast=True, speed="ultrafast")
+        result = await start(ARGS)
+        assert not result.is_error, result.text
+        child = json.loads(result.text)["session_id"]
+    [body] = sent
+    assert (body["fast"], body["speed"]) == (True, "ultrafast")
+    with a.active():
+        row = database.get_session(child)
+        [turn] = agent_turns(child)
+        assert (bool(row["fast"]), row["speed"]) == (True, expected)
+        assert (turn["overrides"]["fast"], turn["overrides"]["speed"]) == (True, expected)
 
 
 async def test_starts_on_the_chosen_worker_once(workers, monkeypatch, kicks):

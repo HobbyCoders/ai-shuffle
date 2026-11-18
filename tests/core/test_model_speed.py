@@ -468,6 +468,90 @@ async def test_a_parent_hands_down_fast_never_ultrafast(live, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("eligible,expected", [(True, "ultrafast"), (False, "fast")])
+async def test_a_parent_hands_down_ultrafast_where_the_child_can_run_it(live, monkeypatch, eligible, expected):
+    state, runtime, save = live
+    monkeypatch.setattr(api, "_inherited_fast_skip", lambda session: None)
+    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: eligible)
+    result = await api.apply_run_settings("s", api.RunSettingsUpdate(fast=True, speed="ultrafast"),
+                                          inherited=True, propagate=False)
+    assert (result["fast"], result["speed"]) == (True, expected)
+    save.assert_called_with("s", effort="high", fast=True, speed=expected, clear_effort=False)
+    assert runtime.turn["overrides"]["speed"] == expected
+
+
+@pytest.mark.asyncio
+async def test_a_parent_switch_from_fast_to_ultrafast_reaches_its_unpinned_subagents(monkeypatch):
+    """Parent Fast -> Ultrafast mid-chat: an eligible child runs Ultrafast, an
+    ineligible one Fast, a pinned one keeps its own, a remote one is asked."""
+    from app.core.model_override import ultrafast_supported
+
+    children = {"parent": [{"id": "able"}, {"id": "unable"}, {"id": "pinned"}, {"id": "remote"}],
+                "able": [{"id": "grandchild"}]}
+    rows = {"able": {"model": "gpt-6.2-sol", "provider_id": "oa"},
+            "grandchild": {"model": "gpt-6.2-sol", "provider_id": "oa"},
+            "unable": {"model": "gpt-6-luna", "provider_id": "oa"},
+            "pinned": {"model": "gpt-6.2-sol", "provider_id": "oa", "fast_pinned": True},
+            "remote": {"model": "gpt-6.2-sol", "provider_id": "oa"}}
+    monkeypatch.setattr(db, "list_worker_children", lambda sid: children.get(sid, []))
+    monkeypatch.setattr(api.control, "owner_of", lambda child: "peer" if child["id"] == "remote" else None)
+    monkeypatch.setattr("app.core.model_override.fast_mode_supported", lambda model, provider: True)
+    # The real Ultrafast rule for an OpenAI API-key row.
+    monkeypatch.setattr("app.db.model_providers.resolve_model_provider", lambda pid: {
+        "id": pid, "provider_type": "openai", "base_url": "https://api.openai.com/v1"})
+    monkeypatch.setattr("app.core.provider.harness_adapter._lookup_provider_row_shape",
+                        lambda pid: ("openai", None, None))
+    assert ultrafast_supported("gpt-6.2-sol", "oa") and not ultrafast_supported("gpt-6-luna", "oa")
+    applied, remote = {}, []
+
+    async def apply(sid, body, *, inherited, propagate):
+        assert inherited and not propagate
+        session = {"id": sid, **rows[sid]}
+        skip = api._inherited_fast_skip(session)
+        if skip:
+            return {"skipped": skip}
+        tier = api._inherited_tier(session, body.speed)
+        applied[sid] = tier
+        return {"effort": "high", "fast": tier != "standard", "speed": tier}
+
+    async def call(owner, action, body):
+        remote.append((owner, action, body))
+        return {"effort": "high", "fast": True, "speed": body.get("speed")}
+
+    monkeypatch.setattr(api, "apply_run_settings", apply)
+    monkeypatch.setattr(api.control, "call", call)
+    monkeypatch.setattr(api, "run_sync", AsyncMock(side_effect=lambda fn, *a, **k: fn(*a, **k)))
+    await api.propagate_fast("parent", True, speed="ultrafast")
+    assert applied == {"able": "ultrafast", "grandchild": "ultrafast", "unable": "fast"}
+    assert remote == [("peer", "run-settings", {
+        "session_id": "remote", "fast": True, "inherited": True, "speed": "ultrafast"})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", [
+    "1 validation error for RunSettingsUpdate\nspeed\n  Extra inputs are not permitted [type=extra_forbidden]",
+    "A parent hands down only fast mode",
+])
+async def test_a_remote_owner_older_than_inherited_ultrafast_runs_it_on_fast(monkeypatch, message):
+    calls = []
+
+    async def call(owner, action, body):
+        calls.append(body)
+        if "speed" in body:
+            raise api.control.ControlRefused(message)
+        return {"effort": "high", "fast": body["fast"]}
+
+    monkeypatch.setattr(api.control, "call", call)
+    assert await api._hand_down_remote("old-peer", "c", "ultrafast") == {"effort": "high", "fast": True}
+    assert calls == [{"session_id": "c", "fast": True, "inherited": True, "speed": "ultrafast"},
+                     {"session_id": "c", "fast": True, "inherited": True}]
+    # Fast and Standard travel as ``fast`` alone, as every owner reads them.
+    calls.clear()
+    await api._hand_down_remote("old-peer", "c", "standard")
+    assert calls == [{"session_id": "c", "fast": False, "inherited": True}]
+
+
+@pytest.mark.asyncio
 async def test_remote_owner_older_than_speed_degrades_to_fast(monkeypatch):
     calls = []
 

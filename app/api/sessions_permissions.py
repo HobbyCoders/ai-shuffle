@@ -63,10 +63,22 @@ async def _store_live_overrides(session_id: str, runtime) -> None:
                        turn_id, session_id, exc_info=True)
 
 
-def _inherited_fast_skip(session: dict) -> Optional[str]:
-    """Why a parent's fast-mode change leaves this subagent alone, or None.
+#: What an owner older than inherited ``speed`` answers when handed one.
+_FAST_ONLY_HAND_DOWN = "A parent hands down only fast mode"
 
-    ``pinned``: the owner set this subagent's fast mode in its own chat.
+
+def _session_model(session: dict) -> Optional[str]:
+    """The model a subagent runs: its own, else its agent's. Blocking."""
+    model = session.get("model") or session.get("launched_model")
+    if not model and session.get("profile_id"):
+        model = ((database.get_profile(session["profile_id"]) or {}).get("config") or {}).get("model")
+    return model
+
+
+def _inherited_fast_skip(session: dict) -> Optional[str]:
+    """Why a parent's speed change leaves this subagent alone, or None.
+
+    ``pinned``: the owner set this subagent's speed in its own chat.
     ``unsupported``: its model has no fast mode, so it keeps its own setting.
     Blocking.
     """
@@ -74,26 +86,63 @@ def _inherited_fast_skip(session: dict) -> Optional[str]:
 
     if session.get("fast_pinned"):
         return "pinned"
-    model = session.get("model") or session.get("launched_model")
-    if not model and session.get("profile_id"):
-        model = ((database.get_profile(session["profile_id"]) or {}).get("config") or {}).get("model")
-    if not fast_mode_supported(model, session.get("provider_id")):
+    if not fast_mode_supported(_session_model(session), session.get("provider_id")):
         return "unsupported"
     return None
 
 
-async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = None) -> None:
-    """Hand a fast-mode change down to the session's subagents.
+def _inherited_tier(session: dict, tier: str) -> str:
+    """A parent's tier fitted to this subagent, never above it. Blocking.
 
-    Every delegated worker under ``session_id`` takes the same setting, as
-    the parent does, except one the owner pinned in its own chat and one whose
-    model has no fast mode. A worker in the middle of a turn finishes that turn
-    at the speed it began with and says so in its own chat; the answer to the
-    parent's toggle speaks only for the parent. A worker run by
-    another worker gets it through that worker's ``run-settings`` action,
-    which hands it on to its own subagents there. Never raises: a subagent
-    that cannot take the change keeps its setting.
+    Ultrafast stays Ultrafast only where the subagent's own row offers it
+    for its model; anywhere else it runs on Fast.
     """
+    from app.core.model_override import ultrafast_supported
+    from app.core.model_speed import FAST, ULTRAFAST
+
+    if tier == ULTRAFAST and not ultrafast_supported(_session_model(session), session.get("provider_id")):
+        return FAST
+    return tier
+
+
+async def _hand_down_remote(owner: Any, child_id: str, tier: str) -> Any:
+    """Hand ``tier`` to a subagent another worker runs.
+
+    Fast and Standard travel as ``fast`` alone, as every owner reads it. An
+    Ultrafast tier adds ``speed``; an owner older than that refuses it, so it
+    is asked again with ``fast`` alone and runs the subagent on Fast.
+    """
+    from app.core.model_speed import STANDARD, ULTRAFAST
+
+    body = {"session_id": child_id, "fast": tier != STANDARD, "inherited": True}
+    if tier != ULTRAFAST:
+        return await control.call(owner, "run-settings", body)
+    try:
+        return await control.call(owner, "run-settings", {**body, "speed": tier})
+    except (control.ControlRefused, ValueError) as exc:
+        if not (_older_owner_refused_speed(exc) or _FAST_ONLY_HAND_DOWN in str(exc)):
+            raise
+        logger.info("Owner of %s predates inherited Ultrafast; handing down Fast", child_id)
+        return await control.call(owner, "run-settings", body)
+
+
+async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = None, *,
+                         speed: Optional[str] = None) -> None:
+    """Hand a speed change down to the session's subagents.
+
+    ``speed`` is the parent's tier (``fast`` alone means Fast or Standard).
+    Every delegated worker under ``session_id`` takes it, fitted to what it
+    can run (:func:`_inherited_tier`), except one the owner pinned in its own
+    chat and one whose model has no fast mode. A worker in the middle of a
+    turn finishes that turn at the speed it began with and says so in its own
+    chat; the answer to the parent's toggle speaks only for the parent. A
+    worker run by another worker gets it through that worker's
+    ``run-settings`` action, which hands it on to its own subagents there.
+    Never raises: a subagent that cannot take the change keeps its setting.
+    """
+    from app.core.model_speed import normalize_speed, resolve_speed
+
+    tier = normalize_speed(speed) or resolve_speed(fast)
     seen = _seen if _seen is not None else {session_id}
     try:
         children = await run_sync(database.list_worker_children, session_id)
@@ -108,21 +157,22 @@ async def propagate_fast(session_id: str, fast: bool, _seen: Optional[set] = Non
         try:
             owner = await run_sync(control.owner_of, child)
             if owner is not None:
-                await control.call(owner, "run-settings", {
-                    "session_id": child_id, "fast": fast, "inherited": True,
-                })
+                await _hand_down_remote(owner, child_id, tier)
                 continue
             result = await apply_run_settings(
-                child_id, RunSettingsUpdate(fast=fast), inherited=True, propagate=False)
+                child_id, RunSettingsUpdate(fast=tier != "standard", speed=tier),
+                inherited=True, propagate=False)
             if "skipped" not in result:
-                await propagate_fast(child_id, fast, seen)
+                # Its own subagents take the tier it now runs, as one it
+                # started now would (``provider_agent._caller_speed``).
+                await propagate_fast(child_id, bool(result["fast"]), seen, speed=result.get("speed"))
         except Exception:  # noqa: BLE001 — one subagent never blocks the rest
-            logger.info("Fast mode was not handed to subagent %s of %s", child_id, session_id,
+            logger.info("Speed was not handed to subagent %s of %s", child_id, session_id,
                         exc_info=True)
 
 
-def _start_propagation(session_id: str, fast: bool) -> None:
-    task = asyncio.get_running_loop().create_task(propagate_fast(session_id, fast))
+def _start_propagation(session_id: str, fast: bool, speed: Optional[str] = None) -> None:
+    task = asyncio.get_running_loop().create_task(propagate_fast(session_id, fast, speed=speed))
     _fast_propagations.add(task)
     task.add_done_callback(_fast_propagations.discard)
 
@@ -131,12 +181,14 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inheri
                              propagate: bool = True, announce: bool = False) -> dict:
     """Change a session's live run settings.
 
-    A fast-mode change is then handed down to the session's subagents in the
+    A speed change is then handed down to the session's subagents in the
     background (:func:`propagate_fast`), unless ``propagate`` is False.
     ``inherited`` marks a change handed down from a parent: it carries only
-    fast mode, and a subagent the owner pinned, or one whose model has no
-    fast mode, answers ``{"skipped": reason}`` and is left unchanged. The
-    owner's own change to a subagent pins it.
+    the speed (``fast``, and ``speed`` from a parent that knows the tier),
+    fitted to this subagent (Ultrafast runs on Fast where its row has none).
+    A subagent the owner pinned, or one whose model has no fast mode, answers
+    ``{"skipped": reason}`` and is left unchanged. The owner's own change to
+    a subagent pins it.
 
     ``fast_applies_turn`` in the answer names the running turn when that turn
     began under another Fast setting, so the new one takes effect with the next
@@ -149,7 +201,7 @@ async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inheri
     """
     result = await _apply_run_settings(session_id, body, inherited=inherited, announce=announce)
     if propagate and ({"fast", "speed"} & body.model_fields_set) and "skipped" not in result:
-        _start_propagation(session_id, bool(result["fast"]))
+        _start_propagation(session_id, bool(result["fast"]), result.get("speed"))
     return result
 
 
@@ -179,14 +231,17 @@ async def _apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inher
     async with settings_lock(session_id):
         session = await run_sync(control._require_owned, session_id)
         if inherited:
-            if set(changes) != {"fast"}:
-                # Ultrafast is never inherited: a parent hands down Fast on/off.
-                raise ValueError("A parent hands down only fast mode")
+            if not picks_speed or set(changes) - {"fast", "speed"}:
+                raise ValueError("A parent hands down only its speed")
             skip = await run_sync(_inherited_fast_skip, session)
             if skip:
                 return {"skipped": skip}
-            # On is Fast, never a tier the child's row still remembers.
-            changes["speed"] = "fast" if changes["fast"] else "standard"
+            # The parent's tier (``fast`` alone from an older parent: on is
+            # Fast, never a tier the child's row still remembers), fitted to
+            # what this subagent can run.
+            tier = changes.get("speed") or resolve_speed(changes.get("fast"))
+            tier = await run_sync(_inherited_tier, session, tier)
+            changes.update(fast=tier != "standard", speed=tier)
         if "context_window" in changes:
             # Unlike effort, a window is connect-time state on BOTH legs. Save
             # it now, but never interrupt/reconfigure an in-flight request. The

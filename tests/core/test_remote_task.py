@@ -946,15 +946,15 @@ def test_sender_resolves_fast_for_a_preference_unaware_v4_receiver(
     database.set_session_run_binding("parent", fast=parent)
     if saved is not None:
         database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
-    resolve = model_effort.resolve_child_fast
+    resolve = model_effort.resolve_child_speed
 
     def old_receiver(model, provider, *, parent=None, caller=None, profile_id=None):
         if world.net.device_id == TARGET:
             # Main e9804d721's v4 receiver expression: no saved-pick lookup.
-            return provider_agent.worker_fast(parent, provider, model, profile_id)
+            return provider_agent.worker_speed(parent, provider, model, profile_id)
         return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id)
 
-    monkeypatch.setattr(model_effort, "resolve_child_fast", old_receiver)
+    monkeypatch.setattr(model_effort, "resolve_child_speed", old_receiver)
     calls = []
     route_to_target(world, monkeypatch, calls)
     if entrypoint == "Task":
@@ -1013,6 +1013,53 @@ def test_receiver_fast_pick_for_the_child_model_beats_the_sender(world, monkeypa
     [turn] = child_turns(answer["worker_session_id"])
     assert bool(row["fast"]) is expected
     assert turn["overrides"].get("fast", False) is expected
+
+
+@pytest.mark.parametrize("version,sent_speed,expected", [
+    # A target that reads ``speed`` runs the caller's Ultrafast.
+    (remote_task.SPEED_VERSION, "ultrafast", "ultrafast"),
+    # An older target refuses unknown fields: ``fast`` alone, Fast there.
+    (remote_task.FAST_VERSION, None, "fast"),
+])
+def test_an_ultrafast_caller_hands_its_tier_to_a_remote_child(world, monkeypatch, version, sent_speed, expected):
+    from app.core import model_override
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+    monkeypatch.setattr(model_override, "ultrafast_supported", lambda model, provider: True)
+    _target_version(monkeypatch, version)
+    database.set_session_run_binding("parent", fast=True, speed="ultrafast")
+    calls = []
+    route_to_target(world, monkeypatch, calls)
+    result = dispatch({})
+    assert result["ok"] is True, result
+    [(_, _, body)] = calls
+    assert body["fast"] is True
+    assert body.get("speed") == sent_speed
+    row = database.get_session(result["worker_session_id"])
+    [turn] = child_turns(result["worker_session_id"])
+    assert (bool(row["fast"]), row["speed"]) == (True, expected)
+    assert (turn["overrides"]["fast"], turn["overrides"]["speed"]) == (True, expected)
+
+
+def test_a_target_runs_a_sent_ultrafast_on_fast_where_its_row_has_none(world, monkeypatch):
+    from app.core import model_override
+    monkeypatch.setattr(model_override, "fast_mode_supported", lambda model, provider: True)
+    checked = []
+    monkeypatch.setattr(model_override, "ultrafast_supported",
+                        lambda model, provider: checked.append(model) or False)
+    answer = start_on_target(world, body_for(world, fast=True, speed="ultrafast"))
+    assert checked == ["sonnet"]
+    row = database.get_session(answer["worker_session_id"])
+    [turn] = child_turns(answer["worker_session_id"])
+    assert (bool(row["fast"]), row["speed"]) == (True, "fast")
+    assert (turn["overrides"]["fast"], turn["overrides"]["speed"]) == (True, "fast")
+
+
+@pytest.mark.parametrize("value", ["turbo", 1, True, ""])
+def test_an_invalid_speed_value_is_refused(world, value):
+    body = body_for(world, state=RemoteWorkerBranch("none"))
+    with world.net.as_target():
+        with pytest.raises(ValueError, match="speed"):
+            remote_task.prepare_task_start({**body, "speed": value}, PARENT)
 
 
 @pytest.mark.parametrize("value", ["true", 1, 0, "false"])

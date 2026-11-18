@@ -119,6 +119,7 @@ _BODY_KEYS = frozenset({
     "name", "provider_id", "model", "effort", "permission_mode",
     "tool_allowlist", "mode", "origin", "depth", "checkout", "parent",
     "context_window", "fast", "effort_explicit", "sender_version", "session_mode",
+    "speed",
 })
 #: The ``remote_task`` capability that accepts ``context_window`` in the body.
 #: An older target refuses unknown fields, so the parent sends it only to
@@ -135,6 +136,10 @@ CHORE_BRANCH_VERSION = 5
 FRESH_BASE_VERSION = 6
 #: v6 was released for fresh bases; target-only projects and chat opt-in use v7.
 TARGET_DEFAULT_VERSION = 7
+#: The ``remote_task`` capability that accepts ``speed`` (the caller's tier,
+#: refining ``fast``). An older target refuses the field, so it gets ``fast``
+#: alone and runs an Ultrafast caller's child on Fast.
+SPEED_VERSION = 8
 #: Upper bound for a requested window; real choices are at most 1M.
 MAX_CONTEXT_WINDOW = 10_000_000
 _PARENT_KEYS = frozenset({
@@ -251,12 +256,13 @@ def start_body(
     fast: Optional[bool] = None,
     effort_explicit: Optional[bool] = None,
     session_mode: Optional[str] = None,
+    speed: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The ``task-start`` body. Identifiers only; never a path or credential.
 
-    ``context_window`` (the caller's window choice) and ``fast`` (its fast
-    mode) are sent only when set, so a request without them is
-    byte-identical to the version-1 wire.
+    ``context_window`` (the caller's window choice), ``fast`` (its fast
+    mode) and ``speed`` (the tier refining it) are sent only when set, so a
+    request without them is byte-identical to the version-1 wire.
     """
     body = {
         "version": WIRE_VERSION,
@@ -287,6 +293,8 @@ def start_body(
         body["context_window"] = int(context_window)
     if fast is not None:
         body["fast"] = bool(fast)
+    if speed is not None:
+        body["speed"] = speed
     if effort_explicit is not None:
         body["effort_explicit"] = effort_explicit
     if session_mode == "chat":
@@ -295,18 +303,18 @@ def start_body(
 
 
 def _caller_bindings(caller_row: Mapping[str, Any], caller_session_id: str):
-    """``(permission mode, loop-guard origin, context window, fast mode)`` the
+    """``(permission mode, loop-guard origin, context window, speed tier)`` the
     child inherits. Blocking."""
     from app.core import loop_guard
     from app.core.provider_agent import (
-        _caller_context_window, _caller_fast, _caller_permission_mode,
+        _caller_context_window, _caller_permission_mode, _caller_speed,
     )
 
     return (
         _caller_permission_mode(caller_row),
         loop_guard.session_origin(caller_session_id),
         _caller_context_window(caller_row),
-        _caller_fast(caller_row),
+        _caller_speed(caller_row),
     )
 
 
@@ -325,6 +333,11 @@ def _accepts_context_window(worker: Mapping[str, Any]) -> bool:
 def _accepts_fast(worker: Mapping[str, Any]) -> bool:
     """Whether the target's ``remote_task`` capability takes ``fast``."""
     return _remote_task_version(worker) >= FAST_VERSION
+
+
+def _accepts_speed(worker: Mapping[str, Any]) -> bool:
+    """Whether the target's ``remote_task`` capability takes ``speed``."""
+    return _remote_task_version(worker) >= SPEED_VERSION
 
 
 def _link_job(caller_session_id: str, worker_id: str, device_id: str, label: str) -> None:
@@ -433,15 +446,22 @@ async def _dispatch_remote(
         return {"ok": False, "error": refusal}
 
     worker_id = str(uuid.uuid4())
-    permission_mode, origin, context_window, fast = await asyncio.to_thread(
+    permission_mode, origin, context_window, speed = await asyncio.to_thread(
         _caller_bindings, caller_row, caller_session_id)
-    from app.core.model_effort import resolve_child_fast
+    from app.core.model_effort import resolve_child_speed
+    from app.core.provider_agent import speed_is_fast
 
     # Resolve before sending: v4 peers fit fast to the model but do not read
     # per-model preferences. In particular, an owner's saved off stays off.
-    fast = await asyncio.to_thread(
-        resolve_child_fast, model_id, provider_id, parent=fast,
+    # The target fits ``speed`` again to its own row.
+    speed = await asyncio.to_thread(
+        resolve_child_speed, model_id, provider_id, parent=speed,
         caller=caller_row, profile_id=profile_id)
+    fast = speed_is_fast(speed)
+    if speed is not None and not _accepts_speed(worker):
+        # An older target refuses unknown fields; ``fast`` alone runs an
+        # Ultrafast caller's child on Fast there.
+        speed = None
     if fast is not None and not _accepts_fast(worker):
         # Same rule as the window: an older target refuses unknown fields, and
         # its child runs at standard speed.
@@ -504,6 +524,7 @@ async def _dispatch_remote(
         context_window=context_window, fast=fast,
         effort_explicit=effort_explicit if _remote_task_version(worker) >= EFFORT_VERSION else None,
         session_mode="chat" if chat_child else None,
+        speed=speed,
     )
     if stop_generation is not None and task_registry.stop_invalidated(root_session_id, stop_generation):
         await release()
@@ -662,6 +683,7 @@ class _Start:
     fast: Optional[bool] = None
     effort_explicit: bool = False
     session_mode: Optional[str] = None
+    speed: Optional[str] = None
 
 
 def _text(body: Mapping[str, Any], key: str, limit: int) -> str:
@@ -733,6 +755,10 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
     fast = body.get("fast")
     if fast is not None and type(fast) is not bool:
         raise ValueError("fast must be true or false")
+    from app.core.model_speed import SPEEDS
+    speed = body.get("speed")
+    if speed is not None and speed not in SPEEDS:
+        raise ValueError("speed must be standard, fast or ultrafast")
     tools = body.get("tool_allowlist")
     if tools is not None and (
             not isinstance(tools, list) or not tools or len(tools) > MAX_TOOLS
@@ -773,6 +799,7 @@ def _parse(body: Mapping[str, Any], from_device: str) -> _Start:
         session_mode=session_mode,
         context_window=context_window,
         fast=fast,
+        speed=speed,
     )
 
 
@@ -937,11 +964,16 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     # Fitted to the child's model on THIS worker's provider rows.
     context_window = provider_agent.worker_context_window(
         start.context_window, start.provider_id, start.model)
-    # The owner's fast-mode pick for the child's model here, else the
-    # sender's; fitted to the child's model on THIS worker, as the window is.
-    from app.core.model_effort import resolve_child_effort, resolve_child_fast
-    fast = resolve_child_fast(start.model, start.provider_id, parent=start.fast,
-                              profile_id=start.agent)
+    # The owner's speed pick for the child's model here, else the sender's
+    # tier (``fast`` alone from an older sender: Fast at most); fitted to the
+    # child's model and provider row on THIS worker, as the window is.
+    from app.core.model_effort import resolve_child_effort, resolve_child_speed
+    from app.core.model_speed import resolve_speed
+    parent_speed = (resolve_speed(start.fast, start.speed) if start.fast is not None
+                    else start.speed)
+    speed = resolve_child_speed(start.model, start.provider_id, parent=parent_speed,
+                                profile_id=start.agent)
+    fast = provider_agent.speed_is_fast(speed)
     effort = resolve_child_effort(start.model, start.provider_id,
                                   explicit=start.effort if start.effort_explicit else None,
                                   parent=start.effort)
@@ -952,7 +984,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
         worktree_branch=checkout.branch if checkout else None,
         worktree_path=checkout.path if checkout else None,
         permission_mode=permission_mode, context_window=context_window,
-        permission_ceiling=permission_mode, fast=fast,
+        permission_ceiling=permission_mode, fast=fast, speed=speed,
     )
     if not project_v2_id and start.session_mode == "chat":
         # Only an explicit v6 request opts in. Old senders/legacy code keep their ceiling.
@@ -960,7 +992,7 @@ def prepare_task_start(body: Mapping[str, Any], from_device: str) -> Dict[str, A
     overrides = provider_agent.worker_turn_overrides(
         provider_id=start.provider_id, model_id=start.model, effort=effort,
         cwd=received.cwd, permission_mode=permission_mode, checkout=checkout,
-        tool_allowlist=tools, context_window=context_window, fast=fast,
+        tool_allowlist=tools, context_window=context_window, fast=fast, speed=speed,
     )
     payload: Dict[str, Any] = {
         REPORT_DEVICE_KEY: from_device,
