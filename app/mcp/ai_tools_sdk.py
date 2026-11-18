@@ -725,11 +725,6 @@ def _with_operation(output, operation):
     return output
 
 
-def _catalog_category(endpoint):
-    from app.services.fal_catalog import catalog_service
-    return next((m.category for m in catalog_service.search() if m.endpoint_id == endpoint), None)
-
-
 def _bounded_choose(output):
     """A ``choose`` result the chat can still draw as a card on every leg.
 
@@ -947,8 +942,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
         output = await call_resolver.generate(kind, request, current)
         if current.unattended and output.get("status") == "refused":
             output.update(status="skipped", message=output.get("error", "Generation skipped; nothing was submitted."))
-        op = generation_operations.for_endpoint(_catalog_category(endpoint), endpoint, kind)
-        return _tool_result(_bounded_choose(_with_operation(output, op.id if op else None)))
+        return _tool_result(_bounded_choose(output))
 
     tools.append(run_fal)
     return tools

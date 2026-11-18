@@ -7,10 +7,11 @@
  import { getProviders, getModelLabel, decodeProviderModel } from '$lib/constants/models';
  import { choiceOf, formatValue, modelLabel, priceView, saveOutcome, sourceLabel,
   type GenerationChoice, type GenerationKind, type GenerationOption, type GenerationPrice,
-  type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
+  type ModelRow, type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
  import { SettingRow, SelectField, Switch, InlineBanner } from '$lib/components/layout/view';
  import TextField from '$lib/components/settings/rows/TextField.svelte';
  import TextAreaField from '$lib/components/layout/view/TextAreaField.svelte';
+ import GenerationModelBrowser from '$lib/components/chat/GenerationModelBrowser.svelte';
  let { kind, options, onpick, pickLabel = 'Pin to this job' }: {
   kind: GenerationKind; options: GenerationOption[];
   onpick: (choice: GenerationChoice) => Promise<Partial<SaveQuote> | void>; pickLabel?: string;
@@ -29,7 +30,13 @@
  let quoteTimer: ReturnType<typeof setTimeout> | null = null;
  let quoteSeq = 0;
  const prompt = '';
- const current = $derived(options[selected]);
+ // A model picked from the shared browser joins the options as one extra slot.
+ let browsed = $state<GenerationOption | null>(null);
+ let browseOpen = $state(false);
+ let browseLoading = $state(false);
+ let browseError = $state<string | null>(null);
+ const list = $derived(browsed ? [...options, browsed] : options);
+ const current = $derived(list[selected]);
  const currentPrice = $derived(priceView(quotes[selected],kind));
  const here = $derived(generationChoices.worker);
  function displayModel(model: string): string {
@@ -161,8 +168,8 @@
 	}
 
 	function resetAdvanced() {
-		values = values.map((v, i) => (i === selected ? { ...options[i].options } : v));
-		quotes = quotes.map((q, i) => (i === selected ? options[i].price : q));
+		values = values.map((v, i) => (i === selected ? { ...list[i].options } : v));
+		quotes = quotes.map((q, i) => (i === selected ? list[i].price : q));
 		quoteError = null;
 	}
 
@@ -174,7 +181,7 @@
 		quoteTimer = setTimeout(async () => {
 			quoteTimer = null;
 			try {
-				const quote = await generationChoices.quote(kind, choiceOf(options[index], values[index]), prompt);
+				const quote = await generationChoices.quote(kind, choiceOf(list[index], values[index]), prompt);
 				if (seq !== quoteSeq) return;
 				if (quote.ok && quote.price) {
 					quotes = quotes.map((q, i) => (i === index ? quote.price! : q));
@@ -193,6 +200,21 @@
 
  onDestroy(() => { if (quoteTimer) clearTimeout(quoteTimer); quoteSeq++; });
  const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving);
+ async function pickBrowsed(row: ModelRow) {
+  browseError = null;
+  const existing = list.findIndex(o => o.model === row.model && o.account === row.account && o.worker === row.worker);
+  if (existing >= 0 && list[existing].available) { selected = existing; quoteError = null; saveError = null; return; }
+  browseLoading = true;
+  try {
+   const option = await generationChoices.optionFor(kind, row);
+   const slot = options.length;
+   browsed = option;
+   values = [...values.slice(0, slot), { ...option.options }];
+   quotes = [...quotes.slice(0, slot), option.price];
+   selected = slot; quoteError = null; saveError = null;
+  } catch (error) { browseError = getErrorMessage(error, 'Could not load this model.'); }
+  finally { browseLoading = false; }
+ }
  async function use() {
   if (!canUse || !current) return;
   saving = true; saveError = null; outcome = null;
@@ -205,10 +227,18 @@
  <SettingRow label="Source and model">
   {#snippet expanded()}
    <SelectField label="Source and model" width={620} value={String(selected)}
-    options={options.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
+    options={list.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
     onchange={(value) => {selected=Number(value);quoteError=null;saveError=null;}} />
   {/snippet}
  </SettingRow>
+ <button class="st-btn" aria-expanded={browseOpen} onclick={() => browseOpen = !browseOpen}>All models</button>
+ {#if browseOpen}
+  <div class="picker-browse">
+   <GenerationModelBrowser {kind} selectedModel={current?.model} preferAccount={current?.account} onpick={pickBrowsed} />
+   {#if browseLoading}<p class="st-note" role="status">Loading the model's options…</p>{/if}
+   {#if browseError}<div role="alert"><InlineBanner>{browseError}</InlineBanner></div>{/if}
+  </div>
+ {/if}
  {#if current}
   <p class="st-note">{current.reason || `${sourceLabel(current.source)} · ${displayModel(current.model)}`}</p>
   <p class="st-note">{currentPrice.figure} {currentPrice.note}</p>
@@ -238,5 +268,6 @@
 </div>
 <style>
  .picker { font-size:13px; }
+ .picker-browse { margin:8px 0 12px; }
  .picker-actions { display:flex; justify-content:flex-end; margin:16px 0; }
 </style>

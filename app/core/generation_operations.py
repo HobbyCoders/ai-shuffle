@@ -65,13 +65,6 @@ def for_tool(tool_name: str) -> Operation | None:
     return next((op for op in OPERATIONS.values() if name in op.tools), None)
 
 
-def for_endpoint(category: str | None, endpoint_id: str, kind: str) -> Operation | None:
-    """The most specific operation a fal endpoint performs, if any of ``kind``."""
-    matches = [op for op in OPERATIONS.values() if op.kind == kind and fits(op, category, endpoint_id)]
-    # An endpoint naming a hint ("extend", "reference") is that operation.
-    return next((op for op in matches if op.id_hints), matches[0] if matches else None)
-
-
 def fits(op: Operation, category: str | None, endpoint_id: str) -> bool:
     if category not in op.categories:
         return False

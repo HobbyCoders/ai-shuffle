@@ -482,3 +482,92 @@ describe('GenerationChoiceCard save-time quote', () => {
 		expect(notice()).toBeNull();
 	});
 });
+
+describe('GenerationChoiceCard: provider, then any model, then its options', () => {
+	const RECRAFT: GenerationOption = {
+		...FAL,
+		model: 'fal-ai/recraft/v3',
+		label: undefined,
+		options: { style: 'realistic' },
+		quick_settings: { style: 'realistic' },
+		price: { ...PRICE, amount: '0.04', total: '0.04' },
+		schema: { fields: [{ name: 'prompt', type: 'string', is_primary_text: true }, { name: 'style', type: 'enum', title: 'Style', enum: ['realistic', 'vector'], default: 'realistic' }] }
+	};
+	const UNQUOTED = { ...UNKNOWN_PRICE_FIXTURE, reason: 'not_quoted', detail: 'Pick this model to price its options.', rate: { amount: '0.04', unit: 'images' } };
+	const row = (model: string, name: string, extra: Record<string, unknown> = {}) => ({
+		source: 'fal', account: 'fal-ai', worker: 'worker-a', model, kind: 'image', options: {}, verified: false,
+		price: UNQUOTED, schema: null, available: true, reason: null, status: 'unpriced', name, ...extra
+	});
+
+	beforeEach(() => {
+		mocks.get.mockImplementation(async (url: string) => {
+			if (url.startsWith('/generation/choices')) return { remembered: {}, last: {}, migrated: true, worker: 'worker-a' };
+			if (url.startsWith('/generation/providers/image')) {
+				return {
+					kind: 'image', operation: 'text-to-image', operation_label: 'Text to image',
+					providers: [
+						{ source: 'fal', account: 'fal-ai', workers: ['worker-a'], available: true, reason: null, native: false, model_count: 3 },
+						{ source: 'supergrok', account: 'grok-9', workers: ['worker-c'], available: false, reason: 'Update that worker.', native: true }
+					]
+				};
+			}
+			if (url.startsWith('/generation/models/image')) {
+				const q = new URLSearchParams(url.split('?')[1]);
+				if (q.get('query') === 'nothing') return { models: [], total: 0, offset: 0, limit: 20, has_more: false };
+				if (q.get('offset') === '2') return { models: [row('fal-ai/sdxl', 'SDXL', { available: false, reason: 'fal is down.' , status: 'unavailable'})], total: 3, offset: 2, limit: 20, has_more: false };
+				return { models: [row('fal-ai/recraft/v3', 'Recraft V3'), row('fal-ai/flux/dev', 'FLUX dev')], total: 3, offset: 0, limit: 20, has_more: true };
+			}
+			if (url.startsWith('/generation/catalog')) return { entries: [{ ...RECRAFT, status: 'available' }], favourites: {}, kinds: ['image'], limit: 1 };
+			throw new Error(`unexpected ${url}`);
+		});
+	});
+
+	it('lists providers with unavailable reasons, pages and searches on the server, and never shows unknown as free', async () => {
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		const providers = await screen.findByRole('radiogroup', { name: 'Provider' });
+		expect(within(providers).getByRole('radio', { name: /fal\.ai/ }).getAttribute('aria-checked')).toBe('true');
+		expect(screen.getByText(/Update that worker\./)).toBeTruthy();
+		const recraft = await screen.findByRole('button', { name: /Recraft V3/ });
+		expect(recraft.textContent).toContain('$0.04 per image');
+		expect(recraft.textContent).not.toMatch(/Free|Included/);
+		expect(screen.getByText('2 of 3')).toBeTruthy();
+		await fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
+		expect((await screen.findByRole('button', { name: /SDXL/ }) as HTMLButtonElement).disabled).toBe(true);
+		expect(screen.getByText('fal is down.')).toBeTruthy();
+		expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/\/generation\/models\/image\?source=fal&offset=2&limit=20/));
+		await fireEvent.input(screen.getByPlaceholderText('Search 3 models'), { target: { value: 'nothing' } });
+		expect(await screen.findByText('No model matches “nothing”.')).toBeTruthy();
+		expect(mocks.get).toHaveBeenCalledWith(expect.stringContaining('query=nothing'));
+	});
+
+	it('loads a picked model with its declared options, quotes them live and sends that model back', async () => {
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		const picked = await screen.findByRole('radio', { name: /Picked/ });
+		expect(picked.getAttribute('aria-checked')).toBe('true');
+		expect(picked.textContent).toMatch(/recraft/i);
+		expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/\/generation\/catalog\?kind=image&source=fal&model=fal-ai%2Frecraft%2Fv3/));
+		const style = await screen.findByLabelText('Style');
+		await fireEvent.change(style, { target: { value: 'vector' } });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/generation/quote', expect.objectContaining({ choice: expect.objectContaining({ model: 'fal-ai/recraft/v3', options: { style: 'vector' } }) })));
+		await waitFor(() => expect((screen.getByRole('button', { name: /^Use / }) as HTMLButtonElement).disabled).toBe(false));
+		await fireEvent.click(screen.getByRole('button', { name: /^Use / }));
+		await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+		expect(mocks.send.mock.calls[0][0]).toContain('"model":"fal-ai/recraft/v3"');
+		expect(mocks.send.mock.calls[0][0]).toContain('"style":"vector"');
+	});
+
+	it('keeps an unselected option showing the options its price was quoted for', async () => {
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /Advanced/ }));
+		await fireEvent.change(await screen.findByLabelText('Image size'), { target: { value: 'landscape_16_9' } });
+		await waitFor(() => expect(mocks.post).toHaveBeenCalled());
+		await fireEvent.click(screen.getByRole('radio', { name: /SuperGrok/ }));
+		const fal = screen.getByRole('radio', { name: /flux/i });
+		expect(fal.getAttribute('aria-checked')).toBe('false');
+		expect(fal.textContent).toContain('image size landscape_16_9');
+		expect(fal.textContent).not.toContain('image size square');
+	});
+});

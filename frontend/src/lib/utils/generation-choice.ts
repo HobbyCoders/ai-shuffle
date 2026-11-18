@@ -105,6 +105,53 @@ export interface CatalogEntry extends GenerationOption {
 	status: CatalogStatus;
 }
 
+/** A provider or account that can make one kind for one operation (`GET /generation/providers/{kind}`). */
+export interface GenerationProvider {
+	source: string;
+	account: string;
+	workers: string[];
+	available: boolean;
+	reason: string | null;
+	native: boolean;
+	/** A subscription account's model. */
+	model?: string;
+	/** fal: how many models fit the operation. */
+	model_count?: number;
+}
+
+export interface ProvidersResponse {
+	kind: GenerationKind;
+	operation: string;
+	operation_label: string;
+	providers: GenerationProvider[];
+}
+
+/** One row of a provider's models (`GET /generation/models/{kind}`). */
+export interface ModelRow extends CatalogEntry {
+	/** fal's display name and category. */
+	name?: string;
+	category?: string;
+	description?: string;
+}
+
+export interface ModelPage {
+	models: ModelRow[];
+	total: number;
+	offset: number;
+	limit: number;
+	has_more: boolean;
+}
+
+/** The account a provider row filters `/models` by: fal, or one subscription account. */
+export function providerKey(provider: Pick<GenerationProvider, 'source' | 'account'>): string {
+	return provider.source === 'fal' ? 'fal' : provider.account;
+}
+
+/** A model row's title: fal's display name, else the readable model id. */
+export function modelRowTitle(row: Pick<ModelRow, 'name' | 'model'>): string {
+	return row.name?.trim() || modelLabel(row.model);
+}
+
 /**
  * A short name for the worker holding an account: its device name when the
  * install registry knows it, `This worker` for the local one, else a clipped
@@ -127,6 +174,8 @@ export interface ChooseResult {
 	tool: string;
 	options: GenerationOption[];
 	prompt: string;
+	/** What the call does (`image-to-video`...); the model browser lists models that fit it. */
+	operation?: string;
 	rememberedUnavailable: boolean;
 	/** The remembered choice has no known price, so it did not run unasked. */
 	rememberedUnpriced: boolean;
@@ -206,6 +255,7 @@ export function chooseResult(message: Pick<ChatMessage, 'type' | 'toolName' | 't
 		tool: displayToolName(message.toolName!),
 		options,
 		prompt,
+		...(typeof result.operation === 'string' && /^[a-z0-9-]{1,40}$/.test(result.operation) ? { operation: result.operation } : {}),
 		rememberedUnavailable: result.remembered_unavailable === true,
 		rememberedUnpriced: result.remembered_unpriced === true
 	};
@@ -411,6 +461,18 @@ export function quickChips(option: Pick<GenerationOption, 'quick_settings' | 'op
 		.filter(([, v]) => v !== null && v !== undefined && typeof v !== 'object')
 		.slice(0, max)
 		.map(([k, v]) => `${k.replace(/_/g, ' ')} ${formatValue(v)}`);
+}
+
+/**
+ * The chips an option shows for the options it will run with (`values`):
+ * edited settings first, then the server's quick settings, so a card never
+ * shows the defaults next to a price quoted for edited options.
+ */
+export function optionChips(option: Pick<GenerationOption, 'quick_settings' | 'options'>, values: Record<string, unknown>, max = 3): string[] {
+	const quick = option.quick_settings && Object.keys(option.quick_settings).length ? Object.keys(option.quick_settings) : Object.keys(values);
+	const edited = Object.keys(values).filter((k) => !quick.includes(k) && JSON.stringify(values[k]) !== JSON.stringify(option.options?.[k]));
+	const shown = [...edited, ...quick].filter((k) => Object.hasOwn(values, k));
+	return quickChips({ options: Object.fromEntries(shown.map((k) => [k, values[k]])) }, max);
 }
 
 export function choiceOf(option: GenerationOption, options: Record<string, unknown> = option.options): GenerationChoice {

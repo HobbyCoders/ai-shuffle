@@ -190,3 +190,22 @@ describe('labels and prices', () => {
 		expect(repliedFigure('Use the cheap one please ($5).')).toBeNull();
 	});
 });
+
+describe('model picker helpers', () => {
+	it('shows edited options first, then the quick settings, from the values that will run', async () => {
+		const { optionChips } = await import('./generation-choice');
+		const option = { options: { duration: 5, aspect_ratio: '16:9', seed: null }, quick_settings: { aspect_ratio: '16:9' } };
+		expect(optionChips(option, { duration: 10, aspect_ratio: '16:9' })).toEqual(['duration 10', 'aspect ratio 16:9']);
+		expect(optionChips(option, option.options)).toEqual(['aspect ratio 16:9']);
+	});
+
+	it('reads the operation a choose result names, ignoring anything malformed', async () => {
+		const { chooseResult } = await import('./generation-choice');
+		const base = { type: 'tool_use' as const, toolName: 'mcp__ai-tools__generateVideo', toolInput: { prompt: 'p' } };
+		const option = { source: 'fal', account: 'fal-ai', worker: 'w', model: 'm', kind: 'video', options: {}, verified: false, price: { currency: 'USD', unit: 'video', amount: '0.1', total: '0.1', status: 'estimated' }, available: true };
+		const result = (extra: object) => JSON.stringify({ status: 'choose', options: [option], ...extra });
+		expect(chooseResult({ ...base, toolResult: result({ operation: 'text-to-video' }) })?.operation).toBe('text-to-video');
+		expect(chooseResult({ ...base, toolResult: result({ operation: '<script>' }) })?.operation).toBeUndefined();
+		expect(chooseResult({ ...base, toolResult: result({}) })?.operation).toBeUndefined();
+	});
+});

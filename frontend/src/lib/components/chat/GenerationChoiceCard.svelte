@@ -20,6 +20,7 @@
 	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import GenerationModelBrowser from './GenerationModelBrowser.svelte';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { getErrorMessage } from '$lib/api/client';
@@ -32,7 +33,7 @@
 		priceView,
 		saveOutcome,
 		repliedFigure,
-		quickChips,
+		optionChips,
 		sameChoice,
 		sourceLabel,
 		workerLabel,
@@ -40,6 +41,7 @@
 		type GenerationKind,
 		type GenerationOption,
 		type GenerationPrice,
+		type ModelRow,
 		type NativeValue,
 		type SaveOutcome,
 		type SaveQuote,
@@ -71,6 +73,8 @@
 		onpick?: (choice: GenerationChoice) => Promise<Partial<SaveQuote> | void>;
 		/** The settings variant's button text when `onpick` is set. */
 		pickLabel?: string;
+		/** What the call does (`image-to-video`...): the model browser lists models that fit it. */
+		operation?: string;
 	}
 
 	let {
@@ -85,7 +89,8 @@
 		answeredBy = undefined,
 		onsaved,
 		onpick,
-		pickLabel = 'Use this choice'
+		pickLabel = 'Use this choice',
+		operation = undefined
 	}: Props = $props();
 
 	onMount(() => {
@@ -133,7 +138,16 @@
 	let quoteTimer: ReturnType<typeof setTimeout> | null = null;
 	let quoteSeq = 0;
 
-	const current = $derived(options[selected]);
+	/**
+	 * A model picked from the browser joins the suggested options as one extra
+	 * slot (index options.length), with its own values and quote.
+	 */
+	let browsed = $state<GenerationOption | null>(null);
+	let browsing = $state(false);
+	let browseLoading = $state('');
+	let browseError = $state<string | null>(null);
+	const list = $derived(browsed ? [...options, browsed] : options);
+	const current = $derived(list[selected]);
 	const currentPrice = $derived(priceView(quotes[selected], kind));
 	const label = $derived(KIND_LABEL[kind]);
 	const Icon = $derived(KIND_ICON[kind]);
@@ -147,7 +161,7 @@
 	// held by another worker names it, so the same plan on two workers differs.
 	const here = $derived(generationChoices.worker);
 	const elsewhere = (option: GenerationOption) => !!here && !!option.worker && option.worker !== here && option.worker !== 'local';
-	const anyElsewhere = $derived(options.some(elsewhere));
+	const anyElsewhere = $derived(list.some(elsewhere));
 	$effect(() => {
 		if (anyElsewhere && $workerInstalls === null) refreshWorkerPresence().catch(() => {});
 	});
@@ -155,8 +169,10 @@
 	// Which option a reply picked (it carries the exact model and account).
 	const repliedIndex = $derived.by(() => {
 		if (!reply) return -1;
-		return options.findIndex((o) => reply.includes(`"model":${JSON.stringify(o.model)}`) && reply.includes(`"source":${JSON.stringify(o.account)}`));
+		return list.findIndex((o) => reply.includes(`"model":${JSON.stringify(o.model)}`) && reply.includes(`"source":${JSON.stringify(o.account)}`));
 	});
+	// A browsed pick is gone after a reload; the reply still names it.
+	const repliedLabel = $derived(reply && repliedIndex < 0 ? (/^Use (.+?) for this /.exec(reply.split('\n', 1)[0])?.[1] ?? '') : '');
 	const settled = $derived(variant === 'chat' && (picked !== null || reply !== null));
 	let reopened = $state(false);
 	const collapsed = $derived(settled && !reopened);
@@ -280,8 +296,8 @@
 	}
 
 	function resetAdvanced() {
-		values = values.map((v, i) => (i === selected ? { ...options[i].options } : v));
-		quotes = quotes.map((q, i) => (i === selected ? options[i].price : q));
+		values = values.map((v, i) => (i === selected ? { ...list[i].options } : v));
+		quotes = quotes.map((q, i) => (i === selected ? list[i].price : q));
 		quoteError = null;
 	}
 
@@ -293,7 +309,7 @@
 		quoteTimer = setTimeout(async () => {
 			quoteTimer = null;
 			try {
-				const quote = await generationChoices.quote(kind, choiceOf(options[index], values[index]), prompt);
+				const quote = await generationChoices.quote(kind, choiceOf(list[index], values[index]), prompt);
 				if (seq !== quoteSeq) return;
 				if (quote.ok && quote.price) {
 					quotes = quotes.map((q, i) => (i === index ? quote.price! : q));
@@ -311,10 +327,40 @@
 	}
 
 	function select(index: number) {
-		if (!options[index]?.available || collapsed) return;
+		if (!list[index]?.available || collapsed) return;
 		selected = index;
 		quoteError = null;
 		saveError = null;
+	}
+
+	/** A browsed model becomes the extra slot, with its declared options and default price. */
+	let browseSeq = 0;
+	async function pickBrowsed(row: ModelRow) {
+		if (settled || saving) return;
+		browseError = null;
+		const existing = list.findIndex((o) => o.model === row.model && o.account === row.account && o.worker === row.worker);
+		if (existing >= 0 && list[existing].available) {
+			select(existing);
+			return;
+		}
+		const mine = ++browseSeq;
+		browseLoading = row.model;
+		let option: GenerationOption;
+		try {
+			option = await generationChoices.optionFor(kind, row, operation);
+		} catch (e) {
+			if (mine === browseSeq) browseError = getErrorMessage(e, 'Could not load this model.');
+			return;
+		} finally {
+			if (mine === browseSeq) browseLoading = '';
+		}
+		if (mine !== browseSeq || settled) return;
+		const slot = options.length;
+		browsed = option;
+		values = [...values.slice(0, slot), { ...option.options }];
+		quotes = [...quotes.slice(0, slot), option.price];
+		select(slot);
+		advancedOpen = true;
 	}
 
 	function onRadioKey(event: KeyboardEvent, index: number) {
@@ -322,9 +368,9 @@
 		if (!keys.includes(event.key)) return;
 		event.preventDefault();
 		const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
-		for (let n = 1; n <= options.length; n++) {
-			const next = (index + step * n + options.length) % options.length;
-			if (options[next].available) {
+		for (let n = 1; n <= list.length; n++) {
+			const next = (index + step * n + list.length) % list.length;
+			if (list[next].available) {
 				select(next);
 				document.getElementById(`${uid}-opt-${next}`)?.focus();
 				return;
@@ -348,7 +394,7 @@
 		saving = true;
 		saveError = null;
 		const index = selected;
-		const option = options[index];
+		const option = list[index];
 		const chosen = values[index];
 		const keep = variant === 'settings' ? true : remember;
 		outcome = null;
@@ -398,7 +444,7 @@
 	}
 
 	const summaryIndex = $derived(picked?.index ?? repliedIndex);
-	const summaryOption = $derived(summaryIndex >= 0 ? options[summaryIndex] : null);
+	const summaryOption = $derived(summaryIndex >= 0 ? list[summaryIndex] : null);
 	const summaryRemembered = $derived(!!summaryOption && sameChoice(remembered, summaryOption));
 	// After a reload the live quote is gone; the reply carries the figure it was picked at.
 	// The saved pick's warning, still shown on the collapsed line.
@@ -436,6 +482,8 @@
 						{summaryFigure}
 						{#if summaryRemembered}<span class="gcc-dot" aria-hidden="true">·</span> remembered for {label.plural}{/if}
 						{#if summaryWarning}<span class="gcc-sub-warn" title={summaryWarning}><span class="gcc-dot" aria-hidden="true">·</span><TriangleAlert aria-hidden="true" />Unattended runs will skip it</span>{/if}
+					{:else if repliedLabel}
+						{repliedLabel}{#if reply && repliedFigure(reply)}<span class="gcc-dot" aria-hidden="true">·</span>{repliedFigure(reply)}{/if}
 					{:else}
 						Answered in the chat
 					{/if}
@@ -468,9 +516,9 @@
 		{/if}
 
 		<div class="gcc-options" role="radiogroup" aria-labelledby="{uid}-title">
-			{#each options as option, index (index)}
+			{#each list as option, index (index)}
 				{@const view = priceView(quotes[index], kind)}
-				{@const chips = quickChips({ ...option, quick_settings: index === selected ? values[index] : option.quick_settings })}
+				{@const chips = optionChips(option, values[index] ?? option.options)}
 				<button
 					type="button"
 					role="radio"
@@ -488,6 +536,8 @@
 						<span class="gcc-source">{sourceLabel(option.source)}</span>
 						{#if option.label}
 							<span class="gcc-badge card-badge card-badge--primary">{option.label}</span>
+						{:else if index >= options.length}
+							<span class="gcc-badge card-badge card-badge--muted">Picked</span>
 						{:else if sameChoice(remembered, option)}
 							<span class="gcc-badge card-badge card-badge--primary">Remembered</span>
 						{:else if option.verified && option.source !== 'fal'}
@@ -512,6 +562,37 @@
 					{#if index === selected}<span class="gcc-check" aria-hidden="true"><Check /></span>{/if}
 				</button>
 			{/each}
+		</div>
+
+		<div class="gcc-advanced gcc-browse">
+			<button
+				type="button"
+				class="gcc-adv-toggle"
+				aria-expanded={browsing}
+				aria-controls="{uid}-browse"
+				disabled={settled}
+				onclick={() => (browsing = !browsing)}
+			>
+				<ChevronDown class="gcc-chev" aria-hidden="true" />
+				All models
+				<span class="gcc-adv-meta">pick a provider, then any of its models</span>
+			</button>
+			{#if browsing}
+				<div class="gcc-adv-body" id="{uid}-browse">
+					<GenerationModelBrowser
+						{kind}
+						{operation}
+						selectedModel={current?.model}
+						preferAccount={current?.account}
+						onpick={pickBrowsed}
+					/>
+					{#if browseLoading}
+						<p class="gcc-note" role="status">Loading the options for {modelLabel(browseLoading)}…</p>
+					{:else if browseError}
+						<p class="gcc-note warn" role="alert"><TriangleAlert aria-hidden="true" />{browseError}</p>
+					{/if}
+				</div>
+			{/if}
 		</div>
 
 		{#if current?.available}
@@ -625,7 +706,7 @@
 		{/if}
 		{#if outcome}
 			{@const view = outcome.view}
-			{@const saved = options[outcome.index]}
+			{@const saved = list[outcome.index]}
 			<div class="gcc-saved" data-state={view.state} role={view.warning ? 'alert' : 'status'}>
 				<span class="gcc-saved-icon" aria-hidden="true">
 					{#if view.warning}<TriangleAlert />{:else}<Check />{/if}
