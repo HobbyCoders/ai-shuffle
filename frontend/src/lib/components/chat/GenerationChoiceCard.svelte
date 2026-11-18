@@ -421,7 +421,8 @@
 	// options change or "Try again".
 	$effect(() => {
 		const option = current;
-		if (!option?.available || collapsed || saving) return;
+		// Not while a browsed model loads: the user has moved on from this one.
+		if (!option?.available || collapsed || saving || browseLoading) return;
 		const state = quoteAt(selected);
 		const key = keyOf(option, values[selected]);
 		if (state.pending && !asking[key]) untrack(() => scheduleQuote(selected));
@@ -432,12 +433,14 @@
 		// A model still loading from the browser no longer takes the selection.
 		browseSeq++;
 		browseLoading = '';
+		// The quote still waiting for the row the user leaves is never sent.
+		if (index !== selected) cancelQuote();
 		selected = index;
 		saveError = null;
 	}
 
 	/** A browsed model becomes the extra slot, with its declared options; it is quoted for this call before it can be used. */
-	async function pickBrowsed(row: ModelRow) {
+	async function pickBrowsed(row: ModelRow, listed?: string) {
 		if (settled || saving) return;
 		browseError = null;
 		const existing = list.findIndex((o) => o.model === row.model && o.account === row.account && o.worker === row.worker);
@@ -446,10 +449,13 @@
 			return;
 		}
 		const mine = ++browseSeq;
+		// Moving to another row: the previous model's unsent quote is dropped.
+		cancelQuote();
 		browseLoading = row.model;
 		let option: GenerationOption;
 		try {
-			option = await generationChoices.optionFor(kind, row, operation);
+			// Settings has no call operation: check the model against the one it was listed for.
+			option = await generationChoices.optionFor(kind, row, operation ?? listed);
 		} catch (e) {
 			if (mine === browseSeq && !destroyed) browseError = getErrorMessage(e, 'Could not load this model.');
 			return;
@@ -519,8 +525,9 @@
 			const result =
 				handoff && onpick
 					? await onpick(choiceOf(option, chosen))
-					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
-			if (destroyed || (variant === 'chat' && !canAct(sourceSessionId))) return;
+					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card', operation);
+			// A chat card that unmounted while saving still sends its reply (#1444).
+			if (variant === 'chat' ? !canAct(sourceSessionId) : destroyed) return;
 			// The server remembers a pick only once its own quote priced it.
 			const kept = keep && !(result && 'remembered' in result && result.remembered === false);
 			// Shown before the chat reply goes out, so a failed send still says what was saved.
@@ -697,8 +704,7 @@
 					<GenerationModelBrowser
 						{kind}
 						{operation}
-						selectedModel={current?.model}
-						preferAccount={current?.account}
+						selected={current}
 						onpick={pickBrowsed}
 					/>
 					{#if browseLoading}

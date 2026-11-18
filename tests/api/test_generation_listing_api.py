@@ -342,13 +342,13 @@ def _edit_schema(endpoint, *fields, required=()):
      None),
     # Needs at least two images: editImage sends one.
     (_edit_schema("fal-ai/flux/edit", ParamField("image_urls", type="array", required=True, minimum=2),
-                  required=["image_urls"]), "This model's declared inputs do not fit editImage."),
+                  required=["image_urls"]), "This model's image_urls does not accept the one input editImage sends."),
     # A required field editImage never fills.
     (_edit_schema("fal-ai/flux/edit", ParamField("image_url", type="string", required=True),
                   ParamField("mask_url", type="string", required=True), required=["image_url", "mask_url"]),
      "This model needs mask_url, which editImage does not send."),
     # No image input at all.
-    (_edit_schema("fal-ai/flux/edit"), "This model does not take an image, which editImage sends."),
+    (_edit_schema("fal-ai/flux/edit"), "This model does not take a source image, which editImage sends."),
 ])
 def test_a_browsed_models_inputs_must_fit_the_tool(client, schema, problem):
     client.schema_reads.return_value = schema

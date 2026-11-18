@@ -162,8 +162,14 @@ and `worker` asks only that worker (the picker reads a browsed row's options fro
 the worker that listed it). A lookup that names a `model` is a detail read that is
 quoted next: it reads no listing price, so it never waits on a listing rate read.
 With `operation`, a fal model whose declared inputs that operation's tool cannot
-fill (it takes no image for an edit, or needs a field such as `mask_url` the tool
-never sends) is `available: false` with the reason, so it cannot be picked.
+fill is `available: false` with the reason, so it cannot be picked. The check
+models the request the tool really builds: the endpoint it calls (a base
+`nano-banana` id is sent to its `/edit` endpoint, a `text-to-video` id to its
+`image-to-video` twin), the field its one source goes in (`kontext` edits send
+`image_url`, so `kontext/max/multi`, which needs `image_urls`, is refused) and
+the fields it never sends (such as `mask_url`). Every picker sends an operation: the chat card sends
+the tool call's, and Settings and the automation picker send the one the browsed
+list was for (the kind's text operation).
 
 ### Provider and model listing
 
@@ -220,7 +226,10 @@ Like remembering, it is stored only after a server-side quote priced it, with
 nothing submitted: a pick that is unavailable or has no verified price is a `409`
 saying why, and the job keeps the choice it had. Saving the job again with the
 exact pin it already has is not a new pin: it stays, with `unchanged: true` and
-the warning, even if its price has since become unknown. The response adds the save-time
+the warning, even if its price has since become unknown. An optional `operation`
+query parameter (default: the kind's text operation) names what the pick is for;
+a fal model whose inputs do not fit it, or the text operation that runs pinned
+picks, is a `422` naming the reason, and nothing is pinned. The response adds the save-time
 `price`, `priced`, `quote_error`, `unattended_skip_reason` and `warning`.
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
 protection as preferences. Job choices are account-scoped preferences, separate
@@ -361,7 +370,12 @@ preferences:
   copied. A remembered choice is never overwritten by the migration.
 
 `GET /api/v1/generation/choices` lists them; `PUT /api/v1/generation/choices/{kind}`
-saves a pick (`remember: false` records only the last choice). A pick is
+saves a pick (`remember: false` records only the last choice). An optional
+`operation` query parameter (default: the kind's text operation) names what the
+pick is for. A fal model whose inputs do not fit that operation's tool is a `422`
+with the reason and nothing is saved; with `remember: true` it must also fit the
+kind's text operation, which is the one that reuses remembered picks. Choices
+saved without an operation keep loading and resolving as before. A pick is
 remembered only when the server-side quote priced it; otherwise it is saved as
 the last choice only, with `remembered: false` and a warning saying so. The save
 response includes a server-side `price`, `priced`, `unattended_skip_reason` and a `warning` when the

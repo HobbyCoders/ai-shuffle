@@ -246,7 +246,8 @@
 	// edits), after the edit debounce, so stepping through models sends no burst.
 	$effect(() => {
 		const option = current;
-		if (!option?.available || saving) return;
+		// Not while a browsed model loads: the user has moved on from this one.
+		if (!option?.available || saving || browseLoading) return;
 		const state = quoteAt(selected);
 		if (state.pending && !asking[quoteKey(option, values[selected])]) untrack(() => scheduleQuote(selected));
 	});
@@ -255,14 +256,23 @@
  // A browsed model still loading means the user moved on from the current one.
  const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving && !browseLoading);
  let browseSeq = 0;
- async function pickBrowsed(row: ModelRow) {
+ /** Select an option; a model still loading and the left row's unsent quote are dropped. */
+ function select(index: number) {
+  browseSeq++; browseLoading = false;
+  if (index !== selected) cancelQuote();
+  selected = index; saveError = null;
+ }
+ async function pickBrowsed(row: ModelRow, listed?: string) {
   browseError = null;
-  const mine = ++browseSeq;
   const existing = list.findIndex(o => o.model === row.model && o.account === row.account && o.worker === row.worker);
-  if (existing >= 0 && list[existing].available) { browseSeq++; browseLoading = false; selected = existing; saveError = null; return; }
+  if (existing >= 0 && list[existing].available) { select(existing); return; }
+  const mine = ++browseSeq;
+  // Moving to another row: the previous model's unsent quote is dropped.
+  cancelQuote();
   browseLoading = true;
   try {
-   const option = await generationChoices.optionFor(kind, row);
+   // The detail lookup checks the model's inputs against the operation it was listed for.
+   const option = await generationChoices.optionFor(kind, row, listed);
    if (mine !== browseSeq || destroyed) return; // a later pick (or a reselect) won
    const slot = options.length;
    browsed = option;
@@ -286,13 +296,13 @@
   {#snippet expanded()}
    <SelectField label="Source and model" width={620} value={String(selected)}
     options={list.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
-    onchange={(value) => {browseSeq++;browseLoading=false;selected=Number(value);saveError=null;}} />
+    onchange={(value) => select(Number(value))} />
   {/snippet}
  </SettingRow>
  <button class="st-btn" aria-expanded={browseOpen} onclick={() => { browseOpen = !browseOpen; if (!browseOpen) { browseSeq++; browseLoading = false; } }}>All models</button>
  {#if browseOpen}
   <div class="picker-browse">
-   <GenerationModelBrowser {kind} selectedModel={current?.model} preferAccount={current?.account} onpick={pickBrowsed} />
+   <GenerationModelBrowser {kind} selected={current} onpick={pickBrowsed} />
    {#if browseLoading}<p class="st-note" role="status">Loading the model's options…</p>{/if}
    {#if browseError}<div role="alert"><InlineBanner>{browseError}</InlineBanner></div>{/if}
   </div>

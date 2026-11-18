@@ -27,14 +27,16 @@
 	interface Props {
 		kind: GenerationKind;
 		operation?: string;
-		/** The model currently picked on the card, marked in the list. */
-		selectedModel?: string;
-		/** Open on this account's provider when it can make the kind. */
-		preferAccount?: string;
-		onpick: (row: ModelRow) => void;
+		/**
+		 * The pick currently on the card: its row is marked (same account,
+		 * worker and model) and the browser opens on its provider and worker.
+		 */
+		selected?: Pick<ModelRow, 'source' | 'account' | 'worker' | 'model'> | null;
+		/** `operation` is the one the rows were listed for (the server resolves an omitted one). */
+		onpick: (row: ModelRow, operation: string | undefined) => void;
 	}
 
-	let { kind, operation, selectedModel = '', preferAccount = '', onpick }: Props = $props();
+	let { kind, operation, selected = null, onpick }: Props = $props();
 
 	const PAGE = 20;
 	const SEARCH_DEBOUNCE_MS = 250;
@@ -42,6 +44,7 @@
 
 	let providers = $state<GenerationProvider[] | null>(null);
 	let operationLabel = $state('');
+	let listedOperation = $state<string | undefined>(undefined);
 	let providerError = $state('');
 	let active = $state('');
 	let query = $state('');
@@ -63,6 +66,14 @@
 	const here = $derived(generationChoices.worker);
 	const current = $derived(providers?.find((p) => providerKey(p) === active));
 	const unavailable = $derived((providers ?? []).filter((p) => !p.available));
+	// "local" and this worker's ID name the same worker.
+	const workerOf = (w: string | null | undefined) => (!w || w === 'local' ? here : w);
+	const isPicked = (row: ModelRow) =>
+		!!selected && row.model === selected.model && row.account === selected.account && workerOf(row.worker) === workerOf(selected.worker);
+	// The pick's fal worker is not among the providers that answered.
+	const pickAway = $derived(
+		!!providers && selected?.source === 'fal' && !providers.some((p) => p.source === 'fal' && p.available && workerOf(p.worker) === workerOf(selected.worker))
+	);
 
 	function providerName(p: GenerationProvider): string {
 		const name = sourceLabel(p.source);
@@ -77,11 +88,15 @@
 			const data = await generationChoices.providers(kind, operation);
 			providers = data.providers ?? [];
 			operationLabel = data.operation_label ?? '';
+			listedOperation = data.operation || operation;
 			const usable = providers.filter((p) => p.available);
-			// fal on this worker first, then any fal row or the named account.
-			const preferred =
-				usable.find((p) => p.source === 'fal' && preferAccount === 'fal-ai' && p.worker === here) ??
-				usable.find((p) => p.account === preferAccount);
+			// Open on the current pick's provider, on its own worker for fal.
+			const pick = selected;
+			const preferred = !pick
+				? undefined
+				: pick.source === 'fal'
+					? usable.find((p) => p.source === 'fal' && workerOf(p.worker) === workerOf(pick.worker))
+					: usable.find((p) => p.source !== 'fal' && p.account === pick.account);
 			const first = preferred ?? usable[0];
 			if (first) choose(providerKey(first));
 		} catch (e) {
@@ -198,6 +213,11 @@
 			{/each}
 		</div>
 	{/if}
+	{#if pickAway && selected}
+		<p class="gmb-msg" role="status">
+			{workerLabel(selected.worker ?? undefined, $workerInstalls, here)} holds the current pick and is not serving fal.ai models right now. The pick is kept.
+		</p>
+	{/if}
 	{#if unavailable.length}
 		<ul class="gmb-unavailable" aria-label="Unavailable providers">
 			{#each unavailable as provider (providerKey(provider) + provider.workers.join())}
@@ -245,11 +265,11 @@
 						<button
 							type="button"
 							class="gmb-row"
-							class:selected={row.model === selectedModel}
-							aria-pressed={row.model === selectedModel}
+							class:selected={isPicked(row)}
+							aria-pressed={isPicked(row)}
 							disabled={!row.available || !ready}
 							title={row.available ? (unpriced && view.detail) || row.description || row.model : row.reason || 'Unavailable'}
-							onclick={() => ready && onpick(row)}
+							onclick={() => ready && onpick(row, listedOperation ?? operation)}
 						>
 							<span class="gmb-row-main">
 								<span class="gmb-row-title">{title}</span>

@@ -93,15 +93,21 @@ async def list_choices(request: Request, token: str = Depends(require_auth)) -> 
 
 
 @router.put("/choices/{kind}")
-async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
+async def save_choice(kind: str, body: SaveChoiceRequest, request: Request, operation: Optional[str] = None,
                       token: str = Depends(require_preference_write)) -> dict:
     """Record a pick as the last choice and, with ``remember``, reuse it next time.
 
     A pick is remembered only after a successful server-side quote priced it;
     otherwise it is kept as the last choice (this pick only) and says why.
+    ``operation`` (default: the kind's text operation) is what the pick is
+    for; a fal model whose inputs do not fit it is refused (422) with the
+    reason, and a remembered pick must also fit the text operation that uses it.
     """
     _kind(kind)
-    quoted = await _save_time_quote(kind, body.choice, request, token)
+    quoted = await _save_time_quote(kind, body.choice, request, token,
+                                    _operations(kind, operation, stored=body.remember))
+    if quoted.get("incompatible"):
+        raise HTTPException(422, f"{quoted['incompatible']} It was not saved.")
     remember = body.remember and quoted["priced"]
     try:
         choice = await run_sync(lambda: generation_choices.save(
@@ -116,20 +122,35 @@ async def save_choice(kind: str, body: SaveChoiceRequest, request: Request,
     return {"kind": kind, "choice": choice, "remembered": remember, **quoted}
 
 
-async def _save_time_quote(kind: str, choice: ChoiceBody, request: Request, token: str) -> dict:
-    return await save_time_quote(kind, choice.model_dump(exclude_none=True), _context(request))
+def _operations(kind: str, operation: Optional[str], *, stored: bool) -> tuple:
+    """The operations a written pick must fit: the one it was picked for and,
+    when it is stored for reuse, the kind's text operation (the only one that
+    reads remembered and pinned picks). Default: the text operation."""
+    picked = _operation(kind, operation)
+    text = _operation(kind, None)
+    return (picked,) if not stored or picked == text else (picked, text)
 
 
-async def save_time_quote(kind: str, choice: dict, context) -> dict:
+async def _save_time_quote(kind: str, choice: ChoiceBody, request: Request, token: str, operations=None) -> dict:
+    return await save_time_quote(kind, choice.model_dump(exclude_none=True), _context(request), operations)
+
+
+async def save_time_quote(kind: str, choice: dict, context, operations=None) -> dict:
     """A fresh server-side quote for a pick that was just saved (also used by
     the agent's ``generationPreferences`` before it remembers a pick).
 
     Never a client-supplied price. Failure to quote does not lose the pick or
     imply it is free; it reports what unattended runs will do with it.
+    ``operations`` (default: the kind's text operation) are what the pick
+    must fit; ``incompatible`` names why it does not, and it is unpriced then.
     """
     from app.core.generation_resolver import UNKNOWN_PRICE
+    if operations is None:
+        from app.core import generation_operations
+        operations = (generation_operations.resolve(kind),)
     try:
-        quoted = await asyncio.wait_for(quote_choice(kind, choice, context), timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
+        quoted = await asyncio.wait_for(quote_choice(kind, choice, context, operations=operations),
+                                        timeout=_SAVE_QUOTE_TIMEOUT_SECONDS)
     except TimeoutError:
         quoted = {"ok": False, "error": "The saved choice's quote timed out. Its worker or provider may be unavailable."}
     except Exception:  # noqa: BLE001 - optional provider quote must not lose a saved pick
@@ -144,7 +165,7 @@ async def save_time_quote(kind: str, choice: dict, context) -> dict:
         warning = "This saved choice has no verified price. Unattended runs will skip it until a price is available."
     return {"price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible, "quote_error": quote_error,
             "unattended_skip_reason": None if eligible else skip_reason,
-            "warning": None if eligible else warning}
+            "warning": None if eligible else warning, "incompatible": quoted.get("incompatible")}
 
 
 @router.delete("/choices/{kind}")
@@ -411,16 +432,19 @@ def _same_pin(a: dict, b: dict) -> bool:
 
 @router.put("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
 async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Request,
+                          operation: Optional[str] = None,
                           token: str = Depends(require_preference_write)) -> dict:
     """Pin a pick for a job's unattended runs. Like remembering, it is written
     only after a successful server-side quote priced it (nothing is
-    submitted); otherwise 409 says why and the job keeps what it had."""
+    submitted); otherwise 409 says why and the job keeps what it had. A fal
+    model whose inputs do not fit ``operation`` and the kind's text operation
+    is refused (422) with the reason."""
     _kind(kind)
     job_id = await _job(job_id)
     pinned = generation_choices.clean(body.model_dump(exclude_none=True))
     if pinned is None or not pinned.get("account") or not pinned.get("worker"):
         raise HTTPException(422, "A job choice must pin its account, worker and model.")
-    quoted = await _save_time_quote(kind, body, request, token)
+    quoted = await _save_time_quote(kind, body, request, token, _operations(kind, operation, stored=True))
     if not quoted["priced"]:
         try:
             stored = (await run_sync(lambda: generation_choices.load_job(_identity(request), job_id))).get(kind)
@@ -428,8 +452,10 @@ async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Req
             stored = None
         if stored is not None and _same_pin(stored, pinned):
             # Saving the job again with the pick it already has is not a new
-            # pin: keep it and say why it will be skipped while unpriced.
+            # pin: keep it and say why it will be skipped (unpriced or unfit).
             return {"job_id": job_id, "kind": kind, "choice": stored, "unchanged": True, **quoted}
+        if quoted.get("incompatible"):
+            raise HTTPException(422, f"{quoted['incompatible']} It was not pinned.")
         why = (quoted["quote_error"] or "This choice is unavailable right now.") \
             if quoted["unattended_skip_reason"] == "stored_choice_unavailable" else "This choice has no verified price."
         raise HTTPException(409, f"{why} It was not pinned; unattended runs skip a step without a priced pick.")
@@ -456,7 +482,10 @@ async def quote(body: QuoteRequest, request: Request, token: str = Depends(requi
     return await quote_choice(_kind(body.kind), body.choice.model_dump(exclude_none=True), _context(request), body.prompt)
 
 
-async def quote_choice(kind: str, choice: dict, context, prompt: str | None = None) -> dict:
+async def quote_choice(kind: str, choice: dict, context, prompt: str | None = None, operations=()) -> dict:
+    """``operations``: a fal model must fit each one's tool (``input_problem``
+    with the pick's options), else ``incompatible`` says why; nothing is priced."""
+    from app.core import generation_operations
     from app.core.generation_resolver import matches, normalize_source, price_total
     from app.services.generation_sources import Sources
 
@@ -470,6 +499,11 @@ async def quote_choice(kind: str, choice: dict, context, prompt: str | None = No
     if len(candidates) != 1:
         return {"ok": False, "error": "This account or model is not available right now."}
     candidate = candidates[0]
+    if candidate.source == "fal":
+        for op in operations:
+            problem = generation_operations.schema_problem(op, candidate.schema, choice.get("options"))
+            if problem:
+                return {"ok": False, "error": problem, "incompatible": problem, "price": candidate.price}
     try:
         prepared = await backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, prompt)
     except ValueError as exc:

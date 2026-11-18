@@ -87,10 +87,18 @@ class GenerationChoices {
 	 * response carries the server's fresh quote and, when unattended runs will
 	 * skip the pick, why. It never submits or approves anything.
 	 */
-	async save(kind: GenerationKind, choice: GenerationChoice, remember: boolean, origin: 'card' | 'settings' = 'card'): Promise<SavedChoice> {
+	async save(
+		kind: GenerationKind,
+		choice: GenerationChoice,
+		remember: boolean,
+		origin: 'card' | 'settings' = 'card',
+		operation?: string
+	): Promise<SavedChoice> {
 		const { origin: _drop, ...body } = choice;
 		void _drop;
-		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}`, {
+		// The server refuses a fal model whose inputs do not fit the call's tool.
+		const q = operation ? `?operation=${encodeURIComponent(operation)}` : '';
+		const response = await api.put<SavedChoice>(`/generation/choices/${encodeURIComponent(kind)}${q}`, {
 			choice: body,
 			remember,
 			origin

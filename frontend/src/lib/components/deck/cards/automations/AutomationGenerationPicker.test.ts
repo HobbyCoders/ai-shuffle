@@ -37,7 +37,8 @@ describe('automation generation picker',() => {
   render(AutomationGenerationPicker,{kind:'image',options:[option],onpick});
   await fireEvent.click(screen.getByRole('button',{name:'All models'}));
   await fireEvent.click(await screen.findByRole('button',{name:/Kling v3/}));
-  await waitFor(() => expect(mocks.optionFor).toHaveBeenCalledWith('image',expect.objectContaining({model:'fal-ai/kling/v3'})));
+  // The detail lookup checks the model against the operation the providers answer listed it for.
+  await waitFor(() => expect(mocks.optionFor).toHaveBeenCalledWith('image',expect.objectContaining({model:'fal-ai/kling/v3'}),'text-to-image'));
   await waitFor(() => expect((screen.getByRole('button',{name:'Pin to this job'}) as HTMLButtonElement).disabled).toBe(false));
   await fireEvent.click(screen.getByRole('button',{name:'Pin to this job'}));
   expect(onpick).toHaveBeenCalledWith(expect.objectContaining({model:'fal-ai/kling/v3',options:{shape:'wide'}}));
@@ -85,6 +86,29 @@ describe('automation generation picker',() => {
   expect(pin().disabled).toBe(true);
   release(kling);
   await waitFor(() => expect(pin().disabled).toBe(false));
+ });
+ it('never quotes the model the user left while the next one is still loading',async () => {
+  const kling={...option,model:'fal-ai/kling/v3',options:{shape:'wide'}};
+  const flux={...option,model:'fal-ai/flux/schnell',options:{shape:'square'}};
+  let release:(v:unknown)=>void=() => {};
+  mocks.quote.mockResolvedValue({ok:true,price:option.price});
+  mocks.providers.mockResolvedValue({kind:'image',operation:'text-to-image',operation_label:'Text to image',providers:[{source:'fal',account:'test-account',worker:'worker-a',workers:['worker-a'],available:true,reason:null,native:false,model_count:2}]});
+  mocks.models.mockResolvedValue({models:[{...kling,status:'available',name:'Kling v3'},{...flux,status:'available',name:'Flux schnell'}],total:2,offset:0,limit:20,has_more:false});
+  mocks.optionFor.mockImplementation((_k:string,row:{model:string}) => row.model===kling.model ? Promise.resolve(kling) : new Promise(resolve => release=resolve));
+  render(AutomationGenerationPicker,{kind:'image',options:[option],onpick:vi.fn(async () => {})});
+  const pin = () => document.querySelector('.picker-actions button') as HTMLButtonElement;
+  await fireEvent.click(screen.getByRole('button',{name:'All models'}));
+  await fireEvent.click(await screen.findByRole('button',{name:/Kling v3/}));
+  await waitFor(() => expect(mocks.optionFor).toHaveBeenCalledTimes(1));
+  await new Promise(r => setTimeout(r,20));
+  await fireEvent.click(screen.getByRole('button',{name:/Flux schnell/}));
+  // Flux's options take longer than the quote debounce: Kling's quote must not go out meanwhile.
+  await new Promise(r => setTimeout(r,600));
+  expect(mocks.quote).not.toHaveBeenCalled();
+  release(flux);
+  await waitFor(() => expect(pin().disabled).toBe(false));
+  expect(mocks.quote).toHaveBeenCalledTimes(1);
+  expect(mocks.quote.mock.calls[0][1].model).toBe('fal-ai/flux/schnell');
  });
  it('lets only the newest quote for the same options settle them (edit X, Y, back to X)',async () => {
   const held: Record<string, ((v: unknown) => void)[]> = {};

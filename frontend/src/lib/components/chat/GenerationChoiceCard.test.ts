@@ -576,6 +576,22 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(recraft.textContent).toContain('$0.04 per image');
 	});
 
+	it('checks a model browsed in Settings against the operation it was listed for, and keeps an unfit one out', async () => {
+		const listing = mocks.get.getMockImplementation()!;
+		const reason = 'This model needs image_url, mask_url, which generateImage does not send.';
+		mocks.get.mockImplementation(async (url: string) =>
+			url.startsWith('/generation/catalog')
+				? { entries: [{ ...RECRAFT, available: false, reason, status: 'unavailable' }], favourites: {}, kinds: ['image'], limit: 1 }
+				: listing(url)
+		);
+		card({ variant: 'settings', answeredBy: undefined, toolId: '' });
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		expect(await screen.findByText(reason)).toBeTruthy();
+		expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/^\/generation\/catalog\?.*operation=text-to-image/));
+		expect(screen.queryByRole('radio', { name: /Picked/ })).toBeNull();
+	});
+
 	it('loads a picked model with its declared options, quotes them live and sends that model back', async () => {
 		card();
 		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
@@ -817,6 +833,30 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(mocks.post.mock.calls[0][1].choice.model).toBe('fal-ai/flux/dev');
 	});
 
+	it('never quotes the model the user left while the next one is still loading', async () => {
+		withModels([row('fal-ai/recraft/v3', 'Recraft V3'), row('fal-ai/flux/dev', 'FLUX dev')],
+			(model) => ({ ...RECRAFT, model, status: 'available' }));
+		const loaded = mocks.get.getMockImplementation()!;
+		let release: () => void = () => {};
+		mocks.get.mockImplementation((url: string) => url.startsWith('/generation/catalog') && url.includes('flux')
+			? new Promise((resolve) => (release = () => resolve(loaded(url))))
+			: loaded(url));
+		mocks.post.mockImplementation(async () => ({ ok: true, priced: true, price: { ...PRICE, amount: '0.04', total: '0.04' } }));
+		card({ options: [] });
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Recraft V3/ }));
+		await waitFor(() => expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/recraft/i));
+		await fireEvent.click(screen.getByRole('button', { name: /FLUX dev/ }));
+		// FLUX's detail takes longer than the quote debounce: Recraft's quote must not go out meanwhile.
+		await new Promise((r) => setTimeout(r, 600));
+		expect(mocks.post).not.toHaveBeenCalled();
+		release();
+		await waitFor(() => expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/flux/i));
+		await waitFor(() => expect(useButton().disabled).toBe(false));
+		expect(mocks.post).toHaveBeenCalledTimes(1);
+		expect(mocks.post.mock.calls[0][1].choice.model).toBe('fal-ai/flux/dev');
+	});
+
 	it('keeps the previous option from being used while a browsed model is still loading', async () => {
 		withModels([row('fal-ai/recraft/v3', 'Recraft V3')], () => ({ ...RECRAFT, status: 'available' }));
 		const loaded = mocks.get.getMockImplementation()!;
@@ -848,6 +888,51 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(await screen.findByText('This model needs mask_url, which editImage does not send.')).toBeTruthy();
 		expect(screen.queryByRole('radio', { name: /Picked/ })).toBeNull();
 		expect(mocks.post).not.toHaveBeenCalledWith('/generation/quote', expect.anything());
+	});
+
+	it('marks the picked row by account, worker and model, and reopens on the pick’s worker', async () => {
+		const listing = mocks.get.getMockImplementation()!;
+		let bGone = false;
+		const fal = (worker: string, name: string) =>
+			({ source: 'fal', account: 'fal-ai', worker, worker_name: name, workers: [worker], available: true, reason: null, native: false, model_count: 1 });
+		mocks.get.mockImplementation(async (url: string) => {
+			const q = new URLSearchParams(url.split('?')[1] ?? '');
+			if (url.startsWith('/generation/providers/image')) {
+				return { kind: 'image', operation: 'text-to-image', operation_label: 'Text to image',
+					providers: bGone ? [fal('worker-a', 'This device')] : [fal('worker-a', 'This device'), fal('worker-b', 'Box-b')] };
+			}
+			if (url.startsWith('/generation/models/image')) {
+				const worker = q.get('worker')!;
+				return { models: [row('fal-ai/same', 'Same Model', { worker })], total: 1, offset: 0, limit: 20, has_more: false, worker, available: true };
+			}
+			if (url.startsWith('/generation/catalog')) {
+				return { entries: [{ ...RECRAFT, model: q.get('model'), worker: q.get('worker'), status: 'available' }], favourites: {}, kinds: ['image'], limit: 1 };
+			}
+			return listing(url);
+		});
+		mocks.post.mockImplementation(async () => ({ ok: true, priced: true, price: { ...PRICE, amount: '0.04', total: '0.04' } }));
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		const providers = await screen.findByRole('radiogroup', { name: 'Provider' });
+		await fireEvent.click(within(providers).getByRole('radio', { name: /fal\.ai · Box-b/ }));
+		await fireEvent.click(await screen.findByRole('button', { name: /Same Model/ }));
+		await waitFor(() => expect(screen.getByRole('button', { name: /Same Model/ }).getAttribute('aria-pressed')).toBe('true'));
+		// The same endpoint on another worker is not the pick.
+		await fireEvent.click(within(providers).getByRole('radio', { name: /fal\.ai · This device/ }));
+		await waitFor(() => expect(mocks.get).toHaveBeenLastCalledWith(expect.stringMatching(/worker=worker-a/)));
+		await waitFor(() => expect(screen.getByRole('button', { name: /Same Model/ }).getAttribute('aria-pressed')).toBe('false'));
+		// Reopened, the browser starts on the pick's worker.
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		const again = await screen.findByRole('radiogroup', { name: 'Provider' });
+		await waitFor(() => expect(within(again).getByRole('radio', { name: /fal\.ai · Box-b/ }).getAttribute('aria-checked')).toBe('true'));
+		// That worker gone, the pick is kept and the browser says where it lives.
+		bGone = true;
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		// The worker's label comes from presence (other tests in this file name worker-b).
+		expect((await screen.findByText(/holds the current pick and is not serving fal\.ai models right now\. The pick is kept\./)).textContent).toMatch(/^\s*(worker-b|DesktopWorker) holds/);
+		expect(screen.getByRole('radio', { name: /Picked/ }).textContent).toMatch(/same/i);
 	});
 
 	it('lists fal once per keyed worker and browses only the picked worker, keeping rows if it goes away', async () => {
