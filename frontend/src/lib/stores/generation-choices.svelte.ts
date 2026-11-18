@@ -93,7 +93,8 @@ class GenerationChoices {
 			origin
 		});
 		this.last = { ...this.last, [kind]: response.choice };
-		if (remember) this.remembered = { ...this.remembered, [kind]: response.choice };
+		// The server remembers a pick only once it priced it.
+		if (remember && response.remembered !== false) this.remembered = { ...this.remembered, [kind]: response.choice };
 		return response;
 	}
 

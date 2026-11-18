@@ -807,7 +807,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
                   "3d": {"art_style": {"type": "string"}, "topology": {"type": "string"},
                          "target_polycount": {"type": "integer"}, "wait_for_completion": {"type": "boolean"}}}.get(kind, {})
         description = (f"Generate {kind}. No source/model: the user's saved choice, else they pick; never pick for them. "
-                       "IDs/schema: searchModels. Unknown prices never run (unattended skips, interactive asks); "
+                       "IDs/schema: searchModels. Unknown prices (price.reason says why) never run unattended; in chat the user asks or approves; "
                        "above-threshold spend needs an approved retry.")
         @tool(name, description, {
             "type": "object", "properties": {**properties, **legacy}, "required": ["prompt"], "additionalProperties": False,
@@ -838,7 +838,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.extend(generation_tool(name, kind) for name, kind in UNIFIED_TOOL_KINDS.items())
 
-    @tool("searchModels", "Look up accounts, exact model IDs, workers, prices and compact declared fields. Use full_schema=true for complete schemas. Unknown prices are never free.", {
+    @tool("searchModels", "Look up accounts, exact model IDs, workers, prices and compact declared fields. Use full_schema=true for complete schemas. Unknown prices are never free; price.reason says why.", {
         "type": "object", "properties": {
             "query": {"type": "string"}, "source": {"type": "string"}, "model": {"type": "string"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},
@@ -898,7 +898,7 @@ def _create_unified_tools(worker, context=None, *, lanes=None, tool_env=None):
 
     tools.append(search_models)
 
-    @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run; unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
+    @tool("runFalModel", "Run a fal model by endpoint ID through price, confirmation and daily-cap checks. Unknown prices never run unattended; in chat the user may approve one run if fal's rate applies. Unattended calls need a stored choice or skip and report. A declared text prompt is required. Prefer the kind's tool; get IDs/schema via searchModels.", {
         "type": "object", "properties": {
             "endpoint_id": {"type": "string"}, "input": {"type": "object"},
             "output_type": {"type": "string", "enum": ["image", "video", "audio", "3d"]},

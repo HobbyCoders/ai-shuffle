@@ -38,6 +38,17 @@ UNREADABLE_SKIP_MESSAGE = ("Generation skipped: the user's saved generation choi
                            "unattended run has no known choice to use. Nothing was submitted.")
 UNREADABLE_CHOOSE_MESSAGE = (" The user's saved generation choices could not be read, so none was used; "
                              "tell them briefly.")
+# The one loosening of "nothing unpriced runs": in a chat turn with the app's
+# permission prompt, the person may approve ONE run of a local fal model whose
+# total cannot be bounded, after seeing fal's raw rate. Unattended runs, remote
+# workers and clients without a prompt keep refusing. Set False to remove it.
+INTERACTIVE_UNPRICED_APPROVAL = True
+# The unknown-price reasons it covers: fal's listed rate applies to the picked
+# options and only the quantity is unknown. Never a missing, failed or
+# inapplicable rate (no_pricing_row, pricing_request_failed, rate_not_listed),
+# an unreadable unit (unsupported_unit), unvalidated options
+# (schema_unavailable, invalid_options) or a prompt-priced call (needs_prompt).
+UNPRICED_APPROVABLE_REASONS = frozenset({"billed_by_usage", "depends_on_input", "needs_option", "length_not_declared"})
 # Validates saved options alone when a remembered choice fails to prepare.
 _NEUTRAL_PROMPT = "A preview of this choice."
 # The chat shows a ``choose`` result as a choice card; the pick arrives as the
@@ -276,7 +287,7 @@ class Candidate:
 
 
 class Backend(Protocol):
-    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None) -> list[Candidate]: ...
+    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None, worker: str | None = None, listing_prices: bool = True) -> list[Candidate]: ...
     async def prepare(self, candidate: Candidate, options: dict, prompt: str) -> Candidate: ...
     async def reserve(self, candidate: Candidate, context: RunContext) -> bool: ...
     async def execute(self, candidate: Candidate, prompt: str, context: RunContext) -> dict: ...
@@ -294,6 +305,29 @@ def price_total(price: dict) -> Decimal | None:
         return total
     except (KeyError, InvalidOperation, TypeError, ValueError):
         return None
+
+
+def money_text(value) -> str:
+    """One text per amount: ``0.28``, ``"0.280"`` and ``"2.80E-1"`` are all ``"0.28"``."""
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return str(value)
+    return f"{amount.normalize():f}" if amount.is_finite() else str(value)
+
+
+def canonical_price(price):
+    """A price with its money fields normalised, for comparing and fingerprinting.
+    Every other field (status, unit, reason, basis) still has to match exactly."""
+    if not isinstance(price, dict):
+        return price
+    return {key: canonical_price(value) if isinstance(value, dict)
+            else money_text(value) if key in ("amount", "total") and type(value) in (str, int, float) else value
+            for key, value in price.items()}
+
+
+def same_price(a, b) -> bool:
+    return canonical_price(a) == canonical_price(b)
 
 
 def matches(candidate: Candidate, choice: dict) -> bool:
@@ -356,6 +390,60 @@ class Resolver:
         except ValueError:
             return False
         return True
+
+    async def _price_changed(self, kind, candidate, prompt) -> dict | None:
+        """After the owner approved a fal price on the prompt, read fal's rate
+        again; a different price is re-quoted (refused), never submitted."""
+        if candidate.source != "fal":
+            return None
+        try:
+            again = await self.backend.prepare(candidate, candidate.options, prompt)
+        except ValueError as exc:
+            return result("refused", price=candidate.price, reason="invalid_request", error=str(exc))
+        if same_price(again.price, candidate.price):
+            return None
+        return result("refused", price=again.price, reason="price_changed", kind=kind, choice=candidate.choice(),
+                      error="fal's price changed while waiting for approval; nothing was submitted. Ask again for the new price.")
+
+    def _may_ask_unpriced(self, candidate, context) -> bool:
+        """INTERACTIVE_UNPRICED_APPROVAL applies: see its comment."""
+        local = getattr(self.backend, "local_worker", None)
+        price = candidate.price or {}
+        rate = price.get("rate")
+        return (INTERACTIVE_UNPRICED_APPROVAL and not context.unattended and context.spend_prompt is not None
+                and price.get("reason") in UNPRICED_APPROVABLE_REASONS
+                and candidate.source == "fal" and isinstance(rate, dict) and local is not None
+                and hasattr(self.backend, "reserve_amount") and candidate.worker == local())
+
+    async def _run_unpriced(self, kind, candidate, prompt, context) -> dict:
+        """One owner-approved run with no bounded total. The permission prompt
+        states fal's rate and that the total is not bounded; nothing here
+        accepts a receipt or an agent's ``confirmed``. The cap check reserves
+        one billing unit (the least it can cost) and refuses a day already at
+        the cap."""
+        if context.not_the_approved_call is not None:
+            from app.core import owner_confirm
+            from app.core.generation_confirmations import SPEND_TOOL, spend_request
+
+            if not owner_confirm.is_approved_call(context.session_id, SPEND_TOOL, spend_request(kind, candidate, prompt)):
+                return await context.not_the_approved_call()
+        declined = await context.spend_prompt(kind, candidate, prompt)
+        if declined is not None:
+            return result("refused", price=candidate.price, reason="declined", kind=kind,
+                          choice=candidate.choice(), error=declined)
+        if (changed := await self._price_changed(kind, candidate, prompt)) is not None:
+            return changed
+        try:
+            reserved = await self.backend.reserve_amount(Decimal(str(candidate.price["rate"]["amount"])))
+        except (ValueError, InvalidOperation, KeyError) as exc:
+            return result("refused", price=candidate.price, reason="budget_unavailable", error=str(exc))
+        if not reserved:
+            return result("refused", price=candidate.price, reason="daily_cap", error="The daily spending cap would be exceeded.")
+        output = await self.backend.execute(candidate, prompt, context)
+        if not isinstance(output, dict) or not output.get("success"):
+            output = no_retry(output)
+        return result("completed" if output.get("success") else "failed", price=candidate.price,
+                      choice=candidate.choice(), result=output, unpriced_approved=True)
 
     async def _generate_on_approved_wake(self, kind, args, context, exclude_sources) -> dict:
         """A call on a wake carrying the owner's Approve of one spend (#523).
@@ -454,11 +542,18 @@ class Resolver:
         if choice is None:
             choice = {"source": args.get("source"), "model": args.get("model"), "worker": args.get("worker")}
         source = normalize_source(choice.get("source") or choice.get("account"))
+
+        async def find(listing_prices):
+            found = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt,
+                                               worker=choice.get("worker"), listing_prices=listing_prices)
+            return [c for c in found if matches(c, {k: v for k, v in choice.items() if k != "source"})
+                    and (not source or source in (c.source, c.account)) and c.source not in exclude_sources]
+
+        # A named model is prepared (priced fresh) next, so it skips listing
+        # rates; a choice card needs them and lists again below.
+        named = bool((explicit or stored) and choice.get("model"))
         try:
-            candidates = await self.backend.catalog(kind, source=source, model=choice.get("model"), limit=4, prompt=prompt,
-                                                    worker=choice.get("worker"))
-            candidates = [c for c in candidates if matches(c, {k: v for k, v in choice.items() if k != "source"})
-                          and (not source or source in (c.source, c.account)) and c.source not in exclude_sources]
+            candidates = await find(not named)
             if (explicit or stored) and any(c.available for c in candidates):
                 # An unreachable or old peer cannot make a named choice ambiguous
                 # when a usable candidate matches; it never runs either way.
@@ -473,6 +568,10 @@ class Resolver:
             if (not stored and not explicit) or len(candidates) != 1:
                 if context.not_the_approved_call is not None:
                     return await context.not_the_approved_call()
+                if named:
+                    candidates = await find(True)
+                    if any(c.available for c in candidates):
+                        candidates = [c for c in candidates if c.available]
                 last = context.last_for(kind)
                 if last and follow_account:
                     last = await follow_account(last)
@@ -537,9 +636,13 @@ class Resolver:
                     return result("skipped", price=candidate.price, reason="stored_choice_unpriced", kind=kind,
                                   choice=candidate.choice(), message=UNPRICED_SKIP_MESSAGE)
                 return await reoffer("remembered_unpriced")
+            if total is None and self._may_ask_unpriced(candidate, context):
+                return await self._run_unpriced(kind, candidate, prompt, context)
             if total is None:
+                detail = candidate.price.get("detail") if isinstance(candidate.price, dict) else None
                 return result("refused", price=candidate.price, reason="price_unavailable",
-                              error="A reliable price is unavailable; generation was not submitted.", choice=candidate.choice())
+                              error=f"A reliable price is unavailable{f' ({detail.rstrip(chr(46))})' if detail else ''}; "
+                                    "generation was not submitted.", choice=candidate.choice())
             if context.not_the_approved_call is not None:
                 from app.core import owner_confirm
                 from app.core.generation_confirmations import SPEND_TOOL, spend_request
@@ -548,7 +651,7 @@ class Resolver:
                                                       spend_request(kind, candidate, prompt)):
                     return await context.not_the_approved_call()
             fingerprint = hashlib.sha256(json.dumps(
-                [kind, prompt, context.session_id, candidate.choice(), candidate.price],
+                [kind, prompt, context.session_id, candidate.choice(), canonical_price(candidate.price)],
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             expensive = max(total, Decimal(str(candidate.price["amount"]))) > CONFIRM_ABOVE_USD
             if expensive:
@@ -571,6 +674,8 @@ class Resolver:
                     if declined is not None:
                         return result("refused", price=candidate.price, reason="declined", kind=kind,
                                       choice=candidate.choice(), error=declined)
+                    if (changed := await self._price_changed(kind, candidate, prompt)) is not None:
+                        return changed
                     approved = True
                 if not approved:
                     if len(self._confirmations) >= 256:

@@ -16,7 +16,7 @@ def _create_generation_tools(
         "Read, remember or forget generation picks for image/video/audio/3d. "
         "Use searchModels IDs, never guess. Optional job_id scopes a pick to an existing "
         "automation (pin account and worker). Writes need the user's acknowledgment "
-        "and confirm=true. Saves do not generate, verify availability or approve spending; "
+        "and confirm=true. Only a pick with a verified price is remembered. Saves do not generate or approve spending; "
         "the next turn rechecks choices, price and caps.",
         {
             "type": "object",
@@ -55,6 +55,33 @@ def _create_generation_tools(
             return _error(
                 "Explain the change and get the user's acknowledgment, then set confirm=true."
             )
+
+        if action == "remember" and args.get("job_id") is None:
+            # The same rule as the card: a pick is remembered only after a fresh
+            # server-side quote priced it, so a working default is never
+            # replaced by one every run would refuse or skip.
+            from app.api.generation_choices import save_time_quote
+            from app.core import generation_choices as choices
+            from app.core.generation_resolver import RunContext
+
+            try:
+                value = choices.clean(args.get("choice"))
+            except (ValueError, TypeError):
+                value = None
+            if value is None:
+                return _error("A remembered pick needs a choice with a model from searchModels.")
+            quoted = await save_time_quote(kind, value, RunContext(unattended=False, owner=True))
+            if not quoted["priced"]:
+                price = quoted["price"] or {}
+                if quoted["unattended_skip_reason"] == "stored_choice_unavailable":
+                    why = quoted["quote_error"] or "This choice is unavailable right now."
+                else:
+                    reason = price.get("reason") or "unknown"
+                    detail = str(price.get("detail") or "").rstrip(". ")
+                    why = f"It has no verified price ({reason}{': ' + detail if detail else ''})."
+                return _tool_result({"success": False, "remembered": False, "kind": kind, "price": price,
+                                     "error": f"Not remembered. {why} The current default is unchanged; "
+                                              "the user can still pick it for a single run."})
 
         def apply() -> dict:
             from app.core import generation_choices as choices

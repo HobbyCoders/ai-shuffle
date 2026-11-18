@@ -19,8 +19,10 @@ round-trip per model selection would make the picker feel sluggish.
 """
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field, asdict
+from decimal import Decimal, ROUND_CEILING
 from typing import Any, Optional
 
 import httpx
@@ -70,6 +72,70 @@ _FILE_NAME_HINTS = (
 )
 
 
+class PricingUnknown(ValueError):
+    """Why a declared fal rate could not become a bounded price.
+
+    ``reason`` is machine-readable (see ``app.services.fal_pricing.REASONS``);
+    the message is a short sentence safe to show the owner and the agent.
+    """
+
+    def __init__(self, reason: str, message: str):
+        super().__init__(message)
+        self.reason = reason
+
+
+# Units fal bills by what the run consumed, which no declared option bounds.
+_USAGE_UNITS = ("unit", "units", "credit", "credits", "compute second", "compute seconds", "")
+# Units counted on the caller's input media, unknown until the media is read.
+_INPUT_UNITS = re.compile(r"(?:\d+ )?(?:frames?|input seconds?|processed seconds?)")
+# Short side in pixels for the resolution labels fal video models declare.
+_FOLLOWS_INPUT = re.compile(r"\bmatch(?:es|ing)?\b[^.]{0,30}\b(?:input|source)\b")
+_RESOLUTION_LINES = re.compile(r"(\d{3,4})p")
+# A duration's unit, only where the text states the field's own unit:
+# a range of its values ("4 to 30 seconds", "4-30s", "(0.5-22)s"), or a
+# sentence whose subject is the field ("Clip length (seconds)", "Duration of
+# the video in seconds", "How long the audio is, in seconds", "Number of
+# seconds ...", "Seconds of video"). Sentences about how long the work takes
+# are dropped first (``_value_sentences``), so no form or range ever reads them.
+_DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?|hrs?|s"
+_RANGE = re.compile(
+    rf"(?<![\d.])(\d+(?:\.\d+)?)\s*({_DURATION_WORDS})?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*\)?\s*({_DURATION_WORDS})\b", re.I)
+_SUBJECT = r"(?:[\w'-]+\s+){0,4}?(?:duration|length)"
+_SUBJECT_UNIT = [
+    re.compile(rf"^{_SUBJECT}\s*\(\s*(?:in\s+)?({_DURATION_WORDS})\s*\)", re.I),
+    re.compile(rf"^(?:{_SUBJECT}\b|how\s+long\b)[^.;!?]{{0,60}}?\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+    re.compile(rf"^(?:the\s+)?(?:number\s+of\s+({_DURATION_WORDS})\b|({_DURATION_WORDS})\s+(?:of|for)\b)", re.I),
+    # The noun and its unit side by side: "... audio length in seconds".
+    re.compile(rf"\b(?:duration|length)\s+in\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+]
+# A sentence with any of these is about how long the work takes, not the value.
+_WORK_TIME = re.compile(r"\b(?:render\w*|process\w*|complet\w*|finish\w*|takes?|took|taking|wait\w*|retr(?:y|ies|ied|ying)"
+                        r"|time\s*outs?|timeouts?|queue\w*|latency|runtime)\b", re.I)
+
+
+def _value_sentences(text: str | None) -> list[str]:
+    """The sentences of ``text`` that are not about work time."""
+    return [s for s in re.split(r"(?<=[.;!?])\s+", (text or "").strip()) if s and not _WORK_TIME.search(s)]
+
+
+def _unit_of(word: str) -> str:
+    word = word.casefold()
+    if word == "ms" or word.startswith("mil"):
+        return "ms"
+    return "h" if word.startswith("h") else "min" if word.startswith("m") else "s"
+
+
+# The widest aspect ratio any fal video model declares; used when the model
+# chooses ("auto") and declares no list to bound it.
+_WIDEST_RATIO = Decimal(21) / Decimal(9)
+# fal's own token formula for ByteDance video (tokens = width * height *
+# seconds * 24 / 1024) is documented as "roughly", and its listed per-token
+# rate holds for 480p/720p while 1080p costs about 9% more per token. This
+# margin keeps every documented per-second figure covered (480p, 720p, 1080p).
+_TOKEN_MARGIN = Decimal("1.15")
+_TOKEN_MAX_LINES = 1080
+
+
 @dataclass
 class ParamField:
     """A single normalized input parameter for a model."""
@@ -114,7 +180,8 @@ class ModelSchema:
             raise ValueError("Unknown model option; use the model's declared parameters.")
         values = {} if partial else {f.name: f.default for f in self.fields if f.default is not None}
         values.update(options)
-        if not self.primary_text_field:
+        # Saved settings and quotes need no prompt; a request does.
+        if not self.primary_text_field and not partial:
             raise ValueError("This model has no declared text input.")
         if self.primary_text_field in options:
             raise ValueError("Pass the prompt separately, not in options.")
@@ -174,48 +241,57 @@ class ModelSchema:
                 raise ValueError(f"Invalid model option: {name}.")
         return values
 
-    def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None):
+    def pricing_quantity(self, unit: str, options: dict, prompt: str | None = None, notes: list | None = None):
         """Conservative billable units from this model's declared parameters.
 
         fal's documented ImageSize presets have fixed pixel dimensions. For an
         unresolved size, only a fully understood enum can bound the largest
-        allowed output; arbitrary resolution labels and tokens are not guessed.
-        Missing duration units or text lengths leave the price unknown. Whole
-        billing units round up so a fractional block cannot under-reserve the cap.
+        allowed output; arbitrary resolution labels are not guessed. A duration
+        the model picks itself ("auto" or unset) is bounded by the largest value
+        it declares. Whole billing units round up so a fractional block cannot
+        under-reserve the cap. ``notes`` collects each assumption for display.
+        Raises :class:`PricingUnknown` (a ValueError) with a reason otherwise.
         """
-        from decimal import Decimal, ROUND_CEILING
-        import re
-
+        notes = notes if notes is not None else []
         fields = {f.name: f for f in self.fields}
+
         def number(value):
             if type(value) not in (int, float, str):
-                raise ValueError("Unknown billable quantity.")
-            value = Decimal(str(value))
+                raise PricingUnknown("invalid_options", "Unknown billable quantity.")
+            try:
+                value = Decimal(str(value))
+            except ArithmeticError:
+                raise PricingUnknown("invalid_options", "Unknown billable quantity.") from None
             if not value.is_finite() or value <= 0:
-                raise ValueError("Unknown billable quantity.")
+                raise PricingUnknown("invalid_options", "Unknown billable quantity.")
             return value
 
         count_fields = [name for name in ("num_images", "number_of_images", "num_outputs", "num_videos", "num_samples", "batch_size")
                         if name in fields and name in options]
         if len(count_fields) > 1:
-            raise ValueError("Ambiguous output count.")
+            raise PricingUnknown("invalid_options", "Ambiguous output count.")
         count = number(options[count_fields[0]]) if count_fields else Decimal(1)
         if count != count.to_integral_value() or count > 100:
-            raise ValueError("Invalid output count.")
+            raise PricingUnknown("invalid_options", "Invalid output count.")
         unit = re.sub(r"\s+", " ", unit.strip().casefold())
         if unit.startswith("per "):
             unit = unit[4:]
         unit = {"requests": "request", "inferences": "inference", "images": "image",
                 "videos": "video", "audios": "audio", "meshes": "mesh",
                 "generations": "generation", "characters": "character",
-                "seconds": "second", "minutes": "minute", "megapixels": "megapixel"}.get(unit, unit)
+                "seconds": "second", "minutes": "minute", "megapixels": "megapixel",
+                "processed megapixels": "processed megapixel", "cloned voices": "cloned voice"}.get(unit, unit)
         if unit in ("request", "inference"):
             return Decimal(1), Decimal(1)
-        if unit in ("image", "video", "audio", "mesh", "3d", "generation"):
+        if unit in ("image", "video", "audio", "mesh", "3d", "generation", "cloned voice"):
             return Decimal(1), count
+        if unit in _USAGE_UNITS:
+            raise PricingUnknown("billed_by_usage", "fal bills this model by what each run uses, which is not known in advance.")
+        if _INPUT_UNITS.fullmatch(unit):
+            raise PricingUnknown("depends_on_input", "The cost depends on the length of the input media.")
         if unit in ("character", "characters", "1k chars", "1000 characters", "1000 utf-8 bytes"):
             if prompt is None or not prompt:
-                raise ValueError("Text length is needed for pricing.")
+                raise PricingUnknown("needs_prompt", "Priced by text length; the prompt is needed for a price.")
             divisor = 1 if unit == "character" else 1000
             length = len(prompt.encode("utf-8")) if unit == "1000 utf-8 bytes" else len(prompt)
             quantity = (Decimal(length) / divisor).to_integral_value(rounding=ROUND_CEILING)
@@ -223,33 +299,16 @@ class ModelSchema:
         duration_unit = re.fullmatch(r"(?:(\d+) )?(seconds?|minutes?)", unit)
         if duration_unit:
             block_seconds = number(duration_unit[1] or 1) * (60 if duration_unit[2].startswith("minute") else 1)
-            durations = []
-            for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds", "music_duration"):
-                if name not in fields or name not in options:
-                    continue
-                field = fields[name]
-                value = str(options[name])
-                match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", value)
-                if not match:
-                    continue
-                declaration = " ".join((name, field.title, field.description)).lower()
-                suffix = match[2]
-                if suffix:
-                    in_minutes = suffix.startswith("m")
-                elif "millisecond" in declaration:
-                    continue
-                elif "minute" in declaration:
-                    in_minutes = True
-                elif "second" in declaration or name in ("duration_sec", "seconds"):
-                    in_minutes = False
-                else:
-                    continue
-                durations.append(number(match[1]) * (60 if in_minutes else 1))
-            if len(durations) != 1:
-                raise ValueError("No unambiguous declared duration in seconds.")
-            quantity = durations[0] / block_seconds
+            quantity = self._seconds(options, notes) / block_seconds
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
-        if unit in ("megapixel", "megapixels"):
+        token_unit = re.fullmatch(r"(\d+)?\s*(k|m)?\s*tokens?", unit)
+        if token_unit:
+            per = Decimal(token_unit[1] or 1) * {"k": 1000, "m": 1_000_000, None: 1}[token_unit[2]]
+            return self._video_tokens(options, notes) / per, count
+        if unit in ("megapixel", "processed megapixel"):
+            if unit == "processed megapixel" and self._has_media_input(options, "image"):
+                # Input images are billed too, at sizes only the files declare.
+                raise PricingUnknown("depends_on_input", "The cost includes the input images' size.")
             dimensions = options.get("image_size") if "image_size" in fields else None
             if isinstance(dimensions, str) and dimensions in _IMAGE_SIZE_PRESETS:
                 width, height = _IMAGE_SIZE_PRESETS[dimensions]
@@ -261,11 +320,203 @@ class ModelSchema:
                 if allowed and all(isinstance(size, str) and size in _IMAGE_SIZE_PRESETS for size in allowed):
                     width, height = max((_IMAGE_SIZE_PRESETS[size] for size in allowed), key=lambda size: size[0] * size[1])
                     dimensions = {"width": width, "height": height}
+                    notes.append(f"largest size {width}×{height}")
             if not isinstance(dimensions, dict) or any(type(dimensions.get(k)) is not int for k in ("width", "height")):
-                raise ValueError("Declared pixel dimensions or a bounded ImageSize preset are required.")
+                raise PricingUnknown("needs_option", "Priced per megapixel; choose a declared output size for a price.")
             quantity = number(dimensions["width"]) * number(dimensions["height"]) / 1_000_000
             return quantity.to_integral_value(rounding=ROUND_CEILING), count
-        raise ValueError("Unsupported declared pricing unit.")
+        raise PricingUnknown("unsupported_unit", f"Pricing unit \"{unit}\" is not supported yet.")
+
+    def _declared_max(self, field: "ParamField") -> Decimal | None:
+        """The field's largest value from its structure: enum, maximum."""
+        candidates = []
+        for item in field.enum or []:
+            try:
+                candidates.append(Decimal(str(item).rstrip("s")))
+            except ArithmeticError:
+                continue
+        raw = ((self.input_schema or {}).get("properties") or {}).get(field.name) or {}
+        for variant in [raw, *(raw.get("anyOf") or []), *(raw.get("oneOf") or [])]:
+            if isinstance(variant, dict) and isinstance(variant.get("maximum"), (int, float)):
+                candidates.append(Decimal(str(variant["maximum"])))
+        if field.maximum is not None:
+            candidates.append(Decimal(str(field.maximum)))
+        candidates = [c for c in candidates if c.is_finite() and c > 0]
+        return max(candidates) if candidates else None
+
+    @staticmethod
+    def _prose_range(field: "ParamField"):
+        """A range stated in prose: unit-bearing ("4 to 30s") or a bare
+        parenthesised one ("Duration in seconds (0.5-30)")."""
+        text = " ".join(_value_sentences(field.description))
+        return _RANGE.search(text) or re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text)
+
+    def _bound(self, field: "ParamField", value):
+        """A declared number, or the field's own largest value when the model
+        chooses (``auto``/unset). None when nothing declared bounds it."""
+        if value not in (None, "", "auto", "adaptive", "default"):
+            return value, False
+        top = self._declared_max(field)
+        if top is None and (span := self._prose_range(field)):
+            top = Decimal(span[3] if span.re is _RANGE else span[2])
+            top = top if top.is_finite() and top > 0 else None
+        return top, True
+
+    @staticmethod
+    def _enum_suffix(field: "ParamField") -> str | None:
+        """The unit every numeric enum value carries (``"5s"``, ``"10s"``)."""
+        units = {m[1] for item in field.enum or []
+                 if (m := re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*(s|sec|seconds?|m|min|minutes?)", str(item)))}
+        values = [i for i in field.enum or [] if str(i) not in ("auto", "adaptive", "default")]
+        return units.pop() if len(units) == 1 and values and all(
+            re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*[a-z]+", str(i)) for i in values) else None
+
+    def _value_units(self, field: "ParamField", name: str) -> set:
+        """Units declared for this field's own value, from structure only:
+        (a) the field's name; (b) a unit every enum value carries; (c) a range
+        of values with its unit that is the field's bound or agrees with its
+        declared maximum; (d) a sentence whose subject is the field and that
+        names its unit (``_SUBJECT_UNIT``). Any other unit word is ignored."""
+        units = set()
+        if name in ("duration_seconds", "duration_sec", "seconds"):
+            units.add("s")
+        elif name == "duration_minutes":
+            units.add("min")
+        elif name.endswith("_ms"):
+            units.add("ms")
+        if suffix := self._enum_suffix(field):
+            units.add(_unit_of(suffix))
+        units.update(self._prose_units(field)[0])
+        return units
+
+    def _prose_units(self, field: "ParamField") -> tuple[set, list]:
+        """Units the field's title/description declare (forms (c) and (d)
+        above) and which form matched, for the catalog audit."""
+        units, forms = set(), []
+        top = self._declared_max(field)
+        description = " ".join(_value_sentences(field.description))
+        first = _RANGE.search(description)
+        for m in _RANGE.finditer(description):
+            # The range agrees with the declared maximum or, with none, is the
+            # bound itself (the one ``_bound`` reads).
+            if (Decimal(m[3]) == top) if top is not None else m.start() == first.start():
+                units.update(_unit_of(u) for u in (m[2], m[4]) if u)
+                forms.append(("range", m[0]))
+        for sentence in _value_sentences(field.title) + _value_sentences(field.description):
+            for index, form in enumerate(_SUBJECT_UNIT):
+                if m := form.search(sentence):
+                    units.add(_unit_of(next(g for g in reversed(m.groups()) if g)))
+                    forms.append((("subject (unit)", "subject … in unit", "number of unit / unit of",
+                                   "noun in unit")[index], m[0]))
+        return units, forms
+
+    def _seconds(self, options: dict, notes: list) -> Decimal:
+        fields = {f.name: f for f in self.fields}
+        durations = []
+        for name in ("duration", "duration_seconds", "duration_sec", "duration_minutes", "seconds", "music_duration",
+                     "duration_ms", "music_length_ms"):
+            if name not in fields:
+                continue
+            field = fields[name]
+            declaration = " ".join((name, field.title, field.description)).lower()
+            chosen = options.get(name)
+            if chosen in (None, "", 0, "0") and _FOLLOWS_INPUT.search(declaration):
+                raise PricingUnknown("depends_on_input", "Priced per second, and unless you set a length it follows the input media.")
+            value, bounded = self._bound(field, chosen)
+            if value is None:
+                continue
+            match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", str(value))
+            if not match:
+                continue
+            units = self._value_units(field, name)
+            if match[2]:
+                units.add(_unit_of(match[2]))
+            # Exactly one unit, tied to this field's value; milliseconds only
+            # where the model names the field so, never hours.
+            scale = {"s": Decimal(1), "min": Decimal(60), "ms": Decimal("0.001")}
+            if len(units) != 1 or (unit := units.pop()) not in scale or (unit == "ms" and not name.endswith("_ms")):
+                continue
+            seconds = Decimal(match[1]) * scale[unit]
+            if not seconds.is_finite() or seconds <= 0:
+                continue
+            if bounded:
+                notes.append(f"length up to {seconds.normalize():f} s (the model picks it)")
+            durations.append(seconds)
+        if not durations and (frames := self._frame_seconds(options, notes)) is not None:
+            return frames
+        if len(durations) != 1:
+            if any(f.name in ("duration", "duration_seconds", "seconds") for f in self.fields):
+                raise PricingUnknown("needs_option", "Priced per second, but the model does not declare its length in seconds.")
+            if any(f.is_file or (f.type == "array" and any(m in f.name for m in ("audio", "video")))
+                   for f in self.fields if any(m in f.name for m in ("audio", "video", "image"))):
+                raise PricingUnknown("depends_on_input", "Priced per second of output, and the length follows the input media.")
+            raise PricingUnknown("length_not_declared", "Priced per second, and the model sets its own length without a declared limit.")
+        return durations[0]
+
+    def _frame_seconds(self, options: dict, notes: list) -> Decimal | None:
+        """Length of a model declaring frames and a frame rate: frames / fps.
+        The rate is the lower of the chosen and default fps, so a faster
+        frame rate never prices below fal's per-second rate at the default."""
+        fields = {f.name: f for f in self.fields}
+        rate_name = next((n for n in ("frames_per_second", "fps", "frame_rate") if n in fields), None)
+        if "num_frames" not in fields or rate_name is None:
+            return None
+        frames, bounded = self._bound(fields["num_frames"], options.get("num_frames"))
+        rates = [options.get(rate_name), fields[rate_name].default]
+        try:
+            frames = Decimal(str(frames))
+            fps = min(Decimal(str(r)) for r in rates if r not in (None, ""))
+        except (ArithmeticError, ValueError):
+            return None
+        if not (frames.is_finite() and fps.is_finite() and frames > 0 and fps > 0):
+            return None
+        interpolated = options.get("num_interpolated_frames")
+        if options.get("adjust_fps_for_interpolation") is False and isinstance(interpolated, int) and interpolated > 0:
+            frames *= 1 + interpolated
+        seconds = frames / fps
+        notes.append(f"{frames.normalize():f} frames at {fps.normalize():f} fps"
+                     + (" (the most the model allows)" if bounded else ""))
+        return seconds
+
+    def _has_media_input(self, options: dict, media: str) -> bool:
+        for name, value in options.items():
+            lname = name.lower()
+            if media in lname and ("url" in lname or name in (media, media + "s")) and value not in (None, "", []):
+                return True
+        return False
+
+    def _video_tokens(self, options: dict, notes: list) -> Decimal:
+        """fal's documented ByteDance formula: width * height * seconds * 24 / 1024."""
+        fields = {f.name: f for f in self.fields}
+        if "resolution" not in fields or not any(n in fields for n in ("duration", "duration_seconds")):
+            raise PricingUnknown("unsupported_unit", "Token pricing is only understood for video with a declared resolution and length.")
+        resolution = options.get("resolution") or fields["resolution"].default
+        label = str(resolution or "").strip().casefold()
+        lines = _RESOLUTION_LINES.fullmatch(label)
+        lines = Decimal(lines[1]) if lines else {"2k": Decimal(1440), "4k": Decimal(2160)}.get(label)
+        # Whether the rate applies is settled before anything about the input.
+        if lines is None or lines > _TOKEN_MAX_LINES:
+            raise PricingUnknown("rate_not_listed", f"fal lists no token rate for {resolution}.")
+        if self._has_media_input(options, "video") or str(options.get("task", "")).casefold() in ("editing", "extension"):
+            raise PricingUnknown("depends_on_input", "Input video length is billed too and is not known in advance.")
+        ratio = None
+        aspect = options.get("aspect_ratio")
+        parsed = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", str(aspect or ""))
+        if parsed and Decimal(parsed[1]) > 0 and Decimal(parsed[2]) > 0:
+            ratio = Decimal(parsed[1]) / Decimal(parsed[2])
+        else:
+            declared = []
+            for item in (fields.get("aspect_ratio").enum or []) if "aspect_ratio" in fields else []:
+                found = re.fullmatch(r"(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)", str(item))
+                if found and Decimal(found[1]) > 0 and Decimal(found[2]) > 0:
+                    declared.append(Decimal(found[1]) / Decimal(found[2]))
+            ratio = max(declared, key=lambda r: max(r, 1 / r)) if declared else _WIDEST_RATIO
+            notes.append("widest allowed shape (the model picks it)")
+        long_side = (lines * max(ratio, 1 / ratio)).to_integral_value(rounding=ROUND_CEILING)
+        seconds = self._seconds(options, notes)
+        tokens = (lines * long_side * seconds * 24 / 1024 * _TOKEN_MARGIN).to_integral_value(rounding=ROUND_CEILING)
+        notes.append(f"about {tokens:,} tokens for {seconds.normalize():f} s at {lines}p, with a 15% margin")
+        return tokens
 
     def to_dict(self) -> dict:
         return {
@@ -355,6 +606,11 @@ def _is_file_field(name: str, prop: dict) -> bool:
     # and arrays. Only strings can be a single file/URL input.
     if prop.get("type") not in (None, "string"):
         return False
+    variants = [v for v in (prop.get("anyOf") or prop.get("oneOf") or []) if isinstance(v, dict)]
+    if any("$ref" in v or v.get("enum") or v.get("type") not in (None, "string", "null") for v in variants):
+        # A union such as image_size (preset name or {width, height}) is a
+        # setting, not an upload.
+        return False
     fmt = prop.get("format")
     lname = name.lower()
     if any(hint in lname for hint in _FILE_NAME_HINTS):
@@ -370,6 +626,11 @@ def _is_file_field(name: str, prop: dict) -> bool:
 
 def _normalize_field(name: str, prop: dict, required: bool, root: dict) -> ParamField:
     prop = _deref(prop, root)
+    variants = [v for v in (prop.get("anyOf") or prop.get("oneOf") or []) if isinstance(v, dict)]
+    concrete = [v for v in variants if v.get("type") != "null"]
+    if len(concrete) == 1 and len(variants) == 2 and "$ref" not in concrete[0]:
+        # An optional value ("number or null") keeps its real type and bounds.
+        prop = {**concrete[0], **{k: v for k, v in prop.items() if k not in ("anyOf", "oneOf")}}
     json_type = prop.get("type")
     enum = prop.get("enum")
 
