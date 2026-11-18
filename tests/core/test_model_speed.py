@@ -651,6 +651,83 @@ async def test_interleaved_fan_outs_end_on_the_parents_latest_tier(monkeypatch):
     assert rows["child"]["tier"] == rows["parent"]["tier"] == "fast"
 
 
+async def _until(check, timeout=1.0):
+    async def poll():
+        while not check():
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(poll(), timeout)
+
+
+def _sent_tier(body):
+    return body.get("speed") or ("fast" if body["fast"] else "standard")
+
+
+@pytest.mark.asyncio
+async def test_a_silent_remote_subagent_never_holds_up_the_local_ones(monkeypatch):
+    """The Fast hand-down waits on a peer that never answers; the switch to
+    Ultrafast still reaches the local worker at once."""
+    rows = {"parent": {"tier": "fast"}, "child": {"model": "m", "tier": "standard"},
+            "remote": {"model": "m"}}
+    _tree(monkeypatch, rows, {"parent": ["child", "remote"]})
+    monkeypatch.setattr("app.core.model_override.fast_mode_supported", lambda model, provider: True)
+    monkeypatch.setattr("app.core.model_override.ultrafast_supported", lambda model, provider: True)
+    answered, sent = asyncio.Event(), []
+
+    async def silent(owner, action, body):
+        sent.append(_sent_tier(body))
+        await answered.wait()
+        return {"fast": body["fast"]}
+
+    monkeypatch.setattr(api.control, "call", silent)
+    first = asyncio.create_task(api.propagate_fast("parent", True, speed="fast"))
+    await _until(lambda: sent == ["fast"])
+    assert rows["child"]["tier"] == "fast"
+    rows["parent"]["tier"] = "ultrafast"
+    second = asyncio.create_task(api.propagate_fast("parent", True, speed="ultrafast"))
+    try:
+        await _until(lambda: rows["child"]["tier"] == "ultrafast")
+    finally:
+        answered.set()
+        await asyncio.gather(first, second)
+    assert sent == ["fast", "ultrafast"]
+
+
+@pytest.mark.asyncio
+async def test_sends_to_one_remote_subagent_go_out_in_order_ending_on_the_latest_tier(monkeypatch):
+    """The parent switches twice while its first send to a remote worker is
+    still out: the sends go one at a time, and the last carries the tier the
+    parent runs now."""
+    rows = {"parent": {"tier": "fast"}, "remote": {"model": "m"}}
+    _tree(monkeypatch, rows, {"parent": ["remote"]})
+    gates, sent, in_flight = [], [], []
+
+    async def call(owner, action, body):
+        in_flight.append(body)
+        assert len(in_flight) == 1
+        sent.append(_sent_tier(body))
+        gate = asyncio.Event()
+        gates.append(gate)
+        try:
+            await gate.wait()
+        finally:
+            in_flight.remove(body)
+        return {"fast": body["fast"]}
+
+    monkeypatch.setattr(api.control, "call", call)
+    fan_outs = [asyncio.create_task(api.propagate_fast("parent", True, speed="fast"))]
+    await _until(lambda: sent == ["fast"])
+    for tier in ("ultrafast", "standard"):
+        rows["parent"]["tier"] = tier
+        fan_outs.append(asyncio.create_task(api.propagate_fast("parent", tier != "standard", speed=tier)))
+        await asyncio.sleep(0.02)
+    assert sent == ["fast"]  # still one at a time
+    while not all(task.done() for task in fan_outs):
+        for gate in gates:
+            gate.set()
+        await asyncio.sleep(0.01)
+    assert len(sent) == 3 and sent[-1] == "standard"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pinned", [False, True])
 async def test_a_queued_turn_the_parent_started_runs_on_the_tier_it_has_when_claimed(mock_db, pinned):

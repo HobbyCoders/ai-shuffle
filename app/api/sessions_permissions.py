@@ -147,6 +147,28 @@ def _current_tier(session_id: str) -> Optional[str]:
     return _caller_speed(session, live_only=True)
 
 
+async def _hand_down_remote_latest(session_id: str, owner: Any, child_id: str, fallback: str) -> None:
+    """Send ``session_id``'s tier to a subagent another worker runs. Never raises.
+
+    Runs outside the parent's lock, so a silent peer never holds up the
+    parent's next hand-down to its local workers. Sends to one subagent run
+    one at a time and read the parent's tier just before sending, so they go
+    out in order and the last carries the parent's latest tier.
+    """
+    async with _propagation_locks.setdefault(("remote", child_id), asyncio.Lock()):
+        try:
+            tier = await run_sync(_current_tier, session_id)
+        except Exception:  # noqa: BLE001 — the tier the fan-out read
+            logger.debug("Could not read the speed of %s", session_id, exc_info=True)
+            tier = None
+        try:
+            # Its owner hands it on to that subagent's own workers.
+            await _hand_down_remote(owner, child_id, tier or fallback)
+        except Exception:  # noqa: BLE001 — the subagent keeps its setting
+            logger.info("Speed was not handed to subagent %s of %s", child_id, session_id,
+                        exc_info=True)
+
+
 async def propagate_fast(session_id: str, fast: bool = False, _seen: Optional[set] = None, *,
                          speed: Optional[str] = None) -> None:
     """Hand a speed change down to the subagents ``session_id`` dispatched.
@@ -164,13 +186,14 @@ async def propagate_fast(session_id: str, fast: bool = False, _seen: Optional[se
     with and says so in its own chat; its queued turns take the new tier when
     they start (``turns._session_bound_overrides``). A worker run by another
     worker gets it through that worker's ``run-settings`` action, which hands
-    it on to its own subagents there. Never raises: a subagent that cannot take
-    the change keeps its setting.
+    it on to its own subagents there; that send runs in its own task, outside
+    the parent's lock (:func:`_hand_down_remote_latest`). Never raises: a
+    subagent that cannot take the change keeps its setting.
     """
     from app.core.model_speed import normalize_speed, resolve_speed
 
     seen = _seen if _seen is not None else {session_id}
-    local = []
+    local, remote = [], []
     async with _propagation_locks.setdefault(session_id, asyncio.Lock()):
         try:
             children = await run_sync(database.list_worker_children, session_id)
@@ -193,8 +216,7 @@ async def propagate_fast(session_id: str, fast: bool = False, _seen: Optional[se
             try:
                 owner = await run_sync(control.owner_of, child)
                 if owner is not None:
-                    # Its owner hands it on to that subagent's own workers.
-                    await _hand_down_remote(owner, child_id, tier)
+                    remote.append(_spawn(_hand_down_remote_latest(session_id, owner, child_id, tier)))
                     continue
                 result = await apply_run_settings(
                     child_id, RunSettingsUpdate(fast=tier != "standard", speed=tier),
@@ -209,12 +231,21 @@ async def propagate_fast(session_id: str, fast: bool = False, _seen: Optional[se
     # so the order these land in does not matter.
     for child_id, child_tier in local:
         await propagate_fast(child_id, _seen=seen, speed=child_tier)
+    if remote:
+        # Holds no lock; ``asyncio.wait`` leaves the sends running if this is cancelled.
+        await asyncio.wait(remote)
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Run ``coro`` as a hand-down task, held until it finishes."""
+    task = asyncio.get_running_loop().create_task(coro)
+    _fast_propagations.add(task)
+    task.add_done_callback(_fast_propagations.discard)
+    return task
 
 
 def _start_propagation(session_id: str, fast: bool, speed: Optional[str] = None) -> None:
-    task = asyncio.get_running_loop().create_task(propagate_fast(session_id, fast, speed=speed))
-    _fast_propagations.add(task)
-    task.add_done_callback(_fast_propagations.discard)
+    _spawn(propagate_fast(session_id, fast, speed=speed))
 
 
 async def apply_run_settings(session_id: str, body: RunSettingsUpdate, *, inherited: bool = False,
