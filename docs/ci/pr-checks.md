@@ -580,11 +580,16 @@ A shard whose tests fail reruns only those tests, once, serially
 `LOCAL_CI_RETRY_FAILED=1` as the hosted Windows parts). Tests that pass the
 second time pass the shard but are listed under "Flaky tests (failed once, passed
 on a rerun)" in the job summary and as `Flaky test` warnings, so they still get
-fixed. A test that fails again, a collection error, more than 20 failed tests or
-an interrupted run fails the shard. The receipt of a complete run that had failed
-tests lists them under `failed`; after a passing rerun the runner records exactly
-those tests under `rerun_passed`, and the gate refuses a receipt whose failed
-tests have no recorded passing rerun. The first run's JUnit file and
+fixed. A test that fails again, more than 20 failed tests, or any fault besides
+failed tests fails the shard without a rerun: a collection error anywhere, an
+interrupted, crashed or killed run, a worker restart, or a failed scratch cleanup
+(`scripts/ci/record_failures.py` lists the failed tests only after the whole
+pytest process, cleanup included, ended with just test failures). The receipt of
+a complete run that had failed tests lists them under `failed`. After the rerun
+the runner records them under `rerun_passed` only when the rerun ran exactly
+those tests and each one passed; a skip, xfail or deselection on the rerun is not
+a pass. The gate refuses a receipt whose failed tests have no recorded passing
+rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
 `backend-security` and `backend-contracts` keep a single attempt.
 
@@ -1191,8 +1196,10 @@ also independently supports safe ancestors and rechecks its own pointer.
   so it takes the time of the slowest part. A failed part does not stop the
   others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
   run's newest attempt counts. A failed pytest command there reruns just its
-  failed tests once; a test that then passes is reported as flaky in the job
-  summary and should still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
+  failed tests once, and only when test failures were its sole fault (not a
+  collection error, an interrupted or killed run, or a failed scratch cleanup);
+  a test that then passes is reported as flaky in the job summary and should
+  still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
 - Main stays open during a release. A suite run starts on main's tip and can
