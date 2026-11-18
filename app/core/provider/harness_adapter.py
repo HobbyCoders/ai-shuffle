@@ -8776,6 +8776,11 @@ def _delegated_tool_blocks(options: SessionOptions, registry: Any, *, leg: str =
             file_rule = DELEGATED_TOOL_USE_BLOCK_ONE_SEARCH[callable_search[0]]
         else:
             file_rule = DELEGATED_TOOL_USE_BLOCK_NO_SEARCH
+    # The rule tells the model to keep Bash for builds and git; on the claude
+    # leg a surface can qualify through PowerShell alone while the deny list
+    # walls Bash, so it is written only where Bash survives that list.
+    if file_rule and leg == "claude" and "Bash" in _delegated_disallowed(options, registry):
+        file_rule = None
     # The batching rule rides every session, with the file-tool rule when
     # there is one.
     blocks.append(

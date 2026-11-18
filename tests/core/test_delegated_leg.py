@@ -955,3 +955,39 @@ async def test_search_guidance_names_only_what_the_claude_leg_can_call(
     finally:
         await adapter.disconnect()
         cli_tool_surface.reset_cli_tools()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shell, ruled", [
+    ("PowerShell", False),
+    ("mcp__fluid_bundled__PowerShell", False),
+    ("Bash", True),
+])
+async def test_custom_profile_file_rule_needs_bash_past_the_deny_list(
+    monkeypatch, tmp_path, shell, ruled,
+):
+    """The file rule says to keep Bash for builds and git. A surface that
+    ticks only PowerShell (in either spelling) leaves the CLI's Bash on the
+    deny list, so a custom profile's compiled prompt must not carry it."""
+    from app.core import cli_tool_surface
+    from tests.test_harness_adapter import FILE_RULE_OPENING
+
+    cli_tool_surface.reset_cli_tools()
+    # As on Windows, where the CLI ships its own Glob and Grep.
+    monkeypatch.setattr(ha, "_cli_ships_search_tools", lambda: True)
+    monkeypatch.setattr(ha, "_resolve_claude_cmd", lambda: [sys.executable, str(FAKE)])
+    options = SessionOptions(
+        model="fable", system_prompt="CUSTOM AGENT PROMPT", cwd=str(tmp_path),
+        tool_allowlist=[shell, "Read", "Edit", "Glob"], extra={"session_mode": "code"},
+    )
+    adapter = ha.HarnessAdapter()
+    await adapter.connect(options)
+    try:
+        engine = adapter.engine
+        assert engine.system.startswith("CUSTOM AGENT PROMPT")
+        assert ("Bash" in engine.disallowed_tools) is not ruled
+        assert (FILE_RULE_OPENING in engine.system) is ruled
+        assert "# Tool use on this session" in engine.system
+    finally:
+        await adapter.disconnect()
+        cli_tool_surface.reset_cli_tools()
