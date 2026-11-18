@@ -1545,6 +1545,10 @@
 		const maintainedWindowVersion = windowShiftVersion;
 		const anchor = document.getElementById(turnAnchorId(maintainedTurnId));
 		if (!anchor || !containerRef.contains(anchor)) {
+			// A hidden page mounts no new rows (transcriptWindow.pauseWhenHidden):
+			// a queued prompt delivered while the device is closed has no row yet.
+			// It keeps its anchor until the window mounts it on visibility.
+			if (document.hidden) return;
 			cancelCurrentTurnAnchor();
 			return;
 		}
@@ -2122,7 +2126,10 @@
 			// Use double RAF to ensure browser has finished any scroll restoration
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
-					scrollToBottom();
+					// An anchored prompt keeps its place, as on a resize: the bottom of
+					// its reserve is blank room owed to the reply, not more transcript.
+					if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
+					else scrollToBottom();
 				});
 			});
 		}
