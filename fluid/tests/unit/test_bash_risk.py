@@ -294,6 +294,9 @@ ESCAPING_SPELLINGS = [
     # date: only display forms; a bare operand sets the clock.
     "date 01011200",
     "date +%s 01011200",
+    # sed -l takes a value in GNU sed and none in BSD/macOS sed.
+    "sed -n -l 5 p f",
+    "sed -nl5 p f",
 ]
 
 # Everyday read-only forms around the same programs stay "safe".
@@ -347,6 +350,13 @@ STILL_SAFE = [
     "date --rfc-3339=seconds",
     "date -r f +%F",
     "date -d @1700000000",
+    "date --help",
+    "date --version",
+    "date --resolution",
+    # s with # or ; as its delimiter (handy when the pattern has slashes).
+    "sed -n 's#a/b#c#p' f",
+    "sed -n 's;a/b;c;gp' f",
+    "sed -n 's#/usr#/opt#p;$p' f",
 ]
 
 
@@ -360,6 +370,42 @@ def test_banned_options_in_any_spelling_are_write(command: str) -> None:
 def test_common_read_only_forms_stay_safe(command: str) -> None:
     assert is_read_only(command), command
     assert classify({"command": command}) == "safe"
+
+
+# A ``--`` that is an option's value is not end-of-options: the program keeps
+# reading options after it. Every value-taking option spelling, given ``--``
+# as its value, followed by every spelling of a banned option, must ask.
+_SORT_VALUE_SPELLINGS = ["-k", "-nk", "-t", "-S", "-T", "--key", "--ke", "--field-separator"]
+_SORT_BANNED_SPELLINGS = ["--outp=x", "--compress=x", "-ox", "-uox", "-uo x"]
+DASH_DASH_AS_VALUE = [
+    f"sort {value} -- {banned} f"
+    for value in _SORT_VALUE_SPELLINGS for banned in _SORT_BANNED_SPELLINGS
+] + [
+    "awk -v -- --fil=x f",
+    "awk -F -- --exe=x f",
+    "awk --assign -- --dump=x '{print}' f",
+    "sed -n -e -- --fi=x f",
+    "sed -n --expression -- --in=x f",
+    "date -d -- -s2020",
+    "date --date -- --se=2020",
+    "date -r -- -us 2020",
+]
+
+
+@pytest.mark.parametrize("command", DASH_DASH_AS_VALUE)
+def test_dash_dash_as_an_option_value_does_not_end_options(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "sort -- -old.txt",
+    "sort -k2 -- -old.txt",
+    "sort -t , -- -old.txt",
+    "sort --key 2 -- -old.txt",
+])
+def test_dash_dash_in_option_position_ends_options(command: str) -> None:
+    assert is_read_only(command), command
 
 
 def test_classify_without_command_is_write() -> None:

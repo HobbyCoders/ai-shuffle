@@ -45,14 +45,15 @@ Programs with extra rules:
   outside strings and regex literals asks, and so does a ``/`` the lexer
   cannot place as division or regex. See :func:`_awk_program_ok`.
 - ``sed``: must carry ``-n``/``--quiet``/``--silent``, must not carry ``-i`` or
-  ``--in-place`` or ``-f``/``--file`` (an unread script file), and every
-  script must parse as commands that only print or edit the pattern space;
+  ``--in-place`` or ``-f``/``--file`` (an unread script file) or ``-l`` (GNU
+  and BSD sed disagree on whether it takes a value), and every script must
+  parse as commands that only print or edit the pattern space;
   ``w``/``W``/``r``/``R``/``e``/``a``/``i``/``c``, an ``s`` flag other than
   ``g``/``p``/``i``/``m``/a number, or anything unparsed asks. See
   :func:`_sed_script_ok`.
 - ``date``: display only, see :func:`_date_ok`: at most one operand, a
   ``+FORMAT``, and only ``-d``/``-u``/``-I``/``-R``/``--rfc-3339``/``-r``/``-f``
-  (and their long names).
+  (and their long names), ``--resolution``, ``--help`` and ``--version``.
 - ``sort``: no ``-o``/``--output`` or ``--compress-program``. ``uniq``: at
   most one positional argument (the second is an output file). ``tree``: no
   ``-o`` or ``-R``. ``file``: no ``-C``/``--compile``. ``env``: no arguments
@@ -64,7 +65,9 @@ and for programs that parse long options with getopt_long (sort, file, sed,
 date, gawk) when abbreviated to a prefix that names it unambiguously
 (``--outp=file``; ``sort --c`` is ambiguous and getopt_long refuses it).
 ripgrep and tree reject abbreviations, so their long options match exactly.
-Words after ``--`` are operands; see :func:`_no_flags`.
+For sort, whose value-taking options are listed, words after a ``--`` in
+option position are operands (a ``--`` that is an option's value is not);
+elsewhere every word is scanned. See :func:`_no_flags`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
@@ -171,23 +174,65 @@ def _sets_flag(
     return False
 
 
+def _takes_next_word(
+    arg: str, takes_value: str, short_flags: str,
+    long_options: tuple[str, ...] | None, value_long: frozenset[str],
+) -> bool | None:
+    """Whether option-position word ``arg`` makes the next word its value.
+
+    None when that cannot be told: an unknown short letter, or a long option
+    that is unknown or an ambiguous abbreviation.
+    """
+    if arg == "-" or not arg.startswith("-"):
+        return False  # an operand
+    if arg.startswith("--"):
+        name, eq, _ = arg.partition("=")
+        if eq:
+            return False
+        option = _resolve_long(name, long_options)
+        if option is None or (long_options is not None and option not in long_options):
+            return None
+        return option in value_long
+    for j, ch in enumerate(arg[1:], 1):
+        if ch in takes_value:
+            return j == len(arg) - 1  # value attached unless it is the last letter
+        if ch not in short_flags:
+            return None
+    return False
+
+
 def _no_flags(
     *banned: str, takes_value: str = "", long_options: tuple[str, ...] | None = None,
-    double_dash_ends_options: bool = True,
+    short_flags: str | None = None, value_long: frozenset[str] | None = None,
 ) -> Check:
     """Check: none of ``banned`` is set, in any spelling :func:`_sets_flag` knows.
 
-    Words after ``--`` are operands (``sort -- -old.txt`` reads a file named
-    ``-old.txt``), except where ``double_dash_ends_options`` is off.
+    Every word is scanned, option values included, unless the program's
+    value-taking options are known (``short_flags`` and ``value_long``): then
+    a ``--`` in option position ends the options, so ``sort -- -old.txt``
+    reads a file named ``-old.txt``. A ``--`` that is an option's value
+    (``-k --``) does not, and once a word's value-taking cannot be told
+    (an unknown or ambiguous option) the scan runs to the end.
     """
+    knows_values = short_flags is not None and value_long is not None
+
     def check(args: list[str]) -> bool:
         if _legacy_banned(args, banned):
             return False
+        honour_dash_dash = knows_values
+        is_value = False  # the current word is the previous option's value
         for a in args:
-            if a == "--" and double_dash_ends_options:
+            if a == "--" and honour_dash_dash and not is_value:
                 return True
             if _sets_flag(a, banned, takes_value, long_options):
                 return False
+            if is_value:
+                is_value = False
+            elif honour_dash_dash:
+                nxt = _takes_next_word(a, takes_value, short_flags, long_options, value_long)
+                if nxt is None:
+                    honour_dash_dash = False
+                is_value = bool(nxt)
         return True
     return check
 
@@ -206,6 +251,15 @@ _SORT_LONG_OPTIONS = (
     "--stable", "--temporary-directory", "--unique", "--version", "--version-sort",
     "--zero-terminated",
 )
+# sort's options that take the next word as their value when not given
+# ``=value`` (``--check`` and ``--debug`` take none or ``=`` only), and its
+# short switches. -k, -o, -S, -t, -T (and the obsolete -y) take a value.
+_SORT_VALUE_LONG = frozenset({
+    "--batch-size", "--buffer-size", "--compress-program", "--field-separator",
+    "--files0-from", "--key", "--output", "--parallel", "--random-source", "--sort",
+    "--temporary-directory",
+})
+_SORT_SHORT_FLAGS = "bcCdfghiMmnRrsuVz"
 _FILE_LONG_OPTIONS = (
     "--apple", "--brief", "--checking-printout", "--compile", "--debug", "--dereference",
     "--exclude", "--exclude-quiet", "--extension", "--files-from", "--help", "--keep-going",
@@ -226,7 +280,7 @@ _DATE_LONG_OPTIONS = {
 }
 _DATE_DISPLAY_LONG = frozenset({
     "--date", "--file", "--iso-8601", "--reference", "--rfc-3339", "--rfc-email",
-    "--universal", "--utc",
+    "--universal", "--utc", "--help", "--version", "--resolution",
 })
 
 
@@ -579,18 +633,22 @@ def _sed_ok(args: list[str]) -> bool:
             if ch == "n":
                 quiet = True
             elif ch in "rzuEsb":
+                # Switches in GNU sed; -E/-r/-u are switches in BSD/macOS sed
+                # too, and -z/-s/-b are errors there, which run nothing.
                 continue
-            elif ch in "el":  # value: the rest of the word or the next
+            elif ch == "e":  # script: the rest of the word or the next
                 value = a[j + 1:]
                 if not value:
                     if i >= len(args):
                         return False
                     value, i = args[i], i + 1
-                if ch == "e":
-                    scripts.append(value)
+                scripts.append(value)
                 break
             else:
-                return False  # -i, -f and anything unknown
+                # -i, -f, anything unknown, and -l: GNU sed takes a value
+                # after -l, BSD/macOS sed does not, so the two would read a
+                # different word as the script.
+                return False
     if not scripts and operands:
         scripts = [operands[0]]  # no -e: the first operand is the script
     return quiet and all(_sed_script_ok(s) for s in scripts)
@@ -693,7 +751,7 @@ def _sed_script_ok(script: str) -> bool:
             i = label.end()
         elif cmd in "sy":
             delim = script[i:i + 1]
-            if not delim or delim.isalnum() or delim in " \t\n\\;}#":
+            if not delim or delim.isalnum() or delim in " \t\n\\}":
                 return False
             i = (_sed_regex_end(script, i + 1, delim) if cmd == "s"
                  else _awk_literal_end(script, i + 1, delim, brackets=False))
@@ -757,11 +815,14 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     # into every directory. tree takes option values from the next word, so
     # every letter of a bundle is a flag. tree has its own parser, not
     # getopt, so every word is scanned, ``--`` or not.
-    "tree": _no_flags("-o", "-R", double_dash_ends_options=False),
+    "tree": _no_flags("-o", "-R"),
     "diff": None, "cmp": None,
+    # The one program whose ``--`` ends the scan: its value-taking options
+    # are listed, so an option's value of ``--`` is told apart.
     "sort": _no_flags(
         "-o", "--output", "--compress-program", takes_value="ktSTy",
-        long_options=_SORT_LONG_OPTIONS,
+        long_options=_SORT_LONG_OPTIONS, short_flags=_SORT_SHORT_FLAGS,
+        value_long=_SORT_VALUE_LONG,
     ),
     "uniq": _uniq_ok, "cut": None, "tr": None,
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,
