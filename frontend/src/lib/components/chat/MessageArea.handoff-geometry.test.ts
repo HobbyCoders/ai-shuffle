@@ -104,7 +104,8 @@ function view(layout: Layout, anchored: boolean) {
 			const bottom = slotBottom() - errorOffset;
 			return { top: bottom - shown, bottom, height: shown };
 		} };
-		const chatColumnRef = {};
+		// The column's padding is the tail reserve, and it ends the scroll content.
+		const chatColumnRef = { getBoundingClientRect: () => ({ bottom: layout.proseEnd + padding - layout.scrollTop }) };
 		function setProgrammaticScrollTop(top) {
 			containerRef.scrollTop = Math.max(0, top);
 			lastKnownScrollTop = containerRef.scrollTop;
@@ -353,6 +354,34 @@ describe('queue handoff hold geometry', () => {
 			await v.update(turn(7, 0, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = []; });
 			await v.grow(20);
 			expect(v.read()).toMatchObject({ errorOffset: taken.errorOffset, padding: taken.padding, banner: taken.banner });
+		});
+
+		it('gives back only the lift that would put the banner off screen when the queue drains narrow', async () => {
+			const { layout, v } = await givenBack();
+			await v.update(turn(5, 2, 'CLI error'));
+			const taken = v.read();
+			// Narrow: the two long bubbles wrap taller than the pane can show under the banner.
+			Object.assign(layout, { width: 298, bubbles: [180, 180] });
+			await v.resize(400); await v.frame();
+			const lifted = v.read();
+			expect(lifted.banner.bottom).toBeLessThanOrEqual(lifted.bubblesTop - ROW_GAP);
+			// The queue drains at that width; the column never widens again.
+			await v.update(turn(6, 1, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = [180]; });
+			await v.grow(20);
+			await v.update(turn(7, 0, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = []; });
+			const drained = v.read();
+			// At the followed bottom the whole banner is inside the viewport, and no
+			// lower than it has to be: a still banner is kept as far as it is readable.
+			expect(drained.scrollTop).toBe(layout.proseEnd + drained.padding - layout.clientHeight);
+			expect(drained.banner.top).toBeGreaterThanOrEqual(0);
+			expect(drained.banner.bottom).toBeLessThanOrEqual(layout.clientHeight);
+			expect(drained.banner.top).toBeLessThanOrEqual(1);
+			expect(drained.errorOffset).toBeGreaterThan(taken.errorOffset);
+			// The reserve gave the lift back with it: it holds the banner, no blank beyond.
+			expect(drained.padding).toBe(drained.errorOffset + 60 + ROW_GAP + 2 * autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE);
+			// It stays readable, and still, as the next reply streams under it.
+			await v.grow(200);
+			expect(v.read()).toMatchObject({ errorOffset: drained.errorOffset, banner: drained.banner, padding: drained.padding });
 		});
 
 		it('reserves nothing for an emptied slot while the banner steps aside for its Error row', async () => {

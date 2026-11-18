@@ -252,8 +252,9 @@
 	let tailControlsRef = $state<HTMLDivElement | null>(null);
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
-	// The offset the error took the slot over with (wrap clearance only adds to
-	// it), and the slot width the current offset was measured at.
+	// The offset the error took the slot over with (kept while it leaves the
+	// banner readable; see queueSlotExtent), and the slot width the current
+	// offset was measured at.
 	let tailErrorBaselinePx = 0, tailErrorWidthPx = 0;
 	let tailQueueSlotPx = $state(0);
 	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
@@ -1376,15 +1377,18 @@
 		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
 		// An error owns the slot's painted height, not its blank: it reserves only
 		// what is docked now (none of an empty slot). A docked bubble that grows (a
-		// narrower column wraps it) lifts the banner above it. A bubble leaving
-		// leaves the banner where it is read (moving it then is a shift nothing
-		// asked for); a new width measures afresh, so widening gives the lift back.
-		// The banner never drops below where the error put it.
+		// narrower column wraps it) lifts the banner above it.
+		// Invariant: at the followed bottom the banner is readable, wholly inside the
+		// viewport. Lift nothing docked needs (where the error put it, or what a
+		// leaving bubble left at this width) is kept only as far as that holds:
+		// moving a readable banner is a shift nothing asked for, but an offscreen
+		// one is lost. A new width keeps only the takeover offset.
 		if (tailQueueSlotPx && !handoffSlotPx) {
 			const docked = box.height - blank;
 			if (presentedTailError) {
-				const clear = Math.max(tailErrorBaselinePx, docked > 0 ? docked + rowGapPx() : 0);
-				tailErrorOffsetPx = box.width === tailErrorWidthPx ? Math.max(tailErrorOffsetPx, clear) : clear;
+				const clear = docked > 0 ? docked + rowGapPx() : 0;
+				const kept = Math.max(tailErrorBaselinePx, box.width === tailErrorWidthPx ? tailErrorOffsetPx : 0);
+				tailErrorOffsetPx = Math.max(clear, Math.min(kept, readableErrorOffset(box)));
 				tailErrorWidthPx = box.width;
 			}
 			return docked;
@@ -1407,6 +1411,16 @@
 		if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - px);
 		// The browser clamps scrollTop as the reserve shrinks; that is not the reader.
 		markProgrammaticScrollSettling();
+	}
+
+	/** The highest banner offset over a slot that keeps the banner wholly on screen at the followed bottom. */
+	function readableErrorOffset(slot: DOMRect): number {
+		if (!containerRef || !chatColumnRef) return Infinity;
+		// The slot sits a fixed distance above the column's end (the scroll end),
+		// whatever the reserve; the followed bottom puts that end at the viewport's.
+		const floor = chatColumnRef.getBoundingClientRect().bottom - slot.bottom;
+		const errorHeight = tailErrorRef?.getBoundingClientRect().height ?? 0;
+		return Math.max(0, containerRef.clientHeight - floor - errorHeight);
 	}
 
 	function rowGapPx(): number {
