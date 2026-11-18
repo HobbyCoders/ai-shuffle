@@ -231,6 +231,21 @@ end **both** leases; the SIGKILL guardian also covers both apps, Vites,
 PostgreSQL clusters and private socket directories. Either supervisor ending
 ends the pair. Do not stop only one app by hand; use `down` for the pair.
 
+For a fault test on a disposable pair (not `--ci`), use that worker's
+`workers[i].peer_fixture_dir` from `status`. There is no HTTP switch. After
+pairing, write `{"action":"hydrate","status":200,"body":"truncated"}` to
+`reply.json` there (write a temporary file, then rename it). Only a successful
+protected peer POST for that action has its reply replaced, **after** normal
+authentication and execution; `reply-sent` marks that it happened. Remove
+`reply.json` to restore normal replies. To delay the challenge instead, create
+`hold-auth`; `auth-held` marks an arrival. Remove the switch to release it
+(each request waits at most 30 seconds). Clear old receipt files before a run.
+
+Touch `restart` in **the sending worker's** fixture directory to request one
+normal SIGTERM/lifespan restart. The supervisor consumes the marker, keeps its
+database and leaves the other worker running. Wait for the selected app PID
+to change and mutual `ready` again; `down` still tears down the whole pair.
+
 This cannot simulate a second physical machine, Windows, distinct OS users,
 WAN latency or partitions, account/tunnel registration, real GitHub access or
 real AI providers. Those still need the live smoke. `--workers 1` (the default)
@@ -315,6 +330,9 @@ It is chosen by the request alone, so it behaves the same after restarts:
   taller than the screen, then waits on a 60-second foreground `Bash`: the
   turn stays open with still content and the running-task row under it, for
   Stop with a running task (#1147). Same project and access needs as below.
+* `[script:tool-background-heavy]` is the same open, idle turn behind a log
+  reply larger than the transcript's mounted-content budget, so the turn's own
+  prompt is no longer mounted. For queued bubbles over the running-task row.
 * `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
   (`sleep 120`, no inline wait), then streams a reply at six words per second
   while the task remains in `/live`'s `activeTasks` and the running-tasks list.

@@ -76,6 +76,8 @@ AREAS = {
         "include": (
             "frontend/", "mobile/", "tools/", "browser-mcp/", "docs/content/", "docs/ci/pr-checks.md",
             "scripts/perf/", "scripts/ci/bounded_apt.py", ".github/workflows/ci-frontend.yml",
+            # The blocking npm audit of each JavaScript job.
+            "scripts/npm_audit_gate.py", "scripts/npm_audit_exceptions.json",
             # Read by the frontend and tools tests from outside their folders.
             "app/core/transcript_views/", "app/contract/", "app/core/connectors/catalog.json",
             "fluid/fluid/context/peer.py", "tests/fixtures/", "tests/core/network/",
