@@ -1431,7 +1431,7 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     """Transcript rows from a state copy, with their sync records, in multi-row INSERTs.
 
     ``versions`` holds ``(record_id, clock, origin_device_id, content_hash,
-    order_seq[, origin_incarnation])`` per row; ``fields`` must include ``id``. The caller
+    order_seq)`` per row; ``fields`` must include ``id``. The caller
     checked that neither the rows nor the records existed. A row a local
     writer inserted since then is left alone (``ON CONFLICT DO NOTHING``) and
     gets no record here; the ids of the rows inserted come back, and the
@@ -1450,9 +1450,9 @@ def insert_snapshot_events(cursor, fields, rows: List[List[Any]], versions: List
     position = list(fields).index("id")
     ids = [row[position] for row in rows]
     _insert_rows(cursor, "sync_records", ("collection", "record_id", "clock", "origin_device_id", "content_hash",
-                                          "deleted", "order_seq", "updated_at", "origin_incarnation"),
-                 [("session_events", *version[:4], False, version[4], now, version[5] if len(version) > 5 else None)
-                  for event_id, version in zip(ids, versions)
+                                          "deleted", "order_seq", "updated_at"),
+                 [("session_events", record_id, clock, origin, digest, False, order_seq, now)
+                  for event_id, (record_id, clock, origin, digest, order_seq) in zip(ids, versions)
                   if event_id in inserted], "ON CONFLICT (collection, record_id) DO NOTHING", batch=batch)
     return inserted
 
@@ -1517,13 +1517,6 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
                origin_incarnation = EXCLUDED.origin_incarnation""",
         (collection, record_id, clock, origin_device_id, content_hash, bool(deleted), order_seq, _now(),
          origin_incarnation))
-
-
-def raise_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
-    """Label the version held with a later origin incarnation; a missing one is filled, none is lowered."""
-    cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s "
-                   "AND (origin_incarnation IS NULL OR origin_incarnation < %s)",
-                   (origin_incarnation, collection, record_id, origin_incarnation))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:

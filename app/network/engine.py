@@ -1934,20 +1934,14 @@ def _merge_losing_provider_credentials(cursor, coll: policy.Collection, record_i
     return changed
 
 
-def _item_incarnation(item: Mapping[str, Any]) -> int:
-    """A snapshot item's origin incarnation; 0 when an older build sent none."""
-    value = item.get("origin_incarnation")
-    return value if type(value) is int and value >= 1 else 0
-
-
 def _versus_held(clock: int, origin: str, incarnation: int, held: Mapping[str, Any]) -> int:
-    """``envelope.compare`` of a version against the one held, on every path that picks a winner.
+    """``envelope.compare`` of a signed op against the version held.
 
-    The incarnation decides only an exact (clock, origin) tie (#1568). Its
-    label is recorded when a version is written, or comes with a copy, and is
-    never inferred. Without one on either side, that tie keeps the version
-    held, as before labels existed: a copy from an older build (0) loses to a
-    labelled version, and a version stored before labels were kept stays.
+    The incarnation decides only an exact (clock, origin) tie (#1568), and
+    only a signed op carries one: a version is labelled when it is written or
+    applied from its op, never from a state copy (which proves nothing about
+    the origin) and never inferred. A tie with an unlabelled version (stored
+    before labels were kept, or from a copy) keeps it, as before labels existed.
     """
     if clock == int(held["clock"]) and origin == held["origin_device_id"] and held.get("origin_incarnation") is None:
         return 0
@@ -3103,9 +3097,6 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
     item = {"record_id": version["record_id"], "clock": int(version["clock"]),
             "origin_device_id": version["origin_device_id"], "deleted": bool(version["deleted"]),
             "order_seq": version.get("order_seq"), "record": None}
-    if version.get("origin_incarnation") is not None:
-        # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
-        item["origin_incarnation"] = int(version["origin_incarnation"])
     if not item["deleted"]:
         if not row_known:
             row = _read_row(cursor, coll, version["record_id"])
@@ -3272,13 +3263,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         existing = known.get(item["record_id"]) if known is not None else store.get_record(
             cursor, coll.name, item["record_id"])
         conflict = None
-        incarnation = _item_incarnation(item)
-        incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
-        comparison = 1 if existing is None else _versus_held(
-            int(item["clock"]), item["origin_device_id"], incarnation, existing)
-        if existing is not None and coll.name != "membership" and (
-                existing["origin_device_id"] != item["origin_device_id"]
-                or _restore_fork(item["origin_device_id"], incarnation, existing)):
+        if existing is not None and existing["origin_device_id"] != item["origin_device_id"] and coll.name != "membership":
+            comparison = envelope_mod.compare(int(item["clock"]), item["origin_device_id"],
+                                              int(existing["clock"]), existing["origin_device_id"])
+            incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
             if incoming_hash != existing["content_hash"]:
                 loser, winner = (existing, item) if comparison > 0 else (item, existing)
                 if loser["deleted"]:
@@ -3296,29 +3284,14 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                                 losing_clock=int(loser["clock"]), losing_device_id=loser["origin_device_id"],
                                 losing_record=losing_record, winning_clock=int(winner["clock"]),
                                 winning_device_id=winner["origin_device_id"])
-        if comparison <= 0:
+        if existing is not None and envelope_mod.compare(
+                int(item["clock"]), item["origin_device_id"], int(existing["clock"]), existing["origin_device_id"]) <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
-            if (comparison == 0 and incarnation and coll.name in _SIGNED_AS_STORED
-                    and _same_version(item, incoming_hash, existing)):
-                # The content held, from a copy that names its incarnation: a
-                # missing label is filled (see the raise below).
-                store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             if not item["deleted"] and _merge_losing_provider_credentials(
                     cursor, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
-            continue
-        if existing is not None and _same_version(item, incoming_hash, existing):
-            # The content held, under a later label: the label rises, so every
-            # replica ends on the highest one known for it, and a delayed op of
-            # an incarnation in between loses everywhere (#1568). A copy's label
-            # is trusted as far as its values are (the serving member's claim,
-            # not a signed proof) and never lowers one. Only the label moves:
-            # the row, clock, hash and updated_at stay; nothing is announced.
-            # Where the copy may be a projection, the label held stays.
-            if coll.name in _SIGNED_AS_STORED:
-                store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             continue
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
@@ -3349,7 +3322,7 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 if isinstance(kept, _RefusedDeletedSession):  # owes the tombstone (#1308)
                     store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                                      origin_device_id=item["origin_device_id"], content_hash="", deleted=False,
-                                     order_seq=item.get("order_seq"), origin_incarnation=incarnation or None)
+                                     order_seq=item.get("order_seq"))
                 continue
             _after_mirror(cursor, coll, prepared)
             # Snapshot items have no per-item signature. In particular,
@@ -3370,30 +3343,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             store.add_conflict(cursor, **conflict)
         store.put_record(cursor, coll.name, item["record_id"], clock=int(item["clock"]),
                          origin_device_id=item["origin_device_id"], content_hash=local_hash,
-                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"),
-                         origin_incarnation=incarnation or None)
+                         deleted=bool(item["deleted"]), order_seq=item.get("order_seq"))
         applied += 1
         touched.append((coll.name, item["record_id"], OP_DELETE if item["deleted"] else OP_UPSERT))
         if not item["deleted"] and refresh_billing:
             touched.append(("provider_billing", item["record_id"], OP_UPSERT))
     return applied, touched
-
-
-def _same_version(item: Mapping[str, Any], incoming_hash: str, held: Mapping[str, Any]) -> bool:
-    """Whether a copy item is the version held: same (clock, origin) and the same content."""
-    return (int(item["clock"]) == int(held["clock"]) and item["origin_device_id"] == held["origin_device_id"]
-            and bool(item["deleted"]) == bool(held["deleted"]) and incoming_hash == (held["content_hash"] or ""))
-
-
-# Rows stored exactly as signed: no mirror step, hook, credential merge,
-# reference check or foreign key here drops or rewrites a field by what this
-# worker holds. Elsewhere (a chat whose project is missing here loses its
-# ``project_id``, say) two different signed versions can store the same
-# content, so equal content does not name the version (S19).
-_SIGNED_AS_STORED = frozenset({
-    "user_preferences", "member_names", "tags", "projects_v2", "credential_policies", "plugins_desired",
-    "memory", "working_record", "working_record_acknowledgements",
-})
 
 
 def _records_by_id(cursor, collection: str, record_ids: Sequence[str]) -> Dict[str, dict]:
@@ -3464,8 +3419,7 @@ def _insert_fresh_events(cursor, coll: policy.Collection, items: Sequence[Mappin
     order = sorted(candidates)
     rows = [[_column_value(coll, name, candidates[index].get(name), ()) for name in coll.fields] for index in order]
     versions = [(items[index]["record_id"], int(items[index]["clock"]), items[index]["origin_device_id"],
-                 content_hash(coll, candidates[index]), items[index].get("order_seq"),
-                 _item_incarnation(items[index]) or None) for index in order]
+                 content_hash(coll, candidates[index]), items[index].get("order_seq")) for index in order]
     inserted = store.insert_snapshot_events(cursor, coll.fields, rows, versions, batch=SNAPSHOT_SQL_BATCH)
     # A row a local writer added meanwhile takes the per-record path instead.
     order = [index for index in order if candidates[index]["id"] in inserted]
