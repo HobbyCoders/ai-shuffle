@@ -326,6 +326,46 @@ def test_restart_replaces_only_the_app_process(tmp_path):
     database.close.assert_called_once()
 
 
+@pytest.mark.parametrize("loss", ["stop", "deadline", "owner"])
+def test_restart_loses_authority_during_drain(tmp_path, monkeypatch, loss):
+    from app import preview_run
+
+    ready, draining = tmp_path / "ready", tmp_path / "draining"
+    worker = """import signal, sys
+from pathlib import Path
+ready, draining = map(Path, sys.argv[1:])
+def shutdown(*_):
+    draining.touch()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, shutdown)
+ready.touch()
+signal.pause()
+"""
+    stopped, restart, started = threading.Event(), threading.Event(), []
+    database = Mock()
+    # Only the child's SIGTERM handler marks the drain. No sleeps to race the
+    # supervisor's lease check; a restart is legitimate until the signal lands.
+    if loss == "deadline":
+        monkeypatch.setattr(preview_run, "time", Mock(monotonic=lambda: 31 if draining.exists() else 0))
+    elif loss == "owner":
+        monkeypatch.setattr(preview_run, "process_identity", lambda pid: None if draining.exists() else "owner")
+    else:
+        monkeypatch.setattr(stopped, "is_set", draining.exists)
+
+    def request_restart(process):
+        started.append(process)
+        assert len(started) == 1, "started a replacement after the lease ended during drain"
+        _wait_for(ready.exists)
+        assert not draining.exists()
+        restart.set()
+
+    supervise([sys.executable, "-c", worker, str(ready), str(draining)],
+              preview_environment(tmp_path, 18880, 18881), database, ttl=30,
+              owner_pid=os.getpid(), stopped=stopped, restart=restart, on_start=request_restart)
+    assert draining.exists() and len(started) == 1 and started[0].returncode == 0
+    database.close.assert_called_once()
+
+
 def test_crashed_app_waits_for_a_change_instead_of_ending_the_lease(tmp_path):
     record = tmp_path / "pids"
     env = preview_environment(tmp_path, 18880, 18881)
