@@ -134,15 +134,21 @@ terminal model-call counts and costs once per turn, adds each background
 checkpoint's counters, call and available cost separately, and takes the last
 stop reason. The file records new accounting events through engine close.
 
-The file contains normalized engine counters. OpenRouter Chat Completions and
-OpenAI Responses can turn a missing provider counter into zero. A counter
-absent from the engine event stays unset; the JSONL preserves estimate flags
-when the event supplies them. A missing file does not fall back to transcript
-parsing. Rebuild older wheels before running this adapter.
+The file contains normalized engine counters. Some provider normalizers, for
+example OpenRouter Chat Completions, OpenAI Responses, and Gemini, can turn a
+missing provider counter into zero. A counter absent from the engine event
+stays unset. The JSONL preserves `input_tokens_estimated`,
+`output_tokens_estimated`, `usage_estimated`, and `cost_from_table` when the
+event sets them; Harbor ignores these flags when aggregating. A missing file
+does not fall back to transcript parsing. Rebuild older wheels before running
+this adapter.
 
-CLI-hosted subagents run in separate sessions, so their tokens and cost are not
-included in the parent's figures. A killed run keeps flushed token records but
-has no terminal cost or call count for its unfinished turn.
+CLI-hosted subagents run in separate sessions, so their tokens, costs, and
+calls are not included in the parent's figures. With `continual=true`, the
+learner's separate provider calls, tokens, and costs are also excluded, so
+cost per solved task does not include the cost of learning. A killed run keeps
+flushed token records but has no terminal cost or call count for its unfinished
+turn.
 
 `<job>/…/logs/agent/fluid.txt` still contains the console transcript for
 inspection. Tool text in the transcript does not count as usage or status.

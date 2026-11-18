@@ -150,7 +150,7 @@ def _write_usage_event(out: TextIO, event: Event) -> None:
         provenance = event.usage
     else:
         return
-    for flag in ("input_tokens_estimated", "output_tokens_estimated", "usage_estimated"):
+    for flag in ("input_tokens_estimated", "output_tokens_estimated", "usage_estimated", "cost_from_table"):
         if provenance.get(flag) is True:
             record[flag] = True
     out.write(json.dumps(record) + "\n")

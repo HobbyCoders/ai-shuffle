@@ -1,6 +1,7 @@
 """Benchmark contracts without installing Harbor or making provider calls."""
 import asyncio
 from importlib.util import module_from_spec, spec_from_file_location
+from io import StringIO
 from pathlib import Path
 import json
 import sys
@@ -10,11 +11,18 @@ from unittest.mock import Mock
 import pytest
 
 from fluid.cli import __main__ as cli
+from fluid.codemode.continual import MIN_NEW_ENTRIES, Synthesizer
+from fluid.codemode.skills import SkillStore
+from fluid.config import loader
+from fluid.config.model import HarnessConfig, ProviderConfig
 from fluid.context.checkpoint_summary import CHECKPOINT_SYSTEM
 from fluid.events import TurnComplete, Usage
 from fluid.providers._chat_completions import ChatCompletionsNormalizer
 from fluid.providers._transport import truncated_stream_payload
 from fluid.providers.base import ProviderCaps, StreamChunk
+from fluid.store.base import MemoryStore
+
+from tests.unit.test_delegated_cost_usage import FAKE, Scripted, _turn
 
 
 @pytest.fixture
@@ -282,6 +290,63 @@ def test_export_preserves_estimate_flags_carried_by_usage_event(tmp_path):
     assert record["input_tokens_estimated"] is True
     assert record["output_tokens_estimated"] is True
     assert record["usage_estimated"] is True
+
+
+async def test_export_preserves_delegated_resume_cost_provenance(tmp_path):
+    run = Scripted(tmp_path, {"turns": [_turn(1.25)]}, cli_session_id="cli-prev")
+    try:
+        terminal = await run.turn("one")
+    finally:
+        await run.aclose()
+    assert terminal.usage["cost_from_table"] is True
+    out = StringIO()
+    cli._write_usage_event(out, terminal)
+    record = json.loads(out.getvalue())
+    assert record["cost_usd"] == terminal.cost_usd
+    assert record["cost_from_table"] is True
+
+
+async def test_delegated_continual_transcript_is_identical_with_metrics(tmp_path, monkeypatch):
+    fact = "The user prefers to run tests from the repository root."
+
+    class LearnerProvider:
+        name = "anthropic"
+
+        async def stream(self, request):
+            yield StreamChunk(kind="text_delta", payload={"text": f"<memory>{fact}</memory>"})
+            yield StreamChunk(kind="message_stop")
+
+    script = tmp_path / "script.json"
+    script.write_text(json.dumps({"turns": [_turn(0.10)]}), encoding="utf-8")
+    monkeypatch.setenv("FAKE_CLAUDE_SCRIPT", str(script))
+    monkeypatch.setattr(loader, "_build_provider_client", lambda config, provider: LearnerProvider())
+    # Defer the real synthesis pass to engine close, after stream_turn returns.
+    monkeypatch.setattr(Synthesizer, "_batch_ready", lambda self: False)
+    make_engine = cli.make_engine
+    monkeypatch.setattr(cli, "make_engine", lambda *args, **kw: make_engine(
+        *args, claude_cmd=[sys.executable, str(FAKE)], **kw,
+    ))
+
+    transcripts = []
+    for with_metrics in (False, True):
+        skills_dir = tmp_path / f"skills-{with_metrics}"
+        skills = SkillStore(skills_dir)
+        for i in range(MIN_NEW_ENTRIES):
+            skills.journal_append({"kind": "user", "text": f"Preference {i}: {fact}"})
+        config = HarnessConfig(
+            cwd=str(tmp_path), setting_sources=(), skills_dir=str(skills_dir),
+            default_provider="claude", providers={"claude": ProviderConfig(kind="delegated_claude")},
+            continual=True, continual_provider="anthropic",
+        )
+        out = StringIO()
+        metrics = StringIO() if with_metrics else None
+        assert await cli.run_once(config, MemoryStore(), "answer", out=out, usage_out=metrics) == 0
+        assert any(memory.text == fact for memory in skills.memories())
+        assert "[learned] memory:" in out.getvalue()
+        if metrics is not None:
+            assert any(json.loads(line)["type"] == "status" for line in metrics.getvalue().splitlines())
+        transcripts.append(out.getvalue())
+    assert transcripts[0] == transcripts[1]
 
 
 def test_turn_totals_keep_background_usage_and_unfinished_turns(adapter, tmp_path):
