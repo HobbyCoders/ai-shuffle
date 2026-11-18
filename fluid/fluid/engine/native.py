@@ -63,7 +63,8 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import suppress
+from contextlib import nullcontext, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -248,7 +249,7 @@ from fluid.tools.builtins.tool_search import (
 )
 from fluid.tools.images import condition_image
 from fluid.tools.mrtr import resolve_input_required
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, call_ctx
 from fluid.tools.view import commit_delivery, settle_pointers, verbatim_tool_results
 
 log = logging.getLogger(__name__)
@@ -266,6 +267,82 @@ _RUNTIME_FACTS_HEADER = (
     "shown on the first turn and again only when they change):\n"
 )
 _BACKGROUND_SPAWN_INTERRUPT_GRACE = 1.0
+# How many read-only calls of one model reply may execute at once (see
+# NativeLoop._dispatch_batch). 1 turns concurrent dispatch off.
+DEFAULT_MAX_CONCURRENT_TOOLS = 8
+
+
+def _settle(fut: asyncio.Future[None]) -> None:
+    if not fut.done():
+        fut.set_result(None)
+
+
+class _ToolRun:
+    """Ordering state for one run of consecutive read-only calls.
+
+    ``gates[i]`` settles when call ``i`` has passed its gate (PreToolUse hook,
+    permission decision, doom-loop count) and is free to execute, or, for a
+    call that turned into a barrier, when it has finished. ``dones[i]`` settles
+    when call ``i`` is over, however it ended. Gates are passed in call order;
+    execution is bounded by ``limit``.
+    """
+
+    def __init__(self, size: int, limit: int) -> None:
+        loop = asyncio.get_running_loop()
+        self.gates: list[asyncio.Future[None]] = [loop.create_future() for _ in range(size)]
+        self.dones: list[asyncio.Future[None]] = [loop.create_future() for _ in range(size)]
+        self.limit = asyncio.Semaphore(max(1, limit))
+
+
+@dataclass(eq=False)
+class _RunSlot:
+    """One call's place in a :class:`_ToolRun`, visible to the dispatch path
+    through :data:`_RUN_SLOT` for the duration of that call.
+
+    ``ctx`` is the call's own shallow copy of the session ctx (its
+    ``tool_use_id``, ``view_results`` and ``staged_delivery`` are per call; the
+    registries are shared), and ``deliveries`` the steers its result carries.
+    """
+
+    run: _ToolRun
+    index: int
+    # The loop and call this slot belongs to. A task or child engine started
+    # from inside the call inherits the context variable; it must not mistake
+    # itself for this run member (see NativeLoop._run_slot).
+    owner: Any = None
+    tool_use_id: str = ""
+    ctx: ToolCtx | None = None
+    deliveries: list[SteerDelivery] = field(default_factory=list)
+    barrier: bool = False
+
+    async def enter_gate(self) -> None:
+        """Wait until every earlier call of the run has passed its gate."""
+        if self.index:
+            # asyncio.wait never cancels what it waits on: a cancelled waiter
+            # must not settle a sibling's future.
+            await asyncio.wait({self.run.gates[self.index - 1]})
+
+    async def become_barrier(self) -> None:
+        """From here on this call runs alone: wait for every earlier call to
+        finish; later calls stay behind its unsettled gate until it is over."""
+        if self.barrier:
+            return
+        self.barrier = True
+        if self.index:
+            await asyncio.wait(self.run.dones[: self.index])
+
+    def leave_gate(self) -> None:
+        if not self.barrier:
+            _settle(self.run.gates[self.index])
+
+    def finish(self) -> None:
+        _settle(self.run.gates[self.index])
+        _settle(self.run.dones[self.index])
+
+
+# The run slot of the call being dispatched, when it belongs to a concurrent
+# run. Set inside that call's own task, so siblings never see each other's.
+_RUN_SLOT: ContextVar[_RunSlot | None] = ContextVar("fluid_native_run_slot", default=None)
 
 # Opening words of the reflection nudge — a stable handle for tests and for
 # hosts that want to find or filter it. See NativeLoop._reflection_nudge.
@@ -1134,6 +1211,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         journal: Any | None = None,
         max_model_calls_per_turn: int | None = 200,
         max_continuations_per_turn: int = 3,
+        max_concurrent_tools: int = DEFAULT_MAX_CONCURRENT_TOOLS,
         turn_watchdog_seconds: float | None = DEFAULT_TURN_WATCHDOG_SECONDS,
         tool_arg_guard: ToolArgStreamGuard | None = None,
         trim: TrimConfig | None = None,
@@ -1239,6 +1317,9 @@ class NativeLoop(BackgroundLifecycleMixin):
         # when a turn has to stop. Every comparison below guards that case.
         self.max_model_calls_per_turn = max_model_calls_per_turn
         self.max_continuations_per_turn = max_continuations_per_turn
+        # Read-only calls of one reply that may execute at once; 1 dispatches
+        # every call in order (see _dispatch_batch).
+        self.max_concurrent_tools = max(1, int(max_concurrent_tools))
         # Runaway tool-argument streams. Pass
         # ``ToolArgStreamGuard(max_bytes=None, stall_bytes=None,
         # stall_seconds=None)`` to turn the guard off entirely.
@@ -4797,9 +4878,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                         tu["arg_error"] = _explain_truncation(
                             tu["arg_error"], result.stop_reason
                         )
-                    blocks.append(
-                        await self._dispatch_tool_interruptible(sid, turn_id, tu)
-                    )
+                blocks = await self._dispatch_batch(sid, turn_id, result.tool_uses)
             answers = await self.pending_question_answers()
             if answers and blocks and not self._interrupted.is_set():
                 blocks[-1] = replace(
@@ -6064,6 +6143,106 @@ class NativeLoop(BackgroundLifecycleMixin):
 
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
+    async def _dispatch_batch(
+        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]]
+    ) -> list[ToolResultBlock]:
+        """Dispatch one reply's tool calls; results come back in call order.
+
+        A run of two or more consecutive calls that :meth:`_runs_concurrently`
+        accepts executes together (:meth:`_dispatch_run`). Every other call is
+        a barrier: it runs alone on the serial path, after the calls before it
+        have finished and before the calls after it start. A run member whose
+        gate turns out to need more than a silent allow becomes a barrier
+        inside the run (see ``_RunSlot.become_barrier``).
+
+        ToolResult events go out as each call finishes, so inside a run they
+        can arrive out of call order; every consumer pairs a result with its
+        ToolUse by ``tool_use_id``. The transcript keeps call order.
+        """
+        blocks: list[ToolResultBlock] = []
+        i = 0
+        while i < len(tool_uses):
+            end = i
+            if self.max_concurrent_tools > 1:
+                while end < len(tool_uses) and self._runs_concurrently(tool_uses[end]):
+                    end += 1
+            if end - i >= 2:
+                blocks.extend(await self._dispatch_run(sid, turn_id, tool_uses[i:end]))
+                i = end
+            else:
+                blocks.append(await self._dispatch_tool_interruptible(sid, turn_id, tool_uses[i]))
+                i += 1
+        return blocks
+
+    def _run_slot(self, tool_use_id: str) -> _RunSlot | None:
+        """This call's slot when it is a member of one of this loop's
+        concurrent runs; None for a barrier and for anything that merely
+        inherited the context variable."""
+        slot = _RUN_SLOT.get()
+        if slot is None or slot.owner is not self or slot.tool_use_id != tool_use_id:
+            return None
+        return slot
+
+    def _runs_concurrently(self, tu: dict[str, Any]) -> bool:
+        """May this call execute alongside its neighbours?
+
+        Only a tool that opted in (``ToolSpec.concurrent``), on a call whose
+        effective risk is ``safe`` (read-only Bash qualifies) and that the
+        permission engine allows without a prompt. A dry check: it neither
+        counts toward the doom-loop guard nor prompts; the real gate still runs
+        per call, in order, inside the run.
+        """
+        if self.registry is None or tu.get("arg_error"):
+            return False
+        name, input = tu.get("name"), tu.get("input")
+        if not isinstance(name, str) or not isinstance(input, dict):
+            return False
+        if not self._tool_permitted(name):
+            return False
+        spec = self.registry.get(name)
+        if spec is None or not spec.concurrent or spec.effective_risk(input) != "safe":
+            return False
+        if self.permissions is not None:
+            return self.permissions.decide(spec, input, cwd=self.ctx.cwd).decision == "allow"
+        return True
+
+    async def _dispatch_run(
+        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]]
+    ) -> list[ToolResultBlock]:
+        """Run consecutive read-only calls together; results in call order.
+
+        Each call keeps the serial path's guarantees: it races the interrupt
+        on its own (:meth:`_dispatch_tool_interruptible`), so every call gets
+        exactly one result, and one call failing never cancels the others.
+        """
+        run = _ToolRun(len(tool_uses), self.max_concurrent_tools)
+
+        async def one(index: int, tu: dict[str, Any]) -> ToolResultBlock:
+            slot = _RunSlot(run, index, owner=self, tool_use_id=tu.get("tool_use_id", ""))
+            _RUN_SLOT.set(slot)
+            try:
+                return await self._dispatch_tool_interruptible(sid, turn_id, tu)
+            finally:
+                slot.finish()
+
+        tasks = [asyncio.create_task(one(i, tu)) for i, tu in enumerate(tool_uses)]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            # The engine is closing. gather has cancelled every call; let each
+            # emit its "engine closed" result before the cancellation goes on.
+            for task in tasks:
+                task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait(tasks)
+            raise
+        for outcome in results:
+            if isinstance(outcome, BaseException):
+                # What the serial loop would have raised; the siblings have
+                # finished and recorded their results first.
+                raise outcome
+        return results  # type: ignore[return-value]
+
     async def _dispatch_tool_interruptible(
         self, sid: str, turn_id: str, tu: dict[str, Any]
     ) -> ToolResultBlock:
@@ -6153,23 +6332,37 @@ class NativeLoop(BackgroundLifecycleMixin):
             return ToolResultBlock(
                 tool_use_id=tool_use_id, content=[Text(arg_error)], is_error=True,
             )
-        # Expose the call's id to handlers for the duration of the dispatch
-        # (dispatches are sequential): host tools that spawn UI-joined work
-        # (the Task dispatcher) need it to correlate their cards with this
-        # tool_use block.
-        self.ctx.extra["tool_use_id"] = tool_use_id
-        # The request this call answers, for a repeat that may point back at
-        # an earlier result (fluid.tools.view); None outside this window.
-        self.ctx.view_results = self._request_views.get(sid)
-        # A call cancelled before its result was built (an interrupt during
-        # PostToolUse) leaves its offer here; it must never be committed.
-        self.ctx.staged_delivery = None
-        self._tool_deliveries = []
-        try:
+        slot = self._run_slot(tool_use_id)
+        if slot is not None:
+            # A member of a concurrent run: the per-call fields below live on
+            # its own shallow ctx copy (shared registries, own tool_use_id,
+            # view_results and staged offer), never on the session ctx its
+            # siblings are using at the same time.
+            ctx = slot.ctx = replace(
+                call_ctx(self.ctx, tool_use_id),
+                view_results=self._request_views.get(sid), staged_delivery=None,
+            )
+            deliveries = slot.deliveries
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
-        finally:
-            self.ctx.extra.pop("tool_use_id", None)
-            self.ctx.view_results = None
+        else:
+            # Expose the call's id to handlers for the duration of the dispatch
+            # (barrier calls run alone): host tools that spawn UI-joined work
+            # (the Task dispatcher) need it to correlate their cards with this
+            # tool_use block.
+            ctx = self.ctx
+            self.ctx.extra["tool_use_id"] = tool_use_id
+            # The request this call answers, for a repeat that may point back at
+            # an earlier result (fluid.tools.view); None outside this window.
+            self.ctx.view_results = self._request_views.get(sid)
+            # A call cancelled before its result was built (an interrupt during
+            # PostToolUse) leaves its offer here; it must never be committed.
+            self.ctx.staged_delivery = None
+            deliveries = self._tool_deliveries = []
+            try:
+                outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
+            finally:
+                self.ctx.extra.pop("tool_use_id", None)
+                self.ctx.view_results = None
         if (
             outcome.background_task is not None
             and not outcome.background_task.serves
@@ -6206,12 +6399,12 @@ class NativeLoop(BackgroundLifecycleMixin):
             tool_use_id=tool_use_id,
             content=content,
             is_error=outcome.is_error,
-            delivered_steers=self._tool_deliveries,
+            delivered_steers=deliveries,
             delivery_metadata_version=1,
         )
         # Only now is the result that will be stored known, so only now may
         # the handler's offer become a target for a later repeat.
-        commit_delivery(self.ctx, block)
+        commit_delivery(ctx, block)
         return block
 
     # ── end-of-turn reflection nudge ─────────────────────────────────────
@@ -6334,8 +6527,18 @@ class NativeLoop(BackgroundLifecycleMixin):
         whose in-kernel tool calls are gated host-side by ``HostBridge`` (the
         same hook + permission + doom-loop pipeline, including the
         ``code_mode_allowed=False`` escape hatch).
+
+        Inside a concurrent run (:meth:`_dispatch_run`) everything up to the
+        ``tool_allowed`` notice is the call's gate and runs in call order. A
+        gate that needs more than a silent allow (a hook that denies, stops or
+        rewrites, a prompt, a doom-loop stop) makes the call a barrier first,
+        so permission prompts are never shown while a sibling runs.
         """
         assert self.registry is not None
+        slot = self._run_slot(tool_use_id)
+        if slot is not None:
+            await slot.enter_gate()
+        ctx = slot.ctx if slot is not None and slot.ctx is not None else self.ctx
 
         # CE12 enforcement point 3: a call naming a tool outside this session's
         # surface never reaches the registry. The model should never emit one
@@ -6355,7 +6558,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         spec = self.registry.get(name)
         from fluid.tools.bash_file_guard import guard_input
 
-        guidance = guard_input(name, input, self.registry, self.ctx, self._tool_wired, self.permissions)
+        guidance = guard_input(name, input, self.registry, ctx, self._tool_wired, self.permissions)
         if guidance:
             return await self._finish_tool(
                 sid, turn_id, name, tool_use_id,
@@ -6377,6 +6580,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             )
             await self._report_hook_warnings(sid, turn_id, PRE_TOOL_USE, decision, name)
             if decision.action == "deny" or decision.stop:
+                if slot is not None:
+                    await slot.become_barrier()
                 reason = decision.note or ("stopped by hook" if decision.stop else "denied")
                 if decision.stop:
                     self._hook_stop_reason = reason
@@ -6390,6 +6595,9 @@ class NativeLoop(BackgroundLifecycleMixin):
                     input=input,
                 )
             if decision.action == "modify" and decision.replacement_input is not None:
+                # Rewritten input was never risk-checked for the run: alone.
+                if slot is not None:
+                    await slot.become_barrier()
                 input = decision.replacement_input
             hook_permission = decision.permission_decision
             hook_reason = decision.note
@@ -6402,7 +6610,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         # Permission gate.
         if self.permissions is not None and spec is not None and hook_permission != "allow":
-            decided = self.permissions.decide(spec, input, cwd=self.ctx.cwd)
+            decided = self.permissions.decide(spec, input, cwd=ctx.cwd)
             verdict = decided.decision
             # Default denial text: names the configured rule when one decided.
             deny_message: str | None = decided.deny_message()
@@ -6413,6 +6621,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # "ask" would park the turn until ``permission_timeout`` —
                 # deny with in-context feedback instead; that alone breaks the
                 # repeat pattern.
+                if slot is not None:
+                    await slot.become_barrier()
                 if self.permissions.approval_policy == "never_ask":
                     return await self._finish_tool(
                         sid, turn_id, name, tool_use_id,
@@ -6424,6 +6634,8 @@ class NativeLoop(BackgroundLifecycleMixin):
             if verdict == "allow" and hook_permission == "ask":
                 verdict = "ask"
                 ask_reason = hook_reason or "a PreToolUse hook asked for confirmation"
+            if verdict != "allow" and slot is not None:
+                await slot.become_barrier()
             if verdict == "ask":
                 verdict, responder_message, updated_input = await self._await_permission(
                     sid, turn_id, name, tool_use_id, input, decided.risk,
@@ -6451,33 +6663,42 @@ class NativeLoop(BackgroundLifecycleMixin):
                 "session_id": sid, "name": name, "input": input,
                 "tool_use_id": tool_use_id,
             })
+        if slot is not None:
+            # The gate is passed: the next call of the run may take its turn
+            # (a barrier keeps it waiting until this call is over).
+            slot.leave_gate()
 
         # run_python is engine-driven: it opens the kernel; the kernel's in-process
         # tool calls are gated by HostBridge (see CodeModeSession.run_python),
         # which runs its own MRTR round-trip through this loop's
         # ``_collect_input_responses`` — so an in-kernel input_required pause
         # reaches the user exactly as a JSON-path one does.
-        if self._codemode is not None and name == "run_python":
-            outcome = await self._codemode.run_python(
-                sid=sid, turn_id=turn_id, input=input, loop=self
-            )
-        else:
-            outcome = await self.registry.dispatch(name, input, self.ctx)
+        # A concurrent run bounds how many of its calls execute at once.
+        limit = slot.run.limit if slot is not None and not slot.barrier else nullcontext()
+        async with limit:
+            if self._codemode is not None and name == "run_python":
+                outcome = await self._codemode.run_python(
+                    sid=sid, turn_id=turn_id, input=input, loop=self
+                )
+            else:
+                outcome = await self.registry.dispatch(name, input, ctx)
 
-        # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
-        # Collect answers via QuestionRequest/RespondQuestion round-trips, then
-        # retry the SAME call with inputResponses + the echoed request_state.
-        outcome = await resolve_input_required(
-            outcome,
-            name=name,
-            collect=lambda marker: self._collect_input_responses(
-                sid, turn_id, name, tool_use_id, marker
-            ),
-            redispatch=lambda answers, request_state: self.registry.dispatch(
-                name, input, self.ctx,
-                input_responses=answers, request_state=request_state,
-            ),
-        )
+            # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
+            # Collect answers via QuestionRequest/RespondQuestion round-trips, then
+            # retry the SAME call with inputResponses + the echoed request_state.
+            # (No tool that opts into concurrent runs is an MCP tool, so a run
+            # member never parks here.)
+            outcome = await resolve_input_required(
+                outcome,
+                name=name,
+                collect=lambda marker: self._collect_input_responses(
+                    sid, turn_id, name, tool_use_id, marker
+                ),
+                redispatch=lambda answers, request_state: self.registry.dispatch(
+                    name, input, ctx,
+                    input_responses=answers, request_state=request_state,
+                ),
+            )
         return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
 
     async def _collect_input_responses(
@@ -6804,7 +7025,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             for _, text, sender, origin in delivered:
                 if origin == "user" and sender is None:
                     self.ctx.extra["bash_file_guard_user_text"] = text
-            self._tool_deliveries.extend(
+            # A run member's steers ride its own result block, not whichever
+            # sibling's list ``_tool_deliveries`` would name at this moment.
+            slot = self._run_slot(tool_use_id)
+            (slot.deliveries if slot is not None else self._tool_deliveries).extend(
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin, accepted_at=accepted.get(steer_id))
                 for steer_id, text, sender, origin in delivered
             )

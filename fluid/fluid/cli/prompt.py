@@ -703,11 +703,24 @@ def _tools_section(p: PromptProfile) -> str | None:
         )
     if not p.code_mode:
         # Under code mode one cell carries the calls; there is no reply-level
-        # parallelism to ask for.
+        # parallelism to ask for. What runs concurrently is the native loop's
+        # rule (NativeLoop._dispatch_batch); under the delegated leg the claude
+        # CLI decides, so the bullet makes no claim about it there.
+        reads = bool(t & {"Read", "Grep", "Glob", "WebSearch"})
+        subject = (
+            "Reads, searches and read-only Bash commands" if reads and "Bash" in t
+            else "Reads and searches" if reads
+            else "Read-only Bash commands" if "Bash" in t
+            else ""
+        )
+        how = (
+            "" if p.delegated or not subject else
+            f" {subject} among them run concurrently; any other call runs "
+            "alone, in order."
+        )
         bullets.append(
-            "- Make independent tool calls in the same reply so they run "
-            "together; serialize only when one call's input depends on "
-            "another's result."
+            "- Make independent tool calls in the same reply." + how +
+            " Serialize only when one call's input depends on another's result."
         )
     if p.delegated and t:
         example = next((n for n in ("Note", "AskUser", "Monitor", "Read") if n in t), None)

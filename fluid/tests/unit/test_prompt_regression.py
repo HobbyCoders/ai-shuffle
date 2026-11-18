@@ -556,6 +556,22 @@ def test_code_mode_prompt_drops_the_bullets_the_addendum_contradicts() -> None:
     assert "The user saw the cell run" in code_mode
 
 
+def test_parallel_calls_bullet_says_what_the_native_loop_does() -> None:
+    """The native loop runs read-only calls of one reply concurrently and
+    every other call alone, in order (NativeLoop._dispatch_batch). The claude
+    CLI decides that for the delegated leg, so its bullet makes no claim."""
+    from fluid.cli.prompt import PromptProfile, compose_base_prompt
+
+    native = compose_base_prompt(PromptProfile(model="claude"))
+    delegated = compose_base_prompt(PromptProfile(model="claude", delegated=True))
+    claim = "read-only Bash commands among them run concurrently"
+    assert claim in native and "any other call runs alone, in order" in native
+    assert claim not in delegated
+    for text in (native, delegated):
+        assert "Make independent tool calls in the same reply." in text
+        assert "so they run together" not in text
+
+
 def test_addendum_teaches_the_import_spelling_the_kernel_prefers() -> None:
     """PRM-8."""
     from fluid.cli.prompt import CODE_MODE_ADDENDUM

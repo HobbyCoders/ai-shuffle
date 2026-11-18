@@ -110,6 +110,7 @@ SPEC = ToolSpec(
         "required": ["file_path"],
     },
     risk="safe",
+    concurrent=True,
 )
 
 

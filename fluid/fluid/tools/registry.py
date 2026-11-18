@@ -20,7 +20,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -149,6 +149,59 @@ class ToolCtx:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+class CallExtra(MutableMapping[str, Any]):
+    """``ctx.extra`` as one call sees it when calls share a ctx concurrently.
+
+    Reads find the call's own keys (its ``tool_use_id``) first, then the
+    session's. Writes of any other key go to the session's dict, so state a
+    handler keeps there outlives the call as it does on a serial dispatch.
+    Concurrent calls on one shared ctx (the delegated bundled bridge, the
+    native loop's read-only batches) are why the call's keys cannot be
+    written into that dict.
+    """
+
+    def __init__(self, base: dict[str, Any], own: dict[str, Any]) -> None:
+        self._base = base
+        self._own = own
+
+    def __getitem__(self, key: str) -> Any:
+        if key in self._own:
+            return self._own[key]
+        return self._base[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        if key in self._own:
+            self._own[key] = value
+        else:
+            self._base[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        if key in self._own:
+            del self._own[key]
+        else:
+            del self._base[key]
+
+    def __iter__(self) -> Iterator[str]:
+        yield from self._own
+        yield from (k for k in self._base if k not in self._own)
+
+    def __len__(self) -> int:
+        return len(self._own) + sum(1 for k in self._base if k not in self._own)
+
+
+def call_ctx(ctx: ToolCtx, tool_use_id: str | None) -> ToolCtx:
+    """A shallow copy of ``ctx`` whose ``extra`` carries this call's id.
+
+    The copy shares every per-session registry (read_files, read_seen, ...)
+    with ``ctx``. ``ToolRegistry.dispatch`` publishes the id as
+    ``current_tool_use_id`` for handlers that take no ctx.
+    """
+    if not tool_use_id:
+        return ctx
+    extra = CallExtra(ctx.extra, {"tool_use_id": tool_use_id})
+    return replace(ctx, extra=extra)  # type: ignore[arg-type]
+
+
 @dataclass(frozen=True, kw_only=True)
 class ToolSpec:
     name: str
@@ -188,6 +241,16 @@ class ToolSpec:
     # Retired compatibility aliases remain callable with normal permissions,
     # but are never advertised to a new model context.
     discoverable: bool = True
+    # Opt-in: the handler may run alongside other calls from the same model
+    # reply. The native loop runs a call concurrently only when this is set AND
+    # the call's effective risk is "safe" AND permissions allow it without a
+    # prompt; anything else waits its turn. Set it only on a handler that keeps
+    # no per-call state outside the ctx it is given (concurrent calls each get
+    # a shallow copy; see ``call_ctx``), holds no module-level mutable state,
+    # and updates the shared ctx registries (read_seen, grep_seen, deliveries,
+    # extra) in synchronous steps, with no await between a lookup and the
+    # write that depends on it. Default off: an unaudited tool runs in order.
+    concurrent: bool = False
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:
         """Labels an ``allow_always`` for this call would cover (None = all)."""

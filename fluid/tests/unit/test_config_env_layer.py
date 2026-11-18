@@ -93,6 +93,7 @@ def test_env_overrides_reads_the_process_environment_by_default(monkeypatch) -> 
 
 @pytest.mark.parametrize("var", [
     "FLUID_ANCHOR_BUDGET", "FLUID_MAX_TOKENS", "FLUID_MAX_CALLS", "FLUID_CONTEXT_WINDOW",
+    "FLUID_MAX_CONCURRENT_TOOLS",
 ])
 def test_malformed_integers_are_dropped(var) -> None:
     assert env_overrides({var: "lots"}) == {}

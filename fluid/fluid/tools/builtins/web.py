@@ -572,6 +572,7 @@ SEARCH_SPEC = ToolSpec(
         "required": ["query"],
     },
     risk="safe",
+    concurrent=True,
 )
 
 _RESULT_RE = re.compile(

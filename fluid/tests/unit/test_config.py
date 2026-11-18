@@ -206,6 +206,7 @@ def _non_default_config_dict() -> dict:
         "cwd": "/w",
         "max_tokens": 1000,
         "max_model_calls": 50,
+        "max_concurrent_tools": 3,
         "context_window": 200_000,
         "cache_key": "ck",
         "system": "sys",
@@ -344,6 +345,19 @@ def test_max_model_calls_default_and_env_override() -> None:
     assert env_overrides({"FLUID_MAX_CALLS": "500"})["max_model_calls"] == 500
     assert "max_model_calls" not in env_overrides({"FLUID_MAX_CALLS": "lots"})
     assert HarnessConfig.from_dict(dict(BUILTIN_DEFAULTS)).max_model_calls == 200
+
+
+def test_max_concurrent_tools_default_env_and_engine_wiring() -> None:
+    assert env_overrides({"FLUID_MAX_CONCURRENT_TOOLS": "2"})["max_concurrent_tools"] == 2
+    assert "max_concurrent_tools" not in env_overrides({"FLUID_MAX_CONCURRENT_TOOLS": "x"})
+    default = HarnessConfig.from_dict(dict(BUILTIN_DEFAULTS))
+    assert default.max_concurrent_tools == 8
+    engine = build_engine(default, MemoryStore(), provider=FakeProvider())
+    assert isinstance(engine, NativeLoop) and engine.max_concurrent_tools == 8
+    serial = HarnessConfig.from_dict(deep_merge(BUILTIN_DEFAULTS, {"max_concurrent_tools": 0}))
+    assert serial.max_concurrent_tools == 1  # floor: never "no calls at all"
+    engine = build_engine(serial, MemoryStore(), provider=FakeProvider())
+    assert engine.max_concurrent_tools == 1
 
 
 def test_max_model_calls_zero_means_unlimited() -> None:

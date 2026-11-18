@@ -63,13 +63,20 @@ import logging
 import os
 import re
 import sys
-from collections.abc import Awaitable, Callable, Iterator, MutableMapping
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fluid.tools.mrtr import resolve_input_required, unresolved_notice
-from fluid.tools.registry import InputRequired, ToolCtx, ToolOutcome, ToolRegistry
+from fluid.tools.registry import (
+    CallExtra,
+    InputRequired,
+    ToolCtx,
+    ToolOutcome,
+    ToolRegistry,
+    call_ctx,
+)
 
 if TYPE_CHECKING:
     from fluid.hooks.bus import HookBus
@@ -239,14 +246,14 @@ async def serve_registry_socket(
                     writer.write((json.dumps(_UNAUTHORIZED) + "\n").encode())
                     await writer.drain()
                     return
-                call_ctx = ctx
+                agent_ctx = ctx
                 if req.get("op") == "call" and agent_id_for_tool is not None:
                     tid = req.get("tool_use_id")
                     agent_id = agent_id_for_tool(tid if isinstance(tid, str) else None)
-                    extra = _CallExtra(ctx.extra, {"agent_id": agent_id})
-                    call_ctx = replace(ctx, extra=extra)  # type: ignore[arg-type]
+                    extra = CallExtra(ctx.extra, {"agent_id": agent_id})
+                    agent_ctx = replace(ctx, extra=extra)  # type: ignore[arg-type]
                 resp = await _answer(
-                    registry, call_ctx, req,
+                    registry, agent_ctx, req,
                     tool_filter=tool_filter, permissions=permissions, hooks=hooks,
                     on_stop=on_stop, deferred=deferred, call_through=call_through,
                     on_input_required=on_input_required,
@@ -390,58 +397,6 @@ def _permitted(filt: Callable[[str], bool] | None, name: str) -> bool:
     return filt(name) if filt is not None else True
 
 
-class _CallExtra(MutableMapping[str, Any]):
-    """``ctx.extra`` as one bridge call sees it.
-
-    Reads find the call's own keys (its ``tool_use_id``) first, then the
-    session's. Writes of any other key go to the session's dict, so state a
-    handler keeps there outlives the call as it does on the native loop. The
-    bridge serves concurrent calls on one shared ctx, which is why the call's
-    keys cannot be written into that dict.
-    """
-
-    def __init__(self, base: dict[str, Any], own: dict[str, Any]) -> None:
-        self._base = base
-        self._own = own
-
-    def __getitem__(self, key: str) -> Any:
-        if key in self._own:
-            return self._own[key]
-        return self._base[key]
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        if key in self._own:
-            self._own[key] = value
-        else:
-            self._base[key] = value
-
-    def __delitem__(self, key: str) -> None:
-        if key in self._own:
-            del self._own[key]
-        else:
-            del self._base[key]
-
-    def __iter__(self) -> Iterator[str]:
-        yield from self._own
-        yield from (k for k in self._base if k not in self._own)
-
-    def __len__(self) -> int:
-        return len(self._own) + sum(1 for k in self._base if k not in self._own)
-
-
-def _call_ctx(ctx: ToolCtx, tool_use_id: str | None) -> ToolCtx:
-    """A shallow copy of ``ctx`` whose ``extra`` carries this call's id.
-
-    The copy shares every per-session registry (read_files, read_seen, ...)
-    with ``ctx``. ``ToolRegistry.dispatch`` publishes the id as
-    ``current_tool_use_id`` for handlers that take no ctx.
-    """
-    if not tool_use_id:
-        return ctx
-    extra = _CallExtra(ctx.extra, {"tool_use_id": tool_use_id})
-    return replace(ctx, extra=extra)  # type: ignore[arg-type]
-
-
 async def _gate_call(
     registry: ToolRegistry, ctx: ToolCtx, name: str, args: dict[str, Any],
     *,
@@ -478,7 +433,7 @@ async def _gate_call(
     # this call's generation before a hook/permission wait; the socket and its
     # shared ctx outlive turns, but an old request must never borrow a new lease.
     if name == "Plan" and "session_plan" in ctx.extra:
-        ctx = replace(ctx, extra=_CallExtra(ctx.extra, {
+        ctx = replace(ctx, extra=CallExtra(ctx.extra, {
             "session_plan": ctx.extra["session_plan"],
         }))  # type: ignore[arg-type]
 
@@ -530,14 +485,14 @@ async def _gate_call(
             "session_id": ctx.session_id, "name": name, "input": args,
             "tool_use_id": tool_use_id, **identity,
         })
-    call_ctx = _call_ctx(ctx, tool_use_id)
-    outcome = await registry.dispatch(name, args, call_ctx)
+    this_call = call_ctx(ctx, tool_use_id)
+    outcome = await registry.dispatch(name, args, this_call)
     if on_input_required is not None:
         outcome = await resolve_input_required(
             outcome, name=name,
             collect=lambda marker: on_input_required(name, marker),
             redispatch=lambda answers, request_state: registry.dispatch(
-                name, args, call_ctx, input_responses=answers, request_state=request_state,
+                name, args, this_call, input_responses=answers, request_state=request_state,
             ),
         )
     if hooks is not None:

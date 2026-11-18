@@ -119,6 +119,7 @@ SPEC = ToolSpec(
         "required": ["pattern"],
     },
     risk="safe",
+    concurrent=True,
 )
 
 
