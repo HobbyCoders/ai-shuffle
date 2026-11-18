@@ -1139,9 +1139,24 @@ cases.push({
 });
 
 /** Per painted frame on the cover screen: scroll, the followed content end and
- * blank runs, the row carrying `token` and the queue. No frames run while paused. */
-function sampleCover({ LOG, token }) {
+ * blank runs, the row carrying `token`, the queue and, when `bubble` names the
+ * words of a queued prompt, whether that bubble is drawn in this frame. No
+ * frames run while paused. */
+function sampleCover({ LOG, token, bubble: words }) {
 	const w = window.__cover = { running: true, frames: [] };
+	// Inside the scroller, opaque, with nothing over it: three hit-tests down its
+	// left edge must land in this bubble, in the same frame its box is read.
+	const drawn = (el, log, box) => {
+		if (!el) return null;
+		const r = el.getBoundingClientRect();
+		let opacity = 1, shown = getComputedStyle(el).visibility === 'visible';
+		for (let at = el; at && at !== log; at = at.parentElement) opacity *= +getComputedStyle(at).opacity;
+		const x = r.left + Math.min(24, r.width / 2);
+		const hits = [r.top + 8, (r.top + r.bottom) / 2, r.bottom - 8].filter(y => el.contains(document.elementFromPoint(x, y))).length;
+		return { top: Math.round(r.top - box.top), bottom: Math.round(r.bottom - box.top), hits, opacity: Math.round(opacity * 100) / 100,
+			ok: r.height > 16 && r.top >= box.top && r.bottom <= box.bottom && shown && opacity > 0.99 && hits === 3,
+			text: words.every(s => el.textContent.includes(s)) };
+	};
 	const tick = () => {
 		const log = document.querySelector(LOG);
 		if (!w.running || !log) return;
@@ -1150,6 +1165,7 @@ function sampleCover({ LOG, token }) {
 		const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
 		const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')].filter(el => el.getBoundingClientRect().height > 0);
 		const prompt = rows.findLast(el => el.textContent.includes(token));
+		const queuedBubble = words && [...log.querySelectorAll('.pending-messages [data-queue-confirmed="true"]')].find(el => el.textContent.includes(words[0]));
 		w.frames.push({ w: innerWidth, at: Math.round(performance.now()), top: log.scrollTop, viewport: log.clientHeight,
 			// The followed edge: the last row or a docked control, in scroll coordinates.
 			end: log.scrollTop + Math.max(...[rows.at(-1), ...controls].filter(Boolean).map(el => el.getBoundingClientRect().bottom - box.top)),
@@ -1157,6 +1173,7 @@ function sampleCover({ LOG, token }) {
 			promptTop: prompt ? Math.round(prompt.getBoundingClientRect().top - box.top) : null,
 			promptBottom: prompt ? Math.round(prompt.getBoundingClientRect().bottom - box.top) : null,
 			folded: !!log.querySelector('.chat-column [data-run-fold]'),
+			...(words ? { bubble: drawn(queuedBubble, log, box) } : {}),
 			users: log.querySelectorAll('[data-user-turn-id]').length, queued: log.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length,
 			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming });
 		requestAnimationFrame(tick);
@@ -1213,7 +1230,7 @@ cases.push({
 		await typeAndSend(page, `${queued} runs as its own turn, it names @Notes/note-0f0f0f0f\nThis second line wraps on the cover display ${'word '.repeat(14)}[script:default tps=300]`);
 		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
 		expect(!(await page.evaluate(runFolded)), 'the bubble was confirmed before the tool run folded');
-		await page.evaluate(sampleCover, { LOG, token: queued });
+		await page.evaluate(sampleCover, { LOG, token: queued, bubble: [queued, '@Notes/note-0f0f0f0f'] });
 		await mark('close the device: hidden and paused, then sized to the cover screen');
 		await pauseClose(page);
 		// The server, not the hidden page, says when the run is done: all sixteen
@@ -1254,14 +1271,19 @@ cases.push({
 		const folded = await page.evaluate(runFolded);
 		// Resumed frames before the collapse painted, and the first frame it did.
 		const foldAt = resumed.findIndex((f, i) => i >= from && f.folded) - from;
-		log(`fold close with queue ${JSON.stringify({ paused, folded, foldAt, atFold: resumed[from + foldAt], shown, check, first: resumed[from] })}`);
+		const atFold = resumed[from + foldAt];
+		log(`fold close with queue ${JSON.stringify({ paused, folded, foldAt, atFold, shown, check, first: resumed[from] })}`);
 		expect(folded, 'the tool run folded once the page was visible again');
-		expect(foldAt >= 0 && foldAt < check.frames && resumed[from + foldAt].queued === 1, `the run folded on the cover screen with the bubble still docked (frame ${foldAt} of ${check.frames})`);
+		expect(foldAt >= 0 && foldAt < check.frames && atFold.queued === 1, `the run folded on the cover screen with the bubble still docked (frame ${foldAt} of ${check.frames})`);
+		// The collapse frame itself, sampled in one tick: this prompt's bubble is
+		// inside the scroller, opaque and on top, showing its own words. A bubble
+		// covered, clipped or pushed off screen there and only drawn later fails.
+		expect(atFold.bubble?.ok && atFold.bubble.text, `the queued prompt is drawn on screen with its own words in the frame the run folds (${JSON.stringify(atFold.bubble)})`);
 		expect(shown.streaming === 'true' && shown.bubble.mounted, `the reply still streams over the mounted bubble after resume (${JSON.stringify(shown)})`);
 		expect(check.frames > 20 && check.longest === 0, `no resumed cover frame is blank (${check.longest} of ${check.frames})`);
 		expect(check.by <= RESUME_SLACK, `the follower is not scrolled into the blank reserve on resume (${check.by}px past the content end: ${JSON.stringify(check.around)})`);
 		expect(shown.prose.painted, `the live prose is painted on screen after the fold (${JSON.stringify(shown.prose)})`);
-		expect(shown.bubble.painted && shown.bubble.text, `the queued prompt is painted on screen with its own words (${JSON.stringify(shown.bubble)})`);
+		expect(shown.bubble.painted && shown.bubble.text, `the queued prompt is still painted on screen with its own words (${JSON.stringify(shown.bubble)})`);
 		await mark('the turn ends: the queued prompt runs as its own turn');
 		await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
 		await waitTurnSettled(page, { hold: 800, timeout: 120_000 });
