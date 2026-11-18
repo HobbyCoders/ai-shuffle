@@ -418,3 +418,26 @@ def test_an_unchanged_legacy_pin_says_what_its_runs_will_really_do(client, fal_b
     assert fit["warning"] == ("This saved choice has no verified price. "
                               "Unattended runs will skip it until a price is available.")
     assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/text-only"
+
+
+def test_an_unchanged_legacy_pin_without_its_source_image_is_not_said_to_be_skipped(client, fal_backend, monkeypatch):
+    # generateImage may pass image_url per call, merged before validation and
+    # pricing, so the saved options failing alone is no skip.
+    from app.core import generation_choices
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    prepare = fal_backend.prepare
+
+    async def validating(c, options, prompt):
+        if c.model == "fal-ai/needs-image" and "image_url" not in options:
+            raise ValueError("Model options do not match the declared input schema.")
+        return await prepare(c, options, prompt)
+    monkeypatch.setattr(fal_backend, "prepare", validating)
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    generation_choices.save_job(IDENTITY, "auto-12345678", "image", _pick("fal-ai/needs-image"))
+    kept = client.put(route, json=_pick("fal-ai/needs-image")).json()
+    assert kept["unchanged"] is True and kept["priced"] is False and kept["unattended_skip_reason"] is None
+    assert kept["warning"] == ("This model needs image_url, which generateImage does not send. "
+                               "It would be refused as a new pin; this job keeps the one it already has. "
+                               "A run works only if the call supplies image_url.")
+    assert generation_choices.load_job(IDENTITY, "auto-12345678")["image"]["model"] == "fal-ai/needs-image"

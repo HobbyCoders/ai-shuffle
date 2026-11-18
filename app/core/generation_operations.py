@@ -209,15 +209,34 @@ def input_problem(op: Operation, schema, options: dict | None = None) -> str | N
     return None
 
 
-def schema_problem(op: Operation, schema: dict | None, options: dict | None = None) -> str | None:
-    """``input_problem`` for a candidate's serialised schema (None: no schema to check)."""
+def _parsed(schema: dict | None):
+    """A candidate's serialised schema as a ``ModelSchema`` (None: no schema to check)."""
     if not isinstance(schema, dict) or not schema.get("fields"):
         return None
     from app.services.fal_schema import ModelSchema, ParamField
     try:
-        parsed = ModelSchema(schema.get("endpoint_id") or "", fields=[ParamField(**f) for f in schema["fields"]],
-                             primary_text_field=schema.get("primary_text_field"),
-                             input_schema=schema.get("input_schema"))
+        return ModelSchema(schema.get("endpoint_id") or "", fields=[ParamField(**f) for f in schema["fields"]],
+                           primary_text_field=schema.get("primary_text_field"),
+                           input_schema=schema.get("input_schema"))
     except (TypeError, ValueError):
         return None
-    return input_problem(op, parsed, options)
+
+
+def schema_problem(op: Operation, schema: dict | None, options: dict | None = None) -> str | None:
+    """``input_problem`` for a candidate's serialised schema (None: no schema to check)."""
+    parsed = _parsed(schema)
+    return None if parsed is None else input_problem(op, parsed, options)
+
+
+def missing_inputs(schema: dict | None, options: dict | None) -> list[str]:
+    """Required inputs that neither ``options`` nor a default fills (the prompt
+    aside): a run of these options works only if its call supplies them."""
+    parsed = _parsed(schema)
+    if parsed is None:
+        return []
+    names = {f.name: f for f in parsed.fields}
+    required = (set(parsed.input_schema.get("required") or ()) if parsed.input_schema is not None
+                else {f.name for f in parsed.fields if f.required})
+    return sorted(name for name in required
+                  if name != parsed.primary_text_field and name not in (options or {})
+                  and (name not in names or names[name].default is None))

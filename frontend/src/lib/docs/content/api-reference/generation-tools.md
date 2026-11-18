@@ -229,7 +229,10 @@ exact pin it already has is not a new pin: it stays, with `unchanged: true` and
 a warning. The warning says unattended runs will skip it only when they would (no
 verified price, or unavailable). A pin stored before the operation check that would
 now be refused as a new pin (its `incompatible` reason) is kept and said to be
-refused only as a new pin, since runs still merge its saved options. An optional `operation`
+refused only as a new pin, since runs still merge its saved options and the call's.
+When its saved options alone leave a required input to the call (such as
+`image_url`), the warning says a run works only if the call supplies it, and
+`unattended_skip_reason` is null. An optional `operation`
 query parameter (default: the kind's text operation) names what the pick is for;
 a fal model whose inputs do not fit it, or the text operation that runs pinned
 picks, is a `422` naming the reason, and nothing is pinned. The response adds the save-time

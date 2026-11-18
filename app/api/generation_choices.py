@@ -165,7 +165,8 @@ async def save_time_quote(kind: str, choice: dict, context, operations=None) -> 
         warning = "This saved choice has no verified price. Unattended runs will skip it until a price is available."
     return {"price": quoted.get("price") or dict(UNKNOWN_PRICE), "priced": eligible, "quote_error": quote_error,
             "unattended_skip_reason": None if eligible else skip_reason,
-            "warning": None if eligible else warning, "incompatible": quoted.get("incompatible")}
+            "warning": None if eligible else warning, "incompatible": quoted.get("incompatible"),
+            **({"missing": quoted["missing"]} if quoted.get("missing") else {})}
 
 
 @router.delete("/choices/{kind}")
@@ -479,12 +480,17 @@ async def pin_job_choice(identity: Callable[[], tuple[str, str]], job_id: str, k
 async def _kept_pin(kind: str, pinned: dict, context, quoted: dict) -> dict:
     """What an unchanged stored pin does on its next run. One stored before the
     operation check is not refused by the resolver (which merges its saved
-    options), so only a run-time quote says whether runs will skip it."""
+    options and the call's), so a quote of the saved options alone says
+    whether runs will skip it: only when no call could change that (no
+    verified price, or unavailable), never for inputs a call may supply."""
     reason = quoted.get("incompatible")
     if not reason:
         return quoted
     runs = await save_time_quote(kind, pinned, context, operations=())
     kept = f"{reason} It would be refused as a new pin; this job keeps the one it already has."
+    if runs.get("missing"):
+        return {**runs, "incompatible": reason, "unattended_skip_reason": None,
+                "warning": f"{kept} A run works only if the call supplies {', '.join(runs['missing'])}."}
     return {**runs, "incompatible": reason, "warning": kept if runs["priced"] else f"{kept} {runs['warning']}"}
 
 
@@ -539,10 +545,13 @@ async def quote_choice(kind: str, choice: dict, context, prompt: str | None = No
             problem = generation_operations.schema_problem(op, candidate.schema, choice.get("options"))
             if problem:
                 return {"ok": False, "error": problem, "incompatible": problem, "price": candidate.price}
+    options = {**candidate.options, **(choice.get("options") or {})}
     try:
-        prepared = await backend.prepare(candidate, {**candidate.options, **(choice.get("options") or {})}, prompt)
+        prepared = await backend.prepare(candidate, options, prompt)
     except ValueError as exc:
-        return {"ok": False, "error": str(exc), "price": candidate.price}
+        # ``missing``: required inputs these options leave to the call.
+        missing = generation_operations.missing_inputs(candidate.schema, options) if candidate.source == "fal" else []
+        return {"ok": False, "error": str(exc), "price": candidate.price, **({"missing": missing} if missing else {})}
     price = prepared.price
     if prepared.source == "supergrok" and kind == "video":
         from app.core import native_generation_settings as native
