@@ -92,7 +92,9 @@ model *reads* framing tokens even when they can't structurally escape.
   `fluid/tools/hardening.py`. A path is matched in every spelling the
   file-tool rules check: as written, normalised (`~/.kube/./config`), made
   absolute against the working directory, and with symlinks resolved; names
-  match in any case (`.ENV`). A `Glob` asks when its root or the literal
+  match in any case (`.ENV`). Odd path forms (a link whose name ends in a
+  space, say), a search root that is a link into a credential folder and
+  file names containing a newline are best effort (tracked in #1778). A `Glob` asks when its root or the literal
   parts of its pattern name a credential file or folder (`.aws/**`,
   `**/.env*`, `*` under `~/.ssh`); a wildcard-only pattern (`**/*.json`)
   lists names without asking. They are prepended before user rules, so one
@@ -106,7 +108,10 @@ model *reads* framing tokens even when they can't structurally escape.
   turn) is denied at once with the reason. On the delegated Claude CLI leg
   the PreToolUse hook answers `ask` for a CLI `Read`/`Edit`/`Write`/`Grep`/
   `Glob` call that touches one, judged in the CLI's own working directory,
-  and no earlier "always" covers such a call. Under Bypass nothing asks.
+  and no earlier "always" covers such a call. In the app a saved Deny still
+  answers such a call, but a saved or remembered Allow does only when its
+  pattern names that exact path: a tool-wide "always" on `Write` does not
+  approve a later `.env` write. Under Bypass nothing asks.
 - **Bash is not a credential boundary.** The risk classifier demotes an
   otherwise read-only command to `write` (→ prompts under `on_write`) when an
   argument names a credential file literally (`cat .env`,
@@ -119,19 +124,23 @@ model *reads* framing tokens even when they can't structurally escape.
   (`sort -o`, `tree -o`, `rg --pre`, `git log --output`) makes the command
   `write` in every spelling the program accepts: value glued on
   (`sort -oFILE`), inside combined flags (`sort -uo FILE`), `--opt=value`
-  and abbreviated (`git log --out=FILE`).
+  and abbreviated (`git log --out=FILE`). The previous classifier still runs
+  unchanged underneath (`_bash_risk_main.py`), so no command is `safe` that
+  it asked about.
 - **Agent-owned ACP tools are outside both guarantees.** A tool an ACP agent
   runs itself (Antigravity's own file reads and shell) never passes through
   these rules; the host sees only the permission requests the agent chooses
   to send. "Always" on such a request reaches the agent as `allow_always`
   only for the Bash forms listed under allow-always below (and for
-  non-shell tools, as on the native leg); any other shell command is sent
-  back as allow once, since the agent would keep the grant as broadly as it
-  likes.
+  non-shell tools, as on the native leg); any other shell command, and an
+  `execute` request that carries no command text, is sent back as allow
+  once, or cancelled if the agent offers no allow-once option, since the
+  agent would keep the grant as broadly as it likes.
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. The check reads ripgrep's own path field
-  (`--null`), so a folder named like a `path:line:` prefix cannot hide one.
+  (`--null`), so a folder named like a `path:line:` prefix cannot hide one
+  (names containing a newline are best effort, #1778).
   Reading such a file explicitly still works, through the permission rule
   above.
 
@@ -152,15 +161,19 @@ model *reads* framing tokens even when they can't structurally escape.
 permission engine (policy + last-match-wins rules + scoped allow-always; an
 MCP tool's own `readOnlyHint` counts only for a server with
 `trust_annotations = true`, and a Bash allow-always covers exactly the same
-command text, offered only for a short allowlist of read-only forms: `git
+command text, offered only when every word is plain text (no quotes, `$`,
+backticks, globs, braces, backslashes or leading `~`) and only for a short
+allowlist of read-only forms: `git
 status`/`log`/`diff`/`show` with known options and no index paths (`git show
 :.env` is not one), `ls`, `pwd`, `rg`/`grep` without recursive, hidden or
 no-ignore options, and `sed -n 5p`/`5,10p`. Everything else (any compound,
 `cd`, a wrapper such as `timeout`, `env` or `xargs`, `python -m`, a script,
 `git commit`/`push`/`checkout`, an unknown or abbreviated option) is allowed
-for that call only and the prompt says so. On the delegated Claude CLI leg a
-grant stays in fluid; the CLI's own broader rule, such as `Bash(git:*)`, is
-not handed back), the
+for that call only and the prompt says so. The AI Shuffle app's remembered
+shell approvals ("this chat", "this agent") use the same allowlist and match
+the command exactly; for any other command the approval is one-shot. On the
+delegated Claude CLI leg a grant stays in fluid; the CLI's own broader rule,
+such as `Bash(git:*)`, is not handed back), the
 doom-loop guard, plan mode's exclusion of write tools (from the request
 schemas on the JSON path, and — because code mode reaches its tools through a
 kernel rather than a schema — from the code-mode projection and the host-call

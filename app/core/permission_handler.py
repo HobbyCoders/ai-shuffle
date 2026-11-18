@@ -143,10 +143,11 @@ class PermissionRule:
         """Match pattern against tool input"""
         pattern = self.tool_pattern
 
-        # Handle different tool types
-        if self.tool_name == "Bash":
+        # Handle different tool types. A shell rule matches the command only
+        # (never another field such as a description), case-sensitively.
+        if _is_shell_tool(self.tool_name):
             command = tool_input.get("command", "")
-            return fnmatch.fnmatch(command, pattern)
+            return isinstance(command, str) and fnmatch.fnmatchcase(command, pattern)
 
         elif self.tool_name in ("Read", "Write", "Edit", "Glob"):
             file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
@@ -166,6 +167,43 @@ class PermissionRule:
                 return True
 
         return False
+
+    def targets_exactly(self, tool_input: Dict[str, Any]) -> bool:
+        """Whether the pattern names this call's path exactly (no wildcard)."""
+        pattern = self.tool_pattern
+        if not pattern or any(ch in pattern for ch in "*?["):
+            return False
+        return any(tool_input.get(key) == pattern for key in ("file_path", "notebook_path", "path"))
+
+    def decides(
+        self, tool_name: str, tool_input: Dict[str, Any], decision_reason: Optional[str] = None,
+    ) -> bool:
+        """Whether this rule answers the call. On a credential-file call
+        (``session_modes.is_credential_call``) a Deny still decides, but an
+        Allow does only when its pattern names that path exactly: a tool-wide
+        or wildcard allow does not answer a credential prompt."""
+        from app.core.session_modes import is_credential_call
+
+        if not self.matches(tool_name, tool_input):
+            return False
+        return (
+            self.decision != PermissionDecision.ALLOW
+            or self.targets_exactly(tool_input)
+            or not is_credential_call(tool_input, decision_reason)
+        )
+
+
+def _remembered_bash_pattern(tool_input: Any) -> Optional[str]:
+    """The pattern a remembered shell allow is saved with: the command's exact
+    form when it is on fluid's read-only allowlist, else None (one-shot)."""
+    from fluid.tools.builtins.bash_risk import scoped_form
+
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    return scoped_form(command) if isinstance(command, str) else None
+
+
+def _is_shell_tool(tool_name: str) -> bool:
+    return str(tool_name or "").rsplit("__", 1)[-1] in ("Bash", "Monitor")
 
 
 class PermissionHandler:
@@ -452,7 +490,7 @@ class PermissionHandler:
         # Saved rules short-circuit on the executing runner (profile rules are
         # shared-DB, session rules are local).
         rule = None if skip_saved_rules else self._check_rules(
-            session_id, profile_id, tool_name, tool_input
+            session_id, profile_id, tool_name, tool_input, decision_reason=decision_reason,
         )
         # Safety checks still honour a saved refusal, but never a saved grant.
         if rule and (not safety_check or rule.decision == PermissionDecision.DENY):
@@ -622,11 +660,19 @@ class PermissionHandler:
         # Replay both patterned and tool-wide session rules on the executing
         # runner before the next call. Profile rules are already DB-backed.
         payload_row = result_row.get("payload") or {}
-        if answer.get("remember") == "session" and not self._one_shot_only(payload_row):
+        remembered_pattern = answer.get("pattern")
+        if (answer.get("decision", "allow") == "allow"
+                and _is_shell_tool(payload_row.get("tool_name", ""))):
+            # Whoever wrote the hint, a shell allow covers only its exact form.
+            remembered_pattern = _remembered_bash_pattern(payload_row.get("tool_input"))
+        if (answer.get("remember") == "session" and not self._one_shot_only(payload_row)
+                and (remembered_pattern is not None
+                     or not _is_shell_tool(payload_row.get("tool_name", ""))
+                     or answer.get("decision", "allow") != "allow")):
             self._add_session_rule_idempotent(
                 session_id,
                 payload_row.get("tool_name", ""),
-                answer.get("pattern"),
+                remembered_pattern,
                 answer.get("decision", "allow"),
             )
         decision = answer.get("decision")
@@ -685,6 +731,13 @@ class PermissionHandler:
             # Nobody would wait for the re-shown prompt's answer. Leave the
             # row pending so the owner can still approve or deny it.
             return {"error": "This prompt cannot be deferred. Approve or deny it."}
+        if (decision == "allow" and remember in ("session", "profile")
+                and _is_shell_tool(payload.get("tool_name", ""))):
+            # A remembered shell allow covers exactly this command, and only
+            # for fluid's read-only allowlist; any other command is one-shot.
+            pattern = _remembered_bash_pattern(payload.get("tool_input"))
+            if pattern is None:
+                remember = None
 
         # Defer: answer THIS row {decision: defer}; the requeue path later
         # mints a fresh pending row with the same request_id. The awaiting
@@ -849,7 +902,10 @@ class PermissionHandler:
             # own explicit answer even when an ordinary sibling is remembered.
             if self._one_shot_only(payload):
                 continue
-            if not rule.matches(payload.get("tool_name", ""), payload.get("tool_input") or {}):
+            if not rule.decides(
+                payload.get("tool_name", ""), payload.get("tool_input") or {},
+                payload.get("decision_reason"),
+            ):
                 continue
             if rule.decision == PermissionDecision.ALLOW:
                 answer = {
@@ -1169,6 +1225,7 @@ class PermissionHandler:
         profile_id: Optional[str],
         tool_name: str,
         tool_input: Dict[str, Any],
+        decision_reason: Optional[str] = None,
     ) -> Optional[PermissionRule]:
         """The saved rule (session-level first, then the agent's) that decides
         this call, or None. Blocking (a DB read for the agent's rules).
@@ -1177,16 +1234,22 @@ class PermissionHandler:
         its own: a remembered Deny beats Accept Edits (and the CLI's Auto) the
         way Claude Code's deny rules beat its modes. Bypass never asks.
         """
-        return self._check_rules(session_id or "", profile_id or "", tool_name, tool_input)
+        return self._check_rules(
+            session_id or "", profile_id or "", tool_name, tool_input,
+            decision_reason=decision_reason,
+        )
 
     def _check_rules(
         self,
         session_id: str,
         profile_id: str,
         tool_name: str,
-        tool_input: Dict[str, Any]
+        tool_input: Dict[str, Any],
+        decision_reason: Optional[str] = None,
     ) -> Optional[PermissionRule]:
         """Check if any saved rule matches this tool use.
+
+        Credential-file calls need an exact saved allow (``PermissionRule.decides``).
 
         A rule saved under the bridge's spelling of the same tool
         (``mcp__fluid_bundled__<name>``) applies when no rule names it
@@ -1202,7 +1265,7 @@ class PermissionHandler:
         for name in names:
             # Check session-level rules first (more specific)
             for rule in self._session_rules.get(session_id, ()):
-                if rule.matches(name, tool_input):
+                if rule.decides(name, tool_input, decision_reason):
                     return rule
 
             # Check profile-level rules from database
@@ -1217,7 +1280,7 @@ class PermissionHandler:
                     tool_pattern=rule_data.get("tool_pattern"),
                     decision=PermissionDecision(rule_data["decision"])
                 )
-                if rule.matches(name, tool_input):
+                if rule.decides(name, tool_input, decision_reason):
                     return rule
 
         return None

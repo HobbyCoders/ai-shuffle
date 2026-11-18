@@ -3927,7 +3927,8 @@ class HarnessAdapter(ProviderAdapter):
         return message if isinstance(message, str) and message else "Denied: the owner did not approve this."
 
     async def _saved_rule_decision(
-        self, tool_name: str, tool_input: Optional[Dict[str, Any]]
+        self, tool_name: str, tool_input: Optional[Dict[str, Any]],
+        decision_reason: Optional[str] = None,
     ) -> Optional[str]:
         """The saved rule's ``"allow"``/``"deny"`` for a call, or None.
 
@@ -3948,7 +3949,10 @@ class HarnessAdapter(ProviderAdapter):
 
         def _lookup() -> Optional[str]:
             sid, profile = self._resolve_app_session_id(), extra.get("profile_id")
-            found = [saved_rule_decision(sid, profile, n, tool_input or {}) for n in names]
+            found = [
+                saved_rule_decision(sid, profile, n, tool_input or {}, decision_reason)
+                for n in names
+            ]
             return "deny" if "deny" in found else next((d for d in found if d), None)
 
         return await run_sync(_lookup)
@@ -3975,7 +3979,7 @@ class HarnessAdapter(ProviderAdapter):
             allow, message = False, safety_check_denial(ev.reason)
         elif self.permission_mode != "bypassPermissions":
             try:
-                saved = await self._saved_rule_decision(ev.name, ev.input)
+                saved = await self._saved_rule_decision(ev.name, ev.input, ev.reason)
             except Exception:  # noqa: BLE001 — fail closed, see the docstring
                 logger.warning(
                     "[HarnessAdapter] saved-rule lookup failed for %s; denying it",

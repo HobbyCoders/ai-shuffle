@@ -620,14 +620,19 @@ def mode_approves_without_prompt(
     if permission_mode == "acceptEdits":
         return (
             tool_name in ACCEPT_EDITS_TOOLS
-            and decision_reason != CREDENTIAL_ASK_REASON
-            and not _edits_credential_file(tool_input)
+            and not is_credential_call(tool_input, decision_reason)
         )
     return tool_name != COMPUTER_USE_REQUEST_ACCESS
 
 
-def _edits_credential_file(tool_input: Any) -> bool:
+def is_credential_call(tool_input: Any, decision_reason: Any = None) -> bool:
+    """A file-tool call on a credential file: one the engine's credential rule
+    asked about (``decision_reason``, judged on the resolved path) or one
+    whose path field names such a file literally."""
     from fluid.tools.hardening import is_sensitive_path
+
+    if decision_reason == CREDENTIAL_ASK_REASON:
+        return True
 
     if not isinstance(tool_input, dict):
         return False

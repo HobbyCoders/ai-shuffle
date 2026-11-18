@@ -40,9 +40,10 @@ DEV_ENV_KEYS = frozenset({
 })
 #: The name of the dev loop's saved preview grant (``SHUFFLE_DEV_ACCESS_FILE``).
 #: It holds a live access token, so agents' file tools treat the name as a
-#: credential file (``fluid.tools.hardening.SENSITIVE_BASENAME_GLOBS``). A
-#: grant is written under this name or, for launchers from before the rename,
-#: the legacy ``access.json`` (owner-only, but too generic a name to mark).
+#: credential file (``fluid.tools.hardening.SENSITIVE_BASENAME_GLOBS``). Each
+#: grant is written under this name and, for launchers and readers from before
+#: the rename, the legacy ``access.json`` beside it (owner-only both, but the
+#: legacy name is too generic to mark).
 DEV_ACCESS_FILE = "preview-access.json"
 LEGACY_DEV_ACCESS_FILE = "access.json"
 
@@ -218,10 +219,11 @@ def initialize_preview_access() -> None:
     if access_file and Path(access_file).name not in (DEV_ACCESS_FILE, LEGACY_DEV_ACCESS_FILE):
         logger.warning("SHUFFLE_DEV_ACCESS_FILE must be named %s; the grant is not saved", DEV_ACCESS_FILE)
     elif access_file:
-        _write_private_json(Path(access_file), {
-            "session_id": session_id, "token": token, "url": url,
-            "expires_at": int(time.time()) + ttl,
-        })
+        # Both names, so a launcher or reader of either finds the grant.
+        grant = {"session_id": session_id, "token": token, "url": url,
+                 "expires_at": int(time.time()) + ttl}
+        for name in (DEV_ACCESS_FILE, LEGACY_DEV_ACCESS_FILE):
+            _write_private_json(Path(access_file).with_name(name), grant)
 
 
 async def seed_dev_instance() -> None:

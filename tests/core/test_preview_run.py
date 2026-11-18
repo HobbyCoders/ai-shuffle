@@ -466,9 +466,12 @@ def test_saved_access_is_reused_only_on_launcher_disposable_data(
 def test_access_grant_is_saved_owner_only_under_known_names(
     bare_db: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, saved: bool,
 ) -> None:
-    """The saved grant holds a live token: it is written owner-only, under
-    DEV_ACCESS_FILE (a name agents' file tools treat as a credential) or the
-    legacy access.json older launchers still pass; any other name is refused."""
+    """The saved grant holds a live token: one launch writes it owner-only
+    under both DEV_ACCESS_FILE (a name agents' file tools treat as a
+    credential) and the legacy access.json older launchers and readers use,
+    whichever of the two it names; any other name is refused."""
+    import json
+
     from fluid.tools.hardening import is_sensitive_path
 
     from app.core import encryption, preview_access
@@ -490,9 +493,12 @@ def test_access_grant_is_saved_owner_only_under_known_names(
     assert encryption.initialize_server_key(database)
 
     initialize_preview_access()
-    assert access.exists() is saved
-    if saved and os.name == "posix":
-        assert access.stat().st_mode & 0o077 == 0
+    written = sorted(p.name for p in tmp_path.glob("*.json"))
+    assert written == (["access.json", "preview-access.json"] if saved else [])
+    for path in tmp_path.glob("*.json"):
+        assert json.loads(path.read_text())["url"]
+        if os.name == "posix":
+            assert path.stat().st_mode & 0o077 == 0
 
 
 @pytest.mark.parametrize("has_nofollow", [True, False])

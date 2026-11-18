@@ -7,9 +7,13 @@ from app.core import permission_handler as module
 from app.core.permission_handler import PermissionHandler
 from app.db import database
 
+# Any ordinary tool: a remembered shell allow is narrower (exact allowlisted
+# forms only, see test_permission_shell_remember.py).
+TOOL = "WebFetch"
+
 
 async def start_prompt(
-    handler: PermissionHandler, tool: str = "Bash", provider_agent: dict | None = None,
+    handler: PermissionHandler, tool: str = TOOL, provider_agent: dict | None = None,
     *, profile_id: str | None = "default", request_id: str = "scope-request",
     skip_saved_rules: bool = False, safety_check: bool = False,
 ) -> tuple[asyncio.Task, dict]:
@@ -46,7 +50,7 @@ async def test_scopes_through_producing_path(remember: str | None, decision: str
         assert (await task).behavior == decision
         assert len(handler.get_session_rules("scope-session")) == (remember == "session")
         assert len(database.get_permission_rules(profile_id="default")) == (remember == "profile")
-        rule = handler._check_rules("scope-session", "default", "Bash", {"command": "different"})
+        rule = handler._check_rules("scope-session", "default", TOOL, {"command": "different"})
         assert (rule is not None) == (remember in ("session", "profile"))
     finally:
         if not task.done():
@@ -68,7 +72,7 @@ async def test_peer_scope_advice_does_not_reject_remembered_answers(remember: st
         assert (await task).behavior == "allow"
         assert len(runner.get_session_rules("scope-session")) == (remember == "session")
         assert len(database.get_permission_rules(profile_id="default")) == (remember == "profile")
-        rule = runner._check_rules("scope-session", "default", "Bash", {"command": "next"})
+        rule = runner._check_rules("scope-session", "default", TOOL, {"command": "next"})
         assert rule is not None
     finally:
         if not task.done():
@@ -79,7 +83,7 @@ async def test_peer_scope_advice_does_not_reject_remembered_answers(remember: st
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool,tag", [
     ("ModelSwitch", None),
-    ("Bash", {"remote_approval_id": "approval", "worker_session_id": "child"}),
+    (TOOL, {"remote_approval_id": "approval", "worker_session_id": "child"}),
 ])
 async def test_model_switch_and_remote_proxy_are_one_shot(tool: str, tag: dict | None) -> None:
     handler = PermissionHandler()
@@ -117,7 +121,7 @@ async def test_unpatterned_session_hint_replayed_and_cleared_on_teardown(
         await task
         assert len(handler.get_session_rules("scope-session")) == 1
         # Repeated turns on the same pooled runner retain it; a new process does not.
-        assert handler._check_rules("scope-session", "default", "Bash", {}) is not None
+        assert handler._check_rules("scope-session", "default", TOOL, {}) is not None
         assert not PermissionHandler().get_session_rules("scope-session")
         monkeypatch.setattr(module, "permission_handler", handler)
         from app.api import ws_cleanup
@@ -190,7 +194,7 @@ async def test_remembered_local_answer_cannot_batch_answer_remote_proxy() -> Non
     task, _ = await start_prompt(handler)
     try:
         proxy_payload = handler._build_permission_payload(
-            "remote-request", "default", "Bash", {"command": "echo remote"},
+            "remote-request", "default", TOOL, {"command": "echo remote"},
             None, None, None, None, None, None, None,
             provider_agent={"remote_approval_id": "remote", "worker_session_id": "child"},
         )
@@ -222,7 +226,7 @@ async def test_safety_answer_never_saves_or_resolves_siblings(
         assert bool(row["payload"].get("safety_check")) == safety
         assert handler.get_pending_requests("scope-session")[0]["remember_scopes"] == ["none"]
         sibling_payload = handler._build_permission_payload(
-            "sibling", "default", "Bash", {"command": "echo sibling"},
+            "sibling", "default", TOOL, {"command": "echo sibling"},
             None, None, None, None, None, None, None,
         )
         sibling = interactions.create_interaction("scope-session", "permission", sibling_payload, 300)
@@ -323,7 +327,7 @@ async def test_safety_runner_ignores_legacy_shared_session_hint(skip: bool, safe
 @pytest.mark.parametrize("skip,safety", [(True, False), (False, True), (True, True)])
 async def test_safety_prompt_bypasses_preexisting_saved_rules(skip: bool, safety: bool) -> None:
     handler = PermissionHandler()
-    handler._add_session_rule_idempotent("scope-session", "Bash", None, "allow")
+    handler._add_session_rule_idempotent("scope-session", TOOL, None, "allow")
     task, _ = await start_prompt(handler, skip_saved_rules=skip, safety_check=safety)
     try:
         assert handler.get_queue_count("scope-session") == 1
@@ -347,11 +351,11 @@ async def test_safety_check_honours_saved_deny_but_not_allow(
     from unittest.mock import AsyncMock
 
     handler = PermissionHandler()
-    handler._add_session_rule_idempotent("scope-session", "Bash", None, saved_decision)
+    handler._add_session_rule_idempotent("scope-session", TOOL, None, saved_decision)
     if saved_decision == "deny" and not skip_saved_rules:
         broadcast = AsyncMock()
         result = await handler.request_permission(
-            "scope-request", "scope-session", "default", "Bash", {"command": "echo ok"},
+            "scope-request", "scope-session", "default", TOOL, {"command": "echo ok"},
             broadcast, safety_check=True,
         )
         assert result.behavior == "deny"

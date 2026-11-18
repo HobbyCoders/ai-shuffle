@@ -140,15 +140,12 @@ def _no_flags(*banned: str, values: str = "", optional: str = "") -> Check:
     value, not more flags. A short option in neither list is read as a flag,
     so its glued value is scanned as flags too: options the check does not
     know can only make the command ask, never hide a banned one. Everything
-    after ``--`` is an operand, except that a token spelling a banned option
-    exactly is refused wherever it appears (the older, coarser rule).
+    after ``--`` is an operand.
     """
     short = {b[1] for b in banned if len(b) == 2 and b[0] == "-" and b[1] != "-"}
     long = tuple(b for b in banned if b.startswith("--"))
 
     def check(args: list[str]) -> bool:
-        if any(a.split("=", 1)[0] in banned for a in args):
-            return False
         skip_value = False
         for a in args:
             if skip_value:
@@ -194,20 +191,7 @@ def _awk_ok(args: list[str]) -> bool:
     for a in args:
         if "system(" in a or "getline" in a or "|" in a:
             return False
-        if a.startswith(("-f", "-i", "-l")) and not a.startswith("--"):
-            return False
     return _awk_options_ok(args)
-
-
-# The older check, kept so the narrower one only ever adds asks: a ``w``/``W``
-# write or GNU ``e`` exec anywhere in a script or operand.
-_SED_WRITE_CMD = re.compile(r"(?<![A-Za-z\\])[wW]\s*[\w./\\~-]")
-_SED_EXEC_CMD = re.compile(r"(?<![A-Za-z\\])[gpiImM0-9]*[eE]")
-_SED_ADDRESS_RE = re.compile(r"/[^/]*/")
-
-
-def _sed_runs_or_writes(arg: str) -> bool:
-    return bool(_SED_WRITE_CMD.search(arg) or _SED_EXEC_CMD.search(_SED_ADDRESS_RE.sub("", arg)))
 
 
 def _sed_ok(args: list[str]) -> bool:
@@ -247,8 +231,7 @@ def _sed_ok(args: list[str]) -> bool:
                     return False
     if not scripts and operands:
         scripts.append(operands[0])
-    return (quiet and bool(scripts) and all(_SED_SAFE_SCRIPT.fullmatch(s) for s in scripts)
-            and not any(_sed_runs_or_writes(arg) for arg in scripts + operands))
+    return quiet and bool(scripts) and all(_SED_SAFE_SCRIPT.fullmatch(s) for s in scripts)
 
 
 def _uniq_ok(args: list[str]) -> bool:
@@ -573,13 +556,23 @@ SCOPED_FORMS: dict[str, Check] = {
 }
 
 
+# A word Bash passes through unchanged: no quoting, expansion, globbing,
+# braces, escapes or a leading ``~``.
+_LITERAL_WORD = re.compile(r"[A-Za-z0-9_./:,=@%+-]+")
+
+
 def scoped_form(command: str) -> str | None:
     """The exact form an "always" for ``command`` covers, or None (one-shot).
 
     Only a single simple command on :data:`SCOPED_FORMS`, run by its bare
     program name, that classifies ``safe`` (so no redirection, substitution,
-    assignment or credential operand) has a form; the form is the whole
-    command re-joined from its parsed words."""
+    assignment or credential operand) has a form, and only when every word is
+    literal as typed, so the words checked are the argv Bash runs
+    (``rg {--pre,x}`` and ``ls $NOTE`` have none); the form is the command's
+    words joined by single spaces."""
+    words = command.split()
+    if not words or not all(_LITERAL_WORD.fullmatch(w) for w in words):
+        return None
     groups = _simple_command_tokens(command)
     if groups is None or len(groups) != 1 or classify({"command": command}) != SAFE:
         return None
@@ -587,7 +580,7 @@ def scoped_form(command: str) -> str | None:
     check = SCOPED_FORMS.get(program)
     if check is None or not check(args):
         return None
-    return shlex.join(groups[0])
+    return " ".join(words)
 
 
 def session_scope(input: dict[str, Any]) -> frozenset[str] | None:
@@ -741,11 +734,16 @@ touches_sensitive_path = _touches_sensitive_path
 
 
 def classify(input: dict[str, Any]) -> str:
-    """Effective risk of one Bash tool input: ``safe`` or ``write``."""
+    """Effective risk of one Bash tool input: ``safe`` or ``write``.
+
+    The stricter of this module's checks and main's classifier, kept as it was
+    in :mod:`._bash_risk_main`: these checks can only add an ask."""
+    from fluid.tools.builtins import _bash_risk_main
+
     command = input.get("command")
     if not isinstance(command, str):
         return WRITE
-    if not is_read_only(command):
+    if _bash_risk_main.classify(input) == WRITE or not is_read_only(command):
         return WRITE
     # Read-only, but targeting a credential file → keep the prompt.
     return WRITE if _touches_sensitive_path(command) else SAFE

@@ -35,6 +35,7 @@ def saved_rule_decision(
     profile_id: Optional[str],
     tool_name: str,
     tool_input: Optional[Dict[str, Any]],
+    decision_reason: Optional[str] = None,
 ) -> Optional[SavedDecision]:
     """``"allow"`` or ``"deny"`` when a saved rule decides this call, else None.
 
@@ -47,6 +48,7 @@ def saved_rule_decision(
 
     rule = permission_handler.saved_rule(
         app_session_id, profile_id, tool_name, dict(tool_input or {}),
+        decision_reason=decision_reason,
     )
     if rule is None:
         return None

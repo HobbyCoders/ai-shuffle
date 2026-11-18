@@ -648,3 +648,48 @@ def test_describe_session_scope_names_the_grant() -> None:
 ])
 def test_literal_credential_operands_ask(command: str) -> None:
     assert classify({"command": command}) == "write", command
+
+
+def _command_corpus() -> list[str]:
+    """Every one-line string constant in this file, plus the reviewer's."""
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    found = {
+        node.value for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        and 0 < len(node.value) < 200 and "\n" not in node.value
+    }
+    return sorted(found | {"sed -n 1p -- -info", "cat .credential-ke?s/server.k?y"})
+
+
+def test_never_less_strict_than_mains_classifier() -> None:
+    """Round 3, P1/P2: main's classifier, kept as it was, is the floor."""
+    from fluid.tools.builtins import _bash_risk_main
+
+    relaxed = [
+        command for command in _command_corpus()
+        if _bash_risk_main.classify({"command": command}) == "write"
+        and classify({"command": command}) == "safe"
+    ]
+    assert relaxed == []
+    assert classify({"command": "sed -n 1p -- -info"}) == "write"
+    assert classify({"command": "cat .credential-ke?s/server.k?y"}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "rg {--pre,placeholder} needle .",  # brace expansion makes an option
+    "ls '$NOTE'",
+    "ls $NOTE",
+    "ls ~/notes",
+    "ls src/*",
+    'grep -n "two words" f.py',
+    "grep -n a\\b f.py",
+])
+def test_a_word_bash_could_rewrite_gets_no_session_scope(command: str) -> None:
+    """Round 3, P3: the scope is checked on the words Bash runs, so any
+    quoting, expansion, glob, brace or escape makes the call one-shot."""
+    from fluid.tools.builtins.bash_risk import session_scope
+
+    assert session_scope({"command": command}) is None

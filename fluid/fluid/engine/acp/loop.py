@@ -1129,19 +1129,21 @@ class AcpLoop:
         return None
 
     @staticmethod
-    def _always_is_scoped(data: Any) -> bool:
+    def _always_is_scoped(data: Any, kind: Any = None) -> bool:
         """Whether an owner's "always" may reach the agent as ``allow_always``.
 
         The agent keeps that grant itself, as broadly as it likes (a program
         prefix such as ``git``), and the host never sees the calls it then
         covers. So a shell command goes back as "always" only when it is on
         the allowlist the native leg can scope (``bash_risk.session_scope``:
-        ``git status``, ``ls``, ...); any other command is allowed once.
-        Other tools keep a tool-wide "always", as on the native leg."""
+        ``git status``, ``ls``, ...); any other command, and an ``execute``
+        call whose command text is missing, is allowed once. Other tools keep
+        a tool-wide "always", as on the native leg."""
         from fluid.tools.builtins.bash_risk import session_scope
 
-        if not isinstance(data, Mapping) or not isinstance(data.get("command"), str):
-            return True
+        command = data.get("command") if isinstance(data, Mapping) else None
+        if not isinstance(command, str):
+            return str(kind) != "execute"
         return session_scope(dict(data)) is not None
 
     async def _permission(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1166,10 +1168,12 @@ class AcpLoop:
         # A CallTool call is only ever allowed once, even when the owner chose
         # "always": the agent would remember CallTool itself and stop asking
         # for every tool behind it. The host's saved rule keys on the real tool.
-        proxied = self._is_call_proxy(call)
+        # Neither may an unscopable shell call: then only "allow once" is
+        # chosen, or the prompt is cancelled when the agent offers none.
+        scoped = not self._is_call_proxy(call) and self._always_is_scoped(data, call.get("kind"))
 
         def allow() -> dict[str, Any]:
-            return chose("allow_once") if proxied else chose("allow_once", "allow_always")
+            return chose("allow_once", "allow_always") if scoped else chose("allow_once")
 
         if self._interrupted.is_set():
             return cancelled
@@ -1213,7 +1217,7 @@ class AcpLoop:
                 return cancelled if self._interrupted.is_set() else chose("reject_once", "reject_always")
         finally:
             self._pending_permissions.pop(request_id, None)
-        if response.decision == "allow_always" and not proxied and self._always_is_scoped(data):
+        if response.decision == "allow_always" and scoped:
             return chose("allow_always", "allow_once")
         if response.decision in ("allow", "allow_always"):
             return allow()

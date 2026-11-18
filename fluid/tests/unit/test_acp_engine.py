@@ -753,3 +753,43 @@ def test_acp_always_reaches_the_agent_only_for_allowlisted_shell_forms(data, sco
     from fluid.engine.acp.loop import AcpLoop
 
     assert AcpLoop._always_is_scoped(data) is scoped
+
+
+_ONCE = {"optionId": "once-id", "kind": "allow_once"}
+_ALWAYS = {"optionId": "always-id", "kind": "allow_always"}
+
+
+@pytest.mark.parametrize("call, offered, answer, chosen", [
+    # P9: an execute call without command text cannot be scoped.
+    ({"kind": "execute", "rawInput": {}}, [_ONCE, _ALWAYS], "allow_always", "once-id"),
+    ({"kind": "execute", "rawInput": {}}, [_ALWAYS], "allow_always", None),
+    ({"kind": "execute", "rawInput": {}}, [_ALWAYS], "allow", None),
+    ({"kind": "execute", "rawInput": {"command": "git push --force"}}, [_ALWAYS], "allow", None),
+    ({"kind": "execute", "rawInput": {"command": "git status"}}, [_ONCE, _ALWAYS], "allow_always",
+     "always-id"),
+    ({"kind": "edit", "rawInput": {"text": "b"}}, [_ONCE, _ALWAYS], "allow_always", "always-id"),
+])
+async def test_acp_returns_allow_always_only_for_a_scopable_call(
+        tmp_path: Path, call, offered, answer, chosen) -> None:
+    loop = AcpLoop(store=SerializingStore(), spec=_spec(tmp_path), cwd=str(tmp_path), session_id="s-1")
+    emitted: list[Any] = []
+
+    async def emit(event: Any) -> None:  # the card; no live session needed
+        emitted.append(event)
+
+    loop._emit = emit  # type: ignore[method-assign]
+    from types import SimpleNamespace
+
+    loop._session = SimpleNamespace(session_id="s-1")  # type: ignore[assignment]
+    task = asyncio.create_task(loop._permission(
+        {"toolCall": {"toolCallId": "tc-1", "title": "run", **call}, "options": offered}))
+    for _ in range(500):
+        if loop._pending_permissions or task.done():
+            break
+        await asyncio.sleep(0.01)
+    (request_id,) = loop._pending_permissions
+    loop._pending_permissions[request_id].set_result(
+        RespondPermission(request_id=request_id, decision=answer))
+    outcome = (await asyncio.wait_for(task, 10))["outcome"]
+    assert outcome.get("optionId") == chosen
+    assert outcome["outcome"] == ("selected" if chosen else "cancelled")
