@@ -281,7 +281,7 @@ export const journey = {
 				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
 				await waitChat(page, { streaming: 'true' });
 				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
-				await page.evaluate((landing) => {
+				await page.evaluate(([landing, long]) => {
 					const p = (window.__tailProbe = { started: performance.now(), frames: [], landed: null, running: true });
 					// Read each frame as painted: after rAF, layout and resize observers ran.
 					const afterPaint = new MessageChannel();
@@ -296,16 +296,18 @@ export const journey = {
 						const banner = rect(document.querySelector('.tail-error'));
 						if (p.landed === null && [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(landing))) p.landed = t;
 						p.frames.push({ t, viewport: rect(document.querySelector('.msg-scroll')), banner: banner?.height > 0 ? banner : null,
+							column: document.querySelector('.chat-column')?.getBoundingClientRect().width ?? 0,
+							long: [...document.querySelectorAll('.tail-controls .userrow')].find((el) => el.textContent.includes(long))?.getBoundingClientRect().height ?? 0,
 							rows: [...document.querySelectorAll('.tail-controls .userrow')].map(rect) });
 						next();
 					};
 					afterPaint.port1.onmessage = sample;
 					next();
-				}, needles[0]);
+				}, [needles[0], needles[1]]);
 				await mark('queue three prompts, the second long enough to wrap');
 				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, failing ? 'error-500' : 'slow', failing ? { latency_ms: 0 } : { tps: 8 })}`);
 				await quickSend(page, `queued ${needles[1]} a longer prompt that wraps across several lines in the docked queue bubble `
-					+ `so that narrowing the column makes it taller ${scriptTag(variant, 'slow', { tps: 8 })}`);
+					+ `so that narrowing the column makes it taller by at least one more line in every variant ${scriptTag(variant, 'slow', { tps: 8 })}`);
 				await quickSend(page, `queued ${needles[2]} ${scriptTag(variant, 'long', { tps: 2000 })}`);
 				let narrowed = false;
 				if (failing) {
@@ -334,6 +336,17 @@ export const journey = {
 				log(`${name}: ${JSON.stringify({ frames: probe.frames.length, landed: probe.landed, bannerFrames: shown.length,
 					bannerWithBubbles: docked.length, narrowed, firstBanner: shown[0], lastWithBubbles: docked.at(-1) })}`);
 				if (!failing) expect(docked.length > 0, 'the banner was sampled above docked bubbles');
+				if (narrow && variant.viewport === 'phone') {
+					// The resize case only means something if the column really narrowed
+					// under the banner and the long docked bubble really wrapped taller.
+					expect(narrowed, 'the column was narrowed while the long bubble was docked');
+					const wide = Math.max(0, ...probe.frames.map((f) => f.column));
+					const wideLong = probe.frames.filter((f) => f.long > 0 && f.column >= wide - 1).at(-1)?.long ?? 0;
+					const narrowLong = Math.max(0, ...docked.filter((f) => f.column > 0 && f.column < wide - 1).map((f) => f.long));
+					log(`resize: ${JSON.stringify({ wide, narrow: Math.min(...probe.frames.map((f) => f.column || wide)), wideLong, narrowLong })}`);
+					expect(wideLong > 0 && narrowLong > 0, `the long bubble was sampled docked at ${wide}px and, under the banner, in a narrower column`);
+					expect(narrowLong > wideLong + 1, `the long docked bubble grew when the column narrowed (${wideLong}px -> ${narrowLong}px)`);
+				}
 				for (const f of shown) {
 					expect(f.banner.top >= f.viewport.top - 1 && f.banner.bottom <= f.viewport.bottom + 1,
 						`the banner is on screen at ${f.t}ms (${JSON.stringify({ banner: f.banner, viewport: f.viewport })})`);

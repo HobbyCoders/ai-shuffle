@@ -252,6 +252,9 @@
 	let tailControlsRef = $state<HTMLDivElement | null>(null);
 	let tailErrorRef = $state<HTMLDivElement | null>(null);
 	let tailErrorOffsetPx = $state(0);
+	// The offset the error took the slot over with (wrap clearance only adds to
+	// it), and the slot width the current offset was measured at.
+	let tailErrorBaselinePx = 0, tailErrorWidthPx = 0;
 	let tailQueueSlotPx = $state(0);
 	// The slot a queue handoff is holding (0: none); see the effect after pendingMessages.
 	let handoffSlotPx = $state(0);
@@ -1372,11 +1375,18 @@
 		const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
 		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
 		// An error owns the slot's painted height, not its blank: it reserves only
-		// what is docked now (none of an empty slot), and a docked bubble that
-		// grows (a narrower column wraps it) keeps the banner above it.
+		// what is docked now (none of an empty slot). A docked bubble that grows (a
+		// narrower column wraps it) lifts the banner above it. A bubble leaving
+		// leaves the banner where it is read (moving it then is a shift nothing
+		// asked for); a new width measures afresh, so widening gives the lift back.
+		// The banner never drops below where the error put it.
 		if (tailQueueSlotPx && !handoffSlotPx) {
 			const docked = box.height - blank;
-			if (docked > 0 && presentedTailError) tailErrorOffsetPx = Math.max(tailErrorOffsetPx, docked + rowGapPx());
+			if (presentedTailError) {
+				const clear = Math.max(tailErrorBaselinePx, docked > 0 ? docked + rowGapPx() : 0);
+				tailErrorOffsetPx = box.width === tailErrorWidthPx ? Math.max(tailErrorOffsetPx, clear) : clear;
+				tailErrorWidthPx = box.width;
+			}
 			return docked;
 		}
 		// A bubble sent into the hold docks in its blank; an unheld slot has none.
@@ -2309,7 +2319,8 @@
 			// next error string or the queue's now-empty height. The banner goes
 			// above the bubbles docked now; a handoff hold's blank is not theirs.
 			const docked = box && row ? box.bottom - row.getBoundingClientRect().top : 0;
-			tailErrorOffsetPx = docked > 0 ? docked + rowGapPx() : 0;
+			tailErrorOffsetPx = tailErrorBaselinePx = docked > 0 ? docked + rowGapPx() : 0;
+			tailErrorWidthPx = box?.width ?? 0;
 			// A live hold's blank is no longer reserved (freed after the floor capture below).
 			if (untrack(() => handoffSlotPx) && shouldAutoScroll && !windowShifting) takeoverBlank = Math.max(0, (box?.height ?? 0) - docked - heldBlankPx);
 			// The queue and error are one already-presented slot. Keep its outer

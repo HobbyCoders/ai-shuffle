@@ -32,7 +32,7 @@ const code = transformSync([
 const ROW_GAP = 18, BUBBLE_GAP = 12, BOTTOM = 24;
 type Layout = {
 	clientHeight: number; scrollTop: number; proseEnd: number; anchorTop: number;
-	bubbles: number[]; banner: number;
+	bubbles: number[]; banner: number; width?: number;
 };
 type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; liveTurnId: string | null;
 	error: string | null; queuedMessages: { id: string }[]; stopRequestedTurnId?: string | null };
@@ -40,7 +40,7 @@ type Session = { sessionId: string; messages: unknown[]; isStreaming: boolean; l
 function view(layout: Layout, anchored: boolean) {
 	const store: Record<string, unknown> = {
 		...autoScroll, landedFromQueue, layout, anchored,
-		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
+		handoffPainted: false, heldBlankPx: 0, handoffHold: 0, tailErrorBaselinePx: 0, tailErrorWidthPx: 0, handoffExcessFreed: false, transcriptChangedSinceFrame: false,
 		document: { getElementById: () => anchorEl },
 		getComputedStyle: () => ({ rowGap: String(ROW_GAP), marginTop: '0', marginBottom: '0', getPropertyValue: () => '0' }),
 	};
@@ -96,7 +96,7 @@ function view(layout: Layout, anchored: boolean) {
 		const tailSpacerRef = { getBoundingClientRect: () => ({ top: layout.proseEnd - layout.scrollTop }) };
 		const firstRow = { getBoundingClientRect: () => ({ top: slotBottom() - docked() }) };
 		const tailControlsRef = {
-			getBoundingClientRect: () => ({ top: slotBottom() - slotHeight(), bottom: slotBottom(), height: slotHeight() }),
+			getBoundingClientRect: () => ({ top: slotBottom() - slotHeight(), bottom: slotBottom(), height: slotHeight(), width: layout.width ?? 358 }),
 			querySelector: () => layout.bubbles.length ? { firstElementChild: firstRow } : null
 		};
 		const tailErrorRef = { getBoundingClientRect: () => {
@@ -324,6 +324,35 @@ describe('queue handoff hold geometry', () => {
 			const { banner, bubblesTop } = v.read();
 			expect(banner.bottom).toBeLessThanOrEqual(bubblesTop - ROW_GAP);
 			expect(banner.top).toBeGreaterThanOrEqual(0);
+		});
+
+		it('gives a narrow column\'s wrap clearance back when it widens, and none of it moves on a dequeue', async () => {
+			const { layout, v } = await givenBack();
+			await v.update(turn(5, 2, 'CLI error'));
+			const taken = v.read();
+			// Narrow: both long bubbles wrap taller and lift the banner above them.
+			Object.assign(layout, { width: 298, bubbles: [128, 128] });
+			await v.resize(400); await v.frame();
+			const lifted = v.read();
+			expect(lifted.banner.bottom).toBeLessThanOrEqual(lifted.bubblesTop - ROW_GAP);
+			expect(lifted.errorOffset).toBeGreaterThan(taken.errorOffset);
+			expect(lifted.banner.top).toBeGreaterThanOrEqual(0);
+			// A dequeue at that width leaves the banner where it is read.
+			await v.update(turn(6, 1, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = [128]; });
+			await v.grow(20);
+			expect(v.read()).toMatchObject({ errorOffset: lifted.errorOffset, banner: lifted.banner });
+			// Widen: the bubble unwraps and the banner goes back to where the error put it.
+			Object.assign(layout, { width: 358, bubbles: [80] });
+			await v.resize(400); await v.frame();
+			const widened = v.read();
+			expect(widened).toMatchObject({ errorOffset: taken.errorOffset, banner: taken.banner });
+			// Its reserve follows: the reply consumes the lift's room and ends under the banner as before.
+			await v.grow(200);
+			expect(v.read()).toMatchObject({ padding: taken.padding, replyEnd: layout.clientHeight - taken.padding, banner: taken.banner });
+			// Drain: the last bubble leaves; the banner stays at the takeover position, not the narrow one.
+			await v.update(turn(7, 0, 'CLI error'), () => { layout.proseEnd += 60; layout.bubbles = []; });
+			await v.grow(20);
+			expect(v.read()).toMatchObject({ errorOffset: taken.errorOffset, padding: taken.padding, banner: taken.banner });
 		});
 
 		it('reserves nothing for an emptied slot while the banner steps aside for its Error row', async () => {
