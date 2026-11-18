@@ -1969,7 +1969,11 @@ def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> boo
     nothing about the origin) and never inferred. A version with no label
     (stored before labels were kept, or from a copy) is taken as the same
     stream, so everything else orders exactly as before labels existed. A
-    fork reached only through a copy is therefore not seen (#1792).
+    fork reached only through a copy is therefore not seen (#1792), with one
+    exception in ``_apply_in_order``: an owner-ordered op from an incarnation
+    older than its origin's newest seen (``_older_stream``) no longer has
+    stream order behind it, so it loses to a held version of its origin with
+    a later clock.
     """
     held_incarnation = held.get("origin_incarnation")
     return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
@@ -2048,9 +2052,12 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     elif coll.mode == policy.MODE_OWNER_ORDERED:
         # Owner-ordered: the owner's stream order is the order. No clock race.
         # An op from an incarnation older than the newest seen comes from
-        # across a restore, where that order is gone: (clock, origin) decides.
+        # across a restore, where that order is gone: it cannot replace a
+        # version of its origin with a later clock. At its own clock the held
+        # version is a copy of this very write (a copy carries no label), and
+        # the signed op applies over it as on main (#1568).
         wins = existing is None or (env.origin_device_id == existing["origin_device_id"]
-                                    and not _older_stream(cursor, ctx, env)) or \
+                                    and (env.clock >= int(existing["clock"]) or not _older_stream(cursor, ctx, env))) or \
             envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]), existing["origin_device_id"]) > 0
     else:
         wins = existing is None or envelope_mod.compare(
@@ -3470,6 +3477,20 @@ def adopt_watermarks(watermarks: Mapping[str, Mapping[str, int]], *, ctx: Networ
                     store.set_watermark(cursor, origin, int(incarnation), int(last_seq))
                 cursor.execute("DELETE FROM sync_pending WHERE origin_device_id=%s AND incarnation=%s AND seq<=%s",
                                (origin, int(incarnation), int(last_seq)))
+
+
+def note_incarnations(cursor, watermarks: Mapping[str, Mapping[str, int]], *, ctx: NetworkContext) -> None:
+    """Know a copy's newest incarnation of every origin from its first page on.
+
+    Its frontier waits for the last page, but rows from those incarnations
+    land earlier: an op from an older one that arrives in between must still
+    count as from across a restore (``_older_stream``, #1568). Receives nothing;
+    an origin still on its first incarnation has no older stream to tell apart.
+    """
+    for origin, streams in (watermarks or {}).items():
+        newest = max((int(incarnation) for incarnation in streams or {}), default=0)
+        if origin != ctx.device_id and newest > max(1, store.highest_incarnation(cursor, origin)):
+            store.set_watermark(cursor, origin, newest, 0)
 
 
 def finish_bootstrap(*, ctx: Optional[NetworkContext] = None) -> NetworkContext:

@@ -827,30 +827,115 @@ def test_a_signed_chat_update_repairs_an_earlier_projected_copy(workers):
 
 
 
-def test_an_older_incarnation_op_does_not_replace_a_newer_copied_chat(workers):
-    """Across a restore stream order is gone even with no label to compare: C
-    takes B's post-restore chat from A's copy, with its watermarks, then gets
-    B's earlier pre-restore rename relayed. It is older by clock and loses,
-    as on every replica that holds the labelled version."""
-    a, b, c = _network(workers, "a", "b", "c")
+def _copy_overtaken_by_a_relay(workers, monkeypatch, *, relay_midway):
+    """A holds B's first rename after its backup, D the first two. B restores,
+    writes "new" past both and A takes it. C applies A's whole state copy,
+    one page per commit; D relays B's second rename, which A never had, either
+    after the copy or between its pages (``relay_midway``)."""
+    from app.network import peer_snapshot
+    a, b, c, d = _network(workers, "a", "b", "c", "d")
     _session(b, "chat", title="t", events=0)
-    _converge([a, b, c])
+    _converge([a, b, c, d])
     backup = b.raw.serialize()
     _rename(b, "lost-0")
     _exchange(b, a)
+    _rename(b, "lost-1")
+    _exchange(b, d)
     _restore(b, backup)
     _detect_restore(a, b, 1)
+    _observe(b, int(d.sql("SELECT clock FROM sync_records WHERE collection = 'sessions' "
+                          "AND record_id = 'chat'")[0]["clock"]))
     _rename(b, "new")
     _exchange(b, a)
-    assert _sweep_value(a, "sessions") == "new"
-    _state_copy(a, c, "sessions")
-    assert _sweep_value(c, "sessions") == "new" and _chat_incarnation(c) is None
-    with c.active(), get_db() as conn:  # adopted with the copy, as a snapshot does
-        store.set_watermark(conn.cursor(), b.device_id, 2, _streams(a, b.device_id)["2"])
-    _exchange(a, c)  # B's incarnation-1 rename, relayed
+    assert _sweep_value(a, "sessions") == "new" and set(_streams(a, b.device_id)) == {"1", "2"}
+    with a.active():
+        manifest = peer_snapshot.capture(c.device_id)
+        raw = [peer_snapshot.page(c.device_id, manifest["transfer"], i) for i in range(len(manifest["pages"]))]
+    directory = c.data_dir / "copy"
+    directory.mkdir()
+    for index, page in enumerate(raw):
+        (directory / f"{index}.json").write_bytes(page)
+    sessions = max(i for i, page in enumerate(manifest["pages"]) if page["collection"] == "sessions")
+    assert sessions + 1 < len(manifest["pages"])
+    monkeypatch.setattr(peer_snapshot, "APPLY_BATCH_ITEMS", 1)  # commit after every page
+    save = peer_snapshot._save_applied
+
+    relayed = []
+
+    def committed(directory, manifest, pages):
+        save(directory, manifest, pages)
+        if relay_midway and not relayed and sessions < pages < len(manifest["pages"]):
+            # The chat page is in, the frontier is not: an inbound op lands now.
+            assert _sweep_value(c, "sessions") == "new" and not int(_streams(c, b.device_id).get("2", 0))
+            relayed.append(_exchange(d, c))
+
+    monkeypatch.setattr(peer_snapshot, "_save_applied", committed)
+    with c.active():
+        peer_snapshot.apply(manifest, directory, a.device_id)
+    assert bool(relayed) == relay_midway
+    adopted = _streams(a, b.device_id)
+    assert _streams(c, b.device_id)["2"] == adopted["2"]
+    # D still has the second rename for C: it is the next op, not a duplicate.
+    assert int(_streams(d, b.device_id)["1"]) == int(adopted["1"]) + 1
+    _exchange(d, c)
+    assert _streams(c, b.device_id)["1"] == _streams(d, b.device_id)["1"]
+    return a, b, c, d
+
+
+def test_an_older_incarnation_op_does_not_replace_a_newer_copied_chat(workers, monkeypatch):
+    """Across a restore stream order is gone even with no label to compare: C
+    takes B's post-restore chat from A's copy, with its watermarks, then gets
+    B's pre-restore rename A never had. It is older by clock and loses, as on
+    every replica that holds the labelled version."""
+    a, b, c, d = _copy_overtaken_by_a_relay(workers, monkeypatch, relay_midway=False)
     assert _sweep_value(c, "sessions") == "new"
-    _converge([a, b, c])
-    assert _sweep_value(a, "sessions") == _sweep_value(b, "sessions") == _sweep_value(c, "sessions") == "new"
+    _converge([a, b, c, d])
+    assert {_sweep_value(w, "sessions") for w in (a, b, c, d)} == {"new"}
+
+
+def test_an_older_incarnation_op_between_copy_pages_does_not_replace_the_copied_chat(workers, monkeypatch):
+    """Review S24: the same rename lands after the copy committed B's new chat
+    and before its last page adopts the frontier. The copy's incarnations are
+    known from its first commit, so it still loses."""
+    a, b, c, d = _copy_overtaken_by_a_relay(workers, monkeypatch, relay_midway=True)
+    assert _sweep_value(c, "sessions") == "new"
+    _converge([a, b, c, d])
+    assert {_sweep_value(w, "sessions") for w in (a, b, c, d)} == {"new"}
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_lost_chat_update_does_not_block_its_signed_replay(workers):
+    """Review S23: B changes its chat's permission mode after its backup, then
+    restores and moves to incarnation 2 without touching the chat. A gap in D's
+    stream makes A hand B a state copy, applied before the ops of the same
+    exchange: it installs that very version without the owner's own fields.
+    B's signed op for it then ties the copy and applies, restoring the mode."""
+    from app.network import peer_snapshot
+    a, b, d = _network(workers, "a", "b", "d")
+    _session(b, "chat", title="t", events=0)
+    _converge([a, b, d])
+    backup = b.raw.serialize()
+    with b.active():
+        set_session_run_binding("chat", permission_mode="acceptEdits")
+        engine.scan_all()
+    _exchange(b, a)
+    _restore(b, backup)
+    served_by_a = ServedBy(a, "https://a.example.com")
+    async with httpx.AsyncClient(transport=served_by_a.transport()) as client:
+        await _sync(b, a, client, served_by_a.base_url, catch_up=True)
+        with b.active():
+            assert engine.context().identity.incarnation == 2
+        assert _chat(b)[1] is None
+        set_owner_pref(d, "gap", "x")
+        _exchange(d, a)
+        a.sql("DELETE FROM sync_ops WHERE origin_device_id = ?", (d.device_id,))
+        with a.active():
+            peer_snapshot.capture(b.device_id)
+        result = await _sync(b, a, client, served_by_a.base_url)
+        assert result["snapshot_required"] and owner_pref(b, "gap") == "x"
+        await _sync(b, a, client, served_by_a.base_url)
+    assert _chat(b)[1] == "acceptEdits"
+    assert _head(b, b.device_id, 1) == _head(a, b.device_id, 1)
 
 
 def _sweep_value(worker, collection):

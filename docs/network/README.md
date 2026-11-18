@@ -235,15 +235,21 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   no incarnation, so a signed op meeting it is taken as the same stream, as
   before the upgrade (an owner-ordered row takes it; any other row keeps the
   version held on a tie), unless the op comes from an incarnation older than
-  the newest seen, which only a restore leaves: then (clock, device id)
-  decides and the version held keeps a tie. So two replicas can keep different values, until
+  the newest seen, which only a restore leaves (a state copy makes the
+  incarnations it names known with its first page, not only once its
+  watermarks are adopted after the last): then it does not replace the
+  device's version with a later clock, owner-ordered rows included. At its
+  own clock the version held is taken for a copy of that same write, so an
+  owner-ordered row takes the signed op, getting back what the copy left out
+  such as the owner's own fields, and any other row keeps the version held.
+  So two replicas can keep different values, until
   the record next changes, when all of these hold: the device signed two
   versions of the record at one clock on either side of a restore; one
   replica holds the later incarnation's version and another holds the earlier
-  one's, either of them from a copy; and the later one reaches the second
-  replica only by a state copy (whose watermarks then stop the signed op being
-  sent), or reaches it as a signed op after that replica installed its version
-  from a copy. Origin proofs in copies would close this (#1792). Nor is a
+  one's, either of them from a copy; and the other version reaches a replica
+  only by a state copy (whose watermarks then stop the signed op being sent),
+  or reaches it as a signed op after that replica installed its version from
+  a copy. Origin proofs in copies would close this (#1792). Nor is a
   version replaced across a restore kept as a conflict when it has no
   incarnation: nothing says which side of the restore it came from.
   A version it gets back for a chat it runs restores the chat's owner-only

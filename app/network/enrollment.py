@@ -496,6 +496,8 @@ def _copy_snapshot_sync(ctx: engine.NetworkContext, issuer_id: str | None, endpo
                         peer_snapshot.apply(state_manifest, directory, issuer_id)
                     return
                 manifest = client.get(base + "/api/v1/network/peer/snapshot", headers=headers).json()
+                with store.get_db() as conn:
+                    engine.note_incarnations(conn.cursor(), manifest.get("watermarks") or {}, ctx=ctx)
                 for collection in manifest["collections"]:
                     offset = 0
                     while True:

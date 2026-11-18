@@ -577,6 +577,8 @@ def apply(manifest: dict, directory: Path, publisher: str, *, on_progress=None) 
                 # Context mutations stay private until the copy is applied.
                 trusted.members = copy.deepcopy(current.members)
                 trusted.generation = current.generation
+                # With the first rows: what an older stream's op meets meanwhile.
+                engine.note_incarnations(cursor, manifest["watermarks"], ctx=trusted)
             end, items = index, 0
             while end < len(pages) and (items == 0 or items + int(pages[end]["count"]) <= APPLY_BATCH_ITEMS):
                 items += int(pages[end]["count"]) or 1
