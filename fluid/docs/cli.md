@@ -198,7 +198,8 @@ the allowlist, programs named bare rather than by path) is
 treated as `safe` and runs without a prompt under `on_write`. The allowlist is
 in `fluid/tools/builtins/bash_risk.py`. A read-only command still asks when it
 names a credential file or a process's environment (`cat .env`,
-`cat /proc/1/environ`, or a link to either), or when it searches or compares a whole tree
+`cat /proc/1/environ`; names are checked, not link targets), uses an unquoted
+glob (`ls *.log`), or searches or compares a whole tree
 (`grep -r`, `rg`, `diff`, `git diff a b`), since that would print any `.env`
 inside it. Use the Grep tool for tree-wide searches: it withholds credential
 files.

@@ -108,8 +108,6 @@ SAFE_COMMANDS = [
     "sed -n 's/one/two/p' file.txt",
     "grep 'foo.*bar' file.txt",  # quoted regex, not a glob
     "grep -n 'a.*' src/app.py",
-    "grep foo *.py",  # glob that cannot reach a credential file
-    "ls *.log",
 ]
 
 WRITE_COMMANDS = [
@@ -678,60 +676,92 @@ def test_descriptor_paths_relative_to_cwd_ask() -> None:
     assert classify({"command": "cat cwd/x", "cwd": "/proc/self"}) == "write"
 
 
-@pytest.fixture
-def linked_tree(tmp_path):
-    """A working directory with harmless-looking links to credential files."""
-    work = tmp_path / "work"
-    work.mkdir()
-    (work / ".env").write_text("TOKEN=x\n")
-    (work / "readme.txt").write_text("hi\n")
-    (work / "notes.txt").symlink_to(".env")
-    (tmp_path / "keys").mkdir()
-    (tmp_path / "keys" / ".credential-keys").mkdir()
-    (work / "keydir").symlink_to(tmp_path / "keys" / ".credential-keys")
-    return work
+def test_names_are_checked_not_link_targets(tmp_path) -> None:
+    """No file is looked at (this runs on the event loop): a link named
+    ``notes.txt`` to ``.env`` is a known gap, and a glob asks unexpanded."""
+    (tmp_path / ".env").write_text("TOKEN=x\n")
+    (tmp_path / "notes.txt").symlink_to(".env")
+    cwd = str(tmp_path)
+    assert classify({"command": "cat notes.txt", "cwd": cwd}) == "safe"
+    for command in ("cat no*", "cat n?tes.txt", "ls [n]otes.txt", "cat *.md",
+                    "grep foo *.py", "ls *.log"):
+        assert classify({"command": command, "cwd": cwd}) == "write", command
+
+
+def test_classification_touches_no_file(monkeypatch) -> None:
+    import builtins
+    import glob as globmod
+    import os
+
+    def boom(*_a, **_k):
+        raise AssertionError("classifier touched the filesystem")
+
+    for mod, names in ((os.path, ("realpath", "exists", "lexists", "isdir")),
+                       (os, ("stat", "lstat", "listdir", "scandir", "readlink")),
+                       (globmod, ("glob", "iglob"))):
+        for name in names:
+            monkeypatch.setattr(mod, name, boom)
+    monkeypatch.setattr(builtins, "open", boom)
+    for command in ("cat notes.txt", "cat *.py", "ls ~/x", "grep a f", "cat ../x/.env"):
+        BASH_SPEC.effective_risk({"command": command}, cwd="/srv/work")
 
 
 @pytest.mark.parametrize("command", [
-    "cat notes.txt",
-    "head -n 3 ./notes.txt",
-    "cat no*",
-    "cat n?tes.txt",
-    "ls keydir",
-    "cat keydir/../../work/notes.txt",
-    "grep -f notes.txt readme.txt",
-    "sort --random-source=notes.txt readme.txt",
+    'cat "example folder"/ordinary.txt',
+    "cat 'example folder'/ordinary.txt",
+    'grep -n "a b" "src/my file.py"',
 ])
-def test_links_to_credential_files_ask(linked_tree, command: str) -> None:
-    assert classify({"command": command, "cwd": str(linked_tree)}) == "write"
-    # The session cwd counts when the call has none.
-    assert BASH_SPEC.effective_risk({"command": command}, cwd=str(linked_tree)) == "write"
-    assert PermissionEngine("on_write").decide(
-        BASH_SPEC, {"command": command}, cwd=str(linked_tree)
-    ).decision == "ask"
+def test_a_quoted_operand_is_one_path(command: str) -> None:
+    assert classify({"command": command}) == "safe"
 
 
-def test_links_resolve_from_a_relative_call_cwd(linked_tree) -> None:
-    risk = BASH_SPEC.effective_risk(
-        {"command": "cat notes.txt", "cwd": linked_tree.name}, cwd=str(linked_tree.parent)
-    )
-    assert risk == "write"
+@pytest.mark.parametrize("command", [
+    "cat example\\ folder/ordinary.txt",
+    "echo a\\ b",
+    "cat a.txt \\\nb.txt",
+    "cat a.txt \\",
+])
+def test_an_escaped_blank_asks(command: str) -> None:
+    # Bluntly, as main did: quote a name with a space in it instead.
+    assert classify({"command": command}) == "write"
 
 
-def test_files_that_are_not_links_to_secrets_stay_safe(linked_tree) -> None:
-    for command in ("cat readme.txt", "cat r*", "ls", "wc -l readme.txt"):
-        assert classify({"command": command, "cwd": str(linked_tree)}) == "safe", command
-        assert BASH_SPEC.effective_risk({"command": command}, cwd=str(linked_tree)) == "safe"
+@pytest.mark.parametrize("command", [
+    'cat "example folder"/.env',
+    "cat 'a b'/proc/../.env",
+    'cat /"proc"/1/"environ"',
+    "cat /proc/1/env''iron",
+])
+def test_quote_pieces_join_into_the_path_the_shell_passes(command: str) -> None:
+    assert classify({"command": command}) == "write"
 
 
-def test_the_model_cannot_supply_the_session_cwd(linked_tree, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("cwd", ["/repo/../x", "..", "a/../b", "/proc", "/proc/1", "/dev/fd"])
+def test_relative_operands_ask_under_an_unsure_cwd(cwd: str) -> None:
+    assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
+    assert BASH_SPEC.effective_risk({"command": "cat README.md"}, cwd=cwd) == "write"
+    # Absolute operands are judged by their own text.
+    assert classify({"command": "cat /etc/hostname", "cwd": cwd}) == "safe"
+    assert classify({"command": "pwd", "cwd": cwd}) == "safe"
+    # Bluntly, every relative word counts, subcommands included.
+    assert classify({"command": "git status", "cwd": cwd}) == "write"
+
+
+def test_a_relative_call_cwd_joins_the_session_cwd() -> None:
+    assert BASH_SPEC.effective_risk(
+        {"command": "cat environ", "cwd": "1"}, cwd="/proc"
+    ) == "write"
+    assert BASH_SPEC.effective_risk(
+        {"command": "cat README.md", "cwd": "src"}, cwd="/repo"
+    ) == "safe"
+
+
+def test_the_model_cannot_supply_the_session_cwd() -> None:
     from fluid.tools.registry import SESSION_CWD_KEY
 
-    monkeypatch.chdir(tmp_path)
-    # A model-supplied key is dropped: an empty dir gives no link to resolve,
-    # so the call is judged from the host's cwd, and the real cwd still wins.
-    spoof = {"command": "cat notes.txt", SESSION_CWD_KEY: str(tmp_path / "empty")}
-    assert BASH_SPEC.effective_risk(spoof, cwd=str(linked_tree)) == "write"
+    # A model-supplied key is dropped; the real session cwd wins.
+    spoof = {"command": "cat environ", SESSION_CWD_KEY: "/srv"}
+    assert BASH_SPEC.effective_risk(spoof, cwd="/proc/1") == "write"
     seen: list[dict] = []
     probe = type(BASH_SPEC)(
         name="Probe", description="", input_schema={}, risk="write",
@@ -739,6 +769,13 @@ def test_the_model_cannot_supply_the_session_cwd(linked_tree, tmp_path, monkeypa
     )
     probe.effective_risk({"command": "x", SESSION_CWD_KEY: "/attacker"})
     assert SESSION_CWD_KEY not in seen[-1]
+
+
+def test_a_template_after_a_separator_is_judged_as_a_template() -> None:
+    # Main split ``.env.example;`` as one word and asked; ``;`` ends the
+    # word, so the .env.example template exception now applies.
+    assert classify({"command": "cat .env.example; echo literal"}) == "safe"
+    assert classify({"command": "cat .env; echo literal"}) == "write"
 
 
 @pytest.mark.parametrize("command", [

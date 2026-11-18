@@ -85,18 +85,21 @@ model *reads* framing tokens even when they can't structurally escape.
   file or a process's `environ`/`cmdline`/`mem` — `cat .env` and
   `cat /proc/1/environ` do not sail under the read-only fast path. This
   includes a value attached to an option (`--file=.env`), a `<rev>:<path>`
-  (`git show HEAD:.env`), `self`/`thread-self`/task paths, globs and `..` in
-  a `/proc` path, and a relative name under the directory the command runs
-  in (the call's `cwd`, else the session's). An operand that exists on disk
-  is also checked by its real path, so `cat notes.txt` asks when `notes.txt`
-  links to `.env`, and an unquoted glob is checked by what it matches now.
-  A path through a descriptor or another process's directory
-  (`/proc/<pid>/fd`, `/proc/<pid>/cwd`, `/proc/<pid>/root`, `/dev/fd`) asks
-  without being resolved. This is a preflight, not a boundary: a file can
-  change between the check and the command, so do not rely on it against a
-  process that rewrites links while the agent works. Shell searches that walk
-  a tree prompt too, because they print credential files that the Grep tool
-  would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`, `--recursive`),
+  (`git show HEAD:.env`), `self`/`thread-self`/task paths and `..` in a
+  `/proc` path, and a relative name under the directory the command runs in
+  (the call's `cwd`, else the session's). Each argument is checked as the
+  shell passes it, quotes removed (`"my dir"/.env` is one path), and
+  `.env.example`-style templates stay exempt (`cat .env.example; echo x` is
+  `safe`). An unquoted glob (`*`, `?`, `[`) asks, since what it matches is
+  not in the text; so does a path through a descriptor or another process's
+  directory (`/proc/<pid>/fd`, `/proc/<pid>/cwd`, `/proc/<pid>/root`,
+  `/dev/fd`), and any relative argument when that directory has a `..`
+  component or sits under `/proc` or `/dev/fd`. Names are checked, not link
+  targets: the classifier looks at no file (it runs on the event loop, where
+  a hung mount would stall the worker), so `cat notes.txt` stays `safe` when
+  `notes.txt` is a link to `.env`. This is a preflight, not a boundary.
+  Shell searches that walk a tree prompt too, because they print credential
+  files that the Grep tool would withhold: recursive `grep` (`-r`, `-R`, `-d recurse`, `--recursive`),
   `rg` (it is recursive by default and reads options such as `--pre` from
   `RIPGREP_CONFIG_PATH`), `diff` (two directories compare every file in them)
   and `git diff` with `--no-index` or two operands (outside a repository it
