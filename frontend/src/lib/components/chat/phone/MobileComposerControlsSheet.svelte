@@ -435,15 +435,20 @@
 	/** A page has its own history entry over the panel's, so Android Back returns to the list. */
 	let pageEntry = false;
 	let closeThroughList: string | undefined;
+	/** Opened before the shell history started (boot still loading): its entry waits for the first one. */
+	let awaitingShell = false;
+	/** That late entry, landing under a page the user may already be on: nothing to reconstruct. */
+	let adoptedEntry: string | undefined;
 
 	function pushPageEntry(target: Page) {
 		if (!historyEntry || pageEntry) return;
-		try {
-			shellHistory.overlay({ mobileControls: true, mobileControlsPage: target, mobileControlsList: shellHistory.entryId });
-			pageEntry = true;
-		} catch {
-			// Router not ready (tests): Back closes the panel instead.
-		}
+		// No router or no shell history yet: Back closes the panel instead.
+		pageEntry = shellHistory.overlay({ mobileControls: true, mobileControlsPage: target, mobileControlsList: shellHistory.entryId });
+	}
+
+	function recordPanelEntry() {
+		historyEntry = shellHistory.overlay({ mobileControls: true, mobileControlsPage: direct ? pageName : undefined });
+		return historyEntry;
 	}
 
 	$effect(() => {
@@ -457,14 +462,7 @@
 				rendered = true;
 				picker = null;
 				void focusPanel();
-				if (!historyEntry) {
-					try {
-						shellHistory.overlay({ mobileControls: true, mobileControlsPage: direct ? pageName : undefined });
-						historyEntry = true;
-					} catch {
-						// Router not ready (tests): Back just won't close the panel.
-					}
-				}
+				if (!historyEntry) awaitingShell = !recordPanelEntry();
 				void tick().then(() => {
 					if (bodyRef && pageName === 'main') bodyRef.scrollTop = 0;
 				});
@@ -496,7 +494,7 @@
 						history.back();
 					}
 				}
-				pageEntry = false;
+				pageEntry = awaitingShell = false;
 			}
 		});
 	});
@@ -508,8 +506,13 @@
 
 	// Reconstruct the panel from the landed entry, including a Forward during its close slide.
 	$effect(() => {
-		const { mobileControls, mobileControlsPage, mobileControlsList, shell } = page.state as ShellState;
+		const state = page.state as ShellState;
+		const { mobileControls, mobileControlsPage, mobileControlsList, shell } = state;
 		untrack(() => {
+			// Shell writes land in order after the call that queued them: one queued
+			// before the panel's entry is no Back, and neither is the panel's late entry.
+			if (shellHistory.superseded(state)) return;
+			if (shell && shell.id === adoptedEntry) { adoptedEntry = undefined; return; }
 			const closeList = closeThroughList && closeThroughList === shell?.id && mobileControls && !mobileControlsPage;
 			closeThroughList = undefined;
 			if (closeList) { history.back(); return; }
@@ -524,6 +527,10 @@
 			} else if (historyEntry && open) {
 				historyEntry = pageEntry = false;
 				closePanel();
+			} else if (awaitingShell && open && shell) {
+				// The shell history's first entry: record the panel's over it now.
+				awaitingShell = false;
+				if (recordPanelEntry()) adoptedEntry = shellHistory.entryId;
 			}
 		});
 	});

@@ -59,7 +59,17 @@ export const shellHistory = {
   const next = { ...current.place, ...patch };
   if (JSON.stringify(next) !== JSON.stringify(current.place)) write(next, replace);
  },
- overlay(state: App.PageState) { if (current) write(current.place, false, state); }
+ /** Push `state` over the current place. False before `start`: nothing was recorded. */
+ overlay(state: App.PageState) {
+  if (!mounted || !current) return false;
+  write(current.place, false, state);
+  return true;
+ },
+ /** The landing of an own write that a later write already replaced: not a navigation. */
+ superseded(state: ShellState) {
+  const id = state.shell?.id;
+  return !!id && pending.has(id) && id !== current?.id;
+ }
 };
 
 function viewPlace(view: ActiveView | null): Place {
