@@ -233,11 +233,12 @@ def _patch_receiver(monkeypatch, receiver_worker, old_receiver):
     from app.core import model_effort, provider_agent
     resolve = model_effort.resolve_child_speed
 
-    def receiver(model, provider, *, parent=None, caller=None, profile_id=None, fit=True):
+    def receiver(model, provider, **kwargs):
         if old_receiver and engine.context().device_id == receiver_worker.device_id:
+            parent = kwargs.get("parent")
             flag = None if parent is None else ("standard" if parent == "standard" else "fast")
-            return provider_agent.worker_speed(flag, provider, model, profile_id)
-        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id, fit=fit)
+            return provider_agent.worker_speed(flag, provider, model, kwargs.get("profile_id"))
+        return resolve(model, provider, **kwargs)
 
     monkeypatch.setattr(model_effort, "resolve_child_speed", receiver)
 

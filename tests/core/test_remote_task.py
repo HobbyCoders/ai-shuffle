@@ -949,11 +949,11 @@ def test_sender_resolves_fast_for_a_preference_unaware_v4_receiver(
         database.set_user_preference("account", "owner", model_effort.fast_preference_key("opus"), saved)
     resolve = model_effort.resolve_child_speed
 
-    def old_receiver(model, provider, *, parent=None, caller=None, profile_id=None, fit=True):
+    def old_receiver(model, provider, **kwargs):
         if world.net.device_id == TARGET:
             # Main e9804d721's v4 receiver expression: no saved-pick lookup.
-            return provider_agent.worker_speed(parent, provider, model, profile_id)
-        return resolve(model, provider, parent=parent, caller=caller, profile_id=profile_id, fit=fit)
+            return provider_agent.worker_speed(kwargs.get("parent"), provider, model, kwargs.get("profile_id"))
+        return resolve(model, provider, **kwargs)
 
     monkeypatch.setattr(model_effort, "resolve_child_speed", old_receiver)
     calls = []
