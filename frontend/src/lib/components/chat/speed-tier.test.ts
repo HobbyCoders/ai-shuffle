@@ -31,7 +31,7 @@ describe('speed tier', () => {
 		const ultra = SPEED_OPTIONS.find((o) => o.value === 'ultrafast')!;
 		expect(ultra.title).toMatch(/fastest tier.*much faster/);
 		// A ChatGPT sign-in pays with its plan allowance; an API key pays a price.
-		expect(ultrafastCost('plan')).toMatch(/fastest tier.*ChatGPT plan allowance about 8x faster/);
+		expect(ultrafastCost('plan')).toBe('');
 		expect(ultrafastCost('plan', true)).toMatch(/8x the plan allowance/);
 		expect(ultrafastCost('api')).toMatch(/fastest tier.*several times the Standard API price/);
 		expect(ultrafastCost('api', true)).toMatch(/several times the Standard price/);

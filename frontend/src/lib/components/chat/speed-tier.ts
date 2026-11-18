@@ -17,13 +17,12 @@ export const SPEED_NAMES: Record<ComposerSpeed, string> = {
 export type UltrafastBilling = 'plan' | 'api';
 
 /**
- * The cost guard: shown whenever the picker is, before any pick and never as a
- * dialog, in the terms the row bills in. `short` is the phone sheet's line.
+ * Inline cost note for the speed picker. Only the phone sheet (`short`)
+ * shows a note for ChatGPT plans.
  */
 export function ultrafastCost(billing: UltrafastBilling, short = false): string {
 	if (billing === 'plan') {
-		return short ? 'Ultrafast uses about 8x the plan allowance'
-			: 'Ultrafast is the fastest tier. It uses your ChatGPT plan allowance about 8x faster.';
+		return short ? 'Ultrafast uses about 8x the plan allowance' : '';
 	}
 	return short ? 'Ultrafast costs several times the Standard price'
 		: 'Ultrafast is the fastest tier. It costs several times the Standard API price.';

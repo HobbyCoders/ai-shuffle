@@ -249,9 +249,10 @@ describe('EffortPopoverCard — Ultrafast speed picker', () => {
 		expect(document.querySelector('.effort-pop-card')!.classList.contains('ultrafast-active')).toBe(true);
 		await fireEvent.click(screen.getByRole('radio', { name: /Standard/ }));
 		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
-		// A ChatGPT sign-in words it as plan allowance.
+		// A ChatGPT sign-in keeps the picker without a cost paragraph.
 		await view.rerender({ ...base, fastEnabled: false, ultrafastSupported: true, ultrafastBilling: 'plan', onSelectSpeed });
-		expect(screen.getByTestId('ultrafast-cost').textContent).toMatch(/ChatGPT plan allowance about 8x faster/);
+		expect(screen.getByRole('radio', { name: /Ultrafast/ })).toBeTruthy();
+		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
 	});
 
 	it('holds every tier while the chat\'s own value loads', async () => {
