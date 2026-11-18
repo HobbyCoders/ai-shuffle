@@ -15,7 +15,7 @@ import type { InternalMutableState } from './ws-message-handlers';
 import type { SessionEphemeral } from '../session-cache';
 import type { ExecutionMode, Task } from '../types';
 import { api } from '$lib/api/client';
-import { composerPreferences, resolveComposerProject } from '../composer-preferences';
+import { composerPreferences, composerSpeed, resolveComposerProject } from '../composer-preferences';
 import { STREAM_DEBUG } from '$lib/utils/debug-log';
 import { hasComposerDraft } from './composer-suggestion';
 import { openHeaderDropdown } from '../header-dropdowns';
@@ -362,6 +362,16 @@ export function getPersistedFastMode(): boolean {
 	return composerPreferences.fastForModel(getPersistedModel()) ?? localStorage.getItem('aihub_lastFastMode') === '1';
 }
 
+/**
+ * Whether a new chat's Fast runs as Ultrafast: only the owner's own pick for
+ * that model, never carried over from another one (the tier costs far more).
+ * The composer drops it again if the model turns out to lack the tier.
+ */
+export function getPersistedUltrafastMode(): boolean {
+	if (typeof window === 'undefined' || !getPersistedFastMode()) return false;
+	return composerPreferences.speedForModel(getPersistedModel()) === 'ultrafast';
+}
+
 export function getPersistedContextWindowChoice(): ContextWindowChoice {
 	if (typeof window === 'undefined') return DEFAULT_CONTEXT_WINDOW_CHOICE;
 	const stored = localStorage.getItem('aihub_lastContextWindowChoice');
@@ -530,6 +540,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			profile: state.profile,
 			permissionModeOverride: state.permissionModeOverride,
 			fastMode: state.fastMode,
+			ultrafastMode: !!state.fastMode && !!state.ultrafastMode,
 			workspaceProjectIds: state.workspaceProjectIds ?? [],
 			contextWindowChoice: state.contextWindowChoice,
 			worktreeIntent: state.worktreeIntent,
@@ -840,6 +851,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Cross-device hydration: the row carries the session's own fast-tier
 			// pick, so a chat opened elsewhere shows the tier it actually runs on.
 			fastMode: binding.fastMode,
+			ultrafastMode: binding.ultrafastMode,
 			workspaceProjectIds: ephemeral?.workspaceProjectIds ?? row?.workspace_project_ids ?? [],
 			// Existing-chat picks are acknowledged on the worker, not unsent
 			// drafts. A cache from another tab/device cannot outrank that row.
@@ -929,11 +941,12 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const initialEffort = getState().effortLevelOverride;
 		const initialContextChoice = getState().contextWindowChoice;
 		const initialContextPin = getState().contextWindowPin;
-		const initialFastMode = getState().fastMode;
+		const initialSpeed = composerSpeed(getState());
 		const initialBinding = {
 			profile: getState().profile,
 			permissionModeOverride: getState().permissionModeOverride,
 			fastMode: getState().fastMode,
+			ultrafastMode: getState().ultrafastMode,
 		};
 		let snap: LiveSnapshot | null = null;
 		// Who runs the chat, as of when the answer was asked for (#1659).
@@ -1009,7 +1022,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// A Fast change still waiting out the running turn. Not over a pick made
 		// during this fetch, whose own answer speaks for itself.
-		if (getState().fastMode === initialFastMode) {
+		if (composerSpeed(getState()) === initialSpeed) {
 			patch.fastAppliesTurnId = snap.fast_applies_turn ?? null;
 		}
 
@@ -1231,6 +1244,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			permissionModeOverride: mode !== 'chat' ? getPersistedPermissionMode() : noProjectPermission(getPersistedPermissionMode()),
 			effortLevelOverride: getPersistedEffort(),
 			fastMode: getPersistedFastMode(),
+			ultrafastMode: getPersistedUltrafastMode(),
 			// A compose has no server binding to wait for.
 			bindingUnhydrated: {},
 			bindingPicks: {},
@@ -1283,6 +1297,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			modelOverride:savedDraft.modelOverride, effortLevelOverride:savedDraft.effortLevelOverride,
 			permissionModeOverride:mode === 'chat' ? noProjectPermission(normalizePermissionMode(savedDraft.permissionModeOverride)) : normalizePermissionMode(savedDraft.permissionModeOverride),
 			fastMode:savedDraft.fastMode ?? false,
+			ultrafastMode:!!savedDraft.fastMode && savedDraft.ultrafastMode === true,
 			contextWindowChoice:savedDraft.contextWindowChoice ?? DEFAULT_CONTEXT_WINDOW_CHOICE,
 		}));
 		const afterState = getState();

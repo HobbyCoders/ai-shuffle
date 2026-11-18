@@ -521,13 +521,15 @@ curl -X POST http://localhost:8000/api/v1/sessions/sess_abc123/resume \
 
 ### PUT /api/v1/sessions/{session_id}/run-settings
 
-Change effort or Fast mode while a chat runs, or save a context-window choice separately:
+Change effort, Fast mode or the speed tier while a chat runs, or save a context-window choice separately:
 
 ```json
 { "context_window": 200000 }
 ```
 
 The chosen window must fall within the model's range: from its Standard window (the smaller entry in `context_window_choices`) up to its Extended window (the larger, the model's full context). A value in between raises the Standard cap, so the chat compacts later than the default. The response acknowledges the saved `context_window`. It takes effect on the next turn, including a wake or retry; an in-flight request is not interrupted. A saved pin stays a ceiling when the model changes. An older chat whose picker choice was only remembered in its browser needs that choice selected again to save it on the worker. Unpinned chats keep their model's default window.
+
+`speed` (`standard`, `fast` or `ultrafast`) sets the tier and the `fast` it implies; `fast` alone keeps Ultrafast when it turns Fast on, and off means Standard. `ultrafast` is refused with 409 on a model that does not offer it. In API-lane chats the change applies from the next request. The answer and `GET /api/v1/sessions/{session_id}/live` include `speed`; older clients read `fast`, which is `true` for Ultrafast too.
 
 In a Claude Code chat a Fast mode change reaches the running turn only with the next message. While that is so, the answer has `fast_applies_turn`, the id of the running turn, and `GET /api/v1/sessions/{session_id}/live` reports the same field until that turn ends. It is absent otherwise, including on lanes that switch at their next request.
 
@@ -1049,7 +1051,7 @@ Create a session without a first message. The composer's call button uses it: it
 
 **Auth:** Required
 
-All fields are optional. `project_id` or `project_v2_id` (not both) files the session under a project; with neither it is projectless. `mode` is `code` (default) or `chat`; `voice` is refused with 400. `worktree_id` runs the session in an existing worktree of `project_id`. `overrides` takes the same `model`, `effort`, `permission_mode`, `context_window`, `fast` and `workspace_project_ids` as a query and stores them as the session's run settings. Agent rules match `with-worktree` below.
+All fields are optional. `project_id` or `project_v2_id` (not both) files the session under a project; with neither it is projectless. `mode` is `code` (default) or `chat`; `voice` is refused with 400. `worktree_id` runs the session in an existing worktree of `project_id`. `overrides` takes the same `model`, `effort`, `permission_mode`, `context_window`, `fast`, `speed` and `workspace_project_ids` as a query and stores them as the session's run settings. Agent rules match `with-worktree` below.
 
 `target_instance_id` (a device `id` from `GET /api/v1/cluster/installs`) creates the session on that device, which then runs it, as a first message with a device pick does. This install keeps a read-only copy. A call on it still runs here: see [Calling a chat another worker runs](/docs/features/voice#calling-a-chat-another-worker-runs). It returns `409` when the device is unknown, offline, awaiting approval or does not have the project checked out, and when the device does not accept the session; nothing is left behind in that case. If the device was reached but did not answer, even when asked a second time, it returns `409` and keeps the read-only copy here, since the device may have created the session. If the session does not respond, delete it and start a new one. It cannot be combined with `worktree_id` (`400`).
 

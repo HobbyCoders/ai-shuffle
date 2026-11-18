@@ -235,6 +235,9 @@ export interface ProviderModel {
 	default_effort?: string | null;
 	/** Benchmarked app initial pick; absent means keep the provider's omission. */
 	initial_effort?: string | null;
+	/** True when this route offers OpenAI's Ultrafast tier (`app/core/model_speed.py`):
+	 *  a ChatGPT sign-in whose own catalog lists it, or a documented API-key model. */
+	ultrafast?: boolean;
 }
 
 /**
@@ -685,6 +688,20 @@ export function isFastModeCapable(value: string | null): boolean {
 }
 
 /**
+ * True when `value` is a `prov:<providerId>:<modelId>` pick whose route offers
+ * OpenAI's Ultrafast tier. The registry decides per model (`ultrafast: true`):
+ * a ChatGPT plan only when its own Codex catalog lists the tier, an API-key
+ * row only for the documented models. Unknown rows, native Claude and every
+ * other provider are false, so the composer keeps its plain Fast toggle.
+ */
+export function isUltrafastCapable(value: string | null): boolean {
+	const composite = decodeProviderModel(value);
+	if (!composite) return false;
+	const provider = _registry.providers.find((p) => p.id === composite.providerId);
+	return provider?.models.find((m) => m.id === composite.modelId)?.ultrafast === true;
+}
+
+/**
  * Human-readable label for a stored model value.
  * Falls back to the raw value, or `'Default'` when nothing is set.
  *
@@ -841,6 +858,8 @@ interface RegistryProviderPayload {
 	plan_type?: string | null;
 	auth_mode?: string | null;
 	usable?: boolean | null;
+	/** A ChatGPT row saved before speed tiers were stored: one capability refresh fetches them. */
+	speed_tiers_stale?: boolean;
 }
 
 interface RegistryClaudePayload {
@@ -949,7 +968,7 @@ type CapabilityAttempt = {
 };
 const capabilityAttempts = new Map<string, CapabilityAttempt>();
 let latestCapabilityProviders: RegistryProviderPayload[] = [];
-const needsCapabilities = (p: RegistryProviderPayload) => p.models?.some(m =>
+const needsCapabilities = (p: RegistryProviderPayload) => p.speed_tiers_stale === true || p.models?.some(m =>
 	(m.effort_metadata_version ?? 0) < 1 || m.effort_levels == null);
 
 function retryCapabilities(id: string, attempt: CapabilityAttempt) {

@@ -68,7 +68,9 @@
 	import ProviderGlyph from '$lib/components/settings/ProviderGlyph.svelte';
 	import type { PickerGroup } from '$lib/constants/model-picker';
 	import type { ComposerSheetProps as Props } from '$lib/components/chat/composer-shell';
-	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
+	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
+	import SpeedLabel from '$lib/components/chat/SpeedLabel.svelte';
+	import { SPEED_NAMES, SPEED_OPTIONS, pickedSpeed, shownSpeed } from '$lib/components/chat/speed-tier';
 	import { NO_ADJUSTABLE_EFFORT, UNKNOWN_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 		import {
 		ACCESS_HELP, ACCESS_LABEL, ACCESS_SHORT, BYPASS, VelocityTracker, dragAxis, settlesClosed,
@@ -81,6 +83,7 @@
 		contextChoice, onContextChoiceSelect, contextStandardTokens, onContextStandardChange, effortOptions, effortValue, onEffortSelect,
 		effortKnown = true, effortDefaultValue = null,
 		fastSupported = false, fastEnabled = false, fastPending = false, fastWaitsForNextMessage = false, onToggleFast, showCodeControls = true,
+		ultrafastSupported = false, ultrafastEnabled = false, onSelectSpeed,
 		showSetup = true, permissionOptions, permissionValue, permissionPending = false, permissionUpdating = false, onPermissionSelect,
 		awayEnabled = false, awayAvailable = false, awayBusy = false, awayGlobal = false, onToggleAway,
 		onUsageOpenChange, callAction, browserOpen = false, onBrowserToggle, onBrowserPreload, terminal
@@ -164,6 +167,12 @@
 	const awayChecked = $derived(awayGlobal || (awayEnabled && awayAvailable));
 	const awayOn = $derived(awayShown && awayChecked);
 	const fastShown = $derived(fastSupported && !modelLocked);
+	// Where the route carries Ultrafast, Fast becomes a Standard / Fast /
+	// Ultrafast pick; elsewhere the Fast switch stays as it is.
+	const speedPickerShown = $derived(fastShown && ultrafastSupported);
+	const sheetSpeed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
+	/** The tier the next turn asks for, which the quick bar and effort value show. */
+	const labelSpeed = $derived(fastShown ? shownSpeed({ fastSupported, fastEnabled, fastPending, ultrafastSupported, ultrafastEnabled }) : 'standard');
 
 	const runningTasks = $derived(($activeSession.activeTasks ?? []).filter((t) => t.status === 'running'));
 	// The owner's watches (#371) open the same list. They are long-lived, so
@@ -800,12 +809,12 @@
 			class:locked={modelLocked}
 			data-cell="model"
 			aria-haspopup="dialog"
-			aria-label={`Model: ${modelLabel}${fastShown && fastEnabled && !fastPending ? ', fast mode' : ''}${modelLocked ? ', locked' : ''}`}
+			aria-label={`Model: ${modelLabel}${labelSpeed !== 'standard' ? `, ${SPEED_NAMES[labelSpeed].toLowerCase()} mode` : ''}${modelLocked ? ', locked' : ''}`}
 			aria-disabled={modelLocked || undefined}
 			onclick={() => { if (!modelLocked) openPanel('model'); }}
 		>
-			<span class="ql">{modelLabel}</span>
-			{#if fastShown && fastEnabled && !fastPending}<span class="qi" data-fast-badge aria-hidden="true"><Zap size={12} fill="currentColor" /></span>{/if}
+			<span class="ql"><SpeedLabel text={modelLabel} speed={labelSpeed} bolt={false} /></span>
+			{#if labelSpeed !== 'standard'}<span class="qi" data-fast-badge data-speed={labelSpeed} aria-hidden="true"><Zap size={12} fill="currentColor" />{#if labelSpeed === 'ultrafast'}<Zap size={12} fill="currentColor" />{/if}</span>{/if}
 			{#if modelLocked}<Lock size={14} class="qchev" aria-hidden="true" />{:else}<ChevronDown size={14} class="qchev" aria-hidden="true" />{/if}
 		</button>
 
@@ -981,7 +990,7 @@
 											title={effortPinned ? "Back to Auto: run at the model's default" : "Auto: the model's default is in use"}
 											onclick={() => { if (effortPinned) onEffortSelect(null); }}>Auto</button>
 									{/if}
-									<span class="mcp-val">{panelEffortValue}</span>
+									<span class="mcp-val"><SpeedLabel text={panelEffortValue} speed={effortLocked ? 'standard' : labelSpeed} /></span>
 								</div>
 								<div class="mcp-effort-body">
 									{#each effortNotes as note}
@@ -1001,7 +1010,23 @@
 									{/if}
 								</div>
 							</div>
-							{#if fastShown}
+							{#if speedPickerShown}
+								<div class="mcp-stack" data-row="speed">
+									<div class="mcp-rowhead">
+										<span class="mcp-ic" aria-hidden="true"><Zap size={18} /></span>
+										<span class="mcp-lbl"><span>Speed</span>{#if sheetSpeed === 'ultrafast' && !fastPending}<small data-testid="ultrafast-cost">About 8x the allowance on ChatGPT plans</small>{/if}</span>
+										{#if fastPending}<LoaderCircle size={18} class="mcc-spin mcp-chev" aria-hidden="true" />{/if}
+									</div>
+									<!-- While the chat's own value loads, no tier is checked. -->
+									<div class="mcp-seg" role="radiogroup" aria-label="Speed" aria-busy={fastPending || undefined} style:--n={SPEED_OPTIONS.length}>
+										{#each SPEED_OPTIONS as option (option.value)}
+											<button type="button" role="radio" aria-checked={!fastPending && sheetSpeed === option.value}
+												disabled={fastPending} title={option.title} data-speed={option.value}
+												onclick={() => { if (!fastPending && option.value !== sheetSpeed) onSelectSpeed?.(option.value); }}>{option.label}</button>
+										{/each}
+									</div>
+								</div>
+							{:else if fastShown}
 								<button type="button" class="mcp-row" role="switch" aria-label={fastPending ? 'Fast mode: loading' : 'Fast mode'}
 									aria-checked={fastPending ? false : fastEnabled} aria-busy={fastPending || undefined} disabled={fastPending}
 									onclick={() => { if (!fastPending) onToggleFast?.(); }}>
@@ -1011,7 +1036,7 @@
 								</button>
 							{/if}
 						</div>
-						{#if fastShown && fastWaitsForNextMessage}<p class="mcp-note" data-testid="fast-applies-notice" role="status">{fastAppliesNotice(fastEnabled)}</p>{/if}
+						{#if fastShown && fastWaitsForNextMessage}<p class="mcp-note" data-testid="fast-applies-notice" role="status">{speedPickerShown ? speedAppliesNotice(sheetSpeed) : fastAppliesNotice(fastEnabled)}</p>{/if}
 						{#if modelNotice}<p class="mcp-note warn">{modelNotice}</p>{/if}
 
 						{#if accessShown}
@@ -1181,6 +1206,8 @@
 	.qcell.model { flex: 0 1 auto; min-width: 0; }
 	.qcell.controls { margin-left: auto; }
 	.qi { display: grid; place-items: center; flex: none; color: var(--primary); }
+	.qi[data-speed='ultrafast'] { display: flex; }
+	.qi[data-speed='ultrafast'] :global(svg + svg) { margin-left: -5px; }
 	.ql {
 		min-width: 0;
 		overflow: hidden;

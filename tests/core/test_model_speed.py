@@ -313,3 +313,15 @@ def test_a_chatgpt_row_saved_before_tiers_asks_for_one_refresh(mock_db):
     # Once a catalog fetch stored its answer (even "none"), it stops asking.
     db.update_model_provider("old", models_json=[{"id": "gpt-6.1-sol", "service_tiers": []}])
     assert "speed_tiers_stale" not in registry_payload()["providers"][0]
+
+
+def test_ultrafast_pick_is_one_canonical_record_per_model(mock_db):
+    from app.core.model_effort import canonical_model_preference_key, speed_preference_key
+
+    key = speed_preference_key("gpt-6.1-sol")
+    assert key.startswith("composer.modelSpeed.")
+    assert canonical_model_preference_key(key) == key
+    db.set_user_preference("admin", "admin", key, "ultrafast")
+    # A clear stays a replicated null like the Fast record's.
+    assert db.delete_user_preference("admin", "admin", key) is True
+    assert db.get_user_preference("admin", "admin", key)["value"] is None

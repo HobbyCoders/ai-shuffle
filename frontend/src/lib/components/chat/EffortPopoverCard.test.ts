@@ -217,3 +217,55 @@ describe('EffortPopoverCard', () => {
 		expect(slider().getAttribute('aria-valuetext')).toBe('XHigh');
 	});
 });
+
+describe('EffortPopoverCard — Ultrafast speed picker', () => {
+	const base = { options, value: 'high', onSelect: vi.fn(), fastSupported: true };
+
+	it('keeps the plain Fast toggle where the route has no Ultrafast', () => {
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true } });
+		expect(screen.getByRole('button', { name: 'Fast mode' })).toBeTruthy();
+		expect(screen.queryByRole('radiogroup', { name: 'Speed' })).toBeNull();
+	});
+
+	it('offers Standard, Fast and Ultrafast as one pick', async () => {
+		const onSelectSpeed = vi.fn();
+		const view = render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastSupported: true, onSelectSpeed } });
+		expect(screen.queryByRole('button', { name: 'Fast mode' })).toBeNull();
+		const radios = screen.getAllByRole('radio');
+		expect(radios.map((r) => r.textContent?.trim())).toEqual(['Standard', 'Fast', 'Ultrafast']);
+		expect(radios.map((r) => r.getAttribute('aria-checked'))).toEqual(['false', 'true', 'false']);
+		expect(radios[2].getAttribute('title')).toMatch(/8x on ChatGPT plans/);
+		expect(screen.queryByTestId('ultrafast-cost')).toBeNull();
+		await fireEvent.click(radios[2]);
+		expect(onSelectSpeed).toHaveBeenLastCalledWith('ultrafast');
+		// The current pick is not sent again.
+		await fireEvent.click(radios[1]);
+		expect(onSelectSpeed).toHaveBeenCalledOnce();
+		await view.rerender({ ...base, fastEnabled: true, ultrafastSupported: true, ultrafastEnabled: true, onSelectSpeed });
+		expect(screen.getByRole('radio', { name: /Ultrafast/ }).getAttribute('aria-checked')).toBe('true');
+		expect(screen.getByTestId('ultrafast-cost')).toBeTruthy();
+		expect(document.querySelector('.effort-pop-card')!.classList.contains('ultrafast-active')).toBe(true);
+		await fireEvent.click(screen.getByRole('radio', { name: /Standard/ }));
+		expect(onSelectSpeed).toHaveBeenLastCalledWith('standard');
+	});
+
+	it('holds every tier while the chat\'s own value loads', async () => {
+		const onSelectSpeed = vi.fn();
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, fastPending: true, ultrafastSupported: true, onSelectSpeed } });
+		const group = screen.getByRole('radiogroup', { name: 'Speed' });
+		expect(group.getAttribute('aria-busy')).toBe('true');
+		for (const radio of screen.getAllByRole('radio')) {
+			expect(radio.getAttribute('aria-checked')).toBe('false');
+			expect((radio as HTMLButtonElement).disabled).toBe(true);
+		}
+		await fireEvent.click(screen.getAllByRole('radio')[2]);
+		expect(onSelectSpeed).not.toHaveBeenCalled();
+	});
+
+	it('names the tier a waiting change applies', () => {
+		render(EffortPopoverCard, { props: { ...base, fastEnabled: true, ultrafastSupported: true, ultrafastEnabled: true, fastWaitsForNextMessage: true } });
+		expect(screen.getByTestId('fast-applies-notice').textContent).toBe(
+			'Ultrafast speed applies from your next message. This turn finishes at its current speed.'
+		);
+	});
+});

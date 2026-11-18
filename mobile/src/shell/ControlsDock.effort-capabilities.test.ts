@@ -111,7 +111,7 @@ describe('ControlsDock dynamic effort', () => {
   await tick();
   expect(get(activeSession).effortLevelOverride).toBe('low');
   if (surface === 'desktop') {
-   await fireEvent.click(screen.getByRole('button', { name: 'Effort: Low' }));
+   await fireEvent.click(screen.getByRole('button', { name: /^Effort: Low(,|$)/ }));
    expect(screen.getByRole('slider').getAttribute('max')).toBe('5');
    expect(Array.from(container.querySelectorAll('.stops span'), el => el.textContent)).toEqual(['Low', 'Medium', 'High', 'XHigh', 'Max', 'Ultra']);
    await fireEvent.input(screen.getByRole('slider'), { target: { value: '5' } });
@@ -247,7 +247,7 @@ describe('ControlsDock dynamic effort', () => {
   await hydrateModelRegistry();
   await tick();
   expect(get(activeSession).effortLevelOverride).toBe('xhigh');
-  await fireEvent.click(screen.getByRole('button', { name: 'Effort: XHigh' }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Effort: XHigh(,|$)/ }));
   expect(screen.getByRole('slider').getAttribute('max')).toBe('4');
  });
  it('clamps a GLM pick to the nearest level and renders six Sol and seven full options on mobile', async () => {
@@ -257,7 +257,7 @@ describe('ControlsDock dynamic effort', () => {
   activeSession.setModelOverride('opus');
   activeSession.setEffortLevelOverride('xhigh');
   const { container } = renderDock();
-  await fireEvent.click(screen.getByRole('button', { name: 'Effort: XHigh' }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Effort: XHigh(,|$)/ }));
   activeSession.setModelOverride('prov:or:z-ai/glm-5.3-flash');
   await tick();
   // High and Max are equally close; the shared policy prefers the lower level.
@@ -289,7 +289,7 @@ describe('ControlsDock dynamic effort', () => {
   activeSession.setModelOverride('prov:or:unknown');
   activeSession.setEffortLevelOverride('minimal');
   const { container } = renderDock();
-  await fireEvent.click(screen.getByRole('button', { name: 'Effort: minimal' }));
+  await fireEvent.click(screen.getByRole('button', { name: /^Effort: minimal(,|$)/ }));
   expect(screen.queryByRole('slider')).toBeNull();
   expect(screen.getAllByText(/Reasoning effort capabilities are not known yet/)).toHaveLength(1);
   expect(get(activeSession).effortLevelOverride).toBe('minimal');

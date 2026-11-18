@@ -339,6 +339,48 @@ preferenceSync.registerPrefix(MODEL_FAST_PREFIX, key => {
 });
 for (const model of Object.keys(modelFast)) registerFast(model);
 
+// The Ultrafast pick per model: "ultrafast" or no record. It refines a Fast
+// record that is on, so a client that knows only Fast reads that record and
+// runs the model on Fast.
+export type ComposerSpeed = 'standard' | 'fast' | 'ultrafast';
+
+/** A chat's tier from its two flags: `fast` turns speed up, `ultrafast` refines it. */
+export function composerSpeed(s: { fastMode?: boolean; ultrafastMode?: boolean }): ComposerSpeed {
+	return !s.fastMode ? 'standard' : s.ultrafastMode ? 'ultrafast' : 'fast';
+}
+export const MODEL_SPEED_PREFIX = 'composer.modelSpeed.';
+export const speedPreferenceKey = (model: string | null) => MODEL_SPEED_PREFIX + encodeURIComponent(effortModelKey(model));
+const SPEED_CACHE_KEY = 'ai-shuffle-composer:modelSpeed';
+let modelUltrafast: Record<string, true> = {};
+const registeredSpeed = new Set<string>();
+function applySpeed(model: string, value: unknown) {
+ const next = {...modelUltrafast};
+ if (value === 'ultrafast') next[model] = true; else delete next[model];
+ modelUltrafast = next;
+ try { localStorage.setItem(SPEED_CACHE_KEY, JSON.stringify(Object.keys(modelUltrafast))); } catch { /* memory still works */ }
+}
+function speedAdapter(model: string) {
+ registeredSpeed.add(model);
+ return {
+  read: () => modelUltrafast[model] ? 'ultrafast' : null,
+  apply(value: unknown) { applySpeed(model, value); notifyRemote(); }
+ };
+}
+function registerSpeed(model: string) {
+ if (!registeredSpeed.has(model)) preferenceSync.register(speedPreferenceKey(model), speedAdapter(model));
+}
+try {
+ const parsed: unknown = JSON.parse(localStorage.getItem(SPEED_CACHE_KEY) ?? '[]');
+ if (Array.isArray(parsed)) for (const model of parsed) if (typeof model === 'string' && model) modelUltrafast[effortModelKey(model)] = true;
+} catch { /* SSR or unavailable storage */ }
+preferenceSync.registerPrefix(MODEL_SPEED_PREFIX, key => {
+ try {
+  const model = decodeURIComponent(key.slice(MODEL_SPEED_PREFIX.length));
+  return model && speedPreferenceKey(model) === key ? speedAdapter(model) : null;
+ } catch { return null; }
+});
+for (const model of Object.keys(modelUltrafast)) registerSpeed(model);
+
 // The raised Standard context cap per model (tokens), one account-synced record
 // each. A model without one runs Standard at its family default. A chat's own
 // saved window still wins over this for that chat.
@@ -403,6 +445,25 @@ export const composerPreferences = {
   registerFast(key);
   applyFast(key, on);
   preferenceSync.save(fastPreferenceKey(key), on);
+ },
+ /** The owner's last speed pick for this model (Fast's record refined by
+  *  Ultrafast's); null when Fast was never picked. */
+ speedForModel(model: string | null): ComposerSpeed | null {
+  const key = effortModelKey(model);
+  const fast = modelFast[key];
+  if (fast == null) return null;
+  return !fast ? 'standard' : modelUltrafast[key] ? 'ultrafast' : 'fast';
+ },
+ /** Remember a speed pick: Fast's on/off record, plus the Ultrafast record
+  *  (written only when it changes, so plain Fast use adds no records). */
+ rememberSpeed(model: string | null, speed: ComposerSpeed) {
+  composerPreferences.rememberFast(model, speed !== 'standard');
+  const key = effortModelKey(model);
+  const ultrafast = speed === 'ultrafast';
+  if (!!modelUltrafast[key] === ultrafast) return;
+  registerSpeed(key);
+  applySpeed(key, ultrafast ? 'ultrafast' : null);
+  preferenceSync.save(speedPreferenceKey(key), ultrafast ? 'ultrafast' : null);
  },
  get current(): Readonly<Picks> { return {...values, worktreeIntent:worktreeFor(values.project).intent, checkout:worktreeFor(values.project).checkout}; },
  worktreeForProject: worktreeFor,
