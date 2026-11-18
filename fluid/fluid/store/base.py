@@ -9,6 +9,7 @@ older node; nothing is copied, so the shared prefix stays byte-identical
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -216,6 +217,39 @@ class SessionNode:
     ts: float = field(default_factory=time.time)
 
 
+class NodeConflict(StoreError, ValueError):
+    """An append reused a node id the session already holds, with other content."""
+
+    def __init__(self, session_id: str, node_id: str) -> None:
+        super().__init__(
+            f"session {session_id} already has a different node {node_id}"
+        )
+        self.session_id = session_id
+        self.node_id = node_id
+
+
+def check_node_retry(
+    session_id: str,
+    node_id: str,
+    stored: tuple[str | None, Mapping[str, Any]],
+    incoming: tuple[str | None, Mapping[str, Any]],
+) -> None:
+    """The one duplicate-id rule every store applies, live and on reload.
+
+    ``stored`` and ``incoming`` are ``(parent_id, message dict)``. The same
+    parent and message again is a retry of an append whose outcome was unknown:
+    the stored node stays and the append only moves the head. Anything else
+    raises :class:`NodeConflict` before a byte is written, so a live store can
+    never hold a node its own log would not replay. ``ts`` is not compared; the
+    first record's timestamp stands.
+    """
+    def canonical(message: Mapping[str, Any]) -> str:
+        return json.dumps(message, sort_keys=True, default=str)
+
+    if stored[0] != incoming[0] or canonical(stored[1]) != canonical(incoming[1]):
+        raise NodeConflict(session_id, node_id)
+
+
 def walk_path(
     nodes: dict[str, SessionNode], leaf_node_id: str | None, *, session_id: str
 ) -> list[SessionNode]:
@@ -416,7 +450,12 @@ class SessionStore(Protocol):
         one, and never excluded on that basis."""
         ...
     async def get_session(self, session_id: str) -> SessionMeta | None: ...
-    async def append(self, session_id: str, node: SessionNode) -> None: ...
+    async def append(self, session_id: str, node: SessionNode) -> None:
+        """Store ``node`` and move the head to it, in one durable write.
+
+        Live state changes only after the write commits. An id the session
+        already holds follows :func:`check_node_retry`."""
+        ...
     async def get_node(self, session_id: str, node_id: str) -> SessionNode | None: ...
     async def load_path(self, session_id: str, leaf_node_id: str | None = None) -> list[SessionNode]: ...
     async def set_head(self, session_id: str, node_id: str | None) -> None:
@@ -524,7 +563,16 @@ class MemoryStore:
         return self._sessions.get(session_id)
 
     async def append(self, session_id: str, node: SessionNode) -> None:
-        self._nodes[session_id][node.node_id] = node
+        nodes = self._nodes[session_id]
+        stored = nodes.get(node.node_id)
+        if stored is not None:
+            check_node_retry(
+                session_id, node.node_id,
+                (stored.parent_id, stored.message.to_dict()),
+                (node.parent_id, node.message.to_dict()),
+            )
+        else:
+            nodes[node.node_id] = node
         self._sessions[session_id].head_node_id = node.node_id
 
     async def get_node(self, session_id: str, node_id: str) -> SessionNode | None:

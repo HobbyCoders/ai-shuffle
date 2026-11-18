@@ -1895,6 +1895,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
+        elif isinstance(op, Fork | Rewind) and self._turn_task and not self._turn_task.done():
+            # A running turn chains each node under the one it stored last and
+            # every append moves the head, so a head move now would be silently
+            # overwritten by the turn's next append. Same rule as UserTurn.
+            raise RuntimeError("a turn is already running; Interrupt it first")
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays

@@ -38,6 +38,13 @@ Durability rules:
   the store cuts it off at its next write to that session so the log is clean
   again.
 * ``FLUID_STORE_FSYNC=1`` (or ``fsync=True``) fsyncs after every record.
+* Memory changes only after its record is written. A write that fails may
+  still have landed, so the session is then parsed again from disk: live state
+  is always what a reopen would see.
+* A node id is stored once. Appending the same node again (a retry) only moves
+  the head; a different node under an id the session holds is refused before
+  anything is written. Replay keeps the first record of an id, which is what
+  logs written by older versions that allowed both still reopen to.
 """
 
 from __future__ import annotations
@@ -49,6 +56,7 @@ import os
 import sys
 import time
 import weakref
+from dataclasses import fields
 from itertools import chain
 from pathlib import Path
 
@@ -64,6 +72,7 @@ from fluid.store.base import (
     SessionSearchHit,
     SessionSlice,
     SessionSummary,
+    check_node_retry,
     clip_text,
     message_texts,
     new_id,
@@ -336,6 +345,43 @@ class JsonlStore:
     def _append_line(self, path: Path, record: dict) -> None:
         _write_record(path, record, fsync=self._fsync)
 
+    def _commit(self, session_id: str, path: Path, record: dict) -> None:
+        """Write one record. Callers publish to memory only after this returns.
+
+        A write that raises may still have landed, whole (fsync or close
+        failed after the bytes went out, an interrupt right after the write)
+        or in part (a short write, a full disk mid-line). The session is then
+        read back from disk, so live state equals what a reopen would see; a
+        torn half-line is cut off at the next write as usual. The write's own
+        error is what the caller gets.
+        """
+        try:
+            self._append_line(path, record)
+        except BaseException:
+            self._reload(session_id, events=path == self._events_path(session_id))
+            raise
+
+    def _reload(self, session_id: str, *, events: bool) -> None:
+        """Forget the session's parsed log (or events) and parse it again now.
+
+        A read that fails here leaves the session unloaded, so the next access
+        tries again, and is logged rather than raised over the write's error.
+        """
+        if events:
+            self._events_loaded.discard(session_id)
+            self._events.pop(session_id, None)
+        else:
+            self._loaded.discard(session_id)
+            self._nodes.pop(session_id, None)
+        try:
+            if events:
+                self._ensure_events_loaded(session_id)
+            else:
+                self._ensure_loaded(session_id)
+        except Exception as exc:  # noqa: BLE001 — retried on the next access
+            log.warning("session %s: could not re-read after a failed write: %s",
+                        session_id, exc)
+
     def close(self) -> None:
         """Release every write lock this store holds."""
         _release_store_locks(self._dir, self._held)
@@ -361,7 +407,15 @@ class JsonlStore:
         if parsed is None:
             return False
         meta, nodes = parsed
-        self._sessions[session_id] = meta
+        known = self._sessions.get(session_id)
+        if known is None:
+            self._sessions[session_id] = meta
+        else:
+            # Engines keep the SessionMeta they were handed and read its head
+            # directly; a re-read (after eviction or a failed write) must
+            # update that object, not orphan it.
+            for f in fields(SessionMeta):
+                setattr(known, f.name, getattr(meta, f.name))
         self._nodes[session_id] = nodes
         self._loaded.add(session_id)
         self._touch(session_id)
@@ -503,19 +557,20 @@ class JsonlStore:
             project_root=project_root_for(cwd),
         )
         self._writable(meta.session_id)
-        self._sessions[meta.session_id] = meta
-        self._nodes[meta.session_id] = {}
-        self._events[meta.session_id] = []
-        self._loaded.add(meta.session_id)
-        self._events_loaded.add(meta.session_id)
-        self._touch(meta.session_id)
-        self._append_line(
+        self._commit(
+            meta.session_id,
             self._log_path(meta.session_id),
             {"t": "meta", "session_id": meta.session_id,
              "created_at": meta.created_at, "head_node_id": meta.head_node_id,
              "cli_session_id": meta.cli_session_id,
              "project_root": meta.project_root},
         )
+        self._sessions[meta.session_id] = meta
+        self._nodes[meta.session_id] = {}
+        self._events[meta.session_id] = []
+        self._loaded.add(meta.session_id)
+        self._events_loaded.add(meta.session_id)
+        self._touch(meta.session_id)
         return meta
 
     async def get_session(self, session_id: str) -> SessionMeta | None:
@@ -526,12 +581,21 @@ class JsonlStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         if not self._ensure_loaded(session_id):
             raise KeyError(session_id)
+        stored = self._nodes[session_id].get(node.node_id)
+        if stored is not None:
+            # Replay keeps the first record of an id, so live state must too.
+            check_node_retry(
+                session_id, node.node_id,
+                (stored.parent_id, stored.message.to_dict()),
+                (node.parent_id, node.message.to_dict()),
+            )
+            if self._sessions[session_id].head_node_id != node.node_id:
+                await self.set_head(session_id, node.node_id)
+            return
         self._writable(session_id)
-        self._nodes[session_id][node.node_id] = node
-        self._sessions[session_id].head_node_id = node.node_id
         # Node and head move in one record: a lost tail cannot leave the node
         # on disk with the head still pointing at its parent.
-        self._append_line(self._log_path(session_id), {
+        self._commit(session_id, self._log_path(session_id), {
             "t": "node",
             "node": {
                 "node_id": node.node_id, "parent_id": node.parent_id,
@@ -539,6 +603,8 @@ class JsonlStore:
             },
             "head": True,
         })
+        self._nodes[session_id][node.node_id] = node
+        self._sessions[session_id].head_node_id = node.node_id
 
     async def get_node(self, session_id: str, node_id: str) -> SessionNode | None:
         self._ensure_loaded(session_id)
@@ -558,27 +624,29 @@ class JsonlStore:
         if node_id is not None and node_id not in self._nodes[session_id]:
             raise ValueError(f"session {session_id} has no node {node_id}")
         self._writable(session_id)
-        self._sessions[session_id].head_node_id = node_id
-        self._append_line(
+        self._commit(
+            session_id,
             self._log_path(session_id),
             {"t": "head", "head_node_id": node_id, "ts": time.time()},
         )
+        self._sessions[session_id].head_node_id = node_id
 
     async def set_cli_session_id(self, session_id: str, cli_session_id: str | None) -> None:
         if not self._ensure_loaded(session_id):
             return
         self._writable(session_id)
-        self._sessions[session_id].cli_session_id = cli_session_id
-        self._append_line(
+        self._commit(
+            session_id,
             self._log_path(session_id),
             {"t": "cli_session", "cli_session_id": cli_session_id},
         )
+        self._sessions[session_id].cli_session_id = cli_session_id
 
     async def append_event(self, session_id: str, event: Event) -> None:
         self._ensure_events_loaded(session_id)
         self._writable(session_id)
+        self._commit(session_id, self._events_path(session_id), event_to_dict(event))
         self._events[session_id].append(event)
-        self._append_line(self._events_path(session_id), event_to_dict(event))
 
     async def events_since(self, session_id: str, seq: int) -> list[Event]:
         self._ensure_events_loaded(session_id)

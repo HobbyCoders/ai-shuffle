@@ -157,8 +157,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
         for task_id in tuple(self._background_early):
             if task_id in self._background_pending:
-                op = self._background_early.pop(task_id)
-                await self._finalize_background_task_unlocked(op)
+                await self._finalize_background_task_unlocked(
+                    self._background_early[task_id]
+                )
 
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
@@ -198,7 +199,8 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 or receipt.task_id in self._background_terminal
             )
             if not known:
-                self._background_pending[receipt.task_id] = receipt
+                # State follows the durable record: a failed write leaves the
+                # task unknown, so a retried receipt is not skipped as known.
                 meta = await self._ensure_session()
                 await self._emit(SubagentEvent(
                     session_id=meta.session_id,
@@ -211,7 +213,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     wake_disposition=WAKE_NOT_APPLICABLE,
                     serves=receipt.serves,
                 ))
-                early = self._background_early.pop(receipt.task_id, None)
+                self._background_pending[receipt.task_id] = receipt
+                # Finalize pops it once the terminal record is written.
+                early = self._background_early.get(receipt.task_id)
                 if early is not None:
                     await self._finalize_background_task_unlocked(early)
                 elif self._background_turn_terminal:
@@ -244,7 +248,6 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     meta = await self._ensure_session()
                     if op.is_current is not None and not op.is_current():
                         return
-                    self._background_early[op.task_id] = op
                     await self._emit(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
@@ -259,6 +262,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                         wake_disposition=WAKE_NOT_APPLICABLE,
                         report_path=op.report_path,
                     ))
+                    self._background_early[op.task_id] = op
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -266,14 +270,21 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     async def _finalize_background_task_unlocked(
         self, op: BackgroundTaskFinished
     ) -> None:
+        """Record a task's terminal event, then retire it in memory.
+
+        Every state change waits for the write: if ``_emit`` raises, the task
+        is still pending (and any early completion still held), so the host's
+        resubmission finalizes it and its wake is armed exactly once. A write
+        that failed but landed leaves two identical terminal records; no wake
+        can settle the task between them, so replay reaches the same state.
+        """
         meta = await self._ensure_session()
         if op.is_current is not None and not op.is_current():
             return
-        receipt = self._background_pending.pop(op.task_id, None)
+        receipt = self._background_pending.get(op.task_id)
         worker_session_id = op.worker_session_id or (
             receipt.worker_session_id if receipt is not None else None
         )
-        self._background_terminal.add(op.task_id)
         await self._emit(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
@@ -289,6 +300,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
             report_path=op.report_path,
         ))
+        self._background_pending.pop(op.task_id, None)
+        self._background_early.pop(op.task_id, None)
+        self._background_terminal.add(op.task_id)
         if op.wake:
             self._background_completions[op.task_id] = BackgroundTaskFinished(
                 task_id=op.task_id,

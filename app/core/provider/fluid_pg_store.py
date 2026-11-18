@@ -67,6 +67,7 @@ from fluid.store.base import (
     RECONSTRUCTIBLE_EVENTS,
     SessionMeta,
     SessionNode,
+    check_node_retry,
     new_id,
     project_root_for,
 )
@@ -469,7 +470,11 @@ def _append_node_sync(
 ) -> Optional[int]:
     """Insert the node and advance the head in one transaction (JsonlStore
     parity: append implies head-move). None when another writer took over: the
-    head is updated first so a refused node leaves nothing behind."""
+    head is updated first so a refused node leaves nothing behind.
+
+    An id the session already holds follows fluid's one duplicate rule
+    (``check_node_retry``): the same parent and message is a retry and only
+    moves the head; anything else raises NodeConflict and rolls back."""
     message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
     if node.message.context_pin is not None:
         # The privacy transforms can change lengths before or inside the
@@ -493,6 +498,19 @@ def _append_node_sync(
             "ON CONFLICT (session_id, node_id) DO NOTHING",
             (session_id, node.node_id, node.parent_id, node.ts, Json(message)),
         )
+        if cur.rowcount == 0:
+            cur.execute(
+                "SELECT parent_id, message FROM fluid_session_nodes "
+                "WHERE session_id = %s AND node_id = %s",
+                (session_id, node.node_id),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                check_node_retry(
+                    session_id, node.node_id,
+                    (row["parent_id"], _as_dict(row["message"])),
+                    (node.parent_id, message),
+                )
     # Count raw cached payload off-loop as well as the SQL serialization. A
     # delegated metadata-only store needs neither the count nor another copy.
     return len(json.dumps(node.message.to_dict())) if measure_bytes else 0
@@ -1916,7 +1934,9 @@ class PgFluidStore:
             # from this cache, so it carries on as if the write had landed.
             size = len(json.dumps(node.message.to_dict())) if self.cache_nodes else 0
         if self.cache_nodes:
-            self._cache_node(session_id, node, size)
+            # A retried append keeps the stored node, as the table does.
+            if node.node_id not in self._nodes.get(session_id, {}):
+                self._cache_node(session_id, node, size)
         elif session_id in self._memory_paths:
             head, projection = self._memory_paths[session_id]
             if node.parent_id == head:
@@ -2064,14 +2084,16 @@ class PgFluidStore:
 
     async def set_head(self, session_id: str, node_id: Optional[str]) -> None:
         await self._ensure_loaded(session_id)
-        if session_id in self._sessions:
-            self._sessions[session_id].head_node_id = node_id
+        self._memory_paths.pop(session_id, None)
+        # Memory follows the write: a failed UPDATE leaves the old head live,
+        # as a reload would. A replaced writer carries on as if it landed.
         if not await run_sync(
             _set_head_sync, session_id, node_id,
             generation=self._generations.get(session_id),
         ):
             self._note_replaced(session_id)
-        self._memory_paths.pop(session_id, None)
+        if session_id in self._sessions:
+            self._sessions[session_id].head_node_id = node_id
 
     async def set_cli_session_id(
         self, session_id: str, cli_session_id: Optional[str]
@@ -2084,14 +2106,14 @@ class PgFluidStore:
         """
         async with self._handle_lock:
             await self._ensure_loaded(session_id)
-            meta = self._sessions.get(session_id)
-            if meta is not None:
-                meta.cli_session_id = cli_session_id
             if not await run_sync(
                 _set_cli_session_id_sync, session_id, cli_session_id,
                 generation=self._generations.get(session_id),
             ):
                 self._note_replaced(session_id)
+            meta = self._sessions.get(session_id)
+            if meta is not None:
+                meta.cli_session_id = cli_session_id
 
     async def append_event(self, session_id: str, event: Event) -> None:
         async with self._event_lock:

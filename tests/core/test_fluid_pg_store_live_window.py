@@ -104,16 +104,20 @@ async def test_evict_with_unknown_end_is_a_no_op(mock_db):
 # ── Cycle guard: a looping parent chain raises instead of growing forever ────
 
 async def test_cached_walk_raises_on_a_parent_cycle(mock_db):
-    """Duplicate ids (the lab's old seeding) overwrite a cached node with one
-    whose parent is a later node; the walk must refuse, not append forever."""
+    """A node whose parent is a later node makes a loop; the walk must refuse,
+    not append forever. Re-appending an id with another parent used to build
+    one in the cache (the DB kept the first row); that is refused now, so the
+    loop is built from parents that point forward instead."""
     import pytest
     from app.core.provider.fluid_pg_store import TranscriptCycleError
+    from fluid.store.base import NodeConflict
 
     store = PgFluidStore()
     await store.create_session("cyc")
-    await store.append("cyc", node("a"))
+    await store.append("cyc", node("a", "b"))
     await store.append("cyc", node("b", "a"))
-    await store.append("cyc", node("a", "b"))  # DB keeps the first "a"; cache does not
+    with pytest.raises(NodeConflict):
+        await store.append("cyc", node("a", "c"))
     with pytest.raises(TranscriptCycleError, match="loops"):
         await store.load_path("cyc")
     with pytest.raises(TranscriptCycleError):

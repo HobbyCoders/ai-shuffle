@@ -211,6 +211,63 @@ async def test_fork_via_set_head(mock_db):
 
 
 @pytest.mark.asyncio
+async def test_a_different_node_under_an_existing_id_is_refused_like_jsonl(mock_db):
+    """fluid's one duplicate rule: the cache must not keep a node the table
+    refused, and the refused append must not move the head."""
+    from fluid.store.base import NodeConflict
+
+    store = PgFluidStore()
+    meta = await store.create_session("ses_dup")
+    await store.append("ses_dup", _node("n1", None, "original"))
+    await store.append("ses_dup", _node("n2", "n1", "reply"))
+    with pytest.raises(NodeConflict):
+        await store.append("ses_dup", _node("n1", None, "rewritten"))
+    assert meta.head_node_id == "n2"
+    assert (await store.get_node("ses_dup", "n1")).message.text() == "original"
+    reloaded = PgFluidStore()
+    assert (await reloaded.get_session("ses_dup")).head_node_id == "n2"
+    assert (await reloaded.get_node("ses_dup", "n1")).message.text() == "original"
+
+
+@pytest.mark.asyncio
+async def test_the_same_node_again_only_moves_the_head_like_jsonl(mock_db):
+    store = PgFluidStore()
+    meta = await store.create_session("ses_retry")
+    first = _node("n1", None, "original")
+    await store.append("ses_retry", first)
+    await store.append("ses_retry", _node("n2", "n1", "reply"))
+    await store.append("ses_retry", replace(first, ts=first.ts + 60))
+    assert meta.head_node_id == "n1"
+    assert (await store.get_node("ses_retry", "n1")).ts == first.ts
+    reloaded = PgFluidStore()
+    assert (await reloaded.get_session("ses_retry")).head_node_id == "n1"
+    assert (await reloaded.get_node("ses_retry", "n1")).ts == first.ts
+
+
+@pytest.mark.asyncio
+async def test_failed_head_and_handle_writes_leave_live_meta_as_stored(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    meta = await store.create_session("ses_failhead")
+    await store.append("ses_failhead", _node("n1", None, "root"))
+    await store.append("ses_failhead", _node("n2", "n1", "leaf"))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("write rejected")
+
+    monkeypatch.setattr(module, "_set_head_sync", fail)
+    monkeypatch.setattr(module, "_set_cli_session_id_sync", fail)
+    with pytest.raises(RuntimeError, match="write rejected"):
+        await store.set_head("ses_failhead", "n1")
+    with pytest.raises(RuntimeError, match="write rejected"):
+        await store.set_cli_session_id("ses_failhead", "cli-2")
+    reloaded = await PgFluidStore().get_session("ses_failhead")
+    assert meta.head_node_id == reloaded.head_node_id == "n2"
+    assert meta.cli_session_id == reloaded.cli_session_id is None
+
+
+@pytest.mark.asyncio
 async def test_event_append_is_idempotent_per_seq(mock_db):
     store = PgFluidStore()
     await store.create_session("ses_pg4")
