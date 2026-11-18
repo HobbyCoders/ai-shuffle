@@ -21,8 +21,6 @@ The prompt text picks the behaviour:
   stopReason cancelled); ``agyhold``, rejected, waits for session/cancel.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
-* ``slowonce`` / ``slowonce tool`` — ``slow`` the first time (the second after
-  a finished ``Read`` call); sent again, answers "resumed" at once.
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
 * ``plan`` — a plan update.
 * ``error`` — Antigravity's in-band error text.
@@ -351,24 +349,6 @@ class Agent:
                                     "content": {"type": "text", "text": "notes"}}]})
             await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
-        cancelled: dict = {"stopReason": "cancelled"}
-        if word == "slowonce":
-            # ``slow`` the first time; resent (a Resume), it answers at once,
-            # also from a new process (remembered in FAKE_ACP_STATE).
-            # ``slowonce tool`` runs a finished tool call before streaming.
-            seen = os.path.join(STATE or ".", "slowonce_seen")
-            if os.path.exists(seen):
-                await self.say(sid, "resumed")
-                return {"stopReason": "end_turn"}
-            os.close(os.open(seen, os.O_CREAT | os.O_WRONLY))
-            # Interrupted, it reports what the cut-off turn used.
-            cancelled["usage"] = {"inputTokens": 5, "outputTokens": 2, "totalTokens": 7}
-            if text == "slowonce tool":
-                await self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": "read-1",
-                                        "title": "Read notes.txt", "kind": "read", "status": "completed",
-                                        "rawInput": {"file_path": "notes.txt"}, "content": [
-                                            {"type": "content", "content": {"type": "text", "text": "notes"}}]})
-            word = "slow"
         if word == "slow":
             await self.say(sid, "working")
             assert self.turn is not None
@@ -378,7 +358,7 @@ class Agent:
             for t in pending:
                 t.cancel()
             if cancel in done:
-                return cancelled
+                return {"stopReason": "cancelled"}
             if steer in done:
                 await self.say(sid, " steered:" + steer.result())
             return {"stopReason": "end_turn"}

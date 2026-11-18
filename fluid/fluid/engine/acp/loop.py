@@ -75,10 +75,8 @@ from fluid.events.ops import (
     Steer,
     UserTurn,
 )
-from fluid.messages.content import Image, Message, Text, ToolResultBlock
-from fluid.store.base import (
-    SessionMeta, SessionNode, SessionStore, flush_events, interrupted_prompt_id, new_id, persist_event,
-)
+from fluid.messages.content import Image, Message, Text
+from fluid.store.base import SessionMeta, SessionNode, SessionStore, flush_events, new_id, persist_event
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +112,6 @@ _ACP_MODES: dict[str, str] = {
 _MODE_RANK: dict[str, int] = {"plan": 0, _ACP_NORMAL_MODE: 1, "accept-edits": 2}
 _MODE_LABELS: dict[str, str] = {"default": "Ask", "acceptEdits": "Accept Edits", "plan": "Plan",
                                 "bypassPermissions": "Bypass", "auto": "Auto"}
-
-
-def _is_prompt(message: Message) -> bool:
-    """A user prompt Resume can re-send: text or an image, no tool result."""
-    return any(isinstance(b, Image) or (isinstance(b, Text) and b.text.strip()) for b in message.content) and not any(
-        isinstance(b, ToolResultBlock) for b in message.content)
 
 
 def _mode_rank(mode_id: str | None) -> int:
@@ -936,14 +928,7 @@ class AcpLoop:
                         and (head.message.provider_meta or {}).get("interrupted")):
                     # A reply cut off by an error is not an answer (as in native.py).
                     head = await self.store.get_node(sid, head.parent_id)
-                elif head is not None and not (head.message.role == "user" and _is_prompt(head.message)):
-                    # Nor is a turn cut off by an Interrupt, but only while its
-                    # stored Interrupted names this head; it was that turn's
-                    # prompt that went unanswered.
-                    prompt_id = await interrupted_prompt_id(self.store, sid, head.node_id)
-                    head = await self.store.get_node(sid, prompt_id) if prompt_id else None
-                # Tool results (role "user" too) are no prompt to re-send.
-                if head is None or head.message.role != "user" or not _is_prompt(head.message):
+                if head is None or head.message.role != "user":
                     await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                                 message="Nothing to resume: the last message was answered."))
                     return
@@ -1021,23 +1006,6 @@ class AcpLoop:
         trailing, segments = mapper.finish()
         for event in trailing:
             await self._emit(event)
-        stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
-        # How the turn ended is decided once, before anything is stored;
-        # nothing below reads the interrupt flag again. A stop_agent reason
-        # already set wins over an interrupt; an Interrupt or a stop that lands
-        # while the reply is stored no longer changes the outcome (a stop still
-        # ends the process).
-        silent = self._silent_end(mapper)
-        if self._stop_reason is not None:
-            interrupted = False
-        elif failure is not None:
-            interrupted = self._interrupted.is_set()
-        else:
-            # An agent's own "cancelled" after a request it got no allow for,
-            # with no reply, is that failure; _silent_end is None once the host
-            # interrupted, so a host interrupt stays an interruption.
-            interrupted = (stop == "cancelled" and not silent) or (
-                self._interrupted.is_set() and stop != "end_turn")
         parent = user_node
         for role, blocks in segments:
             node = SessionNode(node_id=new_id("node"), parent_id=parent.node_id,
@@ -1055,22 +1023,23 @@ class AcpLoop:
         stopped, self._stop_reason = self._stop_reason, None
         if stopped:
             await self._stop_process()
-        if stopped and not interrupted:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=stopped,
                                         usage=usage, cost_usd=cost))
             return
-        # The stored Interrupted, naming the head it settled on, is what makes
-        # the turn resumable (interrupted_prompt_id); a failure to store it
-        # raises, so the turn ends on an error instead.
         if failure is not None:
-            if interrupted:
+            if self._interrupted.is_set():
                 await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id))
                 return
             if not conn.alive:
                 await self._stop_process()
             await self._emit(self._failure_event(sid, turn_id, failure, usage=usage, cost_usd=cost))
             return
-        if interrupted:
+        stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
+        # An agent's own "cancelled" after a request it got no allow for,
+        # with no reply, is that failure; _silent_end is None once the host
+        # interrupted, so a host interrupt stays an interruption.
+        if (stop == "cancelled" and not self._silent_end(mapper)) or (
+                self._interrupted.is_set() and stop != "end_turn"):
             await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                          usage=usage, cost_usd=cost))
             return
@@ -1084,6 +1053,7 @@ class AcpLoop:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id,
                                         message="The agent refused this request.", usage=usage, cost_usd=cost))
             return
+        silent = self._silent_end(mapper)
         if silent:
             await self._emit(ErrorEvent(session_id=sid, turn_id=turn_id, message=silent,
                                         usage=usage, cost_usd=cost))

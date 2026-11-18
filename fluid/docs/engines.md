@@ -11,16 +11,14 @@ The standalone Fluid config loader selects native or delegated, not ACP.
 the stated conditions. **Host-provided** means the embedding or subprocess
 owns the behavior. **Not supported** means this Fluid engine does not expose it.
 `Resume` below is the Fluid op for retrying an unanswered prompt, not the
-CLI's `--resume` option for reopening a stored session. On native and ACP, an
-immediate `Resume` after `Interrupt` steps back past the kept partial reply and
-re-runs the prompt under it. The authority is the stored event log: the
-session's last stored terminal event must be the `Interrupted` naming the
-current head ([`interrupted_prompt_id`](../fluid/store/base.py)). A turn whose
-writes failed, or any later terminal event, makes that reply final.
+CLI's `--resume` option for reopening a stored session. Current limitation:
+Native and ACP can save a partial reply on `Interrupt` without marking it as
+interrupted. An immediate `Resume` then rejects the assistant head as already
+answered. Resuming an unanswered user node does not depend on this limitation.
 
 | Capability | Native | Delegated Claude CLI | ACP (Antigravity) |
 |---|---|---|---|
-| `Resume` | **Supported.** Retries from the stored unanswered user node (also looks behind a reply marked interrupted by a provider error, or a reply an `Interrupt` settled on). [`NativeLoop._run_turn_inner`](../fluid/engine/native.py). | **Not supported.** `submit` rejects the op. `_build_argv` can still pass a saved `--resume` handle to reopen the CLI conversation. [`DelegatedLoop`](../fluid/engine/delegated.py). | **Supported.** `_run_turn` resends text/images from the unanswered user node via `session/prompt`; after an interrupted turn, the prompt that turn started from. Separately, `_ensure_process` can reopen the agent session via `session/resume`. [`AcpLoop`](../fluid/engine/acp/loop.py). |
+| `Resume` | **Supported.** Retries from the stored unanswered user node (also looks behind a reply marked interrupted). [`NativeLoop._run_turn_inner`](../fluid/engine/native.py). | **Not supported.** `submit` rejects the op. `_build_argv` can still pass a saved `--resume` handle to reopen the CLI conversation. [`DelegatedLoop`](../fluid/engine/delegated.py). | **Supported.** `_run_turn` resends text/images from the unanswered user node via `session/prompt`. Separately, `_ensure_process` can reopen the agent session via `session/resume`. [`AcpLoop`](../fluid/engine/acp/loop.py). |
 | Interrupt / cancel | **Supported.** `submit(Interrupt)` sets a flag read by the interruptible provider and tool waits. [`_provider_chunks_interruptible`, `_dispatch_tool_interruptible`](../fluid/engine/native.py). | **Supported.** Sends the CLI an interrupt control request. [`submit`, `_send_interrupt`](../fluid/engine/delegated.py). | **Supported.** Sends `session/cancel`; cancellation is reported as `Interrupted` when the agent returns `cancelled`. [`_cancel_remote`, `_drive`](../fluid/engine/acp/loop.py). |
 | Mid-turn steering | **Supported.** Queues `Steer` for a tool result. An undelivered steer is dropped at turn end. [`submit`, `_agent_loop`](../fluid/engine/native.py). | **Supported.** `_deliver_steer` hands text to the CLI at a tool boundary or via stdin, depending on the active lane. [`DelegatedLoop`](../fluid/engine/delegated.py). | **Supported.** `_steer` sends a second `session/prompt` while steering is open. The remote agent decides how to take it. [`AcpLoop._steer`](../fluid/engine/acp/loop.py). |
 | Background completion and wake | **Supported.** The host runs the worker; the engine tracks receipts, accepts `BackgroundTaskFinished`, parks with pending jobs, and schedules a wake turn unless suppressed. [`NativeLoop.submit`](../fluid/engine/native.py), [`BackgroundLifecycleMixin`](../fluid/engine/background.py). | **Supported.** Same receipt and wake lifecycle for Fluid-hosted work, not a promise about Claude's own tasks. [`DelegatedLoop.submit`](../fluid/engine/delegated.py), [`BackgroundLifecycleMixin`](../fluid/engine/background.py). | **Host-provided.** `BackgroundTaskFinished` is a no-op in `submit`; the host owns the wake queue. [`AcpLoop.submit`](../fluid/engine/acp/loop.py), [`prepare_background_completions`](../../app/core/provider/harness_adapter.py). |

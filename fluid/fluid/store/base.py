@@ -20,15 +20,11 @@ from typing import Any, AsyncIterator, Protocol
 
 from fluid.events.model import (
     LIVE_ONLY_EVENTS,
-    ErrorEvent,
     Event,
-    Interrupted,
     ProviderAlive,
     TextDelta,
     ThinkingDelta,
     ToolArgsDelta,
-    TurnComplete,
-    TurnStarted,
 )
 from fluid.messages import Message
 from fluid.messages.content import HARNESS_NOTE_META_KEY
@@ -71,32 +67,6 @@ async def iter_events_of_class(
         async for event in iter_events(store, session_id, seq):
             if isinstance(event, classes):
                 yield event
-
-
-async def interrupted_prompt_id(store: SessionStore, session_id: str, head_id: str | None) -> str | None:
-    """The prompt node of the turn an Interrupt settled at ``head_id``, else None.
-
-    The stored record is the only authority for resuming past a reply: the
-    session's last stored terminal event must be ``Interrupted`` naming
-    ``head_id``, and the prompt is that turn's ``TurnStarted`` node. A write
-    that failed before or while storing the Interrupted leaves another
-    terminal event (or none) last, so that turn is not resumable.
-    """
-    if not head_id:
-        return None
-    started: tuple[str | None, str] | None = None
-    last: Event | None = None
-    async for event in iter_events_of_class(
-        store, session_id, 0, (TurnStarted, TurnComplete, Interrupted, ErrorEvent),
-    ):
-        if isinstance(event, TurnStarted):
-            started = (event.turn_id, event.node_id)
-        else:
-            last = event
-    if (isinstance(last, Interrupted) and last.node_id == head_id
-            and started is not None and started[0] == last.turn_id):
-        return started[1] or None
-    return None
 
 
 def replay_source(store: SessionStore) -> Any:

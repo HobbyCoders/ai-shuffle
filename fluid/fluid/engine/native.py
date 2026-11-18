@@ -47,10 +47,7 @@ the head itself: Resume steps back to the prompt under it, and the new reply
 branches beside the partial text. When a tool call closed before the error,
 the head is the user node holding that call's error result, so the partial
 reply (its text and tool calls) stays on the re-sent path and the model reads
-it, followed by the error results. A reply the user stopped with Interrupt is
-stored unmarked; Resume steps back past it the same way only while the
-session's last stored terminal event is the Interrupted naming it.
-Resume on a head that is a completed assistant reply has nothing to continue
+it, followed by the error results. Resume on a head that is a completed assistant reply has nothing to continue
 and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
 failed call are retained as a new unanswered user-role node and included in an
 explicit later resume.
@@ -238,7 +235,6 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
-    interrupted_prompt_id,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -2731,14 +2727,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             if (
                 head is not None and len(path) > 1
                 and head.message.role == "assistant"
+                and (head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
                 and path[-2].message.role == "user"
-                and ((head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
-                     # An Interrupt's partial reply is unmarked; only the
-                     # turn's stored Interrupted naming it makes it resumable.
-                     or await interrupted_prompt_id(self.store, sid, head.node_id))
             ):
-                # A reply cut off by a provider error or an Interrupt is not
-                # an answer: the prompt under it is still unanswered. Resume from that node,
+                # A reply cut off by a provider error is not an answer: the
+                # prompt under it is still unanswered. Resume from that node,
                 # so the request is the one the failed call sent and the new
                 # reply branches beside the kept partial text.
                 head = path[-2]
