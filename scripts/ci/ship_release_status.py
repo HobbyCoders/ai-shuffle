@@ -8,7 +8,7 @@ posts; a successful owner-dispatched ``windows-suite.yml`` run on main at the
 candidate also satisfies the Windows one), whether edge publication caught up, the Play gates, and
 which platforms actually need a new build, and the live smoke gate: a passing
 smoke result file for the candidate revision on every covered worker, and the
-UI journeys green in main-suite at the candidate for the rows they cover (see
+UI journeys green in CI at the candidate for the rows they cover (see
 ``docs/internal/live-smoke.md``). Nothing is tagged, dispatched or published.
 Worker running revisions are NOT visible from here; the skill gets those from
 the ``DeployStatus`` agent tool.
@@ -224,7 +224,7 @@ def _variable(name: str, env: Optional[str] = None) -> Optional[str]:
 
 
 def journey_ci(revision: str) -> dict:
-    """UI journeys' CI state at ``revision`` (main-suite on main), for the smoke rows they cover."""
+    """UI journeys' CI state at ``revision`` (CI on main), for the smoke rows they cover."""
     return smoke_journeys.fetch(revision, lambda *args: _gh_json(*args))
 
 

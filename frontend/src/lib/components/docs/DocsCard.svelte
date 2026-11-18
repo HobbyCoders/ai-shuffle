@@ -17,8 +17,9 @@
  let detailOpen = $state(false);
  let tocOpen = $state(false);
  let find = $state<{ query: string; key: number } | null>(null);
- // Never reused: DocsContent reveals each search once per key, across documents chosen in between.
- let searches = 0;
+ // Every selection resets the pane, even when the reader picks the same article.
+ let selectionKey = $state(0);
+ let selections = 0;
  const tocId = $props.id();
  let articleEl = $state<HTMLElement>();
  const searchEngine = new DocsSearchEngine(docs);
@@ -53,10 +54,10 @@
   activeSlug = slug;
   tocOpen = false;
   detailOpen = true;
-  find = query ? { query, key: ++searches } : null;
+  const key = ++selections;
+  selectionKey = key;
+  find = query ? { query, key } : null;
   remember(`${category}/${slug}`);
-  const scroll = articleEl?.closest('.view-main-slot');
-  if (scroll) scroll.scrollTop = 0;
  }
  function backToList() {
   detailOpen = false;
@@ -75,7 +76,7 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} onBack={backToList}>
+<ViewShell label="Docs" {detailOpen} detailKey={selectionKey} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}

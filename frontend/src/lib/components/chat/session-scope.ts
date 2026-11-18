@@ -9,9 +9,14 @@
  *   (#641), so it offers the same modes; the backend runs every mode it is given.
  * - Runs on: always on the desktop card; on the phone only when the session
  *   would run somewhere other than the worker the phone is connected to.
- * - Attach a project: one-way, only on an idle no-project session this worker
- *   runs, and it puts the session back on Ask.
+ * - Attach a project: one-way, only on an idle no-project session, and it puts
+ *   the session back on Ask. It runs on the worker that runs the session, from
+ *   whichever of the owner's workers it is viewed on, and takes a project that
+ *   worker has a checkout of.
  */
+
+import type { Install } from '$lib/api/installs';
+import { matches, presenceOf } from '$lib/stores/worker-presence';
 
 
 export interface AccessMode {
@@ -64,6 +69,10 @@ export interface AttachState {
 	hasProject: boolean;
 	/** Another worker runs the session. */
 	isRemote: boolean;
+	/** That worker is known to be offline (only read when `isRemote`). */
+	ownerOffline?: boolean;
+	/** That worker's name, for the offline reason. */
+	ownerName?: string | null;
 	/** A turn is running or starting. */
 	busy: boolean;
 	/** A turn is parked on background work (a sub-agent or a background shell). */
@@ -86,10 +95,92 @@ export function noProjectPillVisible(state: AttachState): boolean {
  */
 export function attachBlockedReason(state: AttachState): string | null {
 	if (!noProjectPillVisible(state)) return 'This session can’t take a project.';
-	if (state.isRemote) return 'Attach the project from the worker that runs this session.';
+	if (state.isRemote && state.ownerOffline) {
+		return `${state.ownerName?.trim() || 'The worker that runs this session'} is offline. It must be online to attach a project.`;
+	}
 	if (state.busy) return 'Wait for this turn to finish, then attach.';
 	if (state.backgroundWork) return 'Wait for this session’s running or background work to finish, then attach.';
 	return null;
+}
+
+/** The worker that runs a session viewed from another worker. */
+export interface AttachOwner {
+	id: string;
+	name: string | null;
+	online: boolean | null;
+}
+
+/**
+ * The worker that runs a session another worker runs, or null for one this
+ * worker runs. instance_id only counts on a row with no owner. Its presence
+ * is the live registry's when known: the board row's `device_online` waits
+ * for the next sessions reload, so it can still say online after the worker
+ * has gone. Else the row's flag, else unknown.
+ */
+export function attachOwnerOf(
+	row: { owner_device_id?: string | null; instance_id?: string | null; device_name?: string | null; device_online?: boolean } | null,
+	isRemote: boolean,
+	installs: Install[] | null,
+	fallbackName: string | null = null
+): AttachOwner | null {
+	if (!isRemote) return null;
+	const raw = row?.owner_device_id || row?.instance_id || '';
+	const fromRow = typeof row?.device_online === 'boolean' ? row.device_online : null;
+	// The catalog names holders by the registry's id; a legacy row may carry
+	// the worker's instance id instead, so take the id of the install it matches.
+	const install = raw ? installs?.find((i) => matches(i, raw)) : undefined;
+	return {
+		id: install?.id || raw,
+		name: row?.device_name ?? fallbackName,
+		online: (raw ? presenceOf(installs, [raw]) : null) ?? fromRow
+	};
+}
+
+interface CatalogHolder {
+	install_id: string;
+	device_name?: string | null;
+	online?: boolean;
+	is_self?: boolean;
+}
+
+/**
+ * Whether the attach sheet can pick a project, and the grey note when not.
+ * A session this worker runs takes this worker's projects. A session another
+ * worker runs (`owner`) takes the projects THAT worker has a checkout of, read
+ * from the cluster catalog's `eligible` list; the attach is relayed to it.
+ */
+export function attachChoice(
+	item: { remoteOnly: boolean; projectV2Id: string | null },
+	catalog: readonly { project_v2_id: string; eligible: readonly CatalogHolder[] }[],
+	owner: AttachOwner | null
+): { pickable: boolean; note: string | null } {
+	const row = item.projectV2Id ? catalog.find((r) => r.project_v2_id === item.projectV2Id) : undefined;
+	const holders = (row?.eligible ?? []).filter((e) => e.online !== false);
+	if (!owner) {
+		if (!item.remoteOnly) return { pickable: true, note: null };
+		return { pickable: false, note: whereNote(holders.filter((e) => !e.is_self)) };
+	}
+	// Offline, the catalog lists nothing for it; the blocked reason says why.
+	if (owner.online === false) return { pickable: false, note: null };
+	if (holders.some((e) => e.install_id === owner.id)) return { pickable: true, note: null };
+	// Two workers are in play here, so "this worker" would read as the chat's
+	// worker: name them instead.
+	const names = workerNames(holders.filter((e) => e.install_id !== owner.id));
+	return {
+		pickable: false,
+		note: names.length ? `only on ${names.join(', ')}` : `not on ${owner.name?.trim() || 'that worker'}`
+	};
+}
+
+function whereNote(holders: CatalogHolder[]): string {
+	const names = holders.map((e) => (e.is_self ? 'this worker' : e.device_name?.trim())).filter(Boolean);
+	return names.length ? `on ${names.join(', ')}` : 'on another worker';
+}
+
+function workerNames(holders: CatalogHolder[]): string[] {
+	return holders
+		.map((e) => e.device_name?.trim() || (e.is_self ? 'this worker' : ''))
+		.filter(Boolean);
 }
 
 /**

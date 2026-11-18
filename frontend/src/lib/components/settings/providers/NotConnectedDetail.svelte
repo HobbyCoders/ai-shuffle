@@ -15,7 +15,7 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import ClaudeCliInstall from './setup/ClaudeCliInstall.svelte';
 	import ClaudeModeRow from './ClaudeModeRow.svelte';
-	import { kindsOf, type ProviderView } from './providers-model';
+	import { kindsOf, type CredentialFlavor, type ProviderView } from './providers-model';
 	import { startSetup } from './provider-actions';
 
 	interface Props {
@@ -30,6 +30,8 @@
 	let showCli = $state(false);
 	$effect(() => { if (cliInstalled) showCli = true; });
 	const kinds = $derived(kindsOf(provider.id));
+	/** Routes that are a pasted key; a sign-in route has no key to list from (#1652). */
+	const KEY_FLAVORS = new Set<CredentialFlavor>(['key', 'plan-key', 'agy-key', 'gateway']);
 	const models = $derived(
 		provider.claude
 			? 'Built in'
@@ -37,7 +39,11 @@
 				? 'Media models'
 				: provider.id === 'openrouter'
 					? 'Hundreds'
-					: 'From the key'
+					: provider.id === 'antigravity'
+						? 'From the agent'
+						: kinds.every((k) => KEY_FLAVORS.has(k.flavor))
+							? 'From the key'
+							: 'From the account'
 	);
 </script>
 

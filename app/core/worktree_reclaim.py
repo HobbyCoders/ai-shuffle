@@ -342,7 +342,7 @@ def _abandon_blocker(context, branch, sessions, registered):
         except (OSError, ValueError, TypeError):
             return "orphan checkout age unavailable"
         return None
-    if any(s.get("is_active") or s.get("running") for s in [worker, *sessions]):
+    if any(_open(s) for s in [worker, *sessions]):
         return "its worker session is active"
     age = _activity_age(worker) if (worker.get("finished_at") or worker.get("is_active") in (False, 0)) else None
     if age is None:
@@ -405,10 +405,17 @@ def _unrecorded_folder(context, session):
     return cache[key]
 
 
+def _open(session) -> bool:
+    """Active, running, or snoozed: a snoozed chat comes back to its checkout,
+    so its worker checkout is kept like an active one's."""
+    from app.core.session_snooze import runs_work
+    return runs_work(session) or bool(session.get("running"))
+
+
 def _unrecorded_user(context, session, branches, target=None):
     """Whether an open session with no recorded branch or folder may be using
     this checkout (``target``, when it has a folder) or these branches."""
-    if not (session.get("is_active") or session.get("running")):
+    if not _open(session):
         return False
     if session.get("branch") or session.get("worktree_branch") or session.get("worktree_path"):
         return False
@@ -724,7 +731,7 @@ def _plan(source, registered, context, *, pulls=None):
     if branch and branch.casefold() == context["default_branch"].casefold():
         return keep("default branch protected")
     sessions = _bound_sessions(context, registered, branch)
-    if any(s.get("is_active") or s.get("running") for s in sessions):
+    if any(_open(s) for s in sessions):
         return keep("bound to an active or running session")
     grace_reason = _session_grace_reason(sessions)
     if grace_reason:
@@ -1008,7 +1015,7 @@ def _apply(source, registered, preview, *, automatic=False, pulls):
             return {**row, "decision": "keep", "reason": "session activity changed during automatic grace check"}
         try:
             users = _bound_sessions({"sessions": _project_sessions(source)}, registered, row["branch"])
-            if any(s.get("is_active") or s.get("running") for s in users) or _session_grace_reason(users):
+            if any(_open(s) for s in users) or _session_grace_reason(users):
                 return {**row, "decision": "keep", "reason": "session activity changed immediately before removal"}
             if row["decision"] == "archive":
                 # The resume path recreates the branch at the snapshot.
@@ -1019,7 +1026,7 @@ def _apply(source, registered, preview, *, automatic=False, pulls):
                 # Failure here aborts removal rather than leaving an unrestorable row.
                 _stamp_head(source, row)
                 users = _bound_sessions({"sessions": _project_sessions(source)}, registered, row["branch"])
-                if any(s.get("is_active") or s.get("running") for s in users) or _session_grace_reason(users):
+                if any(_open(s) for s in users) or _session_grace_reason(users):
                     return {**row, "decision": "keep", "reason": "session activity changed immediately before removal"}
                 if row["decision"] == "forget":
                     forget_stale_worktree_metadata(repo, row["path"])
@@ -1242,7 +1249,7 @@ def _plan_branch(source, context, name, sha, *, pulls=None):
     if name.casefold() == context["default_branch"].casefold():
         return keep("default branch protected")
     sessions = _branch_sessions(context, name)
-    if any(s.get("is_active") or s.get("running") for s in sessions):
+    if any(_open(s) for s in sessions):
         return keep("bound to an active or running session")
     grace_reason = _session_grace_reason(sessions)
     if grace_reason:

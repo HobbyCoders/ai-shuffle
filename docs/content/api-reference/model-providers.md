@@ -464,6 +464,7 @@ Fetch the provider's live model list from upstream so you can pick which ones to
 
 - A provider signed in with ChatGPT lists the ChatGPT/Codex models for that account.
 - A provider signed in with Grok, and every other provider, calls `{base_url}/models` when `base_url` already ends in `/v1`, otherwise `{base_url}/v1/models`, with the stored key.
+- A Google Antigravity provider has no HTTP model list: Google's agent names its models (and each model's thinking levels) when a chat starts, and that list is saved for the row. This call returns the saved list with `source: "agent"`, `agent_version` (the agent's version) and `fetched_at` (when the agent reported it); it does not start the agent. Before a first chat on the row's current sign-in or key it returns the built-in preset list (`source: "preset"`). A list captured on a stored Google sign-in holds only on the worker that captured it and only until that sign-in ends (sign-out, a new sign-in, or the row's removal); elsewhere, or after that, this call returns the preset until a chat on the current sign-in reports again. A list captured on a Gemini API key is shared by paired workers while the row keeps that key.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/model-providers/5f0c2a7e-1b3d-4c8e-9a61-2d4f7b9e0c11/fetch-models \
@@ -554,7 +555,7 @@ Check a Grok sign-in once. Same statuses and errors as the ChatGPT poll. On `com
 
 ## Google Antigravity
 
-Google Antigravity runs Google's own Antigravity agent (`agy`) on the worker and drives it over the Agent Client Protocol. The agent does its own file and shell work and asks AI Shuffle before it acts; AI Shuffle's tools, and the MCP servers the session connects, reach it through one MCP server. To keep the prompt small, that server lists only a few everyday tools in full; the agent sees the rest by name and runs them through `LoadTools` and `CallTool`, with the same approval card and rules as calling the tool directly. Only Gemini models are offered. Rows have `provider_type: "antigravity"` and one of three `auth_mode` values:
+Google Antigravity runs Google's own Antigravity agent (`agy`) on the worker and drives it over the Agent Client Protocol. The agent does its own file and shell work and asks AI Shuffle before it acts; AI Shuffle's tools, and the MCP servers the session connects, reach it through one MCP server. To keep the prompt small, that server lists only a few everyday tools in full; the agent sees the rest by name and runs them through `LoadTools` and `CallTool`, with the same approval card and rules as calling the tool directly. The models are the ones the agent itself lists: Google's Gemini models, and any other model it offers. Rows have `provider_type: "antigravity"` and one of three `auth_mode` values:
 
 | `auth_mode` | In Settings | How it connects |
 | --- | --- | --- |
@@ -566,9 +567,7 @@ The agent keeps a Google sign-in in its own files on the worker. AI Shuffle star
 
 ### In Settings
 
-**Settings > Providers > Google Antigravity** (and the first-run setup) shows whether the agent is installed and its version. **Install Antigravity** downloads Google's release for the worker from its official manifest (Windows, macOS and Linux, on x64 or arm64) and checks it against Google's checksum. Once installed, **Check for update** asks Google for a newer release: it says the agent is up to date, or installs the new version, switches to it and removes the older copies it can (one still running on Windows is left for next time). A worker also checks once when it starts, at most every 10 minutes, but only for the copy AI Shuffle installed. An `agy` you installed yourself is never changed: an update installs AI Shuffle's own copy, which then runs instead, and the message says so. Each row has an **Overview** tab (status, sign-in or key, sign-out), a **Models** tab (which Gemini models the picker offers) and a **Usage** tab. The model picker offers a thinking level (low, medium, high; Gemini 3.1 Pro offers low and high) as the effort control.
-
-**Terms warning.** Google's Antigravity [terms](https://antigravity.google/terms) (section 6) and [FAQ](https://antigravity.google/docs/faq) restrict using a personal Google sign-in (consumer plans) through third-party software, and Google has suspended accounts for it. AI Shuffle runs Google's own unmodified agent and never touches its sign-in, but the account is yours to risk. A Gemini API key or a business sign-in is the supported route. The warning is shown before a personal sign-in starts and on every personal sign-in row.
+**Settings > Providers > Google Antigravity** (and the first-run setup) shows whether the agent is installed and its version. **Install Antigravity** downloads Google's release for the worker from its official manifest (Windows, macOS and Linux, on x64 or arm64) and checks it against Google's checksum. Once installed, **Check for update** asks Google for a newer release: it says the agent is up to date, or installs the new version, switches to it and removes the older copies it can (one still running on Windows is left for next time). A worker also checks once when it starts, at most every 10 minutes, but only for the copy AI Shuffle installed. An `agy` you installed yourself is never changed: an update installs AI Shuffle's own copy, which then runs instead, and the message says so. Each row has an **Overview** tab (status, sign-in or key, sign-out), a **Models** tab (which models the picker offers) and a **Usage** tab. The **Models** tab lists the models the agent itself offers, with the agent's version and the time: when the tab has no list yet for the current sign-in or key, and on **Refresh**, it asks the agent (`agy models`, which starts no chat), and every chat start updates the list too. While a list is being fetched the tab says **Fetching list**, even after you leave the tab and come back, and you can tick or untick models meanwhile. A model it newly offers appears unticked, and a ticked model it no longer offers stays ticked, marked **Not listed by the agent**. When the agent cannot answer (not installed or not signed in on this worker), the tab keeps the last list it gave for the current sign-in or key, or else a built-in set of Gemini models, and says the agent has not listed its models yet. The model picker offers each model's thinking levels (for example low, medium, high, xhigh) as the effort control. If a chat asks for a model the agent does not offer, the agent runs its own choice and the chat shows a **Model rerouted** note naming the model that answered.
 
 **Interactive only.** A personal sign-in row runs only in chats you type into yourself. Automations, scheduled or automatic turns, Task, Swarm and subagent children, sessions another agent started, requests the voice assistant writes on its own, answers Away mode gives for you, and background calls are refused with a message that names the reason and points back to the row. **Allow unattended use** on the row's Overview tab lifts this; it is off for every new row. Key and business rows are not limited.
 
@@ -580,7 +579,7 @@ All of these are owner only, under `/api/v1/antigravity`.
 
 | Endpoint | What it does |
 | --- | --- |
-| `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`, `warning`), the `warning` text, `terms_url`, `dashboard_url`, `guard_default` and `default_models` |
+| `GET /meta` | `provider_type`, `auth_modes` (`id`, `label`, `headless`, `guarded`), `dashboard_url`, `guard_default` and `default_models` |
 | `GET /status` | `installed`, `version`, `source` (`app` when AI Shuffle installed the agent, `path` for an `agy` on PATH, `override` for `AI_SHUFFLE_ANTIGRAVITY_BIN`, or `null`), `can_install` (Google publishes a build for this worker), `unsupported_message` (why not, when `can_install` is false; otherwise `null`), `install` (`kind`: `install` or `update`, `state`: `idle`, `running`, `succeeded` or `failed`, `version`, `message`, `error`) and `workers_requiring_update` |
 | `POST /install` | Download and install Google's agent for this worker's platform; poll `GET /status` |
 | `POST /update` | Check for update: the same background job. It finishes with `message` "Antigravity is up to date (X)." or "Antigravity updated from X to Y."; poll `GET /status` |
@@ -590,6 +589,7 @@ All of these are owner only, under `/api/v1/antigravity`.
 | `PUT /providers/{id}/guard` | `{"allow_unattended": true}` lifts the guard on a personal sign-in row |
 | `POST /providers/{id}/login` | Start a sign-in: `{"login_id", "state": "awaiting_code" or "failed", "url", "message"}`. On a row already signed in on this worker nothing starts: `state` is `signed_in`, `login_id` is `null` and `message` says to sign out first to change accounts |
 | `POST /providers/{id}/login/{login_id}/complete` | `{"code"}` from the Google page; returns `signed_in` or `failed` (a wrong or expired code says so; start the sign-in again for a new code) |
+| `GET /providers/{id}/login/{login_id}` | The sign-in's current `state` (`awaiting_code`, `completing`, or `ended` once it finished, failed, was cancelled or expired, on any device), without asking the agent. The sign-in panel reads it every few seconds while it waits for a code |
 | `DELETE /providers/{id}/login/{login_id}` | Cancel a sign-in |
 | `POST /providers/{id}/sign-out` | Sign the agent out on this worker |
 
@@ -781,4 +781,34 @@ curl http://localhost:8000/api/v1/models \
 - `models`: built-in Claude models. Use `value` as the model id.
 - `default`: the default model, what a new chat runs when you pick none: the model you use most while its provider can run it, else the default model of the oldest provider that can run (adding another key never moves it), Claude's last. `inherit_value`: the value that means "inherit from the parent" (for subagents). `legacy_map`: full Claude model ids and the short id each maps to.
 - `providers`: enabled providers only, never with keys. `auth_kind` is `subscription` for ChatGPT and Grok subscription providers and `api` otherwise; `plan_type` names the subscription plan when known. `capability_generation` changes whenever the provider is edited. `effort_levels` lists the reasoning-effort levels a model accepts: `[]` means none, `null` means unknown (see [refresh-capabilities](#post-apiv1model-providersrefresh-capabilities)).
-- `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known).
+- `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known). On a subscription sign-in it also has `cli_models` (`cli_version`, `captured_at`) once Claude Code has listed its models on this worker.
+- `versioned_models`: on a subscription sign-in, the versioned models this worker's Claude Code lists (for example `claude-opus-4-6`), each with `enabled`. Enabled ones are also in `models`. Empty in other modes.
+
+### Claude subscription models
+
+On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are always offered, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. The versioned models Claude Code lists are off until you check them in **Settings → Providers → Claude → Models**. A checked version runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are offered.
+
+Each worker keeps its own list, for the Claude account it came from. After you switch Claude accounts, AI Shuffle asks Claude Code again; until it answers, only the four short ids are offered. A model id goes unchanged to the Claude Code that runs the chat, including the subagent default and the model a chat hands to a chat it starts. A worker on an older AI Shuffle release runs the short id instead until it updates. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
+
+#### POST /api/v1/models/claude/refresh
+
+Asks this worker's Claude Code for its model list again, then returns the same body as `GET /api/v1/models`. No prompt is sent.
+
+**Auth:** Owner only
+
+**Errors:** `409` when this install is not signed in with a Claude subscription, or Claude Code did not answer.
+
+#### PUT /api/v1/models/claude/enabled
+
+Turns one versioned Claude model on or off in the model pickers. Other models stay as they are, including ones only another worker's Claude Code lists. `400` for a short id such as `opus`.
+
+**Auth:** Owner only
+
+```bash
+curl -X PUT http://localhost:8000/api/v1/models/claude/enabled \
+  -H "Authorization: Bearer $OWNER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "claude-opus-4-6", "enabled": true}'
+```
+
+**Response:** every model now turned on, for example `{ "models": ["claude-opus-4-6"] }`

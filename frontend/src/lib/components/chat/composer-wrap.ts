@@ -16,9 +16,11 @@
  * in the single-line layout, whichever layout is showing, so the composer
  * never flips back and forth at the boundary. While wrapped, that width is
  * estimated from the last single-line measurement, moved by any change in the
- * box's width and in the circles' width (Stop appearing, the mic widening
- * while it listens). The circles keep one size in both layouts so the
- * estimate stays exact.
+ * box's width and in the circles' width (the mic widening while it
+ * listens). The circles keep one size in both layouts so the estimate stays
+ * exact. Stop takes no seat while it is not shown, so in a chat, where it can
+ * arrive and leave under a draft, the text is measured as if it were there
+ * (`getReserve`): Stop coming or going never flips the layout.
  */
 
 export type ComposerCircle = 'talk' | 'send' | 'stop' | 'busy';
@@ -100,6 +102,8 @@ export interface WrapWatcherOptions {
 	getIsland: () => HTMLElement | null;
 	/** The circles right of the text; their width changes move it the other way. */
 	getCircles?: () => HTMLElement | null;
+	/** Width of circles not shown now that the text must leave room for: Stop's seat. */
+	getReserve?: () => number;
 	isWrapped: () => boolean;
 	setWrapped: (wrapped: boolean) => void;
 	/** Lines the text takes at a width. Defaults to a hidden copy of the editor's text. */
@@ -155,12 +159,13 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 		// A hidden/unlaid-out box has no line width. Keep the seeded/current
 		// layout until attachment or the size observer supplies real geometry.
 		if (!editor || !island || !editor.isConnected || editor.clientWidth <= 0 || island.clientWidth <= 0) return;
-		const now = { island: island.clientWidth, circles: options.getCircles?.()?.offsetWidth ?? 0 };
+		const reserve = options.getReserve?.() ?? 0;
+		const now = { island: island.clientWidth, circles: (options.getCircles?.()?.offsetWidth ?? 0) + reserve };
 		const wrapped = options.isWrapped();
 		let width: number;
 		if (!wrapped || !base) {
 			// Measured directly while the single-line layout shows.
-			width = contentWidth(editor);
+			width = contentWidth(editor) - reserve;
 			if (!wrapped) base = { text: width, ...now };
 		} else {
 			width = singleLineTextWidth(base, now);
@@ -214,6 +219,203 @@ export function createWrapWatcher(options: WrapWatcherOptions) {
 			frame = 0;
 			measurer?.remove();
 			measurer = null;
+		}
+	};
+}
+
+/** The action row left to right: dictate, then the circles after it. */
+export type RowButton = 'mic' | ComposerCircle;
+
+/**
+ * How long a mic, Talk or Stop circle ignores pointer presses after it moved
+ * into its seat (#1632). The row keeps no empty seats (owner decision,
+ * 2026-11-14), so when Stop or a held Send leaves, the next button slides
+ * into the place a tap was aimed at; a press made that soon after was aimed
+ * at the button that left, not at one nobody has seen yet.
+ */
+export const ARRIVAL_GUARD_MS = 400;
+
+/** How long after a button moves in a double click's later press can still reach it. */
+export const DOUBLE_PRESS_MS = 500;
+
+/** Arrivals whose press would start or stop something: dictation, a call, the turn. */
+const GUARDED: ReadonlySet<RowButton> = new Set(['mic', 'talk', 'stop']);
+
+/**
+ * When each seat of the action row last got another button in place of the one
+ * it held (a seat that was empty arms nothing). Seats count from
+ * the row's right end, where the circles sit, so a button that slides over
+ * takes a new seat. A row that has just been placed (`settled`: the start
+ * screen, the composer arriving in the chat, another chat's row) arms only the rest of a double
+ * click: its later presses land where the first one was, so one that reaches
+ * a button which moved in since (Send became Stop) is never meant for it. Send
+ * is never guarded: a stray press on it sends the draft that was typed to be
+ * sent.
+ *
+ * Stop coming back to its seat did not arrive, when the button that held the
+ * seat in between had itself arrived less than ARRIVAL_GUARD_MS before: that
+ * one was never there long enough for a press to be aimed at it, so a press
+ * in the seat is still aimed at Stop. This is a queue handoff (Stop, another
+ * button for a moment, Stop again): a press must stop the queued turn. The
+ * seat takes back the arrival time Stop had, so a Stop that had only just
+ * arrived keeps the rest of its own wait, and the button in between stays
+ * guarded while it shows. Only Stop: an ignored press on it leaves a turn
+ * running, while mic and Talk start something and lose nothing by waiting. A
+ * double click still counts the swap: its later press began on the other
+ * button.
+ *
+ * A press that was ignored in a seat also holds back the next press there
+ * within DOUBLE_PRESS_MS when another button has the seat by then (`noteIgnored`):
+ * that is the second tap of a double tap, whatever click count the browser
+ * gives it (a touch tap often reports 1), and it was no more meant for the
+ * new button than the first was. Without this the second tap would reach a
+ * Stop that is back in its seat and stop the queued turn.
+ */
+export function createArrivalGuard(now: () => number = () => performance.now()) {
+	let row: RowButton[] | null = null;
+	let arrivedAt: number[] = [];
+	let movedAt: number[] = [];
+	// The button each seat held before its current one, and when that one had arrived.
+	let before: ({ button: RowButton; arrivedAt: number } | undefined)[] = [];
+	// The last press ignored in each seat: on which button, and when it was made.
+	let ignored: ({ button: RowButton; at: number } | undefined)[] = [];
+	const seatOf = (button: RowButton) => {
+		const index = row ? row.lastIndexOf(button) : -1;
+		return index < 0 ? -1 : row!.length - 1 - index;
+	};
+	const followsIgnored = (seat: number, button: RowButton, pressedAt: number) => {
+		const last = ignored[seat];
+		return !!last && last.button !== button && pressedAt >= last.at && pressedAt < last.at + DOUBLE_PRESS_MS;
+	};
+	return {
+		/** The row as shown now. */
+		update(next: RowButton[], settled: boolean) {
+			const at = now();
+			const arrived: number[] = [];
+			const moved: number[] = [];
+			const earlier: typeof before = [];
+			for (let seat = 0; seat < next.length; seat++) {
+				const button = next[next.length - 1 - seat];
+				const was = row?.[row.length - 1 - seat];
+				if (was === undefined) {
+					// A seat that was empty arms nothing: no press was aimed at a button there.
+					arrived[seat] = moved[seat] = -Infinity;
+				} else if (was === button) {
+					arrived[seat] = arrivedAt[seat] ?? -Infinity;
+					moved[seat] = movedAt[seat] ?? -Infinity;
+					earlier[seat] = before[seat];
+				} else {
+					const leaving = arrivedAt[seat] ?? -Infinity;
+					const back = before[seat];
+					const returns = button === 'stop' && back?.button === button && at - leaving < ARRIVAL_GUARD_MS;
+					arrived[seat] = returns ? back.arrivedAt : at;
+					moved[seat] = at;
+					earlier[seat] = { button: was, arrivedAt: leaving };
+				}
+			}
+			movedAt = moved;
+			arrivedAt = settled ? next.map(() => -Infinity) : arrived;
+			before = settled ? [] : earlier;
+			if (settled) ignored = [];
+			row = [...next];
+		},
+		/**
+		 * A pointer press made at `pressedAt` on `button` was ignored, for any
+		 * reason. A double tap's first press stands: its second does not move
+		 * the window on.
+		 */
+		noteIgnored(button: RowButton, pressedAt: number) {
+			const seat = seatOf(button);
+			if (seat < 0) return;
+			const last = ignored[seat];
+			if (last && pressedAt >= last.at && pressedAt < last.at + DOUBLE_PRESS_MS) return;
+			ignored[seat] = { button, at: pressedAt };
+		},
+		/**
+		 * Whether a pointer press made at `pressedAt` on `button` came too soon
+		 * after it arrived, or follows a press ignored on another button in its
+		 * seat. `clicks` is the press's click count (`event.detail`).
+		 */
+		ignores(button: RowButton, pressedAt: number, clicks = 1): boolean {
+			if (!row || !GUARDED.has(button)) return false;
+			const seat = seatOf(button);
+			if (seat < 0) return false;
+			if (followsIgnored(seat, button, pressedAt)) return true;
+			if (clicks > 1 && pressedAt < (movedAt[seat] ?? -Infinity) + DOUBLE_PRESS_MS) return true;
+			return pressedAt < (arrivedAt[seat] ?? -Infinity) + ARRIVAL_GUARD_MS;
+		}
+	};
+}
+
+/** Where and when a pointer press on the action row began, and when it ended. */
+export interface RowPress<T> { at: number; target: T | null; releasedAt?: number }
+
+/**
+ * How long after its release a press can still be the one behind a click. A
+ * click follows its pointerup at once; the gap covers a touch whose click
+ * comes from the tap gesture a little later. Measured in event times, so a
+ * busy main thread does not stretch or shrink it.
+ */
+export const RELEASE_TO_CLICK_MS = 1000;
+
+/**
+ * The pointer presses on the action row, so a click is judged by when its
+ * press began rather than when it was released (#1632). A press lasts until
+ * it is released or cancelled, however long it is held. Each pointer keeps
+ * only its latest press and a press is used once. A released press that got
+ * no click (the finger slid off) is dropped once its click can no longer
+ * come; `clear` drops everything when the page loses focus or the row goes.
+ * A click with no press of its own (keyboard, assistive technology, a
+ * script) gets none.
+ */
+export function createPressTracker<T>() {
+	const presses = new Map<number, RowPress<T>>();
+	let last: { id: number; press: RowPress<T> } | null = null;
+	const spent = (press: RowPress<T>, at: number) =>
+		press.releasedAt !== undefined && at - press.releasedAt > RELEASE_TO_CLICK_MS;
+	const drop = (id: number) => {
+		presses.delete(id);
+		if (last?.id === id) last = null;
+	};
+	return {
+		/** A pointer went down on the row (`target`: the button under it). */
+		down(pointerId: number, at: number, target: T | null) {
+			for (const [id, press] of presses) if (spent(press, at)) drop(id);
+			const press: RowPress<T> = { at, target };
+			presses.set(pointerId, press);
+			last = { id: pointerId, press };
+		},
+		/** A pointer went up anywhere. */
+		up(pointerId: number, at: number) {
+			const press = presses.get(pointerId);
+			if (press && press.releasedAt === undefined) press.releasedAt = at;
+		},
+		/** The press ended without a click (a scroll, the system took the touch). */
+		cancel(pointerId: number) {
+			drop(pointerId);
+		},
+		clear() {
+			presses.clear();
+			last = null;
+		},
+		/** How many presses are kept (for tests). */
+		get size() { return presses.size; },
+		/**
+		 * The press behind a click on `target`. `pointerId` is the click's own
+		 * (undefined where a click carries none: then only the latest press on
+		 * this same target counts). Clicks from no pointer (id -1) get none.
+		 */
+		take(pointerId: number | undefined, clickAt: number, target: T | null): RowPress<T> | null {
+			let id = pointerId;
+			if (id === undefined) {
+				if (!last || last.press.target !== target) return null;
+				id = last.id;
+			}
+			if (id < 0) return null;
+			const press = presses.get(id);
+			if (!press || press.at > clickAt || spent(press, clickAt)) return null;
+			drop(id);
+			return press;
 		}
 	};
 }

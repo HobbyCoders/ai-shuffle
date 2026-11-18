@@ -58,7 +58,7 @@ class LiveSocket extends NativeWebSocket {
             }
 		});
 	}
-	override send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+	override send(data: Parameters<WebSocket['send']>[0]) {
 		if (typeof data === 'string') {
 			const message = JSON.parse(data);
 			if (message.op) messages.push(message);

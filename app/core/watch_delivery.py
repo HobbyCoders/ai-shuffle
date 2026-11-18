@@ -41,7 +41,10 @@ def assert_allowed(
     if meta != remote_metadata(saved["sender"], body["watch"], body["event"]):
         raise ValueError("Remote watch provenance changed")
     session = watches.owner_session(session_id)
-    if session_id != body["watch"]["creating_session_id"] or not session.get("is_active"):
+    from app.core.session_snooze import runs_work
+
+    # A snooze defers the chat; it does not stop a running remote watch turn.
+    if session_id != body["watch"]["creating_session_id"] or not runs_work(session):
         raise ValueError("Remote watch creator was settled")
     if owner_services.session_stopped(session_id):
         raise ValueError("Remote watch creator was stopped")

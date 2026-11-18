@@ -2,7 +2,7 @@
 
     python scripts/ci/nightly_wait.py <commit>      # or: --pr <number>
 
-Follow the commit, never one main-suite run. main-suite keeps one running and
+Follow the commit, never one CI run. CI keeps one running and
 one waiting run; a newer merge replaces the waiting run, which GitHub then
 reports as "cancelled". That run never started and nothing is lost: the newer
 run tests a main revision that contains the commit, and the publisher ships
@@ -38,7 +38,7 @@ def _load(name):
 nightly = _load("nightly_changed")
 gate = _load("edge_publication_gate")
 
-RUNS_URL = f"https://github.com/{gate.REPOSITORY}/actions/workflows/main-suite.yml"
+RUNS_URL = f"https://github.com/{gate.REPOSITORY}/actions/workflows/ci.yml"
 PUBLISHER_URL = f"https://github.com/{gate.REPOSITORY}/actions/workflows/desktop-source.yml"
 ACTIVE = ("queued", "in_progress", "waiting", "pending", "requested")
 MAIN_EVENTS = ("push", "workflow_dispatch")
@@ -116,11 +116,11 @@ def suite_state(api, commit, *, now, cache=None):
     landing mid-poll must not make its replacement run look unrelated.
     """
     cache = {} if cache is None else cache
-    for run in _active(api, "main-suite.yml", MAIN_EVENTS):
+    for run in _active(api, "ci.yml", MAIN_EVENTS):
         if contains(api, commit, run["head_sha"], cache):
-            return "testing", f"main-suite is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
+            return "testing", f"CI is {run['status'].replace('_', ' ')} on {run['head_sha'][:9]}: {run['html_url']}"
     finished, seen = [], set()
-    for run in _runs(api, "main-suite.yml", "completed", MAIN_EVENTS):
+    for run in _runs(api, "ci.yml", "completed", MAIN_EVENTS):
         sha = run["head_sha"]
         if sha in seen:
             continue  # newest run per commit, as the publication gate reads it
@@ -131,14 +131,14 @@ def suite_state(api, commit, *, now, cache=None):
     passed = next((run for run in finished if run.get("conclusion") == "success"), None)
     age = now - _epoch(passed.get("updated_at")) if passed else 0
     if passed and age < PUBLISH_SECONDS:
-        return "publishing", f"main-suite passed on {passed['head_sha'][:9]}; waiting for the publisher"
+        return "publishing", f"CI passed on {passed['head_sha'][:9]}; waiting for the publisher"
     # The publisher also runs on a schedule, on owner dispatch and from an owner
     # local pass: while one is in flight the commit may still ship.
     publishers = _active(api, "desktop-source.yml")
     if publishers:
         return "publishing", f"A nightly publisher run is in flight: {publishers[0]['html_url']}"
     if passed:
-        return "unpublished", (f"main-suite passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
+        return "unpublished", (f"CI passed on {passed['head_sha'][:9]} {int(age // 60)} minutes ago but no nightly "
                                f"contains it. Check the publisher's latest run for a refusal: {PUBLISHER_URL}")
     # A replaced waiting run ("cancelled", no jobs) is not a failure; only report
     # a run that ran. A run stopped on its first failed job is also "cancelled".
@@ -146,10 +146,10 @@ def suite_state(api, commit, *, now, cache=None):
     if run:
         ended = ("was stopped after a job failed (or cancelled by hand)" if run.get("conclusion") == "cancelled"
                  else f"ended {run.get('conclusion')}")
-        return "failed", (f"The newest main-suite run covering this commit {ended} "
+        return "failed", (f"The newest CI run covering this commit {ended} "
                           f"on {run['head_sha'][:9]} and nothing newer is waiting: {run['html_url']}\n"
                           "The nightly waits for the next green main run: fix or re-run it.")
-    return "none", f"No main-suite run in flight covers this commit yet: {RUNS_URL}"
+    return "none", f"No CI run in flight covers this commit yet: {RUNS_URL}"
 
 
 def _started(api, run):

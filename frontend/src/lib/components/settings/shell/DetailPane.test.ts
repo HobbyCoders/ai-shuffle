@@ -48,14 +48,14 @@ describe('DetailPane', () => {
   expect(screen.getByRole('button',{name:'More note actions'})).toBeTruthy();
   expect(view.container.querySelector('.detail-more')).toBeNull();
  });
- it('removes the identity grid column when leaving a custom avatar for an anonymous header', async () => {
-  const tile = createRawSnippet(() => ({ render: () => '<span data-testid="avatar">AV</span>' }));
+ it('removes the identity grid column when leaving custom identity art for an anonymous header', async () => {
+  const tile = createRawSnippet(() => ({ render: () => '<span data-testid="art">AV</span>' }));
   const view = render(DetailPane, { name: 'Agent', tile, contentFirst: true });
   expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeTruthy();
-  expect(screen.getByTestId('avatar')).toBeTruthy();
+  expect(screen.getByTestId('art')).toBeTruthy();
   await view.rerender({ name: 'Workspace', tile: undefined });
   expect(view.container.querySelector('.st-dh:has(> .st-identity > *)')).toBeNull();
-  expect(screen.queryByTestId('avatar')).toBeNull();
+  expect(screen.queryByTestId('art')).toBeNull();
  });
  it('does not treat an intentionally empty tile snippet as identity art', () => {
   const view = render(EmptyIdentityFixture);

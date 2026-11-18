@@ -2239,6 +2239,47 @@ describe('ws-message-handlers', () => {
 		});
 	});
 
+	describe('session_updated handler (effort pick or Auto from another device, #1579)', () => {
+		afterEach(() => sessionEphemeralCache.clear());
+
+		function openAtMedium() {
+			let state = mockState();
+			state.effortLevelOverride = 'medium';
+			deps = createMockDeps({
+				getState: vi.fn(() => state),
+				update: vi.fn((fn) => { state = fn(state); }),
+			});
+			handlers = createMessageHandlers(deps);
+			return {
+				announce(sessionId: string, effort: string | null) {
+					handlers.handleMessage({ event_type: 'session_updated', session_id: sessionId, data: { updates: { effort } } });
+				},
+				get state() { return state; },
+			};
+		}
+
+		it('device B drops its Medium when device A picks Auto, so its next send pins nothing', () => {
+			const b = openAtMedium();
+			b.announce('session-1', null);
+			// message-sender sends overrides.effort only when this is set.
+			expect(b.state.effortLevelOverride).toBeNull();
+			expect(deps.onPersistSession).toHaveBeenCalled();
+			// The row a later switch falls back to says Auto too.
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { effort: null });
+		});
+
+		it('adopts a level picked elsewhere, and the cached copy of a chat not on screen', () => {
+			const b = openAtMedium();
+			b.announce('session-1', 'high');
+			expect(b.state.effortLevelOverride).toBe('high');
+
+			sessionEphemeralCache.save('elsewhere', { ...b.state, sessionId: 'elsewhere', effortLevelOverride: 'low' } as never);
+			b.announce('elsewhere', null);
+			expect(sessionEphemeralCache.restore('elsewhere')?.effortLevelOverride).toBeNull();
+			expect(b.state.effortLevelOverride).toBe('high');
+		});
+	});
+
 	describe('user_session_updated handler (working time, #1619)', () => {
 		it('patches work_ms and work_started_at into the row without a list reload', async () => {
 			vi.useFakeTimers();
@@ -2630,6 +2671,13 @@ describe('ws-message-handlers', () => {
 		it('clears only the attention entry when a background session is settled', () => {
 			handlers.handleMessage(frame('other', { is_active: false }));
 			expect(attention.has('other')).toBe(false);
+			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
+			expect(state.pendingPermissions).toHaveLength(1);
+			expect(state.pendingQuestions).toHaveLength(1);
+		});
+
+		it('keeps the waits on a snooze, since a wait is what wakes it early', () => {
+			handlers.handleMessage(frame('session-1', { is_active: false, snoozed_until: '2030-01-01T09:00:00Z' }));
 			expect(attention.get('session-1')).toEqual({ count: 1, kind: 'permission' });
 			expect(state.pendingPermissions).toHaveLength(1);
 			expect(state.pendingQuestions).toHaveLength(1);

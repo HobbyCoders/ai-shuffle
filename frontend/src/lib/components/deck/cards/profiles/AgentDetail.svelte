@@ -1,7 +1,7 @@
 <script lang="ts">
 	/**
 	 * AgentDetail: one agent on the Agents page, in the Settings DetailPane
-	 * anatomy. Header (avatar, name, badges, the visible actions: Duplicate,
+	 * anatomy. Header (name, badges, the visible actions: Duplicate,
 	 * Export or Restore defaults), a sideways-scrolling tab strip whose tabs
 	 * carry the counts, then the tab's row groups. The
 	 * Profile tab ends with the danger zone and its inline confirm.
@@ -12,14 +12,12 @@
 	import { tick } from 'svelte';
 	import { Check, Copy, Download, LoaderCircle, Lock, RotateCcw } from 'lucide-svelte';
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/agent-identity';
 	import type { ToolSurface, ToolSurfaceGroup } from '$lib/api/toolSurface';
 	import type { SubagentDefault } from '$lib/api/subagentDefault';
 	import DetailPane from '$lib/components/settings/shell/DetailPane.svelte';
 	import SettingRow from '$lib/components/settings/rows/SettingRow.svelte';
 	import InlineConfirm from '$lib/components/settings/rows/InlineConfirm.svelte';
 	import InlineBanner from '$lib/components/settings/rows/InlineBanner.svelte';
-	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import ProfileToolConfig from './ProfileToolConfig.svelte';
 	import AgentProfileTab from './AgentProfileTab.svelte';
 	import AgentInstructionsTab from './AgentInstructionsTab.svelte';
@@ -38,6 +36,8 @@
 		type GroupState,
 		type RosterAgent
 	} from './agentForm';
+	import { AGENT_NAME_MAX } from './agentList';
+	import { codePoints } from '$lib/utils/code-points';
 
 	interface Props {
 		form: AgentForm;
@@ -46,9 +46,7 @@
 		editingProfile: Profile | null;
 		/** Created in this visit (or still a draft): the template row shows. */
 		isNew: boolean;
-		avatar: AvatarId;
 		isAdmin: boolean;
-		colorSupported: boolean;
 		folder: string;
 		saveState: 'idle' | 'saving' | 'saved' | 'error';
 		remoteChange: string;
@@ -62,9 +60,6 @@
 		others: RosterAgent[];
 		subagentDefault: SubagentDefault | null | undefined;
 		defaultError: string;
-		identityError: string;
-		avatarOf: (id: string) => AvatarId;
-		colorOf: (id: string) => string | null;
 		onTab: (tab: AgentTab) => void;
 		onBack: () => void;
 		onFormChange: (field: keyof AgentForm, value: unknown) => void;
@@ -78,7 +73,6 @@
 		onRemoveFromGroup: (profileId: string) => void;
 		onCreateGroup: (category: string, name: string) => void;
 		onDeleteGroup: (category: string, name: string) => void;
-		onRetryIdentity: () => void;
 		onDefaultModel: (model: string) => void | Promise<void>;
 		onDuplicate: () => void;
 		onExport: () => void;
@@ -93,9 +87,7 @@
 		toolSelectionMode,
 		editingProfile,
 		isNew,
-		avatar,
 		isAdmin,
-		colorSupported,
 		folder,
 		saveState,
 		remoteChange,
@@ -109,9 +101,6 @@
 		others,
 		subagentDefault,
 		defaultError,
-		identityError,
-		avatarOf,
-		colorOf,
 		onTab,
 		onBack,
 		onFormChange,
@@ -125,7 +114,6 @@
 		onRemoveFromGroup,
 		onCreateGroup,
 		onDeleteGroup,
-		onRetryIdentity,
 		onDefaultModel,
 		onDuplicate,
 		onExport,
@@ -139,6 +127,8 @@
 	const builtin = $derived(!!editingProfile?.is_builtin);
 	const modified = $derived(!!editingProfile?.is_modified);
 	const title = $derived(form.name.trim() || 'New agent');
+	/** Saving waits until the name fits; the Name field says by how much. */
+	const nameTooLong = $derived(codePoints(form.name) > AGENT_NAME_MAX);
 
 	let root: HTMLDivElement | undefined = $state();
 	let restoreArmed = $state(false);
@@ -184,13 +174,11 @@
 	}
 </script>
 
-{#snippet tile()}
-	<AgentAvatar {avatar} size={42} color={builtin ? null : form.avatar_color} neutral={builtin} />
-{/snippet}
-
 {#snippet topStatus()}
-	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveState === 'error' || draft} role="status" aria-live="polite">
-		{#if draft}
+	<span class="savetick" class:ok={saveState === 'saved'} class:err={saveState === 'error' || draft || nameTooLong} role="status" aria-live="polite">
+		{#if nameTooLong}
+			Name too long
+		{:else if draft}
 			Name it to save
 		{:else if saveState === 'saving'}
 			<LoaderCircle class="spin" />Saving
@@ -271,7 +259,6 @@
 	<DetailPane
 		width="reading"
 		name={title}
-		{tile}
 		{badges}
 		{subtitle}
 		{primary}
@@ -289,12 +276,7 @@
 				<AgentProfileTab
 					{form}
 					{editingProfile}
-					{avatar}
-					{isAdmin}
-					{colorSupported}
 					{groups}
-					{identityError}
-					{onRetryIdentity}
 					{onFormChange}
 					{onAssignToGroup}
 					{onRemoveFromGroup}
@@ -331,8 +313,6 @@
 					mode={form.agent_invoke_mode}
 					enabled={form.enabled_agents}
 					hasDefault={!!subagentDefault}
-					{avatarOf}
-					{colorOf}
 					onMode={pickInvokeMode}
 					onToggle={onToggleAgent}
 					onSetEnabled={(ids) => onFormChange('enabled_agents', ids)}

@@ -35,8 +35,10 @@
 	import { composerSuggestion, suggestionKey, hasComposerDraft } from '$lib/stores/session/composer-suggestion';
 	import { persistVoiceContext, voiceContextFor } from '$lib/services/voiceExecutionContext';
 	import { attachComposerDictation, detachComposerDictation, startComposerDictation } from '$lib/services/composerDictation';
+	import { clearError as clearSttError } from '$lib/services/globalStt';
 	import { flushPendingDraft, holdPendingDraft, readDraft, releasePendingDraft, writeDraft } from '$lib/stores/session/draft-persistence';
-	import { sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import { appendToChatDraft, sentRowIdsOnScreen, takeUnfinishedRestores } from '$lib/stores/session/restored-draft';
+	import type { JSONContent } from '@tiptap/core';
 	import { rewoundWordsKeptApart } from '$lib/stores/session/rewound-words';
 	import { trackSend } from '$lib/stores/session/message-sender';
 	import { dropPendingSend, notePendingSend, takePendingSends } from '$lib/stores/session/pending-send-note';
@@ -50,7 +52,8 @@
 	import PromptStashMenu from './PromptStashMenu.svelte';
 	import { sessionOwnerEpoch } from '$lib/stores/session-owner';
 	import { getInitGeneration, tabRestoreTarget } from '$lib/stores/session/session-init';
-	import { appData, profiles, sessions } from '$lib/stores/app-data.svelte';
+	import { appData, clusterProjects, profiles, projects, sessions } from '$lib/stores/app-data.svelte';
+	import { agentProjectOnThisWorker } from '$lib/stores/session/session-project';
 	import { newChatSetup, newChatSetupNeed, type NewChatSetupNeed } from '$lib/stores/project-setup';
 	import { hasStoppableWork } from './stoppable-work';
 	import { agentGate, anyCredential } from '$lib/stores/auth.svelte';
@@ -63,7 +66,7 @@
 	import { acknowledge, acknowledgedTokens, coldSendText, shouldWarn } from './cold-send';
 	import { notify, type NotificationSeverity } from '$lib/stores/notifications';
 	import { evaluateSubmitGuards, gateBlocksComposer, projectRulesLane, sendButtonState, NO_CREDENTIAL_REASON } from './submit-guards';
-	import { attachmentBlockReason } from './attach-disable';
+	import { attachmentBlockReason, composerUploadTarget, UPLOAD_CHAT_CHANGED, UPLOAD_OWNER_UNKNOWN } from './attach-disable';
 	// Collapse / gesture / sheet behaviour is the mobile app's; the web build
 	// gets the desktop no-op defaults (see composer-shell.ts).
 	import { composerShell } from './composer-shell';
@@ -74,7 +77,6 @@
 	import './phone/phone-composer.css';
 	import { platform } from '$lib/stores/platform.svelte';
 	import Banner from '$lib/components/Banner.svelte';
-	import { detectProjectMismatch } from './project-mismatch';
 	import CommandAutocomplete from '$lib/components/CommandAutocomplete.svelte';
 	import FileAutocomplete, { type FileItem } from '$lib/components/FileAutocomplete.svelte';
 	import { notesGoAsReferences } from './runs-elsewhere';
@@ -88,7 +90,7 @@
 	import ContextPillBar from './ContextPillBar.svelte';
 	import NewSessionSentence from '$lib/components/layout/NewSessionSentence.svelte';
 	import { ArrowUp, Plus } from 'lucide-svelte';
-	import { composerCircles, createWrapWatcher } from './composer-wrap';
+	import { composerCircles, createArrivalGuard, createPressTracker, createWrapWatcher, type RowButton } from './composer-wrap';
 	import { hasAtMention, findLastAtMentionIndex, extractAtMentionQuery, extractFileChips, isUploadChip } from './tiptap/serialization';
 
 	interface Command {
@@ -140,6 +142,14 @@
 		$activeSession.project || ($activeSession.sessionId ? $activeSession.projectV2Id : '') || undefined
 	);
 	const mentionsAvailable = $derived(!!mentionProjectId);
+	// Project agents are this worker's own (#1659: never by the legacy id of a
+	// chat another worker runs).
+	const subagentProjectId = $derived(agentProjectOnThisWorker(
+		$activeSession,
+		$sessions.find(session => session.id === $activeSession.sessionId)?.project_id,
+		$projects,
+		$clusterProjects
+	));
 	let mentionAwaitingProject: string | null = null;
 	const mentionWorktreeId = $derived(
 		$activeSession.worktreeIntent === 'worktree' && !$activeSession.isRemote
@@ -387,7 +397,11 @@
 		composerSelections.set(sessionId, { from, to });
 	}
 
-	let isUploading = $state(false);
+	// Every accepted upload (picker, drop, large paste) counts until it settles:
+	// Send stays blocked until the last one has, so no result can arrive after
+	// the message it belonged with went (#1659).
+	let uploadsPending = $state(0);
+	const isUploading = $derived(uploadsPending > 0);
 	let isRecording = $state(false);
 	let isTranscribing = $state(false);
 
@@ -466,6 +480,9 @@
 			// included) and becomes the adopted chat's draft, moved out of the New
 			// chat slot the send emptied (#1361).
 			detachComposerDictation(editorRef.getEditor());
+			// That chat is this compose's now: a paste or attachment started on the
+			// New chat lands there too (originChat), even after leaving it.
+			if (newSessionId) composeAdoptions.set(getInitGeneration(), newSessionId);
 			prevSessionId = newSessionId;
 			saveDraftImmediately();
 			writeDraft(null, '');
@@ -694,37 +711,37 @@
 	/** Take a large paste as a .txt attachment; false keeps it inline. */
 	function handleLargePaste(text: string): boolean {
 		if (!attachSupported || !$anyCredential || isUploading) return false;
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return false;
+		if (attachBlockNow()) return false;
 		const file = pastedTextFile(text);
-		isUploading = true;
+		// The paste belongs to this chat even if another one is open by the time
+		// the upload settles (#1659).
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
-		uploadComposerFile(file)
-			.then(result => {
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
-				inputValue = editorRef?.getMessage() ?? '';
-			})
+		uploadComposerFile(file, origin)
+			.then(result => placeUploadedChip(origin, result))
 			.catch((error: unknown) => {
-				// Never lose the paste: fall back to inline.
-				editorRef?.insertPlainText(text);
-				inputValue = editorRef?.getMessage() ?? '';
+				// Never lose the paste: fall back to inline, in the chat it was pasted into.
+				placeInChat(origin, () => editorRef?.insertPlainText(text), restoreMessageDocument(text));
+				if (!ownsComposer() || !originIsOpen(origin)) return;
 				const err = error as { detail?: string };
 				errorMessage = `Couldn't attach the pasted text (${err.detail || 'upload failed'}), so it was pasted inline.`;
 			})
-			.finally(() => { isUploading = false; });
+			.finally(() => { uploadsPending -= 1; });
 		return true;
+	}
+
+	/** Why attaching is refused right now, if it is: the same decision an
+	 *  upload gets (composerUploadTarget), including who runs the chat. */
+	function attachBlockNow(): string | null {
+		return attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId, $activeSession.isRemote);
 	}
 
 	let fileInputRef = $state<HTMLInputElement | null>(null);
 	// The attach circle left of the editor. Why it cannot attach right now, if
 	// it cannot: shown as its tooltip on desktop. On the phone a blocked attach
 	// stays tappable so the tap can say why (triggerFileUpload).
-	const attachBlock = $derived(attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId));
+	const attachBlock = $derived(attachBlockNow());
 	const attachDisabled = $derived(!$anyCredential || isUploading || (!platform.isMobile && !!attachBlock));
 	const attachTitle = $derived(!$anyCredential ? NO_CREDENTIAL_REASON : isUploading ? 'Uploading…' : (attachBlock ?? 'Attach files'));
 
@@ -742,6 +759,85 @@
 		busy: $activeSession.isCreatingWorktree || heldForCatalog || heldForSetup
 	}));
 	const showTalk = $derived(circles.includes('talk'));
+
+	// A button that takes over a seat another button held ignores pointer
+	// presses for a moment (#1632): when Stop, Talk or a held Send leaves, a tap
+	// aimed at it must not start a call or dictation, or stop the turn on a
+	// Stop that just took a spinner's place. Only seats count, never what moved
+	// the row (composer-wrap.ts). Seats carry over only within one chat's
+	// docked composer: on the start screen nothing is guarded but a double
+	// click (the composer moves away as the chat opens), and another chat's
+	// row is a new row.
+	const arrivals = createArrivalGuard();
+	let placed: { inChat: boolean; chat: string | null } | null = null;
+	$effect(() => {
+		const row: RowButton[] = ['mic', ...circles];
+		const now = { inChat: compact, chat: $activeSession.sessionId };
+		const newRow = !placed || placed.inChat !== now.inChat || placed.chat !== now.chat;
+		placed = now;
+		arrivals.update(row, !compact || newRow);
+	});
+	const presses = createPressTracker<HTMLButtonElement>();
+	const rowButtonAt = (target: EventTarget | null) =>
+		((target as Element | null)?.closest?.('button') as HTMLButtonElement | null) ?? null;
+	function rowButtonKind(button: HTMLButtonElement | null): RowButton | null {
+		return button?.classList.contains('voice-btn') ? 'mic'
+			: button?.classList.contains('call-circle') ? 'talk'
+			: button?.classList.contains('stop-btn') ? 'stop' : null;
+	}
+	// Event times, clamped to now: a busy main thread that handles a press
+	// late must not let it through.
+	const eventTime = (event: Event) => {
+		const now = performance.now();
+		return event.timeStamp > 0 && event.timeStamp <= now ? event.timeStamp : now;
+	};
+	function notePress(event: PointerEvent) {
+		presses.down(event.pointerId, eventTime(event), rowButtonAt(event.target));
+	}
+	function forgetPress(event: PointerEvent) {
+		presses.cancel(event.pointerId);
+	}
+	// A press ends wherever its pointer comes up or is cancelled, on the row or
+	// off it; leaving the page abandons every press, as does the row going.
+	$effect(() => {
+		const up = (event: PointerEvent) => presses.up(event.pointerId, eventTime(event));
+		const clear = () => presses.clear();
+		const hidden = () => { if (document.visibilityState === 'hidden') presses.clear(); };
+		window.addEventListener('pointerup', up, true);
+		window.addEventListener('pointercancel', forgetPress, true);
+		window.addEventListener('blur', clear);
+		document.addEventListener('visibilitychange', hidden);
+		return () => {
+			window.removeEventListener('pointerup', up, true);
+			window.removeEventListener('pointercancel', forgetPress, true);
+			window.removeEventListener('blur', clear);
+			document.removeEventListener('visibilitychange', hidden);
+			presses.clear();
+		};
+	});
+	function ignoreArrivingPress(event: MouseEvent) {
+		// detail is 0 for a click from the keyboard (Enter, Space): never ignored.
+		if (event.detail === 0) return;
+		const button = rowButtonAt(event.target);
+		const kind = rowButtonKind(button);
+		if (!kind) return;
+		const clickAt = eventTime(event);
+		const pointerId = 'pointerId' in event && typeof event.pointerId === 'number' ? event.pointerId : undefined;
+		const press = presses.take(pointerId, clickAt, button);
+		// A press that began on another button (Stop, before Talk took its
+		// place) is never a press on this one. Without a press of its own
+		// (assistive technology, a script) the click's time stands in. Every
+		// guard in the row judges this one time: the arrival guard, and Stop
+		// under a double tap on Send (isStrayStopPress).
+		const began = press ? (press.target === button ? press.at : null) : clickAt;
+		if (began !== null && !arrivals.ignores(kind, began, event.detail)
+			&& !(kind === 'stop' && isStrayStopPress(began))) return;
+		// The seat remembers it: a double tap's second press must not reach a
+		// button that has the seat by then (Stop back at a queue handoff).
+		arrivals.noteIgnored(kind, press?.at ?? clickAt);
+		event.preventDefault();
+		event.stopPropagation();
+	}
 
 	// Wrap: while the text fits on one line, attach and the circles sit inline
 	// with it; once it needs a second line they move to the controls row's two
@@ -765,6 +861,12 @@
 		getEditor: () => (editorRef?.getEditor()?.view.dom as HTMLElement | undefined) ?? null,
 		getIsland: () => islandRef,
 		getCircles: () => sendClusterRef,
+		// In a chat Stop can arrive or leave under a draft; the wrap is decided
+		// as if it were there, so that never moves the composer. The phone sets
+		// the seat (Stop and its gap); the desktop text has its own row.
+		getReserve: () => compact && !circles.includes('stop') && sendClusterRef
+			? parseFloat(getComputedStyle(sendClusterRef).getPropertyValue('--composer-stop-seat')) || 0
+			: 0,
 		isWrapped: () => composerWrapped,
 		setWrapped: (wrapped) => {
 			// The observer can run while the lazy editor is still mounting. Its
@@ -795,16 +897,9 @@
 
 	// Error display — shared between file upload errors and voice recording errors
 	let errorMessage = $state('');
-
-	// Wrong-project nudge: a new chat's draft names another registered project
-	// (and not the selected one). Offer a one-click switch before sending.
-	let dismissedMismatch = $state<string | null>(null);
-	// Without a project the nudge offers to add the one the draft names.
-	const projectMismatch = $derived(
-		!$activeSession.sessionId && plainTextValue.length >= 8
-			? detectProjectMismatch(plainTextValue, appData.current.projects, $activeSession.project)
-			: null
-	);
+	// This composer's dictation error (VoiceRecorder): shown with the notices
+	// above the box, never in the action row (#1631).
+	let dictationError = $state<string | null>(null);
 
 	// Autocomplete state
 	let showCommandAutocomplete = $state(false);
@@ -1130,6 +1225,20 @@
 	// window, and until the send has passed its checks, so the second click of
 	// a double click on Send cannot start a call.
 	const DOUBLE_ACTIVATION_MS = 500;
+	// With no seat held, Stop appears in a chat in the place Send just left
+	// (the circles sit at the row's end). Until this time, Stop ignores pointer
+	// presses: the second press of a double tap on Send. Armed only when a
+	// press on the Send circle sends in a chat while Stop is not shown (on the
+	// start screen the composer moves away as the chat opens), and ended by
+	// the next submit, and it holds only for the chat the send went to (a chat
+	// switch inside the window shows another chat's Stop); Stop's keyboard
+	// activation and its confirmation are never ignored. A Stop press is judged
+	// by when it began (ignoreArrivingPress, the row's one press time), so a
+	// stall right after the send cannot use up the window and a touch held
+	// past it still counts as made inside it.
+	let strayStop: { until: number; destination: SendDestination } | null = null;
+	const isStrayStopPress = (pressedAt: number) => !!strayStop && pressedAt < strayStop.until
+		&& stillAtDestination(strayStop.destination, composerPlace());
 	function holdSendCircle(): () => void {
 		sendCircleHolds += 1;
 		let windowOver = false;
@@ -1144,7 +1253,9 @@
 		return () => { sendSettled = true; end(); };
 	}
 
-	async function handleSubmit(compactBeforeSend = false) {
+	/** `sendPressAt`: when the Send circle was pressed in a chat with no Stop beside it. */
+	async function handleSubmit(compactBeforeSend = false, sendPressAt: number | null = null) {
+		strayStop = null;
 		if (pendingSubmit) {
 			if (!pendingSubmit.cleared) return;
 			// Nothing typed since the clear (a second Enter): the same action
@@ -1158,13 +1269,13 @@
 		// nothing gives it up.
 		const turn = activeSession.reserveSend();
 		try {
-			await submitInTurn(compactBeforeSend, turn);
+			await submitInTurn(compactBeforeSend, turn, sendPressAt);
 		} finally {
 			turn.cancel();
 		}
 	}
 
-	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation) {
+	async function submitInTurn(compactBeforeSend: boolean, turn: SendReservation, sendPressAt: number | null) {
 		if (pendingSubmit) {
 			// New chat or a switch during the wait: the words stay as the draft
 			// of the chat they were typed in (session-change effect).
@@ -1187,13 +1298,13 @@
 			releaseSendCircle();
 		};
 		try {
-			await submitComposer(compactBeforeSend, release, turn);
+			await submitComposer(compactBeforeSend, release, turn, sendPressAt);
 		} finally {
 			release();
 		}
 	}
 
-	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation) {
+	async function submitComposer(compactBeforeSend: boolean, composerCleared: () => void, turn: SendReservation, sendPressAt: number | null) {
 		if (!ownsComposer() || heldForCatalog || heldForSetup || (compacting && !compactBeforeSend)) return;
 		// The chat this message was typed in. The checks below and the store's
 		// restore wait can await; a New chat or chat switch in that window must
@@ -1291,6 +1402,7 @@
 		// sendMessage clears the composer before its first await, and holds the
 		// next send until the cold check has answered so two sends keep order.
 		// It sends in the place taken at the click (handleSubmit).
+		if (sendPressAt !== null) strayStop = { until: sendPressAt + DOUBLE_ACTIVATION_MS, destination };
 		await sendMessage(messageToSend, destination, compactBeforeSend, coldCheck, composerCleared, notesForm, turn);
 	}
 
@@ -1701,34 +1813,105 @@
 	// pinned to this directory, which is what makes the resulting @ref openable.
 	// Mirrors `CHAT_UPLOADS_DIRNAME` in app/core/session_modes.py.
 	const CHAT_UPLOADS_DIRNAME = 'chat-uploads';
+	/** How long an upload waits for the open chat's owner before refusing. */
+	const OWNER_WAIT_MS = 5000;
 
 	/**
 	 * Upload one composer attachment to whichever endpoint this lane owns.
 	 * Both call sites (the picker and the drop handler) go through here so the
 	 * two can never drift onto different targets.
 	 */
-	function uploadComposerFile(file: File): Promise<FileUploadResponse> {
-		if (projectLane !== 'chat' && !$activeSession.project && $activeSession.sessionId && $activeSession.projectV2Id) {
-			return api.uploadFile(`/sessions/${encodeURIComponent($activeSession.sessionId)}/upload`, file);
+	/**
+	 * Which compose a result belongs to (#1659): the chat it started in, or a New
+	 * chat together with the chat its own send turns it into. Taking the created
+	 * id is not a navigation (it keeps the init generation); opening another chat
+	 * or a fresh New chat is.
+	 */
+	type ComposeOrigin = { sessionId: string | null; navigation: number };
+	/** The chat each New-chat compose (by its navigation) took as its id. */
+	const composeAdoptions = new Map<number, string>();
+	function captureOrigin(): ComposeOrigin {
+		return { sessionId: $activeSession.sessionId, navigation: getInitGeneration() };
+	}
+	/**
+	 * Whether the composer still shows the compose the result started in. Once
+	 * it names a chat (from the start, or the New chat took its created id),
+	 * that chat open is that compose open, however it was reached: opened again
+	 * from the list, or left and come back to (both move the navigation count).
+	 * A New chat that has not taken an id is one slot: any New chat open is it,
+	 * as before #1659 (the count also moves on first landing and on pressing New
+	 * chat again, without the user leaving).
+	 */
+	function originIsOpen(origin: ComposeOrigin): boolean {
+		const chat = originChat(origin);
+		return chat !== null
+			? $activeSession.sessionId === chat
+			: $activeSession.sessionId === null;
+	}
+	/** The chat the origin names now: a New chat's created id once it took one. */
+	function originChat(origin: ComposeOrigin): string | null {
+		return origin.sessionId ?? composeAdoptions.get(origin.navigation) ?? null;
+	}
+
+	async function uploadComposerFile(file: File, origin: ComposeOrigin): Promise<FileUploadResponse> {
+		// The upload belongs to the chat it started in: never send it to the
+		// target of a chat opened meanwhile.
+		if (!originIsOpen(origin)) throw { detail: UPLOAD_CHAT_CHANGED };
+		// Where it goes follows who runs the chat (#1659): composerUploadTarget
+		// is the one decision. Owner not known yet: wait for the row or /live.
+		let target = composerUploadTarget($activeSession, projectLane);
+		const waitFor = originChat(origin);
+		if (target.kind === 'wait' && waitFor) {
+			const owner = await activeSession.waitForOwner(waitFor, OWNER_WAIT_MS);
+			if (owner === 'left') throw { detail: UPLOAD_CHAT_CHANGED };
+			if (owner !== 'known') throw { detail: UPLOAD_OWNER_UNKNOWN };
+			target = composerUploadTarget($activeSession, projectLane);
 		}
-		if (projectLane === 'chat') {
-			return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+		switch (target.kind) {
+			case 'chat':
+				return api.uploadFile('/workspace/upload', file, undefined, undefined, CHAT_UPLOADS_DIRNAME);
+			case 'session':
+				return api.uploadFile(`/sessions/${encodeURIComponent(target.sessionId)}/upload`, file);
+			case 'project':
+				return api.uploadFile(
+					`/projects/${target.project}/upload`,
+					file,
+					$activeSession.sessionId ?? undefined,
+					$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
+				);
+			case 'blocked':
+				throw { detail: target.reason };
+			default:
+				throw { detail: UPLOAD_OWNER_UNKNOWN };
 		}
-		return api.uploadFile(
-			`/projects/${$activeSession.project}/upload`,
-			file,
-			$activeSession.sessionId ?? undefined,
-			$activeSession.worktreeIntent === 'worktree' ? $activeSession.worktreeId ?? undefined : undefined
-		);
+	}
+
+	/**
+	 * Put what a composer action produced into the chat it started in: the open
+	 * editor while that chat is still open, otherwise that chat's stored draft,
+	 * never the editor of a chat opened meanwhile (#1659). After a sign-out or
+	 * account change it is dropped with the old account's composer.
+	 */
+	function placeInChat(origin: ComposeOrigin, intoEditor: () => void, doc: JSONContent) {
+		if (!ownsComposer()) return;
+		if (originIsOpen(origin)) {
+			intoEditor();
+			inputValue = editorRef?.getMessage() ?? '';
+		} else {
+			appendToChatDraft(originChat(origin), doc);
+		}
+	}
+
+	/** Place one uploaded file as a chip in the chat it was attached in. */
+	function placeUploadedChip(origin: ComposeOrigin, result: FileUploadResponse) {
+		const chip = { path: result.path, filename: result.filename, fullPath: result.full_path, size: result.size, type: 'file' as const };
+		placeInChat(origin, () => editorRef?.insertFileChip(chip), {
+			type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'fileChip', attrs: chip }] }]
+		});
 	}
 
 	function triggerFileUpload() {
-		const block = attachmentBlockReason(
-			$activeSession.project,
-			$activeSession.projectV2Id,
-			projectLane,
-			$activeSession.sessionId
-		);
+		const block = attachBlockNow();
 		if (block) {
 			errorMessage = block;
 			return;
@@ -1742,33 +1925,26 @@
 		if (!files || files.length === 0) return;
 		// A code-lane upload needs the project in the URL; a chat-lane one has no
 		// project by construction and must not be turned away for missing it.
-		if (attachmentBlockReason($activeSession.project, $activeSession.projectV2Id, projectLane, $activeSession.sessionId)) return;
+		if (attachBlockNow()) return;
 
-		isUploading = true;
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(files)) {
-				const result = await uploadComposerFile(file);
+				const result = await uploadComposerFile(file, origin);
 				if (result.filename !== file.name && !result.filename.startsWith(file.name.replace(/\.[^.]+$/, ''))) {
 					console.warn(`[Upload] Filename mismatch! Uploaded "${file.name}" but server returned "${result.filename}"`);
 				}
-				// Insert as inline chip at cursor position
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				// An inline chip at the cursor, in the chat it was attached in.
+				placeUploadedChip(origin, result);
 			}
-			// Update inputValue for state sync
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 			input.value = '';
 		}
 	}
@@ -1843,37 +2019,26 @@
 		// error the user cannot act on.
 		if (!attachSupported) return;
 
-		const dropBlock = attachmentBlockReason(
-			$activeSession.project,
-			$activeSession.projectV2Id,
-			projectLane,
-			$activeSession.sessionId
-		);
+		const dropBlock = attachBlockNow();
 		if (dropBlock) {
 			errorMessage = dropBlock;
 			return;
 		}
 
-		isUploading = true;
+		const origin = captureOrigin();
+		uploadsPending += 1;
 		errorMessage = '';
 		try {
 			for (const file of Array.from(e.dataTransfer.files)) {
-				const result = await uploadComposerFile(file);
-				editorRef?.insertFileChip({
-					path: result.path,
-					filename: result.filename,
-					fullPath: result.full_path,
-					size: result.size,
-					type: 'file'
-				});
+				const result = await uploadComposerFile(file, origin);
+				placeUploadedChip(origin, result);
 			}
-			inputValue = editorRef?.getMessage() ?? '';
 		} catch (error: unknown) {
 			console.error('Upload failed:', error);
 			const err = error as { detail?: string };
 			errorMessage = `Upload failed: ${err.detail || 'Unknown error'}`;
 		} finally {
-			isUploading = false;
+			uploadsPending -= 1;
 		}
 	}
 </script>
@@ -1919,21 +2084,12 @@
 			accept="*/*"
 		/>
 
-		{#if projectMismatch && dismissedMismatch !== projectMismatch.id}
-			<Banner
-				severity="info"
-				message={$activeSession.project
-					? `This looks like it's about ${projectMismatch.name}. Start it there instead?`
-					: `This looks like it's about ${projectMismatch.name}. Add it as this session's project?`}
-				action={{ label: $activeSession.project ? `Switch to ${projectMismatch.name}` : `Add ${projectMismatch.name} as project`, onClick: () => activeSession.setProject(projectMismatch.id, undefined, { user: true }) }}
-				dismissible
-				onDismiss={() => (dismissedMismatch = projectMismatch?.id ?? null)}
-			/>
-		{/if}
-
 		<!-- Error Message (upload errors, voice recording errors) -->
 		{#if errorMessage}
 			<Banner severity="error" message={errorMessage} dismissible onDismiss={() => (errorMessage = '')} />
+		{/if}
+		{#if dictationError}
+			<Banner severity="error" message={dictationError} dismissible onDismiss={clearSttError} />
 		{/if}
 
 		<!-- Agents cannot start here yet (no license, or no provider ready):
@@ -1968,7 +2124,11 @@
 
 		<form
 			use:composerOpenGesture
-			onsubmit={(e) => { e.preventDefault(); handleSubmit(); }}
+			onsubmit={(e) => {
+				e.preventDefault();
+				const sendCircle = compact && !!(e.submitter as HTMLElement | null)?.classList.contains('send-btn') && !circles.includes('stop');
+				handleSubmit(false, sendCircle ? performance.now() : null);
+			}}
 			onpointerdown={handleComposerPointerDown}
 		>
 			<!-- The box: the text across the top, and under it attach, the controls
@@ -2018,7 +2178,7 @@
 							bind:this={fileAutocompleteRef}
 							inputValue={plainTextValue}
 							projectId={mentionProjectId}
-							subagentProjectId={$activeSession.project || undefined}
+							subagentProjectId={subagentProjectId}
 							profileId={$activeSession.profile}
 							worktreeId={mentionWorktreeId}
 							sessionId={$activeSession.sessionId ?? undefined}
@@ -2053,13 +2213,14 @@
 						/>
 					</div>
 
-					<!-- The circles: dictate, then the send slot, then Stop. Talk holds
-					     the slot while there is nothing to send; Send takes it once
-					     there is. Stop must remain reachable whenever session work is
-					     live, including with a draft; Send can queue that draft
+					<!-- The circles: dictate, then Talk, Send or the spinner, then Stop.
+					     Talk shows while there is nothing to send; Send once there is.
+					     Stop must remain reachable whenever session work is live,
+					     including with a draft; Send can queue that draft
 					     independently. StopButton confirms first when background
-					     agents are live. -->
-					<div class="send-cluster" bind:this={sendClusterRef}>
+					     agents are live. A circle that is not shown takes no room:
+					     the others move over (owner decision, 2026-11-14). -->
+					<div class="send-cluster" bind:this={sendClusterRef} onpointerdowncapture={notePress} onclickcapture={ignoreArrivingPress}>
 						{@render recorder()}
 						<PromptStashMenu
 							entries={$promptStash}
@@ -2068,7 +2229,6 @@
 							onRestore={restoreStashed}
 							onDelete={deleteStashed}
 						/>
-						<span class="send-slot">
 						{#if circles.includes('busy')}
 							<!-- Creating worktree, or a send held for the project catalog or a project setup - show spinner -->
 							{#if heldForCatalog}<span class="sr-only" role="status">Loading projects…</span>{/if}
@@ -2097,19 +2257,11 @@
 						     voice availability is read once and a starting call is
 						     never torn down by a keystroke. -->
 						<span class="talk-slot" hidden={!showTalk}>{@render talk()}</span>
-						</span>
-						<!-- The empty Stop seat is held only inside a chat, where work
-						     can start and stop under the reader. The empty-chat hero
-						     has no work to stop, so its circles sit flush right. -->
-						{#if compact || circles.includes('stop')}
-						<span class="stop-slot">
 						{#if circles.includes('stop')}
 							<StopButton
 								activeTasks={$activeSession.activeTasks}
 								onStop={() => { composerSuggestion.invalidate(); activeSession.stopGeneration(); }}
 							/>
-						{/if}
-						</span>
 						{/if}
 					</div>
 				</div>
@@ -2176,6 +2328,7 @@
 		disabled={!$anyCredential || isUploading}
 		bind:isRecording
 		bind:isTranscribing
+		bind:error={dictationError}
 	/>
 {/snippet}
 
@@ -2381,17 +2534,6 @@
 		align-self: center;
 		gap: 6px;
 		flex-shrink: 0;
-	}
-
-	/* Stop arriving/leaving must not change the editor's width (and trigger a
-	   second wrapped layout), nor move Send under the reader's finger. Empty
-	   slots are layout only: no disabled or invisible focusable buttons. */
-	.send-slot, .stop-slot {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		min-width: var(--composer-action-size, 32px);
-		min-height: var(--composer-action-size, 32px);
 	}
 
 	/* Only one of Talk and Send shows; the hidden one stays mounted. */

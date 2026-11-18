@@ -20,16 +20,12 @@ export interface AntigravityAuthModeMeta {
 	headless: boolean;
 	/** Rows of this kind run only in chats the owner types into, unless lifted. */
 	guarded: boolean;
-	/** Show Google's terms warning before and after connecting. */
-	warning: boolean;
 }
 
 export interface AntigravityMeta {
 	provider_type: 'antigravity';
 	capability: string;
 	auth_modes: AntigravityAuthModeMeta[];
-	warning: string;
-	terms_url: string;
 	dashboard_url: string;
 	guard_default: boolean;
 	default_models: ProviderModelEntry[];
@@ -79,7 +75,9 @@ export interface AntigravityProviderStatus extends AntigravityGuardView {
 export interface AntigravityLogin {
 	login_id?: string | null;
 	provider_id?: string;
-	state: 'awaiting_code' | 'failed' | 'not_installed' | 'signed_in';
+	/** `completing`: a code is being checked (any tab). `ended`: from the
+	 *  state read only, the sign-in was finished, cancelled or expired. */
+	state: 'awaiting_code' | 'completing' | 'ended' | 'failed' | 'not_installed' | 'signed_in';
 	url?: string | null;
 	message?: string | null;
 }
@@ -109,6 +107,9 @@ export const setAntigravityGuard = (id: string, allowUnattended: boolean): Promi
 export const startAntigravityLogin = (id: string): Promise<AntigravityLogin> => api.post(`${BASE}/providers/${id}/login`);
 export const completeAntigravityLogin = (id: string, loginId: string, code: string): Promise<AntigravityLogin> =>
 	api.post(`${BASE}/providers/${id}/login/${loginId}/complete`, { code });
+/** One sign-in's state, from the worker's memory: no agent run, cheap to poll (#1533). */
+export const getAntigravityLogin = (id: string, loginId: string): Promise<AntigravityLogin> =>
+	api.get(`${BASE}/providers/${id}/login/${loginId}`);
 export const cancelAntigravityLogin = (id: string, loginId: string): Promise<unknown> =>
 	api.delete(`${BASE}/providers/${id}/login/${loginId}`);
 export const signOutAntigravity = (id: string): Promise<{ state: 'signed_out' }> =>

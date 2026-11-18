@@ -424,15 +424,19 @@
 }
 
 /* Preference and collection pages scroll in the same outer frame. Inner
-   max-widths no longer choose whether the column loses a scrollbar's width. */
+   max-widths no longer choose whether the column loses a scrollbar's width.
+   Who scrolls: .settings-viewport, always. The one exception is an open detail
+   beside its list (split, below); stacked or one pane at a time, the detail
+   scrolls in the viewport like everything else. */
 .settings-shell .settings-viewport > .st-content { overflow: visible; flex: 1 0 auto; }
 .settings-shell .settings-viewport :is(.st-pscroll, .st-lscroll, .st-dpane) { overflow: visible; }
 .settings-shell .settings-viewport .st-coll { min-height: 100%; }
 .settings-shell .settings-viewport .st-lcol { min-height: 0; }
 /* A split collection shares that outer scroller with its list, so a row picked
    far down a long list must not open a detail scrolled out of view above it:
-   the open detail stays pinned while the list scrolls beneath it. */
-.settings-shell .settings-viewport .st-coll:not([data-replace]) > .st-dpane {
+   the open detail stays pinned while the list scrolls beneath it. Stacked
+   (a phone) shows the detail alone, so it needs no scroller of its own. */
+.settings-shell:not([data-stacked]) .settings-viewport .st-coll:not([data-replace]) > .st-dpane {
 	position: sticky;
 	top: 0;
 	align-self: start;

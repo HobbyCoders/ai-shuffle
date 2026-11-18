@@ -6,7 +6,6 @@ retired; watches own all background observation and its permission provenance.
 
 from __future__ import annotations
 
-import json
 import logging
 from contextlib import nullcontext
 from typing import Any
@@ -20,7 +19,6 @@ from app.db.base import get_db, row_to_dict
 
 logger = logging.getLogger(__name__)
 
-AVATAR_PRESETS = store.AVATAR_PRESETS
 AGENT_ID = store.AGENT_ID
 # Mixed-version tombstone only: never seed a built-in agent or hidden home.
 
@@ -120,48 +118,36 @@ def on_network_applied(touched):
 
 
 def agent_identities() -> list[dict[str, Any]]:
-    # ProfileConfig's normal typed serializer deliberately does not contain
-    # assistant presentation metadata. This owner-only projection uses the
-    # SAME unified agent records/IDs, never a parallel agent registry.
-    result = []
-    for agent in database.get_all_profiles():
-        avatar = (agent.get("config") or {}).get("avatar_id", "robot")
-        result.append({"id": agent["id"], "name": agent["name"],
-                       "avatar_id": avatar if avatar in AVATAR_PRESETS else "robot",
-                       # Old clients read this key; no dedicated agent exists.
-                       "dedicated": False})
-    return result
+    # Owner-only projection of agent names over the SAME unified agent
+    # records/IDs, never a parallel agent registry.
+    return [{"id": agent["id"], "name": agent["name"],
+             # Old clients read this key; no dedicated agent exists.
+             "dedicated": False}
+            for agent in database.get_all_profiles()]
 
 
 def update_agent_identity(
-    agent_id: str, name: str | None = None, avatar_id: str | None = None,
-    _conn: Any = None,
+    agent_id: str, name: str | None = None, _conn: Any = None,
 ) -> dict[str, Any]:
-    if avatar_id is not None and avatar_id not in AVATAR_PRESETS:
-        raise ValueError("Unknown avatar preset")
     if name is not None and (not name.strip() or len(name) > 80 or any(ord(c) < 32 for c in name)):
         raise ValueError("Agent name must be 1-80 printable characters")
-    # Lock/read/merge to preserve custom prompts, models, tools, skills and
-    # unknown future config keys; a stale client must not replace the config.
+    # Only the name column changes: custom prompts, models, tools, skills and
+    # unknown config keys are never rewritten by an identity edit.
     with (nullcontext(_conn) if _conn is not None else get_db()) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM agents WHERE id=%s FOR UPDATE", (agent_id,))
+        cursor.execute("SELECT id, name, is_builtin FROM agents WHERE id=%s FOR UPDATE", (agent_id,))
         agent = row_to_dict(cursor.fetchone())
         if not agent:
             raise ValueError("Agent does not exist")
+        if name is None:
+            # Nothing to change (an older client sending only the retired
+            # avatar): answer with the current name and write nothing.
+            return {"id": agent_id, "name": agent["name"]}
         if agent["is_builtin"]:
             raise ValueError("Copy a built-in agent before customizing its identity")
-        config = agent.get("config") or {}
-        if isinstance(config, str):
-            config = json.loads(config)
-        if avatar_id is not None:
-            config["avatar_id"] = avatar_id
-        updated_name = name.strip() if name is not None else agent["name"]
-        cursor.execute(
-            "UPDATE agents SET name=%s,config=%s,updated_at=NOW() WHERE id=%s",
-            (updated_name, json.dumps(config), agent_id),
-        )
-    return {"id": agent_id, "name": updated_name, "avatar_id": config.get("avatar_id", "robot")}
+        updated_name = name.strip()
+        cursor.execute("UPDATE agents SET name=%s,updated_at=NOW() WHERE id=%s", (updated_name, agent_id))
+    return {"id": agent_id, "name": updated_name}
 
 
 def session_stopped(session_id):

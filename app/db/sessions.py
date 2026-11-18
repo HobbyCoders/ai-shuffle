@@ -445,10 +445,13 @@ def _session_list_scope(
         base_query += f" AND COALESCE({col_prefix}hidden, FALSE) = FALSE"
         base_query += f" AND COALESCE({col_prefix}is_worker, FALSE) = FALSE"
 
+    # A snoozed chat is settled with a wake time: it has its own list.
     if membership == "active":
         base_query += f" AND {col_prefix}is_active = TRUE"
     elif membership == "settled":
-        base_query += f" AND COALESCE({col_prefix}is_active, FALSE) = FALSE"
+        base_query += f" AND COALESCE({col_prefix}is_active, FALSE) = FALSE AND {col_prefix}snoozed_until IS NULL"
+    elif membership == "snoozed":
+        base_query += f" AND COALESCE({col_prefix}is_active, FALSE) = FALSE AND {col_prefix}snoozed_until IS NOT NULL"
     if device_id:
         base_query += f" AND {col_prefix}instance_id = {_ph}"
         params.append(device_id)
@@ -847,7 +850,9 @@ def update_session(
         updates.append(f"status = {_ph}")
         values.append("active" if status == "archived" else status)
         if status == "archived":
+            # The legacy archive form is a settle: it also ends a snooze.
             updates.append("is_active = FALSE")
+            updates.append("snoozed_until = NULL")
     # Truthiness (not `!= 0`) on purpose: a None increment passes `!= 0` and
     # emits `col = col + NULL`, which NULLs the column for good — that is what
     # broke GET /api/v1/sessions/cursor (pydantic float validation on
@@ -1344,7 +1349,8 @@ def set_session_project(session_id: str, project_id: str) -> Optional[SessionRow
 
 
 def attach_session_project(
-    session_id: str, project_id: str, project_v2_id: Optional[str]
+    session_id: str, project_id: str, project_v2_id: Optional[str],
+    owned: Optional[Callable[[dict], bool]] = None,
 ) -> Optional[SessionRow]:
     """Give a no-project session its project, once (issue #371 step 4).
 
@@ -1364,15 +1370,20 @@ def attach_session_project(
     The write holds the session row lock that turn admission takes
     (``turns.enqueue_turn``) and raises :class:`AttachBusy`, writing nothing,
     while the session has a turn queued or live. No turn can be admitted
-    between that check and the write.
+    between that check and the write. ``owned`` re-checks, under the same
+    lock, that this worker still runs the row: a hand-off that committed
+    after the caller's own check raises :class:`AttachMoved`.
     """
     _ph = ph()
     now = datetime.now(timezone.utc).isoformat()
     with get_db() as conn:
         cursor = get_cursor(conn)
-        cursor.execute(f"SELECT id FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
-        if cursor.fetchone() is None:
+        cursor.execute(f"SELECT * FROM sessions WHERE id = {_ph} FOR UPDATE", (session_id,))
+        locked = cursor.fetchone()
+        if locked is None:
             return None
+        if owned is not None and not owned(row_to_dict(locked)):
+            raise AttachMoved(session_id)
         cursor.execute(
             f"SELECT DISTINCT state FROM turns WHERE session_id = {_ph} AND state IN "
             "('queued','running','interrupting','draining','parked')",
@@ -1388,6 +1399,11 @@ def attach_session_project(
             (project_id, project_v2_id, now, session_id),
         )
         return row_to_dict(cursor.fetchone())
+
+
+class AttachMoved(Exception):
+    """The row moved to another worker, so :func:`attach_session_project`
+    wrote nothing."""
 
 
 class AttachBusy(Exception):
@@ -2127,26 +2143,33 @@ def _cleanup_working_set_ref(session_id: str, *, row: Optional[dict] = None) -> 
 
 
 def set_session_active(
-    session_id: str, is_active: bool, archived: Optional[bool] = None
+    session_id: str, is_active: bool, archived: Optional[bool] = None,
+    snoozed_until: Optional[str] = None,
 ) -> Optional[SessionRow]:
     """Set the is_active flag (and optionally the archive state) for a session
     and return the updated session. Archiving always leaves Active; restoring
     only touches a row that is actually archived.
 
+    ``snoozed_until`` (canonical ISO UTC) with ``is_active=False`` snoozes the
+    chat; any other change clears a snooze.
+
     On a networked worker a plain membership change is shared sidebar state,
     committed independently of execution ownership."""
     from app.network import engine, session_active
     is_active = False if archived else is_active
+    if is_active or archived:
+        snoozed_until = None
     if engine.context() is not None:
-        return session_active.write_shared(session_id, is_active)
+        return session_active.write_shared(session_id, is_active, snoozed_until)
     _ph = ph()
     with get_db() as conn:
         cursor = get_cursor(conn)
         status_sql, params = archive_status_sql(archived, _ph)
         cursor.execute(
-            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}{status_sql}
+            f"""UPDATE sessions SET is_active = {_ph}, snoozed_until = {_ph}, updated_at = {_ph}{status_sql}
                WHERE id = {_ph} RETURNING *""",
-            (False if archived else is_active, datetime.now(timezone.utc).isoformat(), *params, session_id)
+            (False if archived else is_active, snoozed_until, datetime.now(timezone.utc).isoformat(),
+             *params, session_id)
         )
         return row_to_dict(cursor.fetchone())
 
@@ -2173,7 +2196,7 @@ def set_sessions_active(
     with get_db() as conn:
         cursor = get_cursor(conn)
         cursor.execute(
-            f"""UPDATE sessions SET is_active = {_ph}, updated_at = {_ph}{status_sql}
+            f"""UPDATE sessions SET is_active = {_ph}, snoozed_until = NULL, updated_at = {_ph}{status_sql}
                WHERE id IN ({marks}) RETURNING *""",
             (False if archived else is_active, datetime.now(timezone.utc).isoformat(),
              *status_params, *session_ids)
@@ -2196,6 +2219,9 @@ def get_sessions_by_ids(session_ids: List[str]) -> Dict[str, SessionRow]:
 def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[SessionRow]:
     """Settled (inactive) list-visible top-level rows, newest first.
 
+    A snoozed chat is left out: it is in the sidebar's Snoozed list, and a
+    sweep over "all settled" must not cancel the owner's wake time.
+
     A coarse prefilter for bulk sidebar management. ``api_user_id`` follows
     ``get_sessions``: an empty string selects admin rows (NULL). Callers still
     apply the per-row visibility, owner and project checks ListSessions uses.
@@ -2203,7 +2229,7 @@ def get_settled_sessions(api_user_id: str, limit: int, offset: int = 0) -> List[
     _ph = ph()
     inst_sql, params = _instance_filter(_ph, "")
     query = (f"SELECT * FROM sessions WHERE 1=1{inst_sql}"
-             " AND (is_active IS NULL OR is_active = FALSE)"
+             " AND (is_active IS NULL OR is_active = FALSE) AND snoozed_until IS NULL"
              " AND COALESCE(hidden, FALSE) = FALSE AND COALESCE(is_worker, FALSE) = FALSE"
              " AND parent_session_id IS NULL")
     params = list(params)

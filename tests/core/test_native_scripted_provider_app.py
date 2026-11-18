@@ -689,6 +689,39 @@ async def test_retry_after_a_reply_cut_off_by_a_provider_error_answers_the_promp
     assert len(provider.requests) == 2
     expected = deepcopy(provider.requests[0].body)
     content = expected["messages"][-1]["content"]
-    cache = content[-1].pop("cache_control")
-    content.append({"type": "text", "text": "\n\n" + clock_note, "cache_control": cache})
+    # Resume adds a request-only suffix. The cache marker stays on the
+    # unchanged history prefix, before the fresh note.
+    content.append({"type": "text", "text": clock_note})
     assert provider.requests[1].body == expected
+
+
+@pytest.mark.asyncio
+async def test_native_retry_with_app_and_hook_context(monkeypatch, tmp_path, provider):
+    provider.script(
+        [Messages.start(), *Messages.text_block(0, "Partial"),
+         Messages.error("overloaded_error", "Overloaded")],
+        Messages.text("The full answer"),
+    )
+    async with NativeRun(monkeypatch, tmp_path, provider) as run:
+        from fluid.hooks.bus import TURN_START, HookBus, HookDecision
+        prompts = []
+        hooks = HookBus()
+
+        async def capture(event, payload):
+            prompts.append(payload["prompt"])
+            return HookDecision(action="allow", additional_context="from the turn hook")
+
+        hooks.on(TURN_START, capture)
+        monkeypatch.setattr(run.adapter.engine, "hooks", hooks)
+        monkeypatch.setattr(run.adapter, "_turn_context_note", lambda *args: "from the app")
+        failed = await run.turn("question")
+        assert failed[-1].is_error
+        retried = await _resume(run)
+        stored = await run.stored()
+    assert not retried[-1].is_error
+    assert prompts == ["question", "question"]
+    assert stored[0].prompt_text() == "question"
+    for request in provider.requests:
+        blocks = request.body["messages"][0]["content"]
+        text = "".join(b["text"] for b in blocks if b["type"] == "text")
+        assert "from the app" in text and "from the turn hook" in text

@@ -13,6 +13,10 @@
 //   node tests/journeys/select.mjs --ci --previous-map <f>  the base's map.json: an edited map then
 //                                                   selects what either map names for the other
 //                                                   changed files, instead of every journey
+//   node tests/journeys/select.mjs --ci --before-queue  a pull request that a merge queue checks
+//                                                   again before main: only the journeys a rule
+//                                                   names; the `all` rules and the unmapped
+//                                                   fallback are left to the queue's run
 //   node tests/journeys/select.mjs --check          validate map.json: every glob matches a
 //                                                   tracked file, every journey is reachable
 //   node tests/journeys/select.mjs --check --map <path>  validate another map against this checkout
@@ -146,6 +150,18 @@ export function selectForCi(files, map = loadMap(), journeys = allJourneys(), pr
 	};
 }
 
+/**
+ * What a pull request runs when a merge queue checks the merged result again
+ * before main moves: the journeys a rule names for the changed files, and no
+ * more. The `all` rules and the unmapped fallback are left to the queue's run,
+ * which selects with selectForCi. Every journey the change needs still passes
+ * before main moves, once per pull request instead of once per push.
+ */
+export function selectBeforeQueue(files, map = loadMap(), journeys = allJourneys(), previousMap = null) {
+	const named = (each) => each && { ...each, all: [], unmapped_runs_all: undefined };
+	return selectForCi(files, named(map), journeys, named(previousMap));
+}
+
 function git(args) {
 	return execFileSync('git', args, { cwd: REPO, encoding: 'utf8' });
 }
@@ -208,7 +224,8 @@ if (process.argv[1] && relative(process.argv[1], fileURLToPath(import.meta.url))
 					: changedFiles(baseAt >= 0 ? args[baseAt + 1] : 'origin/main');
 		const previousAt = args.indexOf('--previous-map');
 		const previous = previousAt >= 0 ? JSON.parse(readFileSync(args[previousAt + 1], 'utf8')) : null;
-		const selected = flag('--ci') ? selectForCi(files, loadMap(), allJourneys(), previous) : selectJourneys(files);
+		const forCi = flag('--before-queue') ? selectBeforeQueue : selectForCi;
+		const selected = flag('--ci') ? forCi(files, loadMap(), allJourneys(), previous) : selectJourneys(files);
 		const result = { ...selected, all: selected.journeys.length === allJourneys().length };
 		if (flag('--json')) console.log(JSON.stringify({ ...result, files }, null, 2));
 		else if (flag('--why')) {

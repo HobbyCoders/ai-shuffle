@@ -67,10 +67,11 @@ RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
 HOSTED_SHARDS = 18
 EVERY_JOURNEY = "*"
+QUEUE_EVENT = "merge_group"  # GitHub's merge queue; scripts/ci/proven.py
 SELECTOR = JOURNEYS / "select.mjs"
 SUFFIX = ".journey.mjs"
 JOURNEY_MAP = "frontend/tests/journeys/map.json"
-# Clean shards across six main-suite runs on 2026-11-06 had 7–14s step overhead.
+# Clean shards across six CI runs on 2026-11-06 had 7–14s step overhead.
 # Keep the existing setup, retry and teardown allowances. Planning also reserves
 # the 120s error allowed by the independent hosted calibration: point estimates
 # must not spend that uncertainty out of the full retry/teardown reserves.
@@ -262,38 +263,67 @@ def base_journey_map(root: Path = ROOT, base: str = "HEAD^1") -> str | None:
 
 
 def last_green_main(root: Path = ROOT) -> str | None:
-    """The newest ancestor of HEAD that main-suite passed on; None if unknown.
+    """The nearest ancestor of HEAD that CI passed on; None if unknown.
 
-    Every journey held there: by running, or because that run narrowed the same
-    way from an older green commit. Needs main's history fetched.
+    CI passed there on main or in the merge queue for main. Every journey held
+    there: by running, or because that run narrowed the same way from an older
+    green commit. Needs main's history fetched.
     """
     from scripts.ci import proven
 
-    where = proven.environment()
+    where = proven.history_environment()
     if where is None:
         return None
     try:
         head = _git(root, "rev-parse", "HEAD").strip()
-        for commit in proven.green_main_commits(*where):
-            if commit != head and subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
-                                                 cwd=root, capture_output=True, timeout=60).returncode == 0:
-                return commit
+        green = dict.fromkeys([*proven.green_main_commits(*where), *proven.green_queue_commits(*where)])
+        ancestors = [commit for commit in green
+                     if commit != head and subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
+                                                          cwd=root, capture_output=True, timeout=60).returncode == 0]
+        # The one with the fewest commits after it: the lists are in run order, not history order.
+        return min(ancestors, key=lambda commit: int(_git(root, "rev-list", "--count", f"{commit}..HEAD")),
+                   default=None)
     except Exception as error:  # noqa: BLE001 - not knowing means running every journey
         print(f"[ci] last green main commit unknown: {error}", file=sys.stderr)
     return None
 
 
+def merge_queue_follows() -> bool:
+    """True when this pull request can reach main only through main's merge queue.
+
+    The queue then runs the full selection on the merged result before main
+    moves, so the pull request's own runs keep to the journeys a rule names.
+    Any doubt answers False: the pull request runs the full selection itself.
+    """
+    from scripts.ci import proven
+
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not repository or not token or not path:
+        return False
+    try:
+        base = json.loads(Path(path).read_text(encoding="utf-8"))["pull_request"]["base"]["ref"]
+        return base == "main" and proven.merge_queue_guards(repository, token, base)
+    except Exception as error:  # noqa: BLE001 - not knowing means the full selection
+        print(f"[ci] merge queue unknown, the full selection runs: {error}", file=sys.stderr)
+        return False
+
+
 def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path = JOURNEYS,
-                    previous_map: str | None = None) -> list[str] | None:
+                    previous_map: str | None = None, before_queue: bool = False) -> list[str] | None:
     """The journey files those changed files need; None for all, or when unsure.
 
     ``previous_map`` is the base's map.json text. With it an edited map selects
     what either map names for the other files; without it an edit runs them all.
+    ``before_queue`` keeps to the journeys a rule names (select.mjs --before-queue).
     """
     with tempfile.TemporaryDirectory() as temporary:
         listing = Path(temporary) / "changed-files.txt"
         listing.write_text("\n".join(files) + "\n", encoding="utf-8")
         command = ["node", str(selector), "--ci", "--json", "--files-from", str(listing)]
+        if before_queue:
+            command.append("--before-queue")
         if previous_map is not None:
             previous = Path(temporary) / "base-map.json"
             previous.write_text(previous_map, encoding="utf-8")
@@ -317,25 +347,36 @@ def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path
 def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str] | None, str]:
     """(journey files or None for all, why) for a workflow event.
 
-    A pull request runs what its merge changes. A push to main runs what
-    changed since the last commit main-suite passed on. Both narrow only when
-    the diff and the selection are readable; schedules, dispatches and other
-    callers run all.
+    A pull request runs what its merge changes. A push to main and the merge
+    queue's run of a group headed for main run what changed since the last
+    commit CI passed on. All narrow only when the diff and the selection are
+    readable; schedules, dispatches and other callers run all.
+
+    When main moves only through a merge queue, the queue's run is the one
+    that selects in full, and a pull request keeps to the journeys a rule
+    names for its files: the whole suite then runs once per pull request,
+    before main moves, not on every push to it.
     """
+    before_queue = False
     if event == "pull_request":
         base, files, what = "HEAD^1", pull_request_files(root), "the pull request's merge diff"
-    elif event == "push":
+        before_queue = files is not None and merge_queue_follows()
+    elif event in ("push", QUEUE_EVENT):
         base = last_green_main(root)
         if base is None:
-            return None, "every journey: no earlier commit that main-suite passed on was found"
-        files, what = files_since(base, root), f"the changes since {base[:12]}, which main-suite passed on"
+            return None, "every journey: no earlier commit that CI passed on was found"
+        files, what = files_since(base, root), f"the changes since {base[:12]}, which CI passed on"
     else:
         return None, f"every journey: a {event or 'local'} run is not narrowed"
     if files is None:
         return None, f"every journey: {what} could not be read"
-    only = select_journeys(files, previous_map=base_journey_map(root, base) if JOURNEY_MAP in files else None)
+    only = select_journeys(files, previous_map=base_journey_map(root, base) if JOURNEY_MAP in files else None,
+                           before_queue=before_queue)
     if only is None:
         return None, f"every journey: {len(files)} changed files need the whole suite, or selection failed"
+    if before_queue:
+        return only, (f"{len(only)} of the journeys are named for the {len(files)} files in {what}; "
+                      "the merge queue runs the full selection before main moves")
     return only, f"{len(only)} of the journeys cover the {len(files)} files in {what}"
 
 
@@ -346,19 +387,27 @@ def selection_key(only: list[str] | None) -> str:
     return hashlib.sha256("\n".join(sorted(only)).encode()).hexdigest()[:16]
 
 
-def already_proven(key: str, root: Path = ROOT) -> bool:
-    """True on a push to main when a pull request passed this selection on these exact files."""
+def already_proven(key: str, root: Path = ROOT) -> str | None:
+    """On a push to main, what already passed this selection; None when it has to run.
+
+    The merge queue's run on this very commit, or a pull request that passed
+    the same selection on these exact files.
+    """
     from scripts.ci import proven
 
     where = proven.environment()
     if where is None:
-        return False
+        return None
     try:
+        if proven.queue_passed(*where):
+            return "the merge queue already passed its journeys on this very commit"
         tree = proven.head_tree(root)
-        return any(proven.exists(proven.record_name("journeys", tree, name), *where, area="journeys", tree=tree) for name in dict.fromkeys((key, "all")))
+        if any(proven.exists(proven.record_name("journeys", tree, name), *where, area="journeys", tree=tree)
+               for name in dict.fromkeys((key, "all"))):
+            return "a pull request already passed them on these exact files"
     except Exception as error:  # noqa: BLE001 - a failed lookup means running the journeys
         print(f"[ci] pass-record lookup failed: {error}", file=sys.stderr)
-        return False
+    return None
 
 
 def matrix(shards: int) -> int:
@@ -366,8 +415,9 @@ def matrix(shards: int) -> int:
     key = selection_key(only)
     buckets = plan(shards) if only is None else plan(shards, only=only)
     numbers = [index for index, bucket in enumerate(buckets, 1) if bucket]
-    if numbers and already_proven(key):
-        numbers, why = [], f"none: a pull request already passed them on these exact files ({why})"
+    proven_by = already_proven(key) if numbers else None
+    if proven_by:
+        numbers, why = [], f"none: {proven_by} ({why})"
     print(f"[ci] UI journeys: {why}", file=sys.stderr, flush=True)
     _write_summary(f"\n**UI journeys for this run:** {why}.\n")
     # stdout is the step's output file: exactly these three lines.
@@ -491,7 +541,7 @@ def stale_journeys(run_id: int, changed: list[str], modules: dict[str, set[str]]
 
 
 def _run_revision(run_id: int, repo: str) -> str:
-    """The checked-out revision of one clean green main-suite run; refuses any other run."""
+    """The checked-out revision of one clean green CI run; refuses any other run."""
     state = json.loads(subprocess.check_output(
         ["gh", "run", "view", str(run_id), "--repo", repo, "--json",
          "status,conclusion,attempt,headSha,event,headBranch,workflowName"],
@@ -502,11 +552,15 @@ def _run_revision(run_id: int, repo: str) -> str:
         raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
                          f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
                          "Choose a clean first-attempt run.")
-    # main-suite push jobs check out headSha. PR runs check out a merge revision
-    # the run's headSha does not name, so their source is not recorded.
-    if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
-            "push", "main", "main-suite"):
-        raise ValueError(f"Run {run_id} must be a push to main from main-suite; "
+    # CI push jobs check out headSha, and so does the merge queue's run (with
+    # a queue the journeys run there, not on the push that follows). PR runs
+    # check out a merge revision the run's headSha does not name, so their
+    # source is not recorded.
+    event, branch = state.get("event"), state.get("headBranch")
+    on_main = event == "push" and branch == "main"
+    queued = event == QUEUE_EVENT and isinstance(branch, str) and branch.startswith("gh-readonly-queue/main/")
+    if not (on_main or queued) or state.get("workflowName") != "CI":
+        raise ValueError(f"Run {run_id} must be a push to main, or the merge queue's run for main, from CI; "
                          "PR/other runs do not establish the checkout revision. "
                          "No weights were replaced.")
     revision = state.get("headSha")
@@ -541,7 +595,7 @@ def _run_samples(run_id: int, repo: str) -> list[tuple[str, float, int]]:
 
 
 def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path | None = None) -> None:
-    """Median hosted seconds per journey file from clean green first-attempt main-suite runs.
+    """Median hosted seconds per journey file from clean green first-attempt CI runs.
 
     A sample counts only when the code it timed is still what this checkout
     runs: the journey file and the modules it imports are unchanged since the
@@ -598,7 +652,7 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
     counts.update({name: old_counts[name] for name in kept})
     data = {
         "_comment": "Median hosted journey seconds, excluding instance setup/teardown. Refresh from "
-                    "green main-suite push-to-main runs: python -m scripts.devloop.ci refresh-weights "
+                    "green CI push-to-main runs: python -m scripts.devloop.ci refresh-weights "
                     "RUN_ID [RUN_ID ...] [--out PATH] in a checkout of the runs' revision. Only samples whose "
                     "workload is unchanged and whose case count matches the file count; a file with no "
                     "such sample keeps its entry. seconds_per_case is the median "

@@ -14,8 +14,13 @@
  *  - the browser comes back online or the page is restored from bfcache,
  *  - live sync reconnects after a gap (a worker update restarts the server),
  *  - a lazy import fails (`vite:preloadError`, or a caller's report).
+ *
+ * SvelteKit 3 also asks by itself when the window gains focus or becomes
+ * visible. That only refreshes its own `updated.current`; nothing here reads
+ * it, and a check already in flight is shared, so the monitor below still
+ * decides what a newer build does.
  */
-import { version } from '$app/environment';
+import { version } from '$app/env';
 import { updated } from '$app/state';
 import { get } from 'svelte/store';
 import { liveBanners, notify } from '$lib/stores/notifications';

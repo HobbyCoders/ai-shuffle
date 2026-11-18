@@ -148,3 +148,34 @@ describe('appData.setSessionActive dismisses prompts on settle', () => {
 		expect(mocks.dismissSettledPrompts).not.toHaveBeenCalled();
 	});
 });
+
+describe('appData.setSessionActive with a snooze', () => {
+	it('loads the snoozed chats as their own list', async () => {
+		await appData.loadSessions();
+		const urls = mocks.get.mock.calls.map(([url]) => String(url));
+		expect(urls.some((url) => url.includes('membership=snoozed'))).toBe(true);
+		expect(urls.some((url) => url.includes('membership=active'))).toBe(true);
+	});
+
+	it('settles with the wake time at once and keeps the waits that can wake it', async () => {
+		await appData.loadSessions();
+		const until = '2030-01-01T09:00:00.000Z';
+		const pending = appData.setSessionActive('session-b', false, until);
+		const row = appData.current.sessions.find((s) => s.id === 'session-b');
+		expect(row?.is_active).toBe(false);
+		expect(row?.snoozed_until).toBe(until);
+		await pending;
+		expect(mocks.patchSession).toHaveBeenCalledWith('session-b', false, until);
+		expect(mocks.snapshotPrompts).not.toHaveBeenCalled();
+		expect(mocks.dismissSettledPrompts).not.toHaveBeenCalled();
+	});
+
+	it('clears the wake time when the chat goes back to Active', async () => {
+		await appData.loadSessions();
+		const pending = appData.setSessionActive('session-b', true, '2030-01-01T09:00:00.000Z');
+		expect(appData.current.sessions.find((s) => s.id === 'session-b')?.snoozed_until).toBeNull();
+		await pending;
+		expect(mocks.patchSession).toHaveBeenCalledWith('session-b', true, null);
+		await appData.setSessionActive('session-b', false);
+	});
+});

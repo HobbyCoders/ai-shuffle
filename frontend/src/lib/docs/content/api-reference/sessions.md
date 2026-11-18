@@ -22,8 +22,11 @@ deleting history. Project/device filters explicitly apply to **loaded chats
 only**, not the entire history. Search reaches all history, with **More chat
 results** to continue beyond the first 20 matches.
 
-`GET /api/v1/sessions/cursor` accepts `membership=active|settled` (membership is
-`is_active`, not `status`), plus `device_id` (the owning instance ID).
+`GET /api/v1/sessions/cursor` accepts `membership=active|settled|snoozed`
+(membership is `is_active`, not `status`), plus `device_id` (the owning
+instance ID). `snoozed` lists settled chats that carry a `snoozed_until` time;
+`settled` leaves them out. The panel shows them in their own **Snoozed** group
+under Active, soonest wake first.
 `GET /api/v1/sessions/count` returns `{ "total": n }` without row enrichment,
 using the same project/profile, device, tag, API-user/admin, instance, hidden
 and worker predicates. `exclude_archived` is accepted only for old clients and
@@ -351,6 +354,7 @@ curl http://localhost:8000/api/v1/sessions/sess_abc123 \
   "created_at": "2025-01-15T10:30:00Z",
   "updated_at": "2025-01-15T10:35:00Z",
   "is_active": false,
+  "snoozed_until": null,
   "tags": []
 }
 ```
@@ -647,7 +651,9 @@ In a worker network, this is shared sidebar state, not an execution command. Any
 
 Older clients may still send `"archived": true`; this means ordinary Settle, even when the execution owner is offline. `"archived": false` uses the explicit `is_active` value and does not restore old work or clear Stop. The legacy metadata query `status=archived` also means ordinary Settle. Signed legacy catalog updates and full snapshots are normalized on upgraded peers; an older server may still display its own archive UI until it upgrades.
 
-There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. A left swipe settles a row or brings it back to Active; right swipe has no lifecycle action.
+There is no Archived settings page, Restore bar, Archive hover action or bulk Archive action. Desktop and the real mobile shell show former archived conversations in bounded Settled history and search. On touch, a left swipe settles a row or brings it back to Active, and a right swipe opens the snooze picker for that row (see Snooze below): it moves to **Snoozed** once you pick a time, and stays where it was if you close the picker.
+
+Row swipes are judged where you lift, not at the last move the page received. Drag past 40% of the row (capped at 160px), or move at least 60px horizontally from the press and lift within 350ms. That short-swipe route includes brisk drags and counts any pause before moving; returning below 60px before lifting cancels it. The existing speed-based flick route also remains available for later flicks, but a short flick after a pause longer than 350ms can still cancel when a busy page misses its speed samples. The first decisive move locks the axis: a horizontal lock stays horizontal even if you lift diagonally, while a vertical start stays with list scrolling even if it ends horizontally. Only when no decisive move arrived does the lift choose the axis; horizontal displacement must then exceed vertical displacement.
 
 ```bash
 curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
@@ -655,6 +661,14 @@ curl -X PATCH http://localhost:8000/api/v1/sessions/sess_abc123/active \
   -H "Content-Type: application/json" \
   -d '{"is_active": false}'
 ```
+
+#### Snooze
+
+Send `{"is_active": false, "snoozed_until": "2026-11-16T14:00:00Z"}` to settle a chat until a time. `snoozed_until` is an ISO 8601 time with a timezone; it must be in the future. A past or naive time, or one sent with `"is_active": true` or `"archived"`, returns `422`. The chat moves to the **Snoozed** group (`membership=snoozed`) and its prompts stay open.
+
+At that time the server moves it back to Active by itself, with no browser open. It comes back earlier when it needs you: a permission or approval request, a question for you, or a private-access request. It also comes back when you send it a message, speak to it on a call, or answer one of its question cards yourself (an Away answer or a dismissal does not count). A call on a chat that is only settled still leaves it settled. Progress, a finished turn and background work do not wake it, and snoozing does not stop work that is already running, such as a watch turn (settling still does). Agents see snoozed chats in `ListSessions` with `state="all"`, with their `snoozed_until`; `state="settled"` leaves them out. Settling it by name (including `SettleSession` with `session_ids`) ends the snooze; a sweep over all settled chats (`all_settled`) leaves snoozed chats alone. Any later `PATCH .../active` replaces the snooze: `true` unsnoozes it, and a plain `false` settles it without a wake time.
+
+`snoozed_until` is part of the shared membership record, so a snooze set on any worker shows on the others and works while the execution owner is offline. The worker running the chat wakes it; other workers step in two minutes after it is due if it is still asleep. Workers that predate snooze accept the record and show the chat as Settled. A settle or unsnooze written by such a worker ends the snooze. A wake never undoes a newer snooze or settle.
 
 ### PUT /api/v1/sessions/{session_id}/workspace-folders
 

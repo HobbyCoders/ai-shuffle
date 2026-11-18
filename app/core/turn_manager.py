@@ -658,7 +658,10 @@ def _reactivate_for_send(
     reactivated: dict[str, Any] | None,
 ) -> None:
     """Shared membership write for a local intake OR a forwarding sender."""
-    if source not in _REACTIVATING_SOURCES or (payload or {}).get(VOICE_DELEGATION):
+    if source not in _REACTIVATING_SOURCES:
+        return
+    if (payload or {}).get(VOICE_DELEGATION):
+        _wake_snoozed_for_voice(session_id, reactivated)
         return
     from app.core import archive_guard
     from app.db import database
@@ -669,10 +672,27 @@ def _reactivate_for_send(
     if row and not row.get("is_active", True):
         # On the sending worker this supersedes its own possibly unreplicated
         # settle with a newer membership clock. The runner still does this too.
+        # Activating also ends a snooze: the owner's message wakes it early.
         database.set_session_active(session_id, True)
         if reactivated is not None:
             reactivated.update(user_id=row.get("api_user_id") or "admin",
                                user_type="api_user" if row.get("api_user_id") is not None else "admin")
+
+
+def _wake_snoozed_for_voice(session_id: str, reactivated: dict[str, Any] | None) -> None:
+    """A spoken request ends a snooze; a plain settled chat stays settled.
+
+    A call keeps a settled chat settled (it is not the owner reopening it), but
+    a snoozed chat comes back when the owner talks to it, as a typed message
+    would bring it back. The write is conditional under the row lock, so a
+    newer settle or unsnooze wins.
+    """
+    from app.network import session_active
+
+    row = session_active.write_wake(session_id)
+    if row is not None and reactivated is not None:
+        reactivated.update(user_id=row.get("api_user_id") or "admin",
+                           user_type="api_user" if row.get("api_user_id") is not None else "admin")
 
 
 async def reactivate_for_send(
@@ -692,7 +712,7 @@ def _announce_reactivated_sync(session_id: str, reactivated: dict[str, Any]) -> 
 
     try:
         global_events.lifecycle(reactivated["user_id"], {
-            "type": "user_session_updated", "session_id": session_id, "updates": {"is_active": True},
+            "type": "user_session_updated", "session_id": session_id, "updates": {"is_active": True, "snoozed_until": None},
         }, user_type=reactivated["user_type"])
     except Exception:  # noqa: BLE001 — a durable membership write still needs its turn.
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)
@@ -704,10 +724,10 @@ async def _announce_reactivated(session_id: str, user_id: str) -> None:
 
     try:
         await sync_engine.broadcast_session_updated(
-            session_id=session_id, updates={"is_active": True}, source_device_id=None,
+            session_id=session_id, updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
         await sync_engine.broadcast_user_session_updated(
-            user_id=user_id, session_id=session_id, updates={"is_active": True}, source_device_id=None,
+            user_id=user_id, session_id=session_id, updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
     except Exception:  # noqa: BLE001 — membership and the queued turn are durable.
         logger.warning("Could not announce reactivation of %s", session_id, exc_info=True)

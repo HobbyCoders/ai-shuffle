@@ -31,6 +31,7 @@ import stat
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 import weakref
@@ -68,19 +69,10 @@ _MANIFEST_OS = {"linux": "linux", "win32": "windows", "darwin": "darwin"}
 _MANIFEST_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 _ALLOWED_DOWNLOAD_HOSTS = ("storage.googleapis.com",)
 DASHBOARD_URL = "https://antigravity.google/docs/faq"
-TERMS_URL = "https://antigravity.google/terms"
 
 #: The status and sign-in answer: both are read on the provider's own screen.
 NOT_INSTALLED_HERE = ("Antigravity is not installed on this worker. "
                       "Install it under Antigravity agent below.")
-
-WARNING_TEXT = (
-    "Google's Antigravity terms (section 6) and FAQ restrict using a personal "
-    "Google sign-in (consumer plans) through third-party software, and Google "
-    "has suspended accounts for it. AI Shuffle runs Google's own unmodified "
-    "Antigravity agent and never touches its sign-in, but the account is yours "
-    "to risk. A Gemini API key or a business sign-in is the supported route."
-)
 
 GUARD_REFUSAL = (
     "This Antigravity provider uses a personal Google sign-in, which runs only in "
@@ -104,22 +96,181 @@ def _thinking(levels: List[str]) -> Dict[str, Any]:
     return {"version": 1, "effort_levels": levels, "default_effort": None}
 
 
-#: Models ``agy`` 1.5.6 offered a non-first-party client (spike, 2026-11-11),
-#: with the thinking levels (``thought_level``) the picker offers. 1.5.6
-#: listed low/high for Gemini 3.1 Pro; the others use Google's documented
-#: Gemini thinking levels. The agent's own list wins at session start; these
-#: seed the picker and model curation (``POST /model-providers/{id}/fetch-models``).
+#: The Gemini models ``agy models`` listed on 1.5.8 and 1.5.9 (2026-11-14),
+#: with their thinking levels. Only a stand-in: ``POST /model-providers/{id}/
+#: fetch-models`` asks the agent itself (:func:`refresh_models`) and every
+#: session start stores what it offers; these show only when neither has
+#: answered on this worker for the current credential.
 DEFAULT_MODELS: List[Dict[str, Any]] = [
-    {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "reasoning_capabilities": _thinking(["low", "high"])},
     {"id": "gemini-4-argon", "label": "Gemini 4 Argon",
      "reasoning_capabilities": _thinking(["low", "medium", "high"])},
+    {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen",
+     "reasoning_capabilities": _thinking(["low", "medium", "high", "xhigh"])},
     {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash",
      "reasoning_capabilities": _thinking(["low", "medium", "high"])},
-    {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash",
-     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
-    {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash",
-     "reasoning_capabilities": _thinking(["low", "medium", "high"])},
 ]
+
+
+def offered_catalog(models: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Curation entries for the models the agent offered at a session start.
+
+    ``models`` is what ``AcpLoop`` reports (``{"id", "label", "levels"}``, the
+    levels in the agent's own words). Thinking levels map onto the app's effort
+    scale ("extra" is the agent's older word for xhigh). A model the agent named
+    without levels keeps the seed's levels when it is a seed model, else its
+    levels stay unknown. A model named only by its id gets a readable label.
+    """
+    from fluid.engine.acp.antigravity import THOUGHT_TO_EFFORT
+
+    seeded = {m["id"]: m for m in DEFAULT_MODELS}
+    out: List[Dict[str, Any]] = []
+    for model in models:
+        model_id = str(model.get("id") or "").strip()
+        if not model_id or any(entry["id"] == model_id for entry in out):
+            continue
+        label = str(model.get("label") or "").strip()
+        if not label or label == model_id:
+            # An agent that names a model by its id: the seed's name, else a
+            # readable one ("gemini-4-hydrogen" -> "Gemini 4 Hydrogen").
+            label = seeded[model_id]["label"] if model_id in seeded else model_id.replace("-", " ").title()
+        entry: Dict[str, Any] = {"id": model_id, "label": label}
+        levels = model.get("levels")
+        efforts = list(dict.fromkeys(THOUGHT_TO_EFFORT[level] for level in levels or ()
+                                     if level in THOUGHT_TO_EFFORT))
+        if efforts:
+            entry["reasoning_capabilities"] = _thinking(efforts)
+        elif model_id in seeded:
+            entry["reasoning_capabilities"] = dict(seeded[model_id]["reasoning_capabilities"])
+        out.append(entry)
+    return out
+
+
+def worker_scoped(row: Mapping[str, Any]) -> bool:
+    """A stored Google sign-in row: its model list holds only on the worker
+    that captured it, for that sign-in. The row has no key, so its catalog
+    binding is the same whichever account is signed in on whichever worker."""
+    return row.get("provider_type") == PROVIDER_TYPE and row.get("auth_mode") != agy_spec.GEMINI_API_KEY
+
+
+def _signin_tag_path(row_id: str) -> Path:
+    # The app's own file, outside the binary's home, like the signed-in marker.
+    return _root() / "catalog-scope" / re.sub(r"[^A-Za-z0-9_.-]", "_", str(row_id))
+
+
+_tag_lock = threading.Lock()  # the app is the only writer of these files
+_NONCE_RE = re.compile(r"[0-9a-f]{32}")
+
+
+def signin_tag(row_id: str, *, create: bool = False) -> Optional[str]:
+    """This worker's tag for the row's current sign-in, kept in a file so it
+    survives a restart; dropped with the signed-in marker (``_note_signin``),
+    so the next start after it makes a new one. Only its digest leaves the
+    worker (in the catalog). A missing,
+    empty, cut-short or unreadable file is no tag; ``create`` replaces it,
+    publishing the new one whole (written aside, then renamed)."""
+    path = _signin_tag_path(row_id)
+    with _tag_lock:
+        try:
+            nonce = path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            nonce = ""
+        if not _NONCE_RE.fullmatch(nonce):
+            if not create:
+                return None
+            nonce = uuid.uuid4().hex
+            aside = path.with_name("~" + path.name)  # never a row's own name
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                aside.write_text(nonce, encoding="ascii")
+                os.replace(aside, path)
+            except OSError:
+                logger.debug("[antigravity] could not write the catalog tag of %s", row_id, exc_info=True)
+                return None
+    return hashlib.sha256(nonce.encode("ascii")).hexdigest()[:32]
+
+
+def _forget_signin_tag(row_id: str) -> None:
+    path = _signin_tag_path(row_id)
+    with _tag_lock:
+        for name in (path, path.with_name("~" + path.name)):
+            try:
+                name.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("[antigravity] could not drop the catalog tag of %s", row_id, exc_info=True)
+
+
+def capture_binding(row: Mapping[str, Any]) -> Optional[Dict[str, Optional[str]]]:
+    """What a list from an agent started for ``row`` is saved under (blocking):
+    the row's catalog binding and, for a stored sign-in, this worker's
+    sign-in tag. Take it from the row the agent's spec is built from."""
+    from app.core import model_catalogs
+
+    bound = model_catalogs.binding(row)
+    if not bound:
+        return None
+    if not worker_scoped(row):
+        return {"binding": bound, "signin": None}
+    tag = signin_tag(str(row.get("id") or ""), create=True)
+    return {"binding": bound, "signin": tag} if tag else None
+
+
+def catalog_in_scope(row: Mapping[str, Any], snapshot: Mapping[str, Any]) -> bool:
+    """An Antigravity row's catalog counts only when its agent listed it (an
+    earlier version stored the built-in seed as ``upstream``), and a stored
+    sign-in row's only with this worker's current sign-in tag. Any other
+    row's needs nothing more than its binding."""
+    if row.get("provider_type") == PROVIDER_TYPE and snapshot.get("source") != "agent":
+        return False
+    if not worker_scoped(row):
+        return True
+    tag = signin_tag(str(row.get("id") or ""))
+    return tag is not None and snapshot.get("signin") == tag
+
+
+def record_offered_models(row_id: str, models: List[Mapping[str, Any]],
+                          agent_version: Optional[str],
+                          bound: Optional[Mapping[str, Optional[str]]]) -> Optional[Dict[str, Any]]:
+    """Store the agent's model list as the row's model catalog (blocking).
+
+    ``bound`` is :func:`capture_binding` of the row the reporting agent was
+    started with, never a later read: a list is saved only while the row
+    still has that credential (and, for a sign-in, that sign-in here).
+    ``fetch-models`` serves it from then on in place of :data:`DEFAULT_MODELS`;
+    curation on the row is untouched (new models wait to be ticked).
+    """
+    from app.core import model_catalogs
+
+    entries = offered_catalog(models)
+    if not entries or not bound or not bound.get("binding"):
+        return None
+    return model_catalogs.save_agent(row_id, entries, agent_version=agent_version,
+                                     expected_binding=bound["binding"], signin=bound.get("signin"))
+
+
+_capture_tasks: "set[asyncio.Task[Any]]" = set()
+
+
+def capture_offered_models(row_id: str, bound: Any) -> Any:
+    """An ``AcpLoop(on_models=...)`` callback that stores the list in the
+    background: the engine calls it from its reader, which must not wait on
+    the database. ``bound()`` returns :func:`capture_binding` for the agent
+    running now; it is read when the agent reports, not when the write runs."""
+    def capture(models: List[Dict[str, Any]], agent_version: Optional[str]) -> None:
+        from app.db.async_database import run_sync
+
+        reported_under = bound()
+
+        async def run() -> None:
+            try:
+                await run_sync(record_offered_models, row_id, models, agent_version, reported_under)
+            except Exception:  # noqa: BLE001 — bookkeeping never fails a turn
+                logger.warning("Could not store the models Google's agent offered for provider %s", row_id)
+
+        task = asyncio.get_running_loop().create_task(run())
+        _capture_tasks.add(task)
+        task.add_done_callback(_capture_tasks.discard)
+
+    return capture
 
 _URL_RE = re.compile(r"https://accounts\.google\.com/\S+")
 _LOGIN_PROMPT_RE = re.compile(r"please visit the following url[^:]*:|enter the authorization code\s*:?", re.I)
@@ -597,17 +748,35 @@ def signed_in_here(row_id: str) -> bool:
 
 
 def _note_signin(row_id: str, state: str) -> None:
+    """The one place a sign-in's lifetime on this worker ends or begins.
+
+    A signed-out answer (also what sign-out and delete record) removes the
+    marker and drops the catalog tag: a list captured before it is not the
+    next sign-in's. A signed-in answer that creates the marker bumps
+    :func:`signin_epoch`, so every warm agent of the row is replaced at its
+    next turn with a new capture binding (the tag is made at that start).
+
+    Not closable here: the agent switching accounts with no signed-out answer
+    ever seen by the app (the app never reads its sign-in), and rows with no
+    marker at all. There the list is at worst the previous account's until
+    the next agent start on the row replaces it, and a model it does not
+    offer shows the reroute card.
+    """
     if not row_id or state not in ("signed_in", "signed_out"):
         return  # not installed or an error says nothing about the sign-in
     marker = _signed_in_marker(row_id)
     try:
         if state == "signed_in":
+            if not marker.is_file():
+                _signin_epochs[row_id] = signin_epoch(row_id) + 1
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
         else:
             marker.unlink(missing_ok=True)
     except OSError:
         logger.debug("[antigravity] could not record the sign-in state of %s", row_id, exc_info=True)
+    if state == "signed_out":
+        _forget_signin_tag(row_id)
 
 
 async def probe(row: Mapping[str, Any]) -> Dict[str, Any]:
@@ -615,7 +784,8 @@ async def probe(row: Mapping[str, Any]) -> Dict[str, Any]:
     a sign-in row records the answer for :func:`signed_in_here`."""
     epoch = signin_epoch(str(row.get("id") or ""))
     result = await _probe(row)
-    # A sign-out or delete while the binary answered: its answer is stale.
+    # A sign-out, delete or another answer that began a sign-in while the
+    # binary answered: this answer is stale.
     if row.get("auth_mode") in STORED_SIGN_IN and epoch == signin_epoch(str(row.get("id") or "")):
         _note_signin(str(row.get("id") or ""), str(result.get("state") or ""))
     return result
@@ -889,7 +1059,9 @@ _signin_epochs: Dict[str, int] = {}
 
 def signin_epoch(row_id: str) -> int:
     """Bumped each time this worker forgets the row's sign-in (sign-out,
-    delete): a usage reading taken across a bump is not written."""
+    delete) or the binary first answers signed-in (``_note_signin``): a usage
+    reading taken across a bump is not written, a probe answer across one is
+    not recorded, and a warm agent is replaced at its next turn."""
     return _signin_epochs.get(str(row_id), 0)
 
 
@@ -1270,6 +1442,8 @@ STOPPED_DISABLED = ("This chat's Antigravity provider was turned off, so this tu
                     "Turn it back on or pick a different model.")
 STOPPED_KEY_CHANGED = ("This provider's Gemini API key was replaced, so this turn was stopped. "
                        "Send the message again to continue with the new key.")
+STOPPED_SIGNIN_CHANGED = ("This provider's sign-in or settings changed on this worker, so this turn "
+                          "was stopped. Send the message again to continue.")
 
 # Row id -> live ACP engines and the spawn binding each runs with. Weak: an
 # engine that is gone drops out by itself; nothing here keeps one alive.
@@ -1327,7 +1501,113 @@ async def reconcile_agents(row_ids: Any) -> None:
         elif not row.get("enabled"):
             await stop_agents(row_id, STOPPED_DISABLED)
         else:
-            await stop_agents(row_id, STOPPED_KEY_CHANGED, keep_binding=spawn_binding(row))
+            # Only a key row's binding moves with a key; any other row's with
+            # its sign-in here (``signin_epoch``) or its settings.
+            reason = STOPPED_KEY_CHANGED if row.get("auth_mode") == agy_spec.GEMINI_API_KEY else STOPPED_SIGNIN_CHANGED
+            await stop_agents(row_id, reason, keep_binding=spawn_binding(row))
+
+
+# ---------------------------------------------------------------------------
+# Model list through the binary's own `models` command
+# ---------------------------------------------------------------------------
+
+_MODELS_SECONDS = 20
+#: One listing per row and agent binding at a time; a second refresh waits
+#: for the one already running instead of starting another process.
+_listings: "Dict[tuple, asyncio.Task[Any]]" = {}
+
+
+async def list_models(row: Mapping[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """Run ``agy models`` for the row, in its own home and environment (as an
+    agent for it would run); the models it lists, or None.
+
+    None when the agent is not installed, says it is not signed in (exit 1),
+    fails, prints nothing usable or does not answer in time. Starts no
+    session, so nothing is left in the agent's own session list.
+    """
+    try:
+        spec = build_spec(row)
+    except FileNotFoundError:
+        return None
+    home = home_for(str(row.get("id") or "default"))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            spec.argv[0], "models", cwd=home, env=spec.env,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=os.name == "posix",
+        )
+    except OSError:
+        return None
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=_MODELS_SECONDS)
+    except asyncio.TimeoutError:
+        return None
+    finally:
+        # Also on cancellation: the process ends with the listing, and is
+        # reaped (bounded) so none is left behind.
+        if proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except (asyncio.TimeoutError, OSError):
+                pass
+    if proc.returncode != 0:
+        return None
+    return agy_spec.listed_models(_ANSI_RE.sub("", out.decode("utf-8", "replace"))) or None
+
+
+async def _refresh(row: Mapping[str, Any], bound: Mapping[str, Optional[str]]) -> Optional[Dict[str, Any]]:
+    from app.db.async_database import run_sync
+
+    row_id = str(row.get("id") or "")
+    listed, version = await asyncio.gather(list_models(row), _listing_version(row))
+    if not listed:
+        logger.warning("Google's agent did not list its models for provider %s; "
+                       "keeping the last list", row_id)
+        return None
+    return await run_sync(record_offered_models, row_id, listed, version, bound)
+
+
+async def _listing_version(row: Mapping[str, Any]) -> Optional[str]:
+    binary = find_binary()
+    return await binary_version(binary) if binary else None
+
+
+async def refresh_models(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """Ask the row's agent for its models (``agy models``) and store them as
+    the row's catalog, like a session start does; the stored snapshot or None.
+
+    ``row`` must carry its token (``include_token=True``). The binding and
+    sign-in tag are captured before the agent runs: a credential change,
+    sign-out or new sign-in while it lists drops the list
+    (``model_catalogs.save_agent``). Never raises; a failure logs one warning
+    and leaves the stored list as it was.
+    """
+    from app.db.async_database import run_sync
+
+    def capture() -> tuple:
+        return capture_binding(row), spawn_binding(row)
+
+    try:
+        bound, spawned = await run_sync(capture)
+        if not bound:
+            return None
+        key = (str(row.get("id") or ""), spawned, bound.get("binding"), bound.get("signin"))
+        task = _listings.get(key)
+        if task is None:
+            task = asyncio.get_running_loop().create_task(_refresh(row, bound))
+            _listings[key] = task
+            task.add_done_callback(lambda done, k=key: _listings.pop(k, None) if _listings.get(k) is done else None)
+        # Shielded: one caller going away does not end the listing others wait on.
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — the stored list or the seed answers instead
+        logger.warning("Could not refresh the models of Antigravity provider %s", row.get("id"))
+        return None
 
 
 # ---------------------------------------------------------------------------

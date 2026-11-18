@@ -9,11 +9,11 @@ import logging
 
 from fastapi import APIRouter, HTTPException, Depends, status, Request, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from app.core.models import (
-    Profile, ProfileConfig, ProfileCreate, ProfileUpdate,
-    AgentExport, AgentExportData, AgentImportRequest
+    Profile, ProfileCreate, ProfileName, ProfileUpdate,
+    AgentExport, AgentExportData, AgentImportRequest, PROFILE_ID_MAX_LENGTH, profile_name_error
 )
 from app.db import database
 from app.db.async_database import run_sync
@@ -26,21 +26,6 @@ from app.core.project_agent_service import get_project_agent_service, get_user_a
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/agents", tags=["Agents"])
-
-
-class ProfilePresentationConfig(ProfileConfig):
-    """Read projection; presentation is independently written by identity APIs."""
-    avatar_id: Optional[str] = None
-
-    @field_validator("avatar_id", mode="before")
-    @classmethod
-    def validated_avatar(cls, value):
-        from app.core.owner_services import AVATAR_PRESETS
-        return value if isinstance(value, str) and value in AVATAR_PRESETS else None
-
-
-class ProfilePresentation(Profile):
-    config: ProfilePresentationConfig
 
 
 # Response model for subagent (matches frontend expectations)
@@ -107,6 +92,16 @@ def _refuse_assistant_agent(*agent_ids: str) -> None:
         )
 
 
+def _derived_profile_id(name: str, fallback: str) -> str:
+    slug = re.sub(r"[^a-z0-9-]", "-", name.lower())
+    return re.sub(r"-+", "-", slug).strip("-")[:PROFILE_ID_MAX_LENGTH].rstrip("-") or fallback
+
+
+def _suffixed_profile_id(base_id: str, counter: int) -> str:
+    suffix = f"-{counter}"
+    return base_id[:PROFILE_ID_MAX_LENGTH - len(suffix)] + suffix
+
+
 def _check_profile_modified(profile: dict) -> None:
     """Set is_modified on a built-in agent by comparing to its defaults.
 
@@ -142,7 +137,7 @@ async def list_agent_templates(token: str = Depends(require_auth)):
     ]
 
 
-@router.get("", response_model=List[ProfilePresentation])
+@router.get("", response_model=List[Profile])
 async def list_profiles(request: Request, token: str = Depends(require_auth)):
     """List all agent profiles. API users only see their assigned profiles."""
     api_user = get_api_user_from_request(request)
@@ -195,7 +190,7 @@ async def install_starter_team_template(token: str = Depends(require_admin)):
     return await run_sync(install_starter_team)
 
 
-@router.get("/{profile_id}", response_model=ProfilePresentation)
+@router.get("/{profile_id}", response_model=Profile)
 async def get_profile(request: Request, profile_id: str, token: str = Depends(require_auth)):
     """Get a specific profile. API users can only access their assigned profiles."""
     api_user = get_api_user_from_request(request)
@@ -557,7 +552,7 @@ async def get_all_available_subagents(
 # Request model for creating/updating a subagent via profile
 class ProfileSubagentRequest(BaseModel):
     """Request to create or update a subagent via profile endpoint"""
-    name: Optional[str] = None  # Required for create, optional for update
+    name: Optional[ProfileName] = None  # Required for create, optional for update
     description: str
     prompt: str
     tools: Optional[List[str]] = None
@@ -781,7 +776,7 @@ async def delete_profile_agent(
     return await run_sync(_load)
 
 
-@router.post("", response_model=ProfilePresentation, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def create_profile(request: ProfileCreate, token: str = Depends(require_admin)):
     """Create a custom profile - Admin only"""
     def _load() -> dict:
@@ -791,12 +786,7 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
         inserts under it. Awaiting between the last probe and the insert would
         widen that gap into a real race for the id.
         """
-        # Derive ID from name if not provided
-        if request.id:
-            profile_id = request.id
-        else:
-            profile_id = re.sub(r'[^a-z0-9-]', '-', request.name.lower())
-            profile_id = re.sub(r'-+', '-', profile_id).strip('-')
+        profile_id = request.id or _derived_profile_id(request.name, "agent")
 
         # Ensure uniqueness. Bounded so a store that keeps reporting a conflict (a
         # bug, a stale read, or absurd collision counts) can never spin forever and
@@ -810,7 +800,7 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Could not allocate a unique profile id for: {base_id}",
                 )
-            profile_id = f"{base_id}-{counter}"
+            profile_id = _suffixed_profile_id(base_id, counter)
             counter += 1
 
         profile = database.create_profile(
@@ -819,7 +809,6 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
             description=request.description,
             config=request.config.model_dump(exclude_none=True),
             is_builtin=False,
-            avatar_color=request.avatar_color,
         )
 
         return profile
@@ -827,17 +816,13 @@ async def create_profile(request: ProfileCreate, token: str = Depends(require_ad
     return await run_sync(_load)
 
 
-@router.put("/{profile_id}", response_model=ProfilePresentation)
+@router.put("/{profile_id}", response_model=Profile)
 async def update_profile(
     profile_id: str,
     request: ProfileUpdate,
     token: str = Depends(require_admin),
-    http_request: Request = None,
 ):
     """Update a profile - Admin only. All profiles (including defaults) are editable."""
-    raw_config = None
-    if http_request is not None:
-        raw_config = (await http_request.json()).get("config")
     _refuse_assistant_agent(profile_id)
     def _load() -> dict:
         """Existence check + update in ONE hop (the check gates the write).
@@ -852,25 +837,17 @@ async def update_profile(
         config = None
         if request.config:
             from app.core.profiles import preserve_profile_presentation
-            try:
-                config = preserve_profile_presentation(
-                    existing.get("config") or {},
-                    request.config.model_dump(exclude_none=True), raw_config,
-                )
-            except ValueError as exc:
-                raise HTTPException(400, str(exc)) from exc
+            config = preserve_profile_presentation(
+                existing.get("config") or {},
+                request.config.model_dump(exclude_none=True),
+            )
 
-        extra = (
-            {"avatar_color": request.avatar_color}
-            if "avatar_color" in request.model_fields_set else {}
-        )
         profile = database.update_profile(
             profile_id=profile_id,
             name=request.name,
             description=request.description,
             config=config,
             allow_builtin=True,  # All profiles are editable
-            **extra,
         )
 
         return profile
@@ -913,7 +890,7 @@ async def delete_profile(profile_id: str, token: str = Depends(require_admin)):
     return await run_sync(_load)
 
 
-@router.post("/{profile_id}/restore", response_model=ProfilePresentation)
+@router.post("/{profile_id}/restore", response_model=Profile)
 async def restore_profile_defaults(
     profile_id: str,
     token: str = Depends(require_admin)
@@ -1221,7 +1198,7 @@ async def export_profile(
     return response
 
 
-@router.post("/import", response_model=ProfilePresentation, status_code=status.HTTP_201_CREATED)
+@router.post("/import", response_model=Profile, status_code=status.HTTP_201_CREATED)
 async def import_profile(
     import_request: AgentImportRequest,
     token: str = Depends(require_admin)
@@ -1251,21 +1228,11 @@ async def import_profile(
 
     # Determine profile name
     profile_name = import_request.new_name or agent_data.name
-    if not profile_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Agent name is required"
-        )
+    # A valid override can rescue a legacy file without persisting its old name.
+    if error := profile_name_error(profile_name):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=error)
 
-    # Determine profile ID
-    if import_request.new_id:
-        profile_id = import_request.new_id
-    else:
-        # Generate ID from name
-        profile_id = re.sub(r'[^a-z0-9-]', '-', profile_name.lower())
-        profile_id = re.sub(r'-+', '-', profile_id).strip('-')
-        if not profile_id:
-            profile_id = "imported-agent"
+    profile_id = import_request.new_id or _derived_profile_id(profile_name, "imported-agent")
 
     def _load() -> dict:
         """Id allocation, subagent filtering and the insert in ONE hop.
@@ -1281,7 +1248,7 @@ async def import_profile(
         base_id = profile_id
         counter = 1
         while database.get_profile(profile_id):
-            profile_id = f"{base_id}-{counter}"
+            profile_id = _suffixed_profile_id(base_id, counter)
             counter += 1
             if counter > 100:  # Safety limit
                 raise HTTPException(

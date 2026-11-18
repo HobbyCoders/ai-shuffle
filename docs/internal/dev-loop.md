@@ -231,6 +231,21 @@ end **both** leases; the SIGKILL guardian also covers both apps, Vites,
 PostgreSQL clusters and private socket directories. Either supervisor ending
 ends the pair. Do not stop only one app by hand; use `down` for the pair.
 
+For a fault test on a disposable pair (not `--ci`), use that worker's
+`workers[i].peer_fixture_dir` from `status`. There is no HTTP switch. After
+pairing, write `{"action":"hydrate","status":200,"body":"truncated"}` to
+`reply.json` there (write a temporary file, then rename it). Only a successful
+protected peer POST for that action has its reply replaced, **after** normal
+authentication and execution; `reply-sent` marks that it happened. Remove
+`reply.json` to restore normal replies. To delay the challenge instead, create
+`hold-auth`; `auth-held` marks an arrival. Remove the switch to release it
+(each request waits at most 30 seconds). Clear old receipt files before a run.
+
+Touch `restart` in **the sending worker's** fixture directory to request one
+normal SIGTERM/lifespan restart. The supervisor consumes the marker, keeps its
+database and leaves the other worker running. Wait for the selected app PID
+to change and mutual `ready` again; `down` still tears down the whole pair.
+
 This cannot simulate a second physical machine, Windows, distinct OS users,
 WAN latency or partitions, account/tunnel registration, real GitHub access or
 real AI providers. Those still need the live smoke. `--workers 1` (the default)
@@ -315,6 +330,9 @@ It is chosen by the request alone, so it behaves the same after restarts:
   taller than the screen, then waits on a 60-second foreground `Bash`: the
   turn stays open with still content and the running-task row under it, for
   Stop with a running task (#1147). Same project and access needs as below.
+* `[script:tool-background-heavy]` is the same open, idle turn behind a log
+  reply larger than the transcript's mounted-content budget, so the turn's own
+  prompt is no longer mounted. For queued bubbles over the running-task row.
 * `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
   (`sleep 120`, no inline wait), then streams a reply at six words per second
   while the task remains in `/live`'s `activeTasks` and the running-tasks list.
@@ -415,6 +433,10 @@ before the call (options ride in the tag: `[voice:relay reply_delay_ms=800]`):
 | `long-work` | The agent works about 15 s (`[script:voice-long]`): its progress sentence is said once as a short line, the voice calls `check_work` while the work runs (Grok only), then the short result is said. |
 | `long-work-quiet` | As `long-work`, but the caller says "just tell me when it's done" after the handoff: no progress line, only the result. |
 | `check-idle` | Grok only. With nothing running, the voice answers a new request with `check_work` instead of a handoff; the app takes that call as the handoff, the fake says "Checking on that now." and the reply (`[script:voice-reply]`) is said once. |
+| `status-after-small-talk` | Small talk the voice answers itself, then "Is it done yet?" handed off with nothing running: the app answers from its state ("Nothing is running. ..."), and no chat turn starts. |
+| `status-twice` | Two status questions in a row, each handed off at idle: each gets its own answer from the app's state, and no chat turn starts. |
+| `mute-mixed` | On `long-work`: "just tell me when it's done", then "Keep me posted, skip the updates and reboot the server" (a work request, not a mute): the progress line is said once, then the result. |
+| `mute-work-request` | On `long-work`: "Skip the updates and reboot the server" is a work request, not a mute: the progress line is said once, then the result. |
 
 Steps (one key each): `wait_audio_ms` (wait for that much speech-level
 microphone audio, so a script never runs ahead of a real microphone),
@@ -677,7 +699,7 @@ Historical rows remain unchanged; feature PRs do not need a pre-merge measuremen
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
 with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
-using recent green main-suite runs on main, from a checkout of their revision;
+using recent green `ci.yml` runs on main, from a checkout of their revision;
 files a run lacks, measured with other cases, or measured before their journey
 code, the shared runtime, `ci.py` or the journeys workflow changed keep their entries ([measurement details](../ci/pr-checks.md#ui-journeys)).
 It runs each file of its shard, all of them even after a failure. `--build` builds

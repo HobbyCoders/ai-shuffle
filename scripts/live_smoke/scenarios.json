@@ -717,6 +717,16 @@
           "past_bug": "The phone required manual switching after an outage; a manually selected keyless account worker could only show a toast, leaving native enrollment unreachable."
         },
         {
+          "id": "two-worker-smoke.restored-preference-write",
+          "check": "A paired worker receives the restored worker's next shared preference write",
+          "kind": "owner",
+          "needs": ["install"],
+          "two_worker": true,
+          "how": "Pair two fresh disposable candidate workers A and B in an isolated network. Choose an unused shared owner preference key; confirm it is absent on both. Back up B's database before its first write. On B, write several distinct values to that key and wait until A reads the last value. Stop only disposable B, restore only its database (keep its device identity), then restart it. Let B contact A and confirm B's incarnation advanced. Write a different value to the same key on B exactly once. Let normal exchange run and read the key on A without editing it again.",
+          "pass_when": "A reads B's last pre-restore value before the restore, then reads B's single post-restore value. Record the candidate revision, B's incarnation before and after restore, and the two synthetic values read on A. An incarnation bump or successful transcript delivery alone does not pass.",
+          "past_bug": "#1506 / #1576: the database backup rewound B's clock, so a peer kept B's pre-restore preference instead of its new write."
+        },
+        {
           "id": "two-worker-smoke.shared-settings-rollout",
           "check": "Shared secrets, provider replacements and plugin intent survive independently keyed and mixed-version workers",
           "kind": "owner",
@@ -1138,7 +1148,7 @@
           "kind": "journey",
           "journeys": ["chat-send-stream", "phone-composer"],
           "how": "Every UI journey starts a disposable dev instance (scripts.devloop, the same app.preview_run launcher and bootstrap as python -m app.preview run), opens its printed access link once and drives the chat UI on that preview cookie: chat-send-stream at desktop (1440) and phone (390) widths, phone-composer at phone and the Fold cover screen (360). The 403s on setup and onboarding-complete POSTs with the preview cookie, and the refusal to auto-complete non-preview or unmarked data, are in tests/core/test_preview_run.py.",
-          "pass_when": "The journeys pass in main-suite at the candidate: each width reaches the chat UI (never the setup wizard) and sends a message. Setup and onboarding mutations stay refused with 403 (unit tests).",
+          "pass_when": "The journeys pass in CI at the candidate: each width reaches the chat UI (never the setup wizard) and sends a message. Setup and onboarding mutations stay refused with 403 (unit tests).",
           "past_bug": "#623: the access cookie correctly refused setup mutations, but disposable bootstrap left the web shell stuck at the setup wizard."
         },
         {
@@ -1418,7 +1428,7 @@
           "check": "Neutral owner routes preserve installed-client aliases and stored history",
           "kind": "owner",
           "needs": ["install"],
-          "how": "On a disposable candidate with synthetic retained identity/spend data, use Settings > Usage and the agent editor to save limits, a name and an avatar through the owner-prefixed routes. Read and update the same records through both owner and legacy assistant prefixes, including PUT/PATCH limits and identity PATCH. Refuse API-key and cross-origin writes on both. Restart only the candidate and replay a stored conversational approval. Delete an ordinary disposable chat and try the retired home and research routes. With a disposable older peer when available, sync the historical account collection and complete/replay a bounded remote coordination job. Keep receipts private; no production data or credentials.",
+          "how": "On a disposable candidate with synthetic retained identity/spend data, use Settings > Usage and the agent editor to save limits and a name through the owner-prefixed routes. Read and update the same records through both owner and legacy assistant prefixes, including PUT/PATCH limits and identity PATCH. Refuse API-key and cross-origin writes on both. Restart only the candidate and replay a stored conversational approval. Delete an ordinary disposable chat and try the retired home and research routes. With a disposable older peer when available, sync the historical account collection and complete/replay a bounded remote coordination job. Keep receipts private; no production data or credentials.",
           "pass_when": "The UI uses owner routes; both HTTP prefixes share handlers, authorization and records. Identity config, owner memory and local/remote spending history survive restart without double charging. Stored assistant_confirm approvals still replay. Old-peer assistant collection and remote-usage actions remain understood; no home, research runner or selectable retired agent returns, retired routes stay unavailable and ordinary chat deletion succeeds. Missing real older-peer/provider receipts remain unverified, not a pass.",
           "past_bug": "#561: shared owner services retained retired implementation names; a partial rename could break imports, installed clients or accounting. #557: shared service naming, dead research constants and stale deletion documentation outlived home retirement."
         },

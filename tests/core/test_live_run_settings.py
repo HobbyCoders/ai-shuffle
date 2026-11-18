@@ -338,10 +338,42 @@ async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
 
+    # A Fast change says nothing new about effort.
     broadcast.reset_mock()
-    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": False}))
-    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(effort="low"))
+    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": True}))
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(fast=True))
     broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_effort_pick_and_auto_are_announced_to_open_clients(mock_db, monkeypatch):
+    """#1579: device A picks Auto on a chat device B shows at Medium. B must
+    learn the cleared effort, or its next send carries Medium and pins it again.
+    An explicit Auto (None) is announced, on the worker that took the request
+    and on the owner that saved it."""
+    from app.core.sync_engine import sync_engine
+
+    monkeypatch.setattr(api, "require_session", AsyncMock(return_value={"id": "announce"}))
+    monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
+    broadcast = AsyncMock()
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated", broadcast)
+
+    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "medium", "fast": False}))
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(effort="medium"))
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"effort": "medium"}, source_device_id=None)
+
+    broadcast.reset_mock()
+    monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": None, "fast": False}))
+    await api.update_run_settings(None, "announce", api.RunSettingsUpdate(effort=None))
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"effort": None}, source_device_id=None)
+
+    broadcast.reset_mock()
+    monkeypatch.setattr(api, "apply_run_settings", AsyncMock(return_value={"effort": None, "fast": False}))
+    await api.handle_run_settings({"session_id": "announce", "effort": None}, "peer")
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"effort": None}, source_device_id=None)
 
 
 # --- fast mode handed down the delegation tree --------------------------------

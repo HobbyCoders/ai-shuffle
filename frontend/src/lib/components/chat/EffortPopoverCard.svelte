@@ -12,7 +12,7 @@
 	 * `value === null` means no level is pinned for the chat — the model runs at
 	 * its own default. The slider still needs a resting position, so the thumb
 	 * sits on the declared default (or first stop) without selecting it; the first
-	 * drag pins a level.
+	 * drag pins a level. The header's Auto toggle unpins it again (#1579).
 	 */
 	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
 	import { Zap } from 'lucide-svelte';
@@ -30,7 +30,8 @@
 		known?: boolean;
 		defaultValue?: string | null;
 		value: string | null;
-		onSelect: (value: string) => void;
+		/** A level pins it; `null` returns to Auto (the model's default). */
+		onSelect: (value: string | null) => void | Promise<unknown>;
 		/** Whether the picked model carries the fast service tier. */
 		fastSupported?: boolean;
 		fastEnabled?: boolean;
@@ -64,8 +65,13 @@
 	const progress = $derived(maxIndex > 0 ? (index / maxIndex) * 100 : 0);
 
 	function handleInput(event: Event) {
-		const option = options[Number((event.currentTarget as HTMLInputElement).value)];
-		if (option && option.value !== value) onSelect(option.value);
+		const input = event.currentTarget as HTMLInputElement;
+		const option = options[Number(input.value)];
+		if (!option || option.value === value) return;
+		// The thumb moves before the chat answers. Once it has, put the thumb on
+		// the level in force: a refused pick leaves `index` unchanged, so Svelte
+		// would not move it back by itself.
+		void Promise.resolve(onSelect(option.value)).finally(() => { input.value = String(index); });
 	}
 </script>
 
@@ -77,6 +83,16 @@
 				<span class="pop-value" data-effort-value>{currentLabel}</span>
 			{/key}
 		</span>
+		{#if known && options.length}
+			<!-- Always present, so the header never shifts and focus stays put. -->
+			<button
+				type="button"
+				class="auto-toggle"
+				aria-pressed={!pinned}
+				title={pinned ? "Back to Auto: run at the model's default" : "Auto: the model's default is in use"}
+				onclick={() => { if (pinned) onSelect(null); }}
+			>Auto</button>
+		{/if}
 		{#if fastSupported}
 			<button
 				type="button"
@@ -227,6 +243,38 @@
 			transform: translateY(0);
 		}
 	}
+
+	.auto-toggle {
+		margin-left: auto;
+		padding: 1px 8px;
+		border: 0;
+		border-radius: 999px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font-size: 12px;
+		line-height: 18px;
+		cursor: pointer;
+		transition: background-color 0.12s ease, color 0.12s ease;
+	}
+
+	.auto-toggle:hover {
+		background: var(--muted);
+		color: var(--foreground);
+	}
+
+	.auto-toggle[aria-pressed='true'] {
+		background: color-mix(in oklab, var(--primary) 14%, var(--card));
+		color: var(--primary);
+		cursor: default;
+	}
+
+	.auto-toggle:focus-visible {
+		outline: 1px solid var(--primary);
+		outline-offset: 2px;
+	}
+
+	/* The Fast toggle sits right after Auto instead of pushing itself right. */
+	.auto-toggle + .fast-toggle { margin-left: 0; }
 
 	.fast-toggle {
 		display: grid;
@@ -435,6 +483,7 @@
 		}
 
 		.fast-toggle,
+		.auto-toggle,
 		.fill {
 			transition: none;
 		}

@@ -240,7 +240,10 @@ async def test_timeout_and_cancellation(isolated, monkeypatch, claimed):
     else:
         assert result['reason'] == 'device_timeout'
         assert result['safe_to_retry'] is True
-    assert asyncio.get_running_loop().time() - start < 1
+    # The 0.03 s timeout was honoured, not the 25 s default
+    # (service.MAX_WAIT_SECONDS). Far under that default, far over runner
+    # jitter: a busy CI runner took 1.6 s here (#1601).
+    assert asyncio.get_running_loop().time() - start < service.MAX_WAIT_SECONDS / 2
     task = asyncio.create_task(service.execute('sa', 'a', 'read_screen', {}))
     await asyncio.sleep(0.03)
     task.cancel()

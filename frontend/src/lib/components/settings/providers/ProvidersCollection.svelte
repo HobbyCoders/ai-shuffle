@@ -88,6 +88,24 @@
 		return null;
 	});
 
+	// The detail's props are read through `target`, which goes null as soon as
+	// a removed row leaves the store. A child's effect, or its Remove handler
+	// finishing after the delete, can still read them once more before the
+	// branch is gone; reading null threw on every such read and left the
+	// removed row's page up on a phone (#1651). Hand them the last target the
+	// branch showed instead; which branch shows still follows `target`.
+	type Shown<K> = Extract<NonNullable<typeof target>, { kind: K }>;
+	let lastCredential: Shown<'credential'> | null = null;
+	let lastProvider: Shown<'provider'> | null = null;
+	const shownCredential = $derived.by(() => {
+		if (target?.kind === 'credential') lastCredential = target;
+		return lastCredential;
+	});
+	const shownProvider = $derived.by(() => {
+		if (target?.kind === 'provider') lastProvider = target;
+		return lastProvider;
+	});
+
 	// Back can replay a setup draft that Save removed, or a credential that
 	// was deleted. A settled missing target must show the phone list, not an
 	// empty detail with no Back control. Keep pending loads selected.
@@ -140,17 +158,17 @@
 			</EmptyDetail>
 		{:else if target?.kind === 'draft'}
 			{#key target.draft.item}<DraftDetail draft={target.draft} provider={target.provider} />{/key}
-		{:else if target?.kind === 'provider'}
-			{#if target.provider.pending}
+		{:else if target?.kind === 'provider' && shownProvider}
+			{#if shownProvider.provider.pending}
 				<EmptyDetail icon={KeyRound} message="Loading providers" />
-			{:else if isConnected(target.provider)}
-				<ProviderDetail provider={target.provider} />
+			{:else if isConnected(shownProvider.provider)}
+				<ProviderDetail provider={shownProvider.provider} />
 			{:else}
-				<NotConnectedDetail provider={target.provider} />
+				<NotConnectedDetail provider={shownProvider.provider} />
 			{/if}
-		{:else if target?.kind === 'credential'}
-			{#key target.credential.item}
-				<CredentialDetail credential={target.credential} provider={target.provider} />
+		{:else if target?.kind === 'credential' && shownCredential}
+			{#key shownCredential.credential.item}
+				<CredentialDetail credential={shownCredential.credential} provider={shownCredential.provider} />
 			{/key}
 		{:else if forbidden}
 			<EmptyDetail icon={KeyRound} message={FORBIDDEN_TEXT} />

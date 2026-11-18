@@ -4,7 +4,7 @@
 
 ## Local checks
 
-<!-- List exact commands and results. Run targeted tests while working. Push through the hook (python scripts/local_ci.py install, once per clone): it runs the offline secret scan on every push and no test suites. Full suites run on GitHub CI for every PR, drafts included; merge only after CI is green and reviewed. Include head-SHA CI run links. Edge/nightly publication needs a hosted main-suite pass or an attested local full run on main. -->
+<!-- List exact commands and results. Run targeted tests while working. Push through the hook (python scripts/local_ci.py install, once per clone): it runs the offline secret scan on every push and no test suites. Full suites run on GitHub CI for every PR, drafts included; merge only after CI is green and reviewed. Include head-SHA CI run links. Edge/nightly publication needs a hosted CI pass or an attested local full run on main. -->
 
 ## Running-app checks
 

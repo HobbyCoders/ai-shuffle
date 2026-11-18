@@ -34,6 +34,8 @@
 			: `${runningCount} background agents are still running. Stopping will also stop them.`
 	);
 
+	// A stray press (the second tap of a double tap on Send) never reaches
+	// here: the composer's action row holds it back by when the press began.
 	function handleClick() {
 		if (runningCount > 0) {
 			showConfirm = true;

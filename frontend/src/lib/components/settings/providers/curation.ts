@@ -19,11 +19,14 @@ import {
 
 export interface CurationRow extends ProviderModelEntry {
 	checked: boolean;
+	/** A saved model the agent's last list did not contain (display only, never saved). */
+	unlisted?: boolean;
 }
 
 /**
  * Rows for a stored credential after a catalog fetch:
  * - stored models missing from the catalog stay, checked, so a save never drops them;
+ *   an agent-reported list marks them `unlisted` (#1634): picking one reroutes;
  * - a curated row checks exactly its saved ids; an uncurated one checks the
  *   preset roster and nothing from an upstream fetch;
  * - a stored per-model window and pricing win over the fetched ones; reasoning
@@ -40,6 +43,7 @@ export function rowsFromFetch(stored: ProviderModelEntry[], res: FetchModelsResu
 			id: m.id,
 			label: m.label,
 			checked: true,
+			...(res.source === 'agent' ? { unlisted: true } : {}),
 			context_window: m.context_window,
 			pricing: m.pricing,
 			...copyReasoningMetadata(m),
@@ -85,6 +89,18 @@ export function rowsFromStored(stored: ProviderModelEntry[]): CurationRow[] {
 		...copyReasoningMetadata(m),
 		...copyLocalSettings(m)
 	}));
+}
+
+/**
+ * Rows shown while no catalog has arrived: `next` (the saved list) plus every
+ * row already on screen that it lacks, unticked and in place. Unticking a
+ * model while the list loads must not hide it until the fetch ends (#1650).
+ */
+export function keepShownRows(shown: CurationRow[], next: CurationRow[]): CurationRow[] {
+	const byId = new Map(next.map((r) => [r.id, r]));
+	const kept = shown.map((r) => byId.get(r.id) ?? { ...r, checked: false });
+	const keptIds = new Set(shown.map((r) => r.id));
+	return [...kept, ...next.filter((r) => !keptIds.has(r.id))];
 }
 
 /** Rows for a new credential: nothing checked except what was checked before a refresh. */

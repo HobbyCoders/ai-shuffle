@@ -156,11 +156,11 @@ def test_exhausted_jobs_read_never_writes_publication_permission(monkeypatch, tm
             raise error
         if endpoint.startswith("commits/"):
             return "[]"
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+        if endpoint.startswith("actions/workflows/ci.yml/runs?"):
             return json.dumps({"workflow_runs": [run]})
         return json.dumps({
             "": {"id": 42, "full_name": gate.REPOSITORY},
-            "actions/workflows/main-suite.yml": {"id": 7, "path": gate.MAIN_SUITE_PATH},
+            "actions/workflows/ci.yml": {"id": 7, "path": gate.MAIN_SUITE_PATH},
             "actions/runs/41": run,
         }[endpoint])
 

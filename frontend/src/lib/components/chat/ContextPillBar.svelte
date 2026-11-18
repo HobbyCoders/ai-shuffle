@@ -417,6 +417,8 @@
 			showRunnerDone(sessionId, done);
 			notify.success(adopt ? 'This session now runs on this worker.' : `This session now runs on ${item.label}.`);
 			await appData.loadSessions();
+			// The open chat's project follows its new owner (#1659).
+			activeSession.reconcileOwner(appData.current.sessions);
 		} catch (e) {
 			const detail =
 				e && typeof e === 'object' && 'detail' in e && typeof (e as { detail: unknown }).detail === 'string'

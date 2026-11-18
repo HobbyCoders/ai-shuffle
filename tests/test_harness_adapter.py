@@ -1527,9 +1527,16 @@ async def test_native_slash_submission_expands_from_selected_sources(tmp_path, m
         events = await _collect(adapter)
         assert isinstance(events[-1], ResultMessage)
         assert requests
-        assert expected in str(requests[0].messages)
+        from fluid.providers.anthropic.serialize import build_request_body
+
+        user = next(m for m in requests[0].messages if m.role == "user")
+        assert user.prompt_text() == "/greet world"
+        wire = build_request_body(requests[0])["messages"]
+        texts = [b["text"] for m in wire if m["role"] == "user"
+                 for b in m["content"] if b["type"] == "text"]
+        assert expected in texts
         if sources:
-            assert "/greet world" not in str(requests[0].messages)
+            assert all("/greet world" not in text for text in texts)
     finally:
         await adapter.disconnect()
 
@@ -7566,18 +7573,27 @@ def test_guidance_degrades_to_nothing_without_the_fluid_symbol(monkeypatch):
 
 
 def test_code_mode_section_carries_the_four_contracts():
-    """Budget output and batch independent work, not unseen decisions."""
+    """Budget output and batch independent work, not unseen decisions.
+
+    The batching and failure rules ride run_python's description on every
+    call, so the section names the cap run_python states instead of a number
+    of its own (it once said 16,384 after the cap fell to 8,000) and does not
+    repeat those rules; together the two still carry every contract once.
+    """
     import app.core.provider.harness_adapter as ha
+    from fluid.codemode.session import _run_python_desc
 
     text = ha._code_mode_section()
-    assert "_refs" in text and "stated stdout cap" in text and "16,384 characters" in text
-    assert "Further windows in a later cell are allowed" in text
+    desc = _run_python_desc()
+    both = text + "\n" + desc
+    assert "stdout cap\nrun_python states" in text and "16,384" not in text
+    assert "Further windows in a later\ncell are allowed" in text
+    assert "_refs" in desc and "capped at" in desc
     assert 'Task(mode="background")' in text and "Never poll" in text
-    assert "single-call cell is appropriate" in text
-    assert "independent calls, not decisions" in text
-    assert "safety/validation barriers abort" in text
-    assert "Never spend a cell on a single Read" not in text
-    assert "read every search hit" in text and "do not read every" in text
+    for rule in ("single-call cell is appropriate", "independent calls, not decisions",
+                 "safety/validation barriers abort", "do not read every search hit"):
+        assert both.count(rule) == 1, rule
+    assert "Never spend a cell on a single Read" not in both
     assert "limit<=5" in text and "two unproductive queries" in text
 
 
@@ -7936,12 +7952,17 @@ def test_code_mode_section_names_both_skill_paths_and_the_error_rule():
     assert "`<project>/.fluid/skills/<name>/SKILL.md`" in text
     assert "frontmatter" in text and '"# Available skills" in later sessions' in text
     assert "delete_skill(name=...)" in text
-    # 8b: the try/except sentence that contradicted run_python is gone.
-    assert "Wrap calls that may fail in try/except" not in text
-    assert "a falsy MissingFile instead of raising" in text
-    assert "Grep of a path you guessed" not in text
-    assert "Recoverable failures return inspectable error text" in text
-    assert "safety/validation barriers abort" in text
+    # 8b: the try/except sentence that contradicted run_python is gone; the
+    # error rule and MissingFile note live once, in run_python's description.
+    from fluid.codemode.session import _run_python_desc
+
+    both = text + "\n" + _run_python_desc()
+    assert "Wrap calls that may fail in try/except" not in both
+    assert "Grep of a path you guessed" not in both
+    for rule in ("a falsy MissingFile instead of raising",
+                 "Recoverable failures return inspectable error text",
+                 "safety/validation barriers abort"):
+        assert both.count(rule) == 1, rule
 
 
 def test_save_skill_and_delete_skill_are_documented_in_the_catalog():

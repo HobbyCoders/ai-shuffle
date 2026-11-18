@@ -1,27 +1,30 @@
-"""What a green run already proved, so a later run of the same code can skip it.
+"""The UI journeys a pull request already passed, so main need not run them again.
 
-A pull request's checks run on GitHub's merge of the branch into main. When an
-area's checks all pass there, ``record-pass.yml`` uploads a tiny artifact named
-``proven-<area>-<tree>``: the tree is the content of every file in that merge.
-A squash merge onto an unmoved main produces the same tree, so main-suite finds
-the record and skips that area instead of running it a second time.
+A pull request's checks run on GitHub's merge of the branch into main. When its
+selected UI journeys all pass there, ``record-pass.yml`` uploads a tiny artifact
+named ``proven-journeys-<tree>-<selection>``: the tree is the content of every
+file in that merge. A squash merge onto an unmoved main produces the same tree,
+so the run on main finds the record and starts no journey shard.
 
 The tree covers the workflows and tests too, so a record can only stand for
-the same checks on the same files. Nothing here lists what an area depends on.
-A record counts only when it came from the area's own checks on the pull
-request that was merged as this very commit (never a fork's, never another
-branch's run), and only a push to main looks: scheduled and dispatched runs
-prove everything again.
+the same journeys on the same files. A record counts only when it came from
+the checks of the pull request that was merged as this very commit (never a
+fork's, never another branch's run), and only a push to main looks: scheduled
+and dispatched runs run every journey again.
 
-    python scripts/ci/proven.py check --areas backend,fluid >> "$GITHUB_OUTPUT"
+With a merge queue on main no record is needed for the queued merge: the
+queue's own run checked the very commit main then moves to, so the push that
+follows finds that run by the commit (``queue_passed``). Because the queue
+runs the full selection, a pull request's own runs then keep to the journeys a
+rule names for its files (``merge_queue_guards``).
+
+Every other check keeps its record by the files it reads: scripts/ci/plan.py.
 """
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import subprocess
-import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -29,7 +32,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 API = "https://api.github.com"
 PREFIX = "proven"
-MAIN_SUITE = "main-suite.yml"
+WORKFLOW = "ci.yml"
+MAIN_EVENTS = ("push", "schedule", "workflow_dispatch")
+# GitHub's merge queue tests a pull request on a branch of this form, named for
+# the branch the group is headed for, and starts the run with this event.
+QUEUE_EVENT = "merge_group"
+QUEUE_BRANCH = "gh-readonly-queue/main/"
 
 
 def request(path, token, urlopen=urllib.request.urlopen):
@@ -50,13 +58,9 @@ def record_name(area: str, tree: str, key: str = "") -> str:
     return f"{PREFIX}-{area}-{tree}" + (f"-{key}" if key else "")
 
 
-# The workflow whose checks stand behind each area's record.
-WORKFLOWS = {
-    "backend": "ci-backend.yml", "fluid": "ci-fluid.yml", "windows": "windows-suite.yml",
-    "browser-workspace": "ci-browser-workspace.yml", "container": "container-postgres.yml",
-    "identity": "ci-instance-identity.yml", "desktop-source": "desktop-source-checks.yml",
-    "javascript-checks": "ci-frontend.yml", "journeys": "ci-frontend.yml",
-}
+# The jobs that stand behind each area's record: they start with this, inside
+# the one workflow every pull request runs.
+JOBS = {"journeys": "javascript / "}
 
 
 def merged_pulls(repository: str, commit: str, token: str, call=request) -> dict[str, dict]:
@@ -119,21 +123,24 @@ WAITING = {"queued", "in_progress", "waiting", "pending", "requested"}
 
 
 def passed(run_id, area: str, head: str, pull: dict, tree: str, repository: str, token: str, call=request) -> bool:
-    """True when that run is the area's own pull request workflow, on these files, with nothing failed."""
+    """True when that run is the pull request's own CI run, on these files, with none of the area's jobs failed."""
     run = call(f"/repos/{repository}/actions/runs/{run_id}", token)
     if (run.get("event") != "pull_request" or run.get("head_sha") != head or run.get("head_branch") != pull["ref"]
             or (run.get("head_repository") or {}).get("full_name") != repository
-            or run.get("path") != f".github/workflows/{WORKFLOWS[area]}"
+            or run.get("path") != f".github/workflows/{WORKFLOW}"
             or not ran_on(run, pull, tree, repository, token, call)):
         return False
     data = call(f"/repos/{repository}/actions/runs/{run_id}/jobs?filter=latest&per_page=100", token)
     jobs = data.get("jobs")
     if not isinstance(jobs, list) or not jobs or data.get("total_count") != len(jobs):
         return False
+    if not all(isinstance(job, dict) and isinstance(job.get("name"), str) for job in jobs):
+        return False
+    own = [job for job in jobs if job["name"].startswith(JOBS[area])]
     # Other jobs may still be running when the record is read; anything else must have passed.
-    return all(isinstance(job, dict) and (
+    return bool(own) and all(
         (job.get("status") == "completed" and job.get("conclusion") in ("success", "skipped"))
-        or (job.get("status") in WAITING and job.get("conclusion") is None)) for job in jobs)
+        or (job.get("status") in WAITING and job.get("conclusion") is None) for job in own)
 
 
 def exists(name: str, repository: str, token: str, call=request, *, area: str, tree: str,
@@ -144,16 +151,17 @@ def exists(name: str, repository: str, token: str, call=request, *, area: str, t
     merged head, and the run used exactly the files of ``tree``. So the record
     counts only when all of this holds, and any doubt means it does not:
 
-    - its run is the area's own workflow, started by a pull request of this
+    - its run is the CI workflow, started by a pull request of this
       repository (never a fork) whose head was merged to main as this commit;
     - that pull request is the only one its branch ever opened and its base
       was never changed, so no run on that head used another base's workflows;
     - GitHub's own record of the run names that pull request's test merge
       commit, and that commit holds exactly ``tree``;
-    - no job of the run failed, was cancelled or has an unknown state.
+    - none of the area's jobs in the run failed, was cancelled or has an
+      unknown state.
     """
     commit = commit or os.environ.get("GITHUB_SHA", "")
-    if area not in WORKFLOWS or not commit or not tree:
+    if area not in JOBS or not commit or not tree:
         return False
     pulls, trusted = None, {}
     data = call(f"/repos/{repository}/actions/artifacts?per_page=100&name={urllib.parse.quote(name)}", token)
@@ -177,53 +185,79 @@ def exists(name: str, repository: str, token: str, call=request, *, area: str, t
 
 
 def green_main_commits(repository: str, token: str, call=request) -> list[str]:
-    """Commits whose main-suite run on main succeeded, newest run first."""
-    data = call(f"/repos/{repository}/actions/workflows/{MAIN_SUITE}/runs"
+    """Commits whose CI run on main succeeded, newest run first."""
+    data = call(f"/repos/{repository}/actions/workflows/{WORKFLOW}/runs"
                 "?branch=main&status=success&per_page=30", token)
+    # Pull requests run the same workflow: one from a fork's branch named main is not main.
     return [run["head_sha"] for run in data.get("workflow_runs") or []
-            if run.get("head_branch") == "main" and run.get("conclusion") == "success" and run.get("head_sha")]
+            if run.get("head_branch") == "main" and run.get("event") in MAIN_EVENTS
+            and run.get("conclusion") == "success" and run.get("head_sha")]
+
+
+def queue_runs(repository: str, token: str, call=request, commit: str | None = None) -> list[dict]:
+    """This repository's successful CI runs the merge queue started for main, newest first.
+
+    With ``commit`` only the runs on that commit. Only GitHub starts a run with
+    this event, on the commit the queue built, and that commit becomes main's
+    when the group merges.
+    """
+    query = f"?event={QUEUE_EVENT}&status=success&per_page=30"
+    if commit:
+        query += f"&head_sha={urllib.parse.quote(commit)}"
+    data = call(f"/repos/{repository}/actions/workflows/{WORKFLOW}/runs{query}", token)
+    return [run for run in data.get("workflow_runs") or []
+            if isinstance(run, dict) and run.get("event") == QUEUE_EVENT
+            and run.get("status") == "completed" and run.get("conclusion") == "success"
+            and str(run.get("head_branch") or "").startswith(QUEUE_BRANCH)
+            and run.get("path") == f".github/workflows/{WORKFLOW}"
+            and (run.get("repository") or {}).get("full_name") == repository
+            and (run.get("head_repository") or {}).get("full_name") == repository
+            and run.get("head_sha") and (commit is None or run["head_sha"] == commit)]
+
+
+def green_queue_commits(repository: str, token: str, call=request) -> list[str]:
+    """Commits whose CI run in the merge queue for main succeeded, newest run first."""
+    return [run["head_sha"] for run in queue_runs(repository, token, call)]
+
+
+def queue_passed(repository: str, token: str, call=request, commit: str | None = None) -> bool:
+    """True when the merge queue's CI run succeeded on exactly ``commit`` (by default the one checked out).
+
+    That run selected its journeys the way a push to main does, from the last
+    commit CI passed on, so the push that moves main to the same commit has
+    nothing left to run.
+    """
+    commit = commit or os.environ.get("GITHUB_SHA", "")
+    return bool(commit) and bool(queue_runs(repository, token, call, commit))
+
+
+def merge_queue_guards(repository: str, token: str, branch: str = "main", call=request) -> bool:
+    """True when GitHub's active rules send every merge into ``branch`` through a merge queue."""
+    rules = call(f"/repos/{repository}/rules/branches/{urllib.parse.quote(branch, safe='')}?per_page=100", token)
+    return isinstance(rules, list) and any(isinstance(rule, dict) and rule.get("type") == "merge_queue"
+                                           for rule in rules)
+
+
+def _where() -> tuple[str, str] | None:
+    repository = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
+    return (repository, token) if repository and token else None
+
+
+def _push_to_main() -> bool:
+    return os.environ.get("GITHUB_EVENT_NAME") == "push" and os.environ.get("GITHUB_REF") == "refs/heads/main"
 
 
 def environment() -> tuple[str, str] | None:
     """(repository, token) when a push to main may look for records; else None."""
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    if os.environ.get("GITHUB_EVENT_NAME") != "push" or os.environ.get("GITHUB_REF") != "refs/heads/main":
-        return None
-    return (repository, token) if repository and token else None
+    return _where() if _push_to_main() else None
 
 
-def check(areas: list[str], root: Path = ROOT, call=request) -> dict[str, bool]:
-    """Which areas a record covers. Any doubt or error means not proven: run it."""
-    found = dict.fromkeys(areas, False)
-    where = environment()
-    if where is None:
-        return found
-    try:
-        tree = head_tree(root)
-        for area in areas:
-            found[area] = exists(record_name(area, tree), *where, call=call, area=area, tree=tree)
-    except Exception as error:  # noqa: BLE001 - a lookup must never fail the run
-        print(f"[proven] lookup failed, running everything not yet found: {error}", file=sys.stderr)
-    return found
+def history_environment() -> tuple[str, str] | None:
+    """(repository, token) for a run that narrows from the last commit CI passed on; else None.
 
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("stage", choices=("check",))
-    parser.add_argument("--areas", required=True, help="comma-separated area names")
-    args = parser.parse_args(argv)
-    found = check([area for area in args.areas.split(",") if area])
-    lines = ["### Already proven by a pull request", ""]
-    for area, proven in found.items():
-        print(f"{area}={'true' if proven else 'false'}")
-        lines.append(f"- `{area}`: {'skipped, a pull request passed it on these exact files' if proven else 'runs'}")
-    summary = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary:
-        with open(summary, "a", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    A push to main, and the merge queue's run of a group headed for main.
+    """
+    queued = (os.environ.get("GITHUB_EVENT_NAME") == QUEUE_EVENT
+              and os.environ.get("GITHUB_REF", "").startswith("refs/heads/" + QUEUE_BRANCH))
+    return _where() if queued or _push_to_main() else None

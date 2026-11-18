@@ -26,7 +26,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * components (see store-utils.ts and sessionMode.svelte.ts for the pattern).
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { createSubscribers } from './store-utils';
 
 /**

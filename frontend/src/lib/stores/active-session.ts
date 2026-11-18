@@ -17,7 +17,7 @@
  */
 
 import type { PermissionRequest as PermissionRequestType, UserQuestionRequest, Profile } from '$lib/api/client';
-import { api, recheckAuthOn401 } from '$lib/api/client';
+import { api, getErrorMessage, recheckAuthOn401 } from '$lib/api/client';
 import { acceptUserEvent } from '$lib/services/user-event-dedupe';
 import type { SessionAttention } from './session/ws-message-handlers';
 import { dismissSettledSessionPrompts, snapshotSessionPrompts, type SettlePromptSnapshot } from './session/settle-prompts';
@@ -29,16 +29,17 @@ import { createWsConnection, type WsConnection, type ManualReconnectState } from
 import { createMessageHandlers, type InternalMutableState } from './session/ws-message-handlers';
 import {
 	createSessionSwitcher,
-	getPersistedProfile, getPersistedProject,
+	getPersistedProfile,
 	getPersistedWorktreeIntent, setPersistedWorktreeIntent, projectRejectsWorktrees,
 	getPersistedModel, getPersistedEffort, getPersistedPermissionMode, normalizePermissionMode, getPersistedFastMode,
 	getPersistedContextWindowChoice, setPersistedRunBinding,
-	reconciledSessionMode, attachedSinceSaved, rememberedComposeMode, type AttachRowFields,
+	reconciledSessionMode, attachedSinceSaved, listedComposeMode, type AttachRowFields,
 } from './session/session-switcher';
 
 // Extracted sub-modules
 import type { SendReservation } from './session/send-order';
 import type { Creation } from './session/message-sender';
+import { resolveSessionProject } from './session/session-project';
 import { createSessionInit, setSkipRestore, bumpInitGeneration, tabWillRestoreChat, noteBootProjectPick } from './session/session-init';
 // V2 Phase 1: SSE-fed reducer store for v2_stream sessions (single writer).
 import { markChatUnavailable, clearUnavailableChat } from './unavailable-chat';
@@ -408,9 +409,9 @@ function getAuthToken(): string | null {
 function defaultState(): ActiveSessionState {
 	return {
 		sessionId: null,
-		// A fresh surface starts without a project until init applies the
-		// owner's last project choice (applyComposerDefaults); picking one makes
-		// it a project session. switchSession overwrites this from the row.
+		// A fresh surface starts without a project (owner decision 2026-11-13);
+		// picking one makes it a project session. switchSession overwrites this
+		// from the row, and a restored compose from its snapshot.
 		mode: 'chat',
 		title: 'New Chat',
 		messages: [],
@@ -435,7 +436,7 @@ function defaultState(): ActiveSessionState {
 		profile: getPersistedProfile(),
 		sessionProfileId: null,
 		currentQueryProfileId: null,
-		project: getPersistedProject(),
+		project: '',
 		projectV2Id: null,
 		totalTokensIn: 0,
 		totalTokensOut: 0,
@@ -465,7 +466,7 @@ function defaultState(): ActiveSessionState {
 		draft: '',
 		scrollTop: 0,
 		streamStartTime: null,
-		worktreeIntent: getPersistedWorktreeIntent(getPersistedProject(), composerPreferences.current.project.projectV2Id),
+		worktreeIntent: 'local',
 		deviceIntent: getPersistedDeviceIntent(),
 		worktreeBranch: '',
 		worktreeBaseBranch: 'main',
@@ -502,9 +503,34 @@ const { subscribe: _subscribe, notifySubscribers: _notifySubscribers, createDeri
 		(v) => { _state = v; }
 	);
 
+/**
+ * What the page has learned about who runs the open chat, counted in order
+ * (#1659): every row that names the owner, every change of owner or chat. A
+ * `/live` answer asked for before a newer count must not overwrite it.
+ */
+let ownerObservations = 0;
+
+/**
+ * The accepted rule, held for every writer (#1659): a chat another worker runs
+ * holds its shared project alone. Its legacy id names a folder on that worker;
+ * here it can name an unrelated project. A bound remote chat created from this
+ * composer (the "Runs on" pick keeps the local project it was created from)
+ * and any other path that leaves a local id beside the shared one end here.
+ * A legacy chat with no shared id keeps its id (nothing else names it).
+ */
+function holdSharedProjectForRemote(s: ActiveSessionState): ActiveSessionState {
+	return s.sessionId && s.isRemote === true && s.mode !== 'chat' && s.project && s.projectV2Id
+		? { ...s, project: '' }
+		: s;
+}
+
 function _update(fn: (s: ActiveSessionState) => ActiveSessionState) {
 	const prev = untrack(() => _state);
 	let next = fn(prev);
+	if (next !== _state) {
+		next = holdSharedProjectForRemote(next);
+		if (next.sessionId !== prev.sessionId || next.isRemote !== prev.isRemote) ownerObservations++;
+	}
 	if (next === _state) {
 		// Diagnostic: detect skipped streaming→ended transitions
 		if (prev.isStreaming && !next.isStreaming) {
@@ -703,6 +729,7 @@ const wsConn: WsConnection = createWsConnection({
 const switcher = createSessionSwitcher({
 	update: _update,
 	getState: () => _state,
+	ownerObservation: () => ownerObservations,
 	wsSend: (data) => wsConn.send(data),
 	internal,
 	sessionEphemeralCache,
@@ -916,7 +943,7 @@ async function setLiveRunSetting(field: 'effort' | 'fast' | 'context_window', va
 			});
 		} catch (error) {
 			if (sessionOwnerEpoch() === ownerEpoch && generation === runSettingGenerations[field]) {
-				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${error instanceof Error ? error.message : String(error)}`,
+				notify.error(`Could not change ${field === 'effort' ? 'effort' : field === 'fast' ? 'Fast mode' : 'context window'}: ${getErrorMessage(error)}`,
 					{ session_id: sessionId, persist: false });
 			}
 			return;
@@ -990,8 +1017,8 @@ function sameCheckout(a: CheckoutSnapshot, b: CheckoutSnapshot) {
 	return (Object.keys(a) as (keyof CheckoutSnapshot)[]).every(key => a[key] === b[key]);
 }
 
-/** The project and checkout fields the remembered composer picks resolve to. */
-function composerCheckoutDefaults(code: boolean, selectedProject = composerPreferences.current.project, resolvedProject?: {project:string; projectV2Id:string | null}) {
+/** The project and checkout fields a compose's own project and its remembered per-project picks resolve to. */
+function composerCheckoutDefaults(code: boolean, selectedProject: {projectId:string; projectV2Id:string | null}, resolvedProject?: {project:string; projectV2Id:string | null}) {
 	const picks = composerPreferences.worktreeForProject(selectedProject);
 	const project = resolvedProject ?? resolveComposerProject(selectedProject, appData.current.projects, appData.current.clusterProjects);
 	const intent = code ? getPersistedWorktreeIntent(project.project, project.projectV2Id) : 'local';
@@ -1035,17 +1062,15 @@ function accessForCompose(mode: SessionMode, current: string | null): string | n
 }
 
 /**
- * The checkout of a compose newChat kept (left unsent for another chat): its
- * project, worktree and Auto base stay as picked. Only a remembered branch it
- * did not hold comes back over Auto: one a create was spending when the owner
- * left, which that create then failed to spend.
+ * The compose's own project as this worker resolves it. A compose holding only
+ * a shared id gains its local copy once the catalog lists one; it is never
+ * given a project it does not already hold.
  */
-function keptComposeCheckout() {
-	const project = {project:_state.project, projectV2Id:_state.projectV2Id};
-	if (_state.worktreeIntent !== 'worktree') return {};
-	const remembered = composerCheckoutDefaults(true, {projectId:project.project, projectV2Id:project.projectV2Id}, project);
-	return remembered.worktreeBranch || remembered.selectedWorktreeBranch
-		? {...remembered, worktreeIntent:_state.worktreeIntent} : {};
+function composeProject(): {project:string; projectV2Id:string | null} {
+	const own = {project:_state.project, projectV2Id:_state.projectV2Id ?? null};
+	if (own.project || !own.projectV2Id) return own;
+	const resolved = resolveComposerProject({projectId:'', projectV2Id:own.projectV2Id}, appData.current.projects, appData.current.clusterProjects);
+	return resolved.project ? resolved : own;
 }
 
 export const activeSession = {
@@ -1079,11 +1104,10 @@ export const activeSession = {
 		clearUnavailableChat();
 		setSkipRestore(true);
 		bumpInitGeneration();
-		const { restoredDraft, keptPlace } = switcher.newChat(options);
-		// The run binding follows the account defaults. A compose left unsent
-		// keeps its project, branch and worktree as picked; otherwise the
-		// project is the owner's last choice (rememberedComposeMode).
-		if (!restoredDraft) activeSession.applyComposerDefaults({ keepCheckout: keptPlace });
+		const { restoredDraft } = switcher.newChat(options);
+		// The run binding follows the account defaults; the compose starts
+		// without a project. A kept draft keeps its place and binding as picked.
+		if (!restoredDraft) activeSession.applyComposerDefaults();
 	},
 
 	// ── Messaging (delegated to message-sender) ─────────────────────
@@ -1203,37 +1227,149 @@ export const activeSession = {
 	 * defer to, so `mode` keeps whatever it already holds.
 	 */
 	reconcileSessionMode(sessionsList: ({ id: string } & AttachRowFields)[]): SessionMode | null {
+		activeSession.reconcileOwner(sessionsList);
 		const sessionId = _state.sessionId;
 		const mode = reconciledSessionMode(sessionId, sessionsList);
 		if (!mode) return null;
-		const row = sessionsList.find(s => s.id === sessionId);
-		// Restored from a snapshot saved while the session had no project, and
-		// a project was attached since (another tab or device, #371): take the
-		// row's project and access. The attach reset access to Ask; a saved
-		// Bypass would otherwise ride the next send and re-bind the session.
-		// A chat holds no project of its own: anything in `project` there is a
-		// filled-in device default, so it must not hide the attach.
-		const saved = _state.mode === 'chat'
-			? { mode: _state.mode, project: '', projectV2Id: null }
-			: { mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id };
-		if (attachedSinceSaved(saved, row)) {
-			const permissionMode = normalizePermissionMode(row?.permission_mode ?? 'default') ?? 'default';
-			const cached = sessionEphemeralCache.restore(sessionId!);
-			if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
-			_update(s => ({
-				...s, mode,
-				project: row?.project_id ?? '', projectV2Id: row?.project_v2_id ?? null,
-				worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
-				permissionModeOverride: permissionMode,
-				...markBindingHydrated(s, 'permission'),
-			}));
-			persistSession();
-			return mode;
-		}
+		if (activeSession.adoptAttachedProject(sessionsList)) return mode;
 		if (mode !== _state.mode) {
 			_update(s => ({ ...s, mode }));
 		}
 		return mode;
+	},
+
+	/**
+	 * The open session was a no-project chat and its refreshed row now has a
+	 * project (#371): attached from another tab, or by the worker that runs it
+	 * after a relayed attach (the only way such a chat's page takes its
+	 * project: the tab that asked waits for this row too). Take the row's
+	 * project and access, and report
+	 * whether it did. The attach reset access to Ask; a saved Bypass would
+	 * otherwise ride the next send and re-bind the session. A chat holds no
+	 * project of its own: anything in `project` there is a filled-in device
+	 * default, so it must not hide the attach.
+	 */
+	adoptAttachedProject(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
+		const sessionId = _state.sessionId;
+		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
+		const saved = _state.mode === 'chat'
+			? { mode: _state.mode, project: '', projectV2Id: null }
+			: { mode: _state.mode, project: _state.project, projectV2Id: _state.projectV2Id };
+		if (!row || !attachedSinceSaved(saved, row)) return false;
+		const mode = reconciledSessionMode(sessionId, sessionsList) ?? 'code';
+		const projectV2Id = row.project_v2_id ?? null;
+		// Legacy ids are per install: on a chat another worker runs, the row's
+		// id can name an unrelated project here, so the page holds the shared
+		// id alone (session upload, shared-id listing and Git all take it).
+		const remote = row.is_remote ?? !!_state.isRemote;
+		if (remote && !projectV2Id) return false;
+		const project = remote ? '' : row.project_id ?? '';
+		const permissionMode = normalizePermissionMode(row.permission_mode ?? 'default') ?? 'default';
+		const cached = sessionEphemeralCache.restore(sessionId!);
+		if (cached) sessionEphemeralCache.save(sessionId!, { ...cached, permissionModeOverride: permissionMode, bindingHydrated: { ...cached.bindingHydrated, permission: true } });
+		_update(s => ({
+			...s, mode, project, projectV2Id,
+			worktreeIntent: 'local', worktreeId: null, worktreeBranch: '', worktreeCheckoutPending: false, selectedWorktreeBranch: null,
+			permissionModeOverride: permissionMode,
+			...markBindingHydrated(s, 'permission'),
+		}));
+		persistSession();
+		return true;
+	},
+
+	/**
+	 * Who runs the open chat, from a refreshed row (#1659). A hand-off while
+	 * the page stays open changes it, and a row loaded after a reload or deep
+	 * link can settle it before `/live` does. A legacy project id counts only
+	 * on a chat this worker runs, so the project is re-resolved by the same
+	 * rule as a switch, never by comparing ids. Returns whether it changed.
+	 */
+	reconcileOwner(sessionsList: ({ id: string } & AttachRowFields)[]): boolean {
+		const sessionId = _state.sessionId;
+		const row = sessionId ? sessionsList.find(s => s.id === sessionId) : undefined;
+		if (!row || row.is_remote === undefined) return false;
+		// A row naming the owner is news even when it repeats it: a `/live`
+		// answer asked for before it is older (#1659).
+		ownerObservations++;
+		// Same owner: nothing to change, unless another worker runs it and a
+		// local id is still held beside the shared one (a chat created here to
+		// run elsewhere keeps the project it was created from).
+		const remoteHoldsLocal = row.is_remote && _state.mode !== 'chat' && !!_state.project && !!row.project_v2_id;
+		if (row.is_remote === _state.isRemote && !remoteHoldsLocal) return false;
+		const patch: Partial<ActiveSessionState> = { isRemote: row.is_remote };
+		if (row.device_name !== undefined) patch.ownerDeviceName = row.device_name;
+		if (_state.mode !== 'chat' && (row.project_id !== undefined || row.project_v2_id !== undefined)) {
+			Object.assign(patch, resolveSessionProject({
+				projectId: row.project_id,
+				projectV2Id: row.project_v2_id ?? undefined,
+				ephemeralProject: _state.project,
+				ephemeralProjectV2Id: _state.projectV2Id,
+				isRemote: row.is_remote,
+			}));
+		}
+		_update(s => ({ ...s, ...patch }));
+		persistSession();
+		return true;
+	},
+
+	/**
+	 * Wait until the page knows who runs `sessionId` (a row or `/live` said):
+	 * 'known', 'left' once the page leaves that chat, 'unknown' at `timeoutMs`.
+	 * Uploads into a local project wait on this (#1659).
+	 */
+	waitForOwner(sessionId: string, timeoutMs: number): Promise<'known' | 'left' | 'unknown'> {
+		return new Promise(resolve => {
+			let done = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let unsubscribe: (() => void) | null = null;
+			const finish = (outcome: 'known' | 'left' | 'unknown') => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				unsubscribe?.();
+				resolve(outcome);
+			};
+			unsubscribe = _subscribe(s => {
+				if (s.sessionId !== sessionId) finish('left');
+				else if (s.isRemote !== undefined) finish('known');
+			});
+			if (done) { unsubscribe(); return; }
+			timer = setTimeout(() => finish('unknown'), timeoutMs);
+		});
+	},
+
+	/**
+	 * After a relayed attach (another worker runs the chat): wait until this
+	 * page has adopted the attached row from THIS worker's mirror, since the
+	 * project upload, listing and Git gates read that row, not the relay's
+	 * answer. Reloads sessions once now; the sessions sync (a mirrored row
+	 * invalidates `sessions` here) drives the rest. 'adopted' once the open chat
+	 * holds a project, 'left' when the page leaves that chat, 'pending' at
+	 * `timeoutMs` (the row adopts whenever it arrives).
+	 */
+	waitForAttachedRow(sessionId: string, timeoutMs: number): Promise<'adopted' | 'left' | 'pending'> {
+		return new Promise(resolve => {
+			let done = false;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let unsubscribe: (() => void) | null = null;
+			const finish = (outcome: 'adopted' | 'left' | 'pending') => {
+				if (done) return;
+				done = true;
+				clearTimeout(timer);
+				unsubscribe?.();
+				resolve(outcome);
+			};
+			const check = (s: ActiveSessionState) => {
+				if (s.sessionId !== sessionId) finish('left');
+				else if (s.mode !== 'chat' && (s.project || s.projectV2Id)) finish('adopted');
+			};
+			unsubscribe = _subscribe(check);
+			if (done) { unsubscribe(); return; }
+			timer = setTimeout(() => finish('pending'), timeoutMs);
+			void appData.loadSessions()
+				.then(() => { if (!done) activeSession.adoptAttachedProject(appData.current.sessions); })
+				.catch(() => { /* the sessions sync or the bound ends the wait */ });
+		});
 	},
 
 	/** `user`: the owner picked it in the UI (not a catalog or default fix-up). */
@@ -1245,8 +1381,9 @@ export const activeSession = {
 		const nextV2 = projectV2Id === undefined
 			? appData.current.clusterProjects.find(p => p.local_project_id === projectId)?.project_v2_id ?? null
 			: projectV2Id;
-		// The owner's choice, "no project" included, is what the next new chat
-		// opens with. A catalog fix-up clearing a deleted project is not one.
+		// Record the owner's choice, "no project" included (per-project picks,
+		// other devices); a new chat still starts without a project. A catalog
+		// fix-up clearing a deleted project is not a choice.
 		if (projectId || nextV2 || (user && !_state.sessionId)) composerPreferences.set('project', {projectId, projectV2Id:nextV2});
 		// On a new session the project decides its kind (#371 step 4): picking
 		// one makes it a project session, clearing it makes it one without.
@@ -1513,27 +1650,27 @@ export const activeSession = {
 	},
 
 	/** Remote defaults may update an idle composer, never an existing session or typed draft. */
-	applyComposerDefaults({ keepCheckout = false }: { keepCheckout?: boolean } = {}) {
+	applyComposerDefaults() {
 		if (_state.sessionId || hasComposerDraft(_state.draft) || _state.worktreeBranch || composerBusy()) return;
 		// After a reload the typed text is still only in this tab's draft slot
 		// until the composer reads it back; it keeps the place it was typed in.
 		if (hasComposerDraft(readDraft(null) ?? '')) return;
 		const picks = composerPreferences.current;
-		// An idle compose follows the owner's last project choice; a kept one,
-		// and a voice compose, keep their lane.
-		const mode = keepCheckout || _state.mode === 'voice' ? _state.mode : rememberedComposeMode();
+		// The run binding follows the account defaults, the project does not: an
+		// idle compose keeps its own project (none on a new session) and only
+		// loses one this worker no longer lists. A voice compose keeps its lane.
+		const own = composeProject();
+		const mode = _state.mode === 'voice' ? _state.mode : listedComposeMode({projectId:own.project, projectV2Id:own.projectV2Id});
 		const code = mode !== 'chat';
 		_update(s => ({...s, mode,
 			profile:picks.profile, modelOverride:picks.model, effortLevelOverride:composerPreferences.effortForModel(picks.model) ?? s.effortLevelOverride,
 			permissionModeOverride:code ? normalizePermissionMode(picks.permissionMode) : noProjectPermission(normalizePermissionMode(picks.permissionMode)), fastMode:fastModeForModel(picks.model, picks.fastMode === '1'),
 			contextWindowChoice:getPersistedContextWindowChoice(),
-			...(keepCheckout ? keptComposeCheckout() : composerCheckoutDefaults(code)),
+			...composerCheckoutDefaults(code, {projectId:own.project, projectV2Id:own.projectV2Id}, own),
 		}));
-		// A remembered project applied before the catalog is in is a placeholder
-		// (#1636): remember exactly what it set so the catalog can finish it.
-		// A kept checkout was picked from a resolved catalog; nothing to finish.
-		const remembered = !!(picks.project.projectId || picks.project.projectV2Id);
-		_checkoutBeforeCatalog = code && !keepCheckout && remembered && !appData.projectCatalogLoaded ? checkoutSnapshot() : null;
+		// A project restored before the catalog is in is a placeholder (#1636):
+		// remember exactly what it set so the catalog can finish it.
+		_checkoutBeforeCatalog = code && !!(own.project || own.projectV2Id) && !appData.projectCatalogLoaded ? checkoutSnapshot() : null;
 	},
 
 	/**
@@ -1591,10 +1728,11 @@ export const activeSession = {
 			activeSession.applyComposerDefaults();
 			return;
 		}
-		// A saved project this worker no longer lists leaves the compose without
-		// one. A voice compose keeps its lane.
-		const mode = _state.mode === 'voice' ? _state.mode : rememberedComposeMode();
-		_update(s => ({ ...s, mode, ...composerCheckoutDefaults(mode !== 'chat'),
+		// A project this worker no longer lists leaves the compose without one;
+		// the catalog never adds one. A voice compose keeps its lane.
+		const own = composeProject();
+		const mode = _state.mode === 'voice' ? _state.mode : listedComposeMode({projectId:own.project, projectV2Id:own.projectV2Id});
+		_update(s => ({ ...s, mode, ...composerCheckoutDefaults(mode !== 'chat', {projectId:own.project, projectV2Id:own.projectV2Id}, own),
 			...(mode === 'chat' ? { permissionModeOverride: noProjectPermission(s.permissionModeOverride) } : {}) }));
 	},
 

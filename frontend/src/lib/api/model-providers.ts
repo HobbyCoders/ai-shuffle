@@ -177,6 +177,9 @@ export interface ModelProvider {
 	updated_at: string | null;
 	/** Fingerprint of the current endpoint/credential, not curation or token ciphertext. */
 	catalog_binding?: string | null;
+	/** Google sign-in rows: this worker's tag for the current sign-in (the binding
+	 *  is the same for every account). Null until an agent ran on it, and elsewhere. */
+	catalog_signin?: string | null;
 	/** Opaque generation used to reject stale whole-selection saves. */
 	revision?: string | null;
 }
@@ -247,7 +250,9 @@ export async function toggleModelProvider(id: string): Promise<ModelProvider> {
  * separate shared catalog, never a selection.
  */
 export interface FetchModelsResult {
-	source: 'preset' | 'upstream';
+	/** `agent`: the list the provider's own agent reported at a chat start
+	 *  (Google Antigravity), stamped with `fetched_at` and `agent_version`. */
+	source: 'preset' | 'upstream' | 'agent';
 	models: ProviderModelEntry[];
 	/** Media endpoints the server held back: this picker is for chat models, and
 	 *  audio/voice/image/video ones are configured elsewhere. Reported so the UI
@@ -259,13 +264,44 @@ export interface FetchModelsResult {
 	recommended?: string[];
 	/** Credential binding that produced this discovery, including unshared live results. */
 	binding?: string | null;
+	/** Google sign-in rows: the sign-in the list belongs to (see `catalog_signin`). */
+	signin?: string | null;
 	/** Attribution of a successfully shared refresh; null when sharing was skipped. */
 	fetched_at?: string | null;
 	fetched_by_device?: string | null;
 	fetched_by_name?: string | null;
+	/** The agent's version when `source` is `agent`. */
+	agent_version?: string | null;
 }
 
 export type ModelCatalogSnapshot = FetchModelsResult;
+
+/**
+ * Which credential a model list belongs to: the binding and, for a Google
+ * sign-in row, the sign-in (two accounts share one binding there). A list is
+ * joined, kept or accepted only for the row's current identity. Null without
+ * a binding.
+ */
+export function catalogIdentity(
+	binding: string | null | undefined,
+	signin: string | null | undefined
+): string | null {
+	return binding ? `${binding}#${signin ?? ''}` : null;
+}
+
+/** The identity of a provider row's current credentials (see `catalogIdentity`). */
+export function rowCatalogIdentity(
+	row: Pick<ModelProvider, 'catalog_binding' | 'catalog_signin'> | null | undefined
+): string | null {
+	return catalogIdentity(row?.catalog_binding, row?.catalog_signin);
+}
+
+/** The identity of the credentials a model list came from (see `catalogIdentity`). */
+export function listCatalogIdentity(
+	list: Pick<FetchModelsResult, 'binding' | 'signin'> | null | undefined
+): string | null {
+	return catalogIdentity(list?.binding, list?.signin);
+}
 
 /** Read the last shared discovery snapshot without an upstream request. */
 export async function getModelCatalog(id: string): Promise<ModelCatalogSnapshot | null> {

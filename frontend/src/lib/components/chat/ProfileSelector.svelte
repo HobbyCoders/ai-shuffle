@@ -4,7 +4,7 @@
 	 * Uses GroupedSelector for group-aware profile selection.
 	 *
 	 * In the Assistant's own conversation the agent is fixed, so the chip turns
-	 * into the way to the Assistant's settings: its avatar, its name and a gear.
+	 * into the way to the Assistant's settings: its name and a gear.
 	 * The conversation itself carries no header, so this chip (in the composer
 	 * on desktop, in the controls sheet on the phone) is that door.
 	 */
@@ -181,6 +181,15 @@
 	.selector-wrapper {
 		position: relative;
 		flex-shrink: 0;
+	}
+
+	/* The new-chat row's agent word: it may shrink in its row, and the whole
+	   chip stops at the branch word's cap (ExecutionModeBar's --branch-slot-max)
+	   so a long unbroken name ends in an ellipsis instead of widening the row. */
+	.selector-wrapper.card-variant {
+		flex-shrink: 1;
+		min-width: 0;
+		max-width: min(100%, 232px);
 	}
 
 	.selector-wrapper.sheet-mode {

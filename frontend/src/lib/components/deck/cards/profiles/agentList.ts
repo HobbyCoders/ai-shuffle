@@ -5,6 +5,7 @@
  * without rendering.
  */
 import type { Profile } from '$lib/api/client';
+import { codePoints, cutCodePoints } from '$lib/utils/code-points';
 import { NATIVE_PROVIDER_KEY, VOICE_PROVIDER_KEY, decodeProviderModel } from '$lib/constants/models';
 
 /**
@@ -103,18 +104,59 @@ export function profileModels(p: Profile): Record<string, string> {
 	return models;
 }
 
-/** A free id for a new agent named `name` ("Release notes" → "release-notes", then "-2"). */
+/** Longest agent id the server accepts (`ProfileCreate.id` max_length). */
+export const AGENT_ID_MAX = 50;
+/** Longest agent name the server accepts (`ProfileBase.name` max_length, in code points). */
+export const AGENT_NAME_MAX = 100;
+
+/**
+ * Why `name` cannot be saved yet, or null. The limit counts code points, as
+ * the server's `max_length` does; the field never cuts what was typed.
+ */
+export function agentNameProblem(name: string): string | null {
+	if (!name.trim()) return 'Required to save.';
+	const n = codePoints(name);
+	if (n > AGENT_NAME_MAX) return `Too long: ${n} of ${AGENT_NAME_MAX} characters. Shorten it to save.`;
+	return null;
+}
+
+/** `base` cut so it plus `suffix` fits AGENT_ID_MAX, never ending on a dash. */
+function fitId(base: string, suffix = ''): string {
+	return base.slice(0, AGENT_ID_MAX - suffix.length).replace(/-+$/, '') + suffix;
+}
+
+/**
+ * A free id for a new agent named `name` ("Release notes" → "release-notes",
+ * then "-2"). Long names are cut to AGENT_ID_MAX characters, the suffix
+ * included, so the id always saves and stays unique after the cut.
+ */
 export function uniqueAgentId(name: string, taken: Iterable<string>): string {
 	const used = new Set(taken);
 	const base =
-		name
-			.toLowerCase()
-			.replace(/[^a-z0-9-]+/g, '-')
-			.replace(/-+/g, '-')
-			.replace(/^-|-$/g, '') || 'agent';
+		fitId(
+			name
+				.toLowerCase()
+				.replace(/[^a-z0-9-]+/g, '-')
+				.replace(/-+/g, '-')
+				.replace(/^-|-$/g, '')
+		) || 'agent';
 	let id = base;
-	for (let n = 2; used.has(id); n += 1) id = `${base}-${n}`;
+	for (let n = 2; used.has(id); n += 1) id = fitId(base, `-${n}`);
 	return id;
+}
+
+/**
+ * The name a duplicate of `name` gets ("Scribe" → "Scribe copy", then
+ * "Scribe copy 2" when that is taken), within AGENT_NAME_MAX code points. A
+ * long name is cut on a character boundary to make room, so a copy of a
+ * copy at the limit still gets a name of its own.
+ */
+export function duplicateAgentName(name: string, taken: Iterable<string> = []): string {
+	const used = new Set(taken);
+	const fit = (suffix: string) => cutCodePoints(name, AGENT_NAME_MAX - codePoints(suffix)).trimEnd() + suffix;
+	let copy = fit(' copy');
+	for (let n = 2; used.has(copy); n += 1) copy = fit(` copy ${n}`);
+	return copy;
 }
 
 /** "1 tool", "3 tools". */

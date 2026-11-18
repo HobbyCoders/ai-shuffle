@@ -1,5 +1,8 @@
 """Tests for session title derivation (leading @attachment token strip)."""
 
+import json
+from pathlib import Path
+
 import pytest
 
 from app.core.session_title import derive_session_title, strip_leading_attachment_tokens
@@ -132,3 +135,43 @@ class TestDeriveSessionTitle:
 )
 def test_strip_matrix(text, expected):
     assert strip_leading_attachment_tokens(text) == expected
+
+
+class TestKnownAttachmentReferencesAnywhere:
+    """#1654: the title is the typed words, wherever the chips sit."""
+
+    def test_trailing_chip_run_into_the_last_word(self):
+        path = "/tmp/ai-shuffle-preview/work/chat-uploads/shot 1.png"
+        assert derive_session_title(f"QA E4 worktree B@{path}", [path]) == "QA E4 worktree B"
+
+    def test_several_chips_between_and_after_the_words(self):
+        a, b = "/ws/uploads/a.png", "/ws/uploads/b notes.md"
+        text = f"compare @{a} with @{b}\n\n@{a}"
+        assert derive_session_title(text, [a, b]) == "compare with"
+
+    def test_longer_path_wins_over_its_prefix(self):
+        short, long = "/ws/a.txt", "/ws/a.txt.bak"
+        assert derive_session_title(f"diff @{long} now", [short, long]) == "diff now"
+
+    def test_unknown_mid_message_mention_is_kept(self):
+        assert derive_session_title("email @user today", ["/ws/a.png"]) == "email @user today"
+
+    def test_attachments_only_is_named_by_its_files(self):
+        # Never empty, and never the raw path.
+        assert derive_session_title("@/ws/a.png", ["/ws/a.png"]) == "a.png"
+
+
+# The same cases the client's ``deriveSessionTitle`` is tested against
+# (message-presentation.test.ts), final formatted title and all, so the two
+# title rules cannot drift. ``paths`` is null for a caller in the "unknown"
+# state (server only: the composer always knows its attachments).
+_SHARED_CASES = json.loads(
+    (Path(__file__).resolve().parents[2] / "frontend/src/lib/utils/attachment-title-cases.json").read_text("utf-8")
+)
+
+
+@pytest.mark.parametrize("case", _SHARED_CASES, ids=[c["name"] for c in _SHARED_CASES])
+def test_title_matches_the_client_rule(case):
+    expected_state = "unknown" if case["paths"] is None else "known" if case["paths"] else "known-empty"
+    assert case["state"] == expected_state
+    assert derive_session_title(case["prompt"], case["paths"]) == case["title"]

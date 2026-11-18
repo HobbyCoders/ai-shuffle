@@ -297,6 +297,8 @@ def supervise(
                     break
             stop_group(process, stop_timeout)
             restart.clear()
+            if stopped.is_set() or time.monotonic() >= deadline or process_identity(owner_pid) != owner_start:
+                break
         return process.poll() if process.poll() is not None else 0
     finally:
         try:

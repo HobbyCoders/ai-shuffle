@@ -40,6 +40,24 @@ class WorkerDownloadClientTest {
             assertEquals(1, requests)
         }
     }
+    @Test fun aFileTheWorkerRefusesIsNotReportedAsAnExpiredSession() {
+        fun failure(code: Int, body: String, type: String): String? {
+            val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code).message("Fixture")
+                    .body(body.toResponseBody(type.toMediaType())).build()
+            }.build())
+            return assertThrows(IllegalArgumentException::class.java) {
+                client.save(server, "${server.baseUrl}/file", "session=test-cookie", "test-agent", ByteArrayOutputStream(), { true }, {})
+            }.message
+        }
+        assertEquals(WorkerDownloadClient.REFUSED_MESSAGE,
+            failure(403, """{"detail":"Access denied: file is outside workspace"}""", "application/json"))
+        // ChatDownloads shows only the messages it recognises by their opening words.
+        assertTrue(WorkerDownloadClient.REFUSED_MESSAGE.startsWith("The worker could not"))
+        for ((code, type) in listOf(403 to "text/html", 401 to "application/json")) {
+            assertTrue(failure(code, "denied", type)!!.startsWith("Your worker session expired"))
+        }
+    }
     @Test fun invalidInitialOriginAndRevokedAccountNeverMakeRequest() {
         var requests = 0
         val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain -> requests++; response(chain.request()) }.build())

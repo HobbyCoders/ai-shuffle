@@ -275,6 +275,32 @@ def person_entry(principal: Optional[Mapping[str, Any]]) -> Any:
     return caller == CALLER_AUTHENTICATED and (principal or {}).get("kind") in _OWNER_KINDS
 
 
+def composer_owner(principal: Optional[Mapping[str, Any]]) -> bool:
+    """Whether ``principal`` holds the install owner's authority, live.
+
+    :func:`person_entry` is True for every paired device; this is the narrower
+    rule ``require_admin`` applies: the owner's login or local listener, or a
+    paired device whose account owns this install (``account_owner_admin``,
+    re-derived from the device's own credential, never from a payload).
+    Blocking.
+    """
+    if person_entry(principal) is not True:
+        return False
+    if principal.get("kind") == "admin":
+        return True
+    credential = principal.get("credential_hash")
+    if principal.get("kind") != "paired" or not credential:
+        return False
+    from app.db import database
+
+    try:
+        client = database.get_paired_client_by_session_hash(credential)
+    except Exception:  # noqa: BLE001 — a failed check grants nothing
+        return False
+    return bool(client) and client.get("id") == principal.get("principal_id") \
+        and client.get("account_owner_admin") is True
+
+
 def turn_caller(overrides: Optional[Mapping[str, Any]]) -> Optional[str]:
     """The stamped caller of a turn's ``overrides``, or None when unstamped."""
     value = (overrides or {}).get(CALLER_KEY) if isinstance(overrides, Mapping) else None

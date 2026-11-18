@@ -70,15 +70,16 @@ async function readOrigin(page, log) {
 
 /** Past Welcome, the optional cloud and the provider check, to the first run. */
 async function reachFirstRun(page) {
-	const next = () => page.getByRole('button', { name: 'Continue', exact: true }).last();
-	const run = page.getByRole('button', { name: /run/i }).last();
-	for (let step = 0; step < 6; step += 1) {
-		await page.getByText('Watch an agent answer.').or(next()).first().waitFor({ timeout: 20_000 });
-		if (await page.getByText('Watch an agent answer.').isVisible()) break;
-		await next().click();
-		await page.waitForTimeout(200);
-	}
-	await page.getByText('Watch an agent answer.').waitFor();
+	const step = (name) => page.getByTestId(`setup-${name}`);
+	const advance = (name) => step(name).getByRole('button', { name: 'Continue', exact: true }).click();
+	await step('welcome').or(step('license')).waitFor({ timeout: 20_000 });
+	if (await step('welcome').isVisible()) await advance('welcome');
+	await advance('license');
+	await advance('provider');
+	await advance('workspace');
+	// Saving the workspace is asynchronous. Wait for the Run button in the
+	// next step, not another Continue on the outgoing workspace screen.
+	const run = step('first-run').getByRole('button', { name: 'Run it', exact: true });
 	await run.waitFor({ timeout: 20_000 });
 	return run;
 }

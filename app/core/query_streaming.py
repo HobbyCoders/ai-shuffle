@@ -16,6 +16,35 @@ logger = logging.getLogger(__name__)
 MAX_TOOL_OUTPUT_SIZE = settings.max_tool_output_chars
 MAX_DISPLAY_OUTPUT_SIZE = settings.max_display_output_chars
 
+# The chat parses the result of these tools as JSON and draws a choice,
+# confirmation or saved-choice card from it (frontend generationToolKind), so a
+# 2,000-character display cut leaves invalid JSON and no card (#1603). The
+# unified generation tools bound their own result (CHOOSE_RESULT_CHARS in
+# app/mcp/ai_tools_sdk.py); this cap matches the event log's 64 KiB.
+CARD_RESULT_TOOLS = frozenset({
+    "generateImage", "generateVideo", "generateAudio", "textTo3D",  # ai_tools_sdk.UNIFIED_TOOL_KINDS
+    "GenerateNativeImage", "GenerateNativeVideo",  # guarded native aliases, registered bare
+})
+CARD_RESULT_DISPLAY_SIZE = 65_536
+
+
+def is_card_result_tool(tool_name: Optional[str]) -> bool:
+    """A generation tool whose result the chat draws as a card.
+
+    The native aliases count only bare. The unified tools count bare (native
+    loop) or served by the bundled ai-tools MCP server, never a user MCP
+    server that happens to name a tool the same.
+    """
+    if not tool_name:
+        return False
+    if tool_name in CARD_RESULT_TOOLS:
+        return True
+    prefix, sep, bare = tool_name.rpartition("__")
+    return (
+        bool(sep) and bare in CARD_RESULT_TOOLS and not bare.startswith("GenerateNative")
+        and (prefix == "mcp__ai-tools" or prefix.endswith("__ai-tools"))
+    )
+
 
 _USAGE_TOKEN_KEYS = (
     "input_tokens",
@@ -104,7 +133,9 @@ def extract_mcp_image(content: Any) -> Optional[str]:
     return None
 
 
-def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -> str:
+def truncate_large_payload(
+    content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE, *, tool_name: Optional[str] = None
+) -> str:
     """
     Intelligently truncate large tool output payloads.
 
@@ -117,12 +148,15 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
     Args:
         content: The raw content from a ToolResultBlock
         max_size: Maximum allowed size in characters
+        tool_name: The tool that produced it. A generation tool whose result
+            the chat draws as a card keeps up to CARD_RESULT_DISPLAY_SIZE.
 
     Returns:
         Truncated string with informative message if content was too large
     """
     if content is None:
         return ""
+    display_size = CARD_RESULT_DISPLAY_SIZE if is_card_result_tool(tool_name) else MAX_DISPLAY_OUTPUT_SIZE
 
     # Handle content block lists: [{"type": "text", "text": "..."}, {"type": "image", ...}]
     # Supports both dict-based (MCP) and Pydantic model-based (SDK) content blocks.
@@ -157,7 +191,7 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
 
     # If it's small enough, return as-is (truncated for display)
     if content_len <= max_size:
-        return content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+        return content_str[:display_size]
 
     # Check if it looks like base64 image data using quick prefix checks
     # Common patterns: data:image/..., iVBOR (PNG), /9j/ (JPEG), R0lGOD (GIF)
@@ -178,5 +212,5 @@ def truncate_large_payload(content: Any, max_size: int = MAX_TOOL_OUTPUT_SIZE) -
 
     # For other large content, truncate with indicator
     size_kb = content_len // 1024
-    truncated = content_str[:MAX_DISPLAY_OUTPUT_SIZE]
+    truncated = content_str[:display_size]
     return f"{truncated}\n\n[... truncated - total size: {size_kb}KB]"

@@ -109,8 +109,6 @@ curl -X POST http://localhost:8000/api/v1/agents \
 
 If `id` is omitted, it is derived from the name (lowercase letters, digits and hyphens).
 
-Optional top-level `avatar_color` sets the colour the Agents page shows for the agent. It is one of `primary`, `emerald`, `rose`, `blue` or `warning` (the app's accent token names, so each theme draws its own shade), or `null` to let the page choose. Any other value returns `422`.
-
 ### PUT /api/v1/agents/{agent_id}
 
 Update an existing owner agent, including agents installed from the starter team.
@@ -128,8 +126,6 @@ curl -X PUT http://localhost:8000/api/v1/agents/agent_abc123 \
 ```
 
 `config` replaces the whole stored config. It is not merged: any field you leave out is removed. To change one setting, read the agent with `GET /api/v1/agents/{agent_id}`, change that field, and send the complete `config` object back. `name` and `description` can be sent on their own.
-
-`avatar_color` can be sent on its own too. Send a colour name to set it, `null` to clear it, or leave the key out to keep the current colour.
 
 ### DELETE /api/v1/agents/{agent_id}
 
@@ -185,7 +181,7 @@ All three return `403` with `{"detail": "Owner access required"}` for anyone but
 
 ## Agent Config Fields
 
-The top-level object has `id`, `name`, `description`, `avatar_color`, `is_builtin`, `is_modified`, `session_count`, `created_at`, `updated_at`, and a `config` object. `avatar_color` is `null` when no colour was chosen. The fields below live under `config`:
+The top-level object has `id`, `name`, `description`, `is_builtin`, `is_modified`, `session_count`, `created_at`, `updated_at`, and a `config` object. The fields below live under `config`:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -209,7 +205,7 @@ The tool names that may appear in `allowed_tools` / `disallowed_tools` are not a
 
 `ai_tools` and `app_config_tools` are legacy: those tools are now granted through the same list as everything else. Both fields are still accepted so older exports import cleanly.
 
-Owner sessions with app configuration tools enabled can edit agents with `mcp__app-config__updateProfile` and nested agents with `mcp__app-config__updateSubagent` without resending whole values. `prompt_edits` is an ordered list of `{old, new}` items (an exact replace; `old` must occur exactly once, otherwise the call reports the match count and saves nothing) and `{append}` items (a new paragraph at the end). `add` and `remove` change single entries of `allowed_tools`, `disallowed_tools`, `enabled_agents`, `enabled_plugins`, `add_dirs` (agents) or `tools`, `skills` (nested agents), and single `provider_models` keys. `updateProfile` also takes `reset_system_prompt: true` to go back to the preset prompt. Both tools and `createProfile` / `createSubagent` can set `provider_models`; the agent tools also set `enabled_agents`, `agent_invoke_mode`, `enabled_plugins`, `add_dirs` and `avatar_color`. Values pass the same checks as this API, the tool rules above still apply (an `allow` list cannot be emptied), and a failed call changes nothing.
+Owner sessions with app configuration tools enabled can edit agents with `mcp__app-config__updateProfile` and nested agents with `mcp__app-config__updateSubagent` without resending whole values. `prompt_edits` is an ordered list of `{old, new}` items (an exact replace; `old` must occur exactly once, otherwise the call reports the match count and saves nothing) and `{append}` items (a new paragraph at the end). `add` and `remove` change single entries of `allowed_tools`, `disallowed_tools`, `enabled_agents`, `enabled_plugins`, `add_dirs` (agents) or `tools`, `skills` (nested agents), and single `provider_models` keys. `updateProfile` also takes `reset_system_prompt: true` to go back to the preset prompt. Both tools and `createProfile` / `createSubagent` can set `provider_models`; the agent tools also set `enabled_agents`, `agent_invoke_mode`, `enabled_plugins` and `add_dirs`. Values pass the same checks as this API, the tool rules above still apply (an `allow` list cannot be emptied), and a failed call changes nothing.
 
 
 ## Nested Agents (formerly "subagents")

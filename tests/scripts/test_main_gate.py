@@ -1,5 +1,6 @@
-"""The Main suite gate judges the run from its start, so its verdict never queues."""
+"""The CI gate judges the run from its start, so its verdict never queues."""
 import copy
+import http.client
 import importlib.util
 import io
 import json
@@ -15,10 +16,11 @@ SPEC = importlib.util.spec_from_file_location("main_gate", ROOT / "scripts/ci/ma
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 PLAN = gate.Plan()
+ci_plan = gate.ci_plan
 FIXTURE = json.loads((ROOT / "tests/scripts/fixtures/main_suite_jobs.json").read_text())["jobs"]
 ALL_PROVEN = ("backend", "fluid", "windows", "browser-workspace", "container", "identity", "desktop-source",
               "javascript-checks")
-SELF = {"id": 999, "name": "Main suite", "status": "in_progress", "conclusion": None}
+SELF = {"id": 999, "name": "CI", "status": "in_progress", "conclusion": None}
 # The journey shards of the fixture run, in shard order (the count changes with the workflow).
 SHARDS = sorted((job["name"] for job in FIXTURE if job["name"].startswith("javascript / UI journeys (")),
                 key=lambda name: int(name.split("(")[1].split("/")[0]))
@@ -73,9 +75,9 @@ def test_a_real_green_run_is_complete_and_passes():
 
 def test_areas_match_the_aggregate_inventory_and_the_called_verdict_jobs():
     assert set(PLAN.areas) == set(gate.REQUIRED)
-    jobs = workflow("main-suite.yml")["jobs"]
-    # The verdict jobs main-suite skips are the pull-request required checks;
-    # their names stay as they are, and only main-suite asks them to step aside.
+    jobs = workflow("ci.yml")["jobs"]
+    # The verdict jobs CI skips are the pull-request required checks;
+    # their names stay as they are, and only CI asks them to step aside.
     names = {"backend": "Backend tests", "javascript": "JavaScript package checks",
              "windows": "Windows desktop", "browser-workspace": "Real browser workspace"}
     for area, key in gate.CALLER_GATED.items():
@@ -94,8 +96,8 @@ def test_most_specific_definition_wins():
     assert PLAN.slot_of("windows / Windows desktop").key == "desktop-gate"
     assert PLAN.slot_of("windows / Windows ${{ matrix.part }}").key == "suite"
     assert PLAN.slot_of(SHARDS[6]).key == "journeys"
-    assert PLAN.slot_of("backend / record / Record the pass").key == "record"
-    assert PLAN.is_advisory("source-ui / build") and PLAN.is_advisory("Find what a pull request already proved")
+    assert PLAN.slot_of("javascript / record-journeys / Record the pass").key == "record-journeys"
+    assert PLAN.is_advisory("source-ui / build") and PLAN.is_advisory("Plan what this run has to check")
     for area in gate.REQUIRED:
         assert not PLAN.is_advisory(area) and not PLAN.is_advisory(f"{area} / anything")
 
@@ -123,7 +125,7 @@ def test_any_required_job_that_did_not_pass_fails_the_verdict(conclusion):
 def test_advisory_jobs_never_decide():
     jobs = listing()
     named(jobs, "source-ui / build")["conclusion"] = "failure"
-    named(jobs, "Find what a pull request already proved")["conclusion"] = "failure"
+    named(jobs, "Plan what this run has to check")["conclusion"] = "failure"
     gate.verdict(PLAN, jobs, {"result": "failure", "outputs": {}})
 
 
@@ -206,7 +208,7 @@ def test_inner_rules_match_the_pull_request_verdict_jobs():
                 gate.check_javascript(broken, expected, False)
     for area in ("browser-workspace", "windows"):
         key = gate.CALLER_GATED[area]
-        needs = workflow(workflow("main-suite.yml")["jobs"][area]["uses"].rsplit("/", 1)[1])["jobs"][key]["needs"]
+        needs = workflow(workflow("ci.yml")["jobs"][area]["uses"].rsplit("/", 1)[1])["jobs"][key]["needs"]
         good = {name: {"result": "success"} for name in needs}
         gate.check_every_branch(area, good, needs)
         for name in needs:
@@ -222,8 +224,9 @@ def test_inner_rules_match_the_pull_request_verdict_jobs():
 class Run:
     """A fake Actions API: each GET returns the next listing (the last one repeats)."""
 
-    def __init__(self, *listings, errors=0):
+    def __init__(self, *listings, errors=0, error=None):
         self.listings, self.errors, self.calls, self.slept = list(listings), errors, [], []
+        self.error = error or urllib.error.URLError("unreachable")
 
     def __call__(self, method, path, token):
         self.calls.append((method, path))
@@ -231,7 +234,7 @@ class Run:
             return {}
         if self.errors:
             self.errors -= 1
-            raise urllib.error.URLError("unreachable")
+            raise self.error
         jobs = self.listings.pop(0) if len(self.listings) > 1 else self.listings[0]
         return {"total_count": len(jobs), "jobs": jobs}
 
@@ -285,7 +288,7 @@ def test_a_required_job_that_fails_after_the_gate_started_cancels_the_run(tmp_pa
 def test_a_cancelled_run_is_never_green():
     cancelled = running()
     for job in cancelled:
-        if job["status"] != "completed" and job["name"] != "Main suite":
+        if job["status"] != "completed" and job["name"] != "CI":
             job.update(status="completed", conclusion="cancelled")
     run = Run(running(), cancelled)
     with pytest.raises(SystemExit):
@@ -299,7 +302,7 @@ def test_the_gate_never_judges_or_cancels_for_its_own_job():
     done = listing() + [{**SELF, "status": "completed", "conclusion": "failure"}]
     run = Run(done)
     jobs, _ = watch(run)
-    assert not run.cancelled and all(job["name"] != "Main suite" for job in jobs)
+    assert not run.cancelled and all(job["name"] != "CI" for job in jobs)
 
 
 def test_advisory_failures_do_not_cancel():
@@ -335,29 +338,178 @@ def test_an_expected_job_that_never_appears_fails_instead_of_hanging():
     assert "UI journeys" in out.getvalue() and not run.cancelled
 
 
-def test_an_unreadable_run_is_not_proven():
-    run = Run(listing(), errors=gate.MAX_FAILED_READS)
+# What a read of GitHub's API raised on real runs, or can: no answer, a timeout,
+# a reset connection, a body cut short, a body that is not the JSON expected.
+UNREADABLE = [
+    urllib.error.URLError("unreachable"),
+    TimeoutError("timed out"),
+    ConnectionResetError("reset"),
+    http.client.IncompleteRead(b"", 225289),
+    http.client.RemoteDisconnected("closed without response"),
+    json.JSONDecodeError("cut short", "{", 1),
+]
+
+
+@pytest.mark.parametrize("error", UNREADABLE, ids=lambda error: type(error).__name__)
+def test_an_unreadable_run_is_not_proven(error):
+    run = Run(listing(), errors=gate.MAX_FAILED_READS, error=error)
     with pytest.raises(SystemExit):
         watch(run)
     # A few failed reads are retried.
-    run = Run(listing() + [SELF], errors=3)
-    watch(run)
+    run = Run(listing() + [SELF], errors=3, error=error)
+    jobs, out = watch(run)
+    assert jobs and out.count("could not read the run's jobs") == 3
+
+
+@pytest.mark.parametrize("error", UNREADABLE, ids=lambda error: type(error).__name__)
+def test_settling_survives_an_unreadable_poll(error):
+    run = Run(listing() + [SELF], errors=2, error=error)
+    ticks = iter(range(0, 10**6, gate.POLL_SECONDS))
+    assert gate.settle(PLAN, "o/r", 7, 1, "t", run, run.sleep, lambda: next(ticks), io.StringIO())
 
 
 def test_main_writes_the_evidence_flags(tmp_path):
     output = tmp_path / "output"
     run = Run(listing() + [SELF])
-    environ = {"RESULTS": json.dumps({"proven": lookup()}), "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7",
+    environ = {"RESULTS": json.dumps({gate.LOOKUP: lookup()}), "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7",
                "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output)}
     assert gate.main(environ, call=run, sleep=run.sleep, out=io.StringIO()) == 0
     lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert lines["backend"] == lines["windows"] == "true"
     assert json.loads(lines["backend-needs"])["backend-shard"] == {"result": "success"}
-    # An unproven skip fails, with no evidence flags written.
+    # An unproven skip fails the run. The areas that did finish still have their
+    # receipts checked, so their pass can be recorded.
     output.unlink()
     run = Run(skip_area(listing(), "fluid") + [SELF])
     assert gate.main(environ, call=run, sleep=run.sleep, out=io.StringIO()) == 1
-    assert not output.exists()
+    lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert lines["backend"] == lines["windows"] == "true"
+    assert not [key for key in lines if key.startswith("pass-")]
+
+
+# --- Recording what passed -----------------------------------------------------
+
+RECORDS = {area: f"pass-{area}-{'a' * 40}" for area in ci_plan.AREAS}
+
+
+def planned(**found):
+    return lookup(records=json.dumps(RECORDS), **found)
+
+
+def test_a_green_run_names_a_record_for_every_area_it_ran():
+    assert gate.passes(PLAN, listing() + [SELF], planned()) == RECORDS
+    # An area the plan skipped ran nothing: its record already exists.
+    jobs = skip_area(listing(), "fluid") + [SELF]
+    found = gate.passes(PLAN, jobs, planned(fluid="true"))
+    assert found == {area: record for area, record in RECORDS.items() if area != "fluid"}
+    # Without the plan's names nothing can be recorded.
+    assert gate.passes(PLAN, listing(), lookup()) == {}
+    assert gate.passes(PLAN, listing(), lookup(records="not json")) == {}
+    assert gate.passes(PLAN, listing(), lookup(records="[]")) == {}
+    assert gate.passes(PLAN, listing(), {"result": "failure"}) == {}
+
+
+@pytest.mark.parametrize(("name", "lost"), [
+    ("backend / backend-shard 3", {"backend"}),
+    ("backend / backend-security", {"backend"}),
+    ("fluid / fluid unit tests", {"fluid"}),
+    ("windows / Windows desktop shard (2/3)", {"windows"}),
+    ("javascript / Frontend and mobile production build", {"javascript-checks"}),
+    ("javascript / Frontend tests (3/4)", {"javascript-checks"}),
+    ("android / Build and test Android app", {"android"}),
+    ("android / Android emulator verification (API 34)", {"android"}),
+    ("android-minified / Minified releaseSmoke (API 36)", {"android-minified"}),
+    # Not part of any record: these have no files of their own.
+    ("update-reach", set()), ("supply-chain", set()),
+])
+@pytest.mark.parametrize("state", [("completed", "failure"), ("completed", "cancelled"), ("in_progress", None)])
+def test_an_area_is_recorded_on_its_own_whatever_another_area_did(name, lost, state):
+    jobs = listing() + [SELF]
+    named(jobs, name)["status"], named(jobs, name)["conclusion"] = state
+    assert gate.passes(PLAN, jobs, planned()) == {area: record for area, record in RECORDS.items() if area not in lost}
+
+
+def test_a_failed_journey_does_not_lose_the_record_of_the_other_javascript_checks():
+    """The journeys keep their own record (scripts/ci/proven.py)."""
+    jobs = listing() + [SELF]
+    named(jobs, SHARDS[3])["conclusion"] = "failure"
+    assert gate.passes(PLAN, jobs, planned()) == RECORDS
+    # Still running, the JavaScript workflow is not finished: nothing of it is recorded yet.
+    named(jobs, SHARDS[3])["status"], named(jobs, SHARDS[3])["conclusion"] = "in_progress", None
+    assert gate.passes(PLAN, jobs, planned()) == {
+        area: record for area, record in RECORDS.items() if area != "javascript-checks"}
+
+
+def test_an_area_with_a_job_not_listed_yet_is_not_recorded():
+    """A job waiting on another is listed only once that one finished."""
+    for name, area in (("android / Android emulator verification (API 34)", "android"),
+                       ("fluid / delegated tool-output contract (2.1.308)", "fluid"),
+                       ("windows / Windows desktop", "windows"),
+                       ("javascript / JavaScript package checks", "javascript-checks")):
+        jobs = [job for job in listing() if job["name"] != name]
+        assert area not in gate.passes(PLAN, jobs, planned())
+    # A whole area whose call has not started lists nothing.
+    jobs = [job for job in listing() if not job["name"].startswith("container / ")]
+    assert "container" not in gate.passes(PLAN, jobs, planned())
+
+
+def test_the_emulator_its_own_workflow_lets_fail_does_not_lose_the_record():
+    advisory = "android / Android emulator verification (API 36)"
+    assert gate.TOLERATED == {advisory}
+    matrix = workflow("android.yml")["jobs"]["android-ui"]["strategy"]["matrix"]["include"]
+    assert [item["api"] for item in matrix if item["advisory"] == "true"] == ["36"]
+    assert workflow("android.yml")["jobs"]["android-ui"]["continue-on-error"] == "${{ matrix.advisory }}"
+    jobs = listing() + [SELF]
+    named(jobs, advisory)["conclusion"] = "failure"
+    assert gate.passes(PLAN, jobs, planned()) == RECORDS
+    gate.verdict(PLAN, jobs, planned())
+    # Still running, it holds both back.
+    named(jobs, advisory)["status"], named(jobs, advisory)["conclusion"] = "in_progress", None
+    assert "android" not in gate.passes(PLAN, jobs, planned())
+    with pytest.raises(ValueError):
+        gate.verdict(PLAN, jobs, planned())
+
+
+def test_the_javascript_checks_are_recorded_only_when_every_one_of_them_ran_and_passed():
+    jobs = listing() + [SELF]
+    for job in jobs:
+        if job["name"].startswith("javascript / ") and "UI journeys" not in job["name"] \
+                and job["name"] not in ("javascript / Select UI journeys", "javascript / JavaScript package checks",
+                                        "javascript / record-journeys"):
+            job["conclusion"] = "skipped"
+    assert "javascript-checks" not in gate.passes(PLAN, jobs, planned())
+
+
+def test_main_names_the_records_only_for_this_repositorys_own_runs(tmp_path):
+    output = tmp_path / "output"
+    environ = {"RESULTS": json.dumps({gate.LOOKUP: planned()}), "GITHUB_REPOSITORY": "o/r", "GITHUB_RUN_ID": "7",
+               "GITHUB_RUN_ATTEMPT": "1", "GH_TOKEN": "t", "GITHUB_OUTPUT": str(output),
+               "GITHUB_EVENT_NAME": "pull_request", "RECORD": "true"}
+
+    def written(jobs, **changes):
+        output.write_text("")
+        run = Run(jobs)
+        code = gate.main({**environ, **changes}, call=run, sleep=run.sleep, out=io.StringIO())
+        lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        return code, {key[5:]: value for key, value in lines.items() if key.startswith("pass-")}, run
+
+    # update-reach runs on main only.
+    green = [job if job["name"] != "update-reach" else {**job, "conclusion": "skipped"} for job in listing()] + [SELF]
+    assert written(green)[:2] == (0, RECORDS)
+    # A fork's pull request records nothing: its records would never count.
+    assert written(green, RECORD="false")[:2] == (0, {})
+    # A pull request's run is watched to its end after a failure: every failure
+    # shows in one round and the areas that passed are recorded.
+    red = copy.deepcopy(green)
+    named(red, "fluid / fluid unit tests")["conclusion"] = "failure"
+    code, found, run = written(red)
+    assert code == 1 and not run.cancelled
+    assert found == {area: record for area, record in RECORDS.items() if area != "fluid"}
+    # On main the first failure still stops the run; what had finished is recorded.
+    with pytest.raises(SystemExit):
+        written(red, GITHUB_EVENT_NAME="push")
+    lines = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert lines["pass-backend"] == RECORDS["backend"] and "pass-fluid" not in lines
 
 
 # --- Every matrix member ------------------------------------------------------
@@ -505,9 +657,9 @@ def test_a_rerun_of_only_the_gate_judges_the_copied_jobs():
 
 
 def test_a_rerun_of_failed_jobs_waits_for_them_and_what_they_start():
-    rest = [job for job in copied(listing()) if job["name"] not in ("backend / backend-shard 2", "backend / record")]
+    rest = [job for job in copied(listing()) if job["name"] not in ("backend / backend-shard 2", "backend / Backend tests")]
     shard = {"id": 50, "name": "backend / backend-shard 2", "status": "queued", "conclusion": None}
-    record = {"id": 51, "name": "backend / record", "status": "completed", "conclusion": "skipped"}
+    record = {"id": 51, "name": "backend / Backend tests", "status": "completed", "conclusion": "skipped"}
     queued = rest + [shard, SELF]
     passed = rest + [{**shard, "status": "completed", "conclusion": "success"}, SELF]
     run = Run(queued, passed, passed + [record])
@@ -555,7 +707,7 @@ def test_reporting_waits_for_cancelled_shards_to_upload():
     named(failing, SHARDS[4]).update(status="completed", conclusion="failure")
     uploading = copy.deepcopy(failing)
     for job in uploading:
-        if job["status"] != "completed" and job["name"] != "Main suite":
+        if job["status"] != "completed" and job["name"] != "CI":
             job.update(status="completed", conclusion="cancelled")
     run = Run(failing, failing, uploading)
     out = io.StringIO()
@@ -574,7 +726,7 @@ def test_reporting_waits_for_cancelled_shards_to_upload():
 
 
 def test_the_wait_runs_in_its_own_step_before_reporting():
-    steps = workflow("main-suite.yml")["jobs"]["main-suite"]["steps"]
+    steps = workflow("ci.yml")["jobs"]["ci"]["steps"]
     names = [step.get("name") for step in steps]
     settle = steps[names.index("Wait for cancelled jobs to stop")]
     report = steps[names.index("Open or update flaky journey issues")]
@@ -589,7 +741,7 @@ def test_waiting_and_reporting_fit_before_github_stops_the_cancelled_gate():
     # GitHub force-stops a cancelled job 5 minutes after the cancel; both
     # steps, at their step limits, must end well before that (a minute spare).
     assert gate.CANCELLED_JOB_LIMIT_SECONDS == 300
-    steps = {step.get("name"): step for step in workflow("main-suite.yml")["jobs"]["main-suite"]["steps"]}
+    steps = {step.get("name"): step for step in workflow("ci.yml")["jobs"]["ci"]["steps"]}
     settle = int(steps["Wait for cancelled jobs to stop"]["timeout-minutes"]) * 60
     report = int(steps["Open or update flaky journey issues"]["timeout-minutes"]) * 60
     assert settle + report <= gate.CANCELLED_JOB_LIMIT_SECONDS - 60

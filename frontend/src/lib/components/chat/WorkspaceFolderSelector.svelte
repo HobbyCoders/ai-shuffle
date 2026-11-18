@@ -1,11 +1,12 @@
 <script lang="ts">
 	import { onDestroy, tick } from 'svelte';
-	import { ChevronDown, FolderClosed, Plus, Search, X } from 'lucide-svelte';
+	import { ArrowLeftRight, ChevronDown, FolderClosed, Plus, Search, X } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
 	import { projects } from '$lib/stores/app-data.svelte';
 	import { openHeaderDropdown, openDropdown, closeDropdown } from '$lib/stores/header-dropdowns';
 	import AddProjectModal from '$lib/components/AddProjectModal.svelte';
 	import { floatingMenu } from '$lib/components/ui/floating-menu';
+	import { projectPickerAriaShortcut, projectPickerShortcutHint } from '$lib/services/project-picker';
 
 	interface Props {
 		projectName: string;
@@ -17,9 +18,15 @@
 		variant?: 'chip' | 'sentence';
 		/** Offered on the Main row: start without a project (new sessions only). */
 		onClear?: () => void;
+		/**
+		 * Offered as "Switch project…" (the new-session row): opens the project
+		 * picker on `trigger`, as Cmd/Ctrl+P does.
+		 */
+		onSwitch?: (trigger: HTMLElement) => void;
 	}
 
-	let { projectName, sheetMode = false, variant = 'chip', onClear }: Props = $props();
+	let { projectName, sheetMode = false, variant = 'chip', onClear, onSwitch }: Props = $props();
+	const shortcutHint = projectPickerShortcutHint();
 	const sentence = $derived(variant === 'sentence' && !sheetMode);
 	let panel = $state<HTMLDivElement>();
 	const dropdownId = $derived(sheetMode ? 'sheet-workspace-folders' as const : 'workspace-folders' as const);
@@ -104,9 +111,10 @@
 
 <div class="workspace-selector" class:sheet-mode={sheetMode} class:sentence bind:this={root}>
 	{#if sentence}
-	<button type="button" class="sentence-tok" class:open bind:this={trigger}
+	<button type="button" class="sentence-tok" class:open bind:this={trigger} data-project-control
 		aria-label="Workspace folders: {projectName}{folderIds.length ? ` and ${folderIds.length} more` : ''}"
-		aria-haspopup="dialog" aria-expanded={open} title="Workspace folders" onclick={toggle}
+		aria-haspopup="dialog" aria-expanded={open} aria-keyshortcuts={onSwitch ? projectPickerAriaShortcut() : undefined}
+		title={onSwitch ? `Workspace folders · ${shortcutHint} switches project` : 'Workspace folders'} onclick={toggle}
 	><FolderClosed size={14} strokeWidth={1.75} aria-hidden="true" /><span class="sentence-tok-label">{projectName}</span>{#if folderIds.length}<span class="sentence-count">+{folderIds.length}</span>{/if}</button>
 	{:else}
 	<button type="button" class="ctx-chip repo-chip" class:open bind:this={trigger}
@@ -141,6 +149,9 @@
 				{/each}
 			</div>
 			{#if error}<p class="menu-error" role="alert">{error}</p>{/if}
+			{#if onSwitch && !adding}
+				<button type="button" class="add-project" disabled={saving} onclick={() => { closeDropdown(dropdownId); if (trigger) onSwitch(trigger); }}><ArrowLeftRight size={14} aria-hidden="true" /><span class="switch-label">Switch project…</span>{#if sentence}<kbd class="switch-key" aria-hidden="true">{shortcutHint}</kbd>{/if}</button>
+			{/if}
 			{#if adding}
 				<div class="project-search"><Search size={14} aria-hidden="true" /><input bind:this={searchInput} bind:value={search} placeholder="Search projects" aria-label="Search projects" /></div>
 				<div class="project-options">
@@ -193,6 +204,8 @@
 	.project-search input { width: 100%; min-width: 0; background: transparent; color: var(--foreground); border: 0; font-size: 0.8125rem; padding: 4px; }
 	.empty-projects, .menu-hint, .menu-error { margin: 0; padding: 7px 9px; font-size: 0.6875rem; color: var(--muted-foreground); }
 	.menu-error { color: var(--destructive); }
+	.switch-label { flex: 1; }
+	.switch-key { color: var(--subtle-foreground); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.65625rem; }
 	.sheet-mode { grid-column: 1 / -1; width: 100%; }
 	.sheet-mode .ctx-chip { width: 100%; height: 44px; padding: 0 12px; gap: 8px; border: 1px solid var(--border-subtle); border-radius: var(--composer-control-radius, 12px); background: var(--composer-control-bg, color-mix(in oklch, var(--muted) 55%, var(--card))); font-size: 0.8rem; }
 	.sheet-mode .repo-name { max-width: none; }

@@ -174,7 +174,7 @@ def _journey_check(revision: str, rows: list, journey_ci: dict | None) -> tuple[
         return entry, None
     where = f" ({url})" if url else ""
     return entry, (f"UI journeys at {revision[:9]} are {state}{where}; {len(rows)} rows rely on them "
-                   f"({', '.join(entry['rows'])}). They need a main-suite run on main at this revision "
+                   f"({', '.join(entry['rows'])}). They need a CI run on main at this revision "
                    "with every 'UI journeys' shard green")
 
 

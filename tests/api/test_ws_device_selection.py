@@ -721,7 +721,8 @@ async def test_remote_turn_without_local_project_carries_staged_attachments(
             "upload_paths": [_staged_upload()],
         })
 
-    handler._lift_uploads.assert_awaited_once_with([_staged_upload()], None, "sess-1")
+    # The handler's principal is not the install owner: no composer areas.
+    handler._lift_uploads.assert_awaited_once_with([_staged_upload()], None, "sess-1", composer=False)
     assert p.submit.call_args.kwargs["payload"]["upload_blob_ids"] == ["staged-blob"]
     assert p.submit.call_args.kwargs["no_kick"] is True
 

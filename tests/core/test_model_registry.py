@@ -199,8 +199,13 @@ def test_registry_payload_shape():
     assert by_value["haiku"]["default_effort"] == "medium"
     assert by_value["haiku"]["effort_levels"] == ["low", "medium", "high", "xhigh", "max"]
     # Flipped legacy map is serialized for the frontend — [1m] ids land on base.
-    assert payload["legacy_map"]["claude-opus-4-8"] == "opus"
-    assert payload["legacy_map"]["claude-opus-4-8[1m]"] == "opus"
+    # (API-key and cloud; on a subscription a full id means itself.)
+    from app.core import claude_auth_mode
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_API_KEY)
+        legacy_map = m.registry_payload()["legacy_map"]
+    assert legacy_map["claude-opus-4-8"] == "opus"
+    assert legacy_map["claude-opus-4-8[1m]"] == "opus"
     # Effort uses true current aliases, not the profile version-migration map.
     assert payload["effort_model_aliases"] == m.API_MODEL_IDS
     assert payload["effort_model_aliases"]["opus"] == "claude-opus-5"

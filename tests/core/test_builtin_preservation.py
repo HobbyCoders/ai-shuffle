@@ -52,8 +52,8 @@ def test_customized_builtin_keeps_identity_and_references(mock_db, role, edit):
     config = copy.deepcopy(agent["config"])
     config["builtin_defaults"] = _record(agent)
     changes = {"config": config}
-    if edit in ("name", "description", "avatar_color"):
-        changes[edit] = "violet" if edit == "avatar_color" else "Owner's " + edit
+    if edit in ("name", "description"):
+        changes[edit] = "Owner's " + edit
     elif edit == "mcp_tools":
         changes[edit] = ["mcp__owner__tool"]
     elif edit == "prompt":
@@ -64,6 +64,8 @@ def test_customized_builtin_keeps_identity_and_references(mock_db, role, edit):
         config = changes["config"] = {"unknown_schema": {"instructions": "Owner instructions"}}
     elif edit == "future_record":
         config["builtin_defaults"]["revision"] = 999
+    elif edit == "avatar_color":
+        pass  # Set below: this build no longer writes the retired column.
     else:
         config.update({
             "model": {"model": "owner-model"}, "tools": {"allowed_tools": ["Read"]},
@@ -74,6 +76,12 @@ def test_customized_builtin_keeps_identity_and_references(mock_db, role, edit):
             "unknown": {"future_owner_setting": True},
         }[edit])
     database.update_profile(role, allow_builtin=True, **changes)
+    if edit == "avatar_color":
+        # The retired colour column is no longer written by this build, but a
+        # value an older release or peer stored still marks the role as owned.
+        from app.db.base import get_db
+        with get_db() as conn:
+            conn.cursor().execute("UPDATE agents SET avatar_color='violet' WHERE id=%s", (role,))
     before = database.get_profile(role)
     database.create_session("retirement-chat", role)
     database.create_automation("retirement-job", "Saved job", "interval", {"seconds": 300},

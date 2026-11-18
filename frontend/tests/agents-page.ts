@@ -5,7 +5,6 @@
 //   ?light=1                 light mode (default: dark)
 //   ?mobile=1                the phone shell (platform 'mobile')
 //   ?default=on|unset|404    GET /settings/subagent-default (default: on)
-//   ?colors=0                the agent API without avatar_color
 //   ?empty=1                 built-ins only
 //   ?loading=1               /agents never answers
 //   ?rules=error|slow        saved approvals: fail to load / never answer
@@ -14,7 +13,6 @@ import '@fontsource-variable/inter';
 import '../src/app.css';
 
 const params = new URLSearchParams(location.search);
-const withColors = params.get('colors') !== '0';
 const defaultMode = params.get('default') ?? 'on';
 
 const day = 86_400_000;
@@ -25,7 +23,6 @@ const agent = (o: Record<string, unknown>) => ({
 	created_at: ago(30 * day),
 	updated_at: ago(2 * 3_600_000),
 	session_count: 0,
-	...(withColors ? { avatar_color: null } : {}),
 	...o
 });
 
@@ -35,7 +32,6 @@ let agents: any[] = [
 		name: 'Juniper',
 		description: 'Everyday helper for inbox triage, notes, reminders and quick research.',
 		session_count: 142,
-		...(withColors ? { avatar_color: 'warning' } : {}),
 		config: {
 			provider_models: {},
 			tool_selection_mode: 'disallow',
@@ -49,7 +45,6 @@ let agents: any[] = [
 		description: 'Cuts releases: checks CI, tags builds and drafts the changelog.',
 		session_count: 23,
 		updated_at: ago(day),
-		...(withColors ? { avatar_color: 'blue' } : {}),
 		config: {
 			provider_models: { __native__: 'sonnet' },
 			tool_selection_mode: 'allow',
@@ -93,11 +88,11 @@ let agents: any[] = [
 if (params.get('empty') === '1') agents = agents.filter((a) => a.is_builtin);
 
 const identities = [
-	{ id: 'juniper', name: 'Juniper', avatar_id: 'fox' },
-	{ id: 'release-captain', name: 'Release Captain', avatar_id: 'bolt' },
-	{ id: 'general-purpose', name: 'General Purpose', avatar_id: 'robot' },
-	{ id: 'Plan', name: 'Plan', avatar_id: 'orbit' },
-	{ id: 'frontend-designer', name: 'Frontend Designer', avatar_id: 'spark' }
+	{ id: 'juniper', name: 'Juniper' },
+	{ id: 'release-captain', name: 'Release Captain' },
+	{ id: 'general-purpose', name: 'General Purpose' },
+	{ id: 'Plan', name: 'Plan' },
+	{ id: 'frontend-designer', name: 'Frontend Designer' }
 ];
 
 const T = (name: string, description: string, risk: string | null = null, extra = {}) => ({ name, description, risk, ...extra });
@@ -158,7 +153,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 	}
 	if (path === '/agents' && method === 'POST') {
 		agents = [...agents, agent({ ...body, updated_at: new Date().toISOString() })];
-		identities.push({ id: body.id, name: body.name, avatar_id: 'robot' });
+		identities.push({ id: body.id, name: body.name });
 		return json(body);
 	}
 	const one = path.match(/^\/agents\/([^/]+)$/);
@@ -207,7 +202,7 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 	const identity = path.match(/^\/owner\/agents\/([^/]+)\/identity$/);
 	if (identity) {
 		const id = decodeURIComponent(identity[1]);
-		const row = identities.find((i) => i.id === id) ?? { id, name: id, avatar_id: 'robot' };
+		const row = identities.find((i) => i.id === id) ?? { id, name: id };
 		Object.assign(row, body);
 		return json(row);
 	}

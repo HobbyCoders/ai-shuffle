@@ -1,0 +1,12 @@
+{
+  "description": "Long work ([script:voice-long]). The caller mutes progress (\"just tell me when it's done\"), then says \"Keep me posted, skip the updates and reboot the server.\": the keep-me-posted clause wins over a bare \"skip the updates\" that sits beside a work request, so the progress line is said before the result (#1541).",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Can you look through the test logs? [script:voice-long]"},
+    {"handoff": true, "ack": "Sure, on it."},
+    {"caller": "Thanks, just tell me when it's done."},
+    {"wait_ms": 500},
+    {"caller": "Keep me posted, skip the updates and reboot the server."},
+    {"wait_speech": 2}
+  ]
+}

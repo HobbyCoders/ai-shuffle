@@ -138,9 +138,14 @@ function serializeNode(node: JSONContent, options: SerializeOptions = {}): strin
 	return result;
 }
 
-/** A word typed straight after a chip must not join its @path. */
+/** A word typed straight after a chip must not join its @path, nor a chip
+ *  placed straight after a word ("B@/tmp/…", #1654). */
 function chipSeparator(node: JSONContent, next: JSONContent | undefined): string {
-	if (node.type !== 'fileChip' || !next) return '';
+	if (!next) return '';
+	if (node.type === 'text') {
+		return next.type === 'fileChip' && !/\s$/.test(node.text || '') ? ' ' : '';
+	}
+	if (node.type !== 'fileChip') return '';
 	if (next.type === 'fileChip') return ' ';
 	return next.type === 'text' && !/^\s/.test(next.text || '') ? ' ' : '';
 }

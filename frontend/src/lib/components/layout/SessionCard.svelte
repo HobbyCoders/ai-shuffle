@@ -28,17 +28,25 @@
 	 * the button's description.
 	 *
 	 * Inbox gestures. A touch or pen swipe LEFT settles an active row (moves a
-	 * settled one back to Active); a swipe RIGHT is inert. Past 40% of
-	 * the row the lane goes solid and letting go commits; a fast flick commits
-	 * too. The row then slides out and folds away. A press-and-hold starts
+	 * settled or snoozed one back to Active). Past 40% of the row, and never
+	 * more than 160px in (so a row as wide as a foldable's inner screen asks no
+	 * longer a drag than a phone's), the lane goes solid and letting go
+	 * commits; a fast flick commits too. The row then
+	 * slides out and folds away. A swipe RIGHT snoozes: a snooze needs a time, so
+	 * it opens the sidebar's time picker for this row and springs back; the row
+	 * moves to Snoozed only once a time is picked. A press-and-hold starts
 	 * selection, where a tap toggles the row's checkmark. A mouse never
 	 * swipes: on a pointer that hovers, the same actions sit at the row's right
-	 * edge on hover. Settle has no Undo, since a settled
-	 * session is one tap from Active. Rename, Fork, and Delete
-	 * live on the header session-title menu.
+	 * edge on hover. Settle has no Undo, since a settled session is one tap from
+	 * Active. Snooze sits beside Settle on an active row and beside Move to
+	 * Active on a settled one; a snoozed row offers Unsnooze, Snooze (a new wake
+	 * time) and Settle, and its line two says when it wakes. Rename, Fork, and
+	 * Delete live on the header session-title menu.
 	 */
 	import { untrack } from 'svelte';
 	import {
+		AlarmClock,
+		AlarmClockOff,
 		ArrowUpFromLine,
 		Check,
 		Diff,
@@ -61,6 +69,7 @@
 	import { sessionGitState } from '$lib/stores/session-git-state.svelte';
 	import { notify } from '$lib/stores/notifications';
 	import { platform } from '$lib/stores/platform.svelte';
+	import { swipeArmDistance } from '$lib/utils/swipe-arm';
 	import {
 		GIT_STAGE_TONES,
 		GIT_STAGE_TIPS,
@@ -82,6 +91,9 @@
 		summarizePullRequests,
 		sessionTimestamp,
 		cardActions,
+		snoozeLabel,
+		snoozeUntilMs,
+		swipeActions,
 		withinTapTarget,
 		type CardAction,
 		type SessionCardStatus,
@@ -122,6 +134,8 @@
 		onOpen: (sessionId: string) => void;
 		/** Desktop only: after settling the open session, let the shell move to a fresh chat. */
 		onSettled?: () => void;
+		/** Opens the snooze picker for this row. Without it the row offers no Snooze. */
+		onSnooze?: (sessionId: string) => void;
 	}
 
 	let {
@@ -140,7 +154,8 @@
 		onSelectToggle,
 		onLongPress,
 		onOpen,
-		onSettled
+		onSettled,
+		onSnooze
 	}: Props = $props();
 
 	const live = $derived(isLiveStatus(status));
@@ -305,11 +320,16 @@
 	// Numbers already say "uncommitted", so the word only stands in without them.
 	const progressWord = $derived(diff ? null : gitProgressWord(stage, !!gitStatus?.has_changes));
 
+	// "until Fri 9:00 AM": the wake time takes the place of the row's age.
+	const snoozeText = $derived.by(() => {
+		const until = snoozeUntilMs(session);
+		return until === null || until <= now ? null : snoozeLabel(until, now);
+	});
 	const remote = $derived(!!session.is_remote);
 	const whereText = $derived([showProject ? projectLabel : null, branch].filter(Boolean).join(' · ') || null);
 	// Nothing to report: the line holds the row's age so its rhythm stays and it
 	// never goes blank.
-	const factless = $derived(!showPr && !diff && !progressWord && !whereText);
+	const factless = $derived(!showPr && !diff && !progressWord && !whereText && !snoozeText);
 	const ageText = $derived.by(() => {
 		if (!factless) return null;
 		const age = formatAge(Math.max(0, now - lastActivity));
@@ -317,7 +337,7 @@
 	});
 
 	// The row's whole story, for the hover tip.
-	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText]);
+	const rowFacts = $derived([statusWord, prText, progressWord, diffText, device, projectLabel, branch, ageText, snoozeText ? `Snoozed ${snoozeText}` : null]);
 	const rowDetails = $derived(rowFacts.filter(Boolean).join(' · '));
 	const rowTip = $derived(`${title}\n${rowDetails}`);
 	// The same for a screen reader, which already hears the several-PR chip by
@@ -335,17 +355,20 @@
 	// A row with no recorded work has no time worth a column.
 	const showTimer = $derived(counting || workMs >= 1000);
 
-	const actions = $derived(cardActions(session));
-	/** The single membership toggle is also available to assistive technology. */
+	// Read with the sidebar's clock, so a row whose snooze has run out already
+	// offers the Active actions.
+	const actions = $derived(cardActions(session, now, !!onSnooze));
+	/** Every swipe action is also a button, for assistive technology. */
 	const hoverActions = $derived(actions);
-	/** Left swipe toggles membership; right swipe never changes the session. */
-	const leftAction = $derived<CardAction>(
-		actions[0]
-	);
+	/** Left swipe toggles membership; right swipe opens the snooze picker. */
+	const swipe = $derived(swipeActions(actions));
+	const leftAction = $derived<CardAction>(swipe.left);
 
 	const ACTION_META: Record<CardAction, { title: string; aria: string; label: string }> = {
 		settle: { title: 'Settle session', aria: 'Settle session', label: 'Settle' },
-		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' }
+		activate: { title: 'Move to Active', aria: 'Move session to Active', label: 'Move to Active' },
+		snooze: { title: 'Snooze session', aria: 'Snooze session', label: 'Snooze' },
+		unsnooze: { title: 'Unsnooze: move to Active', aria: 'Unsnooze session and move it to Active', label: 'Move to Active' }
 	};
 
 	function reportFailure(err: unknown) {
@@ -369,7 +392,11 @@
 					if (active && !platform.isMobile) onSettled?.();
 					break;
 				case 'activate':
+				case 'unsnooze':
 					await appData.setSessionActive(id, true);
+					break;
+				case 'snooze':
+					onSnooze?.(id);
 					break;
 			}
 		} catch (err) {
@@ -380,13 +407,19 @@
 	// ── Gestures ────────────────────────────────────────────────────────
 	/** Movement before a press picks an axis; less than this is still a tap. */
 	const AXIS_LOCK = 8;
-	/** Past this share of the row the lane arms and release commits. */
+	/** Past this share of the row, capped at SWIPE_ARM_MAX_PX, the lane arms
+	 *  and release commits. */
 	const ARM_RATIO = 0.4;
-	/** The row follows the finger 1:1 up to here, then with drag. */
-	const EASE_RATIO = 0.62;
+	/** The row follows the finger 1:1 to this multiple of the arm distance,
+	 *  then with drag (62% of a phone row). */
+	const EASE_PAST_ARM = 1.55;
 	/** A flick this fast (px/ms) over FLICK_MIN_DX commits short of the arm point. */
 	const FLICK_VELOCITY = 0.9;
 	const FLICK_MIN_DX = 60;
+	/** Endpoint-only fallback when a busy page cannot sample the flick speed.
+	 *  A brisk short drag also commits; a pause counts toward these 350ms.
+	 *  Keep the sampled route for later flicks on an unstarved page. */
+	const QUICK_SWIPE_MS = 350;
 	const LONG_PRESS_MS = 480;
 	/** Slide-out, then fold: the row height collapses at FOLD_AT and the
 	 *  action runs at COMMIT_AT, once the row is gone. */
@@ -411,8 +444,10 @@
 	let pointerType = '';
 	let startX = 0;
 	let startY = 0;
+	let startT = 0;
 	let axis: 'x' | null = null;
 	let rowWidth = FALLBACK_WIDTH;
+	let armDistance = swipeArmDistance(FALLBACK_WIDTH, ARM_RATIO);
 	let lastX = 0;
 	let lastT = 0;
 	let velocity = 0;
@@ -440,10 +475,12 @@
 		pointerType = event.pointerType;
 		startX = lastX = event.clientX;
 		startY = event.clientY;
+		startT = event.timeStamp;
 		lastT = performance.now();
 		velocity = 0;
 		axis = null;
 		rowWidth = frameRef?.offsetWidth || FALLBACK_WIDTH;
+		armDistance = swipeArmDistance(rowWidth, ARM_RATIO);
 		if (pointerType !== 'mouse') pressing = true;
 		clearLongPress();
 		if (onLongPress) {
@@ -467,7 +504,7 @@
 			clearLongPress();
 			pressing = false;
 			const horizontal = Math.abs(dx) > Math.abs(dy);
-			const allowed = dx < 0;
+			const allowed = dx < 0 || swipe.right !== null;
 			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) {
 				if (horizontal && pointerType !== 'mouse' && !selecting && !allowed) suppressNextClick = true;
 				pointerId = null;
@@ -483,12 +520,12 @@
 		if (elapsed > 0) velocity = (event.clientX - lastX) / elapsed;
 		lastX = event.clientX;
 		lastT = t;
-		// There is no action on a right swipe.
-		dx = Math.min(0, dx);
-		const lim = rowWidth * EASE_RATIO;
+		// A row with no right-swipe action does not move that way.
+		if (swipe.right === null) dx = Math.min(0, dx);
+		const lim = armDistance * EASE_PAST_ARM;
 		dragX = Math.abs(dx) <= lim ? dx : Math.sign(dx) * (lim + (Math.abs(dx) - lim) * 0.35);
 		lane = dx > 0 ? 'l' : dx < 0 ? 'r' : null;
-		armed = Math.abs(dx) > rowWidth * ARM_RATIO;
+		armed = Math.abs(dx) > armDistance;
 	}
 
 	function springBack() {
@@ -508,16 +545,32 @@
 		clearLongPress();
 		pressing = false;
 		pointerId = null;
+		// The lift can differ from the last delivered move (including a reversal).
+		// Neither easing the painted row nor missing moves changes these endpoints.
+		const dx = event.clientX - startX;
+		const dy = event.clientY - startY;
+		if (axis === null) {
+			// With no decisive move delivered, apply the usual axis/eligibility
+			// checks at lift. Never reconsider an axis already locked by a move.
+			const horizontal = Math.abs(dx) >= AXIS_LOCK && Math.abs(dx) > Math.abs(dy);
+			const allowed = dx < 0 || swipe.right !== null;
+			if (!horizontal || pointerType === 'mouse' || selecting || !allowed) return;
+			axis = 'x';
+		}
 		if (axis !== 'x') return;
 		axis = null;
 		// The click this gesture leaves behind must not open the session.
 		suppressNextClick = true;
-		const dx = dragX ?? 0;
+		const elapsed = event.timeStamp - startT;
+		const quick = Math.abs(dx) >= FLICK_MIN_DX && elapsed >= 0 && elapsed <= QUICK_SWIPE_MS;
 		const flick = Math.abs(velocity) > FLICK_VELOCITY && Math.abs(dx) > FLICK_MIN_DX;
-		if (dx !== 0 && (armed || flick)) {
-			const dir = dx < 0 ? -1 : 1;
-			if (dir < 0) slideOut(dir, leftAction);
-			else springBack();
+		if (dx !== 0 && (Math.abs(dx) > armDistance || quick || flick)) {
+			if (dx < 0) slideOut(-1, leftAction);
+			else {
+				// Snooze waits for a time: the row stays put, and the picker opens.
+				springBack();
+				if (swipe.right) void commitAction(swipe.right);
+			}
 		} else {
 			springBack();
 		}
@@ -555,10 +608,13 @@
 	}
 
 	function openCard(event?: MouseEvent) {
-		if (suppressNextClick) {
-			suppressNextClick = false;
-			return;
-		}
+		// Only a pointer's own click (detail > 0) can be the one a swipe or
+		// long press leaves behind. Pointer capture can send that click to the
+		// frame instead, leaving the guard set; keyboard activation (no event)
+		// and an assistive-tech click (detail 0) still open the row, and clear it.
+		const gestureClick = suppressNextClick && !!event && event.detail > 0;
+		suppressNextClick = false;
+		if (gestureClick) return;
 		// A finger that lands just off the 16 px PR chip still means the chip:
 		// touch taps within 44×44 px of it open the list, not the chat.
 		if (
@@ -620,10 +676,15 @@
 >
 	{#if lane}
 		<!-- Lane `l` is uncovered by a right swipe, lane `r` by a left one. -->
+		{#if swipe.right === 'snooze'}
+			<div class="lane l snooze" aria-hidden="true" class:on={lane === 'l'}>
+				<AlarmClock size={20} strokeWidth={2} /><span>Snooze</span>
+			</div>
+		{/if}
 		<div class="lane r toggle" aria-hidden="true" class:on={lane === 'r'}>
 			{#if leftAction === 'settle'}
 				<span>Settle</span><Check size={20} strokeWidth={2} />
-			{:else if leftAction === 'activate'}
+			{:else if leftAction === 'activate' || leftAction === 'unsnooze'}
 				<span>Move to Active</span><Undo2 size={20} strokeWidth={2} />
 			{/if}
 		</div>
@@ -714,6 +775,9 @@
 					{:else if progressWord}
 						<span class="st progress" class:uncommitted={!compact && stage === 'dirty'} aria-hidden="true">{progressWord}</span>
 					{/if}
+					{#if snoozeText}
+						<span class="snooze-until" aria-hidden="true"><AlarmClock size={11} strokeWidth={MARK_STROKE} />{snoozeText}</span>
+					{/if}
 					{#if whereText}
 						<span class="where" aria-hidden="true">{whereText}</span>
 					{:else if ageText}
@@ -745,6 +809,10 @@
 						<Check size={14} strokeWidth={1.75} />
 					{:else if action === 'activate'}
 						<Undo2 size={14} strokeWidth={1.75} />
+					{:else if action === 'snooze'}
+						<AlarmClock size={14} strokeWidth={1.75} />
+					{:else if action === 'unsnooze'}
+						<AlarmClockOff size={14} strokeWidth={1.75} />
 					{/if}
 				</button>
 			{/each}
@@ -798,9 +866,14 @@
 		background: color-mix(in oklab, var(--primary) 28%, var(--sidebar));
 		color: var(--primary);
 	}
+	.lane.snooze {
+		background: color-mix(in oklab, var(--warning) 28%, var(--sidebar));
+		color: var(--warning);
+	}
 	.lane span { opacity: 0.55; transition: opacity 150ms ease; }
 	.lane :global(svg) { flex: none; transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1); }
 	.scard-frame.armed .lane.toggle { background: var(--primary); color: var(--primary-foreground); }
+	.scard-frame.armed .lane.snooze { background: var(--warning); color: var(--warning-foreground); }
 	.scard-frame.armed .lane span { opacity: 1; }
 	.scard-frame.armed .lane :global(svg) { transform: scale(1.18); }
 
@@ -1033,6 +1106,13 @@
 	.diff .p { color: var(--success); }
 	.diff .m { color: var(--destructive); }
 	/* The only fact that truncates, and not into a stump. */
+	.snooze-until {
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		gap: 3px;
+		font-variant-numeric: tabular-nums;
+	}
 	.where {
 		flex: 1 1 0;
 		min-width: 56px;

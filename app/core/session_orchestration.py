@@ -54,7 +54,7 @@ OFFLINE_PEERS_TIMEOUT = 1
 _COMMAND_RE = re.compile(r"orchestration:start:[0-9a-f]{64}")
 _MESSAGE_COMMAND_RE = re.compile(r"orchestration:message:[0-9a-f]{64}")
 _LIST_FIELDS = ("id", "title", "status", "profile_id", "project_id", "project_v2_id",
-                "branch", "model", "updated_at", "is_active", "owner_device_id")
+                "branch", "model", "updated_at", "is_active", "snoozed_until", "owner_device_id")
 REPORT_STATUSES = ("completed", "failed", "stopped")
 MAX_NEEDS_OWNER = 10
 # Turn sources that begin work in a chat. Continuations (unpark, auto-continue,
@@ -118,9 +118,10 @@ def _as_owner_chat(owner, memo=None):
 
 def _list_entry(row):
     entry = {key: row.get(key) for key in _LIST_FIELDS}
-    stamp = entry.get("updated_at")
-    if hasattr(stamp, "isoformat"):
-        entry["updated_at"] = stamp.isoformat()
+    for key in ("updated_at", "snoozed_until"):
+        stamp = entry.get(key)
+        if hasattr(stamp, "isoformat"):
+            entry[key] = stamp.isoformat()
     return entry
 
 
@@ -167,8 +168,11 @@ def _caller(session_id, *, allow_settled=False):
     from app.db import sessions
     from app.core import mobile_tool_identity
     from app.core.task_registry import task_registry
+    from app.core.session_snooze import runs_work
     row = sessions.get_session(session_id) if session_id else None
-    if not _local_top_level(row, allow_settled=allow_settled):
+    # A snoozed chat's own running work (a watch turn, a limit resume) keeps its
+    # tools; as a receiver or in a listing it still counts as settled.
+    if not _local_top_level(row, allow_settled=allow_settled or runs_work(row)):
         raise ValueError("Top-level orchestration requires an active, local, visible top-level chat.")
     if task_registry.is_user_stopped(session_id):
         raise ValueError("The user stopped this session; only the user may continue it.")
@@ -253,7 +257,8 @@ def list_sessions(session_id, data):
             eligible = visible_session(row)
         if row["id"] == session_id or not eligible or _owner(row) != caller_owner:
             continue
-        if state == "settled" and row.get("is_active"):
+        # A snoozed chat is not settled: it wakes on its own (state='all' shows it).
+        if state == "settled" and (row.get("is_active") or row.get("snoozed_until")):
             continue
         if scope == "project" and (
             row.get("project_v2_id") or row.get("project_id")
@@ -2176,8 +2181,10 @@ async def defer_started_report(starter_id, frame, admit=None, *, reason=None):
     from contextlib import nullcontext
     from app.db import sessions, session_events
     from app.core.task_registry import user_stop_holds
+    from app.core.session_snooze import runs_work
     row = await asyncio.to_thread(sessions.get_session, starter_id)
-    if (reason is None and row and row.get("is_active") and row.get("status") != "archived"
+    # A snoozed starter still takes its report (without waking), like an active one.
+    if (reason is None and runs_work(row) and row.get("status") != "archived"
             and not await user_stop_holds(starter_id)):
         return False
     event_id = "deferred-report:" + hashlib.sha256(
@@ -2225,17 +2232,24 @@ async def defer_started_report(starter_id, frame, admit=None, *, reason=None):
 
 
 async def report_settled_start(session_id, settled, outcome):
-    """Settlement hook: send a started chat's report to the assistant. Never raises."""
+    """Settlement hook: send a started chat's report to the assistant. Never
+    raises, except the cancellation of a shutdown: a report to another worker
+    cancelled before it was sent is kept on the started chat first (#1597)."""
+    frame = sender = None
+    # Whether the report's request may have reached that worker (control.call
+    # clears it again after an attempt that provably did not).
+    dispatched = [False]
     try:
         built = await asyncio.to_thread(build_started_report, session_id, settled, outcome)
         if not built:
             return
-        home, device, frame = built
+        home, device, remote_frame = built
         if home:
             # The first delivery of this worker's own settled chat: nothing
             # retries it, so it may steer into a live turn without a receipt.
-            await deliver_started_report(home, frame, steer=True)
+            await deliver_started_report(home, remote_frame, steer=True)
             return
+        frame = remote_frame
         from app.core import provider_capability
         from app.network import control
         sender = await asyncio.to_thread(_report_sender, session_id)
@@ -2254,10 +2268,35 @@ async def report_settled_start(session_id, settled, outcome):
                 await defer_started_report(sender, frame, reason=reason)
             log.warning("Report of started chat %s kept on that chat, not sent: %s", session_id, reason)
             return
+        # Nothing durable says this report is owed, and the receiving worker
+        # keeps no receipt of it, so it is never resent.
         await control.call(device, REPORT_ACTION, {"session_id": session_id, "report": frame},
-                           timeout=REMOTE_TIMEOUT)
+                           timeout=REMOTE_TIMEOUT, on_dispatch=lambda sent: dispatched.__setitem__(0, sent))
+    except asyncio.CancelledError:
+        # A shutdown (or restart) cancelled the send. Before the request left,
+        # the report is kept on the started chat with the owner notified, as
+        # for a starter that cannot take it; after, it may have arrived and is
+        # never kept or sent twice.
+        if frame is not None and not dispatched[0]:
+            await asyncio.shield(_keep_unsent_report(session_id, sender, frame))
+        raise
     except Exception:  # noqa: BLE001 — a report never breaks settlement
         log.warning("Could not report started chat %s back to the assistant", session_id, exc_info=True)
+
+
+async def _keep_unsent_report(session_id, sender, frame):
+    """Keep a report whose send was cancelled before it left on the started chat."""
+    from app.core import turn_scheduler
+    try:
+        if sender is None:
+            sender = await asyncio.to_thread(_report_sender, session_id)
+        async with turn_scheduler._terminal_delivery_lock(sender or session_id):
+            await record_started_report(sender, frame, started_here=True)
+            await defer_started_report(sender, frame,
+                                       reason="The app shut down before the report was sent to the assistant's worker.")
+        log.warning("Report of started chat %s kept on that chat: the app shut down before it was sent", session_id)
+    except Exception:  # noqa: BLE001 — shutting down: the database may already be closing
+        log.warning("Could not keep the unsent report of started chat %s", session_id, exc_info=True)
 
 
 def accept_remote_report(body, from_device):

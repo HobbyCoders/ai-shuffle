@@ -182,6 +182,24 @@ class Message:
     # Durable local metadata only: serializers send the unchanged content.
     context_pin: tuple[int, int] | None = None
 
+    # Durable provenance for hook prompts/titles, not part of provider content.
+    # Usually an end offset into text(); a transformed/multipart prompt can
+    # instead require its original string. None preserves legacy behaviour.
+    submitted_prompt: int | str | None = None
+
+    def record_prompt(self, prompt: str) -> None:
+        text = self.text()
+        if text != prompt:
+            self.submitted_prompt = len(prompt) if text.startswith(prompt) else prompt
+
+    def prompt_text(self) -> str:
+        if isinstance(self.submitted_prompt, str):
+            return self.submitted_prompt
+        text = self.text()
+        if type(self.submitted_prompt) is int and 0 <= self.submitted_prompt <= len(text):
+            return text[:self.submitted_prompt]
+        return text
+
     def pin_context(self, note: str | None) -> Message:
         """Mark the exact note the host just appended; do not scan raw headers."""
         text = self.text()
@@ -201,6 +219,7 @@ class Message:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **({"submitted_prompt": self.submitted_prompt} if self.submitted_prompt is not None else {}),
             **({"context_pin": list(self.context_pin)} if self.context_pin is not None else {}),
             "role": self.role,
             "content": [
@@ -218,6 +237,7 @@ class Message:
             role=d["role"],
             content=[block_from_dict(b) for b in d["content"]],
             provider_meta=d.get("provider_meta", {}),
+            submitted_prompt=d.get("submitted_prompt"),
             context_pin=(tuple(d["context_pin"])
                          if isinstance(d.get("context_pin"), (tuple, list)) else None),
         )

@@ -64,11 +64,13 @@ import { appData } from './app-data.svelte';
 import { auth } from '$lib/stores/auth.svelte';
 import { composerPreferences } from './composer-preferences';
 import { sessionEphemeralCache } from './session-cache';
+import { notify } from './notifications';
 import { selectedContextWindow, standardContextCap } from './session/context-window';
 import { appMode } from './sessionMode.svelte';
 import { bindSessionOwner } from './session-owner';
 import { finishBootReconciliation, getInitGeneration, hasBootProjectPick } from './session/session-init';
 import { captureDestination, stillAtDestination } from '$lib/components/chat/send-destination';
+import { composerUploadTarget } from '$lib/components/chat/attach-disable';
 
 describe('bootstrap new-chat landing', () => {
 	it('forwards the same-surface landing intent without changing explicit New chat', () => {
@@ -412,6 +414,142 @@ describe('attaching a project (#371)', () => {
 		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', permissionModeOverride: 'default' });
 	});
 
+	it('a row this worker runs adopts its own project id', () => {
+		expect(activeSession.adoptAttachedProject([
+			{ id: 'attach-me', mode: null, project_id: 'proj-1', project_v2_id: 'v2-1', permission_mode: 'default', is_remote: false }
+		])).toBe(true);
+		expect(activeSession.current).toMatchObject({ mode: 'code', project: 'proj-1', projectV2Id: 'v2-1' });
+	});
+
+	describe('a chat another worker runs', () => {
+		const adopt = (projectId: string | null, extra: Record<string, unknown> = {}) => {
+			activeSession.current.mode = 'chat';
+			activeSession.current.project = '';
+			activeSession.current.projectV2Id = null;
+			const adopted = activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: projectId, project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true, ...extra }
+			]);
+			return { adopted, project: activeSession.current.project, projectV2Id: activeSession.current.projectV2Id };
+		};
+		afterEach(() => {
+			appData.current.clusterProjects = [];
+		});
+
+		it('adopts the shared id alone with the catalog not loaded, whatever legacy id the row holds (W1)', () => {
+			// A passive watcher: no catalog yet. The row's `app` may be an
+			// unrelated project here; naming it would send uploads into it.
+			appData.current.clusterProjects = [];
+			for (const projectId of ['app', 'same-here', null]) {
+				expect(adopt(projectId)).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			}
+			expect(activeSession.current).toMatchObject({ mode: 'code', permissionModeOverride: 'default' });
+		});
+
+		it('never names a local checkout, even one the catalog lists for the project', () => {
+			appData.current.clusterProjects = [
+				{ project_v2_id: 'v2-mine', origin: 'o1', name: 'mine', local_project_id: 'app', eligible: [] },
+				{ project_v2_id: 'v2-theirs', origin: 'o2', name: 'theirs', local_project_id: 'theirs-here', eligible: [] },
+			] as never;
+			for (const projectId of ['app', 'theirs-here', null]) {
+				expect(adopt(projectId)).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			}
+		});
+
+		it('a row the store knows is remote but whose list entry has no flag yet is treated as remote', () => {
+			activeSession.current.isRemote = true;
+			try {
+				expect(adopt('app', { is_remote: undefined })).toEqual({ adopted: true, project: '', projectV2Id: 'v2-theirs' });
+			} finally {
+				activeSession.current.isRemote = undefined;
+			}
+		});
+
+		it('a remote row with no shared id is not adopted: its legacy id names nothing here', () => {
+			activeSession.current.mode = 'chat';
+			expect(activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: 'app', project_v2_id: null, permission_mode: 'default', is_remote: true }
+			])).toBe(false);
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '' });
+		});
+
+		it('a later sessions refresh keeps the access the owner picked after the attach', () => {
+			adopt('app');
+			activeSession.current.permissionModeOverride = 'acceptEdits';
+			expect(activeSession.adoptAttachedProject([
+				{ id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true }
+			])).toBe(false);
+			expect(activeSession.current.permissionModeOverride).toBe('acceptEdits');
+		});
+	});
+
+	describe('waiting for the mirrored row after a relayed attach (W2)', () => {
+		const noProjectRow = { id: 'attach-me', mode: 'chat', project_id: null, project_v2_id: null, permission_mode: 'bypassPermissions', is_remote: true };
+		const attachedRow = { id: 'attach-me', mode: null, project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote: true };
+		let rows: Record<string, unknown>[];
+		beforeEach(() => {
+			rows = [noProjectRow];
+			vi.spyOn(appData, 'loadSessions').mockImplementation(async () => {
+				appData.current.sessions = rows as never;
+			});
+		});
+		afterEach(() => {
+			vi.useRealTimers();
+			vi.restoreAllMocks();
+			appData.current.sessions = [];
+		});
+		/** What live-sync does on a `sessions` invalidation. */
+		const sync = async () => {
+			await appData.loadSessions();
+			activeSession.adoptAttachedProject(appData.current.sessions as never);
+		};
+
+		it('holds no project until this worker\'s row has it, then adopts the shared id', async () => {
+			let outcome: string | null = null;
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000).then((o) => { outcome = o; });
+			await Promise.resolve();
+			await Promise.resolve();
+			// The owning worker confirmed, but this worker's row is still a
+			// no-project chat: no project in state, so no project controls.
+			expect(appData.loadSessions).toHaveBeenCalledTimes(1);
+			expect(outcome).toBeNull();
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, permissionModeOverride: 'bypassPermissions' });
+
+			rows = [attachedRow];
+			await sync();
+			await wait;
+			expect(outcome).toBe('adopted');
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-theirs', permissionModeOverride: 'default' });
+		});
+
+		it('finishes at once when the row was adopted before the answer returned', async () => {
+			rows = [attachedRow];
+			await sync();
+			await expect(activeSession.waitForAttachedRow('attach-me', 15_000)).resolves.toBe('adopted');
+		});
+
+		it('gives up at the bound with the chat still project-free, and adopts when the row arrives later', async () => {
+			vi.useFakeTimers();
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000);
+			await vi.advanceTimersByTimeAsync(15_000);
+			await expect(wait).resolves.toBe('pending');
+			expect(activeSession.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null });
+
+			rows = [attachedRow];
+			await sync();
+			expect(activeSession.current).toMatchObject({ mode: 'code', project: '', projectV2Id: 'v2-theirs' });
+		});
+
+		it('stops waiting when the page leaves the chat, and never applies the project to another one', async () => {
+			const wait = activeSession.waitForAttachedRow('attach-me', 15_000);
+			activeSession.current.sessionId = 'other-chat';
+			activeSession.setTitle('other-chat', 'Other');
+			await expect(wait).resolves.toBe('left');
+			rows = [attachedRow];
+			await sync();
+			expect(activeSession.current).toMatchObject({ sessionId: 'other-chat', mode: 'chat', project: '', projectV2Id: null });
+		});
+	});
+
 	it('leaves a restored pick alone when nothing was attached', () => {
 		activeSession.reconcileSessionMode([{ id: 'attach-me', mode: 'chat', project_id: null, permission_mode: 'default' }]);
 		expect(activeSession.current.mode).toBe('chat');
@@ -425,6 +563,140 @@ describe('attaching a project (#371)', () => {
 		expect(sessionEphemeralCache.restore('attach-me')?.permissionModeOverride).toBe('default');
 		expect(activeSession.current.permissionModeOverride).toBe('bypassPermissions');
 		expect(activeSession.current.project).toBe('');
+	});
+});
+
+// #1659. Who runs the open chat can change while the page stays open (a
+// hand-off) or first become known from a row loaded after a reload. The legacy
+// id counts only on a chat this worker runs; never decided by comparing ids.
+describe('the open chat\'s owner changes or settles (#1659)', () => {
+	const row = (is_remote: boolean, extra: Record<string, unknown> = {}) => ({
+		id: 'owned', mode: 'code', project_id: 'app', project_v2_id: 'v2-theirs', permission_mode: 'default', is_remote, ...extra,
+	});
+	beforeEach(() => {
+		sessionEphemeralCache.clear();
+		Object.assign(activeSession.current, {
+			sessionId: 'owned', mode: 'code', project: 'app', projectV2Id: 'v2-theirs', isRemote: false, ownerDeviceName: null,
+		});
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		Object.assign(activeSession.current, { sessionId: null, isRemote: undefined, ownerDeviceName: undefined });
+	});
+
+	it('a local chat handed to another worker drops the local id and holds the shared id alone', () => {
+		expect(activeSession.reconcileOwner([row(true, { device_name: 'Other' })])).toBe(true);
+		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs', isRemote: true, ownerDeviceName: 'Other' });
+	});
+
+	it('a remote chat this worker takes over gets its row\'s local project back', () => {
+		Object.assign(activeSession.current, { project: '', isRemote: true });
+		expect(activeSession.reconcileOwner([row(false)])).toBe(true);
+		expect(activeSession.current).toMatchObject({ project: 'app', projectV2Id: 'v2-theirs', isRemote: false });
+	});
+
+	it('an owner first known from a row after a reload settles the project by the same rule', () => {
+		Object.assign(activeSession.current, { isRemote: undefined });
+		activeSession.reconcileSessionMode([row(true)]);
+		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs', isRemote: true });
+	});
+
+	it('leaves the chat alone when the owner did not change, or the row does not say', () => {
+		expect(activeSession.reconcileOwner([row(false, { project_v2_id: 'v2-relinked-since' })])).toBe(false);
+		expect(activeSession.reconcileOwner([{ id: 'owned', project_id: 'other', project_v2_id: 'v2-x' }])).toBe(false);
+		expect(activeSession.reconcileOwner([row(true, { id: 'not-open' })])).toBe(false);
+		expect(activeSession.current).toMatchObject({ project: 'app', projectV2Id: 'v2-theirs', isRemote: false });
+	});
+
+	it('a remote chat still holding a local id beside the shared one drops it on a same-owner row', () => {
+		// A writer that left the local id (not through the store's update).
+		Object.assign(activeSession.current, { isRemote: true });
+		expect(activeSession.reconcileOwner([row(true)])).toBe(true);
+		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs', isRemote: true });
+		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+	});
+
+	it('any store update leaves a chat another worker runs holding the shared id alone', () => {
+		Object.assign(activeSession.current, { isRemote: true });
+		activeSession.setTitle('owned', 'Renamed');
+		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs' });
+		// A legacy chat with no shared id keeps its id: nothing else names it.
+		Object.assign(activeSession.current, { project: 'app', projectV2Id: null });
+		activeSession.setTitle('owned', 'Again');
+		expect(activeSession.current).toMatchObject({ project: 'app', projectV2Id: null, isRemote: true });
+	});
+
+	it('a project chat created here to run on another worker uploads through the session (S4)', async () => {
+		vi.spyOn(api, 'get').mockRejectedValue(new Error('offline'));
+		vi.spyOn(api, 'post').mockResolvedValue({ session_id: 'owned' });
+		Object.assign(activeSession.current, {
+			sessionId: null, mode: 'code', profile: 'coding', project: 'app', projectV2Id: 'v2-theirs',
+			isRemote: undefined, deviceIntent: { id: 'peer', name: 'Peer worker' }, isRestoringSession: false,
+		});
+		// The real create path: newSessionWorker marks the owner, then the id binds.
+		await expect(activeSession.startSessionWithoutPrompt()).resolves.toBe('owned');
+		expect(activeSession.current).toMatchObject({ sessionId: 'owned', isRemote: true, project: '', projectV2Id: 'v2-theirs' });
+		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+		// Its first row (same owner) leaves it so.
+		activeSession.reconcileOwner([row(true)]);
+		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+		vi.restoreAllMocks();
+	});
+
+	it('a /live answer asked for before a newer row cannot restore the old owner (S2)', async () => {
+		let answer!: (value: unknown) => void;
+		vi.spyOn(api, 'get').mockImplementation((url: string) => url.includes('/live')
+			? new Promise(done => { answer = done; }) as never
+			: Promise.reject(new Error('offline')));
+		Object.assign(activeSession.current, { sessionId: null });
+		activeSession.switchSession('owned', 'app', null, null, 'v2-theirs');
+		await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+		activeSession.reconcileOwner([row(false)]);
+		expect(activeSession.current).toMatchObject({ project: 'app', isRemote: false });
+		// A newer sessions refresh reports the hand-off while /live is out.
+		activeSession.reconcileOwner([row(true)]);
+		expect(activeSession.current).toMatchObject({ project: '', isRemote: true });
+		answer({ session_meta: { project_id: 'app', project_v2_id: 'v2-theirs', is_remote: false } });
+		await new Promise(r => setTimeout(r, 0));
+		await new Promise(r => setTimeout(r, 0));
+		expect(activeSession.current).toMatchObject({ project: '', projectV2Id: 'v2-theirs', isRemote: true });
+		expect(composerUploadTarget(activeSession.current)).toEqual({ kind: 'session', sessionId: 'owned' });
+		vi.restoreAllMocks();
+	});
+
+	it('a projectless chat handed over stays projectless', () => {
+		Object.assign(activeSession.current, { mode: 'chat', project: '', projectV2Id: null });
+		activeSession.reconcileOwner([row(true, { mode: 'chat', project_id: null, project_v2_id: null })]);
+		expect(activeSession.current).toMatchObject({ mode: 'chat', project: '', projectV2Id: null, isRemote: true });
+	});
+
+	describe('waiting for the owner before an upload', () => {
+		beforeEach(() => { Object.assign(activeSession.current, { isRemote: undefined }); });
+
+		it('answers known once a row says who runs the chat', async () => {
+			const wait = activeSession.waitForOwner('owned', 5_000);
+			activeSession.reconcileOwner([row(true)]);
+			await expect(wait).resolves.toBe('known');
+		});
+
+		it('answers at once when the owner is already known', async () => {
+			activeSession.current.isRemote = false;
+			await expect(activeSession.waitForOwner('owned', 5_000)).resolves.toBe('known');
+		});
+
+		it('answers unknown at the bound when nothing says (live state failed)', async () => {
+			vi.useFakeTimers();
+			const wait = activeSession.waitForOwner('owned', 5_000);
+			await vi.advanceTimersByTimeAsync(5_000);
+			await expect(wait).resolves.toBe('unknown');
+		});
+
+		it('answers left when the page leaves the chat', async () => {
+			const wait = activeSession.waitForOwner('owned', 5_000);
+			activeSession.current.sessionId = 'other-chat';
+			activeSession.setTitle('other-chat', 'Other');
+			await expect(wait).resolves.toBe('left');
+		});
 	});
 });
 
@@ -716,6 +988,14 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.fastMode).toBe(true);
 		expect(activeSession.current.isStreaming).toBe(true);
 		expect(hoisted.reconnect).not.toHaveBeenCalled();
+	});
+
+	it("shows the worker's reason when it refuses an effort pick", async () => {
+		const error = vi.spyOn(notify, 'error').mockImplementation(() => '');
+		vi.spyOn(api, 'put').mockRejectedValue({ status: 409, detail: 'The session is still connecting. Try again in a moment.' });
+		await activeSession.setEffortLevelOverride('low');
+		expect(error).toHaveBeenCalledWith('Could not change effort: The session is still connecting. Try again in a moment.', expect.anything());
+		expect(activeSession.current.effortLevelOverride).toBe('high');
 	});
 
 	it('retains picks after rejection and does not submit a message', async () => {

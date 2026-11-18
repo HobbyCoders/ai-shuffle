@@ -4,7 +4,7 @@
 // produced by real UI sends through the devloop's fake providers; the long
 // error/Stop case specifically requires the seeded Claude Code CLI project.
 import { writeFileSync } from 'node:fs';
-import { ERROR_ROW_PROBE, SEEDED, api, composer, errorRow, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitTurnSettled } from './lib/app.mjs';
+import { ERROR_ROW_PROBE, SEEDED, api, composer, errorRow, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobile = process.argv.includes('--mobile-shell');
@@ -373,6 +373,12 @@ const cases = [{
 		// The failed CLI turn's error shows in its transcript Error row; the banner
 		// steps aside because the row says the same words (#1341).
 		await errorRow(page, 'claude reported success: API Error: 500').first().waitFor({ timeout: 60_000 });
+		// The failed turn ends as its Error row shows and the first queued
+		// message starts: Stop leaves its seat and comes back. On a slow page the
+		// button in between holds the seat long enough for Stop to count as
+		// arriving, and a press made at once is ignored (#1632). Press a Stop
+		// that has kept its seat, as a person would.
+		await waitSeated(page, 'Stop generating');
 		await mark('Stop the failed CLI turn with queued messages');
 		await page.evaluate(() => { window.__chatFrames.phase = 'stop-requested'; });
 		await page.getByRole('button', { name: 'Stop generating', exact: true }).click();

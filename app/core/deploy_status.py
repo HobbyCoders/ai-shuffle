@@ -175,7 +175,7 @@ def _pr_merge_commit(repo: Path, pr: int) -> Dict[str, Any]:
 
 
 # scripts/ci/edge_publication_gate.py annotates refusals with this title and
-# both remedies: wait for hosted main-suite, or run `python scripts/local_ci.py
+# both remedies: wait for hosted CI, or run `python scripts/local_ci.py
 # full --attest` on a clean main checkout as the owner. The gate stays green.
 EDGE_REFUSAL_TITLE = "Edge publication refused"
 # Scheduled, manual and successful hosted-suite runs can re-run the gate on the

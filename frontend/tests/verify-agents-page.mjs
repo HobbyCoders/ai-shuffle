@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 const require = createRequire(new URL('../../browser-mcp/package.json', import.meta.url));
 const { chromium } = require('playwright-core');
 
-const base = process.env.AGENTS_FIXTURE_URL || 'http://127.0.0.1:5291/tests/agents-page.html';
+const base = process.env.AGENTS_FIXTURE_URL || 'http://localhost:5291/tests/agents-page.html';
 const shots = process.env.SCREENSHOT_DIR;
 if (shots) mkdirSync(shots, { recursive: true });
 const browser = await chromium.launch({
@@ -27,7 +27,8 @@ async function open(query, viewport) {
 	page.on('pageerror', (e) => errors.push(`${query}: ${e.message}`));
 	page.on('console', (m) => m.type() === 'error' && !/404|Not Found/.test(m.text()) && errors.push(`${query}: ${m.text()}`));
 	await page.goto(`${base}?${query}`);
-	await page.waitForSelector('.st-coll');
+	// The Agents view shell (it renders in the loading and empty states too).
+	await page.waitForSelector('[data-view-shell="Agents"]');
 	await page.waitForTimeout(900);
 	return page;
 }
@@ -49,9 +50,10 @@ for (const themeName of ['default', 'vercel']) {
 	await page.waitForTimeout(300);
 	await shot(page, `${themeName}-1440-subagents`);
 	await page.getByRole('tab', { name: /^Profile/ }).click();
-	await page.getByRole('button', { name: 'Change', exact: true }).click();
 	await page.waitForTimeout(300);
-	await shot(page, `${themeName}-1440-avatar`);
+	// The avatar feature is gone: no Avatar row and no identity art in the header.
+	assert.equal(await page.getByText('Avatar', { exact: true }).count(), 0, 'no Avatar row');
+	assert.equal(await page.locator('.st-dh .st-identity > *').count(), 0, 'no header avatar');
 	await page.getByRole('button', { name: 'New agent', exact: true }).first().click();
 	await page.waitForTimeout(300);
 	await shot(page, `${themeName}-1440-new`);
@@ -93,15 +95,16 @@ for (const themeName of ['default', 'vercel']) {
 	await shot(page, `${themeName}-390-models`);
 	await page.getByRole('button', { name: 'Back to Agents', exact: true }).click();
 	await page.waitForTimeout(300);
-	assert.equal(await page.locator('.st-lcol').isVisible(), true, 'back returns to the list');
-	await page.getByRole('button', { name: 'New agent', exact: true }).first().click();
-	await page.waitForTimeout(300);
-	await shot(page, `${themeName}-390-new`);
+	assert.equal(await page.locator('[data-view-shell="Agents"] .inline-panel').isVisible(), true, 'back returns to the list');
+	// On a phone the list's New agent action moves to the app's top bar
+	// (ViewPanel's phonePanelActions, covered by StudioTopBar.test.ts), which
+	// this standalone fixture does not render: the list itself has none.
+	assert.equal(await page.getByRole('button', { name: 'New agent', exact: true }).count(), 0, 'phone list lends New agent to the top bar');
 	await page.close();
 }
 
 // States: 404 default, empty, loading
-let page = await open('default=404&colors=0', { width: 1440, height: 900 });
+let page = await open('default=404', { width: 1440, height: 900 });
 await page.getByRole('tab', { name: /^Models/ }).click();
 await page.waitForTimeout(300);
 assert.equal(await page.getByText('Subagent default').count(), 0);

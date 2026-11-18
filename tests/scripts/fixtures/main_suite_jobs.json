@@ -1,15 +1,57 @@
 {
- "_source": "Job names of a green push run of main-suite (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it. The journey shards follow the 18-shard plan: the 16 shards of that run are listed as the 18 names GitHub gave the shards of an 18-shard run (pull request run 42856985149), and the selection names all 18.",
+ "_source": "Job names of a green push run of main-suite, the workflow ci.yml replaced (run 42795525982), reshaped to this gate: the called workflows' own verdict jobs skipped, the old watcher and reporter jobs gone. The selection job's step that names its shards is added, as ci-frontend.yml now names it. The journey shards follow the 18-shard plan: the 16 shards of that run are listed as the 18 names GitHub gave the shards of an 18-shard run (pull request run 42856985149), and the selection names all 18. The plan job carries its name in ci.yml, the record jobs the areas no longer have are gone (the UI journeys keep theirs), and the two Android areas are added with the names their workflows give their jobs: the publishing job skipped, as on every run of ci.yml.",
  "jobs": [
   {
    "id": 1,
-   "name": "Find what a pull request already proved",
+   "name": "Plan what this run has to check",
    "status": "completed",
    "conclusion": "success"
   },
   {
+   "id": 101,
+   "name": "android / Android emulator verification (API 34)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 102,
+   "name": "android / Android emulator verification (API 36)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 100,
+   "name": "android / Build and test Android app",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 103,
+   "name": "android / Publish verified Android download",
+   "status": "completed",
+   "conclusion": "skipped"
+  },
+  {
    "id": 5,
    "name": "android-and-docs",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 104,
+   "name": "android-minified / Build minified release and smoke APKs",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 105,
+   "name": "android-minified / Minified releaseSmoke (API 34)",
+   "status": "completed",
+   "conclusion": "success"
+  },
+  {
+   "id": 106,
+   "name": "android-minified / Minified releaseSmoke (API 36)",
    "status": "completed",
    "conclusion": "success"
   },
@@ -56,12 +98,6 @@
    "conclusion": "success"
   },
   {
-   "id": 13,
-   "name": "backend / record",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 14,
    "name": "browser-workspace / Browser editor smoke checks",
    "status": "completed",
@@ -92,22 +128,10 @@
    "conclusion": "skipped"
   },
   {
-   "id": 19,
-   "name": "browser-workspace / record",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 20,
    "name": "container / Single-container PostgreSQL and browser",
    "status": "completed",
    "conclusion": "success"
-  },
-  {
-   "id": 21,
-   "name": "container / record",
-   "status": "completed",
-   "conclusion": "skipped"
   },
   {
    "id": 22,
@@ -146,12 +170,6 @@
    "conclusion": "success"
   },
   {
-   "id": 28,
-   "name": "desktop-source / record",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 29,
    "name": "fluid / delegated tool-output contract (2.1.286)",
    "status": "completed",
@@ -176,22 +194,10 @@
    "conclusion": "success"
   },
   {
-   "id": 33,
-   "name": "fluid / record",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 34,
    "name": "identity / Instance identity (windows-latest)",
    "status": "completed",
    "conclusion": "success"
-  },
-  {
-   "id": 35,
-   "name": "identity / record",
-   "status": "completed",
-   "conclusion": "skipped"
   },
   {
    "id": 36,
@@ -392,12 +398,6 @@
    "conclusion": "success"
   },
   {
-   "id": 65,
-   "name": "javascript / record-checks",
-   "status": "completed",
-   "conclusion": "skipped"
-  },
-  {
    "id": 66,
    "name": "javascript / record-journeys",
    "status": "completed",
@@ -462,12 +462,6 @@
    "name": "windows / Windows desktop shard (3/3)",
    "status": "completed",
    "conclusion": "success"
-  },
-  {
-   "id": 77,
-   "name": "windows / record",
-   "status": "completed",
-   "conclusion": "skipped"
   }
  ]
 }

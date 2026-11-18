@@ -12,6 +12,14 @@ import pytest
 from app.core import session_runtime
 from app.db.async_database import run_lease
 
+# Bound for waits on something that must eventually happen. Only how long a
+# stalled CI runner may take, not a latency claim (#1562): the patched lease TTL
+# is 0.05 s and the real one 60 s, so a loop that never fails closed still
+# times out. HOLD_SECONDS outlasts it, so work queued behind a held executor
+# cannot finish inside the wait and pass by accident.
+ARRIVAL_SECONDS = 10
+HOLD_SECONDS = 3 * ARRIVAL_SECONDS
+
 
 @pytest.mark.asyncio
 async def test_pool_failure_retries_promptly_then_resumes_normal_cadence(monkeypatch):
@@ -57,20 +65,20 @@ async def test_lease_executor_survives_default_executor_saturation():
     context.set(True)
 
     def hold():
-        ready.wait(timeout=3)
-        assert release.wait(3)
+        ready.wait(timeout=HOLD_SECONDS)
+        assert release.wait(HOLD_SECONDS)
 
     with ThreadPoolExecutor(max_workers=2) as blocked:
         loop.set_default_executor(blocked)
         holders = [blocked.submit(hold) for _ in range(2)]
         try:
-            ready.wait(timeout=3)
-            assert await asyncio.wait_for(run_lease(context.get), 1)
+            ready.wait(timeout=HOLD_SECONDS)
+            assert await asyncio.wait_for(run_lease(context.get), ARRIVAL_SECONDS)
         finally:
             release.set()
             loop.set_default_executor(original)
         for future in holders:
-            future.result(timeout=3)
+            future.result(timeout=HOLD_SECONDS)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("owner", ["runtime", "recorder"])
@@ -102,7 +110,7 @@ async def test_heartbeat_fails_closed_at_ttl(monkeypatch, owner, failure):
         recorder = turn_recorder.TurnRecorder("session", None, "run", 1, "runner")
         recorder.on_superseded = lost
         heartbeat = recorder._renew_loop()
-    await asyncio.wait_for(heartbeat, 1)
+    await asyncio.wait_for(heartbeat, ARRIVAL_SECONDS)
     assert calls
     lost.assert_called_once()
     if failure == "stuck":
@@ -123,8 +131,8 @@ async def test_recorder_heartbeat_escapes_default_executor_pressure(monkeypatch)
     calls = []
 
     def hold():
-        ready.wait(timeout=3)
-        assert release.wait(3)
+        ready.wait(timeout=HOLD_SECONDS)
+        assert release.wait(HOLD_SECONDS)
 
     def renew(*args):
         calls.append(threading.current_thread().name)
@@ -137,15 +145,15 @@ async def test_recorder_heartbeat_escapes_default_executor_pressure(monkeypatch)
         loop.set_default_executor(blocked)
         holders = [blocked.submit(hold) for _ in range(2)]
         try:
-            ready.wait(timeout=3)
-            await asyncio.wait_for(recorder._renew_loop(), 1)
+            ready.wait(timeout=HOLD_SECONDS)
+            await asyncio.wait_for(recorder._renew_loop(), ARRIVAL_SECONDS)
             assert recorder.superseded
             assert calls[0].startswith("db-lease")
         finally:
             release.set()
             loop.set_default_executor(original)
         for future in holders:
-            future.result(timeout=3)
+            future.result(timeout=HOLD_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -154,14 +162,14 @@ async def test_two_blocked_lease_workers_do_not_stall_other_heartbeats():
     ready = threading.Barrier(3)
 
     def hold():
-        ready.wait(timeout=3)
-        assert release.wait(3)
+        ready.wait(timeout=HOLD_SECONDS)
+        assert release.wait(HOLD_SECONDS)
 
     holders = [asyncio.create_task(run_lease(hold)) for _ in range(2)]
     try:
         # Barrier wait itself must not block the event loop running the holders.
-        await asyncio.to_thread(ready.wait, 3)
-        assert await asyncio.wait_for(run_lease(lambda: True), 1)
+        await asyncio.to_thread(ready.wait, HOLD_SECONDS)
+        assert await asyncio.wait_for(run_lease(lambda: True), ARRIVAL_SECONDS)
     finally:
         release.set()
         await asyncio.gather(*holders)

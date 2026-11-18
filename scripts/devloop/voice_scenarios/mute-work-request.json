@@ -1,0 +1,10 @@
+{
+  "description": "Long work ([script:voice-long]). The caller says \"Skip the updates and reboot the server.\": a work request about software updates, not a request to stop spoken progress, so the progress line is still said before the result (#1541).",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Can you look through the test logs? [script:voice-long]"},
+    {"handoff": true, "ack": "Sure, on it."},
+    {"caller": "Skip the updates and reboot the server."},
+    {"wait_speech": 2}
+  ]
+}

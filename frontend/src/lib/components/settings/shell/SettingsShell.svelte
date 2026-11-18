@@ -29,6 +29,7 @@
 	import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
 	import { settingsNav, decodeTarget, type SettingsHistoryState } from '$lib/settings/navigation.svelte';
 	import { setSettingsAccess, settingsAccess } from '$lib/settings/access.svelte';
+	import type { CategoryId } from '$lib/settings/types';
 	import { saveStatus } from '$lib/settings/save-status.svelte';
 	import {
 		PREFERENCE_PAGES,
@@ -222,6 +223,21 @@
 	function cssEscape(value: string): string {
 		return typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
 	}
+
+	// Stacked, every category shares the one scroller (.settings-viewport), so a
+	// category opens at its top, not where the previous one was left. Reopening
+	// the same category from the index counts as opening it; its own list and
+	// detail steps keep the offset CollectionPage gives them.
+	// Turning the phone (stacked to split and back) is not opening anything.
+	const shownCategory = $derived(settingsNav.view === 'index' ? null : category);
+	let lastShown: CategoryId | null | undefined;
+	$effect(() => {
+		const current = shownCategory;
+		const previous = lastShown;
+		lastShown = current;
+		if (previous === undefined || previous === current || current === null || !untrack(() => stacked)) return;
+		root?.querySelector<HTMLElement>('.settings-viewport')?.scrollTo?.({ top: 0 });
+	});
 
 	const PreferenceComponent = $derived(isPreferenceCategory(category) ? PREFERENCE_PAGES[category] : null);
 	const collectionCategory = $derived(isPreferenceCategory(category) ? null : (category as CollectionCategory));

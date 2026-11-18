@@ -243,6 +243,31 @@ class WorkerAssetLoaderTest {
         assertFalse(loaded)
     }
 
+    // A file link outside the folders the worker serves: the worker accepted the phone and
+    // answered 403 itself. That is not a pairing failure, and the notice must not stay up.
+    @Test fun aFileTheWorkerRefusesIsNotReportedAsAnAuthorizationFailure() {
+        fun statusFor(code: Int, body: String, type: String): List<String> {
+            val loader = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(code).message("Fixture")
+                    .body(body.toResponseBody(type.toMediaType())).build()
+            }.build()))
+            val statuses = mutableListOf<String>()
+            val result = loader.load(server, server.baseUrl + assetPaths[3], "GET", emptyMap(), "token", null, "fixture",
+                { true }, { statuses.add(it) }, { fail("a refused file is not a loaded file") })
+            assertEquals(code, result.statusCode)
+            result.data.close()
+            return statuses
+        }
+        val refusal = """{"detail":"Access denied: file is outside workspace"}"""
+        assertEquals(listOf(WorkerAssetLoader.REFUSED_MESSAGE), statusFor(403, refusal, "application/json"))
+        // A 403 from in front of the worker, and any 401, still say what they said before.
+        assertEquals(listOf(WorkerAssetLoader.AUTH_MESSAGE), statusFor(403, "<html>Forbidden</html>", "text/html"))
+        assertEquals(listOf(WorkerAssetLoader.AUTH_MESSAGE), statusFor(401, """{"detail":"Not authenticated"}""", "application/json"))
+        for (text in listOf("pair", "Update")) assertFalse(text, WorkerAssetLoader.REFUSED_MESSAGE.contains(text))
+        // ChatActivity keeps only AUTH_MESSAGE on screen until the owner acts.
+        assertNotEquals(WorkerAssetLoader.AUTH_MESSAGE, WorkerAssetLoader.REFUSED_MESSAGE)
+    }
+
     @Test fun rejectsMissingAuthMainOriginSpoofsAndReportsOldWorkerAuthFailures() {
         var requests = 0
         val loader = WorkerAssetLoader(WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->

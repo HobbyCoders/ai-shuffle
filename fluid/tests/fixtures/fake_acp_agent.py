@@ -22,13 +22,20 @@ FAKE_ACP_SIGNED_IN=1 (a stored sign-in exists), GEMINI_API_KEY,
 FAKE_ACP_STATE (directory remembering session ids across processes),
 FAKE_ACP_MODES (comma-separated mode ids it offers; default
 "default,accept-edits,plan"), FAKE_ACP_REJECT_MODES (mode ids
-``session/set_mode`` refuses with an RPC error).
+``session/set_mode`` refuses with an RPC error), FAKE_ACP_CATALOG (JSON
+``{model: [thought levels]}`` it offers, in place of 1.5.6's three models with
+low/high; a session keeps the model and level it was set to),
+FAKE_ACP_CONFIG_UPDATES=1 (also announce each config change as a
+``config_option_update`` before answering it).
 
 Other entry points, like the real binary's: ``acp --login`` prints a sign-in
 link and reads the code on stdin (code ``good`` signs in by writing a marker
 in the agent's own HOME); ``-p /usage --output-format json`` prints
 FAKE_ACP_USAGE verbatim, or a quota reply in the community-reported shape
-(after FAKE_ACP_USAGE_SLEEP seconds, when set).
+(after FAKE_ACP_USAGE_SLEEP seconds, when set); ``models`` prints the model
+list as 1.5.9 does (agy_models_1.5.9.tsv, the real binary's output, or the
+file FAKE_ACP_MODELS_FILE names), or its sign-in error with exit 1 when not
+signed in (after FAKE_ACP_MODELS_SLEEP seconds, when set).
 """
 
 from __future__ import annotations
@@ -74,16 +81,36 @@ def mode_ids() -> list[str]:
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-def config_options(model: str = "gemini-3.1-pro", level: str = "low", mode: str = "") -> list:
-    mode = mode or mode_ids()[0]
+def catalog() -> dict[str, list[str]]:
+    raw = os.environ.get("FAKE_ACP_CATALOG")
+    if raw:
+        return json.loads(raw)
+    return {m: ["low", "high"] for m in ("gemini-4-argon", "gemini-3.8-flash", "gemini-3.1-pro")}
+
+
+def default_config() -> dict:
+    model = "gemini-3.1-pro" if "gemini-3.1-pro" in catalog() else next(iter(catalog()))
+    return {"model": model, "thought_level": catalog()[model][0], "mode": mode_ids()[0]}
+
+
+def config_options(config: dict | None = None) -> list:
+    config = config or default_config()
+    model, level = config["model"], config["thought_level"]
     return [
         {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
-         "options": [{"value": v, "name": v} for v in ("gemini-4-argon", "gemini-3.8-flash", "gemini-3.1-pro")]},
+         "options": [{"value": v, "name": v} for v in catalog()]},
         {"id": "thought_level", "name": "Thinking Level", "category": "thought_level", "type": "select",
-         "currentValue": level, "options": [{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}]},
-        {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+         "currentValue": level, "options": [{"value": v, "name": v.title()} for v in catalog()[model]]},
+        {"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": config["mode"],
          "options": [{"value": v, "name": v} for v in mode_ids()]},
     ]
+
+
+def models_state(config: dict) -> dict:
+    """The legacy ``models`` reply: one combined id per model and level."""
+    return {"currentModelId": f"{config['model']}-{config['thought_level']}",
+            "availableModels": [{"modelId": f"{m}-{lvl}", "name": f"{m}-{lvl}"}
+                                for m, levels in catalog().items() for lvl in levels]}
 
 
 class Agent:
@@ -159,26 +186,35 @@ class Agent:
         if method == "session/new":
             self.need_auth()
             sid = str(uuid.uuid4())
-            self.sessions[sid] = {"params": params, "mcp": params.get("mcpServers") or []}
+            config = default_config()
+            self.sessions[sid] = {"params": params, "mcp": params.get("mcpServers") or [], "config": config}
             if STATE:
                 open(os.path.join(STATE, sid), "w").close()
             return {"sessionId": sid, "modes": {"currentModeId": mode_ids()[0], "availableModes": [
-                {"id": m, "name": m} for m in mode_ids()]}, "configOptions": config_options()}
+                {"id": m, "name": m} for m in mode_ids()]}, "models": models_state(config),
+                "configOptions": config_options(config)}
         if method == "session/resume":
             self.need_auth()
             sid = params.get("sessionId")
             if not self.known(sid):
                 raise RpcError(-32602, f"unknown session {sid}")
-            self.sessions[sid] = {"params": params, "mcp": params.get("mcpServers") or [], "resumed": True}
-            return {"configOptions": config_options()}
+            config = default_config()
+            self.sessions[sid] = {"params": params, "mcp": params.get("mcpServers") or [], "resumed": True,
+                                  "config": config}
+            return {"models": models_state(config), "configOptions": config_options(config)}
         if method == "session/set_config_option":
-            opts = config_options()
-            for o in opts:
-                if o["id"] == params.get("configId"):
-                    if params.get("value") not in [v["value"] for v in o["options"]]:
-                        raise RpcError(-32602, "bad value")
-                    o["currentValue"] = params["value"]
-            return {"configOptions": opts}
+            session = self.sessions.get(params.get("sessionId")) or {}
+            config = session.setdefault("config", default_config())
+            option = next((o for o in config_options(config) if o["id"] == params.get("configId")), None)
+            if option is None or params.get("value") not in [v["value"] for v in option["options"]]:
+                raise RpcError(-32602, "bad value")
+            config[option["id"]] = params["value"]
+            if option["id"] == "model" and config["thought_level"] not in catalog()[config["model"]]:
+                config["thought_level"] = catalog()[config["model"]][0]
+            if os.environ.get("FAKE_ACP_CONFIG_UPDATES") == "1":
+                await self.update(params.get("sessionId"), {"sessionUpdate": "config_option_update",
+                                                            "configOptions": config_options(config)})
+            return {"configOptions": config_options(config)}
         if method == "session/set_mode":
             rejected = (os.environ.get("FAKE_ACP_REJECT_MODES") or "").split(",")
             if params.get("modeId") in rejected or params.get("modeId") not in mode_ids():
@@ -405,6 +441,25 @@ def usage() -> int:
     return 0
 
 
+def models() -> int:
+    import time
+    if os.environ.get("FAKE_ACP_MODELS_SLEEP"):  # a listing that does not answer
+        time.sleep(float(os.environ["FAKE_ACP_MODELS_SLEEP"]))
+    sys.stderr.write("Fetching available models...")
+    if not (os.environ.get("FAKE_ACP_SIGNED_IN") == "1" or os.path.exists(_MARKER)
+            or os.environ.get("GEMINI_API_KEY")):
+        sys.stderr.write(" Error: Please sign in to view available models. "
+                         "Launch the CLI without arguments to sign in.\n")
+        return 1
+    sys.stderr.write("\n")
+    path = os.environ.get("FAKE_ACP_MODELS_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "agy_models_1.5.9.tsv")
+    with open(path, encoding="utf-8") as listing:
+        sys.stdout.write(listing.read())
+    sys.stdout.flush()
+    return 0
+
+
 if __name__ == "__main__":
     if "--version" in sys.argv:
         print(INIT["agentInfo"]["version"], flush=True)
@@ -413,4 +468,6 @@ if __name__ == "__main__":
         sys.exit(login())
     if "-p" in sys.argv:
         sys.exit(usage())
+    if sys.argv[1:2] == ["models"]:
+        sys.exit(models())
     asyncio.run(main())

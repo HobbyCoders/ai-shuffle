@@ -234,7 +234,7 @@ Self-hosting controls where the app runs and its data is stored. Configured clou
 
 ## For contributors
 
-The app uses Python 3.12+, FastAPI, PostgreSQL 16, Svelte 5/SvelteKit, TypeScript, and Tailwind. Building the web and tool packages requires Node.js 22.12+. The desktop shell uses Electron; Android uses Kotlin.
+The app uses Python 3.12+, FastAPI, PostgreSQL 16, Svelte 5/SvelteKit, TypeScript, and Tailwind. Building the web and tool packages requires Node.js 22.17+. The desktop shell uses Electron; Android uses Kotlin.
 
 | Directory | Responsibility |
 | --- | --- |
@@ -398,7 +398,7 @@ Preparation admits one job, reuses one child, refreshes two normalized replay sw
 call and joins the child on shutdown. Database operations stay on the existing
 asynchronous thread path; no pool/socket is forked into the CPU child. Both
 SQLite and native PostgreSQL have an unconditional CI measurement on PRs;
-main-suite repeats each five times. Cold application-import and abrupt-death
+the run on main repeats each five times. Cold application-import and abrupt-death
 regressions cover the child boundary separately from warm contention limits.
 Implicit interrupt prose and its user barrier stay in carry regardless of
 window distance; a deep rewind without a known barrier fails closed rather

@@ -4,11 +4,10 @@ run-name: "${{ github.workflow }} (4 shards, 2 workers each)"
 # Full backend coverage and security checks on every PR, including drafts.
 # Cross-tree contracts and credential-path checks make path-based skips unsafe.
 on:
-  pull_request:
   workflow_call:
     inputs:
       gated_by_caller:
-        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        description: The caller judges these jobs itself (ci.yml), so the verdict job here does not queue for a runner
         type: boolean
         default: false
   workflow_dispatch:
@@ -25,7 +24,7 @@ permissions:
 # Cancel superseded runs (force-pushes / rapid successive commits) instead of
 # letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  # main-suite's daily run gets its own group so it never queues with a push run.
+  # CI's daily run gets its own group so it never queues with a push run.
   group: ci-backend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -463,12 +462,3 @@ jobs:
           BACKEND_NEEDS: ${{ toJSON(needs) }}
           HEAD_SHA: ${{ github.sha }}
         run: python scripts/ci/backend_gate.py --head "$HEAD_SHA"
-
-  # Leave a record that these checks passed on exactly these files, so
-  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
-  record:
-    needs: [backend]
-    if: needs.backend.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    uses: ./.github/workflows/record-pass.yml
-    with:
-      area: backend

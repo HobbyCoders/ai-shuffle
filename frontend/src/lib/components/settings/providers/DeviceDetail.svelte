@@ -83,8 +83,10 @@
 			button: 'Remove',
 			question: `Remove ${credential.name}?`,
 			onConfirm: async () => {
+				// Deleting closes this detail; capture its props first (#1651).
+				const back = provider.item;
 				await providers.deleteProvider(row.id);
-				settingsNav.selectItem(provider.item, 'providers');
+				settingsNav.selectItem(back, 'providers');
 			}
 		}
 	]);

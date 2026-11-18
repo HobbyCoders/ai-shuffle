@@ -412,7 +412,9 @@ it.each([false, true])('fills defaults and re-arms the socket under an accepted 
 	if (adopted) ctx.adopt();
 	ctx.preferences.resolve({ selectedProfile: 'default-profile', selectedProject: 'default-project' });
 	await initializing;
-	expect(get(state)).toMatchObject({ sessionId: adopted ? 'created' : null, profile: 'default-profile', project: 'default-project', isRestoringSession: false });
+	// A compose is never given the device's last project; only the adopted
+	// session saved without one still falls back to it.
+	expect(get(state)).toMatchObject({ sessionId: adopted ? 'created' : null, profile: 'default-profile', project: adopted ? 'default-project' : '', isRestoringSession: false });
 	expect(get(state).messages.map(message => message.content)).toEqual(['accepted first message']);
 	expect(ctx.wsConn.activate).toHaveBeenCalledOnce();
 	expect(ctx.wsConn.connect).toHaveBeenCalledOnce();

@@ -95,7 +95,6 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.apiGet, post: mocks.apiPost },
 	getErrorMessage: (error: Error, fallback: string) => error?.message || fallback,
 }));
-vi.mock('$lib/api/agent-identity', () => ({ getAgentIdentities: vi.fn().mockResolvedValue([]) }));
 
 vi.mock('$lib/stores/notifications', async (importOriginal) => ({
 	...await importOriginal<typeof import('$lib/stores/notifications')>(),
@@ -227,7 +226,7 @@ describe('Archived sessions', () => {
 
 describe('A new chat changing the order of the project groups (#1307)', () => {
 	const row = (id: string, title: string, project: string | null, minute: number) =>
-		session(id, title, project, true, false, { updated_at: `2026-08-20T12:${minute}:00Z` });
+		session(id, title, project, true, false, { created_at: `2026-08-20T12:${minute}:00Z` });
 	const projectChat = row('project', 'Project chat', 'visible-project', 20);
 	const looseChat = row('loose', 'Loose chat', null, 10);
 	const newLooseChat = row('new', 'New loose chat', null, 30);
@@ -457,6 +456,44 @@ describe('Sidebar session groups', () => {
 		expect(mocks.save).not.toHaveBeenCalled();
 	});
 
+	it('drops the second half of a double-click that lands on a row after the header moved', async () => {
+		vi.useFakeTimers({ toFake: ['Date'] });
+		try {
+			const onOpenSession = vi.fn();
+			const onSettledOpenSession = vi.fn();
+			const { container } = render(Sidebar, { props: { ...sidebarProps, onOpenSession, onSettledOpenSession } });
+			const header = Array.from(container.querySelectorAll<HTMLButtonElement>('.sect'))
+				.find(button => button.textContent?.includes('Settled'))!;
+			const opened = () => onOpenSession.mock.calls.length + onSettledOpenSession.mock.calls.length;
+			const spot = { detail: 1, clientX: 135, clientY: 872 };
+			// Start from a closed group, whatever the saved choice is.
+			if (header.getAttribute('aria-expanded') === 'true') await fireEvent.click(header);
+			expect(screen.queryByText('Settled chat')).toBeNull();
+
+			// The header opens the group and moves away; the same spot now holds a row.
+			await fireEvent.click(header, spot);
+			await fireEvent.click(screen.getByText('Settled chat'), { ...spot, detail: 2 });
+			expect(opened()).toBe(0);
+
+			// A click somewhere else in that moment is a choice, and so is a keyboard one.
+			await fireEvent.click(screen.getByText('Settled chat'), { detail: 1, clientX: 135, clientY: 700 });
+			expect(opened()).toBe(1);
+			await fireEvent.click(header, spot);
+			await fireEvent.click(header, spot);
+			await fireEvent.click(screen.getByText('Settled chat'));
+			expect(opened()).toBe(2);
+
+			// The same spot works again once the header has come to rest.
+			await fireEvent.click(header, spot);
+			await fireEvent.click(header, spot);
+			vi.setSystemTime(Date.now() + 1000);
+			await fireEvent.click(screen.getByText('Settled chat'), spot);
+			expect(opened()).toBe(3);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('groups sessions into Active and Settled by is_active', () => {
 		render(Sidebar, {
 			props: {
@@ -513,7 +550,7 @@ describe('Sidebar session groups', () => {
 		mocks.projectCatalogReady.set(false);
 		mocks.projects.set([]);
 		mocks.sessions.set([
-			session('newer', 'Project chat', 'late-project', true),
+			session('newer', 'Project chat', 'late-project', true, false, { created_at: '2026-08-20T12:01:00Z' }),
 			session('older', 'Loose chat', null, true),
 		]);
 
@@ -533,7 +570,7 @@ describe('Sidebar session groups', () => {
 	// A project swapping places moves a screenful of rows, so its newest chat
 	// leaving a lane, for good or until the server refuses it, must not do that.
 	it('keeps a project in its place when its newest chat leaves the lane', async () => {
-		const at = (minutes: number) => ({ updated_at: new Date(Date.now() - minutes * 60_000).toISOString() });
+		const at = (minutes: number) => ({ created_at: new Date(Date.now() - minutes * 60_000).toISOString() });
 		const visible = (id: string, title: string, isActive: boolean, minutes: number, extra = {}) =>
 			session(id, title, 'visible-project', isActive, false, { ...at(minutes), ...extra });
 		const other = (id: string, title: string, minutes: number) =>
@@ -706,7 +743,7 @@ describe('Sidebar session groups', () => {
 
 	it('marks the filter button and shows a clearable chip once a filter is applied', async () => {
 		mocks.sessions.set([
-			session('active', 'Active chat', 'visible-project', true),
+			session('active', 'Active chat', 'visible-project', true, false, { created_at: '2026-08-20T12:01:00Z' }),
 			session('other', 'Other project chat', 'other-project', false, false, { project_name: 'Other Project' }),
 			session('peer', 'Laptop chat', 'visible-project', false, false, {
 				is_remote: true,
@@ -733,7 +770,7 @@ describe('Sidebar session groups', () => {
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear device filter Laptop' }));
 		expect(cardIds()).toEqual(['active', 'peer']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		// Visible Project holds the newest chat, so it comes first in every lane.
+		// Visible Project holds the newest-started chat, so it comes first in every lane.
 		expect(cardIds()).toEqual(['active', 'peer', 'other']);
 		expect(document.querySelector('.filter-btn.set')).toBeNull();
 	});
@@ -999,12 +1036,15 @@ describe('Sidebar ordering (must never change silently)', () => {
 		]);
 	});
 
-	it('keeps Active cards in the same order, above the Settled group', () => {
+	it('lists Active cards by when they were started, newest first, above the Settled group', () => {
 		mocks.sessions.set([
-			session('a-old', 'Active older', 'visible-project', true, false, {
-				updated_at: '2026-08-20T08:00:00Z',
+			// Started first, and the one that last had activity.
+			session('a-first', 'Started first', 'visible-project', true, false, {
+				created_at: '2026-08-20T08:00:00Z',
+				updated_at: '2026-08-20T20:00:00Z',
 			}),
-			session('a-new', 'Active newer', 'visible-project', true, false, {
+			session('a-last', 'Started last', 'visible-project', true, false, {
+				created_at: '2026-08-20T18:00:00Z',
 				updated_at: '2026-08-20T18:00:00Z',
 			}),
 			session('s-one', 'Settled one', 'visible-project', false, false, {
@@ -1015,8 +1055,188 @@ describe('Sidebar ordering (must never change silently)', () => {
 		render(Sidebar, { props: sidebarProps });
 
 		const groups = document.querySelectorAll('.cards');
-		expect(cardIds(groups[0])).toEqual(['a-new', 'a-old']);
+		expect(cardIds(groups[0])).toEqual(['a-last', 'a-first']);
 		expect(cardIds(groups[1])).toEqual(['s-one']);
+	});
+});
+
+describe('Sidebar rows keep their place', () => {
+	const started = (hour: number) => `2026-08-20T${String(hour).padStart(2, '0')}:00:00Z`;
+	const chat = (id: string, project: string | null, hour: number, extra = {}) =>
+		session(id, `Chat ${id}`, project, true, false, { created_at: started(hour), updated_at: started(hour), ...extra });
+	const activeIds = () => cardIds(document.querySelector('[data-group="active"]') ?? undefined);
+
+	it('does not move a row when its chat gets a reply', async () => {
+		const rows = [chat('one', null, 8), chat('two', null, 9), chat('three', null, 10)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+
+		// The oldest chat is now the one with the newest activity, and the store
+		// hands it over first as well.
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z', turn_count: 9 }, rows[1], rows[2]]);
+		await tick();
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+	});
+
+	it('adds a new chat on top and leaves the rest as they were', async () => {
+		const rows = [chat('one', null, 8, { updated_at: started(22) }), chat('two', null, 9)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['two', 'one']);
+
+		mocks.sessions.set([...rows, chat('three', null, 12)]);
+		await tick();
+		expect(activeIds()).toEqual(['three', 'two', 'one']);
+	});
+
+	it('does not move a project group when one of its chats gets a reply', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [
+			chat('early', 'visible-project', 8),
+			chat('late', 'other-project', 10, { project_name: 'Other Project' }),
+		];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z' }, rows[1]]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+	});
+
+	it('does not move the Active projects when a page of older Settled history arrives', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [
+			chat('early', 'visible-project', 8),
+			chat('late', 'other-project', 9, { project_name: 'Other Project' }),
+		];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		// Settled pages come by last activity, so an older page can hold a chat
+		// started after every chat loaded so far.
+		const history = session('history', 'Settled later start', 'visible-project', false, false, {
+			created_at: started(10),
+			updated_at: started(10),
+		});
+		mocks.sessions.set([...rows, history]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+
+		// And a later refresh of the same rows changes nothing either.
+		mocks.sessions.set([history, { ...rows[1] }, { ...rows[0] }]);
+		await tick();
+		expect(activeIds()).toEqual(['late', 'early']);
+	});
+
+	it('does not move the other Active rows when a snoozed chat wakes', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const snoozed = session('a10', 'Chat a10', 'visible-project', false, false, {
+			created_at: started(10),
+			updated_at: started(10),
+			snoozed_until: new Date(Date.now() + 3_600_000).toISOString(),
+		});
+		const rows = [chat('a08', 'visible-project', 8), chat('b09', 'other-project', 9, { project_name: 'Other Project' })];
+		mocks.sessions.set([...rows, snoozed]);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['a08', 'b09']);
+
+		mocks.sessions.set([...rows, { ...snoozed, is_active: true, snoozed_until: null }]);
+		await tick();
+		expect(activeIds()).toEqual(['a10', 'a08', 'b09']);
+	});
+
+	it('counts a chat that started and settled while a filter hid the other project', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		const rows = [chat('a08', 'visible-project', 8), chat('b09', 'other-project', 9, { project_name: 'Other Project' })];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		expect(activeIds()).toEqual(['b09', 'a08']);
+
+		// With one project listed the lane has no groups to order.
+		await openFilter();
+		await fireEvent.click(filterOption('Visible Project'));
+		const a10 = chat('a10', 'visible-project', 10);
+		mocks.sessions.set([...rows, a10]);
+		await tick();
+		expect(activeIds()).toEqual(['a10', 'a08']);
+		mocks.sessions.set([...rows, { ...a10, is_active: false }]);
+		await tick();
+		expect(activeIds()).toEqual(['a08']);
+
+		// Unfiltered, the new chat would have lifted its project and settling it
+		// would have left the project there. The filter changes neither.
+		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
+		await tick();
+		expect(activeIds()).toEqual(['a08', 'b09']);
+	});
+
+	it('keeps two projects started at the same moment in place when a row leaves the lane', async () => {
+		mocks.projects.set([
+			{ id: 'visible-project', name: 'Visible Project' },
+			{ id: 'other-project', name: 'Other Project' },
+		]);
+		// Whichever project the tie favours, its newest chat is the one that leaves.
+		for (const leaving of ['visible-project', 'other-project']) {
+			const staying = leaving === 'visible-project' ? 'other-project' : 'visible-project';
+			const rows = [
+				chat(`${leaving}-newest`, leaving, 10, { project_name: 'Other Project' }),
+				chat(`${staying}-newest`, staying, 10, { project_name: 'Other Project' }),
+				chat(`${leaving}-older`, leaving, 8, { project_name: 'Other Project' }),
+			];
+			mocks.sessions.set(rows);
+			const view = render(Sidebar, { props: sidebarProps });
+			const before = activeIds();
+
+			mocks.sessions.set([{ ...rows[0], is_active: false }, rows[1], rows[2]]);
+			await tick();
+			expect(activeIds()).toEqual(before.filter((id) => id !== `${leaving}-newest`));
+			view.unmount();
+		}
+	});
+
+	it('keeps start order in Needs you too, whichever row asked last', async () => {
+		const rows = [chat('one', null, 8), chat('two', null, 9)];
+		mocks.sessions.set(rows);
+		mocks.backgroundPermissions.set(
+			new Map([
+				['two', { count: 1, kind: 'permission' as const }],
+				['one', { count: 1, kind: 'permission' as const }],
+			])
+		);
+		render(Sidebar, { props: sidebarProps });
+		await tick();
+		const needsIds = () => cardIds(document.querySelector('[data-group="needs-you"]') ?? undefined);
+		expect(needsIds()).toEqual(['two', 'one']);
+
+		mocks.sessions.set([{ ...rows[0], updated_at: '2026-08-20T23:00:00Z' }, rows[1]]);
+		await tick();
+		expect(needsIds()).toEqual(['two', 'one']);
+	});
+
+	it('orders chats started at the same moment the same way whatever order they arrive in', async () => {
+		const rows = [chat('b', null, 8), chat('a', null, 8), chat('c', null, 8)];
+		mocks.sessions.set(rows);
+		render(Sidebar, { props: sidebarProps });
+		const before = activeIds();
+
+		mocks.sessions.set([rows[2], rows[0], rows[1]]);
+		await tick();
+		expect(activeIds()).toEqual(before);
 	});
 });
 
@@ -1270,7 +1490,8 @@ describe('Sidebar multi-select (R15)', () => {
 			expect(selbar().getAttribute('aria-hidden')).toBe('true');
 
 			const card = await longPress('active');
-			await fireEvent.click(card);
+			// The click the finger leaves on release (detail 1) neither opens nor unpicks it.
+			await fireEvent.click(card, { detail: 1 });
 			expect(selbar().getAttribute('aria-hidden')).toBeNull();
 			expect(selbar().textContent).toContain('1 selected');
 			expect(onOpenSession).not.toHaveBeenCalled();
@@ -1329,6 +1550,138 @@ describe('Sidebar multi-select (R15)', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('Sidebar Snoozed lane', () => {
+	const NOW = Date.parse('2026-08-20T12:10:00Z');
+	const inMin = (m: number) => new Date(NOW + m * 60_000).toISOString();
+	const snoozed = (id: string, title: string, minutes: number) =>
+		session(id, title, 'visible-project', false, false, { snoozed_until: inMin(minutes) });
+	const snoozedIds = () => cardIds(document.querySelector('[data-group="snoozed"]') ?? document.createElement('div'));
+
+	afterEach(() => vi.useRealTimers());
+
+	it('sits between Active and Settled, soonest wake first, each row with its time', () => {
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			snoozed('late', 'Late snooze', 300),
+			snoozed('soon', 'Soon snooze', 30),
+			session('settled', 'Settled chat', 'visible-project', false),
+		]);
+		render(Sidebar, sidebarProps);
+		expect(sectLabels().map((l) => l.replace(/ \d+$/, ''))).toEqual(['Active', 'Snoozed', 'Settled']);
+		expect(sectLabels()[1]).toBe('Snoozed 2');
+		expect(snoozedIds()).toEqual(['soon', 'late']);
+		expect(cardFrame('Soon snooze').textContent).toMatch(/until /);
+		expect(cardIds(document.querySelector('[data-group="settled"]')!)).toEqual(['settled']);
+	});
+
+	it('is hidden when nothing is snoozed, and collapses like the others', async () => {
+		render(Sidebar, sidebarProps);
+		expect(sectLabels().some((l) => l.startsWith('Snoozed'))).toBe(false);
+		cleanup();
+
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 30)]);
+		render(Sidebar, sidebarProps);
+		const header = screen.getByRole('button', { name: /^Snoozed/ });
+		expect(header.getAttribute('aria-expanded')).toBe('true');
+		await fireEvent.click(header);
+		expect(header.getAttribute('aria-expanded')).toBe('false');
+		expect(screen.queryByText('Soon snooze')).toBeNull();
+	});
+
+	it('moves a row back to Active on its own the moment its time passes', async () => {
+		vi.useFakeTimers({ now: NOW });
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 1), session('settled', 'Settled chat', 'visible-project', false)]);
+		render(Sidebar, sidebarProps);
+		expect(snoozedIds()).toEqual(['soon']);
+
+		await vi.advanceTimersByTimeAsync(59_000);
+		expect(snoozedIds()).toEqual(['soon']);
+		await vi.advanceTimersByTimeAsync(2_000);
+		expect(sectLabels().some((l) => l.startsWith('Snoozed'))).toBe(false);
+		expect(cardIds(document.querySelector('[data-group="active"]')!)).toEqual(['soon']);
+	});
+
+	it('snoozes a row from its Snooze button through the picker', async () => {
+		vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+		render(Sidebar, sidebarProps);
+		await fireEvent.click(within(cardFrame('Active chat')).getByTitle('Snooze session'));
+		const picker = screen.getByRole('dialog', { name: 'Snooze chat' });
+		await fireEvent.click(within(picker).getByRole('button', { name: /^Tomorrow, / }));
+		const tomorrow = new Date(NOW);
+		tomorrow.setDate(tomorrow.getDate() + 1);
+		tomorrow.setHours(9, 0, 0, 0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false, tomorrow.toISOString());
+		expect(screen.queryByRole('dialog', { name: 'Snooze chat' })).toBeNull();
+	});
+
+	it('closes the picker on Escape without snoozing', async () => {
+		render(Sidebar, sidebarProps);
+		await fireEvent.click(within(cardFrame('Active chat')).getByTitle('Snooze session'));
+		expect(screen.getByRole('dialog', { name: 'Snooze chat' })).toBeTruthy();
+		await fireEvent.keyDown(window, { key: 'Escape' });
+		expect(screen.queryByRole('dialog', { name: 'Snooze chat' })).toBeNull();
+		expect(mocks.setSessionActive).not.toHaveBeenCalled();
+	});
+
+	it('offers Snooze beside Settle in the selection bar', async () => {
+		vi.useFakeTimers();
+		platform.set('mobile');
+		const nowMs = Date.now();
+		mocks.sessions.set([
+			session('active', 'Active chat', 'visible-project', true),
+			session('later', 'Later chat', 'visible-project', true),
+		]);
+		render(Sidebar, sidebarProps);
+		const frame = document.querySelector('[data-session-card="active"]') as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await fireEvent.click(document.querySelector('[data-session-card="later"] .scard') as HTMLElement);
+		const bar = document.querySelector('.selbar') as HTMLElement;
+		const labels = within(bar).getAllByRole('button').map((b) => b.textContent?.trim());
+		expect(labels.slice(-2)).toEqual(['Snooze', 'Settle']);
+
+		await fireEvent.click(within(bar).getByRole('button', { name: 'Snooze' }));
+		const picker = screen.getByRole('dialog', { name: 'Snooze chats' });
+		expect(within(picker).getByText('Snooze 2 chats until')).toBeTruthy();
+		const field = within(picker).getByLabelText('Pick a date and time');
+		const when = new Date(nowMs + 2 * 86_400_000);
+		when.setSeconds(0, 0);
+		const pad = (n: number) => String(n).padStart(2, '0');
+		const value = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())}T${pad(when.getHours())}:${pad(when.getMinutes())}`;
+		await fireEvent.input(field, { target: { value } });
+		await fireEvent.click(within(picker).getByRole('button', { name: 'Snooze' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('active', false, when.toISOString());
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('later', false, when.toISOString());
+		expect(bar.getAttribute('aria-hidden')).toBe('true');
+	});
+
+	it('offers Active, Snooze and Settle for a selected snoozed row, each with an accessible name', async () => {
+		vi.useFakeTimers({ now: NOW });
+		platform.set('mobile');
+		mocks.sessions.set([snoozed('soon', 'Soon snooze', 30)]);
+		render(Sidebar, sidebarProps);
+		const frame = document.querySelector('[data-session-card="soon"]') as HTMLElement;
+		const card = frame.querySelector('.scard') as HTMLElement;
+		await fireEvent.pointerDown(card, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		await vi.advanceTimersByTimeAsync(520);
+		await fireEvent.pointerUp(frame, { pointerId: 1, isPrimary: true, button: 0, pointerType: 'touch', clientX: 100, clientY: 20 });
+		const bar = document.querySelector('.selbar') as HTMLElement;
+		// The labels can collapse to icons in a narrow bar, so the names live on aria-label.
+		expect(within(bar).getAllByRole('button').slice(1).map((b) => b.getAttribute('aria-label'))).toEqual(['Active', 'Snooze', 'Settle']);
+		expect(bar.classList.contains('crowded')).toBe(true);
+		expect(bar.textContent).toContain('1 selected');
+
+		await fireEvent.click(within(bar).getByRole('button', { name: 'Active' }));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(mocks.setSessionActive).toHaveBeenCalledWith('soon', true);
 	});
 });
 
@@ -1868,7 +2221,9 @@ describe('Sidebar unified conversation history', () => {
 		appMode.set(mode);
 		mocks.sessions.set(fixture());
 		render(Sidebar, { props: sidebarProps });
-		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+		// All four share one start time, so the two groups fall to their project
+		// key ("No project" sorts first), not to which row the list holds first.
+		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
 		expect(screen.getByRole('button', { name: 'Filter' })).toBeTruthy();
 	});
 	it('says one thing when there is nothing at all, with no empty Settled lane', () => {
@@ -1888,7 +2243,7 @@ describe('Sidebar unified conversation history', () => {
 		await tick();
 		expect(cardIds()).toEqual(['legacy', 'coded']);
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear project filter Visible Project' }));
-		expect(cardIds()).toEqual(['legacy', 'coded', 'chatty', 'spoken']);
+		expect(cardIds()).toEqual(['chatty', 'spoken', 'legacy', 'coded']);
 	});
 });
 

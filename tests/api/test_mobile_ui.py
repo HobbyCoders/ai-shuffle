@@ -78,5 +78,5 @@ def test_the_frontend_build_emits_the_phone_ui() -> None:
     builder = (root / "frontend/scripts/build-mobile-ui.mjs").read_text()
     assert "await buildUIs(frontend, mobile);" in builder
     assert "await frontend();\n\tawait mobile();" in builder
-    assert "paths" in (root / "mobile/svelte.config.js").read_text()
-    assert "base: '/mobile'" in (root / "mobile/svelte.config.js").read_text()
+    assert "paths" in (root / "mobile/vite.config.js").read_text()
+    assert "base: '/mobile'" in (root / "mobile/vite.config.js").read_text()

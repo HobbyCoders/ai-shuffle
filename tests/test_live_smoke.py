@@ -1655,7 +1655,7 @@ def _fake_gh(runs, jobs_by_run, calls=None):
         if calls is not None:
             calls.append(args)
         url = args[1]
-        if "/workflows/main-suite.yml/runs?head_sha=" in url:
+        if "/workflows/ci.yml/runs?head_sha=" in url:
             return None if runs is None else {"workflow_runs": runs}
         run_id = int(url.split("/runs/")[1].split("/")[0])
         jobs = jobs_by_run.get(run_id)
@@ -1672,7 +1672,7 @@ def test_journey_fetch_reads_main_suite_on_main_at_the_revision():
     gh = _fake_gh([_main_run(9, branch="feature"), _main_run(8, sha="c" * 40), _main_run(7)],
                   {9: SHARDS, 8: SHARDS, 7: SHARDS}, calls)
     assert journeys.fetch(REV, gh) == {"state": "success", "url": "https://ci.example/run/7"}
-    assert calls[0] == ("api", (f"repos/HobbyCoders/ai-shuffle/actions/workflows/main-suite.yml/runs"
+    assert calls[0] == ("api", (f"repos/HobbyCoders/ai-shuffle/actions/workflows/ci.yml/runs"
                                 f"?head_sha={REV}&per_page=20"))
     assert [c[1].split("/runs/")[1].split("/")[0] for c in calls[1:]] == ["7"]  # other branches and commits unread
 

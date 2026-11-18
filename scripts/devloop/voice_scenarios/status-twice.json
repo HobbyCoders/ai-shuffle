@@ -1,0 +1,12 @@
+{
+  "description": "Nothing is running. The caller asks two status questions in a row and the voice hands each off. Each is answered from the task state and neither starts a chat turn (#1541).",
+  "steps": [
+    {"wait_audio_ms": 300},
+    {"caller": "Is it done yet?"},
+    {"handoff": true, "ack": "Let me look."},
+    {"wait_speech": 1},
+    {"caller": "Is anything running right now?"},
+    {"handoff": true, "ack": "One moment."},
+    {"wait_speech": 2}
+  ]
+}

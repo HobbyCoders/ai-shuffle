@@ -2,24 +2,22 @@
 	/**
 	 * AgentList: the list column of the Agents page. Sections: "Yours" and
 	 * "Built-in". Each row is a
-	 * Settings ListItem: avatar, name with at most two chips (Draft,
-	 * Modified), one line of description, and the agent's model on the right.
+	 * Settings ListItem: name with at most two chips (Draft, Modified), one
+	 * line of description, and the agent's model on the right.
 	 * Up/Down moves between rows. ProfileCard owns the search and filters and
 	 * passes the sections in.
 	 */
 	import type { Profile } from '$lib/api/client';
-	import type { AvatarId } from '$lib/api/agent-identity';
 	import { Plus } from 'lucide-svelte';
 	import ListItem from '$lib/components/settings/rows/ListItem.svelte';
 	import ListGroupLabel from '$lib/components/settings/rows/ListGroupLabel.svelte';
  import EmptyDetail from '$lib/components/settings/shell/EmptyDetail.svelte';
-	import AgentAvatar from '$lib/components/agents/AgentAvatar.svelte';
 	import type { AgentSections } from '$lib/components/deck/cards/profiles/agentList';
 
 	interface Props {
 		sections: AgentSections;
 		/** The unsaved new agent, listed first under Yours. */
-		draft: { name: string; color: string | null } | null;
+		draft: { name: string } | null;
 		/** Open agent id; '' while the draft is open. */
 		selectedId: string | null;
 		loading: boolean;
@@ -32,8 +30,6 @@
 		query: string;
 		/** Built-in section hidden by the filter. */
 		showYours: boolean;
-		avatarOf: (id: string) => AvatarId;
-		colorOf: (p: Profile) => string | null;
 		metaOf: (p: Profile) => string;
 		onSelect: (p: Profile) => void;
 		onSelectDraft: () => void;
@@ -51,8 +47,6 @@
 		narrowed,
 		query,
 		showYours,
-		avatarOf,
-		colorOf,
 		metaOf,
 		onSelect,
 		onSelectDraft,
@@ -73,9 +67,6 @@
 		selected={selectedId === p.id}
 		onselect={() => onSelect(p)}
 	>
-		{#snippet lead()}
-			<AgentAvatar avatar={avatarOf(p.id)} size={20} color={colorOf(p)} neutral={p.is_builtin} />
-		{/snippet}
 		{#snippet badges()}
 			{#if p.is_builtin && p.is_modified}<span class="chip warn">Modified</span>{/if}
 		{/snippet}
@@ -87,7 +78,6 @@
 		<div class="sk-lg"><span class="sk" style:width="70px" style:height="9px"></span></div>
 		{#each Array.from({ length: 6 }, (_, i) => i) as i (i)}
 			<div class="sk-row">
-				<span class="sk a"></span>
 				<span>
 					<span class="sk l1" style:width="{40 + ((i * 13) % 30)}%"></span>
 					<span class="sk l2"></span>
@@ -108,7 +98,6 @@
 					selected={selectedId === ''}
 					onselect={onSelectDraft}
 				>
-					{#snippet lead()}<AgentAvatar avatar="robot" size={20} color={draft.color} />{/snippet}
 					{#snippet badges()}<span class="chip">Draft</span>{/snippet}
 				</ListItem>
 			{/if}
@@ -166,18 +155,11 @@
 	.sk-lg {
 		padding: 18px 10px 6px;
 	}
-	/* Same geometry as the rows: the 20px avatar centred on the 16px slot, text on the Chats title x. */
+	/* Same geometry as the rows: the 8px inset and the empty 16px slot plus its
+	   6px gap put the text on the Chats title x. */
 	.sk-row {
 		display: grid;
-		grid-template-columns: 20px 1fr;
-		gap: 4px;
-		align-items: center;
-		padding: 12px 10px 12px 6px;
-	}
-	.sk.a {
-		width: 20px;
-		height: 20px;
-		border-radius: 50%;
+		padding: 12px 10px 12px 30px;
 	}
 	.sk.l1 {
 		height: 11px;

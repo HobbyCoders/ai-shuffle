@@ -82,7 +82,7 @@ export function evaluateSubmitGuards(s: SubmitGuardInput): SubmitBlock | null {
 			: { notice: { message: 'No agents yet — create one to start chatting.', tone: 'warning' } };
 	}
 	// Only the code lane binds a repository. Chat and voice are projectless by
-	// construction — `newChatModeState` clears the project slice for them and
+	// construction — a new compose starts with no project slice and
 	// neither surface renders a picker — so demanding a project there refuses
 	// every send with advice the user has no control to follow.
 	// Only a NEW code chat can pick a project; refusing an open one sent the user

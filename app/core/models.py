@@ -4,8 +4,8 @@ Pydantic models for API requests and responses
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional, List, Dict, Any, Union, Literal
-from pydantic import BaseModel, Field, field_validator, computed_field, model_validator
+from typing import Annotated, Optional, List, Dict, Any, Union, Literal
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_validator, computed_field, model_validator
 
 # Import-cycle safe: ``session_modes`` only imports ``tool_access``, which has
 # no app imports at all (the same discipline that lets the DB migrations use it).
@@ -183,65 +183,43 @@ class ProfileConfig(BaseModel):
 
 
 
-# The colours an agent may carry on the Agents page (#1827): the frontend's
-# accent token names (``frontend/src/app.css``: ``--primary`` plus the Studio
-# Noir accent set ``--emerald`` / ``--rose`` / ``--blue`` and ``--warning``),
-# stored by name so each theme renders its own value. None = the page picks.
-AGENT_AVATAR_COLORS = ("primary", "emerald", "rose", "blue", "warning")
+PROFILE_NAME_MAX_LENGTH = 100
+ProfileName = Annotated[str, Field(min_length=1, max_length=PROFILE_NAME_MAX_LENGTH)]
+PROFILE_ID_MAX_LENGTH = 50
+_PROFILE_NAME_ADAPTER = TypeAdapter(ProfileName)
 
 
-def _check_avatar_color(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    if not isinstance(value, str) or value.strip() not in AGENT_AVATAR_COLORS:
-        raise ValueError(
-            "avatar_color must be one of: " + ", ".join(AGENT_AVATAR_COLORS) + " (or null)"
-        )
-    return value.strip()
+def profile_name_error(name: object) -> str | None:
+    """Validate the effective name for writes outside a typed request field."""
+    try:
+        _PROFILE_NAME_ADAPTER.validate_python(name, strict=True)
+    except ValidationError:
+        return f"Agent name must be between 1 and {PROFILE_NAME_MAX_LENGTH} characters."
+    return None
 
 
 class ProfileBase(BaseModel):
     """Base profile fields"""
-    name: str = Field(..., min_length=1, max_length=100)
+    name: ProfileName
     description: Optional[str] = None
     config: ProfileConfig
 
 
 class ProfileCreate(ProfileBase):
     """Profile creation request - id is optional; if omitted, derived from name"""
-    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
-    avatar_color: Optional[str] = None
-
-    @field_validator("avatar_color")
-    @classmethod
-    def _valid_avatar_color(cls, value):
-        return _check_avatar_color(value)
+    id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=PROFILE_ID_MAX_LENGTH)
 
 
 class ProfileUpdate(BaseModel):
-    """Profile update request. ``avatar_color`` null clears it; omitted keeps it."""
-    name: Optional[str] = None
+    """Profile update request"""
+    name: Optional[ProfileName] = None
     description: Optional[str] = None
     config: Optional[ProfileConfig] = None
-    avatar_color: Optional[str] = None
-
-    @field_validator("avatar_color")
-    @classmethod
-    def _valid_avatar_color(cls, value):
-        return _check_avatar_color(value)
 
 
 class Profile(ProfileBase):
     """Full profile response"""
     id: str
-    # Read side is lenient: a value outside the set (a newer peer's colour)
-    # reads as null instead of failing the whole agent list.
-    avatar_color: Optional[str] = None
-
-    @field_validator("avatar_color", mode="before")
-    @classmethod
-    def _known_avatar_color(cls, value):
-        return value if isinstance(value, str) and value in AGENT_AVATAR_COLORS else None
     is_builtin: bool = False
     is_modified: bool = False  # Whether built-in profile has been modified from defaults
     session_count: Optional[int] = None  # Number of sessions using this profile
@@ -388,12 +366,17 @@ class Session(SessionBase):
     sdk_session_id: Optional[str] = None
     status: str = "active"
     is_active: bool = False
+    # Snooze: a settled chat that goes back to Active at this time (UTC).
+    # Null when it is not snoozed.
+    snoozed_until: Optional[datetime] = None
     parked_task_kind: Optional[str] = None
     has_running_tasks: bool = False
     remote_runtime_state: Optional[str] = None
     # The latest turn that ran ended in a failure, so the row says so (#1032).
     # Like the chips: read for the list and search, null where it was not read.
     last_turn_failed: Optional[bool] = None
+    # The latest turn that ran was stopped, so the row reads Stopped, not Done (#1340).
+    last_turn_stopped: Optional[bool] = None
     # Accepted, but held by start admission until the database can take it (#583).
     # Only set while it waits; read from memory, never stored.
     start_queued: Optional[bool] = None
@@ -1065,9 +1048,9 @@ class AgentImportRequest(BaseModel):
     agent: AgentImportData
 
     # Optional override for profile ID (otherwise generated from name)
-    new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=50)
+    new_id: Optional[str] = Field(None, pattern=r'^[a-z0-9-]+$', min_length=1, max_length=PROFILE_ID_MAX_LENGTH)
     # Optional override for profile name
-    new_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    new_name: Optional[ProfileName] = None
 
 
 # ============================================================================

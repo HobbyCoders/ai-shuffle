@@ -35,6 +35,14 @@ def request_person_entry(request: Request):
     return person_entry(_request_query_principal(request))
 
 
+def request_composer_owner(request: Request) -> bool:
+    """``session_modes.composer_owner`` of a REST request: whether it may attach
+    from every area the owner's composer stages into. Blocking."""
+    from app.core.session_modes import composer_owner
+
+    return composer_owner(_request_query_principal(request))
+
+
 class HTTPQuerySender(ChatWebSocketHandler):
     """Use the same validation, attachments, placement and queueing as a send.
 

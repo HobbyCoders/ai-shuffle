@@ -8,6 +8,7 @@
 	import { marked } from 'marked';
 	import { onDestroy } from 'svelte';
 	import { sanitizeHtml } from '$lib/utils/sanitize';
+	import { streamingSplit } from '$lib/utils/chat-markdown';
 	import { retryImages } from '$lib/utils/media';
 	import { Typewriter } from '$lib/utils/typewriter';
 	import StreamingIndicator from './StreamingIndicator.svelte';
@@ -119,7 +120,10 @@
 
 	// ── Incremental markdown rendering ──────────────────────────────────────
 	// During streaming, thinking content is only appended. Cache the rendered
-	// HTML for completed paragraphs and only re-parse the tail.
+	// HTML for completed blocks and only re-parse the tail. The split is the
+	// chat reply's (same lexer options): a blank line inside an open fence,
+	// HTML block or raw inline tag is not a boundary, so the tail never draws
+	// an image the full render keeps as code or text (#1627).
 	// Use a plain object to avoid Svelte 5 compiling these as reactive signals.
 	// Mutating reactive `let` vars inside `$derived` corrupts the effect linked list.
 	const _cache = { content: '', html: '', stablePrefixContent: '', stablePrefixHtml: '' };
@@ -130,10 +134,10 @@
 
 		// Incremental: if content was only appended
 		if (_cache.content.length > 0 && text.startsWith(_cache.content)) {
-			const lastBoundary = text.lastIndexOf('\n\n');
-			if (lastBoundary > 0) {
-				const stableContent = text.substring(0, lastBoundary);
-				const tailContent = text.substring(lastBoundary);
+			const split = streamingSplit(text);
+			if (split > 0) {
+				const stableContent = text.substring(0, split);
+				const tailContent = text.substring(split);
 
 				let prefixHtml: string;
 				if (stableContent === _cache.stablePrefixContent) {

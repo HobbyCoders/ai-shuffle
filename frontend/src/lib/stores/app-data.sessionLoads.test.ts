@@ -47,6 +47,9 @@ import { ResourceSync } from '$lib/services/resource-sync';
 
 interface Row { id: string; title: string; is_active: boolean }
 
+/** The snoozed list is fetched beside the Active one; these tests hold none. */
+const NO_SNOOZED = { items: [], next_cursor: null, next_cursor_id: null, has_more: false };
+
 /** Two 100-row pages, so an uncapped loader would make two round-trips. */
 const page1: Row[] = Array.from({ length: 100 }, (_, i) => ({
 	id: `s${i}`,
@@ -79,6 +82,7 @@ beforeEach(() => {
 	listDelayMs = 0;
 	mocks.get.mockImplementation(async (url: string) => {
 		if (url.startsWith('/sessions/count')) return { total: 138 };
+		if (url.includes('membership=snoozed')) return NO_SNOOZED;
 		if (url.startsWith('/sessions/cursor')) {
 			if (listDelayMs) await new Promise((r) => setTimeout(r, listDelayMs));
 			// The Active group is pulled in separately so the page cap can never
@@ -110,6 +114,7 @@ describe('capped initial load (W1)', () => {
  it('pages the Active working set separately from bounded Settled history and its total', async () => {
   mocks.get.mockImplementation(async (url: string) => {
    if (url.startsWith('/sessions/count')) return { total: 1000 };
+   if (url.includes('membership=snoozed')) return NO_SNOOZED;
    if (url.includes('membership=active')) return url.includes('cursor=active-next')
     ? { items: [{ id: 'active-101', is_active: true }], has_more: false }
     : { items: Array.from({ length: 100 }, (_, i) => ({ id: `active-${i}`, is_active: true })), has_more: true, next_cursor: 'active-next', next_cursor_id: 'a' };
@@ -134,13 +139,14 @@ describe('capped initial load (W1)', () => {
 			listDelayMs = 500;
 			sync.invalidate(['sessions', 'projects']);
 			await vi.advanceTimersByTimeAsync(100);
-			expect(mocks.get).toHaveBeenCalledTimes(3);
+			// Settled page, Active set, Snoozed set and the Settled total.
+			expect(mocks.get).toHaveBeenCalledTimes(4);
 			// A focus refresh while the requests are running must not be lost.
 			const refreshed = appData.loadSessions();
 			void appData.loadSessions();
 			await vi.advanceTimersByTimeAsync(1000);
 			await refreshed;
-			expect(mocks.get).toHaveBeenCalledTimes(6);
+			expect(mocks.get).toHaveBeenCalledTimes(8);
 		} finally { off.forEach(stop => stop()); sync.clear(); vi.useRealTimers(); }
 	});
 
@@ -148,7 +154,7 @@ describe('capped initial load (W1)', () => {
 		let resolve!: (value: unknown) => void;
 		mocks.get.mockImplementation((url: string) => {
 			if (url.startsWith('/sessions/count')) return Promise.resolve({ total: 0 });
-			if (url.includes('membership=active')) return Promise.resolve({ items: [] });
+			if (url.includes('membership=active') || url.includes('membership=snoozed')) return Promise.resolve({ items: [] });
 			if (url.includes('tag_id=old')) return new Promise(done => { resolve = done; });
 			return Promise.resolve({ items: [{id: 'new-tag'}], has_more: false });
 		});
@@ -168,9 +174,9 @@ describe('capped initial load (W1)', () => {
 	it('fetches ONE page up front (plus the Active set) and reports more', async () => {
 		await appData.loadSessions();
 
-		// One page + one active-only request, in parallel — not ⌈N/100⌉
-		// sequential round-trips.
-		expect(mocks.get).toHaveBeenCalledTimes(3);
+		// One page + the active-only and snoozed requests, in parallel — not
+		// ⌈N/100⌉ sequential round-trips.
+		expect(mocks.get).toHaveBeenCalledTimes(4);
 		expect(appData.current.sessions).toHaveLength(101);
 		expect(appData.current.sessionsHasMore).toBe(true);
 		expect(appData.current.sessionsCursor).toBe('c1');
@@ -624,7 +630,7 @@ describe('"Load older sessions" paging', () => {
 
 	it('stops reporting more when the server repeats the same cursor', async () => {
 		mocks.get.mockImplementation(async (url: string) => {
-			if (url.includes('membership=active')) return { items: [], next_cursor: null, next_cursor_id: null, has_more: false };
+			if (url.includes('membership=active') || url.includes('membership=snoozed')) return NO_SNOOZED;
 			if (url.includes('cursor=stuck')) {
 				return { items: [], next_cursor: 'stuck', next_cursor_id: 'stuck-id', has_more: true };
 			}
@@ -648,8 +654,8 @@ describe('early sidebar list (VITE_PERF_EARLY_SESSION_LIST)', () => {
 		listDelayMs = 20;
 		appData.prefetchSessions();
 		await appData.loadSessions();
-		// One capped page plus the Active set, not twice.
-		expect(listCalls()).toBe(2);
+		// One capped page plus the Active and Snoozed sets, not twice.
+		expect(listCalls()).toBe(3);
 		expect(appData.current.sessions.length).toBeGreaterThan(0);
 	});
 
@@ -658,10 +664,10 @@ describe('early sidebar list (VITE_PERF_EARLY_SESSION_LIST)', () => {
 		await vi.waitFor(() => expect(appData.current.sessionsLoading).toBe(false));
 		await new Promise(r => setTimeout(r, 0));
 		await appData.loadSessions();
-		expect(listCalls()).toBe(2);
+		expect(listCalls()).toBe(3);
 		// Only the first loadSessions takes it; a later refresh reloads.
 		await appData.loadSessions();
-		expect(listCalls()).toBe(4);
+		expect(listCalls()).toBe(6);
 	});
 
 	it('loads again when the boot load asks for a different filter', async () => {

@@ -16,6 +16,7 @@ arbitrary code, so the hard gate lives host-side, never in the kernel.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -90,6 +91,12 @@ class KernelResult:
     # Chars of the cell's whole stdout; above truncate.FULL_STDOUT_MAX,
     # ``stdout_full`` holds only its head and tail.
     stdout_total: int = 0
+    # A failed cell's whole error text when ``error`` was clipped or cut (""
+    # otherwise); the host spills it and never shows it to the model.
+    error_full: str = ""
+    # "Type: message" for the exception that ended the cell, one bounded line
+    # built from the exception object ("" for host-authored errors).
+    error_summary: str = ""
 
 
 # The host-call callback: (tool_name, kwargs) -> HostReply. Awaited by the
@@ -103,6 +110,27 @@ HostCall = Callable[[str, dict], Awaitable[HostReply]]
 # host-call bound, so an approval a user takes ten minutes to answer never
 # looks like a hung tool. Optional: without it, human waits are charged.
 HostWaitCredit = Callable[[], float]
+
+
+@dataclass
+class HostCallSalvage:
+    """The reply a host call already has, kept for its per-call deadline.
+
+    The kernel opens one per host call (``current_host_call_salvage``) and
+    the bridge files the tool's finished, capped reply in it before the
+    post-processing that can still take time (PostToolUse hooks), then the
+    final reply. When the per-call ceiling expires after that, the kernel
+    returns the filed reply instead of a bare cancellation, so a Bash that
+    timed out inside the ceiling keeps its output (#1549). A turn cancel
+    never reads it.
+    """
+
+    reply: HostReply | None = None
+
+
+current_host_call_salvage: ContextVar[HostCallSalvage | None] = ContextVar(
+    "fluid_current_host_call_salvage", default=None,
+)
 
 
 @runtime_checkable

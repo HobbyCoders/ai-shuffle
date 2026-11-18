@@ -65,6 +65,9 @@ HARNESS_REMINDER_OPENERS = (
     "# Harness scratch\n",
     "Session notes (",
     "Runtime facts as of this message (",
+    "Environment as of this message:\n",
+    "# Environment details\n",
+    # The pre-split wording (one block), still in older transcripts.
     "Environment as of this message (",
     "The following deferred tools are available.",
 )

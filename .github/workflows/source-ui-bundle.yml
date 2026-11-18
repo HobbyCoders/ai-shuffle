@@ -23,7 +23,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    # Only the speculative main-suite cache may fail open. Publication callers
+    # Only the speculative CI cache may fail open. Publication callers
     # retain the blocking default and rebuild when a cache is unavailable.
     continue-on-error: ${{ inputs.optional }}
     steps:

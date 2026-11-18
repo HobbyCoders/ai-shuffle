@@ -71,7 +71,8 @@ class MinifiedBuildTests(unittest.TestCase):
 
     def test_workflow_cannot_publish_and_tests_both_apis(self):
         workflow = yaml.load((ROOT / ".github/workflows/ci-android-minified.yml").read_text(), Loader=yaml.BaseLoader)
-        self.assertEqual({"pull_request", "workflow_dispatch", "workflow_call"}, set(workflow["on"]))
+        # ci.yml calls it when what the APK is built from changed.
+        self.assertEqual({"workflow_dispatch", "workflow_call"}, set(workflow["on"]))
         self.assertEqual({"contents": "read"}, workflow["permissions"])
         self.assertEqual({"build", "smoke"}, set(workflow["jobs"]))
         build, smoke = workflow["jobs"]["build"], workflow["jobs"]["smoke"]

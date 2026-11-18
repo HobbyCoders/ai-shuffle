@@ -24,7 +24,10 @@ function makeTask(over: Partial<Task> = {}): Task {
 	};
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+	cleanup();
+	vi.restoreAllMocks();
+});
 
 function stopButton() {
 	return screen.getByRole('button', { name: /stop generating/i });

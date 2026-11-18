@@ -13,6 +13,7 @@
  */
 import { get } from 'svelte/store';
 import { pushState, replaceState } from '$app/navigation';
+import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
 import { activeView, layout } from '$lib/stores/layout.svelte';
 import { isCategoryId, PAGE_TYPES, type CategoryId, type SettingsTarget, type SettingsView } from './types';
 
@@ -147,12 +148,16 @@ function settingsPosition(state: SettingsHistoryState | null | undefined): Setti
 	return state?.settingsView && !isChatEntry(state) ? state : null;
 }
 
-/** SvelteKit's own number for a history entry. Unlike its state, this survives a reload. */
-const KIT_ENTRY_KEY = 'sveltekit:history';
+/**
+ * Where SvelteKit keeps its own record of a history entry. Its `historyIndex`
+ * numbers the entry and, unlike the entry's `page.state`, survives a reload.
+ */
+const KIT_ENTRY_KEY = 'sveltekit:metadata';
 
 function currentEntryId(): number | null {
 	if (typeof history === 'undefined') return null;
-	const id = (history.state as Record<string, unknown> | null)?.[KIT_ENTRY_KEY];
+	const entry = (history.state as Record<string, unknown> | null)?.[KIT_ENTRY_KEY];
+	const id = (entry as { historyIndex?: unknown } | null | undefined)?.historyIndex;
 	return typeof id === 'number' ? id : null;
 }
 
@@ -204,6 +209,8 @@ export class SettingsNavigation {
 	/** The reader chose a page here: a reload or a shrink to one pane keeps it (#1043). */
 	private hasPlace = false;
 	private ownEntry: OwnEntry | null = null;
+	/** Counts `noteEntry` calls, so a note still waiting for its entry yields to a later one. */
+	private entryNotes = 0;
 	/** Mounted SettingsShell count; `openSettings` updates in place when > 0. */
 	mounted = 0;
 	/** On-screen SettingsShell count: while > 0, Ctrl+K focuses Settings search. */
@@ -409,17 +416,27 @@ export class SettingsNavigation {
 
 	private restoreEntry(position: SettingsHistoryState): void {
 		try {
-			replaceState('', position as App.PageState);
+			ignoreRouterNotReady(replaceState('', position as App.PageState));
 		} catch {
 			// Router not ready: this entry stays empty until the next visit.
 		}
 	}
 
-	/** Remember the entry just landed on, or that it is not one of ours. */
-	private noteEntry(position: SettingsHistoryState | null): void {
-		const id = position ? currentEntryId() : null;
-		this.ownEntry = position && id !== null ? { id, state: position } : null;
-		this.persist();
+	/**
+	 * Remember the entry Settings stands on. `landed` is what `pushState`
+	 * returned: SvelteKit creates the entry asynchronously, so its number can
+	 * only be read once that settles.
+	 */
+	private noteEntry(position: SettingsHistoryState | null, landed?: Promise<void> | void): void {
+		const note = ++this.entryNotes;
+		const record = () => {
+			if (note !== this.entryNotes) return;
+			const id = position ? currentEntryId() : null;
+			this.ownEntry = position && id !== null ? { id, state: position } : null;
+			this.persist();
+		};
+		if (landed) void landed.then(record, () => {});
+		else record();
 	}
 
 	private entryShows(position: SettingsHistoryState | null, place: SettingsView): boolean {
@@ -483,6 +500,7 @@ export class SettingsNavigation {
 
 	private moveTo(view: SettingsView): void {
 		let pushed: SettingsHistoryState | null = null;
+		let landed: Promise<void> | void = undefined;
 		if (this.stacked && view !== 'index') {
 			// Every step into a page or detail is its own Back step, even
 			// sideways (detail to another detail via a link).
@@ -495,7 +513,7 @@ export class SettingsNavigation {
 				...(this.staleBelow ? { settingsStaleBelow: this.staleBelow } : {})
 			};
 			try {
-				pushState('', state as App.PageState);
+				landed = pushState('', state as App.PageState);
 				this.depth = depth;
 				pushed = state;
 			} catch {
@@ -503,7 +521,7 @@ export class SettingsNavigation {
 			}
 		}
 		this.view = view;
-		if (pushed) this.noteEntry(pushed);
+		if (pushed) this.noteEntry(pushed, landed);
 	}
 
 	private notePlace(): void {

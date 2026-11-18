@@ -242,6 +242,18 @@ async def test_subagent_readouts_preserve_task_assignments(
 
 class TestCreateSubagent:
     """Tests for the createSubagent tool."""
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("action", ["create", "update"])
+    async def test_invalid_name_never_reaches_subagent_write(self, admin_tools, action):
+        tool = get_tool(admin_tools, action + "Subagent")
+        with patch(f"app.db.database.{action}_subagent") as write:
+            result = await tool.handler({"subagent_id": "existing", "name": "🌿" * 101,
+                                         "description": "Original", "prompt": "Hello"})
+        body = _parse_result(result)
+        assert body["success"] is False
+        assert "1 and 100 characters" in body["error"]
+        write.assert_not_called()
+
 
     @pytest.mark.asyncio
     async def test_create_subagent_minimal(self, admin_tools):

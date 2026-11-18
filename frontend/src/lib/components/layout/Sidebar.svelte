@@ -6,10 +6,11 @@
 	 * Left: an icon rail (SidebarRail) holding New, the destinations the user
 	 * put there, More and Settings. Right: one column with the mode toggle and
 	 * header buttons, search and filter, and the ledger itself: Needs you,
-	 * Active and Settled.
+	 * Active, Snoozed and Settled.
 	 *
 	 * Rows follow the inbox model. Swipe left settles an active session (or
-	 * brings a settled one back); swipe right is inert. A long press starts a
+	 * brings a settled or snoozed one back); swipe right opens the snooze
+	 * picker for that row, which snoozes it once a time is picked. A long press starts a
 	 * multi-select whose bar offers the same moves in bulk. On desktop the
 	 * same moves sit in each row's hover actions.
 	 *
@@ -19,7 +20,6 @@
 	import { onDestroy, onMount, untrack, type Snippet } from 'svelte';
 	import type { AnimationConfig } from 'svelte/animate';
 	import { cubicOut } from 'svelte/easing';
-	import { refreshAgentIdentities } from '$lib/stores/agent-identities';
 	import {
 		Search,
 		ListFilter,
@@ -31,6 +31,7 @@
 		X,
 		Check,
 		Undo2,
+		AlarmClock,
 		Files,
 		Notebook,
 		SquarePen,
@@ -78,17 +79,21 @@
 	import PanelToggle from './view/PanelToggle.svelte';
 	import SidebarSheet from './sidebar/SidebarSheet.svelte';
 	import WorkspaceCustomize from './sidebar/WorkspaceCustomize.svelte';
+	import SnoozePicker from './sidebar/SnoozePicker.svelte';
 	import type { WorkspaceNavItem } from './sidebar/workspace-items';
 	import {
 		branchLabel,
 		deriveStatus,
+		sessionStartedAt,
 		sessionTimestamp,
 		sessionDeviceId,
 		sessionPrState,
 		projectKey,
 		isVisibleSidebarSession,
 		sidebarGroup,
+		snoozeUntilMs,
 		lastWorkFailed,
+		lastWorkStopped,
 		openSessionNeeds,
 		sessionNeedsInput,
 		liveProjectKeys,
@@ -164,6 +169,25 @@
 	const collapsedGroups: Record<string, boolean> = $derived({ settled: true, ...$sidebarGroups });
 	function toggleGroup(name: string) {
 		sidebarGroups.set({ ...collapsedGroups, [name]: !collapsedGroups[name] });
+	}
+	// Opening or closing a group at the bottom of the panel moves its header out
+	// from under the pointer, and a row can take its place. A second click that
+	// fast on the same spot is the other half of a double-click on the header,
+	// not a wish to open that row. A click anywhere else goes through.
+	const GROUP_SETTLE_MS = 500;
+	const SAME_SPOT_PX = 10;
+	let headerClick = { at: 0, x: 0, y: 0 };
+	function dropStrayClick(event: MouseEvent) {
+		// Keyboard activation has no position and never follows a moving header.
+		if (event.detail === 0) return;
+		if (event.target instanceof Element && event.target.closest('.sect')) {
+			headerClick = { at: Date.now(), x: event.clientX, y: event.clientY };
+			return;
+		}
+		if (Date.now() - headerClick.at >= GROUP_SETTLE_MS) return;
+		if (Math.hypot(event.clientX - headerClick.x, event.clientY - headerClick.y) > SAME_SPOT_PX) return;
+		event.preventDefault();
+		event.stopPropagation();
 	}
 
 	// ---------------------------------------------------------------- clock
@@ -388,7 +412,45 @@
 	// `ts` is the row's last-activity time, resolved ONCE per row (R2). The
 	// comparator used to call sessionTimestamp() — a `Date` parse — on every
 	// comparison, i.e. O(n log n) date parses per recompute.
-	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number }
+	// `started` is when the chat was started, resolved once the same way. It is
+	// the row's place in Needs you and Active; `ts` stays the card's timer and
+	// the order of Settled, which is history paged by last activity.
+	interface CardRow { session: Session; status: SessionCardStatus; openPr: boolean; ts: number; started: number }
+
+	// Needs you and Active list chats in the order they were started, newest on
+	// top, and a row keeps that place: a reply, a finished turn or a tool call
+	// never moves it. Ties fall to the id, so the store handing over the same
+	// rows in another order cannot swap two of them either.
+	const byStart = (a: CardRow, b: CardRow) =>
+		b.started - a.started || (a.session.id < b.session.id ? -1 : a.session.id > b.session.id ? 1 : 0);
+
+	// Snoozes whose time has passed count as Active at once: the server's wake
+	// lands a moment later and changes nothing on screen. Keyed by a string so
+	// the shared ticker only rebuilds the rows when a snooze actually runs out.
+	const snoozeDueKey = $derived(
+		visibleSessions
+			.filter((s) => {
+				const until = snoozeUntilMs(s);
+				return until !== null && until <= now;
+			})
+			.map((s) => s.id)
+			.join(',')
+	);
+	const snoozeDue = $derived(new Set(snoozeDueKey ? snoozeDueKey.split(',') : []));
+	const rowActive = (s: Session) => !!s.is_active || snoozeDue.has(s.id);
+	const rowSnoozed = (s: Session) => !rowActive(s) && snoozeUntilMs(s) !== null;
+
+	// The shared ticker can be 30s apart, so wake the list at the soonest snooze
+	// time itself, to the second.
+	$effect(() => {
+		const soonest = Math.min(
+			...visibleSessions.map((s) => snoozeUntilMs(s) ?? Infinity).filter((at) => at > now)
+		);
+		if (!Number.isFinite(soonest)) return;
+		// setTimeout's ceiling is ~24.8 days; a later wake re-arms on the next tick.
+		const timer = setTimeout(() => (now = Date.now()), Math.min(soonest - Date.now() + 50, 2 ** 31 - 1));
+		return () => clearTimeout(timer);
+	});
 
 	const rows = $derived.by((): CardRow[] =>
 		visibleSessions
@@ -409,15 +471,17 @@
 						privateAccess: ($privateAccessPending.get(s.id) ?? 0) > 0,
 						prState: sessionPrState(s),
 						openPr: !s.pr_state && !!(branch && prSet?.has(branch)),
-						isActive: !!s.is_active,
+						isActive: rowActive(s),
 						failed: lastWorkFailed(s),
+						stopped: lastWorkStopped(s),
 						open: sessionNeedsInput(
 							s.id === openNeedsId,
 							openNeedsNow,
 							groupToolCalls && rememberedProse.has(s.id)
 						)
 					}),
-					ts: sessionTimestamp(s)
+					ts: sessionTimestamp(s),
+					started: sessionStartedAt(s)
 				};
 			})
 			.sort((a, b) => b.ts - a.ts)
@@ -428,9 +492,17 @@
 	// unrelated activity. Settling is the user saying "not
 	// now" (#2324): a settled row always lands in Settled, keeping its amber badge
 	// if the server still reports a wait.
-	const laneOf = (r: CardRow) => sidebarGroup(r.status, !!r.session.is_active);
-	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs'));
-	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active'));
+	// A snoozed row has its own lane, soonest wake first, until its time passes.
+	// Changing lane is the only way a row in Needs you or Active moves: inside
+	// the lane it sits by when it was started.
+	const laneOf = (r: CardRow) => sidebarGroup(r.status, rowActive(r.session), rowSnoozed(r.session));
+	const needsYouRows = $derived(rows.filter((r) => laneOf(r) === 'needs').sort(byStart));
+	const activeRows = $derived(rows.filter((r) => laneOf(r) === 'active').sort(byStart));
+	const snoozedRows = $derived(
+		rows
+			.filter((r) => laneOf(r) === 'snoozed')
+			.sort((a, b) => (snoozeUntilMs(a.session) ?? 0) - (snoozeUntilMs(b.session) ?? 0))
+	);
 	const settledRows = $derived(rows.filter((r) => laneOf(r) === 'settled'));
 	let settledLimit = $state(SETTLED_LIMIT);
 	const visibleSettledRows = $derived(settledRows.slice(0, settledLimit));
@@ -454,8 +526,6 @@
 	const settledLaneShown = $derived(settledRows.length > 0 || ($settledTotal ?? 0) > 0 || loadingOlder || $sessionsHasMore);
 	onMount(() => {
 		if (!isAdmin) return;
-		// Agent names and avatars for the new-session agent card.
-		void refreshAgentIdentities().catch(() => {});
 		// The worker's answer is the only terminal gate (see terminal/gating.ts).
 		void terminals.ensureCapability();
 	});
@@ -534,8 +604,8 @@
 	// One kind of session; the project is picked (or not) on the new screen.
 	const newLabel = 'New chat';
 
-	/** Which overlay is up: the More menu, the filter, or neither. */
-	let sheet = $state<'more' | 'filter' | null>(null);
+	/** Which overlay is up: the More menu, the filter, the snooze picker, or none. */
+	let sheet = $state<'more' | 'filter' | 'snooze' | null>(null);
 	let customizeOpen = $state(false);
 
 	function openCustomize() {
@@ -572,43 +642,62 @@
 		if (ts >= today - 6 * DAY) return 'Earlier this week';
 		return 'Older';
 	}
-	// A project's place follows its most recent chat in ANY lane, archived-but-
-	// not-yet-gone included. Ranking on the lane's own rows made a project swap
-	// places, moving a screenful of rows, whenever its newest chat left the lane,
-	// and swap back if the server then refused the change.
-	const projectRecency = $derived.by(() => {
-		const latest = new Map<string, number>();
-		for (const s of visibleSessions) {
+	// A project's place is the newest START among its chats in Needs you, Active
+	// and Snoozed. Activity in a chat never moves its project: only a chat
+	// arriving in those lanes does (a new chat, or one brought back from Settled).
+	// None of these may move it, which is why the place is a high-water mark kept
+	// for as long as this list is mounted:
+	// - its newest chat leaving the lane (settled, or archived and not yet gone).
+	//   Ranking on what is left made a project swap places, moving a screenful of
+	//   rows, and swap back if the server then refused the change;
+	// - a snoozed chat waking: Snoozed is loaded whole, so it already counts;
+	// - a page of Settled history arriving. Settled comes in pages by last
+	//   activity, so an older page can hold a chat started after everything
+	//   loaded so far. Settled rows are never read here.
+	// It is recorded in an effect, from every listed chat, so a chat that came and
+	// went while a filter hid its project, or its lane was closed, still counted.
+	let projectStart = $state.raw(new Map<string, number>());
+	$effect.pre(() => {
+		const seen = untrack(() => projectStart);
+		let next: Map<string, number> | null = null;
+		for (const s of sidebarSessions) {
+			if (!s.is_active && snoozeUntilMs(s) === null) continue;
 			const key = projectKey(s);
-			const ts = sessionTimestamp(s);
-			if (ts > (latest.get(key) ?? -Infinity)) latest.set(key, ts);
+			const started = sessionStartedAt(s);
+			if (started > ((next ?? seen).get(key) ?? -Infinity)) (next ??= new Map(seen)).set(key, started);
 		}
-		return latest;
+		if (next) projectStart = next;
 	});
 	// Inside a lane, rows sit under their project when the lane spans more than
-	// one, so no row has to repeat it. Rows keep their recency order inside it.
+	// one, so no row has to repeat it. Rows keep the lane's order inside it.
 	function byProject(laneRows: CardRow[]): { key: string; label: string | null; rows: CardRow[] }[] {
 		const groups = new Map<string, CardRow[]>();
+		// A project with no chat in Needs you or Active (a Settled day can hold
+		// one) goes by the newest start among its rows here.
+		const newestHere = new Map<string, number>();
 		for (const row of laneRows) {
 			const key = projectKey(row.session);
 			const group = groups.get(key);
 			if (group) group.push(row);
 			else groups.set(key, [row]);
+			if (row.started > (newestHere.get(key) ?? -Infinity)) newestHere.set(key, row.started);
 		}
 		// Keyed by its project even with no header, so a second project arriving
 		// moves this group instead of rebuilding every row in it.
 		if (groups.size < 2) return [{ key: [...groups.keys()][0] ?? 'all', label: null, rows: laneRows }];
-		const recency = (key: string) => projectRecency.get(key) ?? 0;
+		const started = (key: string) => projectStart.get(key) ?? newestHere.get(key) ?? 0;
+		// Projects started at the same moment fall to their key, never to which
+		// row the lane happens to list first: that changes when a row leaves.
 		return [...groups]
-			.sort(([a], [b]) => recency(b) - recency(a))
+			.sort(([a], [b]) => started(b) - started(a) || (a < b ? -1 : a > b ? 1 : 0))
 			.map(([key, rows]) => ({
 				key,
 				label: key === UNGROUPED_PROJECT ? 'No project' : projectLabel(rows[0].session),
 				rows
 			}));
 	}
-	// A project's place is its newest chat, so a chat starting in a project lower
-	// down lifts that whole group over the ones above it (#1307). That is a
+	// A project's place is its newest-started chat, so a chat starting in a project
+	// lower down lifts that whole group over the ones above it (#1307). That is a
 	// screenful of rows changing place with nothing the user touched, so they
 	// glide there. Position only: a group growing by a row must not stretch.
 	/** How far through its easing a group sinking out of sight reaches the list's bottom edge. */
@@ -661,8 +750,10 @@
 	let selected = $state<Set<string>>(new Set());
 	const selecting = $derived(selected.size > 0);
 	const selectedRows = $derived(rows.filter((r) => selected.has(r.session.id)));
-	const anySelectedActive = $derived(selectedRows.some((r) => r.session.is_active));
-	const anySelectedSettled = $derived(selectedRows.some((r) => !r.session.is_active));
+	const anySelectedSettled = $derived(selectedRows.some((r) => !rowActive(r.session)));
+	// Settle and Snooze both take Active rows and snoozed ones (a new time, or
+	// no snooze at all); a settled row only goes back to Active.
+	const anySelectedSettleable = $derived(selectedRows.some((r) => rowActive(r.session) || rowSnoozed(r.session)));
 
 	// Rows that left the list (archived elsewhere, filtered out) leave the
 	// selection too, so the count never names rows the user cannot see.
@@ -716,7 +807,7 @@
 
 	async function runBulk(kind: 'settle' | 'activate') {
 		const targets = selectedRows.filter((r) =>
-			kind === 'settle' ? r.session.is_active : kind === 'activate' ? !r.session.is_active : true
+			kind === 'settle' ? rowActive(r.session) || rowSnoozed(r.session) : !rowActive(r.session)
 		);
 		cancelSelection();
 		if (targets.length === 0) return;
@@ -730,6 +821,41 @@
 		if (kind === 'settle') {
 			if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
 		}
+	}
+
+	// --- snooze --------------------------------------------------------------
+	// One picker for a row's Snooze button and the selection bar's.
+	let snoozeTargets = $state<string[]>([]);
+	let snoozeOpenedAt = $state(Date.now());
+
+	function openSnooze(ids: string[]) {
+		if (ids.length === 0) return;
+		snoozeTargets = ids;
+		snoozeOpenedAt = Date.now();
+		sheet = 'snooze';
+	}
+
+	function snoozeSelected() {
+		openSnooze(selectedRows.filter((r) => rowActive(r.session) || rowSnoozed(r.session)).map((r) => r.session.id));
+	}
+
+	async function applySnooze(at: Date) {
+		const ids = snoozeTargets;
+		sheet = null;
+		snoozeTargets = [];
+		cancelSelection();
+		const until = at.toISOString();
+		const results = await Promise.allSettled(ids.map((id) => appData.setSessionActive(id, false, until)));
+		const done = ids.filter((_, i) => results[i].status === 'fulfilled');
+		const failed = ids.length - done.length;
+		if (failed) {
+			const reason = results.find((r): r is PromiseRejectedResult => r.status === 'rejected')?.reason as { detail?: unknown } | undefined;
+			const detail = typeof reason?.detail === 'string' ? reason.detail.trim() : '';
+			if (ids.length === 1 && detail) notify(`Failed to snooze: ${detail}`, { severity: 'error' });
+			else reportBulkFailure(failed, ids.length);
+		}
+		// Like Settle, the open chat leaves Active; on desktop the shell moves on.
+		if (activeId && done.includes(activeId) && !phone) onSettledOpenSession();
 	}
 
 	// --- keyboard ------------------------------------------------------------
@@ -799,6 +925,7 @@
 		onLongPress={startSelecting}
 		onOpen={onOpenSession}
 		onSettled={onSettledOpenSession}
+		onSnooze={(id) => openSnooze([id])}
 	/>
 {/snippet}
 
@@ -815,11 +942,11 @@
 	{/each}
 {/snippet}
 
-{#snippet sect(key: 'needs' | 'active' | 'settled', label: string, count: number)}
+{#snippet sect(key: 'needs' | 'active' | 'snoozed' | 'settled', label: string, count: number)}
 	<button
 		class="sect"
 		class:needs={key === 'needs'}
-		class:settled={key === 'settled'}
+		class:settled={key === 'settled' || key === 'snoozed'}
 		class:closed={collapsedGroups[key]}
 		onclick={() => toggleGroup(key)}
 		aria-expanded={!collapsedGroups[key]}
@@ -866,19 +993,22 @@
 	{/if}
 	<div class="col" class:selecting class:rail-hidden={ownsPanel} inert={ownsPanel} aria-hidden={ownsPanel || undefined}>
 		<!-- Selection bar: slides over the header while rows are selected. -->
-		<div class="selbar" inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
+		<div class="selbar" class:crowded={anySelectedSettled && anySelectedSettleable} inert={!selecting} aria-hidden={selecting ? undefined : 'true'}>
 			<button class="icon-btn" type="button" aria-label="Cancel selection" onclick={cancelSelection}>
 				<X size={18} strokeWidth={1.75} />
 			</button>
-			<span class="cnt" aria-live="polite">{selected.size} selected</span>
+			<span class="cnt" aria-live="polite">{selected.size}<span class="cnt-word">{' '}selected</span></span>
 			{#if anySelectedSettled}
-				<button class="act" type="button" onclick={() => runBulk('activate')}>
-					<Undo2 size={15} strokeWidth={2} />Active
+				<button class="act" type="button" aria-label="Active" onclick={() => runBulk('activate')}>
+					<Undo2 size={15} strokeWidth={2} /><span class="lbl">Active</span>
 				</button>
 			{/if}
-			{#if anySelectedActive}
-				<button class="act primary" type="button" onclick={() => runBulk('settle')}>
-					<Check size={15} strokeWidth={2.25} />Settle
+			{#if anySelectedSettleable}
+				<button class="act snooze" type="button" aria-label="Snooze" aria-haspopup="dialog" onclick={snoozeSelected}>
+					<AlarmClock size={15} strokeWidth={2} /><span class="lbl">Snooze</span>
+				</button>
+				<button class="act primary" type="button" aria-label="Settle" onclick={() => runBulk('settle')}>
+					<Check size={15} strokeWidth={2.25} /><span class="lbl">Settle</span>
 				</button>
 			{/if}
 		</div>
@@ -939,7 +1069,7 @@
 
 		</div>
 
-		<div class="list" class:edge-guard={phone} bind:this={listRef}>
+		<div class="list" class:edge-guard={phone} bind:this={listRef} onclickcapture={dropStrayClick}>
 			{#if needsYouRows.length > 0}
 				{@render sect('needs', 'Needs you', needsYouRows.length)}
 				{#if !collapsedGroups.needs}
@@ -956,6 +1086,22 @@
 				{:else}
 					<div class="cards" data-group="active">
 						{@render laneRows(activeGroups)}
+					</div>
+				{/if}
+			{/if}
+
+			<!-- Takes the list's spare height, so Snoozed and Settled sit at the
+			     bottom of the panel. With no spare height it is nothing at all. -->
+			<div class="lane-push" aria-hidden="true"></div>
+
+			{#if snoozedRows.length > 0}
+				{@render sect('snoozed', 'Snoozed', snoozedRows.length)}
+				{#if !collapsedGroups.snoozed}
+					<!-- One list in wake order, so no project headers: each row names its own. -->
+					<div class="cards" data-group="snoozed">
+						{#each snoozedRows as row (row.session.id)}
+							{@render card(row, true, spansProjects)}
+						{/each}
 					</div>
 				{/if}
 			{/if}
@@ -1019,6 +1165,12 @@
 					<button class="opt" type="button" aria-pressed={deviceFilter === opt.id} onclick={() => (deviceFilter = opt.id)}>{opt.label}</button>
 				{/each}
 			</div>
+		</SidebarSheet>
+
+		<SidebarSheet open={sheet === 'snooze'} label={snoozeTargets.length > 1 ? 'Snooze chats' : 'Snooze chat'} {phone} placement="popover" onClose={() => (sheet = null)}>
+			{#if sheet === 'snooze'}
+				<SnoozePicker now={snoozeOpenedAt} count={snoozeTargets.length} {phone} onPick={applySnooze} />
+			{/if}
 		</SidebarSheet>
 	</div>
 
@@ -1222,12 +1374,21 @@
 		position: relative;
 		flex: 1 1 auto;
 		min-height: 0;
+		/* A column, so the spacer below can push the quiet lanes to the bottom. */
+		display: flex;
+		flex-direction: column;
 		overflow-x: hidden;
 		overflow-y: auto;
 		padding: 0 8px 12px;
 		scrollbar-width: thin;
 		scrollbar-color: var(--border-strong) transparent;
 	}
+	/* Nothing in the list gives up height to fit: a long list scrolls. */
+	.list > * { flex: none; }
+	/* Needs you and Active read from the top; Snoozed and Settled rest at the
+	   bottom of the panel while there is room, and follow the rows above them
+	   once the list is taller than the panel (or one of them is open and long). */
+	.list > .lane-push { flex: 1 0 0px; }
 	/* The phone card is 4px wider inside (10px inset, 8px gap) than the shared
 	   row, so a 4px list inset puts section labels on the 16px page gutter and
 	   titles at 38, the same x as the Notes, Agents and Projects lists. */
@@ -1238,7 +1399,7 @@
 	   to the system. Hold the rows off the right edge so the whole row, and
 	   the place a thumb starts a left (settle) swipe, sit inside the app's own
 	   touch area. The left edge needs no guard: the icon rail already keeps
-	   the rows, and the start of a right (archive) swipe, clear of it. */
+	   the rows, and the start of a right (snooze) swipe, clear of it. */
 	.list.edge-guard { padding-right: 24px; }
 	.cards, .proj-group { display: flex; flex-direction: column; gap: 2px; }
 	/* Tiers: the lane label, then this quieter project label, then its rows. */
@@ -1341,15 +1502,20 @@
 		transform: translateY(-100%);
 		transition: transform 0.26s cubic-bezier(0.16, 1, 0.3, 1);
 	}
-	.phone .selbar { height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
+	.phone .selbar { gap: 4px; height: calc(56px + env(safe-area-inset-top, 0px)); padding-top: env(safe-area-inset-top, 0px); }
+	.phone .act { padding: 0 10px; }
 	.col.selecting .selbar { transform: none; }
-	.cnt { margin-right: auto; padding-left: 2px; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
+	/* A snoozed row offers Active, Snooze and Settle at once: the count gives
+	   way first so the three buttons fit a phone-width bar. */
+	.cnt { min-width: 0; margin-right: auto; padding-left: 2px; overflow: hidden; text-overflow: ellipsis; font-size: 13px; font-weight: 650; white-space: nowrap; color: var(--foreground); }
 	.act {
 		display: flex;
+		flex-shrink: 0;
 		align-items: center;
 		gap: 6px;
 		height: 34px;
 		padding: 0 12px;
+		white-space: nowrap;
 		border: 0;
 		border-radius: 10px;
 		background: var(--row-hover);
@@ -1362,6 +1528,30 @@
 	.act:hover { background: var(--row-selected); }
 	.act.primary { background: var(--action); color: var(--action-foreground); }
 	.act.primary:hover { background: var(--action-hover); }
+	/* A finger needs 44px, also when a crowded bar drops the labels (#1615):
+	   in the phone app and in the browser on any touch screen, including a
+	   touch laptop whose main pointer is its trackpad. */
+	.phone .act, .phone .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
+	@media (pointer: coarse), (any-pointer: coarse) {
+		.act, .selbar .icon-btn { justify-content: center; min-width: 44px; height: 44px; }
+	}
+	/* A narrow sidebar cannot fit every labelled button (the bar's content box
+	   is about 248px at the desktop default width, 374px on a 390px phone).
+	   Each button carries an aria-label, so the words go first: Snooze's, then
+	   all three when a snoozed row adds Active, then the word after the count
+	   at the narrowest sidebar. */
+	.selbar { container-type: inline-size; }
+	@container (max-width: 359px) {
+		.crowded .act { padding: 0 10px; }
+		.crowded .act .lbl { display: none; }
+	}
+	@container (max-width: 309px) {
+		.act.snooze { padding: 0 10px; }
+		.act.snooze .lbl { display: none; }
+	}
+	@container (max-width: 229px) {
+		.cnt-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+	}
 
 	/* Sheet contents (SidebarSheet supplies the surface). */
 	h4 { margin: 0 4px 8px; font-size: 13px; font-weight: 600; color: var(--muted-foreground); }

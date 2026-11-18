@@ -1571,17 +1571,23 @@ def test_queue_observation_cannot_delay_liveness(
         tripped = False
 
         probes = 0
+        loop_thread = threading.get_ident()
+        probe_threads: list[int] = []
+        entered_at: list[float] = []  # when the observer blocked, on loop.time()
 
         def probe(*args: object) -> bool:
             nonlocal probes
             probes += 1
+            probe_threads.append(threading.get_ident())
             if blocked_stage == "probe":
+                entered_at.append(loop.time())  # a monotonic read, safe off-loop
                 loop.call_soon_threadsafe(entered.set)
                 assert release.wait(2)
             return True
 
         async def notice(queued: bool) -> None:
             if blocked_stage == "notice":
+                entered_at.append(loop.time())
                 entered.set()
                 await asyncio.Future()
 
@@ -1594,13 +1600,32 @@ def test_queue_observation_cannot_delay_liveness(
         monkeypatch.setattr(pa, "WAIT_SLICE_SECONDS", 0.01)
         monkeypatch.setattr(pa.rate_limit_breaker, "is_tripped", lambda _: tripped)
         now = loop.time()
-        task = asyncio.create_task(pa._await_worker_idle(
-            "blocked-observer", "provider", feed=SimpleNamespace(queued=notice),
-            first_frame_deadline=now + 0.04 if verdict == pa.WAIT_NO_FIRST_FRAME else None,
-            wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
-        ))
+        deadlines = {pa.WAIT_NO_FIRST_FRAME: now + 0.04, pa.WAIT_DEADLINE: now + 0.06}
+        answered_at: list[float] = []  # when the verdict was returned, not observed
+
+        async def watch() -> object:
+            result = await pa._await_worker_idle(
+                "blocked-observer", "provider", feed=SimpleNamespace(queued=notice),
+                first_frame_deadline=deadlines.get(pa.WAIT_NO_FIRST_FRAME)
+                if verdict == pa.WAIT_NO_FIRST_FRAME else None,
+                wall_cap=pa._WallCap(now, 0.06) if verdict == pa.WAIT_DEADLINE else None,
+            )
+            answered_at.append(loop.time())
+            return result
+
+        task = asyncio.create_task(watch())
         try:
-            await asyncio.wait_for(entered.wait(), 1)
+            # Reaching the blocked stage is an entry wait, not the claim under
+            # test: a stalled CI runner can start the observer late (#1674).
+            # A deadline verdict may then come before the observer is entered;
+            # idle and rate-limited cannot, as nothing triggers them yet.
+            entering = asyncio.ensure_future(entered.wait())
+            reached, _ = await asyncio.wait(
+                {entering, task}, timeout=10, return_when=asyncio.FIRST_COMPLETED,
+            )
+            entering.cancel()
+            assert reached, "the observer never reached its blocked stage"
+            triggered_at = loop.time()
             if verdict == "idle":
                 idle.set()
             elif verdict == pa.WAIT_RATE_LIMITED:
@@ -1608,8 +1633,23 @@ def test_queue_observation_cannot_delay_liveness(
             assert await asyncio.wait_for(task, 0.3) == (
                 None if verdict == "idle" else verdict
             )
-            assert loop.time() - now < 0.3
-            assert probes == 1  # blocked observation never creates a query backlog
+            # The DB probe never runs on the event loop: there it would hold
+            # every liveness check for as long as the query takes.
+            assert loop_thread not in probe_threads, "the queue probe blocked the event loop"
+            # Response time runs from when the verdict became due to when it
+            # was returned: the trigger for idle/rate-limited, and for a
+            # deadline the later of that deadline and the observer blocking.
+            # Neither end is the test's own resume, so a slow start or a late
+            # resume on a busy runner cannot spend the bound.
+            if verdict in deadlines:
+                due = max(deadlines[verdict], *entered_at) if entered_at else None
+            else:
+                due = triggered_at
+            if due is not None:
+                assert answered_at[0] - due < 0.3
+            # Never a query backlog. Entry implies the one probe ran; a verdict
+            # that beat entry may have come before the probe thread started.
+            assert probes == 1 if entered.is_set() else probes <= 1
         finally:
             release.set()
             if not task.done():
@@ -1635,7 +1675,7 @@ def test_idle_db_outage_still_allows_cancellation(monkeypatch):
         monkeypatch.setattr(turns, "session_has_unsettled_turns", unavailable)
         monkeypatch.setattr(turn_manager, "_ensure_gateway_listener", lambda: None)
         waiter = asyncio.create_task(pa._await_worker_idle("worker-1", None))
-        await asyncio.wait_for(probed.wait(), timeout=1.0)
+        await asyncio.wait_for(probed.wait(), timeout=10)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter

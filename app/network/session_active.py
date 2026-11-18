@@ -28,15 +28,22 @@ def project(cursor, record: dict) -> None:
     There is deliberately no FK: a membership envelope can precede the session
     catalog on a third worker. prepare_session_mirror applies it on insertion.
     """
-    # Local-only fencing counter: advance for every accepted local or mirrored
-    # membership write, even with a frozen clock or while publication is held.
-    # Scope counters to this local row's lifetime. Receipts travel with history
-    # on handoff, and network reset/rejoin can recreate the membership row.
-    cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
-                   "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
-                   "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
-    cursor.execute("UPDATE sessions SET is_active=%s, status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
-                   (record["is_active"], record["session_id"]))
+    # Active is never snoozed. A record from an older peer has no snooze field:
+    # its write is a plain settle/activate and ends any snooze.
+    snoozed = None if record["is_active"] else record.get("snoozed_until")
+    cursor.execute("SELECT is_active, snoozed_until, status FROM sessions WHERE id=%s", (record["session_id"],))
+    before = cursor.fetchone()
+    if not _snooze_transition(before, record["is_active"], snoozed):
+        # Local-only fencing counter: advance for every accepted local or mirrored
+        # membership write, even with a frozen clock or while publication is held.
+        # Scope counters to this local row's lifetime. Receipts travel with history
+        # on handoff, and network reset/rejoin can recreate the membership row.
+        cursor.execute("UPDATE network_session_active SET local_revision=local_revision+1, "
+                       "local_revision_epoch=CASE WHEN local_revision_epoch='' THEN %s ELSE local_revision_epoch END "
+                       "WHERE session_id=%s", (str(uuid4()), record["session_id"]))
+    cursor.execute("UPDATE sessions SET is_active=%s, snoozed_until=%s, "
+                   "status=CASE WHEN status='archived' THEN 'active' ELSE status END WHERE id=%s RETURNING *",
+                   (record["is_active"], snoozed, record["session_id"]))
     row = cursor.fetchone()
     if row is not None and control.owner_of(dict(row)):
         # This is a local projection of an owner-ordered catalog, not a new
@@ -50,20 +57,55 @@ def project(cursor, record: dict) -> None:
                            (engine.content_hash(coll, serialized), record["session_id"]))
 
 
-def _record_active(cursor, session_id: str, active: bool) -> Optional[dict]:
+def _snooze_transition(before, active: bool, snoozed) -> bool:
+    """A snooze, re-snooze or wake: the chat only moves between Active and Snoozed.
+
+    These writes do not advance the membership fence, so pending work fenced on
+    it (an armed limit resume) survives them. A plain settle, an unsettle of a
+    settled chat, an archived row or an unknown row still advances it.
+    """
+    from app.core import session_snooze
+    if before is None or not session_snooze.runs_work(dict(before)):
+        return False
+    # Active -> active still fences: it can be a peer's settle + reactivate coalesced
+    # while it was held, which must cancel. Follow-up: a replicated settlement generation.
+    return bool(snoozed) or (active and bool(before["snoozed_until"]) and not before["is_active"])
+
+
+def project_snooze(cursor, session_id: str) -> None:
+    """Align ``sessions.snoozed_until`` with the shared record, if there is one."""
+    cursor.execute("SELECT is_active, snoozed_until FROM network_session_active WHERE session_id=%s", (session_id,))
+    shared = cursor.fetchone()
+    if shared is None:
+        return
+    want = None if shared["is_active"] else shared["snoozed_until"]
+    cursor.execute("SELECT snoozed_until FROM sessions WHERE id=%s", (session_id,))
+    row = cursor.fetchone()
+    from app.core import session_snooze
+    if row is not None and session_snooze.parse(row["snoozed_until"]) != session_snooze.parse(want):
+        cursor.execute("UPDATE sessions SET snoozed_until=%s WHERE id=%s", (want, session_id))
+
+
+def _record_active(cursor, session_id: str, active: bool,
+                   snoozed_until: Optional[str] = None) -> Optional[dict]:
+    """Write the shared membership row. Settling or activating clears a snooze;
+    ``snoozed_until`` (canonical ISO UTC) with ``active=False`` snoozes."""
+    snoozed = None if active else snoozed_until
     record = {"session_id": session_id, "is_active": active,
-              "updated_at": datetime.now(timezone.utc).isoformat()}
+              "updated_at": datetime.now(timezone.utc).isoformat(), "snoozed_until": snoozed}
     cursor.execute(
-        "INSERT INTO network_session_active (session_id, is_active, updated_at, local_pending) VALUES (%s, %s, %s, TRUE) "
-        "ON CONFLICT (session_id) DO UPDATE SET is_active=EXCLUDED.is_active, updated_at=EXCLUDED.updated_at, local_pending=TRUE",
-        (session_id, active, record["updated_at"]),
+        "INSERT INTO network_session_active (session_id, is_active, updated_at, snoozed_until, local_pending) "
+        "VALUES (%s, %s, %s, %s, TRUE) "
+        "ON CONFLICT (session_id) DO UPDATE SET is_active=EXCLUDED.is_active, updated_at=EXCLUDED.updated_at, "
+        "snoozed_until=EXCLUDED.snoozed_until, local_pending=TRUE",
+        (session_id, active, record["updated_at"], snoozed),
     )
     project(cursor, record)
     # While publishing is held, the scanner signs this durable row later.
     return engine.record(cursor, "session_active", session_id, record, force=True)
 
 
-def write_shared(session_id: str, active: bool) -> Optional[dict]:
+def write_shared(session_id: str, active: bool, snoozed_until: Optional[str] = None) -> Optional[dict]:
     """Commit a sidebar edit here, even when its execution owner is offline."""
     if not isinstance(active, bool):
         raise ValueError("boolean is_active is required")
@@ -75,7 +117,7 @@ def write_shared(session_id: str, active: bool) -> Optional[dict]:
         cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
         if cur.fetchone() is None:
             return None
-        membership_envelope = _record_active(cur, session_id, active)
+        membership_envelope = _record_active(cur, session_id, active, snoozed_until)
         cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
         row = dict(cur.fetchone())
         row["_settled_membership"] = membership_envelope
@@ -115,8 +157,40 @@ def write_shared_many(session_ids: list[str], active: bool) -> list[dict]:
     return rows
 
 
-async def set_shared(session_id: str, active: bool) -> dict:
-    row = await run_sync(write_shared, session_id, active)
+def write_wake(session_id: str, expected: Optional[str] = None) -> Optional[dict]:
+    """End a snooze: Active again, only if the chat is still snoozed.
+
+    ``expected`` (the wake time the caller saw) must still match under the row
+    lock, so a wake never undoes a newer snooze, unsnooze or settle. Returns
+    the updated row, or None when nothing changed (idempotent).
+    """
+    from app.core import session_snooze
+    networked = engine.context() is not None
+    with get_db() as conn:
+        cur = conn.cursor()
+        if networked:
+            store.lock_state(cur)  # same lock order as write_shared and incoming replication
+        cur.execute("SELECT * FROM sessions WHERE id=%s FOR UPDATE", (session_id,))
+        row = cur.fetchone()
+        if row is None or row["is_active"] or row["status"] == "archived":
+            return None
+        current = session_snooze.parse(row["snoozed_until"])
+        if current is None or (expected is not None and current != session_snooze.parse(expected)):
+            return None
+        if networked:
+            _record_active(cur, session_id, True)
+        else:
+            cur.execute("UPDATE sessions SET is_active=TRUE, snoozed_until=NULL, updated_at=%s WHERE id=%s",
+                        (datetime.now(timezone.utc).isoformat(), session_id))
+        cur.execute("SELECT * FROM sessions WHERE id=%s", (session_id,))
+        row = dict(cur.fetchone())
+    if networked:
+        engine.kick()
+    return row
+
+
+async def set_shared(session_id: str, active: bool, snoozed_until: Optional[str] = None) -> dict:
+    row = await run_sync(write_shared, session_id, active, snoozed_until)
     if row is None:
         raise LookupError("Unknown session")
     await _apply_settle_change(row, active)
@@ -128,7 +202,8 @@ async def _apply_settle_change(row: dict, active: bool, archived: Optional[bool]
     """Dismiss waits on the owner; shared membership remains offline-first."""
     envelope = row.pop("_settled_membership", None)
     revision = row.pop("_settled_revision", {"session_updated_at": row.get("updated_at")})
-    if active:
+    if active or row.get("snoozed_until"):
+        # A snooze defers the chat; it keeps its waits so they can wake it.
         return
     owner = control.owner_of(row)
     try:
@@ -159,7 +234,8 @@ async def dismiss_replicated(session_ids: list[str]) -> None:
     from app.core.session_settlement import dismiss_owner_waits
     for session_id in session_ids:
         row = await run_sync(database.get_session, session_id)
-        if row and not row.get("is_active") and control.owner_of(row) is None:
+        if (row and not row.get("is_active") and not row.get("snoozed_until")
+                and control.owner_of(row) is None):
             try:
                 await dismiss_owner_waits(session_id)
                 await _broadcast(row, session_id)
@@ -259,13 +335,20 @@ class MembershipUpdateFailed(RuntimeError):
     """The local writer did not return an updated session."""
 
 
-async def update_membership(existing: dict, active: bool, archived: Optional[bool] = None) -> dict:
-    """Legacy archive intents are ordinary shared settlement, never Stop."""
+async def update_membership(existing: dict, active: bool, archived: Optional[bool] = None,
+                            snoozed_until: Optional[str] = None) -> dict:
+    """Legacy archive intents are ordinary shared settlement, never Stop.
+
+    ``snoozed_until`` (canonical ISO UTC, with ``active=False``) snoozes;
+    without it a settle or activate clears any snooze.
+    """
     session_id = existing["id"]
     active = False if archived else active
+    if active or archived:
+        snoozed_until = None
     if engine.context() is not None:
-        return await set_shared(session_id, active)
-    row = await run_sync(database.set_session_active, session_id, active, None)
+        return await set_shared(session_id, active, snoozed_until)
+    row = await run_sync(database.set_session_active, session_id, active, None, snoozed_until)
     if row is None:
         raise MembershipUpdateFailed("Failed to update active status")
     await _apply_settle_change(row, active)
@@ -288,10 +371,12 @@ async def _apply_archive_change(session_id: str, archived: Optional[bool], resto
 
 async def _broadcast(row: dict, session_id: str) -> None:
     try:
+        from app.core import session_snooze
         from app.core.sync_engine import sync_engine
         await sync_engine.broadcast_user_session_updated(
             user_id=row.get("api_user_id") or "admin", session_id=session_id,
-            updates={"is_active": bool(row.get("is_active")), "status": row.get("status")},
+            updates={"is_active": bool(row.get("is_active")), "status": row.get("status"),
+                     "snoozed_until": session_snooze.canonical(row.get("snoozed_until"))},
             source_device_id=None,
         )
     except Exception:  # durable update already committed

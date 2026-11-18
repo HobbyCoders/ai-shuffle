@@ -34,10 +34,11 @@ import { subagentChats } from '../subagent-chats';
 // V2 Phase 1: SSE-fed reducer store — the transcript authority for a session.
 import { feedController } from './v2/feed-controller';
 import { setSkipRestore } from './session-init';
+import { flushPendingDraft } from './draft-persistence';
 import { pendingQueue, restoredDraftFields } from './pending-queue';
 import { queueHydration } from './queue-hydration';
 import { beginJourney } from '$lib/services/journey-timing';
-import { resolveNewChatProject, resolveSessionProject } from './session-project';
+import { resolveSessionProject } from './session-project';
 import { appMode, normalizeSessionMode, type SessionMode } from '../sessionMode.svelte';
 import { noProjectPermission } from '$lib/components/chat/session-scope';
 import { encodeProviderModel } from '$lib/constants/models.svelte';
@@ -83,6 +84,11 @@ export interface SessionSwitcherDeps {
 
 	// Callbacks
 	onPersistTimerChanged: (timer: ReturnType<typeof setTimeout> | null) => void;
+
+	/** Counts what the page learned about who runs the open chat, in order
+	 *  (#1659). A `/live` answer requested before a newer count is stale about
+	 *  the owner. Absent: no other source, every answer is current. */
+	ownerObservation?: () => number;
 }
 
 /** Minimal shape of the one-shot `/live` metadata snapshot used on switch-in. */
@@ -146,9 +152,9 @@ interface SessionSwitcher {
 	 *  strip with it (#320). For a reconnect, which resumes the feed at its
 	 *  cursor without a fresh `/live` snapshot. */
 	refreshRunningTasks: (sessionId: string) => Promise<void>;
-	/** `restoredDraft`: a typed draft came back. `keptPlace`: so did the
-	 *  project and checkout of a compose left unsent. */
-	newChat: (options?: { initialLanding?: boolean }) => { restoredDraft: boolean; keptPlace: boolean };
+	/** `restoredDraft`: a kept draft (typed text or a staged checkout) came
+	 *  back, with the place it was composed for. */
+	newChat: (options?: { initialLanding?: boolean }) => { restoredDraft: boolean };
 	persistSession: () => void;
 	loadPersistedSession: () => Promise<PersistedSession | null>;
 	getPersistedProfile: () => string;
@@ -171,20 +177,34 @@ export function getPersistedProject(): string {
 }
 
 /**
- * The lane a fresh compose opens in: the owner's last project choice, "no
- * project" included (owner decision 2026-10-31, replacing #371 step 4's
- * "starts empty"). Working in a project, every new session opens in it until
- * the owner picks another or clears it. Before the catalog answers a saved
- * project counts (the composer holds a send until it resolves, #1636); after,
- * one this worker no longer lists does not (#434).
+ * The lane a compose's OWN project still allows. Every new session starts
+ * without a project (owner decision 2026-11-13, reversing the 2026-10-31
+ * "opens in the last project picked"); the owner's last pick is still recorded
+ * (per-project worktree picks, other devices) but never applied to a fresh
+ * compose. This only keeps or drops the project a compose already holds: before
+ * the catalog answers it counts (the composer holds a send until it resolves,
+ * #1636); after, one this worker no longer lists does not (#434).
  */
-export function rememberedComposeMode(): SessionMode {
-	const pick = composerPreferences.current.project;
+export function listedComposeMode(pick: { projectId: string; projectV2Id: string | null }): SessionMode {
 	if (!pick.projectId && !pick.projectV2Id) return 'chat';
 	if (!appData.projectCatalogLoaded || appData.projectCatalogFailed) return 'code';
 	const { projects, clusterProjects } = appData.current;
 	const { project, projectV2Id } = resolveComposerProject(pick, projects, clusterProjects);
 	return project || (projectV2Id && clusterProjects.some(p => p.project_v2_id === projectV2Id)) ? 'code' : 'chat';
+}
+
+/**
+ * A brand-new tab falls back to the device's last snapshot. When that is an
+ * unbound compose, its project was another tab's pick, and its typed text
+ * (kept per tab) did not come along: this tab boots a new session, which
+ * starts without a project. A staged checkout is a compose in progress and
+ * keeps its place, like a kept draft does on New session.
+ */
+export function withoutBorrowedComposeProject(value: PersistedSession): PersistedSession {
+	if (value.sessionId || value.mode === 'voice' || value.worktreeBranch || value.worktreeId) return value;
+	if (!value.project && !value.projectV2Id) return value;
+	return { ...value, mode: 'chat', project: '', projectV2Id: null, workspaceProjectIds: [], worktreeIntent: 'local',
+		selectedWorktreeBranch: null, worktreeMode: 'new' };
 }
 
 /** Reuse the already-loaded Git status; never borrow another project's status. */
@@ -250,6 +270,9 @@ export interface AttachRowFields {
 	project_id?: string | null;
 	project_v2_id?: string | null;
 	permission_mode?: string | null;
+	/** Another worker runs the session: its legacy id means nothing here. */
+	is_remote?: boolean;
+	device_name?: string | null;
 }
 
 /**
@@ -270,44 +293,22 @@ export function attachedSinceSaved(
 }
 
 /**
- * The repository slice of a fresh compose, which depends on the lane it opens in.
- *
- * Chat and voice run projectless — neither surface renders a project picker, a
- * branch picker or the Local/Worktree toggle. Restoring the last code-mode
- * project and worktree intent into one of them would bind a checkout the user
- * has no control to inspect or undo: the first message would quietly cut a
- * branch in a repo they thought they had left behind. So those lanes clear the
- * slice outright and only 'code' consults the remembered picks.
+ * The repository slice of a fresh compose: no project, so no checkout either.
+ * Without a project the composer offers no branch picker or Local/Worktree
+ * toggle, so a leftover worktree intent would bind a checkout the user has no
+ * control to inspect or undo. A kept draft puts its own place back afterwards.
  */
-type NewChatModeSlice = Pick<
+const NO_PROJECT_SLICE: Pick<
 	ActiveSessionState,
 	'project' | 'projectV2Id' | 'worktreeIntent' | 'worktreeId' | 'worktreeBranch' | 'selectedWorktreeBranch'
->;
-
-function newChatModeState(
-	mode: SessionMode,
-	ephemeral: { project: string; projectV2Id: string | null } | null | undefined,
-	fallbackProject: string,
-): NewChatModeSlice {
-	if (mode === 'chat') {
-		return {
-			project: '',
-			projectV2Id: null,
-			worktreeIntent: 'local',
-			worktreeId: null,
-			worktreeBranch: '',
-			selectedWorktreeBranch: null,
-		};
-	}
-	const project = resolveNewChatProject(ephemeral, fallbackProject);
-	return {
-		...project,
-		worktreeIntent: getPersistedWorktreeIntent(project.project, project.projectV2Id),
-		worktreeId: null,
-		worktreeBranch: '',
-		selectedWorktreeBranch: null,
-	};
-}
+> = {
+	project: '',
+	projectV2Id: null,
+	worktreeIntent: 'local',
+	worktreeId: null,
+	worktreeBranch: '',
+	selectedWorktreeBranch: null,
+};
 
 /**
  * Last-used run binding — the model, effort and permission mode the user last
@@ -621,7 +622,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		try {
 			const prefKey = serverPrefKey();
 			const response = await api.get<{ key: string; value: PersistedSession } | null>(`/preferences/${encodeURIComponent(prefKey)}`);
-			if (response?.value) return response.value;
+			if (response?.value) return withoutBorrowedComposeProject(response.value);
 		} catch {
 			// No persisted session — fresh start
 		}
@@ -682,11 +683,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const ephemeral = sessionEphemeralCache.restore(sessionId);
 		const row = appData.current.sessions.find((s) => s.id === sessionId);
+		// Who owns the chat. Without a loaded row (a deep link, a row outside the
+		// loaded page) a re-open of the chat on screen keeps what /live already
+		// said: unknown reads as mirrored, which hides the shown transcript behind
+		// a first-sync check until /live answers again (#890).
+		const keepOwner = !row && state.sessionId === sessionId;
+		const isRemote = keepOwner ? state.isRemote : row?.is_remote;
+		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
+		// The owner also decides whether the row's legacy id names a project here
+		// (#1659); an owner not known yet is settled by /live below.
 		const { project: targetProject, projectV2Id: targetV2 } = resolveSessionProject({
 			projectId: projectId !== undefined ? projectId : row?.project_id,
 			projectV2Id: projectV2Id !== undefined ? projectV2Id : (row?.project_v2_id ?? undefined),
 			ephemeralProject: ephemeral?.project,
 			ephemeralProjectV2Id: ephemeral?.projectV2Id,
+			isRemote,
 		});
 
 		// Single update: set sessionId, reset + restore ephemeral state.
@@ -723,14 +734,6 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const binding = restoreComposerBinding(ephemeral, row, {
 			rowPermissionWins: attachedSinceSaved(ephemeral, row),
 		});
-
-		// Who owns the chat. Without a loaded row (a deep link, a row outside the
-		// loaded page) a re-open of the chat on screen keeps what /live already
-		// said: unknown reads as mirrored, which hides the shown transcript behind
-		// a first-sync check until /live answers again (#890).
-		const keepOwner = !row && state.sessionId === sessionId;
-		const isRemote = keepOwner ? state.isRemote : row?.is_remote;
-		const ownerDeviceName = keepOwner ? state.ownerDeviceName : row?.device_name;
 
 		update(s => ({
 			...s,
@@ -933,8 +936,11 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			fastMode: getState().fastMode,
 		};
 		let snap: LiveSnapshot | null = null;
+		// Who runs the chat, as of when the answer was asked for (#1659).
+		let ownerAsked = deps.ownerObservation?.() ?? 0;
 		for (let attempt = 0; ; attempt++) {
 			try {
+				ownerAsked = deps.ownerObservation?.() ?? 0;
 				// `include_messages=false`: the SSE feed is the transcript authority, so
 				// the message list this endpoint would otherwise build (megabytes on a
 				// long session) is discarded on arrival. Asking for metadata only keeps
@@ -1009,8 +1015,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		const meta = snap.session_meta;
 		if (meta) {
-			if (meta.is_remote !== undefined) patch.isRemote = meta.is_remote;
-			if (meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
+			// The page may have learned who runs the chat after this was asked
+			// (a sessions refresh reporting a hand-off): that newer word stands,
+			// so a late answer neither restores the old owner nor its project.
+			const ownerCurrent = (deps.ownerObservation?.() ?? 0) === ownerAsked;
+			const metaOwner = ownerCurrent ? meta.is_remote : undefined;
+			if (metaOwner !== undefined) patch.isRemote = metaOwner;
+			if (ownerCurrent && meta.device_name !== undefined) patch.ownerDeviceName = meta.device_name;
 			// Reloads and deep links have no row to tell an archived chat apart.
 			if (meta.status !== undefined) archivedChats.mark(sessionId, meta.status === 'archived');
 			if (meta.is_worker !== undefined) subagentChats.mark(sessionId, meta.is_worker);
@@ -1023,14 +1034,21 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// Deep links can open before the sidebar row arrives. Restore the
 			// durable project alongside its branch, including remote-only/null IDs.
 			// Do not replace a project selection made while the request was in flight.
+			// An owner that changes with this answer re-resolves even then: the
+			// legacy id must not outlive the owner it was valid for (#1659).
+			const ownerChanges = metaOwner !== undefined && getState().isRemote !== undefined
+				&& metaOwner !== getState().isRemote;
 			if ((meta.project_id !== undefined || meta.project_v2_id !== undefined)
-				&& getState().project === initialProject
-				&& getState().projectV2Id === initialProjectV2Id) {
+				&& (ownerChanges || (getState().project === initialProject
+					&& getState().projectV2Id === initialProjectV2Id))) {
 				Object.assign(patch, resolveSessionProject({
 					projectId: meta.project_id,
 					projectV2Id: meta.project_v2_id,
 					ephemeralProject: initialProject,
 					ephemeralProjectV2Id: initialProjectV2Id,
+					// A reload restores the project from a saved snapshot and a
+					// deep link has no row: this answer is where the owner is known.
+					isRemote: metaOwner ?? getState().isRemote,
 				}));
 			}
 			// No sidebar row (hidden child/deep link), or a reload whose saved
@@ -1100,6 +1118,9 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 	}
 
 	function newChat(options?: { initialLanding?: boolean }) {
+		// Words typed just before (still in the composer's save debounce) are a
+		// draft too: a compose with them keeps its project below.
+		flushPendingDraft();
 		const state = getState();
 		// Bootstrap may reconcile the new-chat surface the user is already on.
 		// Only that landing preserves a popover; actual navigation still closes it.
@@ -1144,21 +1165,13 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 		const savedDraft = newChatEphemeral && (hasComposerDraft(newChatEphemeral.draft) || newChatEphemeral.worktreeBranch || newChatEphemeral.worktreeId)
 			? newChatEphemeral : null;
 
-		// A new session opens on the owner's last project choice, "no project"
-		// included (rememberedComposeMode). A kept draft typed for a project
-		// reopens with it. So does a compose left unsent to open another chat,
-		// typed or not: coming back, its project, branch and worktree are still
-		// the owner's picks, like its worker. A draft typed with no project stays
-		// without one: the text was written for that place.
-		const comingBack = leavingSessionId !== null;
-		const keptPlace = newChatEphemeral && (savedDraft || comingBack)
-			&& (newChatEphemeral.project || newChatEphemeral.projectV2Id) ? newChatEphemeral : null;
-		const mode: SessionMode = keptPlace ? 'code' : savedDraft ? 'chat' : rememberedComposeMode();
-		// The remembered project as this worker resolves it, shared id included,
-		// so a project with only a shared id here is not dropped from the compose.
-		const remembered = mode === 'code' && !keptPlace
-			? resolveComposerProject(composerPreferences.current.project, appData.current.projects, appData.current.clusterProjects)
-			: null;
+		// A new session starts without a project (owner decision 2026-11-13). A
+		// kept draft (typed text or a staged checkout) reopens in the project,
+		// branch and worktree it was composed for: that is the compose in
+		// progress, not a default. An untyped compose left to open another chat
+		// starts over without one; only its worker carries over.
+		const keptPlace = savedDraft && (savedDraft.project || savedDraft.projectV2Id) ? savedDraft : null;
+		const mode: SessionMode = keptPlace ? 'code' : 'chat';
 
 		// Single update: reset everything (including draft from ephemeral cache)
 		update(s => ({
@@ -1221,7 +1234,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			// A compose has no server binding to wait for.
 			bindingUnhydrated: {},
 			bindingPicks: {},
-			workspaceProjectIds: newChatEphemeral?.workspaceProjectIds ?? [],
+			workspaceProjectIds: keptPlace?.workspaceProjectIds ?? [],
 			contextWindowChoice: getPersistedContextWindowChoice(),
 			contextWindowPin: undefined,
 			pendingPermissions: [],
@@ -1236,14 +1249,8 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 			draft: newChatEphemeral?.draft || '',
 			scrollTop: 0,
 			streamStartTime: null,
-			// Project + worktree slice, and the last-toggled Local/Worktree mode —
-			// restored for a code compose, cleared for the projectless lanes.
-			...newChatModeState(
-				mode,
-				remembered ?? newChatEphemeral,
-				// Never the session being left: its project is not a choice here.
-				remembered?.project ?? getPersistedProject(),
-			),
+			// No project and no checkout; a kept draft restores its own below.
+			...NO_PROJECT_SLICE,
 			// A restored compose keeps its explicit pick (including Local/null).
 			// Otherwise use the last worker chosen, not the session being left.
 			deviceIntent: newChatEphemeral ? newChatEphemeral.deviceIntent : getPersistedDeviceIntent(),
@@ -1283,7 +1290,7 @@ export function createSessionSwitcher(deps: SessionSwitcherDeps): SessionSwitche
 
 		// Persist immediately (not debounced)
 		persistSessionImmediate();
-		return { restoredDraft: savedDraft !== null, keptPlace: keptPlace !== null };
+		return { restoredDraft: savedDraft !== null };
 	}
 
 	function destroy() {

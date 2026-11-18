@@ -1,7 +1,7 @@
 /**
  * The Agents page (#1825) end to end against faked API replies: the list and
- * its filters, the detail tabs, autosave, create, duplicate and delete, the
- * avatar colour, and the Models tab with and without the subagent default.
+ * its filters, the detail tabs, autosave, create, duplicate and delete, and
+ * the Models tab with and without the subagent default.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
@@ -11,19 +11,12 @@ const mocks = vi.hoisted(() => ({
 	put: vi.fn(),
 	post: vi.fn(),
 	del: vi.fn(),
-	getAgentIdentities: vi.fn(),
-	updateAgentIdentity: vi.fn(),
 	clearFeatureItemId: vi.fn(),
 	openFeaturePage: vi.fn()
 }));
 vi.mock('$lib/api/client', async (original) => ({
 	...(await original<typeof import('$lib/api/client')>()),
 	api: { get: mocks.get, put: mocks.put, post: mocks.post, delete: mocks.del }
-}));
-vi.mock('$lib/api/agent-identity', async (original) => ({
-	...(await original<typeof import('$lib/api/agent-identity')>()),
-	getAgentIdentities: mocks.getAgentIdentities,
-	updateAgentIdentity: mocks.updateAgentIdentity
 }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: () => {} }));
 vi.mock('$lib/stores/auth.svelte', async (original) => ({
@@ -41,10 +34,8 @@ vi.mock('$lib/api/toolSurface', async (original) => ({
 
 import ProfileCard from './ProfileCard.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
-import { agentIdentities } from '$lib/stores/agent-identities';
 import type { Profile } from '$lib/api/client';
 
-let serverAvatar: string;
 let agents: Profile[];
 /** What GET /settings/subagent-default answers; null = 404. */
 let subagentDefault: unknown;
@@ -59,7 +50,6 @@ const researcher = (): Profile => ({
 	created_at: '',
 	updated_at: '',
 	config: {
-		avatar_id: 'robot',
 		system_prompt: { type: 'custom', content: 'Keep my original prompt' },
 		model: 'original-model',
 		permission_mode: 'default',
@@ -85,31 +75,21 @@ beforeEach(async () => {
 	} catch {
 		/* no storage */
 	}
-	serverAvatar = 'robot';
 	subagentDefault = null;
 	agents = [researcher(), designer()];
-	agentIdentities.set([]);
 	mocks.get.mockImplementation(async (path: string) => {
-		if (path === '/agents') return agents.map((a) => ({ ...a, config: { ...a.config, avatar_id: serverAvatar } }));
+		if (path === '/agents') return agents;
 		if (path === '/settings/subagent-default') {
 			if (subagentDefault === null) throw { status: 404, detail: 'Not Found' };
 			return subagentDefault;
 		}
 		return [];
 	});
-	mocks.getAgentIdentities.mockImplementation(async () => [{ id: 'agent', name: 'Researcher', avatar_id: serverAvatar }]);
-	mocks.updateAgentIdentity.mockImplementation(async (id, patch) => {
-		if (id === 'agent') serverAvatar = patch.avatar_id;
-		return { id, name: 'Researcher', avatar_id: patch.avatar_id };
-	});
-	// Model the normal PUT contract: an omitted identity preserves its latest
-	// narrow PATCH, while a stale explicit identity would overwrite it.
 	mocks.put.mockImplementation(async (path: string, payload: any) => {
 		if (path === '/settings/subagent-default') return payload;
-		if (Object.hasOwn(payload.config, 'avatar_id')) serverAvatar = payload.config.avatar_id;
 		const id = path.split('/').pop();
 		agents = agents.map((a) => (a.id === id ? { ...a, ...payload } : a));
-		return { ...payload, config: { ...payload.config, avatar_id: serverAvatar } };
+		return payload;
 	});
 	mocks.post.mockImplementation(async (path: string, payload: any) => {
 		if (path === '/agents') {
@@ -295,13 +275,13 @@ describe('subagents roster', () => {
 });
 
 describe('autosave and identity', () => {
-	it('omits the stale read-projected avatar after an identity edit', async () => {
+	it('shows no avatar and saves the identity without one', async () => {
 		render(ProfileCard, { initialSelectedId: 'agent' });
 		await heading('Researcher');
-		await fireEvent.click(await screen.findByRole('button', { name: 'Change' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'orbit avatar' }));
-		await waitFor(() => expect(mocks.updateAgentIdentity).toHaveBeenCalledWith('agent', { avatar_id: 'orbit' }));
-		expect(screen.getByRole('button', { name: 'orbit avatar' }).getAttribute('aria-pressed')).toBe('true');
+		// The avatar feature is gone: no Avatar row, no picker, no art in the header.
+		expect(screen.queryByText('Avatar')).toBeNull();
+		expect(screen.queryByRole('button', { name: 'Change' })).toBeNull();
+		expect(document.querySelector('.st-identity')?.children.length ?? 0).toBe(0);
 		await fireEvent.input(screen.getByLabelText('Description'), { target: { value: 'Edited description' } });
 		await waitFor(() => expect(mocks.put).toHaveBeenCalled(), { timeout: 2000 });
 		const [path, payload] = mocks.put.mock.calls.at(-1)!;
@@ -314,9 +294,7 @@ describe('autosave and identity', () => {
 		expect(payload.config).not.toHaveProperty('permission_mode');
 		// A setting the page does not edit goes back as stored (#1546).
 		expect(payload.config.custom_future_key).toEqual({ keep: true });
-		// No colour field on this worker, so none is sent.
 		expect(payload).not.toHaveProperty('avatar_color');
-		expect(serverAvatar).toBe('orbit');
 	});
 
 	it('keeps settings the page does not edit when another field is saved (#1546)', async () => {
@@ -352,27 +330,78 @@ describe('autosave and identity', () => {
 		// What the page owns still comes from the form, and retired keys stay out.
 		expect(payload.config.system_prompt.content).toBe('Keep my original prompt');
 		expect(payload.config).not.toHaveProperty('model');
-		expect(payload.config).not.toHaveProperty('avatar_id');
+	});
+});
+
+describe('a name over the 100 limit (code points, as the server counts)', () => {
+	const settle = () => new Promise((r) => setTimeout(r, 900));
+	const nameField = () => screen.getByLabelText('Name') as HTMLInputElement;
+	const tooLong = () => screen.queryByText(/^Too long: \d+ of 100 characters\. Shorten it to save\.$/);
+	const headerSays = (text: string) => screen.getAllByRole('status').some((s) => s.textContent?.includes(text));
+	const savedNames = () => mocks.put.mock.calls.map(([, payload]) => payload.name as string);
+
+	async function open() {
+		render(ProfileCard, { initialSelectedId: 'agent' });
+		await heading('Researcher');
+	}
+
+	it('keeps every letter when a combining mark is typed at the limit, and does not save (S4)', async () => {
+		await open();
+		const full = 'a'.repeat(100);
+		await fireEvent.input(nameField(), { target: { value: full } });
+		await waitFor(() => expect(savedNames()).toContain(full), { timeout: 2000 });
+		const accented = 'a'.repeat(50) + '\u0301' + 'a'.repeat(50);
+		await fireEvent.input(nameField(), { target: { value: accented } });
+		await settle();
+		expect(nameField().value).toBe(accented);
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(nameField().getAttribute('aria-invalid')).toBe('true');
+		expect(headerSays('Name too long')).toBe(true);
+		expect(savedNames()).not.toContain(accented);
+		expect(savedNames().every((n) => Array.from(n).length <= 100)).toBe(true);
 	});
 
-	it('hides the colour choice when the agent API has no avatar_color', async () => {
-		render(ProfileCard);
-		await heading('Researcher');
-		await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-		expect(screen.queryByRole('radiogroup', { name: 'Colour' })).toBeNull();
+	it('leaves an over-long paste whole, blocks the save, and saves again once shortened (S5)', async () => {
+		await open();
+		const pasted = 'x'.repeat(150);
+		await fireEvent.input(nameField(), { target: { value: pasted } });
+		await settle();
+		// Nothing rewrote the field, so the browser's own Undo still has the paste to undo.
+		expect(nameField().value).toBe(pasted);
+		expect(tooLong()?.textContent).toContain('150 of 100');
+		expect(mocks.put).not.toHaveBeenCalled();
+		// What Undo does to the field (back to the old name) saves as usual.
+		await fireEvent.input(nameField(), { target: { value: 'Researcher' } });
+		await settle();
+		expect(tooLong()).toBeNull();
+		expect(headerSays('Name too long')).toBe(false);
 	});
 
-	it('saves the colour through the agent save when the field exists', async () => {
-		agents = agents.map((a) => ({ ...a, avatar_color: null }));
-		await appData.loadProfiles();
-		render(ProfileCard);
-		await heading('Researcher');
-		await fireEvent.click(screen.getByRole('button', { name: 'Change' }));
-		await fireEvent.click(screen.getByRole('radio', { name: 'Green' }));
-		await waitFor(() => expect(mocks.put).toHaveBeenCalled(), { timeout: 2000 });
-		const [, payload] = mocks.put.mock.calls.at(-1)!;
-		expect(payload.avatar_color).toBe('emerald');
-		expect(payload.config).not.toHaveProperty('avatar_color');
+	it('counts an emoji as one: 99 letters and an emoji save, one more is refused', async () => {
+		await open();
+		const atLimit = 'a'.repeat(99) + '😀';
+		await fireEvent.input(nameField(), { target: { value: atLimit } });
+		await waitFor(() => expect(savedNames()).toContain(atLimit), { timeout: 2000 });
+		expect(tooLong()).toBeNull();
+		const over = 'a'.repeat(100) + '😀';
+		await fireEvent.input(nameField(), { target: { value: over } });
+		await settle();
+		expect(nameField().value).toBe(over);
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(savedNames()).not.toContain(over);
+	});
+
+	it('leaves an IME composition at the limit whole and does not save it', async () => {
+		await open();
+		const field = nameField();
+		await fireEvent.compositionStart(field);
+		await fireEvent.input(field, { target: { value: 'a'.repeat(99) + 'にほ' }, isComposing: true });
+		await fireEvent.compositionEnd(field);
+		await fireEvent.input(field, { target: { value: 'a'.repeat(99) + 'にほ' } });
+		await settle();
+		expect(field.value).toBe('a'.repeat(99) + 'にほ');
+		expect(tooLong()?.textContent).toContain('101 of 100');
+		expect(mocks.put).not.toHaveBeenCalled();
 	});
 });
 
@@ -433,9 +462,8 @@ describe('create, duplicate, delete', () => {
 		const [path, payload] = mocks.post.mock.calls[0];
 		expect(path).toBe('/agents');
 		expect(payload).toMatchObject({ id: 'researcher-copy', name: 'Researcher copy', description: 'Original description' });
-		expect(payload.config).not.toHaveProperty('avatar_id');
+		expect(payload).not.toHaveProperty('avatar_color');
 		expect(payload.config.system_prompt.content).toBe('Keep my original prompt');
-		await waitFor(() => expect(mocks.updateAgentIdentity).toHaveBeenCalledWith('researcher-copy', { avatar_id: 'robot' }));
 		await heading('Researcher copy');
 	});
 

@@ -1,0 +1,8 @@
+[
+  {
+    "id": "GHSA-fc5q-39xc-vjpf",
+    "packages": ["picomatch"],
+    "reason": "ReDoS from hostile glob patterns; no patched picomatch release exists (all <= 4.0.7 affected, upstream fixes still open on 2026-11-17). picomatch is reached only through build and test tooling (vite, vitest, tinyglobby, fdir) with patterns from our own config, and no package ships it at runtime. Remove this entry when a fixed picomatch is locked.",
+    "expires": "2026-12-01"
+  }
+]

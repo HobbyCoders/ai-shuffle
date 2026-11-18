@@ -4,10 +4,12 @@
 	 * (#371 step 4). A centred sheet on desktop, a bottom sheet on the phone
 	 * (mobile/src/mobile.css) that a downward drag or flick dismisses.
 	 *
-	 * Lists the projects this worker has a checkout of (others show which
-	 * worker has them, greyed), says what appears once attached, and states
-	 * plainly that it is one-way before the confirm. The backend holds the same
-	 * rule (POST /sessions/{id}/attach-project refuses a second attach).
+	 * Lists the projects the worker that runs the session has a checkout of
+	 * (this worker, or the other worker for a session it runs; others show
+	 * which worker has them, greyed), says what appears once attached, and
+	 * states plainly that it is one-way before the confirm. The backend holds
+	 * the same rule (POST /sessions/{id}/attach-project refuses a second
+	 * attach, and relays one for a session another worker runs).
 	 */
 	import { FolderClosed, GitBranch, Lock, ShieldCheck, SquareTerminal, X, Check, Loader2 } from 'lucide-svelte';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
@@ -27,27 +29,38 @@
 	import { platform } from '$lib/stores/platform.svelte';
 	import { obscuresTranscript } from '$lib/components/chat/transcript-reading-area';
 	import { buildWorkspacePickerItems } from './workspace-catalog';
-	import { ATTACH_GAINS, attachWarning } from '$lib/components/chat/session-scope';
+	import { ATTACH_GAINS, attachChoice, attachWarning, type AttachOwner } from '$lib/components/chat/session-scope';
 
 	interface Props {
 		open: boolean;
 		sessionId: string;
 		agentName: string | null;
-		/** Why attaching is not possible right now (busy, another worker), or null. */
+		/** Why attaching is not possible right now (busy, owner offline), or null. */
 		blockedReason: string | null;
+		/** The worker that runs the session when it is not this one, else null. */
+		owner?: AttachOwner | null;
 		onClose: () => void;
 	}
 
-	let { open, sessionId, agentName, blockedReason, onClose }: Props = $props();
+	let { open, sessionId, agentName, blockedReason, owner = null, onClose }: Props = $props();
+
+	/** How long a relayed attach waits for this worker's mirrored row before
+	 *  closing with a notice (the row is applied here within seconds). */
+	const ATTACH_ROW_WAIT_MS = 15_000;
 
 	let picked = $state<string | null>(null);
 	let attaching = $state(false);
 	let error = $state<string | null>(null);
 
-	const items = $derived(buildWorkspacePickerItems($projects, $clusterProjects));
+	const items = $derived(
+		buildWorkspacePickerItems($projects, $clusterProjects).map((item) => ({
+			...item,
+			...attachChoice(item, $clusterProjects, owner)
+		}))
+	);
 	const pickedItem = $derived(items.find((i) => i.id === picked) ?? null);
 	const warning = $derived(attachWarning(agentName, pickedItem?.name));
-	const canAttach = $derived(!!pickedItem && !pickedItem.remoteOnly && !blockedReason && !attaching);
+	const canAttach = $derived(!!pickedItem && pickedItem.pickable && !blockedReason && !attaching);
 
 	$effect(() => {
 		if (!open) { picked = null; error = null; attaching = false; dragY = 0; dragging = false; leaving = false; gesture = null; }
@@ -179,11 +192,11 @@
 	}
 
 	// Radiogroup keyboard model: one stop in the Tab order (the picked row, else
-	// the first one this worker can attach), and the arrow keys move the pick
-	// and the focus together. Rows on another worker can't be picked, so the
-	// arrows skip them; they stay listed with their reason.
+	// the first one that can be attached), and the arrow keys move the pick and
+	// the focus together. Rows the session's worker has no checkout of can't be
+	// picked, so the arrows skip them; they stay listed with their reason.
 	let rowRefs = $state<Record<string, HTMLButtonElement | null>>({});
-	const pickable = $derived(items.filter((i) => !i.remoteOnly));
+	const pickable = $derived(items.filter((i) => i.pickable));
 	const tabStop = $derived(picked ?? pickable[0]?.id ?? null);
 
 	function onRadioKeydown(e: KeyboardEvent, id: string) {
@@ -226,17 +239,63 @@
 		}
 	}
 
+	// The pill remounts the sheet per chat (#1663). An answer that returns
+	// after that must not close the sheet another chat has open since.
+	let mounted = true;
+	$effect(() => () => { mounted = false; });
+	const closeIfMounted = () => { if (mounted) onClose(); };
+
 	async function confirm() {
 		if (!canAttach || !pickedItem) return;
+		// Fix everything this attach needs now: by the time an answer returns
+		// the page may show another chat.
+		const id = sessionId;
+		const relayTo = owner;
+		const name = pickedItem.name;
+		const agent = agentName?.trim() || 'Your agent';
+		// Another worker runs the session: name the project by its shared
+		// identity, since this worker's project ids mean nothing there.
+		const target = relayTo
+			? { project_v2_id: pickedItem.projectV2Id ?? '' }
+			: { project_id: pickedItem.project };
+		// The page moved to another chat while waiting. The attach still happened
+		// on the server; that chat shows its project when it is opened again.
+		const left = () => sessionId !== id || activeSession.current.sessionId !== id;
 		attaching = true;
 		error = null;
 		try {
-			const result = await attachProject(sessionId, pickedItem.project);
-			activeSession.applyAttachedProject(sessionId, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
-			notify(`${pickedItem.name} attached. ${agentName?.trim() || 'Your agent'} now works in its checkout, on Ask first.`, { severity: 'success' });
+			const result = await attachProject(id, target);
+			if (left()) {
+				closeIfMounted();
+				return;
+			}
+			if (!relayTo) {
+				activeSession.applyAttachedProject(id, result.project_id, result.project_v2_id, result.permission_mode ?? 'default');
+			} else {
+				const outcome = await activeSession.waitForAttachedRow(id, ATTACH_ROW_WAIT_MS);
+				if (outcome === 'left' || left()) {
+					closeIfMounted();
+					return;
+				}
+				if (outcome === 'pending') {
+					// The page holds a project only once this worker's own row does:
+					// the upload, file and Git routes here read that row.
+					notify(`${name} is attached on ${relayTo.name?.trim() || 'the worker that runs this chat'}. This page switches to it when it syncs.`);
+					onClose();
+					return;
+				}
+			}
+			notify(`${name} attached. ${agent} now works in its checkout, on Ask first.`, { severity: 'success' });
 			onClose();
 		} catch (e) {
-			error = getErrorMessage(e, 'Could not attach the project.');
+			const message = getErrorMessage(e, 'Could not attach the project.');
+			if (left()) {
+				// The sheet belongs to another chat now; say it outside it.
+				closeIfMounted();
+				notify(message, { severity: 'error' });
+			} else {
+				error = message;
+			}
 		} finally {
 			attaching = false;
 		}
@@ -284,16 +343,16 @@
 						class:selected={picked === item.id}
 						role="radio"
 						aria-checked={picked === item.id}
-						aria-disabled={item.remoteOnly ? 'true' : undefined}
+						aria-disabled={item.pickable ? undefined : 'true'}
 						tabindex={item.id === tabStop ? 0 : -1}
-						title={item.remoteOnly ? 'Not checked out on this worker' : item.name}
-						onclick={() => { if (!item.remoteOnly && !attaching) picked = item.id; }}
+						title={item.note ? `${item.name} — ${item.note}` : item.name}
+						onclick={() => { if (item.pickable && !attaching) picked = item.id; }}
 						onkeydown={(e) => onRadioKeydown(e, item.id)}
 					>
 						<FolderClosed size={15} strokeWidth={1.7} aria-hidden="true" />
 						<span class="proj-name">{item.name}</span>
-						{#if item.remoteOnly}
-							<span class="proj-note">on another worker</span>
+						{#if !item.pickable}
+							{#if item.note}<span class="proj-note">{item.note}</span>{/if}
 						{:else if picked === item.id}
 							<Check size={14} strokeWidth={2.4} class="proj-check" aria-hidden="true" />
 						{/if}

@@ -19,7 +19,7 @@ before a release. The catalog keeps four kinds of row:
 | Kind | Who checks it | Evidence the gate reads |
 |---|---|---|
 | `script` | the runner, on a real worker with a real provider | the worker's result file |
-| `journey` | the named UI journeys, in CI | a main-suite run on main at the candidate with every `UI journeys` shard green |
+| `journey` | the named UI journeys, in CI | a `ci.yml` run on main at the candidate with every `UI journeys` shard green |
 | `browser` | an agent with the browser tools | a recorded result in the worker's file |
 | `owner` | a person (the owner, or an agent on disposable installs) | listed as a to-do, never blocks |
 
@@ -259,7 +259,7 @@ a browser row not recorded (rows marked `optional` excepted). Owner rows
 never block; they are listed as owner to-dos.
 
 Journey rows are not read from any worker's file. When the catalog has any,
-the gate asks GitHub for `main-suite.yml` runs on main at the candidate
+the gate asks GitHub for `ci.yml` runs on main at the candidate
 commit (`scripts/live_smoke/journeys.py`, through `gh`) and blocks unless one
 of them has every `UI journeys (k/N)` shard present and green. No run, a run
 still going, a failed or missing shard or an unreadable GitHub all block,

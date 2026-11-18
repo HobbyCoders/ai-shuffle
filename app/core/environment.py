@@ -1427,12 +1427,17 @@ def _package_dirs(cwd: Path) -> list:
 
 def _node_dependency_facts(cwd: Path) -> list:
     """Checkout-scoped receipts; never prescribe npm ci without a lockfile."""
-    missing, present, lockless = [], [], []
+    from app.core.checkout_manager import shares_generated_types_with_another_checkout
+
+    missing, present, lockless, foreign = [], [], [], []
     mobile_missing = False
     for rel in _package_dirs(cwd):
         directory = cwd / rel if rel != "." else cwd
         if (directory / "node_modules" / ".bin").is_dir():
-            present.append(rel)
+            if shares_generated_types_with_another_checkout(directory / "node_modules", cwd):
+                foreign.append(rel)
+            else:
+                present.append(rel)
         elif (directory / "package-lock.json").is_file():
             missing.append(rel)
         elif rel == "mobile" and _is_ai_shuffle_checkout(cwd):
@@ -1444,6 +1449,12 @@ def _node_dependency_facts(cwd: Path) -> list:
         lines.append(_Fact("Node: node_modules MISSING in " + ", ".join(missing)
                            + " — run `npm ci` there first; never junction or copy "
                            "another checkout's node_modules.", _RANK_NODE_MISSING))
+    if foreign:
+        lines.append(_Fact("Node: node_modules in " + ", ".join(foreign) + " is linked from "
+                           "another checkout; SvelteKit 3 keeps generated types there, so "
+                           "sync, check and build would use and overwrite that checkout's. "
+                           "Delete the link itself (never its contents), then install "
+                           "this checkout's own dependencies.", _RANK_NODE_MISSING))
     if mobile_missing:
         lines.append(_Fact("Mobile: dependencies MISSING; install frontend in this SAME "
                            "checkout, then run `npm run deps` in mobile (no lockfile: "

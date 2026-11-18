@@ -197,6 +197,45 @@ describe('ControlsDock dynamic effort', () => {
   expect(composerPreferences.effortForModel('prov:api:claude-opus-4-6-20260205[1m]')).toBe('low');
   expect(composerPreferences.effortForModel('opus')).toBe('max');
  });
+ // #1579: once a level was pinned nothing brought Auto back. The pin still
+ // carries to a model the owner has not picked for; Auto carries the same way.
+ it.each(['desktop', 'mobile'])('returns a pinned effort to Auto on %s, and Auto holds across a model switch', async (surface) => {
+  mocks.get.mockResolvedValue(payload);
+  await hydrateModelRegistry();
+  activeSession.newChat();
+  activeSession.setModelOverride('opus');
+  activeSession.setEffortLevelOverride(null, false);
+  renderDock();
+  await tick();
+  const chip = () => screen.getByRole('button', { name: /^Effort:/ }).textContent?.trim();
+  const shown = () => surface === 'desktop' ? chip() : panelEffortValue();
+  if (surface === 'desktop') await fireEvent.click(screen.getByRole('button', { name: /^Effort:/ }));
+  else await openPanel();
+  expect(shown()).toBe('Auto (High)');
+  const auto = screen.getByRole('button', { name: 'Auto' });
+  expect(auto.getAttribute('aria-pressed')).toBe('true');
+
+  // One step below High pins Medium, as the issue's ArrowLeft did.
+  if (surface === 'desktop') await fireEvent.input(screen.getByRole('slider'), { target: { value: '1' } });
+  else await fireEvent.click(panelEfforts()[1]);
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBe('medium');
+  expect(shown()).toBe('Medium');
+  expect(auto.getAttribute('aria-pressed')).toBe('false');
+
+  await fireEvent.click(auto);
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBeNull();
+  expect(shown()).toBe('Auto (High)');
+  expect(auto.getAttribute('aria-pressed')).toBe('true');
+  expect(composerPreferences.effortForModel('opus')).toBeNull();
+
+  activeSession.setModelOverride('prov:or:openai/gpt-5.6-sol');
+  await tick();
+  expect(get(activeSession).effortLevelOverride).toBeNull();
+  expect(shown()).toBe('Auto (Medium)');
+  expect(screen.getByRole('button', { name: 'Auto' }).getAttribute('aria-pressed')).toBe('true');
+ });
  it('preserves XHigh on Astra after metadata hydration', async () => {
   activeSession.newChat();
   activeSession.setModelOverride('prov:or:openai/gpt-6-astra');

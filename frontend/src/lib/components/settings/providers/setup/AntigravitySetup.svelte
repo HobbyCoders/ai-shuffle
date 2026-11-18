@@ -3,10 +3,10 @@
 	 * AntigravitySetup: a new Google Antigravity provider row.
 	 *  - Gemini API key (`agy-key`): Continue creates the row with the key, then
 	 *    the models step picks which Gemini models the pickers offer.
-	 *  - Personal Google sign-in (`agy-personal`): Google's terms warning first,
-	 *    then the agent's own sign-in. The row is created when the sign-in
-	 *    starts (the agent signs in per row) and deleted again if it is
-	 *    cancelled. The row starts interactive-only.
+	 *  - Personal Google sign-in (`agy-personal`): the agent's own sign-in.
+	 *    The row is created when the sign-in starts (the agent signs in per
+	 *    row) and deleted again if it is cancelled. The row starts
+	 *    interactive-only.
 	 *  - Business Google sign-in (`agy-business`): the agent offers it only
 	 *    through a browser on the worker, so this explains that and offers the
 	 *    Gemini API key instead.
@@ -22,7 +22,6 @@
 	import TextField from '../../rows/TextField.svelte';
 	import InlineBanner from '../../rows/InlineBanner.svelte';
 	import ModelCuration from '../ModelCuration.svelte';
-	import AntigravityWarning from '../AntigravityWarning.svelte';
 	import AntigravityInstall from './AntigravityInstall.svelte';
 	import AntigravitySignIn from './AntigravitySignIn.svelte';
 	import { antigravity } from '../antigravity.svelte';
@@ -144,8 +143,6 @@
 			<button type="button" class="st-btn primary" disabled={busy || !key.trim() || blocked} onclick={saveKey}>{busy ? 'Saving' : 'Continue'}</button>
 		</div>
 	{:else}
-		<!-- Personal sign-in: the terms warning comes before anything starts. -->
-		<AntigravityWarning />
 		{#if modeMeta?.guarded}
 			<p class="pv-note">This provider runs only in chats you type into yourself. Automations, scheduled runs, subagents and sessions another agent starts are refused until you allow unattended use on it.</p>
 		{/if}

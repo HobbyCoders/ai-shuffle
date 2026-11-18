@@ -3,17 +3,19 @@ import '@fontsource-variable/inter';
 import '@fontsource-variable/jetbrains-mono';
 import '../src/app.css';
 
-// #1636 fixture: a fresh tab reopens on the New Chat view saved in the layout,
-// while the device's server-side snapshot still names an older session. The
-// real app bootstrap, session store and composer run; every request and the
-// WebSocket are answered here.
+// #1636 fixture: this tab reloads mid-compose on the New Chat view. Its own
+// saved slot holds an unbound compose in a project (a new chat starts without
+// one, so the project is the compose's own), while the device's server-side
+// snapshot still names an older session; the tab slot wins. The real app
+// bootstrap, session store and composer run; every request and the WebSocket
+// are answered here.
 //   ?fail=1            the worktree session create fails (500)
-//   ?checkout=existing a remembered existing worktree instead of a staged branch
-//   ?checkout=auto     no remembered checkout: the branch is named on send
+//   ?checkout=existing the compose holds an existing worktree instead of a staged branch
+//   ?checkout=auto     no staged checkout: the branch is named on send
 //   ?ws=down           the WebSocket never opens
 //   ?hold=sessions     the startup session-list load waits for fixtureRelease()
 //   ?hold=projects     the startup project-catalog load (both halves) waits for fixtureRelease()
-//   ?cluster=1         the remembered project is cluster-linked (shared UUID)
+//   ?cluster=1         the compose's project is cluster-linked (shared UUID)
 const params = new URLSearchParams(location.search);
 const OLD = 'old-session';
 const CREATED = 'created-session';
@@ -32,6 +34,18 @@ const picks: Record<string, unknown> = {
 	profile: 'claude-code', project: { projectId: PROJECT, projectV2Id: REPO }, worktreeIntent: 'worktree', checkout,
 };
 for (const [key, value] of Object.entries(picks)) localStorage.setItem(`ai-shuffle-composer:${key}`, JSON.stringify(value));
+// This tab's own slot (device-id.ts TAB_ACTIVE_SESSION_KEY): the unbound
+// compose it was showing before the reload, with its staged checkout. Under
+// ?hold=projects the slot was written while the project was still waiting on
+// the catalog, so the remembered branch above is not staged in it yet, and a
+// cluster-linked project is known only by its shared id.
+const staged = checkout?.kind === 'existing'
+	? { worktreeMode: 'existing', worktreeId: 'wt-1', selectedWorktreeBranch: BRANCH }
+	: checkout && params.get('hold') !== 'projects' ? { worktreeMode: 'new', worktreeBranch: BRANCH } : {};
+sessionStorage.setItem('ai-shuffle-active-session', JSON.stringify({
+	sessionId: null, title: 'New Chat', profile: 'claude-code', project: REPO ? '' : PROJECT, projectV2Id: REPO, mode: 'code',
+	modelOverride: null, permissionModeOverride: null, effortLevelOverride: null, worktreeIntent: 'worktree', ...staged,
+}));
 
 const requests: { method: string; path: string; body: unknown }[] = [];
 const frames: Record<string, unknown>[] = [];
@@ -49,8 +63,8 @@ window.fetch = async (input, init) => {
 	if (path.endsWith('/auth/status')) return json({ authenticated: true, is_admin: false, has_any_credential: true, onboarding_complete: true });
 	if (path.endsWith('/preferences/all')) return json({ preferences: {}, versions: {} });
 	if (path.includes('/preferences/active_session')) {
-		// The server copy of this device's last open session (a new tab has no
-		// per-tab copy): the session the earlier check was working in.
+		// The server copy of this device's last open session: the session the
+		// earlier check was working in. The tab's own slot above wins over it.
 		return json({ key: 'active_session', value: {
 			sessionId: OLD, title: 'Earlier work', profile: 'claude-code', project: PROJECT, mode: 'code',
 			worktreeIntent: 'worktree', worktreeBranch: BRANCH, worktreeMode: 'new',

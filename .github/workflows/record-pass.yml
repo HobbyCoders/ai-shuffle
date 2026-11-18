@@ -1,14 +1,14 @@
 name: Record a pass
 
 # After a pull request's checks for one area all pass, leave a record named for
-# the exact files they ran on, so main-suite does not run them a second time on
+# the exact files they ran on, so CI does not run them a second time on
 # the same files (scripts/ci/proven.py reads it). Callers run this only for a
 # pull request from this repository, after every job of the area succeeded.
 on:
   workflow_call:
     inputs:
       area:
-        description: Area name, as main-suite's "proven" job asks for it
+        description: Area name, as CI's "proven" job asks for it
         required: true
         type: string
       key:

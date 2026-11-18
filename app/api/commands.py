@@ -1375,7 +1375,7 @@ async def _execute_rewind(
             sync_engine.broadcast_user_session_updated(
                 user_id=session.get("api_user_id") or "admin",
                 session_id=session_id,
-                updates={"last_turn_failed": False},
+                updates={"last_turn_failed": False, "last_turn_stopped": False},
             )
         )
 

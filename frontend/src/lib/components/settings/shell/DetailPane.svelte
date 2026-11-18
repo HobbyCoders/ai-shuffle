@@ -41,7 +41,7 @@
 		contentFirst?: boolean;
 		/** Tight editorial header, e.g. a phone note with its metadata folded away. */
 		compactHeader?: boolean;
-		/** Only genuine identity art (an agent avatar or provider logo), never a generic decorative tile. */
+		/** Only genuine identity art (a provider logo), never a generic decorative tile. */
 		identity?: boolean;
 		icon?: SettingsIcon;
 		/** Tile text instead of an icon (provider glyph). */

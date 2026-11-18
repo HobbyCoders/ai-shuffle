@@ -209,10 +209,28 @@ def _interrupt_env():
         yield spy
 
 
+# Bound for waits on something that must eventually happen (the pump being
+# entered, a driven interrupt reaching the SDK, a released turn finishing).
+# Only how long a stalled CI runner may take, not a latency claim (#1567).
+_ARRIVAL_SECONDS = 10.0
+
+
+async def _until_awaited(spy, count: int) -> None:
+    """Wait for the fire-and-forget interrupt task to reach the SDK signal."""
+    deadline = asyncio.get_running_loop().time() + _ARRIVAL_SECONDS
+    while spy.await_count < count:
+        assert asyncio.get_running_loop().time() < deadline, (
+            f"interrupt_session awaited {spy.await_count} times, expected {count}"
+        )
+        await asyncio.sleep(0.005)
+    # Same settle window as before, so a duplicate drive is still caught.
+    await asyncio.sleep(0.05)
+
+
 async def _drain_observer_tasks():
     for t in list(turn_claim._interrupt_tasks):
         try:
-            await asyncio.wait_for(t, 2.0)
+            await asyncio.wait_for(t, _ARRIVAL_SECONDS)
         except Exception:  # noqa: BLE001
             pass
 
@@ -473,7 +491,7 @@ async def test_foreign_interrupt_flip_observed_and_driven_once(mock_db, monkeypa
     with _runtime_env(pump=_blocking_pump(pump_entered, release)), \
             _interrupt_env() as interrupt_spy:
         exec_task = asyncio.create_task(session_runtime.SessionRuntime(turn).execute())
-        await asyncio.wait_for(pump_entered.wait(), 1.0)
+        await asyncio.wait_for(pump_entered.wait(), _ARRIVAL_SECONDS)
 
         # FOREIGN durable flip: another install's WS handler ran
         # turns.interrupt_turn — its in-process executor cannot reach the
@@ -481,7 +499,7 @@ async def test_foreign_interrupt_flip_observed_and_driven_once(mock_db, monkeypa
         assert turns_db.interrupt_turn("s-int", "stop") is not None
 
         await turn_claim.claim_once()
-        await asyncio.sleep(0.05)  # let the fire-and-forget task reach the SDK signal
+        await _until_awaited(interrupt_spy, 1)
         interrupt_spy.assert_awaited_once_with("s-int")
 
         # Second observation of the same flip: guarded no-op (O4).
@@ -490,7 +508,7 @@ async def test_foreign_interrupt_flip_observed_and_driven_once(mock_db, monkeypa
         assert interrupt_spy.await_count == 1
 
         release.set()
-        await asyncio.wait_for(exec_task, 2.0)
+        await asyncio.wait_for(exec_task, _ARRIVAL_SECONDS)
     await _drain_observer_tasks()
 
 
@@ -724,15 +742,15 @@ async def test_interrupt_guard_resets_for_the_next_turn(mock_db, monkeypatch):
                 exec_task = asyncio.create_task(
                     session_runtime.SessionRuntime(turn).execute()
                 )
-                await asyncio.wait_for(pump_entered.wait(), 1.0)
+                await asyncio.wait_for(pump_entered.wait(), _ARRIVAL_SECONDS)
                 assert turns_db.interrupt_turn("s-o4", "stop") is not None
 
                 await turn_claim.claim_once()
-                await asyncio.sleep(0.05)
+                await _until_awaited(interrupt_spy, expected_count)
                 assert interrupt_spy.await_count == expected_count
 
                 release.set()
-                await asyncio.wait_for(exec_task, 2.0)
+                await asyncio.wait_for(exec_task, _ARRIVAL_SECONDS)
             await _drain_observer_tasks()
             turn_claim._interrupt_tasks.clear()
 

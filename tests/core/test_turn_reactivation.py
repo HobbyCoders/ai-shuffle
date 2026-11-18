@@ -29,9 +29,9 @@ async def test_direct_submit_reactivates_before_kick(mock_db, monkeypatch, sourc
     assert kicked == [True]
     assert turns.get_turn(tid)["state"] == "queued"
     if async_call:
-        broadcast.assert_awaited_once_with(session_id=sid, updates={"is_active": True}, source_device_id=None)
+        broadcast.assert_awaited_once_with(session_id=sid, updates={"is_active": True, "snoozed_until": None}, source_device_id=None)
         user_broadcast.assert_awaited_once_with(
-            user_id="admin", session_id=sid, updates={"is_active": True}, source_device_id=None,
+            user_id="admin", session_id=sid, updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
         broadcast.reset_mock()
         user_broadcast.reset_mock()
@@ -75,11 +75,11 @@ async def test_reactivation_announced_even_when_enqueue_fails(mock_db, monkeypat
     assert sessions.get_session("refused-send")["is_active"]
     if async_call:
         broadcast.assert_awaited_once_with(
-            session_id="refused-send", updates={"is_active": True}, source_device_id=None,
+            session_id="refused-send", updates={"is_active": True, "snoozed_until": None}, source_device_id=None,
         )
     else:
         lifecycle.assert_called_once_with("admin", {
-            "type": "user_session_updated", "session_id": "refused-send", "updates": {"is_active": True},
+            "type": "user_session_updated", "session_id": "refused-send", "updates": {"is_active": True, "snoozed_until": None},
         }, user_type="admin")
 
 
@@ -99,5 +99,5 @@ async def test_sync_handoff_release_announces_membership_from_worker_thread(mock
     assert (sent, unsent) == (1, [])
     assert sessions.get_session("release-here")["is_active"]
     lifecycle.assert_called_once_with("admin", {
-        "type": "user_session_updated", "session_id": "release-here", "updates": {"is_active": True},
+        "type": "user_session_updated", "session_id": "release-here", "updates": {"is_active": True, "snoozed_until": None},
     }, user_type="admin")

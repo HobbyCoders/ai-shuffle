@@ -257,6 +257,8 @@ def validate_scenario(name: str, data: Any) -> dict:
                                 "text), refusal or error")
         if "refusal" in step:
             _validate_refusal(f"{name} step {number}", step["refusal"])
+        if "reasoning" in step and not isinstance(step["reasoning"], str):
+            raise ScenarioError(f"{name} step {number}: reasoning must be a string")
         if "served_model" in step and not isinstance(step["served_model"], str):
             raise ScenarioError(f"{name} step {number}: served_model must be a string")
         for call in step.get("tool_calls") or []:
@@ -326,6 +328,7 @@ class Scenarios:
 class Plan:
     """What one request gets, before it is framed for a dialect."""
     text: str = ""
+    reasoning: str = ""  # optional chat-completions reasoning deltas (real ThinkingBlock path)
     calls: list[dict] = field(default_factory=list)
     error: dict | None = None
     cut_after: int | None = None
@@ -404,6 +407,8 @@ def frame_chat(plan: Plan, body: Any, stream: bool) -> Reply:
         if plan.cut_after is not None:
             return Reply(frames=[CUT], framing="chunked", content_type="application/json")
         message: dict[str, Any] = {"role": "assistant", "content": plan.text or None}
+        if plan.reasoning:
+            message["reasoning"] = plan.reasoning
         if calls:
             message["tool_calls"] = [{"id": c["id"], "type": "function", "function": {
                 "name": c["name"], "arguments": c["args"]}} for c in calls]
@@ -414,6 +419,11 @@ def frame_chat(plan: Plan, body: Any, stream: bool) -> Reply:
             "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
                       "total_tokens": prompt_tokens + completion_tokens}})])
     frames: list[Any] = [Chat.chunk({"role": "assistant", "content": ""}, model=model)]
+    if plan.reasoning:
+        # Reasoning finishes before text; hold_open/cut_after belong to the answer.
+        reasoning_frames, _ = _streamed(plan.reasoning, Plan(tps=plan.tps),
+                                        lambda t: Chat.chunk({"reasoning": t}, model=model))
+        frames += reasoning_frames
     text_frames, cut = _streamed(plan.text, plan,
                                  lambda t: Chat.chunk({"content": t}, model=model))
     frames += text_frames
@@ -661,6 +671,7 @@ class FakeAI:
         text = text.replace("{round}", str(round_ + 1))
         text = text.replace("{answer}", latest_answer(entries) or "(no answer yet)")
         plan.text = text
+        plan.reasoning = step.get("reasoning", "")
         wanted = step.get("tool_calls") or []
         if wanted:
             offered = {tool.lower(): tool for tool in facts["tools"]}

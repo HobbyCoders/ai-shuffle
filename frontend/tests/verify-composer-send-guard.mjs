@@ -34,7 +34,7 @@ async function open(query, width = 1280, height = 800) {
 	'the fixture loads Git capability through the real store');
 	assert.deepEqual(await page.evaluate(() => window.fixtureGit()), {
 		projectId: 'shuffle-scratch', worktreeId: null, sessionId: null, hydrated: true, isGitRepo: true,
-	}, 'the remembered project is a known Git repo, not an existing session checkout');
+	}, "the compose's project is a known Git repo, not an existing session checkout");
 	const session = () => page.evaluate(() => window.fixtureSession());
 	const creates = () => page.evaluate(() => window.fixtureRequests
 		.filter(r => r.method === 'POST' && /\/sessions(\/with-worktree)?$/.test(r.path)));
@@ -48,9 +48,9 @@ try {
 	for (const [width, height] of [[1280, 800], [390, 844]]) {
 		const size = `${width}x${height}`;
 		for (const query of ['?hold=projects', '?hold=projects&cluster=1']) {
-			// Before the project catalog is in, the restored New Chat's remembered
-			// project and branch are not resolved yet (a cluster-linked one has
-			// only its shared id). The send is held with the text in place and a
+			// Before the project catalog is in, the restored New Chat's own
+			// project and its remembered branch are not resolved yet (a
+			// cluster-linked one has only its shared id). The send is held with the text in place and a
 			// loading state, then goes out on the remembered branch once the
 			// catalog answers. Nothing may go to the older session the server
 			// remembered, or out on an auto-named branch.
@@ -58,7 +58,12 @@ try {
 			const { page, errors, session, creates, queries, send, editorText } = await open(query, width, height);
 			await page.waitForFunction(() => window.fixtureRequests.some(r => r.path.endsWith('/cluster/projects')));
 			assert.equal((await session()).sessionId, null, 'the New Chat view is not bound to the old session');
-			assert.equal((await session()).worktreeBranch, '', 'the remembered branch waits for the catalog');
+			// A compose saved with its local project already names it, so its
+			// remembered branch is staged at once; one known only by its shared
+			// id waits for the catalog to name the local clone. Either way the
+			// send below is held until the catalog answers.
+			assert.equal((await session()).worktreeBranch, cluster ? '' : 'live/1528-explicit',
+				cluster ? 'the remembered branch waits for the catalog' : 'the local project stages its remembered branch');
 			await send();
 			await page.getByRole('button', { name: 'Loading projects…' }).waitFor();
 			await page.waitForTimeout(300);
@@ -72,7 +77,7 @@ try {
 			assert.equal(created.length, 1, 'one create request');
 			assert.equal(created[0].body.branch_name, 'live/1528-explicit', 'the remembered branch, not an auto-named one');
 			// A cluster-linked pick resolves to this worker's clone of it.
-			assert.equal(created[0].body.project_id, 'shuffle-scratch', 'the remembered project, resolved to its local clone');
+			assert.equal(created[0].body.project_id, 'shuffle-scratch', "the compose's project, resolved to its local clone");
 			const sent = await queries();
 			assert.equal(sent.length, 1);
 			assert.equal(sent[0].session_id, 'created-session');

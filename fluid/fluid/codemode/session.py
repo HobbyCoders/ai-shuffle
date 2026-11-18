@@ -42,7 +42,7 @@ from typing import Any
 
 from fluid.codemode.bridge import HostBridge
 from fluid.codemode.journal import FrictionDetector, append_friction, strip_reminders
-from fluid.codemode.kernel import HostReply
+from fluid.codemode.kernel import HostReply, current_host_call_salvage
 from fluid.codemode.projection import Projection, func_name
 from fluid.codemode.skills import SkillStore, referenced_skills, validate_skill
 from fluid.codemode.subprocess_kernel import KernelConfig, SubprocessKernel
@@ -245,6 +245,28 @@ def _spill_cell_stdout(full: str, ctx: Any, total: int = 0) -> str:
         )
     return (
         f"[cell stdout cut to the cap; all {len(full):,} chars saved to {path} "
+        f"(session scratch) — {spill.READ_HINT}]"
+    )
+
+
+def _spill_cell_error(full: str, ctx: Any) -> str:
+    """Spill a clipped cell error's whole text; the one-line pointer, or "".
+
+    The kernel already bounded the error the model sees (see
+    ``truncate.ERROR_CAP``); this only says where the rest went.
+    """
+    if not full or ctx is None:
+        return ""
+    path = spill.write_spill(full, ctx=ctx, tool="run_python")
+    if path is None:
+        return ""
+    if len(full) > FULL_STDOUT_MAX:
+        # The kernel held the error to FULL_STDOUT_MAX: only its head and tail.
+        saved = f"its first and last {FULL_STDOUT_MAX // 2:,} chars"
+    else:
+        saved = f"all {len(full):,} chars"
+    return (
+        f"[cell error clipped; {saved} saved to {path} "
         f"(session scratch) — {spill.READ_HINT}]"
     )
 
@@ -615,6 +637,57 @@ class CodeModeSession:
                 # to know they were reached from inside the kernel (ToolSearch
                 # otherwise prints wire names the kernel cannot import).
                 extra["in_kernel_call"] = True
+            finished = False
+
+            async def _finish(reply: HostReply) -> None:
+                # Everything a reply contributes outside the kernel (images for
+                # the cell outcome, the call record, friction, harvested facts,
+                # the ToolResult event) happens here, once, whether the reply
+                # came back normally or was salvaged at the per-call ceiling.
+                nonlocal finished
+                if finished:
+                    return
+                finished = True
+                collected_images.extend(reply.images)
+                record["ok"] = reply.result is not None
+                record["shell_exit_code"] = reply.shell_exit_code
+                if reply.result is not None:
+                    out, is_error = reply.result, False
+                elif reply.denied:
+                    out, is_error = reply.message or "permission denied", True
+                else:
+                    out, is_error = reply.error or "tool error", True
+                if self._skills is not None:
+                    # Best-effort friction detection over this in-kernel call; the
+                    # entries ride out with the cell's journal record.
+                    try:
+                        self._friction_pending.extend(
+                            self._friction.observe(name, kwargs, out, is_error)
+                        )
+                    except Exception:
+                        pass
+                    # Facts a tool result establishes on its own (the browser
+                    # host) go straight to the memory store, tool-provenance,
+                    # so the next session does not rediscover them.
+                    try:
+                        from fluid.context.runtime_facts import (
+                            harvest_tool_facts,
+                            write_harvested_facts,
+                        )
+
+                        harvested = harvest_tool_facts(name, out)
+                        if harvested:
+                            write_harvested_facts(
+                                self._skills, (extra or {}).get("memory_project"), harvested,
+                            )
+                    except Exception:
+                        pass
+                await loop._emit(ToolResult(
+                    session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                    name=name, output=out, is_error=is_error,
+                    images=[{"media_type": image.media_type, "data": image.data} for image in reply.images],
+                ))
+
             try:
                 reply = await bridge.on_host_call(
                     name, kwargs, tool_use_id=tool_use_id
@@ -623,16 +696,22 @@ class CodeModeSession:
                 # The kernel's per-call ceiling (or the turn's watchdog)
                 # cancelled this call. The ToolUse above already went out;
                 # without a matching ToolResult the transcript would show a
-                # call that never returned.
+                # call that never returned. A tool that had already finished
+                # (its reply filed for the kernel, #1549) is finished exactly
+                # as a normal reply is: the kernel hands that reply to the cell.
+                filed = getattr(current_host_call_salvage.get(), "reply", None)
                 try:
-                    await loop._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                        name=name, is_error=True,
-                        output=(
-                            f"{name} was cancelled before it returned (per-call "
-                            "ceiling or turn watchdog); the cell stops here."
-                        ),
-                    ))
+                    if filed is not None:
+                        await _finish(filed)
+                    else:
+                        await loop._emit(ToolResult(
+                            session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
+                            name=name, is_error=True,
+                            output=(
+                                f"{name} was cancelled before it returned (per-call "
+                                "ceiling or turn watchdog); the cell stops here."
+                            ),
+                        ))
                 except Exception:  # noqa: BLE001 — the cancel must still land
                     pass
                 raise
@@ -643,45 +722,7 @@ class CodeModeSession:
                         extra["tool_use_id"] = previous
                     else:
                         extra.pop("tool_use_id", None)
-            collected_images.extend(reply.images)
-            record["ok"] = reply.result is not None
-            record["shell_exit_code"] = reply.shell_exit_code
-            if reply.result is not None:
-                out, is_error = reply.result, False
-            elif reply.denied:
-                out, is_error = reply.message or "permission denied", True
-            else:
-                out, is_error = reply.error or "tool error", True
-            if self._skills is not None:
-                # Best-effort friction detection over this in-kernel call; the
-                # entries ride out with the cell's journal record.
-                try:
-                    self._friction_pending.extend(
-                        self._friction.observe(name, kwargs, out, is_error)
-                    )
-                except Exception:
-                    pass
-                # Facts a tool result establishes on its own (the browser
-                # host) go straight to the memory store, tool-provenance,
-                # so the next session does not rediscover them.
-                try:
-                    from fluid.context.runtime_facts import (
-                        harvest_tool_facts,
-                        write_harvested_facts,
-                    )
-
-                    harvested = harvest_tool_facts(name, out)
-                    if harvested:
-                        write_harvested_facts(
-                            self._skills, (extra or {}).get("memory_project"), harvested,
-                        )
-                except Exception:
-                    pass
-            await loop._emit(ToolResult(
-                session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                name=name, output=out, is_error=is_error,
-                images=[{"media_type": image.media_type, "data": image.data} for image in reply.images],
-            ))
+            await _finish(reply)
             return reply
 
         result = await kernel.exec(
@@ -702,6 +743,9 @@ class CodeModeSession:
         text = "\n".join(parts) if parts else "(no output)"
         if result.error:
             text = (text + "\n" if parts else "") + f"Error: {result.error}"
+            error_note = _spill_cell_error(result.error_full, getattr(loop, "ctx", None))
+            if error_note:
+                text = f"{text.rstrip(chr(10))}\n{error_note}"
         # Every cell can print sliced or persisted shell data, even without a
         # host call this time. Frame at the model boundary, not in Python strings.
         text = fence_shell_output(text, "code-mode output (may include shell stdout/stderr)")
@@ -741,12 +785,16 @@ class CodeModeSession:
             return
         try:
             error_lines = (result.error or "").strip().splitlines()
+            # The kernel's one-line summary of the exception; a host-authored
+            # error (timeout, kernel death) has none and is short.
+            error = getattr(result, "error_summary", "") or (
+                error_lines[-1][:_JOURNAL_VALUE_CAP] if error_lines else None)
             self._skills.journal_append({
                 "kind": "cell",
                 "code": _cap_code(code),
                 "stdout": result.stdout[:_JOURNAL_STDOUT_CAP],
                 "value": result.value_repr[:_JOURNAL_VALUE_CAP],
-                "error": error_lines[-1] if error_lines else None,
+                "error": error,
                 "host_calls": result.host_calls,
                 "tools": sorted({c["name"] for c in called_tools}),
                 # Compatible extension: the same calls in the order they ran,

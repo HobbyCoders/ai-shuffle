@@ -30,14 +30,13 @@ name: Windows full suite
 # mirrors a desktop install: requirements, the native extras, fluid editable.
 
 on:
-  pull_request:
   workflow_call:
     inputs:
       main_suite:
         type: boolean
         default: false
       gated_by_caller:
-        description: The caller judges these jobs itself (main-suite), so the verdict job here does not queue for a runner
+        description: The caller judges these jobs itself (ci.yml), so the verdict job here does not queue for a runner
         type: boolean
         default: false
   workflow_dispatch:
@@ -51,7 +50,7 @@ permissions:
   contents: read
 
 concurrency:
-  # main-suite's daily run gets its own group so it never queues with a push run.
+  # CI's daily run gets its own group so it never queues with a push run.
   group: windows-suite-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
@@ -289,12 +288,3 @@ jobs:
           name: windows-suite-log
           path: ${{ runner.temp }}/local-ci.log
           retention-days: 7
-
-  # Leave a record that these checks passed on exactly these files, so
-  # main-suite need not repeat them after the merge (scripts/ci/proven.py).
-  record:
-    needs: [desktop-gate]
-    if: needs.desktop-gate.result == 'success' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-    uses: ./.github/workflows/record-pass.yml
-    with:
-      area: windows

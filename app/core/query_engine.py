@@ -538,12 +538,14 @@ _QUERY_REPLAY_NOTES = frozenset({
 })
 
 
-async def _record_query_message(recorder, message):
+async def _record_query_message(recorder, message, tool_names: Optional[Dict[str, str]] = None):
     """Record full HTTP/headless blocks plus the controls that govern replay.
 
     Partial StreamEvents mirror these blocks and must not be recorded again.
     Native blocks arrive before the end-of-call sanitization notice, so quote
     their model-authored control markers before they reach the durable log.
+    ``tool_names`` (one dict per query) carries each tool use's name to its
+    result, so a generation card result keeps its full JSON.
     """
     if not recorder:
         return
@@ -555,11 +557,14 @@ async def _record_query_message(recorder, message):
                 await recorder.on_event({"type": "stream_delta", "delta_type": "thinking",
                                          "content": quote_assistant_text(block.thinking)})
             elif isinstance(block, ToolUseBlock):
+                if tool_names is not None:
+                    tool_names[block.id] = block.name
                 await recorder.on_event({"type": "tool_use", "name": block.name,
                                          "id": block.id, "input": block.input})
             elif isinstance(block, ToolResultBlock):
+                tool_name = (tool_names or {}).get(block.tool_use_id)
                 await recorder.on_event({"type": "tool_result", "tool_use_id": block.tool_use_id,
-                                         "output": truncate_large_payload(block.content),
+                                         "output": truncate_large_payload(block.content, tool_name=tool_name),
                                          "is_error": block.is_error})
         if isinstance(message, AssistantMessage) and message.usage:
             await recorder.on_event({"type": "turn_usage", "usage": message.usage})
@@ -793,8 +798,9 @@ async def _execute_query_turn(
             set_turn_source("automation_step")
         await adapter.send_query(prompt)
 
+        recorded_tool_names: Dict[str, str] = {}
         async for message in adapter.receive_events():
-            await _record_query_message(recorder, message)
+            await _record_query_message(recorder, message, recorded_tool_names)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
             # Task messages subclass SystemMessage, so this must run before the
             # isinstance chain claims them via the SystemMessage branch below.
@@ -1571,8 +1577,9 @@ async def _stream_query_turn(
         )
         await state.adapter.send_query(agent_prompt)
 
+        recorded_tool_names: Dict[str, str] = {}
         async for message in state.adapter.receive_events():
-            await _record_query_message(recorder, message)
+            await _record_query_message(recorder, message, recorded_tool_names)
             # Check typed task messages before generic SystemMessage
             # (they are subclasses and would match isinstance SystemMessage)
             # Mirror background-task lifecycle into the registry (TaskList / /live).
@@ -1647,9 +1654,9 @@ async def _stream_query_turn(
 
                     elif isinstance(block, ToolResultBlock):
                         # Truncate large outputs
-                        output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
+                        output = truncate_large_payload(block.content, tool_name=tool_name)
                         yield {
                             "type": "tool_result",
                             "name": tool_name,
@@ -1706,8 +1713,8 @@ async def _stream_query_turn(
                 # UserMessage contains tool results from Claude's tool executions
                 for block in message.content:
                     if isinstance(block, ToolResultBlock):
-                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_name = tool_id_to_name.get(block.tool_use_id, "unknown")
+                        output = truncate_large_payload(block.content, tool_name=tool_name) if block.content else ""
                         logger.debug(f"UserMessage ToolResultBlock - tool_use_id: {block.tool_use_id}, tool_name: {tool_name}, content length: {len(str(block.content) if block.content else '')}")
 
                         yield {
@@ -3864,9 +3871,9 @@ async def _stream_to_websocket_turn(
                         # Extract screenshot (as a data URI) from MCP content blocks
                         # before truncation strips the image data for display.
                         screenshot = extract_mcp_image(block.content)
-                        output = truncate_large_payload(block.content)
                         tool_use_id = getattr(block, 'tool_use_id', None)
                         tool_name = tool_id_to_name.get(tool_use_id, getattr(block, 'name', 'unknown'))
+                        output = truncate_large_payload(block.content, tool_name=tool_name)
 
                         # Diagnostic: log when tool result content is empty/missing
                         if not output:
@@ -4141,10 +4148,10 @@ async def _stream_to_websocket_turn(
                     elif isinstance(block, ToolResultBlock):
                         # Extract screenshot from MCP content blocks before truncation
                         screenshot_b64 = extract_mcp_image(block.content)
-                        output = truncate_large_payload(block.content) if block.content else ""
                         tool_use_id = block.tool_use_id
                         # Look up tool name from preceding ToolUseBlock
                         tool_name = tool_id_to_name.get(tool_use_id, "unknown")
+                        output = truncate_large_payload(block.content, tool_name=tool_name) if block.content else ""
                         content_len = len(str(block.content) if block.content else '')
                         logger.debug(f"[WS] UserMessage ToolResultBlock - tool_use_id: {tool_use_id}, tool_name: {tool_name}, parent_tool_id: {parent_tool_id}, content length: {content_len}, has_screenshot: {screenshot_b64 is not None}, is_error: {block.is_error}")
 

@@ -348,3 +348,33 @@ export function formatHotkeyConfig(config: {
 
 	return parts.join('+');
 }
+
+/**
+ * A compact shortcut label for a tooltip or hint: "⌘P" on a Mac, "Ctrl+P"
+ * elsewhere.
+ */
+export function formatShortcutHint(config: {
+	key: string;
+	cmdOrCtrl?: boolean;
+	shift?: boolean;
+	alt?: boolean;
+}): string {
+	if (!isMac) return formatHotkeyConfig(config);
+	const mods = `${config.cmdOrCtrl ? '⌘' : ''}${config.alt ? '⌥' : ''}${config.shift ? '⇧' : ''}`;
+	return mods + formatHotkeyConfig({ key: config.key });
+}
+
+/** The value of `aria-keyshortcuts` for a shortcut ("Meta+P" on a Mac, "Control+P" elsewhere). */
+export function ariaKeyShortcut(config: {
+	key: string;
+	cmdOrCtrl?: boolean;
+	shift?: boolean;
+	alt?: boolean;
+}): string {
+	const parts: string[] = [];
+	if (config.cmdOrCtrl) parts.push(isMac ? 'Meta' : 'Control');
+	if (config.shift) parts.push('Shift');
+	if (config.alt) parts.push('Alt');
+	parts.push(config.key.length === 1 ? config.key.toUpperCase() : config.key);
+	return parts.join('+');
+}

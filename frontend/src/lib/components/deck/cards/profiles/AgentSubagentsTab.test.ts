@@ -20,8 +20,6 @@ function setup(mode: AgentInvokeMode, enabled: string[] = [], agents = AGENTS) {
 		mode,
 		enabled,
 		hasDefault: true,
-		avatarOf: () => 'robot',
-		colorOf: () => null,
 		onMode,
 		onToggle,
 		onSetEnabled

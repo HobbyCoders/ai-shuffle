@@ -21,7 +21,7 @@ const { session, auth, execution, branches, appSessions, listInstallsMock, getCl
 vi.mock('$lib/stores/active-session', async () => {
 	const { writable } = await import('svelte/store');
 	session.store = writable({});
-	return { activeSession: session.store };
+	return { activeSession: Object.assign(session.store, { reconcileOwner: vi.fn() }) };
 });
 vi.mock('$lib/stores/app-data.svelte', () => {
 	const sessions = writable([]);
@@ -31,7 +31,7 @@ vi.mock('$lib/stores/app-data.svelte', () => {
 		clusterProjects: writable([]),
 		profiles: writable([]),
 		sessions,
-		appData: { loadSessions: vi.fn() }
+		appData: { loadSessions: vi.fn(), current: { sessions: [] } }
 	};
 });
 vi.mock('$lib/stores/auth.svelte', () => {
@@ -254,6 +254,8 @@ describe.each([false, true])('worktree indicator (sheetMode=%s)', (sheetMode) =>
 		}
 		if (action === 'confirm') expect(moveSession).toHaveBeenCalledExactlyOnceWith(base.sessionId, 'peer');
 		else expect(moveSession).not.toHaveBeenCalled();
+		// #1659: the open chat's project follows its new owner once rows reload.
+		if (action === 'confirm') await waitFor(() => expect((session.store as unknown as { reconcileOwner: () => void }).reconcileOwner).toHaveBeenCalled());
 	});
 
 	it('shows why a confirmed move was refused inside the reopened worker menu', async () => {

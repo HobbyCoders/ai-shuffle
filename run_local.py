@@ -276,20 +276,20 @@ def build_frontend():
 
 
 def check_node_version() -> bool:
-    """Vite 7 supports Node 20.19+ or 22.12+ (and newer even releases)."""
+    """SvelteKit 3 needs Node 22.17 or newer."""
     node = shutil.which("node")
     if not node:
-        print_status("Node.js 22.12+ (or 20.19+) is required for setup/update", "error")
+        print_status("Node.js 22.17+ is required for setup/update", "error")
         return False
     try:
         version = subprocess.check_output([node, "--version"], text=True).strip().lstrip("v")
         major, minor, *_ = (int(part) for part in version.split("."))
-        supported = (major == 20 and minor >= 19) or (major == 22 and minor >= 12) or major > 22
+        supported = (major == 22 and minor >= 17) or major > 22
         if supported:
             return True
     except (ValueError, OSError, subprocess.SubprocessError):
         pass
-    print_status("Node.js 22.12+ (or 20.19+) is required; update Node before setup", "error")
+    print_status("Node.js 22.17+ is required; update Node before setup", "error")
     return False
 
 

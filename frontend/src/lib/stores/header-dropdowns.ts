@@ -27,6 +27,8 @@ type HeaderDropdownId =
 	// A new chat's Runs on and Project rows in Chat controls, before it has a project.
 	| 'sheet-new-runner'
 	| 'sheet-new-project'
+	// The new-session row's searchable project picker (Cmd/Ctrl+P).
+	| 'new-project'
 	| 'notifications'
 	// The phone top bar's own bell, beside the drawer's mounted one.
 	| 'notifications-bar'

@@ -23,7 +23,7 @@ import { preferenceSync } from '$lib/services/preferences';
  * components (see store-utils.ts and theme.svelte.ts for the pattern).
  */
 
-import { browser } from '$app/environment';
+import { browser } from '$app/env';
 import { untrack } from 'svelte';
 import { createSubscribers } from './store-utils';
 

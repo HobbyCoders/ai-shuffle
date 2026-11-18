@@ -46,7 +46,7 @@ class GitHub:
                     "head_sha": revision, "head_branch": "main", "event": "push",
                     "status": "completed", "conclusion": "success", "run_attempt": 2,
                     "repository": copy.deepcopy(REPO), "head_repository": copy.deepcopy(REPO)}
-        self.jobs = [{"name": "Main suite", "status": "completed", "conclusion": "success"}]
+        self.jobs = [{"name": "CI", "status": "completed", "conclusion": "success"}]
         self.artifacts = [{"id": 99, "name": cache.artifact_name(revision, 2), "expired": False,
                            "size_in_bytes": 1000, "workflow_run": {
                                "id": 71, "repository_id": 17, "head_repository_id": 17,
@@ -59,9 +59,9 @@ class GitHub:
         self.calls.append(endpoint)
         if endpoint == "":
             return copy.deepcopy(REPO)
-        if endpoint == "actions/workflows/main-suite.yml":
+        if endpoint == "actions/workflows/ci.yml":
             return {"id": 12, "path": cache.gate.MAIN_SUITE_PATH}
-        if endpoint.startswith("actions/workflows/main-suite.yml/runs?"):
+        if endpoint.startswith("actions/workflows/ci.yml/runs?"):
             assert f"head_sha={self.revision}" in endpoint
             return {"workflow_runs": [copy.deepcopy(self.run)]}
         if endpoint == "actions/runs/71":
@@ -224,7 +224,7 @@ def test_cache_failure_or_owner_only_pass_does_not_weaken_the_existing_gate(cand
 
 
 def test_source_ui_is_parallel_optional_and_secret_free_but_not_a_suite_substitute():
-    main = workflow("main-suite.yml")
+    main = workflow("ci.yml")
     speculative = main["jobs"]["source-ui"]
     assert "needs" not in speculative and "secrets" not in speculative
     assert "github.ref == 'refs/heads/main'" in speculative["if"]
@@ -233,7 +233,7 @@ def test_source_ui_is_parallel_optional_and_secret_free_but_not_a_suite_substitu
     assert speculative["uses"] == "./.github/workflows/source-ui-bundle.yml"
     assert speculative["with"] == {"source-ref": "${{ github.sha }}", "optional": "true",
                                    "artifact-name": "source-ui-${{ github.sha }}-${{ github.run_attempt }}"}
-    assert "source-ui" not in main["jobs"]["main-suite"]["needs"]
+    assert "source-ui" not in main["jobs"]["ci"]["needs"]
     build = workflow("source-ui-bundle.yml")
     assert build["permissions"] == {"contents": "read"}
     assert build["on"]["workflow_call"]["inputs"]["optional"] == {"type": "boolean", "default": "false"}
@@ -277,9 +277,10 @@ def test_publication_stages_validated_cache_or_requires_successful_fallback_and_
     assert len(rechecks) == 2
     assert publish["concurrency"] == {"group": "desktop-source-publish", "cancel-in-progress": "false"}
     assert all("source_ui_artifact.py" not in step.get("run", "") for step in publish["steps"])
-    # This change does not move or replace any full-suite PR trigger.
+    # The source bundle never stands in for the checks of a pull request: ci.yml runs them.
+    assert "pull_request" in workflow("ci.yml")["on"]
     for name in ("ci-backend", "ci-frontend", "ci-fluid", "container-postgres"):
-        assert "pull_request" in workflow(name + ".yml")["on"]
+        assert f"uses: ./.github/workflows/{name}.yml" in (ROOT / ".github/workflows/ci.yml").read_text()
     stable = workflow("release.yml")["jobs"]
     for name in ("ui-stable",):
         assert "optional" not in stable[name]["with"]

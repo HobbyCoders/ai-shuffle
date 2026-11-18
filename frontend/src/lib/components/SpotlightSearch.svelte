@@ -49,14 +49,15 @@
  ]);
  // The worker's terminal probe is the only gate for the Terminal page.
  const pages = $derived(terminalAccess(terminals.capability).kind === 'ready' ? [...searchPages, terminalPage] : searchPages);
- // Settings rows come first: they are local and instant, so slower sources
- // arriving later add rows below instead of moving the one Enter would open.
+ // Local groups come first: they are instant, so slower sources arriving
+ // later add rows below instead of moving the one Enter would open, or
+ // anything else on screen (#1600).
  const settingsItems = $derived(onOpenSetting && settingsQuery ? settingsResults(trimmed, settingsIndex, settingsQuery, onOpenSetting) : []);
  const groups = $derived<SearchGroup[]>([
   { id: 'settings', label: 'Settings', items: settingsItems },
-  ...results,
   ...(trimmed && onOpenFeature ? [{ id: 'pages', label: 'App pages', items: pages.filter(item => matches(item, trimmed)) }] : []),
-  { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) }
+  { id: 'actions', label: 'Quick actions', items: actions.filter(item => !trimmed || matches(item, trimmed)) },
+  ...results
  ].filter(group => group.items.length || group.hasMore));
  const items = $derived(groups.flatMap(group => group.items));
 
@@ -159,9 +160,8 @@
     <input bind:this={input} bind:value={query} aria-label="Search everything" placeholder="Search everything" class="min-w-0 flex-1 bg-transparent text-foreground placeholder-muted-foreground focus:outline-hidden text-base" />
     <kbd class="text-xs text-muted-foreground">esc</kbd>
    </div>
-   <div bind:this={list} class="max-h-[65vh] overflow-y-auto" aria-busy={searching}>
+   <div bind:this={list} class="spotlight-results max-h-[65vh] overflow-y-auto" aria-busy={searching}>
     {#if !trimmed}<p class="px-4 py-3 text-sm text-muted-foreground">Find settings, session messages, agents, MCP servers, plugins, notes and docs.</p>{/if}
-    {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#each groups as group, groupIndex (group.id)}
      <section aria-label={group.label}>
       <h3 class="px-4 py-2 text-xs font-medium text-muted-foreground border-t border-border">{group.label} <span class="opacity-60">{group.total ?? group.items.length}</span></h3>
@@ -181,6 +181,8 @@
       {/if}
      </section>
     {/each}
+    <!-- Below the rows, so the results replacing it move nothing above (#1600). -->
+    {#if searching}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Searching…</p>{/if}
     {#if trimmed && !searching && !items.length}<p class="px-4 py-8 text-center text-muted-foreground">No results found.</p>{/if}
     {#if failures.length}<p role="status" class="px-4 py-3 text-sm text-muted-foreground">Could not search: {failures.join(', ')}. Try again.</p>{/if}
    </div>
@@ -193,7 +195,15 @@
  .spotlight-search:focus-within { outline: 2px solid var(--ring); outline-offset: -2px; }
  .spotlight-search input, .spotlight-search input:focus, .spotlight-search input:focus-visible { border: 0; outline: none; box-shadow: none; }
  .spotlight-overlay { align-items: start; padding-top: 10dvh; }
- @media (max-width: 600px) { .spotlight-overlay { padding: 0; align-items: end; } .spotlight-item { min-height: 44px; } }
+ /* The phone sheet is bottom-anchored, so a sheet that grew with its results
+    moved its top edge (and the search field) each time a search answered
+    (#1600). A fixed height keeps it still; the results scroll inside. */
+ @media (max-width: 600px) {
+  .spotlight-overlay { padding: 0; align-items: end; }
+  .spotlight-overlay .ui-dialog { height: 85dvh; }
+  .spotlight-results { flex: 1 1 auto; min-height: 0; max-height: none; }
+  .spotlight-item { min-height: 44px; }
+ }
   .spotlight-item:hover {
     background: var(--hover-overlay);
   }

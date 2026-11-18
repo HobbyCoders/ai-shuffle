@@ -10,8 +10,8 @@ vi.mock('./resource-sync', async (importOriginal) => {
  m.clear.mockImplementation(sync.clear.bind(sync));
  return { ...actual, resourceSync: { subscribe: vi.fn(sync.subscribe.bind(sync)), invalidate: m.invalidate, clear: m.clear } };
 });
-vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),dropMissingProject:vi.fn(),resetForAccountChange:vi.fn()}}));
-vi.mock('$lib/stores/app-data.svelte',()=>({appData:{loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadProjectCatalog:m.loadProjectCatalog,loadSessions:m.loadSessions}}));
+vi.mock('$lib/stores/active-session',()=>({handleGlobalUserEvent:m.handle,activeSession:{current:{sessionId:null},applyComposerDefaults:vi.fn(),dropMissingProject:vi.fn(),adoptAttachedProject:vi.fn(),reconcileOwner:vi.fn(),resetForAccountChange:vi.fn()}}));
+vi.mock('$lib/stores/app-data.svelte',()=>({appData:{current:{sessions:[]},loadProfiles:vi.fn().mockResolvedValue(undefined),loadProjects:m.loadProjects,loadClusterProjects:m.loadClusterProjects,loadProjectCatalog:m.loadProjectCatalog,loadSessions:m.loadSessions}}));
 vi.mock('$lib/stores/notifications',()=>({notify:{resetLocal:vi.fn()}}));
 vi.mock('$lib/constants/models',()=>({hydrateModelRegistry:vi.fn().mockResolvedValue(true)}));
 vi.mock('$lib/stores/session/v2/feed-controller',()=>({feedController:m.feed}));
@@ -193,6 +193,17 @@ describe('root authenticated live-sync lifecycle',()=>{
   expect(m.loadProjectCatalog).toHaveBeenCalledOnce();
   // Both subscriptions enter the central coalescing loadSessions operation.
   expect(m.loadSessions).toHaveBeenCalledTimes(2);
+ });
+ it('adopts a project attached elsewhere into the open chat once the session list reloads',async()=>{
+  stop=startLiveSync();account('alice');
+  const subscription=vi.mocked(resourceSync.subscribe).mock.calls.filter(([names])=>names.includes('sessions')).at(-1);
+  await subscription?.[1]();
+  expect(m.loadSessions).toHaveBeenCalled();
+  expect(activeSession.adoptAttachedProject).toHaveBeenCalledWith([]);
+  // #1659: the open chat's project follows an owner change from the same rows.
+  expect(activeSession.reconcileOwner).toHaveBeenCalledWith([]);
+  expect(vi.mocked(m.loadSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.reconcileOwner).mock.invocationCallOrder[0]);
+  expect(vi.mocked(m.loadSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(activeSession.adoptAttachedProject).mock.invocationCallOrder[0]);
  });
  it('refreshes session project assignments when a project is changed or removed',async()=>{
   stop=startLiveSync();account('alice');

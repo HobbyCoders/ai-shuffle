@@ -127,18 +127,66 @@ def save(provider_id: str, catalog: dict[str, Any], *, expected_binding: str | N
     return snapshot
 
 
+def _holds(row: Mapping[str, Any] | None, snapshot: Mapping[str, Any]) -> bool:
+    """The snapshot's binding is the row's current one; a Google sign-in row's
+    also needs this worker's current sign-in tag (``antigravity.catalog_in_scope``)."""
+    from app.core import antigravity
+
+    current = binding(row)
+    return bool(current) and snapshot.get("binding") == current and antigravity.catalog_in_scope(row or {}, snapshot)
+
+
+def save_agent(provider_id: str, models: list[dict[str, Any]], *, agent_version: str | None,
+               expected_binding: str | None, signin: str | None = None) -> dict[str, Any] | None:
+    """Save the model list a provider's own agent reported (``source: "agent"``).
+
+    ``expected_binding`` (and ``signin``, the sign-in tag of a Google sign-in
+    row) belong to the credential the reporting agent was started with; the
+    list is dropped when the row no longer has them. For a provider with no
+    HTTP catalog (Google Antigravity), the agent's list at a session start is
+    the only evidence, so this also saves on an unpaired worker: a
+    ``v2:local:`` binding verifies only where it was made, so a copy that
+    ever replicated elsewhere is ignored there. ``fetched_at`` is when the
+    agent reported the list; ``agent_version`` the agent's own version.
+    """
+    if not expected_binding:
+        return None
+    device_id = settings.effective_instance_id
+    worker = db.get_install(device_id) or {}
+    snapshot = {
+        "source": "agent", "models": [_model(m) for m in models], "hidden": [],
+        "binding": expected_binding, "recommended": [],
+        "agent_version": agent_version or None,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_by_device": device_id,
+        "fetched_by_name": worker.get("device_name") or device_id,
+    }
+    if signin:
+        snapshot["signin"] = signin
+    value = _encode(snapshot)
+    if len(value.encode("utf-8")) > MAX_BYTES:
+        logger.warning("Model list for provider %s is too large to store; keeping the previous one", provider_id)
+        return None
+    if not _holds(db.get_model_provider(provider_id, include_token=True), snapshot):
+        return None
+    db.set_system_setting(key(provider_id), value)
+    return snapshot
+
+
 def read(provider_id: str) -> dict[str, Any] | None:
     """Return discovery only when it matches the current credential binding.
 
     This rejects old or delayed sync records without needing delete tombstones.
     Legacy snapshots without a binding are not evidence for the current key.
+    A Google Antigravity row's list holds only when its agent listed it, and
+    a Google sign-in row's only with this worker's current sign-in tag, so a
+    copy synced from another worker or an earlier sign-in is ignored.
     """
     value = db.get_system_setting(key(provider_id))
     if not value:
         return None
     snapshot = json.loads(value)
-    current = binding(db.get_model_provider(provider_id, include_token=True))
-    return snapshot if current and snapshot.get("binding") == current else None
+    return snapshot if _holds(db.get_model_provider(provider_id, include_token=True), snapshot) else None
 
 
 def delete(provider_id: str) -> None:

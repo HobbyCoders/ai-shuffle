@@ -53,7 +53,7 @@
 				"frontend/package.json",
 				"frontend/package-lock.json",
 				"frontend/vite.config.*",
-				"frontend/svelte.config.*"
+				"frontend/svelte-options.js"
 			]
 		},
 		{
@@ -107,6 +107,11 @@
 			"globs": ["frontend/tests/journeys/steer-lifecycle.journey.mjs", "frontend/src/lib/stores/session/pending-queue.ts", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/components/chat/PendingMessages.svelte", "frontend/src/lib/components/chat/PendingStatusAnnouncer.svelte", "app/core/session_handoff.py", "app/api/chat_ws_handler.py", "app/core/message_admission.py", "app/core/turn_manager.py", "app/network/control.py"]
 		},
 		{
+			"why": "a refused send clears Stop and hands the words back, in the orderings only a reordered socket and feed show: the auto-worktree fallback and a socket start ahead of the feed",
+			"journeys": ["refused-send"],
+			"globs": ["frontend/tests/journeys/refused-send.journey.mjs", "frontend/src/lib/stores/session/message-sender.ts", "frontend/src/lib/stores/session/ws-message-handlers.ts", "frontend/src/lib/stores/session/v2/feed-controller.ts", "frontend/src/lib/stores/session/v2/sse-feed.ts", "app/api/sessions_worktree.py", "app/api/chat_ws_handler.py"]
+		},
+		{
 			"why": "an image click inside an inline HTML preview goes to the page that handles it, or else to the lightbox",
 			"journeys": ["html-preview-image-click"],
 			"globs": [
@@ -133,7 +138,7 @@
 		{
 			"why": "a Settings collection too narrow for list and detail shows one pane, keeps a way back and shows list actions' results",
 			"journeys": ["settings-narrow-collection"],
-			"globs": ["frontend/tests/journeys/settings-narrow-collection.journey.mjs", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/settings/shell/settings.css", "frontend/src/lib/components/settings/shell/EmptyDetail.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/settings/navigation.svelte.ts", "frontend/src/lib/settings/list-width.ts", "frontend/src/lib/components/settings/logs/LogsCollection.svelte"]
+			"globs": ["frontend/tests/journeys/settings-narrow-collection.journey.mjs", "frontend/src/lib/components/settings/shell/CollectionPage.svelte", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/settings.css", "frontend/src/lib/components/settings/shell/EmptyDetail.svelte", "frontend/src/lib/components/settings/shell/DetailPane.svelte", "frontend/src/lib/settings/navigation.svelte.ts", "frontend/src/lib/settings/list-width.ts", "frontend/src/lib/components/settings/logs/LogsCollection.svelte"]
 		},
 		{
 			"why": "Settings > Memory lists, edits and deletes saved memories without losing a draft",
@@ -195,12 +200,12 @@
 			"globs": ["frontend/src/lib/components/layout/view/ViewShell.svelte", "frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
 		},
 		{
-			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, and every search result opened marks its phrase",
+			"why": "Docs: \"On this page\" on every open with unique heading anchors, a reload reopens the document, Docs adds no history entry, every search result opened marks its phrase, and a phrase match ranks first in the Docs panel and in Spotlight",
 			"journeys": ["docs-viewer"],
-			"globs": ["frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
+			"globs": ["app/core/docs_content.py", "frontend/src/lib/components/docs/DocsCard.svelte", "frontend/src/lib/components/docs/DocsContent.svelte", "frontend/src/lib/components/docs/DocsSearch.svelte", "frontend/src/lib/docs/markdown.ts", "frontend/src/lib/docs/search.ts"]
 		},
 		{
-			"why": "the rail's notification history opens inside the Sidebar, and the empty-chat composer holds no empty Stop seat",
+			"why": "the rail's notification history opens inside the Sidebar, and the composer holds no empty Stop seat",
 			"journeys": ["rail-popover-composer-inset"],
 			"globs": ["frontend/src/lib/components/NotificationCenter.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
 		},
@@ -256,6 +261,23 @@
 				"frontend/src/lib/components/layout/SessionCard*",
 				"frontend/src/lib/components/layout/session-card-data*",
 				"frontend/src/lib/components/chat/ContextPillBar.svelte",
+				"app/api/sessions_helpers.py"
+			]
+		},
+		{
+			"why": "snooze from a sidebar row: the row moves to the Snoozed group with its wake time, and Unsnooze brings it back to Active",
+			"journeys": ["sidebar-snooze"],
+			"globs": [
+				"frontend/tests/journeys/sidebar-snooze.journey.mjs",
+				"frontend/src/lib/stores/app-data*",
+				"frontend/src/lib/components/layout/Sidebar.svelte",
+				"frontend/src/lib/components/layout/SessionCard*",
+				"frontend/src/lib/components/layout/session-card-data*",
+				"frontend/src/lib/components/layout/sidebar/SnoozePicker*",
+				"frontend/src/lib/components/layout/sidebar/SidebarSheet*",
+				"mobile/src/shell/drawer-gesture*",
+				"app/core/session_snooze.py",
+				"app/network/session_active.py",
 				"app/api/sessions_helpers.py"
 			]
 		},
@@ -335,6 +357,20 @@
 			]
 		},
 		{
+			"why": "a long unbroken agent name saves and duplicates within the id limit, and truncates in the Subagents tab and the new-chat agent word",
+			"journeys": ["agent-long-name"],
+			"globs": [
+				"frontend/tests/journeys/agent-long-name.journey.mjs",
+				"frontend/src/lib/components/deck/cards/ProfileCard.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/agentList.ts",
+				"frontend/src/lib/components/deck/cards/profiles/AgentProfileTab.svelte",
+				"frontend/src/lib/components/deck/cards/profiles/AgentSubagentsTab.svelte",
+				"frontend/src/lib/components/chat/ProfileSelector.svelte",
+				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
+				"app/api/agents.py"
+			]
+		},
+		{
 			"why": "an agent's edits save through the preview cookie a dev instance is reached with, and read back after a reload",
 			"journeys": ["agent-model-pin"],
 			"globs": [
@@ -359,6 +395,30 @@
 				"app/api/rewind_owner.py"
 			]
 		},
+			{
+				"why": "attaching a project to a chat with no project: a rewound attachment resends after it, and the sheet belongs to the chat it was opened in",
+				"journeys": ["attach-project"],
+				"globs": [
+					"frontend/tests/journeys/attach-project.journey.mjs",
+					"frontend/src/lib/components/layout/NoProjectPill.svelte",
+					"frontend/src/lib/components/layout/AttachProjectSheet.svelte",
+					"app/core/upload_transfer.py",
+					"app/api/sessions_attach.py",
+					"app/api/chat_ws_handler.py",
+					"app/core/session_runtime.py"
+				]
+			},
+			{
+				"why": "a worktree chat's first message with an attachment: the prompt keeps the words and the chip apart, and the branch and chat title come from the typed words only (#1654)",
+				"journeys": ["new-worktree-session"],
+				"globs": [
+					"app/core/session_title.py",
+					"frontend/src/lib/components/chat/tiptap/serialization.ts",
+					"frontend/src/lib/utils/message-presentation.ts",
+					"frontend/src/lib/utils/attachment-title-cases.json",
+					"frontend/src/lib/stores/session/message-sender.ts"
+				]
+			},
 			{
 				"why": "a rewound sent message comes back whole: its words after a reload and its attachments as chips",
 				"journeys": ["rewind-restore"],
@@ -387,6 +447,16 @@
 				]
 			},
 		{
+			"why": "where a composer upload goes in a project chat another worker runs (#1659)",
+			"journeys": ["mirrored-project-upload"],
+			"globs": [
+				"frontend/tests/journeys/mirrored-project-upload.journey.mjs",
+				"frontend/src/lib/components/chat/attach-disable.ts",
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/services/live-sync.ts"
+			]
+		},
+		{
 			"why": "mirrored chats: the sync check ChatView runs and the gate that shows it",
 			"journeys": ["mirrored-chat", "open-unloaded-chat"],
 			"globs": [
@@ -400,7 +470,10 @@
 			"globs": [
 				"frontend/tests/journeys/remote-chat-mentions.journey.mjs",
 				"frontend/src/lib/components/FileAutocomplete.svelte",
-				"app/api/session_files.py"
+				"frontend/src/lib/components/chat/ChatInput.svelte",
+				"frontend/src/lib/stores/session/session-project.ts",
+				"app/api/session_files.py",
+				"app/api/sessions_helpers.py"
 			]
 		},
 		{
@@ -421,11 +494,14 @@
 			]
 		},
 		{
-			"why": "the new-session screen opens on the owner's last project choice, no project included",
+			"why": "every new session starts with no project, a typed draft keeps its project, and Cmd/Ctrl+P picks one from the keyboard",
 			"journeys": ["new-chat-project"],
 			"globs": [
 				"frontend/tests/journeys/new-chat-project.journey.mjs",
 				"frontend/src/lib/stores/composer-preferences*",
+				"frontend/src/lib/stores/session/session-switcher.ts",
+				"frontend/src/lib/services/project-picker.ts",
+				"frontend/src/lib/components/GroupedSelector.svelte",
 				"frontend/src/lib/components/layout/NewSessionSentence.svelte",
 				"frontend/src/lib/components/layout/WorkspaceSelector.svelte",
 				"frontend/src/lib/components/chat/WorkspaceFolderSelector.svelte"
@@ -446,6 +522,11 @@
 				"frontend/tests/journeys/type-at-boot.journey.mjs",
 				"frontend/src/lib/components/chat/composer-*"
 			]
+		},
+		{
+			"why": "HTML inline lexer state and stable streamed media (#1627)",
+			"journeys": ["streaming-inline-html"],
+			"globs": ["frontend/tests/journeys/streaming-inline-html.journey.mjs", "frontend/src/lib/utils/chat-markdown*", "frontend/src/lib/components/chat/AssistantMessage*", "frontend/src/lib/components/chat/ThinkingBlock*"]
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
@@ -515,8 +596,13 @@
 			"globs": ["frontend/src/lib/components/chat/StopButton*", "frontend/src/lib/components/chat/BackgroundWorkStrip*"]
 		},
 		{
+			"why": "the composer's action row holds no empty seat for Send or Stop, a double tap on Send never lands on the Stop that takes its place, a late tap never lands on a button that slid into a freed seat, and the phone slot keeps its height on the first send",
+			"journeys": ["composer-no-empty-seat"],
+			"globs": ["frontend/tests/journeys/composer-no-empty-seat.journey.mjs", "frontend/src/lib/components/chat/composer-wrap*", "frontend/src/lib/components/chat/phone/phone-composer.css", "frontend/src/lib/components/chat/ChatInput.svelte", "frontend/src/lib/components/chat/VoiceRecorder.svelte"]
+		},
+		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
+			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2", "queue-over-running-tasks"],
 			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
@@ -626,6 +712,19 @@
 			]
 		},
 		{
+			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"journeys": ["claude-cli-models"],
+			"globs": [
+				"frontend/tests/journeys/claude-cli-models.journey.mjs",
+				"frontend/src/lib/components/settings/providers/tabs/ClaudeCliModels.svelte",
+				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
+				"frontend/src/lib/constants/models.svelte.ts",
+				"app/core/claude_cli_models.py",
+				"app/core/model_registry.py",
+				"app/api/model_registry.py"
+			]
+		},
+		{
 			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
 			"journeys": ["fast-midturn"],
 			"globs": [
@@ -730,6 +829,11 @@
 			"globs": ["frontend/src/lib/docs/content/**"]
 		},
 		{
+			"why": "queued bubbles stay below the running-task row when a long turn has paged its own prompt out of the mounted rows",
+			"journeys": ["queue-over-running-tasks"],
+			"globs": ["frontend/tests/journeys/queue-over-running-tasks.journey.mjs", "frontend/src/lib/components/chat/RunningTasksList*", "scripts/devloop/scenarios/tool-background-heavy.json"]
+		},
+		{
 			"why": "the queue-while-busy cases, which two journey files run in halves",
 			"journeys": ["queue-while-busy", "queue-while-busy-2"],
 			"globs": ["frontend/tests/journeys/queue-while-busy*"]
@@ -748,6 +852,16 @@
 			"why": "a journey file itself",
 			"journeys": ["$self"],
 			"globs": ["frontend/tests/journeys/*.journey.mjs"]
+		},
+		{
+			"why": "the Agents page card: data-pages opens Agents and checks an agent's header, shell-geometry opens an agent's detail and the collapsed list",
+			"journeys": ["data-pages", "shell-geometry"],
+			"globs": ["frontend/src/lib/components/deck/cards/ProfileCard.svelte"]
+		},
+		{
+			"why": "Settings > Cloud: shell-geometry checks its title and content gap and its slow-licence loading state",
+			"journeys": ["shell-geometry"],
+			"globs": ["frontend/src/lib/components/settings/pages/CloudPage.svelte"]
 		}
 	]
 }

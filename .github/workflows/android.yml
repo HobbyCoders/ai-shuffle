@@ -1,7 +1,9 @@
 name: Android CI
 
 # Android app (android/); cloud services live in hobbycoders-cloud. This workflow
-# runs unsigned build/test and emulator checks on relevant PRs. Chat loads the
+# runs unsigned build/test and emulator checks. ci.yml calls it, for a pull
+# request or for main, only when the files the APK is built from changed since
+# they last passed (scripts/ci/plan.py). Chat loads the
 # phone UI from the paired worker's /mobile/ (app/mobile_ui.py), while the APK
 # bundles mobile/ (+ shared frontend/ code) as the offline demo. Both asset
 # sources therefore need native coverage too. Signed sideload builds require
@@ -13,14 +15,6 @@ name: Android CI
 #
 # Standard GitHub-hosted runners are free in public repositories; keep dispatches deliberate.
 on:
-  pull_request:
-    paths:
-      - 'android/**'
-      - 'mobile/**'
-      - 'frontend/**'
-      - '.github/workflows/android.yml'
-      - 'scripts/ci/test-cost-policy.py'
-      - 'tests/scripts/test_owner_publication_policy.py'
   workflow_dispatch:
     inputs:
       publish_download:
@@ -34,15 +28,16 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: Existing versioned release to attach the verified APK to
+        description: Existing versioned release to attach the verified APK to (a release caller sets it; ci.yml does not)
         type: string
-        required: true
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # CI's daily run gets its own group so it never queues with a push run.
+  group: android-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

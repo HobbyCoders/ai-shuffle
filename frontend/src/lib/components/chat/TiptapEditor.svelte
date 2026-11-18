@@ -14,6 +14,7 @@
 	import type { FileChipAttributes } from './tiptap/FileChipNode';
 	import type { ChipRemovalNotice } from './tiptap/chip-removal';
 	import { serializeToMessage, isEditorEmpty, findActiveAtMention, getSlashCommand, type SerializeOptions } from './tiptap/serialization';
+	import { trackComposerEditor } from './composer-editors';
 
 	interface Props {
 		placeholder?: string;
@@ -53,6 +54,7 @@
 	let isFocused = $state(false);
 	let editorEmpty = $state(false);
 	let liveDictation: ReturnType<typeof createLiveDictation> | null = null;
+	let untrack: (() => void) | null = null;
 
 	// Store reference for cleanup to handle edge cases where editorElement might change
 	let boundElement: HTMLDivElement | null = null;
@@ -90,6 +92,7 @@
 				}
 			});
 			editorEmpty = editor.isEmpty;
+			untrack = trackComposerEditor(editor);
 
 			liveDictation = createLiveDictation(editor);
 
@@ -120,6 +123,8 @@
 		}
 		liveDictation?.destroy();
 		liveDictation = null;
+		untrack?.();
+		untrack = null;
 		editor?.destroy();
 		editor = null;
 	});

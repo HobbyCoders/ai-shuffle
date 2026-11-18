@@ -30,7 +30,7 @@ For frontend work, run `npm ci` and `npx svelte-kit sync` in `frontend/` once pe
 
 Then commit and push. The hook scans every outgoing commit for credentials, with no cache, and refuses the push if it finds one. Never bypass it with `--no-verify`. Fix any failures reported by PR CI before review and merge.
 
-`fast` (affected tests), `check`, `full` and `full --step --attest` remain available for optional local validation; the push gate does not run or require them. Edge/nightly publication separately needs a hosted main-suite pass or the owner's attested local full run on the exact main revision. See [where tests run](docs/ci/pr-checks.md).
+`fast` (affected tests), `check`, `full` and `full --step --attest` remain available for optional local validation; the push gate does not run or require them. Edge/nightly publication separately needs a hosted CI pass or the owner's attested local full run on the exact main revision. See [where tests run](docs/ci/pr-checks.md).
 
 ## Open a pull request
 

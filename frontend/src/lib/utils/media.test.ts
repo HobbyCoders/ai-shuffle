@@ -6,7 +6,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
 	classifyMediaUrl,
-	rewriteMediaMarkdown,
+	embedKind,
 	clampRevealToMediaBoundary,
 	extractToolResultMedia,
 	toolResultMedia,
@@ -19,6 +19,12 @@ import {
 	mediaHtml
 } from './media';
 import { chatFileUrl } from './chat-files';
+import { renderChatMarkdown } from './chat-markdown';
+
+// The chat reply's render: media markdown becomes players in marked's own
+// image and link renderers (#1619).
+const renderMedia = (text: string) => renderChatMarkdown(text, false, {});
+const plain = (text: string) => renderChatMarkdown(text, false);
 
 describe('classifyMediaUrl', () => {
 	it('classifies the /api/generated-* serve routes', () => {
@@ -46,9 +52,24 @@ describe('classifyMediaUrl', () => {
 	});
 });
 
-describe('rewriteMediaMarkdown', () => {
+describe('embedKind (#1603)', () => {
+	it('treats an artifact URL under the image sigil as a picture', () => {
+		expect(embedKind('image', '/api/v1/artifacts/e0b8f9e9?session_id=s1')).toBe('image');
+		expect(embedKind('image', 'https://w.example:8000/api/v1/artifacts/e0b8f9e9')).toBe('image');
+		expect(embedKind('link', '/api/v1/artifacts/e0b8f9e9')).toBeNull();
+		expect(embedKind('image', '/api/v1/artifacts/')).toBeNull();
+	});
+	it('reads the file type from the last path segment only', () => {
+		// A worker-origin artifact URL names no type: the download gets a default name.
+		expect(mediaHtml('image', 'https://w.example/api/v1/artifacts/abc')).toContain('download="generated-image.png"');
+		expect(embedKind('link', '/work/v1.2/clip.mp4')).toBe('video');
+		expect(embedKind('link', '/work/a.png')).toBeNull();
+	});
+});
+
+describe('media markdown in the chat render', () => {
 	it('rewrites image markdown into an <img> player with controls', () => {
-		const out = rewriteMediaMarkdown('![cat](/api/generated-images/by-path?path=/w/cat.png)');
+		const out = renderMedia('![cat](/api/generated-images/by-path?path=/w/cat.png)');
 		expect(out).toContain('<img');
 		expect(out).toContain('media-zoomable');
 		expect(out).toContain('media-expand-btn');
@@ -57,40 +78,40 @@ describe('rewriteMediaMarkdown', () => {
 	});
 
 	it('rewrites link-syntax video and audio into players', () => {
-		const v = rewriteMediaMarkdown('See [clip](/api/generated-videos/by-path?path=/w/c.mp4)');
+		const v = renderMedia('See [clip](/api/generated-videos/by-path?path=/w/c.mp4)');
 		expect(v).toContain('<video');
-		const a = rewriteMediaMarkdown('Listen [theme](/api/generated-audio/by-path?path=/w/t.wav)');
+		const a = renderMedia('Listen [theme](/api/generated-audio/by-path?path=/w/t.wav)');
 		expect(a).toContain('<audio');
 	});
 
 	it('leaves non-media links and plain text untouched', () => {
 		const md = 'Read [the docs](https://example.com/docs) and ![](nope.txt)';
-		expect(rewriteMediaMarkdown(md)).toBe(md);
+		expect(renderMedia(md)).toBe(plain(md));
 	});
 
 	it('embeds by URL kind under the image sigil (![] = "embed this media")', () => {
 		// A video URL written with ![] still embeds as a <video>, not a broken <img>.
-		const out = rewriteMediaMarkdown('![v](/api/generated-videos/by-path?path=/w/c.mp4)');
+		const out = renderMedia('![v](/api/generated-videos/by-path?path=/w/c.mp4)');
 		expect(out).toContain('<video');
 		expect(out).not.toContain('<img');
 	});
 
 	it('leaves plain image links (not ![]) as links, not embeds', () => {
 		const md = 'Download [the chart](/api/files/by-path?path=%2Fwork%2Fchart.png)';
-		expect(rewriteMediaMarkdown(md)).toBe(md);
+		expect(renderMedia(md)).toBe(plain(md));
 	});
 
 	it('renders the real player during streaming (no "loading" placeholder)', () => {
 		// The same function is used for streaming and final render, so an image
 		// shows up the instant its markdown is complete.
-		const out = rewriteMediaMarkdown('![cat](/api/generated-images/by-path?path=/w/cat.png)');
+		const out = renderMedia('![cat](/api/generated-images/by-path?path=/w/cat.png)');
 		expect(out).toContain('<img');
 		expect(out).not.toContain('media-placeholder');
 	});
 
 	it('collapses a raw base64 image blob instead of dumping it', () => {
 		const blob = 'A'.repeat(200);
-		const out = rewriteMediaMarkdown(`prefix "image_base64":"${blob}" suffix`);
+		const out = renderMedia(`prefix "image_base64":"${blob}" suffix`);
 		expect(out).toContain('media-placeholder');
 		expect(out).not.toContain(blob);
 	});

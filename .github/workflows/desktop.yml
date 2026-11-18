@@ -3,7 +3,6 @@ name: Desktop CI
 # Desktop typechecks and unit tests on every PR, including drafts.
 # Packaging and runtime assembly remain manual; releases live in release.yml.
 on:
-  pull_request:
   workflow_call:
     inputs:
       main_suite:
@@ -30,7 +29,7 @@ permissions:
   contents: read
 
 concurrency:
-  # main-suite's daily run gets its own group so it never queues with a push run.
+  # CI's daily run gets its own group so it never queues with a push run.
   group: desktop-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 

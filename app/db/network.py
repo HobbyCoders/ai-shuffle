@@ -227,6 +227,8 @@ def create_schema(cursor) -> None:
             expires_at TIMESTAMP WITH TIME ZONE NOT NULL
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_sync_conflicts_version "
+                   "ON sync_conflicts(collection, record_id, losing_clock)")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sync_peers (
             device_id TEXT PRIMARY KEY,
@@ -286,7 +288,10 @@ def create_schema(cursor) -> None:
             session_id TEXT PRIMARY KEY,
             is_active BOOLEAN NOT NULL,
             local_pending BOOLEAN NOT NULL DEFAULT FALSE,
-            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            -- Canonical ISO-8601 UTC wake time of a snoozed (settled) chat, as
+            -- signed. TEXT so the signed spelling round-trips unchanged.
+            snoozed_until TEXT
         )
     """)
     # A chat this worker deleted as its owner (#1308): incoming sync never
@@ -391,6 +396,7 @@ def _ensure_columns(cursor) -> None:
                 ("network_presence", "source_revision", "TEXT"),
                 ("network_session_active", "local_revision", "BIGINT NOT NULL DEFAULT 0"),
                 ("network_session_active", "local_revision_epoch", "TEXT NOT NULL DEFAULT ''"),
+                ("network_session_active", "snoozed_until", "TEXT"),
                 ("network_transcript_backfill_state", "generation", "BIGINT NOT NULL DEFAULT 1"),
                 ("network_transcript_backfill_state", "stalled_since", "BIGINT"),
                 # Breaks an exact (clock, origin) tie across a restore fork (#1568).
@@ -1807,13 +1813,20 @@ def membership_ops_after(cursor, origin: str, incarnation: int, seq: int) -> Lis
 
 def add_conflict(cursor, *, collection: str, record_id: str, losing_clock: int, losing_device_id: str,
                  losing_record: Any, winning_clock: int, winning_device_id: str) -> None:
+    # Apply transactions serialize on the network_state clock row. A replay
+    # of the same loss should neither append a row nor renew its retention.
+    version = (collection, record_id, losing_clock, losing_device_id, _json(losing_record),
+               winning_clock, winning_device_id)
     now = datetime.now(timezone.utc)
     cursor.execute(
         """INSERT INTO sync_conflicts (collection, record_id, losing_clock, losing_device_id, losing_record,
                                        winning_clock, winning_device_id, created_at, expires_at)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-        (collection, record_id, losing_clock, losing_device_id, _json(losing_record), winning_clock,
-         winning_device_id, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat()))
+           SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s
+           WHERE NOT EXISTS (SELECT 1 FROM sync_conflicts
+                             WHERE collection = %s AND record_id = %s AND losing_clock = %s
+                               AND losing_device_id = %s AND losing_record = %s
+                               AND winning_clock = %s AND winning_device_id = %s)""",
+        (*version, now.isoformat(), (now + timedelta(days=CONFLICT_RETENTION_DAYS)).isoformat(), *version))
 
 
 def list_conflicts(limit: int = 200) -> List[dict]:

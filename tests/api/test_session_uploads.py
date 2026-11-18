@@ -66,7 +66,7 @@ def test_other_session_paths_cannot_be_lifted(upload_client, mock_db):
     client, row, _, _ = upload_client
     body = client.post("/api/v1/sessions/worker-session/upload",
                        files={"file": ("notes.txt", b"data", "text/plain")}).json()
-    with pytest.raises(upload_transfer.UploadLiftError, match="outside the project"):
+    with pytest.raises(upload_transfer.UploadLiftError, match="outside this session.s upload area"):
         upload_transfer.lift_session_paths_to_blobs([body["full_path"]], {**row, "id": "another"})
 
 

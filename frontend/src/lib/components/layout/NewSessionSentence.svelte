@@ -15,8 +15,16 @@
 	 * session: branch and worktree only for a project that is a git repository,
 	 * the checkout branch only in local mode with GitHub signed in. The worker's
 	 * online dot lives in its menu.
+	 *
+	 * Cmd/Ctrl+P (AppPage's shortcut) opens the project picker from here while
+	 * the row is on screen: on "No project" to add one, or on the project word
+	 * to switch it (with a "No project" row). Focus returns to the message
+	 * editor after a pick or Escape.
 	 */
+	import { onMount } from 'svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import { composerReturn } from '$lib/components/chat/composer-editors';
+	import { provideProjectPicker } from '$lib/services/project-picker';
 	import { clusterProjects, projects } from '$lib/stores/app-data.svelte';
 	import { githubAuthenticated } from '$lib/stores/auth.svelte';
 	import { git } from '$lib/stores/git.svelte';
@@ -52,29 +60,60 @@
 	function selectProject(projectId: string, projectV2Id?: string | null) {
 		activeSession.setProject(projectId, projectV2Id ?? null, { user: true });
 	}
+	const clearProject = () => activeSession.clearProject({ user: true });
+
+	let row = $state<HTMLElement | null>(null);
+	let picker = $state<ReturnType<typeof WorkspaceSelector> | null>(null);
+
+	/** Open the picker on the row's project control; false when the row is not usable now. */
+	function openPicker(returnFocus: HTMLElement | (() => void) | null): boolean {
+		if ($activeSession.sessionId || !row?.isConnected || !picker) return false;
+		// Hidden under another page (Settings, Agents): not on screen.
+		if (typeof row.checkVisibility === 'function' && !row.checkVisibility()) return false;
+		// A dialog over the screen (Settings search, a modal) owns the keys.
+		if (document.querySelector('[aria-modal="true"]')) return false;
+		const anchor = row.querySelector<HTMLElement>('[data-project-control]');
+		picker.openPicker({ anchor, returnFocus });
+		return true;
+	}
+
+	/** "Switch project…" in the folders menu: open once its click has finished (it would close the picker as an outside click). */
+	function switchFrom(trigger: HTMLElement) {
+		setTimeout(() => openPicker(trigger));
+	}
+
+	// After a pick or Escape, back to the message box with the caret (the
+	// editor's own selection) where it was, or at the end of the one on screen.
+	onMount(() => provideProjectPicker(() => openPicker(composerReturn())));
 </script>
 
-<section class="ns-context" aria-label="New chat">
+<section class="ns-context" aria-label="New chat" bind:this={row}>
 	<ProfileSelector variant="card" />
 	<div class="ns-sentence" role="group" aria-label="Where this session runs">
 		<RunsOnPicker />
 		{#if hasProject}
 			<ExecutionModeBar variant="sentence">
 				{#snippet between()}
-					{#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={() => activeSession.clearProject({ user: true })} />{:else}<span class="sentence-tok ns-pending">Project</span>{/if}
+					{#if projectName}<WorkspaceFolderSelector variant="sentence" {projectName} onClear={clearProject} onSwitch={switchFrom} />{:else}<span class="sentence-tok ns-pending" data-project-control>Project</span>{/if}
 					{#if showCheckoutBranch}
 						<BranchSelector variant="sentence" onClickNewBranch={() => (showCreateBranchModal = true)} />
 					{/if}
 				{/snippet}
 			</ExecutionModeBar>
-		{:else}
+		{/if}
+		<!-- One picker for both: its own "No project" word, or (headless) opened on
+		     the project word to switch. Keyed so a pick remounts it closed. -->
+		{#key hasProject}
 			<WorkspaceSelector
+				bind:this={picker}
 				variant="sentence"
+				headless={hasProject}
 				selectedProject={$activeSession.project}
 				selectedProjectV2Id={$activeSession.projectV2Id}
 				onSelectProject={selectProject}
+				onClearProject={clearProject}
 			/>
-		{/if}
+		{/key}
 	</div>
 </section>
 {#if hasProject}

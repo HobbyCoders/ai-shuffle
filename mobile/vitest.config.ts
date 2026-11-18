@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import { fileURLToPath } from 'node:url';
 import { appVersion } from '../frontend/app-version.js';
+import { svelteOptions } from '../frontend/svelte-options.js';
 
 // Tests here exercise the mobile shell: same build flag as `vite build`.
 process.env.VITE_SHUFFLE_SHELL = 'mobile';
@@ -15,7 +16,7 @@ const FULL_RUN_TRIGGERS = [
 	'**/package.json/**',
 	'**/{vitest,vite}.config.*/**',
 	'**/package-lock.json',
-	'**/svelte.config.js',
+	'**/svelte-options.js',
 	'**/tsconfig.json',
 	'**/app-version.js',
 	'**/src/lib/test-stubs/**',
@@ -25,7 +26,8 @@ const FULL_RUN_TRIGGERS = [
 
 export default defineConfig({
 	cacheDir: '.svelte-kit/vitest-cache',
-	plugins: [svelte({ hot: !process.env.VITEST })],
+	// SvelteKit 3 has no svelte.config.js for the plugin to find: pass the options.
+	plugins: [svelte({ ...svelteOptions, hot: !process.env.VITEST })],
 	define: {
 		__APP_VERSION__: JSON.stringify(appVersion)
 	},
@@ -40,13 +42,12 @@ export default defineConfig({
 		alias: [
 			{ find: /^\$lib\/(.*)$/, replacement: `${lib}/$1` },
 			{ find: /^\$lib$/, replacement: lib },
-			{ find: /^\$app\/environment$/, replacement: `${stubs}/app-environment.ts` },
-			{ find: /^\$app\/stores$/, replacement: `${stubs}/app-stores.ts` },
+			{ find: /^\$app\/env$/, replacement: `${stubs}/app-env.ts` },
 			{ find: /^\$app\/navigation$/, replacement: `${stubs}/app-navigation.ts` },
 			{ find: /^\$app\/state$/, replacement: `${stubs}/app-state.svelte.ts` }
 		]
 	},
-	// Shared components import assets from ../frontend (avatar SVGs);
+	// Shared components and their assets load from ../frontend;
 	// mirrors server.fs.allow in vite.config.js.
 	server: {
 		fs: { allow: ['..'] }

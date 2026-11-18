@@ -8,7 +8,7 @@ import { createLiveDictation } from './tiptap/liveDictation';
 import type { SttStreamHandlers } from '$lib/services/sttStream';
 
 const mocks = vi.hoisted(() => ({ start: vi.fn(), capability: vi.fn() }));
-vi.mock('$app/environment', () => ({ browser: true }));
+vi.mock('$app/env', () => ({ browser: true }));
 vi.mock('$lib/services/keyboard', () => ({ registerShortcut: vi.fn() }));
 vi.mock('$lib/stores/hotkeyPreferences.svelte', () => ({ hotkeyPreferences: {} }));
 vi.mock('$lib/utils/earcon', () => ({ playEarcon: vi.fn(), primeEarcons: vi.fn(), setEarconsEnabled: vi.fn() }));
@@ -119,6 +119,14 @@ describe('rendered recorder with live editor ownership', () => {
 		expect(startButton.querySelector('.voice-waveform')).toBeNull();
 		expect(screen.queryByRole('button', { name: 'Discard voice input' })).toBeNull();
 		expect(editor.getText()).toBe('Draft A private words');
+	});
+	it('leaves a dictation error to the composer instead of rendering it in the action row (#1631)', async () => {
+		mocks.start.mockRejectedValueOnce(new Error('Microphone unavailable'));
+		await fireEvent.click(screen.getByRole('button', { name: 'Start voice input' }));
+		await vi.advanceTimersByTimeAsync(0);
+		await tick();
+		expect(get(globalSttState).error).toBeTruthy();
+		expect(screen.queryByRole('alert')).toBeNull();
 	});
 	it('rejects a transcript immediately on owner change, even before navigation effects settle', async () => {
 		await start();

@@ -8,6 +8,7 @@ become methods.  Behaviour is identical to the original implementation.
 
 import asyncio
 from contextvars import ContextVar
+import functools
 import json
 import logging
 import time
@@ -22,7 +23,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from app.core.config import settings
 from app.core.message_resolver import message_resolver, resolve_working_dir
 from app.core.permission_handler import permission_handler
-from app.core.session_modes import chat_mode_read_permitted, normalize_session_mode
+from app.core.session_modes import chat_mode_read_permitted, composer_owner, normalize_session_mode
 from app.core.session_payload import client_view
 from app.core.session_title import derive_session_title
 from app.core.sync_engine import invalidate_queue_snapshot, queue_snapshot_epoch, sync_engine
@@ -1157,15 +1158,22 @@ class ChatWebSocketHandler:
         upload_paths: List[str],
         project_id: Optional[str],
         session_id: str,
+        *,
+        composer: bool = False,
     ) -> List[str]:
         """Lift this send's staged uploads into durable blobs.
 
+        ``composer``: an owner send, which also admits the areas the owner's
+        composer stages into (``upload_transfer.composer_staging_roots``).
         Raises ``UploadLiftError`` (or anything the DB layer raises) so the
         caller can refuse the send — never returns partial results.
         """
         from app.core import upload_transfer
 
-        return await run_sync(upload_transfer.lift_send_uploads, upload_paths, project_id, session_id)
+        return await run_sync(functools.partial(
+            upload_transfer.lift_send_uploads, upload_paths, project_id, session_id,
+            composer=composer,
+        ))
 
     async def _authorize_mobile_session(self, session_id, *, claim=False):
         from app.core.mobile_tool_identity import bind_session
@@ -1422,6 +1430,13 @@ class ChatWebSocketHandler:
             [p for p in raw_upload_paths if isinstance(p, str) and p]
             if isinstance(raw_upload_paths, list) else []
         )
+        # What a title leaves out: every attachment the message names, fresh
+        # or restored (#1654). Text only; admission checks the references.
+        raw_references = data.get("upload_references")
+        title_paths = upload_paths + [
+            ref["path"] for ref in (raw_references if isinstance(raw_references, list) else [])
+            if isinstance(ref, dict) and isinstance(ref.get("path"), str) and ref["path"]
+        ]
         # Sidepanel mode for a NEW session (code / chat / voice). Creation-time
         # only: an existing session's mode is settled on its row, so re-sending
         # it here could never move a session between surfaces. The frontend
@@ -1520,7 +1535,13 @@ class ChatWebSocketHandler:
                 chat_mode_read_permitted("Read", {"file_path": p})
                 for p in upload_paths
             )
-            if upload_paths and not project_id and not chat_lane_uploads:
+            from app.core import upload_transfer
+            if upload_paths and not project_id and not chat_lane_uploads and not (
+                await run_sync(composer_owner, self.trusted_principal)
+                and await run_sync(upload_transfer.composer_staged, upload_paths)
+            ):
+                # The install owner's composer chips stay admitted: the send
+                # below copies or lifts each from the area that holds it.
                 from app.api.common import ATTACHMENTS_NEED_LOCAL_CHECKOUT
 
                 await self.send_json({
@@ -1565,7 +1586,7 @@ class ChatWebSocketHandler:
             session_id = str(uuid.uuid4())
             is_new_session = True
             # Generate title from the user's first message
-            title = derive_session_title(prompt, upload_paths)
+            title = derive_session_title(prompt, title_paths)
 
             # Create session + first user message atomically so neither is orphaned.
             # Wrapped in run_sync to avoid blocking the event loop during DB I/O.
@@ -1719,7 +1740,7 @@ class ChatWebSocketHandler:
             # run via the queue. (The user-message persist itself happens further
             # down, only after this query WINS the check-and-register.)
             if existing_session and not (existing_session.get("title") or "").strip():
-                derived_title = derive_session_title(prompt, upload_paths)
+                derived_title = derive_session_title(prompt, title_paths)
                 if derived_title:
                     await run_sync(
                         database.update_session,
@@ -1752,14 +1773,30 @@ class ChatWebSocketHandler:
 
         local_upload_paths = upload_paths
         upload_references = []
+        composer = False
         if upload_paths or data.get("upload_references"):
             from app.core import upload_transfer
+            # The owner's composer may have staged a file under an earlier
+            # project or the chat lane before the project, worktree or worker
+            # changed. Only the install owner's send admits those areas.
+            composer = await run_sync(composer_owner, self.trusted_principal)
             try:
                 upload_session = await run_sync(database.get_session, session_id)
                 local_upload_paths, upload_references = await run_sync(
-                    upload_transfer.partition_upload_paths, upload_paths, upload_session,
-                    references=data.get("upload_references"),
+                    functools.partial(
+                        upload_transfer.partition_upload_paths, upload_paths, upload_session,
+                        references=data.get("upload_references"), composer=composer,
+                    )
                 )
+                if composer and not placed_remote and local_upload_paths:
+                    # A turn here re-checks its paths against the session's own
+                    # areas, and a confined agent reads only those: copy in.
+                    adopted = await run_sync(
+                        upload_transfer.adopt_composer_uploads, local_upload_paths, upload_session,
+                    )
+                    if adopted:
+                        local_upload_paths = [adopted.get(p, p) for p in local_upload_paths]
+                        prompt = upload_transfer.rewrite_prompt(prompt, adopted)
                 upload_paths = local_upload_paths + [ref["path"] for ref in upload_references]
             except (upload_transfer.UploadLiftError, OSError, ValueError, RuntimeError):
                 await self.send_json({
@@ -1860,7 +1897,8 @@ class ChatWebSocketHandler:
         if placed_remote and local_upload_paths:
             try:
                 blob_ids = await self._lift_uploads(
-                    local_upload_paths, project_id, session_id
+                    local_upload_paths, project_id, session_id,
+                    composer=composer,
                 )
             except Exception as lift_exc:  # noqa: BLE001 — refuse, never half-send
                 logger.warning(

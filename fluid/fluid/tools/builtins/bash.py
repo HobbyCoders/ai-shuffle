@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import os
 import re
 import signal
@@ -24,17 +25,33 @@ from fluid.tools.priority import (
     priority_creationflags,
     raise_oom_score_adj,
 )
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import (
+    ToolCtx,
+    ToolOutcome,
+    ToolSpec,
+    current_call_in_cell,
+    current_call_time_left,
+)
 from fluid.tools.shell import resolve_shell
 
 DEFAULT_TIMEOUT_S = 120.0
 MIN_TIMEOUT_S = 1.0
 MAX_TIMEOUT_S = 600.0
+# Seconds kept clear, after a timeout, for the kill, the 2s drain of the pipe
+# and the result's way back, when a code-mode cell's per-call ceiling bounds
+# the call: the timeout is cut so the whole run ends inside it (#1549).
+KILL_GRACE_S = 5.0
+_DRAIN_S = 2.0
 # Bytes of a command's output kept in memory while it runs: the first half
 # and the last half, the middle dropped as it streams. Far above what the
 # model sees inline, so the spill file holds the whole output of all but a
 # runaway command (and its marker says when it does not).
 MAX_CAPTURE_BYTES = 1024 * 1024
+# The cut limit for Bash called from a code-mode cell. The value goes to the
+# cell, not to the model: the cell's stdout cap bounds what the model sees and
+# a big result rides behind a ResultRef, so a `git diff` or `gh ... --json`
+# the cell slices or parses arrives whole. Above this it still spills.
+CELL_TRUNCATE_LIMIT = 50_000
 # Share of the inline budget given to the head; the tail gets the rest, since
 # errors, tracebacks and exit summaries come last.
 _HEAD_SHARE = 1 / 3
@@ -121,7 +138,8 @@ def describe(tools: frozenset[str] | None = None, *, windows: bool | None = None
         "- There is no stdin: commands that prompt for input will hang until "
         "the timeout. Pass non-interactive flags (e.g. --yes) where needed; "
         "interactive git flags (e.g. `git rebase -i`) are not supported.\n"
-        f"- Output over {_TRUNCATE_LIMIT:,} characters keeps its head and a "
+        f"- Output over {_TRUNCATE_LIMIT:,} characters ({CELL_TRUNCATE_LIMIT:,} "
+        "in code mode) keeps its head and a "
         "longer tail; the cut marker names a file with the saved output"
         f"{read_back} instead of re-running. NEVER pipe a build or test command through tail/head/cat to shorten "
         "output (e.g. `cargo build | tail -20`): the cap already handles "
@@ -306,7 +324,8 @@ async def _read_capped(stream: asyncio.StreamReader, capture: _Capture | None = 
 
 
 def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
-    """The captured output, ANSI-stripped and cut to the inline cap.
+    """The captured output, ANSI-stripped and cut to the inline cap (the
+    higher :data:`CELL_TRUNCATE_LIMIT` when a code-mode cell called it).
 
     Over the cap, the same cleaned text is spilled once and the marker names
     it. It says "full output" only when nothing was dropped while capturing.
@@ -317,13 +336,39 @@ def _render(capture: _Capture, ctx: ToolCtx, *, timed_out: bool = False) -> str:
     if capture.dropped:
         saved_as = "captured " + saved_as.removeprefix("full ")
         note = f"the middle ~{capture.dropped:,} bytes were not captured"
+    # A timeout's partial output is an error message, not a value: it keeps
+    # the direct cap even in a cell.
+    in_cell = current_call_in_cell.get() and not timed_out
+    limit = CELL_TRUNCATE_LIMIT if in_cell else _TRUNCATE_LIMIT
     return truncate(
-        text, ctx=ctx, tool="Bash", head_share=_HEAD_SHARE, saved_as=saved_as, note=note)
+        text, limit, ctx=ctx, tool="Bash", head_share=_HEAD_SHARE, saved_as=saved_as, note=note)
 
 
 async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     command = input["command"]
     timeout = clamp_timeout(input.get("timeout", DEFAULT_TIMEOUT_S))
+    # Inside a cell the kernel cancels the call at its per-call ceiling, and a
+    # cancelled call returns nothing. Read the time left now, on the input
+    # that actually runs (after every hook and approval rewrite), and cut the
+    # timeout so a timeout lands first and keeps the output (#1549).
+    held = ""
+    time_left = current_call_time_left.get()
+    if time_left is not None:
+        room = math.floor((time_left() - KILL_GRACE_S) * 10) / 10
+        if room < MIN_TIMEOUT_S:
+            return ToolOutcome(
+                text=(
+                    "Bash was not run: this cell's per-call ceiling has too "
+                    "little time left for it. Call Bash outside the cell, or "
+                    "give the cell a longer timeout."
+                ),
+                is_error=True,
+            )
+        if room < timeout:
+            held = (
+                f" (cut from {timeout:g}s to fit the time left on this cell's "
+                "per-call ceiling; a longer run belongs outside the cell)")
+            timeout = room
     cwd = input.get("cwd") or ctx.cwd
     # The settings stack's ``env`` (ctx.extra["settings_env"], set by the
     # loader) rides on top of the process environment for the child only;
@@ -356,19 +401,23 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     raise_oom_score_adj(proc.pid)
     assert proc.stdout is not None
     capture = _Capture()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
     try:
         await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=timeout)
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
+        # One deadline for the whole run: a command that closes its output
+        # and then hangs gets the time left, not a second full timeout.
+        await asyncio.wait_for(proc.wait(), timeout=max(0.0, deadline - loop.time()))
     except TimeoutError:
         await kill_tree(proc)
         with contextlib.suppress(TimeoutError, OSError):
             # What the command wrote just before the kill is still in the pipe.
-            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=2.0)
+            await asyncio.wait_for(_read_capped(proc.stdout, capture), timeout=_DRAIN_S)
         # Say what the retry should change rather than leaving the model to
         # re-run the same command, and show what it printed before the kill:
         # the error that explains a hang is usually the last thing printed.
         text = (
-            f"command timed out after {timeout:g}s and was killed. Raise "
+            f"command timed out after {timeout:g}s{held} and was killed. Raise "
             "the timeout parameter for a genuinely long command, narrow "
             "the command's scope, or use Monitor for a long-running job "
             "(serves=true only for a service meant to stay up). Do not "
@@ -378,7 +427,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         partial = _render(capture, ctx, timed_out=True)
         if partial.strip():
             text += "\n" + fence_shell_output(
-                partial, "Bash partial output (command timed out; output up to the timeout)")
+                partial,
+                "Bash partial output (command timed out; output up to the timeout, may be incomplete)")
         return ToolOutcome(text=text, is_error=True)
     except asyncio.CancelledError:
         # Any cancellation (a user stop, a turn cancel, a host deadline): this

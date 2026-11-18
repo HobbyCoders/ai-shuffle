@@ -18,11 +18,12 @@ from typing import Any
 
 import pytest
 
-from fluid.engine.acp.antigravity import AntigravitySpec, split_model_id
+from fluid.engine.acp.antigravity import AntigravitySpec, offered_models, split_model_id
 from fluid.engine.acp.loop import AcpLoop
 from fluid.events.model import (
     ErrorEvent,
     Interrupted,
+    ModelServed,
     PermissionRequest,
     QuestionRequest,
     SteerDelivered,
@@ -52,7 +53,7 @@ TERMINAL = (TurnComplete, ErrorEvent, Interrupted)
 
 
 def _spec(tmp_path: Path, *, signed_in: bool = True, auth_mode: str = "oauth-personal",
-          api_key: str | None = None) -> AntigravitySpec:
+          api_key: str | None = None, catalog: dict[str, list[str]] | None = None) -> AntigravitySpec:
     spec = AntigravitySpec.build(sys.executable, auth_mode=auth_mode, home=str(tmp_path / "home"),
                                  api_key=api_key)
     spec.argv = [sys.executable, "-I", FAKE]  # stands in for ``agy acp``
@@ -62,6 +63,8 @@ def _spec(tmp_path: Path, *, signed_in: bool = True, auth_mode: str = "oauth-per
         "FAKE_ACP_STATE": str(tmp_path),
         "FAKE_ACP_SIGNED_IN": "1" if signed_in else "0",
     })
+    if catalog is not None:
+        spec.env["FAKE_ACP_CATALOG"] = json.dumps(catalog)
     return spec
 
 
@@ -113,7 +116,7 @@ class Driver:
 
 
 async def _driver(tmp_path: Path, **kw: Any) -> Driver:
-    spec_kw = {k: kw.pop(k) for k in ("signed_in", "auth_mode", "api_key") if k in kw}
+    spec_kw = {k: kw.pop(k) for k in ("signed_in", "auth_mode", "api_key", "catalog") if k in kw}
     loop = AcpLoop(store=kw.pop("store", None) or SerializingStore(), spec=_spec(tmp_path, **spec_kw),
                    cwd=str(tmp_path), **kw)
     driver = Driver(loop)
@@ -135,7 +138,7 @@ async def test_streaming_turn_maps_chunks_usage_and_instructions(tmp_path: Path)
         assert "systemPrompt" not in new  # not advertised as the standard field
         configs = {(r["params"]["configId"], r["params"]["value"])
                    for r in _received(tmp_path, "session/set_config_option")}
-        # xhigh → "extra", which this model lacks: the nearest offered level.
+        # xhigh, which this model lacks: the nearest offered level.
         assert configs == {("model", "gemini-3.8-flash"), ("thought_level", "high")}
         init = _received(tmp_path, "initialize")[0]["params"]
         assert init["clientCapabilities"]["auth"] == {"terminal": True}
@@ -554,6 +557,31 @@ async def test_set_model_mid_session_and_images(tmp_path: Path) -> None:
 def test_split_model_id() -> None:
     assert split_model_id("gemini-3.1-pro-high") == ("gemini-3.1-pro", "high")
     assert split_model_id("gemini-4-argon") == ("gemini-4-argon", None)
+    assert split_model_id("gemini-4-hydrogen-xhigh") == ("gemini-4-hydrogen", "xhigh")
+
+
+def test_listed_models_reads_agy_models_output() -> None:
+    """``agy models`` as 1.5.9 printed it on a signed-in worker: combined ids
+    fold into one model per base with its levels, the "(Level)" leaves the
+    label, an id with no level suffix keeps unknown levels, and every model
+    the agent lists is kept (not only Gemini)."""
+    from fluid.engine.acp.antigravity import listed_models
+
+    text = (Path(FAKE).parent / "agy_models_1.5.9.tsv").read_text(encoding="utf-8")
+    listed = listed_models(text)
+    assert [(m["id"], m["label"], m["levels"]) for m in listed] == [
+        ("gemini-4-argon", "Gemini 4 Argon", ["low", "medium", "high"]),
+        ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ["low", "medium", "high", "xhigh"]),
+        ("gemini-pro-orchestrator-g1-pro", "Orchestrator (Argon)", None),
+        ("gemini-3.8-flash", "Gemini 3.8 Flash", ["low", "medium", "high"]),
+        ("claude-opus-5-5", "Claude Opus 5.5", ["low", "medium", "high"]),
+        ("claude-sonnet-5-5", "Claude Sonnet 5.5", ["low", "medium", "high"]),
+        ("gpt-oss-120b", "GPT-OSS 120B", ["medium"]),
+    ]
+    # Windows line ends, a progress line and blank or label-less lines.
+    noisy = "Fetching available models...\r\n\r\ngemini-x-high\tGemini X (High)\r\nno tab here\r\n\tNo id\r\n"
+    assert listed_models(noisy) == [{"id": "gemini-x", "label": "Gemini X", "levels": ["high"]}]
+    assert listed_models("") == [] and listed_models("Error: Please sign in") == []
 
 
 def test_agent_env_passes_only_its_own_settings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -582,3 +610,130 @@ def test_agent_env_keeps_windows_app_data_in_the_rows_home(monkeypatch: pytest.M
     assert os.path.isdir(env["APPDATA"]) and os.path.isdir(env["LOCALAPPDATA"])
     monkeypatch.setattr(sys, "platform", "linux")
     assert "APPDATA" not in agent_env(home, source=source)
+
+
+# CLI 1.5.9's combined ids (the binary's strings); the option values the real
+# agent offers for them were not observed.
+HYDROGEN = {"gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+            "gemini-4-carbon": ["low", "medium", "high"], "gemini-3.1-pro": ["low", "high"]}
+
+
+def _options(model: str, levels: list[str], models: list[str]) -> list[dict[str, Any]]:
+    return [
+        {"id": "model", "category": "model", "currentValue": model,
+         "options": [{"value": m, "name": m.replace("-", " ").title()} for m in models]},
+        {"id": "thought_level", "category": "thought_level", "currentValue": levels[0],
+         "options": [{"value": v, "name": v} for v in levels]},
+    ]
+
+
+def test_offered_models_read_levels_from_combined_ids_and_the_current_option() -> None:
+    models = {"currentModelId": "gemini-3.1-pro-low", "availableModels": [
+        {"modelId": f"{m}-{lvl}"} for m, levels in HYDROGEN.items() for lvl in levels]}
+    offered = offered_models(_options("gemini-3.1-pro", ["low", "high"], [*HYDROGEN, "gemini-9-new"]), models)
+    assert offered == [
+        {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "levels": ["low", "medium", "high"]},
+        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "levels": ["low", "high"]},
+        # Named with no levels: unknown, not "none".
+        {"id": "gemini-9-new", "label": "Gemini 9 New", "levels": None},
+    ]
+    # No legacy ``models``: the current model's levels come from its option.
+    only = offered_models(_options("gemini-4-hydrogen", ["low", "extra"], ["gemini-4-hydrogen"]), None)
+    assert only == [{"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "levels": ["low", "extra"]}]
+
+
+def test_the_current_models_level_option_wins_over_its_combined_ids() -> None:
+    """A later config_option_update may add or drop a level for the current model."""
+    combined = {"availableModels": [{"modelId": f"gemini-4-hydrogen-{lvl}"} for lvl in ("low", "high")]}
+    ids = ["gemini-4-hydrogen", "gemini-4-carbon"]
+    added = offered_models(_options("gemini-4-hydrogen", ["low", "high", "xhigh"], ids), combined)
+    assert added[0]["levels"] == ["low", "high", "xhigh"]
+    dropped = offered_models(_options("gemini-4-hydrogen", ["low"], ids), combined)
+    assert dropped[0]["levels"] == ["low"]
+    # The option is the current model's only: Carbon's levels stay unknown,
+    # and with Carbon current Hydrogen keeps its combined-id levels.
+    assert added[1]["levels"] is None
+    other = offered_models(_options("gemini-4-carbon", ["medium"], ids), combined)
+    assert {m["id"]: m["levels"] for m in other} == {"gemini-4-hydrogen": ["low", "high"],
+                                                     "gemini-4-carbon": ["medium"]}
+
+
+@pytest.mark.parametrize(("offered", "chosen"), [
+    (["low", "medium", "high", "xhigh"], "xhigh"),
+    (["low", "high", "extra"], "extra"),  # the agent's older word for the same step
+    (["low", "high"], "high"),            # nearest, preferring the lower level
+])
+def test_xhigh_effort_picks_what_the_model_offers(offered: list[str], chosen: str) -> None:
+    spec = AntigravitySpec.build(sys.executable, auth_mode="oauth-personal", home="/nonexistent")
+    options = _options("gemini-4-hydrogen", offered, ["gemini-4-hydrogen"])
+    assert spec.config_value(options, "thought_level", spec.effort_value("xhigh")) == ("thought_level", chosen)
+    # A combined id selects the model it names.
+    assert spec.config_value(options, "model", "gemini-4-hydrogen-xhigh") == ("model", "gemini-4-hydrogen")
+
+
+async def test_session_start_reports_offered_models_and_xhigh_reaches_the_agent(tmp_path: Path) -> None:
+    reports: list[tuple[list[dict[str, Any]], str | None]] = []
+
+    async def on_models(models: list[dict[str, Any]], version: str | None) -> None:
+        reports.append((models, version))
+
+    d = await _driver(tmp_path, catalog=HYDROGEN, model="gemini-4-hydrogen", effort="xhigh", on_models=on_models)
+    try:
+        end = await d.turn("stream")
+        assert isinstance(end, TurnComplete), end
+        configs = [(r["params"]["configId"], r["params"]["value"])
+                   for r in _received(tmp_path, "session/set_config_option")]
+        assert configs == [("model", "gemini-4-hydrogen"), ("thought_level", "xhigh")]
+        assert not [e for e in d.events if isinstance(e, ModelServed)]
+        # Reported once: setting model and level changed current values, not the list.
+        assert len(reports) == 1
+        models, version = reports[0]
+        assert version == "1.5.6"
+        assert {m["id"]: m["levels"] for m in models} == HYDROGEN
+    finally:
+        await d.close()
+
+
+async def test_every_agent_start_reports_once_even_with_the_same_list(tmp_path: Path) -> None:
+    """A new key on the same chat: the replacement agent's list is captured
+    again (the stored one was dropped with the old key). Within one agent's
+    lifetime an unchanged list is not reported twice."""
+    reports: list[list[dict[str, Any]]] = []
+    spec = _spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-old", catalog=HYDROGEN)
+    assert spec.env is not None
+    spec.env["FAKE_ACP_CONFIG_UPDATES"] = "1"  # the session's own config updates during start
+    d = Driver(AcpLoop(store=SerializingStore(), spec=spec, cwd=str(tmp_path), session_id="s-1",
+                       model="gemini-4-hydrogen", effort="xhigh",
+                       on_models=lambda models, version: reports.append(models)))
+    await d.start()
+    try:
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert len(reports) == 1  # session reply and its config updates: one report
+        await d.loop._on_notification("session/update", {"update": {
+            "sessionUpdate": "config_option_update", "configOptions": d.loop._config_options}})
+        assert len(reports) == 1
+        replacement = _spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-new", catalog=HYDROGEN)
+        assert replacement.env is not None
+        replacement.env["FAKE_ACP_CONFIG_UPDATES"] = "1"
+        await d.loop.replace_spec(replacement)
+        assert isinstance(await d.turn("again"), TurnComplete)
+        assert _received(tmp_path, "session/resume")
+        assert len(reports) == 2 and reports[1] == reports[0]
+    finally:
+        await d.close()
+
+
+async def test_a_model_the_agent_does_not_offer_is_named_in_the_turn(tmp_path: Path) -> None:
+    d = await _driver(tmp_path, model="gemini-4-hydrogen")  # 1.5.6's list has no Hydrogen
+    try:
+        end = await d.turn("stream")
+        assert isinstance(end, TurnComplete), end
+        assert _received(tmp_path, "session/set_config_option") == []
+        served = [e for e in d.events if isinstance(e, ModelServed)]
+        assert len(served) == 1
+        assert (served[0].requested_model, served[0].served_model) == ("gemini-4-hydrogen", "gemini-3.1-pro")
+        assert served[0].rerouted and served[0].reason == "not_offered"
+        assert served[0].turn_id == end.turn_id
+    finally:
+        await d.close()

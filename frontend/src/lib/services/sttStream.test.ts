@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startSttStream, SttUnsupportedError } from './sttStream';
 
-vi.mock('$app/environment', () => ({ browser: true }));
+vi.mock('$app/env', () => ({ browser: true }));
 class FakeSocket {
 	static OPEN = 1;
 	static last: FakeSocket;

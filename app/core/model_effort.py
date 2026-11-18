@@ -143,6 +143,14 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
                 from app.core.model_registry import delegated_model_aliases
                 aliases = delegated_model_aliases()
             cap = table.get(aliases.get(model, model)) or table.get(canonical_effort_model(model))
+            if route == "delegated":
+                # A subscription CLI's own list says which levels it accepts.
+                from app.core import claude_cli_models
+
+                listed = claude_cli_models.entry(model)
+                if listed is not None and listed.get("effort_levels") is not None:
+                    known = cap or table.get(_ALIASES.get(model, model)) or {}
+                    cap = _capability(list(listed["effort_levels"]), known.get("default_effort"))
         elif provider.get("provider_type") == "openai" and provider.get("auth_mode") not in ("chatgpt", "grok"):
             cap = _OPENAI.get(model)
         elif provider.get("provider_type") in ("xai", "grok"):

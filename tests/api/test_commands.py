@@ -585,7 +585,7 @@ class TestExecuteRewindEndpoint:
         # The cut itself records the reset, in one transaction.
         assert mock_session_store_truncation.call_args.kwargs["reset_session_id"] == "session-1"
         mock_sync_engine.broadcast_user_session_updated.assert_called_once_with(
-            user_id="user-1", session_id="session-1", updates={"last_turn_failed": False},
+            user_id="user-1", session_id="session-1", updates={"last_turn_failed": False, "last_turn_stopped": False},
         )
 
     @pytest.mark.asyncio

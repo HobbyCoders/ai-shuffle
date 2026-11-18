@@ -223,12 +223,12 @@ Accepted nightly Docker candidates have a separate explicit promotion lane:
 `python3 scripts/release/promote_image.py --digest sha256:HEX --tags nightly`.
 Run it only after that digest's canary acceptance, from a clean checkout of the
 current public main. It verifies the pulled image's revision/tree/sequence and
-requires an owner-authored local full-suite status or verified hosted main-suite
+requires an owner-authored local full-suite status or verified hosted `CI`
 success on the exact protected-main revision, using the same read-only gate. It rechecks main after the image pull and reads the nightly alias
 back. Missing/stale/failed evidence refuses promotion; this lane never moves
 `latest`, major or minor aliases, and mixed nightly/stable requests are rejected.
 
-The **nightly** source update runs automatically after `main-suite` completes
+The **nightly** source update runs automatically after `CI` completes
 successfully on protected `main`, as well as once a day at **06:00 UTC** and by
 owner-only manual dispatch for retries. Pushes start the read-only full suite,
 not signing directly. Before setting up publication dependencies, the publisher
@@ -238,8 +238,8 @@ Publication requires either proof on the **exact revision being published**:
 
 - The owner's successful `local/full-suite` commit status, posted by
   `python scripts/local_ci.py full --attest` from a clean current-main checkout.
-- A successful run of `.github/workflows/main-suite.yml` in this repository,
-  with successful `Main suite` aggregate. The gate checks the workflow ID and
+- A successful run of `.github/workflows/ci.yml` in this repository,
+  with successful `CI` verdict job. The gate checks the workflow ID and
   exact path through GitHub's API, both repository identities, `head_sha`,
   `head_branch: main`, and event `push` or `workflow_dispatch`. Those events
   load the root workflow from that main revision, never PR/fork workflow code.
@@ -258,7 +258,7 @@ hosted CI passed. Pending retries are ignored: the newest owner status in
 success unblocks a veto. With no terminal owner outcome, hosted evidence can
 still pass. Off-main dispatches
 and PR runs are excluded from hosted run selection, so they cannot shadow main
-at the same SHA. Manual main-suite dispatches on refs other than `main` cannot
+at the same SHA. Manual `ci.yml` dispatches on refs other than `main` cannot
 pass the aggregate and never authorize publication. Repository/workflow metadata
 is fetched once per gate invocation; run/attempt/job evidence is always fresh.
 
@@ -294,7 +294,7 @@ sequence. A stale feed or losing concurrent writer refuses rather than moving
 backwards. A published revision that is not on public main refuses selection.
 Selection scans at most 100 unpublished main commits; without a pass in that
 window it fails closed and needs a fresh tip full-suite pass. See
-[the hosted parity inventory](pr-checks.md#hosted-main-suite) for the exact local
+[the hosted parity inventory](pr-checks.md#the-run-on-main) for the exact local
 to hosted mapping. No test job receives signing secrets or a private checkout.
 The strict signed-pointer/merged-PR reach walk uses public material only.
 

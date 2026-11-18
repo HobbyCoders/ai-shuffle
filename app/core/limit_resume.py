@@ -853,7 +853,10 @@ def _last_decision(session_id: str) -> Dict[str, Any]:
 
 
 def _once_fence(session_id: str) -> Dict[str, Any]:
-    """Durable membership/ownership revision: settle/unsettle is not a reload."""
+    """Durable membership/ownership revision: settle/unsettle is not a reload.
+
+    A snooze, re-snooze or wake does not advance it (``session_active.project``).
+    """
     from app.db import database
     from app.db.base import get_db
 
@@ -870,6 +873,15 @@ def _once_fence(session_id: str) -> Dict[str, Any]:
             "membership": dict(membership) if membership else None}
 
 
+def _same_fence(stored: Dict[str, Any], current: Dict[str, Any]) -> bool:
+    """Revision 0 is a row no fenced write advanced yet (a first snooze can
+    create it): the same as no row, so a snooze never reads as a change."""
+    def norm(fence):
+        membership = fence.get("membership")
+        return {**fence, "membership": membership if membership and membership.get("local_revision") else None}
+    return norm(stored) == norm(current)
+
+
 async def _once_refused(session_id: str, session: Any, meta: Dict[str, Any]) -> Optional[str]:
     from app.core import session_handoff
     from app.db.async_database import run_sync
@@ -877,14 +889,16 @@ async def _once_refused(session_id: str, session: Any, meta: Dict[str, Any]) -> 
     reason = await _refused(session_id, session)
     if reason:
         return reason
-    if session.get("is_active") is not None and not session["is_active"]:
+    from app.core.session_snooze import runs_work
+    # A snooze defers the chat; an armed resume still fires (without waking it).
+    if session.get("is_active") is not None and not runs_work(session):
         return "settled"
     if session_handoff.pending_for(session_id):
         return "handoff"
     last = await run_sync(_last_settled_turn, session_id)
     if not last or last["id"] != meta.get("turn_id"):
         return "newer_turn"
-    if "fence" in meta and meta["fence"] != await run_sync(_once_fence, session_id):
+    if "fence" in meta and not _same_fence(meta["fence"], await run_sync(_once_fence, session_id)):
         return "session_changed"
     if meta.get("once"):
         decision = await run_sync(_last_decision, session_id)

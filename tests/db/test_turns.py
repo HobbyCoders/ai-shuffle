@@ -858,6 +858,21 @@ def test_an_abort_the_user_asked_for_is_not_a_failure(mock_db, stop_reason):
     assert _failed("s1") == set()
 
 
+@pytest.mark.parametrize("stop_reason", ["interrupted", "interrupt_escalation", "user_stopped"])
+def test_a_stop_reads_as_stopped_not_failed(mock_db, stop_reason):
+    _ended("s1", "aborted", stop_reason)
+    assert turns.latest_turn_outcomes(["s1"]) == {"s1": "stopped"}
+
+
+def test_only_the_latest_turn_says_stopped(mock_db):
+    _ended("s1", "aborted", "interrupted")
+    _ended("s1")
+    _ended("s2", "aborted", "error", "boom")
+    _ended("s3", "aborted", "interrupted")
+    _ended("s3", "aborted", "removed_from_queue")
+    assert turns.latest_turn_outcomes(["s1", "s2", "s3"]) == {"s2": "failed", "s3": "stopped"}
+
+
 def test_a_clean_finish_is_not_a_failure_and_one_with_an_error_is(mock_db):
     _ended("clean")
     _ended("errored", "completed", error="Provider returned status 529")

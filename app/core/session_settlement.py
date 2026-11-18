@@ -39,7 +39,9 @@ def _capture_and_dismiss(session_id, broker, expected_revision):
         family = [r["id"] for r in cur.fetchall()]
         locked = lock_session_runtimes(cur, [session_id, *family])
         row = locked[session_id]
-        if not row or row.get("is_active") or control.owner_of(dict(row)):
+        from app.core.session_snooze import runs_work
+        # A snoozed chat keeps its waits; only a plain settle dismisses them.
+        if not row or runs_work(dict(row)) or control.owner_of(dict(row)):
             return None
         revision = store.get_record(cur, "session_active", session_id)
         cur.execute("SELECT local_revision, local_revision_epoch, local_pending FROM network_session_active WHERE session_id=%s", (session_id,))
