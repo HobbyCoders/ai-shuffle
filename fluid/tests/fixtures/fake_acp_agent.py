@@ -17,7 +17,8 @@ The prompt text picks the behaviour:
   fails with no text and the turn ends with no message at all. ``agyquiet``
   ends it at once, with no failed calls; ``agyid`` asks by the call's id
   alone, as the ACP protocol's example does; ``agyalways`` offers only
-  "Always allow" and, unless chosen, ends it at once.
+  "Always allow" and, unless chosen, ends it at once (``agycancelled``: with
+  stopReason cancelled); ``agyhold``, rejected, waits for session/cancel.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
@@ -312,7 +313,7 @@ class Agent:
                                     "content": {"type": "text", "text": result}}]})
             await self.say(sid, "mcp said: " + result)
             return {"stopReason": "end_turn"}
-        if word in ("agymcp", "agyquiet", "agyid", "agyalways"):
+        if word in ("agymcp", "agyquiet", "agyid", "agyalways", "agycancelled", "agyhold"):
             _, name, args = text.split(" ", 2)
             call = {"toolCallId": "agy-1", "title": f"Run mcp_fluid_bundled_{name}", "kind": "other",
                     "status": "pending", "rawInput": json.loads(args)}
@@ -324,7 +325,7 @@ class Agent:
             offered = [{"optionId": "allow", "name": "Allow", "kind": "allow_once"},
                        {"optionId": "always", "name": "Always allow", "kind": "allow_always"},
                        {"optionId": "deny", "name": "Deny", "kind": "reject_once"}]
-            if word == "agyalways":
+            if word in ("agyalways", "agycancelled"):
                 offered = offered[1:2]
             reply = await self.call("session/request_permission",
                                     {"sessionId": sid, "toolCall": asked, "options": offered})
@@ -335,7 +336,10 @@ class Agent:
                 for tool_id in ("agy-1", "agy-2") if word == "agymcp" else ():
                     await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": tool_id,
                                             "status": "failed"})
-                return {"stopReason": "end_turn"}
+                if word == "agyhold":
+                    assert self.turn is not None
+                    await asyncio.wait_for(self.turn["cancel"].wait(), timeout=10)
+                return {"stopReason": "cancelled" if word in ("agycancelled", "agyhold") else "end_turn"}
             result = await self.call_mcp(sid, name, json.loads(args))
             await self.update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "agy-1",
                                     "status": "completed", "content": [{"type": "content",

@@ -111,7 +111,6 @@ class _ToolState:
     started: bool = False
     finished: bool = False
     content: list[Any] = field(default_factory=list)
-    call: dict[str, Any] = field(default_factory=dict)
 
 
 class TurnMapper:
@@ -189,15 +188,6 @@ class TurnMapper:
 
     # ─── tools ──────────────────────────────────────────────────────────
 
-    def identify(self, update: Mapping[str, Any]) -> tuple[dict[str, Any], str, dict[str, Any], bool]:
-        """The call ``update`` names, as one identity: its fields over those
-        of the call already known by its id (a permission request may carry
-        only the id). Returns the merged call, the name, the input, and
-        whether only agy's title form named it."""
-        state = self.tools.get(str(update.get("toolCallId") or ""))
-        call = {**(state.call if state else {}), **{k: v for k, v in update.items() if v is not None}}
-        return (call, *self.tool_name_and_input(call))
-
     def tool_name_and_input(self, call: Mapping[str, Any]) -> tuple[str, dict[str, Any], bool]:
         raw = call.get("rawInput")
         data: dict[str, Any] = dict(raw) if isinstance(raw, Mapping) else (
@@ -237,7 +227,7 @@ class TurnMapper:
         out = self.close_block()
         if state is None:
             name, data, _ = self.tool_name_and_input(call)
-            state = _ToolState(tool_use_id=tool_id, name=name, input=data, call=dict(call))
+            state = _ToolState(tool_use_id=tool_id, name=name, input=data)
             self.tools[tool_id] = state
         if not state.started:
             state.started = True

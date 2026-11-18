@@ -622,10 +622,14 @@ class AcpLoop:
         came only from agy's title form (``_agy_titled``); None for others.
 
         Every name the engine gives an ACP call comes from here (through
-        ``TurnMapper.identify``): the transcript card, the permission card,
-        the host's policy and saved rules, and the proxy checks, so they all
-        agree.
+        ``TurnMapper.tool_name_and_input``): the transcript card, the
+        permission card, the host's policy and saved rules, and the proxy
+        checks, so they all agree. A call of one of the agent's own kinds is
+        that tool, whatever its title says (a shell command's title can start
+        with a bridged tool's name).
         """
+        if str(call.get("kind") or "other") in KIND_TOOL_NAMES:
+            return None
         title = str(call.get("title") or "")
         meta = call.get("_meta") if isinstance(call.get("_meta"), Mapping) else {}
         candidates = [str(meta.get(k)) for k in ("toolName", "tool_name", "mcpTool") if meta.get(k)]
@@ -648,16 +652,13 @@ class AcpLoop:
         """A bridged call agy 1.5.9 named only by its title (issue #1751).
 
         The whole title must be one verb and the tool's server-prefixed name,
-        "Run mcp_fluid_bundled_Glob", and the kind none of the agent's own
-        tools (a shell call's title can name a bridged tool too). Never a
-        proxy: CallTool unwraps to another tool and LoadTools skips the
-        checks, which a title alone does not earn. Nor is the agent ever told
-        to remember it (``_permission``).
+        "Run mcp_fluid_bundled_Glob" (``_bridged_name`` has already set aside
+        the agent's own kinds). Never a proxy: CallTool unwraps to another
+        tool and LoadTools skips the checks, which a title alone does not
+        earn. Nor is the agent ever told to remember it (``_permission``).
         """
         from fluid.tools.mcp.call_through import CALL_TOOL, LOAD_TOOL
 
-        if str(call.get("kind") or "other") in KIND_TOOL_NAMES:
-            return None
         verb, _, rest = str(call.get("title") or "").partition(" ")
         tool = rest.removeprefix(f"mcp_{BUNDLED_SERVER_NAME}_")
         if verb.isalpha() and tool != rest and tool in served and tool not in (LOAD_TOOL, CALL_TOOL):
@@ -1035,7 +1036,11 @@ class AcpLoop:
             await self._emit(self._failure_event(sid, turn_id, failure, usage=usage, cost_usd=cost))
             return
         stop = str((result or {}).get("stopReason") or "end_turn") if isinstance(result, Mapping) else "end_turn"
-        if stop == "cancelled" or (self._interrupted.is_set() and stop != "end_turn"):
+        # An agent's own "cancelled" after a request it got no allow for,
+        # with no reply, is that failure; _silent_end is None once the host
+        # interrupted, so a host interrupt stays an interruption.
+        if (stop == "cancelled" and not self._silent_end(mapper)) or (
+                self._interrupted.is_set() and stop != "end_turn"):
             await self._emit(Interrupted(session_id=sid, node_id=parent.node_id, turn_id=turn_id,
                                          usage=usage, cost_usd=cost))
             return
@@ -1215,11 +1220,11 @@ class AcpLoop:
             # shows what is being asked about.
             for event in mapper.map_update({"sessionUpdate": "tool_call", **call}):
                 await self._emit(event)
-        # The request may carry only the call's id, or add to what the
-        # tool_call said: one identity for the card, the policy and a refusal.
-        call, name, data, titled = (mapper or TurnMapper(
+        # Judged by the request's own payload alone: a request carrying only
+        # an id names an unknown tool, never the call announced before it.
+        name, data, titled = (mapper or TurnMapper(
             session_id="", turn_id="", bridged_name=self._bridged_name, unwrap_bridged=self._unwrap_bridged,
-        )).identify(call)
+        )).tool_name_and_input(call)
         # Allowed once only, even when the owner chose "always": for CallTool,
         # the agent would remember CallTool itself and stop asking for every
         # tool behind it; for a name read off a title, the agent picks what
