@@ -69,4 +69,25 @@ describe('automation generation picker',() => {
   await new Promise(r => setTimeout(r,20));
   expect((screen.getByRole('button',{name:/Pin to this job|Checking price/}) as HTMLButtonElement).disabled).toBe(true);
  });
+ it('lets only the newest quote for the same options settle them (edit X, Y, back to X)',async () => {
+  const held: Record<string, ((v: unknown) => void)[]> = {};
+  mocks.quote.mockImplementation((_k: string, choice: {options: Record<string, unknown>}) =>
+   new Promise((resolve) => (held[String(choice.options.shape)] ??= []).push(resolve)));
+  render(AutomationGenerationPicker,{kind:'image',options:[option],onpick:vi.fn(async () => {})});
+  const pin = () => document.querySelector('.picker-actions button') as HTMLButtonElement;
+  await fireEvent.click(screen.getByRole('button',{name:'Advanced'}));
+  const shape = screen.getByRole('combobox',{name:'Shape'});
+  await fireEvent.change(shape,{target:{value:'wide'}});
+  await waitFor(() => expect(held.wide?.length).toBe(1));
+  await fireEvent.change(shape,{target:{value:'square'}});
+  await fireEvent.change(shape,{target:{value:'wide'}});
+  await waitFor(() => expect(held.wide?.length).toBe(2));
+  held.wide[0]({ok:true,price:option.price});
+  await new Promise((r) => setTimeout(r, 20));
+  expect(pin().disabled).toBe(true);
+  expect(pin().textContent).toBe('Checking price…');
+  held.wide[1]({ok:false,error:'Not this shape.'});
+  await waitFor(() => expect(screen.getByText(/Not this shape\./)).toBeTruthy());
+  expect(pin().disabled).toBe(true);
+ });
 });

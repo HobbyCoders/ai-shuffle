@@ -15,7 +15,7 @@
 	 * collapsing never hides it. Saving never submits, re-quotes or approves.
 	 */
 	import '../deck/cards/card-design-system.css';
-	import { getContext, onMount, untrack } from 'svelte';
+	import { getContext, onDestroy, onMount, untrack } from 'svelte';
 	import { derived, get } from 'svelte/store';
 	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
@@ -26,6 +26,7 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import {
 		KIND_LABEL,
+		LatestRequests,
 		choiceOf,
 		formatValue,
 		modelIdentity,
@@ -99,6 +100,13 @@
 	onMount(() => {
 		void generationChoices.load();
 	});
+	// After unmount no answer (detail, quote, save) may write card state.
+	let destroyed = false;
+	onDestroy(() => {
+		destroyed = true;
+		requests.reset();
+		cancelQuote();
+	});
 
 	const KIND_ICON = { image: ImageIcon, video: Film, audio: AudioLines, '3d': Box } as const;
 	const QUOTE_DEBOUNCE_MS = 350;
@@ -135,6 +143,9 @@
 	let quoted = $state<Record<string, Quoted>>({});
 	// Keys whose quote is waiting for the debounce or on its way.
 	let asking = $state<Record<string, true>>({});
+	// Only the newest request for a key settles it (an older one for the same
+	// key, e.g. edit X, Y, back to X, is ignored when it lands).
+	const requests = new LatestRequests();
 	// The last price quoted for each model, shown (marked busy) while it re-quotes.
 	let shown = $state<Record<string, GenerationPrice>>({});
 	let advancedOpen = $state(false);
@@ -338,15 +349,28 @@
 		return { price: done.error ? stale : done.price, error: done.error, pending: !!asking[key] };
 	}
 
+	function unask(key: string) {
+		const { [key]: _drop, ...rest } = asking;
+		void _drop;
+		asking = rest;
+	}
+
+	/** Drop the quote still waiting on its debounce (one on its way still lands, if it is the newest for its key). */
 	function cancelQuote() {
 		if (quoteTimer) clearTimeout(quoteTimer);
 		quoteTimer = null;
 		if (timerKey) {
-			const { [timerKey]: _drop, ...rest } = asking;
-			void _drop;
-			asking = rest;
+			requests.drop(timerKey);
+			unask(timerKey);
 		}
 		timerKey = null;
+	}
+
+	/** Void every outstanding quote (a save starts): none of them may settle anything. */
+	function voidQuotes() {
+		cancelQuote();
+		requests.reset();
+		asking = {};
 	}
 
 	function scheduleQuote(index = selected, delay = QUOTE_DEBOUNCE_MS) {
@@ -355,6 +379,7 @@
 		const chosen = { ...values[index] };
 		const key = keyOf(option, chosen);
 		cancelQuote();
+		const token = requests.begin(key);
 		asking = { ...asking, [key]: true };
 		timerKey = key;
 		quoteTimer = setTimeout(async () => {
@@ -369,14 +394,14 @@
 			} catch (e) {
 				result = { price: null, error: getErrorMessage(e, 'Could not update the price.') };
 			}
+			// A newer request for this key, a save, or unmount voids this answer.
+			if (destroyed || !requests.settle(key, token)) return;
 			quoted = { ...quoted, [key]: result };
 			if (result.price) {
 				shown = { ...shown, [identityOf(option)]: result.price };
 				if (key === keyOf(list[selected], values[selected])) tick++;
 			}
-			const { [key]: _drop, ...rest } = asking;
-			void _drop;
-			asking = rest;
+			unask(key);
 		}, delay);
 	}
 
@@ -388,16 +413,18 @@
 		quoted = rest;
 	}
 
-	// Whatever is selected and not yet priced as it stands is quoted once, at
-	// once: a browsed model with this prompt (its list price was for default
-	// options), or a model whose edits were never quoted. A failed quote stays
-	// until the options change or "Try again".
+	// Whatever is selected and not yet priced as it stands is quoted once,
+	// after the same short debounce as option edits: a browsed model with this
+	// prompt (its list price was for default options), or a model whose edits
+	// were never quoted. Moving on before it fires cancels it, so stepping
+	// through models sends no burst of quotes. A failed quote stays until the
+	// options change or "Try again".
 	$effect(() => {
 		const option = current;
 		if (!option?.available || collapsed || saving) return;
 		const state = quoteAt(selected);
 		const key = keyOf(option, values[selected]);
-		if (state.pending && !asking[key]) untrack(() => scheduleQuote(selected, 0));
+		if (state.pending && !asking[key]) untrack(() => scheduleQuote(selected));
 	});
 
 	function select(index: number) {
@@ -424,17 +451,26 @@
 		try {
 			option = await generationChoices.optionFor(kind, row, operation);
 		} catch (e) {
-			if (mine === browseSeq) browseError = getErrorMessage(e, 'Could not load this model.');
+			if (mine === browseSeq && !destroyed) browseError = getErrorMessage(e, 'Could not load this model.');
 			return;
 		} finally {
 			if (mine === browseSeq) browseLoading = '';
 		}
-		if (mine !== browseSeq || settled) return;
+		if (destroyed || mine !== browseSeq || settled || saving) return;
 		const slot = options.length;
 		browsed = option;
 		values = [...values.slice(0, slot), { ...option.options }];
 		select(slot);
 		advancedOpen = true;
+	}
+
+	/** Closing the browser drops a model detail still loading from it. */
+	function toggleBrowser() {
+		browsing = !browsing;
+		if (!browsing) {
+			browseSeq++;
+			browseLoading = '';
+		}
 	}
 
 	function onRadioKey(event: KeyboardEvent, index: number) {
@@ -467,6 +503,7 @@
 		if (!canUse || !current || (variant === 'chat' && !canAct(sourceSessionId))) return;
 		saving = true;
 		saveError = null;
+		voidQuotes();
 		const index = selected;
 		const option = list[index];
 		const chosen = values[index];
@@ -481,7 +518,7 @@
 				handoff && onpick
 					? await onpick(choiceOf(option, chosen))
 					: await generationChoices.save(kind, choiceOf(option, chosen), keep, variant === 'settings' ? 'settings' : 'card');
-			if (variant === 'chat' && !canAct(sourceSessionId)) return;
+			if (destroyed || (variant === 'chat' && !canAct(sourceSessionId))) return;
 			// The server remembers a pick only once its own quote priced it.
 			const kept = keep && !(result && 'remembered' in result && result.remembered === false);
 			// Shown before the chat reply goes out, so a failed send still says what was saved.
@@ -497,7 +534,7 @@
 			reopened = !!view?.warning;
 			onsaved?.(option);
 		} catch (e) {
-			saveError = getErrorMessage(e, 'Could not use this choice.');
+			if (!destroyed) saveError = getErrorMessage(e, 'Could not use this choice.');
 		} finally {
 			turn?.cancel();
 			saving = false;
@@ -647,7 +684,7 @@
 				aria-expanded={browsing}
 				aria-controls="{uid}-browse"
 				disabled={settled}
-				onclick={() => (browsing = !browsing)}
+				onclick={toggleBrowser}
 			>
 				<ChevronDown class="gcc-chev" aria-hidden="true" />
 				All models

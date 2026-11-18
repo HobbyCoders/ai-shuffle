@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+	LatestRequests,
+	optionsKey as canonicalOptionsKey,
 	chooseResult,
 	generationToolKind,
 	isGenerationChoiceRow,
@@ -215,5 +217,31 @@ describe('model picker helpers', () => {
 		expect(chooseResult({ ...base, toolResult: result({ operation: 'text-to-video' }) })?.operation).toBe('text-to-video');
 		expect(chooseResult({ ...base, toolResult: result({ operation: '<script>' }) })?.operation).toBeUndefined();
 		expect(chooseResult({ ...base, toolResult: result({}) })?.operation).toBeUndefined();
+	});
+});
+
+
+describe('optionsKey and LatestRequests', () => {
+	it('keys options as canonical wire JSON: sorted at every depth, undefined dropped', () => {
+		const a = canonicalOptionsKey({ b: 1, a: { y: [1, { d: 2, c: 3 }], x: undefined } });
+		expect(a).toBe('{"a":{"y":[1,{"c":3,"d":2}]},"b":1}');
+		expect(canonicalOptionsKey({ a: { y: [1, { c: 3, d: 2 }] }, b: 1 })).toBe(a);
+		expect(a).toBe(JSON.stringify({ a: { y: [1, { c: 3, d: 2 }] }, b: 1 }));
+	});
+
+	it('settles a key only for its newest request, once, and voids all on reset', () => {
+		const r = new LatestRequests();
+		const first = r.begin('x');
+		const second = r.begin('x');
+		expect(r.settle('x', first)).toBe(false);
+		expect(r.pending('x')).toBe(true);
+		expect(r.settle('x', second)).toBe(true);
+		expect(r.settle('x', second)).toBe(false);
+		const third = r.begin('y');
+		r.reset();
+		expect(r.settle('y', third)).toBe(false);
+		const fourth = r.begin('z');
+		r.drop('z');
+		expect(r.settle('z', fourth)).toBe(false);
 	});
 });

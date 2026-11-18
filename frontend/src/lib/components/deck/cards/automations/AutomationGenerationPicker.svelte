@@ -5,7 +5,7 @@
  import { workerInstalls } from '$lib/stores/worker-presence';
  import { getErrorMessage } from '$lib/api/client';
  import { getProviders, getModelLabel, decodeProviderModel } from '$lib/constants/models';
- import { choiceOf, formatValue, modelIdentity, modelLabel, optionsKey, priceView, quoteKey, saveOutcome, sourceLabel,
+ import { LatestRequests, choiceOf, formatValue, modelIdentity, modelLabel, optionsKey, priceView, quoteKey, saveOutcome, sourceLabel,
   type GenerationChoice, type GenerationKind, type GenerationOption, type GenerationPrice,
   type ModelRow, type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
  import { SettingRow, SelectField, Switch, InlineBanner } from '$lib/components/layout/view';
@@ -31,6 +31,8 @@
  let quoteTimer: ReturnType<typeof setTimeout> | null = null;
  let timerKey: string | null = null;
  let destroyed = false;
+ // Only the newest request for a key settles it, as on the chat card.
+ const requests = new LatestRequests();
  const prompt = '';
  // A model picked from the shared browser joins the options as one extra slot.
  let browsed = $state<GenerationOption | null>(null);
@@ -199,6 +201,7 @@
 	function cancelQuote() {
 		if (quoteTimer) clearTimeout(quoteTimer);
 		quoteTimer = null;
+		if (timerKey) requests.drop(timerKey);
 		unask(timerKey);
 		timerKey = null;
 	}
@@ -209,6 +212,7 @@
 		const chosen = { ...values[index] };
 		const key = quoteKey(option, chosen);
 		cancelQuote();
+		const token = requests.begin(key);
 		asking = { ...asking, [key]: true };
 		timerKey = key;
 		quoteTimer = setTimeout(async () => {
@@ -221,7 +225,7 @@
 			} catch (e) {
 				result = { price: null, error: getErrorMessage(e, 'Could not update the price.') };
 			}
-			if (destroyed) return;
+			if (destroyed || !requests.settle(key, token)) return;
 			quoted = { ...quoted, [key]: result };
 			if (result.price) {
 				shown = { ...shown, [modelIdentity(option)]: result.price };
@@ -238,15 +242,16 @@
 		quoted = rest;
 	}
 
-	// The selection is quoted once as it stands (a browsed model, unquoted edits).
+	// The selection is quoted once as it stands (a browsed model, unquoted
+	// edits), after the edit debounce, so stepping through models sends no burst.
 	$effect(() => {
 		const option = current;
 		if (!option?.available || saving) return;
 		const state = quoteAt(selected);
-		if (state.pending && !asking[quoteKey(option, values[selected])]) untrack(() => scheduleQuote(selected, 0));
+		if (state.pending && !asking[quoteKey(option, values[selected])]) untrack(() => scheduleQuote(selected));
 	});
 
- onDestroy(() => { destroyed = true; if (quoteTimer) clearTimeout(quoteTimer); });
+ onDestroy(() => { destroyed = true; requests.reset(); if (quoteTimer) clearTimeout(quoteTimer); });
  const canUse = $derived(!!current?.available && currentPrice.priced && !quoting && !quoteError && !saving);
  let browseSeq = 0;
  async function pickBrowsed(row: ModelRow) {
@@ -267,9 +272,11 @@
  }
  async function use() {
   if (!canUse || !current) return;
+  // A save voids every quote still out: none may settle state after it starts.
+  cancelQuote(); requests.reset(); asking = {};
   saving = true; saveError = null; outcome = null;
-  try { const result = await onpick(choiceOf(current,values[selected])); outcome = saveOutcome(result || null,kind); }
-  catch (error) { saveError = getErrorMessage(error,'Could not use this choice.'); }
+  try { const result = await onpick(choiceOf(current,values[selected])); if (!destroyed) outcome = saveOutcome(result || null,kind); }
+  catch (error) { if (!destroyed) saveError = getErrorMessage(error,'Could not use this choice.'); }
   finally { saving = false; }
  }
 </script>
@@ -281,7 +288,7 @@
     onchange={(value) => {browseSeq++;browseLoading=false;selected=Number(value);saveError=null;}} />
   {/snippet}
  </SettingRow>
- <button class="st-btn" aria-expanded={browseOpen} onclick={() => browseOpen = !browseOpen}>All models</button>
+ <button class="st-btn" aria-expanded={browseOpen} onclick={() => { browseOpen = !browseOpen; if (!browseOpen) { browseSeq++; browseLoading = false; } }}>All models</button>
  {#if browseOpen}
   <div class="picker-browse">
    <GenerationModelBrowser {kind} selectedModel={current?.model} preferAccount={current?.account} onpick={pickBrowsed} />

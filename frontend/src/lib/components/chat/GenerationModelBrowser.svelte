@@ -16,6 +16,7 @@
 		modelRowTitle,
 		priceView,
 		providerKey,
+		providerTitle,
 		sourceLabel,
 		workerLabel,
 		type GenerationKind,
@@ -53,8 +54,8 @@
 	// The provider and search the shown rows belong to. Rows and "Show more"
 	// act only while that matches what is asked and no page is on its way.
 	let shownFor = $state('');
-	// The worker that served the first fal page; later pages come from it.
-	let pageWorker: string | null = null;
+	// The picked worker stopped answering: rows stay, a reload is offered.
+	let offline = $state(false);
 	let seq = 0;
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 	const ready = $derived(!loading && shownFor === `${active}\n${query}`);
@@ -65,7 +66,7 @@
 
 	function providerName(p: GenerationProvider): string {
 		const name = sourceLabel(p.source);
-		if (p.source === 'fal') return name;
+		if (p.source === 'fal') return providerTitle(p, providers ?? []);
 		const remote = p.workers.find((w) => w && w !== here && w !== 'local');
 		return remote ? `${name} · ${workerLabel(remote, $workerInstalls, here)}` : name;
 	}
@@ -77,7 +78,10 @@
 			providers = data.providers ?? [];
 			operationLabel = data.operation_label ?? '';
 			const usable = providers.filter((p) => p.available);
-			const preferred = usable.find((p) => p.account === preferAccount || (p.source === 'fal' && preferAccount === 'fal-ai'));
+			// fal on this worker first, then any fal row or the named account.
+			const preferred =
+				usable.find((p) => p.source === 'fal' && preferAccount === 'fal-ai' && p.worker === here) ??
+				usable.find((p) => p.account === preferAccount);
 			const first = preferred ?? usable[0];
 			if (first) choose(providerKey(first));
 		} catch (e) {
@@ -101,7 +105,7 @@
 		hasMore = false;
 		shownFor = '';
 		notice = '';
-		pageWorker = null;
+		offline = false;
 		void loadPage(0);
 	}
 
@@ -110,22 +114,27 @@
 		const key = `${active}\n${query}`;
 		// "Show more" pages only the list on screen, never a newer search.
 		if (offset && shownFor !== key) return;
+		const provider = current;
+		if (!provider) return;
 		const mine = ++seq;
 		loading = true;
 		listError = '';
 		try {
+			// A fal row browses exactly its worker; there is no fallback to another.
 			const page = await generationChoices.models(kind, {
-				source: active, operation, query, offset, limit: PAGE, worker: offset ? pageWorker : null
+				source: provider.source === 'fal' ? 'fal' : provider.account, operation, query, offset, limit: PAGE,
+				worker: provider.source === 'fal' ? provider.worker ?? null : null
 			});
 			if (mine !== seq) return;
+			notice = page.notice ?? '';
+			offline = page.available === false;
+			shownFor = key;
+			// The worker stopped answering after rows were shown: keep them and
+			// their count, offer a reload.
+			if (offline && rows.length) return;
 			rows = offset ? [...rows, ...page.models] : page.models;
 			total = page.total;
 			hasMore = page.has_more;
-			if (!offset) {
-				pageWorker = page.worker ?? null;
-				notice = page.notice ?? '';
-			}
-			shownFor = key;
 		} catch (e) {
 			if (mine === seq) listError = getErrorMessage(e, 'Could not list the models.');
 		} finally {
@@ -212,14 +221,21 @@
 				/>
 			</label>
 		{/if}
-		{#if notice}<p class="gmb-msg" role="note">{notice}</p>{/if}
+		{#if notice}
+			<p class="gmb-msg gmb-notice" role="note">
+				<span>{notice}</span>
+				{#if offline}
+					<button type="button" class="gmb-more" disabled={loading} onclick={() => loadPage(0)}>Reload</button>
+				{/if}
+			</p>
+		{/if}
 		{#if listError}
 			<p class="gmb-msg" role="alert">{listError}</p>
 		{:else if !rows.length && loading}
 			<div class="gmb-skeleton" aria-busy="true" aria-label="Loading models"><span></span><span></span></div>
-		{:else if !rows.length}
+		{:else if !rows.length && !offline}
 			<p class="gmb-msg">{query ? `No model matches “${query}”.` : 'This provider has no models for this.'}</p>
-		{:else}
+		{:else if rows.length}
 			<ul class="gmb-list" aria-label="Models" aria-busy={loading}>
 				{#each rows as row (row.worker + row.account + row.model)}
 					{@const view = priceView(row.price, kind)}
@@ -252,8 +268,8 @@
 				{/each}
 			</ul>
 			<div class="gmb-foot">
-				<span class="gmb-shown">{rows.length} of {total}</span>
-				{#if hasMore}
+				<span class="gmb-shown">{rows.length} of {Math.max(total, rows.length)}</span>
+				{#if hasMore && !offline}
 					<button type="button" class="gmb-more" disabled={!ready} onclick={() => loadPage(rows.length)}>
 						{loading ? 'Loading' : 'Show more'}
 					</button>
@@ -273,6 +289,12 @@
 		margin: 0;
 		font-size: 0.75rem;
 		color: var(--muted-foreground);
+	}
+	.gmb-notice {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 0.375rem 0.5rem;
 	}
 	.gmb-providers {
 		display: flex;

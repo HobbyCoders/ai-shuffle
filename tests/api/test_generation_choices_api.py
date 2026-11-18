@@ -99,9 +99,14 @@ def test_catalog_forwards_filters_and_collects_every_kind(
     monkeypatch.setattr(generation_sources, "Sources", lambda *a, **kw: Backend([]))
     data = client.get("/api/v1/generation/catalog?source=openai&model=m&query=cat&limit=3").json()
     assert data["kinds"] == ["image", "video", "audio", "3d"]
+    # A named model is a detail lookup priced fresh next: no listing price read.
     assert calls == [
-        (k, {"source": "openai", "model": "m", "query": "cat", "limit": 3}) for k in data["kinds"]
+        (k, {"source": "openai", "model": "m", "query": "cat", "limit": 3, "listing_prices": False})
+        for k in data["kinds"]
     ]
+    calls.clear()
+    client.get("/api/v1/generation/catalog?kind=image&query=cat&limit=3")
+    assert calls == [("image", {"source": None, "model": None, "query": "cat", "limit": 3})]
 
 
 def test_job_writer_binds_real_session_to_unattended_tool(

@@ -117,6 +117,9 @@ export interface GenerationProvider {
 	model?: string;
 	/** fal: how many models fit the operation. */
 	model_count?: number;
+	/** fal: the one worker whose catalog this row browses (one row per keyed worker). */
+	worker?: string | null;
+	worker_name?: string | null;
 }
 
 export interface ProvidersResponse {
@@ -140,15 +143,24 @@ export interface ModelPage {
 	offset: number;
 	limit: number;
 	has_more: boolean;
-	/** The worker that served this fal page; pass it back for the next page. */
+	/** The worker that served this fal page (the one asked for). */
 	worker?: string | null;
-	/** Workers that need an update before their fal models can be browsed here. */
+	/** Why that worker cannot answer now (offline, needs an update). */
 	notice?: string | null;
+	/** False when the worker could not answer: keep what is shown, offer a reload. */
+	available?: boolean;
 }
 
-/** The account a provider row filters `/models` by: fal, or one subscription account. */
-export function providerKey(provider: Pick<GenerationProvider, 'source' | 'account'>): string {
-	return provider.source === 'fal' ? 'fal' : provider.account;
+/** One provider row: a subscription account, or fal on one worker. */
+export function providerKey(provider: Pick<GenerationProvider, 'source' | 'account' | 'worker'>): string {
+	return provider.source === 'fal' ? `fal:${provider.worker ?? ''}` : provider.account;
+}
+
+/** A fal row names its worker only when more than one worker lists fal. */
+export function providerTitle(provider: GenerationProvider, all: readonly GenerationProvider[]): string {
+	const base = sourceLabel(provider.source);
+	if (provider.source !== 'fal' || !provider.worker_name) return base;
+	return all.filter((p) => p.source === 'fal').length > 1 ? `${base} · ${provider.worker_name}` : base;
 }
 
 /** A model row's title: fal's display name, else the readable model id. */
@@ -489,10 +501,60 @@ export function choiceOf(option: GenerationOption, options: Record<string, unkno
 	return { source: option.source, account: option.account, worker: option.worker, model: option.model, options };
 }
 
-/** Options in a stable order, so the same options always give the same key. */
+function canonical(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonical);
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const k of Object.keys(value).sort()) {
+			const v = (value as Record<string, unknown>)[k];
+			if (v !== undefined) out[k] = canonical(v);
+		}
+		return out;
+	}
+	return value;
+}
+
+/** The options as JSON exactly as sent on the wire, keys sorted at every depth. */
 export function optionsKey(options: Record<string, unknown> | undefined): string {
-	const v = options ?? {};
-	return JSON.stringify(Object.keys(v).sort().map((k) => [k, v[k]]));
+	return JSON.stringify(canonical(options ?? {}));
+}
+
+/**
+ * Per-key request tokens, shared by the chat card and the automation picker:
+ * only the latest request for a key may settle it, so an older answer for the
+ * same key (edit X, Y, back to X) never ends the wait for the newer one.
+ * `reset()` voids every outstanding request (close, save, destroy).
+ */
+export class LatestRequests {
+	private latest = new Map<string, number>();
+	private next = 0;
+
+	/** Start a request for `key`; pass the token to `settle`. */
+	begin(key: string): number {
+		const token = ++this.next;
+		this.latest.set(key, token);
+		return token;
+	}
+
+	/** True once, for the newest request of `key`; false for any stale answer. */
+	settle(key: string, token: number): boolean {
+		if (this.latest.get(key) !== token) return false;
+		this.latest.delete(key);
+		return true;
+	}
+
+	pending(key: string): boolean {
+		return this.latest.has(key);
+	}
+
+	/** Forget `key`'s outstanding request: its answer will be ignored. */
+	drop(key: string): void {
+		this.latest.delete(key);
+	}
+
+	reset(): void {
+		this.latest.clear();
+	}
 }
 
 /** Which model a quote is for: source, account, holding worker, model and operation. */

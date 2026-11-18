@@ -93,10 +93,11 @@ async def fal_pages(kind, *, operation, query=None, offset=0, limit=20, worker=N
     """Ask online peers (or only ``worker``) in parallel for one page of fal models.
 
     Returns ``(served, stale)``. ``served`` holds ``(candidates, total,
-    details, worker)`` from each peer that serves fal for ``kind``; its total
-    may be 0 (nothing matches there). A peer without fal is left out, so it
-    never hides one that has it. ``stale`` names peers whose older code lists
-    fal but cannot page or filter by operation: they need an update.
+    details, worker, name)`` from each peer that serves fal for ``kind``; its
+    total may be 0 (nothing matches there). A peer without fal is left out.
+    ``stale`` holds ``(worker, name)`` for peers whose older code lists fal but
+    cannot page or filter by operation (or echoes another operation): they
+    need an update before their fal models can be browsed.
     """
     peers = [p for p in await run_sync(runners.other_workers)
              if p.get("online") and (worker is None or p.get("device_id") == worker)]
@@ -122,33 +123,38 @@ async def fal_pages(kind, *, operation, query=None, offset=0, limit=20, worker=N
         if any(c.source != "fal" or c.kind != kind or c.worker != device for c in found):
             return None
         details = page.get("details") if isinstance(page.get("details"), dict) else {}
-        return found, page["total"], details, device
+        return found, page["total"], details, device, peer.get("device_name") or device
 
     served, stale = [], []
     for peer, answer in zip(peers, await asyncio.gather(*(one(p) for p in peers))):
         if answer == "stale":
-            stale.append(peer.get("device_name") or peer["device_id"])
+            stale.append((peer["device_id"], peer.get("device_name") or peer["device_id"]))
         elif answer is not None:
             served.append(answer)
     return served, stale
 
 
-async def catalog_page(kind, *, operation, query=None, offset=0, limit=20, worker=None):
-    """One page of fal models from one peer that serves fal for ``kind``.
+def stale_notice(name: str) -> str:
+    return f"Update {name} to browse its fal.ai models here."
 
-    ``worker`` pins the page to the worker that served the first one, so
-    "Show more" never mixes two catalogs. Unpinned, the first peer (by device
-    ID) with matches answers, else one with an empty page. Returns
-    ``(candidates, total, details, worker, notice)``; ``total`` None means no
-    peer serves fal, and ``notice`` says which workers need an update.
+
+async def catalog_page(kind, *, operation, worker, query=None, offset=0, limit=20):
+    """One page of fal models from peer ``worker``, the one the user picked.
+
+    There is no implicit winner between workers: the caller names the worker
+    (the provider list has one fal row per serving worker). Returns
+    ``(candidates, total, details, notice)``; ``total`` None means that worker
+    cannot answer now (offline, no fal, or older code) and ``notice`` says so.
     """
     served, stale = await fal_pages(kind, operation=operation, query=query, offset=offset, limit=limit, worker=worker)
-    notice = (f"Update {', '.join(stale)} to browse {'its' if len(stale) == 1 else 'their'} fal.ai models here."
-              if stale else None)
-    if not served:
-        return [], None, {}, None, notice
-    found, total, details, device = min(served, key=lambda s: (s[1] == 0, s[3]))
-    return found, total, details, device, notice
+    if served:
+        found, total, details, _, _ = served[0]
+        return found, total, details, None
+    if stale:
+        return [], None, {}, stale_notice(stale[0][1])
+    peer = await run_sync(runners.find, worker)
+    name = (peer or {}).get("device_name") or "That worker"
+    return [], None, {}, f"{name} is not serving fal.ai models right now. Reload to try again."
 
 
 async def prepare(candidate, options, prompt, context):

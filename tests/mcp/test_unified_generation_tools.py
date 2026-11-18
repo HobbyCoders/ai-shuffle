@@ -230,18 +230,27 @@ async def test_chatgpt_choice_card_model_id_can_be_submitted_through_guard(
     legacy.assert_not_awaited()
 
 
-async def test_a_native_model_picked_from_all_models_reaches_the_resolver_exactly(monkeypatch):
-    # The card's reply for a SuperGrok model browsed under "All models"
+XAI_PRICE = {"currency": "USD", "unit": "image", "amount": "0.02", "total": "0.02", "status": "estimated"}
+
+
+@pytest.mark.parametrize("source,model,sibling,price", [
+    # A SuperGrok plan model (Included).
+    ("supergrok", "grok-imagine-image-pro", "grok-imagine-image", None),
+    # An xAI API account (priced per image), the case shown live in the devloop.
+    ("xai", "grok-imagine-image", "grok-imagine-image-pro", XAI_PRICE),
+])
+async def test_a_native_model_picked_from_all_models_reaches_the_resolver_exactly(monkeypatch, source, model, sibling, price):
+    # The card's reply for a native model browsed under "All models"
     # (GenerationChoiceCard.test.ts pins the same JSON): the guard runs that
     # account, worker and model with those options, not a neighbour.
     from app.core.generation_resolver import INCLUDED_PRICE
-    def native(account, model, worker):
-        return replace(candidate(source="supergrok", account=account, model=model),
-                       worker=worker, price=dict(INCLUDED_PRICE))
+    def native(account, name, worker):
+        return replace(candidate(source=source, account=account, model=name),
+                       worker=worker, price=dict(price or INCLUDED_PRICE))
     entries = [
-        native("grok-1", "grok-imagine-image", "worker-b"),
-        native("grok-1", "grok-imagine-image-pro", "worker-b"),
-        native("grok-2", "grok-imagine-image-pro", "worker-c"),
+        native("acct-1", sibling, "worker-b"),
+        native("acct-1", model, "worker-b"),
+        native("acct-2", model, "worker-c"),
         candidate(model="fal-ai/flux/dev"),
     ]
     tools, backend, legacy = lane_tools(monkeypatch, entries, INTERACTIVE)
@@ -253,11 +262,12 @@ async def test_a_native_model_picked_from_all_models_reaches_the_resolver_exactl
         return await prepare(c, options, prompt)
 
     backend.prepare = recording
-    reply = {"source": "grok-1", "model": "grok-imagine-image-pro", "worker": "worker-b", "options": {"size": "1k"}}
+    reply = {"source": "acct-1", "model": model, "worker": "worker-b", "options": {"size": "1k"}}
     output = payload(await tools["generateImage"].handler({"prompt": "a lighthouse at dusk", **reply}))
-    assert output["status"] == "completed"
-    assert seen == [("supergrok", "grok-1", "worker-b", "grok-imagine-image-pro", {"size": "1k"})]
-    assert output["choice"]["model"] == "grok-imagine-image-pro" and output["choice"]["worker"] == "worker-b"
+    assert output["status"] == "completed", output
+    assert seen == [(source, "acct-1", "worker-b", model, {"size": "1k"})]
+    assert output["choice"]["model"] == model and output["choice"]["worker"] == "worker-b"
+    assert output["choice"]["account"] == "acct-1"
     legacy.assert_not_awaited()
 
 

@@ -209,9 +209,11 @@ class GenerationChoices {
 			option = full;
 		}
 		if (!option.available) throw new Error(option.reason || 'This model is not available right now.');
+		// The detail lookup reads no listing price (the card quotes this call
+		// next); the row's listing figure is shown, marked busy, meanwhile.
 		return {
 			source: option.source, account: option.account, worker: option.worker, model: option.model, kind,
-			options: { ...(option.options ?? {}) }, verified: option.verified, price: option.price,
+			options: { ...(option.options ?? {}) }, verified: option.verified, price: row.source === 'fal' ? row.price : option.price,
 			quick_settings: option.quick_settings, schema: option.schema, available: true, reason: null
 		};
 	}

@@ -7,6 +7,7 @@ nothing is reserved or submitted here.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -181,55 +182,65 @@ def _status(entry: dict) -> str:
             "unpriced" if price_total(entry["price"]) is None else "available")
 
 
-async def _fal_provider(backend, kind: str, op) -> dict:
-    """fal's provider row from credential, operation and catalog presence on
-    each worker; never from one model's schema or price."""
-    counts: dict[str, int] = {}
+async def _fal_providers(backend, kind: str, op) -> list[dict]:
+    """fal's provider rows: one per worker that holds a fal key (each lists
+    its own catalog, so the user picks the worker), plus one unavailable row
+    per peer whose older code cannot be browsed. Availability comes from the
+    credential, the operation and catalog presence, never from one model's
+    schema or price. No keyed worker at all is one unavailable row."""
+    from app.network.generation import fal_pages, stale_notice
+
+    rows: list[dict] = []
+
+    def add(worker, name, count=None, reason=None):
+        row = {"source": "fal", "account": "fal-ai", "worker": worker, "worker_name": name, "workers": [worker],
+               "available": bool(count), "native": False, "reason": reason}
+        if count:
+            row["model_count"] = count
+        elif reason is None:
+            row["reason"] = f"fal.ai on {name} has no {op.label.lower()} models right now."
+        rows.append(row)
+
     if await backend.fal_serves(kind):
-        counts[backend.local_worker()] = len(await backend.fal_models(kind, operation=op.id))
-    stale: list[str] = []
+        add(backend.local_worker(), "This device", len(await backend.fal_models(kind, operation=op.id)))
     if backend.context.owner and not backend.local_only:
-        from app.network.generation import fal_pages
         served, stale = await fal_pages(kind, operation=op.id, limit=1)
-        for _, total, _, device in served:
-            counts.setdefault(device, total)
-    workers = [worker for worker, count in counts.items() if count]
-    row = {"source": "fal", "account": "fal-ai", "workers": workers, "available": bool(workers),
-           "native": False, "reason": None}
-    if workers:
-        row["model_count"] = max(counts.values())
-    elif counts:
-        row["reason"] = f"fal.ai has no {op.label.lower()} models right now."
-    elif stale:
-        row["reason"] = f"Update {', '.join(stale)} to use {'its' if len(stale) == 1 else 'their'} fal.ai models here."
-    else:
-        row["reason"] = "No fal.ai API key on any worker. Add one in Settings, Providers."
+        for _, total, _, device, name in sorted(served, key=lambda s: (s[4].lower(), s[3])):
+            add(device, name, total)
+        for device, name in stale:
+            add(device, name, reason=stale_notice(name))
+    if not rows:
+        rows = [{"source": "fal", "account": "fal-ai", "worker": None, "worker_name": None, "workers": [],
+                 "available": False, "native": False,
+                 "reason": "No fal.ai API key on any worker. Add one in Settings, Providers."}]
     if kind == "image":
         from app.core.provider import subscription_images as sub
         if await run_sync(sub.plan_images_configured):
             # generateImage refuses fal while images use the ChatGPT plan (#1796).
-            row.update(available=False, reason="Image generation is set to the ChatGPT plan, so fal.ai is not used for images.")
-            row.pop("model_count", None)
-    return row
+            for row in rows:
+                row.update(available=False, reason="Image generation is set to the ChatGPT plan, so fal.ai is not used for images.")
+                row.pop("model_count", None)
+    return rows
 
 
 @router.get("/providers/{kind}")
 async def list_providers(kind: str, request: Request, operation: Optional[str] = None,
                          token: str = Depends(require_auth)) -> dict:
     """The providers/accounts that can perform ``operation`` (default: the
-    kind's text operation), merged across workers, unavailable ones with
-    their reason. Pick one, then page its models with ``/models/{kind}``."""
+    kind's text operation), unavailable ones with their reason. fal has one
+    row per worker holding a key (``worker``, ``worker_name``). Pick one, then
+    page its models with ``/models/{kind}`` (pass a fal row's ``worker``)."""
     import asyncio
     from app.services.generation_sources import Sources
 
     op = _operation(kind, operation)
     backend = Sources(None, _context(request))
     entries, fal = await asyncio.gather(backend.catalog(kind, operation=op.id, limit=1, fal=False),
-                                        _fal_provider(backend, kind, op))
-    providers: dict[tuple, dict] = {("fal",): fal}
+                                        _fal_providers(backend, kind, op))
+    providers: dict[tuple, dict] = {}
     for entry in entries:
         if entry.source == "fal":
-            continue  # fal's row comes from _fal_provider
+            continue  # fal's rows come from _fal_providers
         key = (entry.source, entry.account)
         row = providers.setdefault(key, {
             "source": entry.source, "account": entry.account, "workers": [], "available": False, "reason": None,
@@ -241,8 +252,9 @@ async def list_providers(kind: str, request: Request, operation: Optional[str] =
             row["model"] = entry.model
         elif not row["available"] and not row["reason"]:
             row["reason"] = entry.reason
+    rows = fal + list(providers.values())
     return {"kind": kind, "operation": op.id, "operation_label": op.label,
-            "providers": sorted(providers.values(), key=lambda p: (not p["available"], p["source"] != "fal"))}
+            "providers": sorted(rows, key=lambda p: (not p["available"], p["source"] != "fal"))}
 
 
 @router.get("/models/{kind}")
@@ -253,8 +265,9 @@ async def list_models(kind: str, request: Request, source: str = "fal", operatio
 
     fal rows carry fal's rate and, once a model's schema is cached, a price;
     ``POST /quote`` prices the picked options. Nothing is submitted. fal pages
-    come from one worker, named in ``worker``: pass it back for the next page.
-    ``notice`` says which workers need an update before they can be browsed.
+    come from the one worker named in ``worker`` (a fal provider row's
+    ``worker``; omitted means this worker), never another. ``available`` false
+    with a ``notice`` means that worker cannot answer now.
     """
     from app.core.generation_resolver import normalize_source
     from app.services.generation_sources import Sources
@@ -265,20 +278,26 @@ async def list_models(kind: str, request: Request, source: str = "fal", operatio
     backend = Sources(None, _context(request))
     source = normalize_source(source) or "fal"
     details: dict = {}
-    served_by, notice = None, None
+    served_by, notice, available = None, None, True
     if source == "fal":
         here = backend.local_worker()
-        local = (await backend.fal_page(kind, operation=op.id, query=query, offset=offset, limit=limit)
-                 if worker in (None, here) else None)
-        if local is not None:
-            (entries, total, details), served_by = local, here
-        elif backend.context.owner and worker != here:
+        served_by = worker or here
+        if served_by == here:
+            local = await backend.fal_page(kind, operation=op.id, query=query, offset=offset, limit=limit)
+            if local is None:
+                entries, total, available = [], 0, False
+                notice = "This device has no fal.ai API key for this right now."
+            else:
+                entries, total, details = local
+        elif backend.context.owner and not backend.local_only:
             from app.network.generation import catalog_page
-            entries, total, details, served_by, notice = await catalog_page(
-                kind, operation=op.id, query=query, offset=offset, limit=limit, worker=worker)
-            total = total or 0
+            entries, total, details, notice = await catalog_page(
+                kind, operation=op.id, worker=served_by, query=query, offset=offset, limit=limit)
+            if total is None:
+                entries, total, available = [], 0, False
         else:
-            entries, total = [], 0
+            entries, total, available = [], 0, False
+            notice = "Only the owner can browse another worker's fal.ai models."
     else:
         found = await backend.catalog(kind, source=source, operation=op.id, limit=1)
         entries = [e for e in found if e.source != "fal" and (source in (e.source, e.account))]
@@ -292,7 +311,7 @@ async def list_models(kind: str, request: Request, source: str = "fal", operatio
         models.append({**view, **details.get(entry.model, {}), "status": _status(view)})
     return {"kind": kind, "operation": op.id, "source": source, "query": query, "models": models,
             "total": total, "offset": offset, "limit": limit, "has_more": offset + len(entries) < total,
-            "worker": served_by, "notice": notice}
+            "worker": served_by, "notice": notice, "available": available}
 
 
 @router.get("/catalog")
@@ -304,26 +323,36 @@ async def catalog(request: Request, kind: Optional[str] = None, source: Optional
 
     Limit is per kind/source, capped at 50; use query/model to narrow the fal
     catalog, and ``worker`` to ask only the worker that holds a browsed row.
-    Prices are live estimates for default options, not admission.
+    Prices are live estimates for default options, not admission. A named
+    ``model`` is a detail lookup the caller quotes next (``POST /quote``): it
+    reads no listing price, so it never waits on a listing rate read, and with
+    ``operation`` a fal model whose declared inputs do not fit that
+    operation's tool comes back unavailable with the reason.
     No generation is submitted. Favourites never imply consent to generate.
     """
     import asyncio
+    from app.core import generation_operations
     from app.core.generation_resolver import Resolver, price_total
     from app.services.generation_sources import Sources
 
     kinds = [_kind(kind)] if kind else list(generation_choices.KINDS)
     if operation is not None and not kind:
         raise HTTPException(422, "operation needs a kind.")
-    op = _operation(kinds[0], operation).id if operation else None
+    op = _operation(kinds[0], operation) if operation else None
     limit = max(1, min(limit, 50))
     resolver = Resolver(Sources(None, _context(request)))
     catalogs = await asyncio.gather(*(
-        resolver.catalog(k, source=source, model=model, query=query, limit=limit, operation=op, worker=worker or None)
+        resolver.catalog(k, source=source, model=model, query=query, limit=limit, operation=op and op.id,
+                         worker=worker or None, listing_prices=not model)
         for k in kinds
     ))
     entries = []
     for result in catalogs:
         for entry in result.get("options", []):
+            problem = (generation_operations.schema_problem(op, entry.get("schema"))
+                       if model and op and entry.get("source") == "fal" and entry["available"] else None)
+            if problem:
+                entry = {**entry, "available": False, "reason": problem}
             status = (
                 "unavailable" if not entry["available"] else
                 "unpriced" if price_total(entry["price"]) is None else "available"
@@ -372,6 +401,14 @@ async def job_choices(job_id: str, request: Request, token: str = Depends(requir
     return {"job_id": job_id, "choices": choices}
 
 
+def _same_pin(a: dict, b: dict) -> bool:
+    """The same account/worker/model/options pin (``origin`` is bookkeeping)."""
+    def key(choice):
+        return json.dumps({k: choice.get(k) for k in ("source", "account", "worker", "model", "options")},
+                          sort_keys=True, separators=(",", ":"))
+    return key(a) == key(b)
+
+
 @router.put("/jobs/{job_id}/choices/{kind}", dependencies=[Depends(require_admin)])
 async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Request,
                           token: str = Depends(require_preference_write)) -> dict:
@@ -385,6 +422,14 @@ async def save_job_choice(job_id: str, kind: str, body: ChoiceBody, request: Req
         raise HTTPException(422, "A job choice must pin its account, worker and model.")
     quoted = await _save_time_quote(kind, body, request, token)
     if not quoted["priced"]:
+        try:
+            stored = (await run_sync(lambda: generation_choices.load_job(_identity(request), job_id))).get(kind)
+        except ValueError:
+            stored = None
+        if stored is not None and _same_pin(stored, pinned):
+            # Saving the job again with the pick it already has is not a new
+            # pin: keep it and say why it will be skipped while unpriced.
+            return {"job_id": job_id, "kind": kind, "choice": stored, "unchanged": True, **quoted}
         why = (quoted["quote_error"] or "This choice is unavailable right now.") \
             if quoted["unattended_skip_reason"] == "stored_choice_unavailable" else "This choice has no verified price."
         raise HTTPException(409, f"{why} It was not pinned; unattended runs skip a step without a priced pick.")

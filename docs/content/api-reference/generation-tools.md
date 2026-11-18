@@ -159,7 +159,11 @@ Ordinary API users see only their own permitted sources, not owner accounts.
 Catalog lookup submits no generation; a quote/admission must still recheck cost.
 An optional `operation` (it needs `kind`) limits fal entries to that operation,
 and `worker` asks only that worker (the picker reads a browsed row's options from
-the worker that listed it).
+the worker that listed it). A lookup that names a `model` is a detail read that is
+quoted next: it reads no listing price, so it never waits on a listing rate read.
+With `operation`, a fal model whose declared inputs that operation's tool cannot
+fill (it takes no image for an edit, or needs a field such as `mask_url` the tool
+never sends) is `available: false` with the reason, so it cannot be picked.
 
 ### Provider and model listing
 
@@ -172,30 +176,35 @@ or one of another kind, is a `422`.
 
 `GET /api/v1/generation/providers/{kind}?operation=` returns `kind`, `operation`,
 `operation_label` and `providers`. Each provider has `source`, `account`,
-`workers`, `available`, `reason` and `native`; fal adds `model_count` when it is
-available. Accounts are merged across your workers. Unavailable ones stay listed
-with their reason: fal without a key, fal while images use the ChatGPT plan, or a
-worker that needs an update. Plan accounts only generate from a prompt, so they are
-not offered for edit, reference, extend or image-to operations. fal is available
-when a worker holds a key and fal lists models for the operation; one model's
-missing schema never hides it.
+`workers`, `available`, `reason` and `native`. Accounts are merged across your
+workers. fal is listed once per worker that holds a fal key, each row with that
+`worker`, its `worker_name` and its `model_count`, because each worker lists its
+own catalog: the user picks the worker. A worker running older code that cannot
+page or filter by operation is its own unavailable row with the reason "Update
+<worker> to browse its fal.ai models here." With no keyed worker there is one
+unavailable fal row saying so; while images use the ChatGPT plan, fal rows are
+unavailable with that reason. Plan accounts only generate from a prompt, so they
+are not offered for edit, reference, extend or image-to operations. A fal row is
+available when its worker holds a key and lists models for the operation; one
+model's missing schema never hides it.
 
 `GET /api/v1/generation/models/{kind}` returns one page of one provider's models.
 Parameters are `source` (default `fal`, or an account), `operation`, `query`
 (server-side search on the model ID, name and description), `offset` and `limit`
-(1–50, default 20). The response has `models`, `total`, `offset`, `limit`,
-`has_more`, `worker` and `notice`. Rows are catalog entries plus fal's `name`, `category` and
+(1–50, default 20), and `worker` for fal (a fal provider row's `worker`; omitted
+means this worker). The response has `models`, `total`, `offset`, `limit`,
+`has_more`, `worker`, `notice` and `available`. Rows are catalog entries plus fal's `name`, `category` and
 `description`, and a `status`. A page reads fal's rates in one batch and no
 schemas, so a fal row is `unpriced` with `price.reason: "not_quoted"` and the raw
 `price.rate` until its schema is cached; then it carries a real price. A model fal
 has no rate for keeps its own reason (for example `no_pricing_row`). When fal's
 pricing service is rate limited, the page keeps rates it already knows and marks
-the rest `pricing_request_failed`. Unknown totals are null, never zero. On the
-owner's worker without a local fal key, fal pages come from one worker that has
-one, named in `worker`: pass it back as `worker` for the next page, so pages never
-mix two catalogs. A worker without fal never hides one that has it. A worker
-running older code that cannot page or filter by operation is named in `notice`
-for an update; its catalog is not shown in part.
+the rest `pricing_request_failed`. Unknown totals are null, never zero. fal pages
+come only from the named worker, never another, so pages never mix two catalogs; a
+search with no match there is simply empty. When that worker cannot answer
+(offline, no longer keyed, or running older code that cannot page), the page is
+empty with `available: false` and a `notice` saying why; the picker keeps the rows
+it already shows and offers a reload.
 
 `PUT /api/v1/generation/favourites/{kind}` accepts a choice directly
 (`source` or `account`, `model`, optional `worker`, `options`).
@@ -209,7 +218,9 @@ per-kind `choices` map. `PUT .../choices/{kind}` stores a choice directly;
 it must pin `account`, `worker` and `model` (and may include `source`, `options`).
 Like remembering, it is stored only after a server-side quote priced it, with
 nothing submitted: a pick that is unavailable or has no verified price is a `409`
-saying why, and the job keeps the choice it had. The response adds the save-time
+saying why, and the job keeps the choice it had. Saving the job again with the
+exact pin it already has is not a new pin: it stays, with `unchanged: true` and
+the warning, even if its price has since become unknown. The response adds the save-time
 `price`, `priced`, `quote_error`, `unattended_skip_reason` and `warning`.
 `DELETE .../choices/{kind}` clears it. Writes use the same preview-cookie
 protection as preferences. Job choices are account-scoped preferences, separate

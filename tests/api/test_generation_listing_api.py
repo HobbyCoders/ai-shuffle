@@ -189,12 +189,16 @@ def test_native_account_models_and_plan_image_rule(client, monkeypatch):
     assert client.get("/api/v1/generation/models/image").json()["models"] == []
 
 
-def _peers(monkeypatch, replies):
-    """Online peers answering ``catalog`` with ``replies[device]``; returns the request log."""
+def _peers(monkeypatch, replies, *, keyed=False, offline=()):
+    """Peers answering ``catalog`` with ``replies[device]``; returns the request log.
+    The caller (worker-a) holds a fal key only when ``keyed``."""
     from app.core import fal_credential
     from app.network import generation, runners
-    monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)  # the caller holds no key
-    monkeypatch.setattr(runners, "other_workers", lambda: [{"device_id": d, "online": True} for d in replies])
+    if not keyed:
+        monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
+    monkeypatch.setattr(runners, "other_workers", lambda: [
+        {"device_id": d, "device_name": d.replace("worker", "Box"), "online": d not in offline} for d in replies])
+    monkeypatch.setattr(runners, "find", lambda d: {"device_id": d, "device_name": d.replace("worker", "Box")})
     asked = []
 
     async def request(worker, operation, **body):
@@ -214,60 +218,92 @@ def _page(device, models, total, *, serves=True, operation="text-to-video", **ex
     return {"version": 2, "candidates": rows, "media_operation": operation, "page": page, **extra}
 
 
-def test_remote_fal_pages_come_from_one_serving_peer(client, monkeypatch):
+def _legacy(device):
+    from dataclasses import asdict
+    remote = asdict(replace(candidate(source="fal", account="fal-ai", model="fal-ai/t2v-a"), worker=device, kind="video"))
+    return {"version": 2, "candidates": [remote]}  # older code: no page, no operation echo
+
+
+def _fal_rows(client, query=""):
+    return [p for p in client.get(f"/api/v1/generation/providers/video{query}").json()["providers"]
+            if p["source"] == "fal"]
+
+
+def test_a_remote_page_comes_from_the_named_worker(client, monkeypatch):
     asked = _peers(monkeypatch, {"worker-b": _page("worker-b", ["fal-ai/i2v-a"], 7, operation="image-to-video")})
-    data = client.get("/api/v1/generation/models/video?operation=image-to-video").json()
+    data = client.get("/api/v1/generation/models/video?operation=image-to-video&worker=worker-b").json()
     assert data["total"] == 7 and data["models"][0]["name"] == "FAL-AI/I2V-A" and data["worker"] == "worker-b"
-    assert data["models"][0]["worker"] == "worker-b" and data["notice"] is None
+    assert data["models"][0]["worker"] == "worker-b" and data["notice"] is None and data["available"] is True
+    assert [w for w, _ in asked] == ["worker-b"]
     assert asked[0][1]["media_operation"] == "image-to-video" and asked[0][1]["page"] == {"offset": 0, "limit": 20}
 
 
-def test_a_peer_without_fal_never_hides_the_one_that_has_it(client, monkeypatch):
-    replies = {"worker-a": _page("worker-a", [], 0, serves=False), "worker-b": _page("worker-b", ["fal-ai/t2v-a"], 3)}
+def test_every_keyed_worker_is_its_own_fal_provider(client, monkeypatch):
+    # Local key + a current peer with a key + a legacy peer with a key.
+    replies = {"worker-b": _page("worker-b", ["fal-ai/t2v-b"], 90), "worker-c": _legacy("worker-c")}
+    asked = _peers(monkeypatch, replies, keyed=True)
+    rows = {(p["worker"], p["worker_name"]): p for p in _fal_rows(client)}
+    assert set(rows) == {("worker-a", "This device"), ("worker-b", "Box-b"), ("worker-c", "Box-c")}
+    assert rows["worker-a", "This device"]["available"] and rows["worker-a", "This device"]["model_count"] == 3
+    assert rows["worker-b", "Box-b"]["available"] and rows["worker-b", "Box-b"]["model_count"] == 90
+    legacy = rows["worker-c", "Box-c"]
+    assert legacy["available"] is False and legacy["reason"] == "Update Box-c to browse its fal.ai models here."
+    # Each row's models come from that worker only; there is no implicit winner.
+    asked.clear()
+    local = client.get("/api/v1/generation/models/video?worker=worker-a").json()
+    assert local["worker"] == "worker-a" and local["total"] == 3 and asked == []
+    remote = client.get("/api/v1/generation/models/video?worker=worker-b").json()
+    assert remote["worker"] == "worker-b" and remote["total"] == 90 and [w for w, _ in asked] == ["worker-b"]
+    # A zero-match search on the chosen worker is simply empty.
+    replies["worker-b"] = _page("worker-b", [], 0)
+    empty = client.get("/api/v1/generation/models/video?worker=worker-b&query=zzz").json()
+    assert (empty["models"], empty["total"], empty["available"], empty["notice"]) == ([], 0, True, None)
+
+
+def test_one_serving_worker_keeps_a_single_fal_row_and_no_key_anywhere_is_one_reason(client, monkeypatch):
+    replies = {"worker-c": _page("worker-c", [], 0, serves=False), "worker-b": _page("worker-b", ["fal-ai/t2v-a"], 3)}
     _peers(monkeypatch, replies)
-    data = client.get("/api/v1/generation/models/video").json()
-    assert (data["worker"], data["total"], [m["model"] for m in data["models"]]) == ("worker-b", 3, ["fal-ai/t2v-a"])
-    providers = client.get("/api/v1/generation/providers/video").json()["providers"]
-    fal = next(p for p in providers if p["source"] == "fal")
-    assert fal["available"] and fal["workers"] == ["worker-b"] and fal["model_count"] == 3
-    # A peer that serves fal but has no match for this search loses to one that does.
-    replies["worker-a"] = _page("worker-a", [], 0)
-    assert client.get("/api/v1/generation/models/video?query=t2v").json()["worker"] == "worker-b"
-    # A peer from before ``serves`` that sends an empty page is treated as having no fal.
-    replies["worker-a"] = _page("worker-a", [], 0, serves=None)
-    assert client.get("/api/v1/generation/models/video").json()["worker"] == "worker-b"
+    rows = _fal_rows(client)
+    assert [(r["worker"], r["available"], r["model_count"]) for r in rows] == [("worker-b", True, 3)]
+    # A peer before ``serves`` that sends an empty page is treated as having no fal.
+    replies["worker-c"] = _page("worker-c", [], 0, serves=None)
+    assert [r["worker"] for r in _fal_rows(client)] == ["worker-b"]
+    replies["worker-b"] = _page("worker-b", [], 0, serves=False)
+    rows = _fal_rows(client)
+    assert len(rows) == 1 and rows[0]["available"] is False and "No fal.ai API key" in rows[0]["reason"]
 
 
-def test_later_pages_stay_on_the_worker_that_served_the_first(client, monkeypatch):
+def test_a_worker_that_stops_answering_between_pages_is_named_never_replaced(client, monkeypatch):
     replies = {"worker-b": _page("worker-b", ["fal-ai/t2v-a"], 30), "worker-c": _page("worker-c", ["fal-ai/t2v-b"], 90)}
     asked = _peers(monkeypatch, replies)
-    first = client.get("/api/v1/generation/models/video").json()
-    assert first["worker"] == "worker-b"  # by device ID, never a mix of catalogs
-    asked.clear()
     data = client.get("/api/v1/generation/models/video?offset=20&worker=worker-c").json()
     assert [w for w, _ in asked] == ["worker-c"] and data["worker"] == "worker-c" and data["total"] == 90
     asked.clear()
-    # Pinned to a worker that no longer serves fal: nothing from another worker.
+    # It no longer serves fal: nothing from another worker, and it says so.
     replies["worker-c"] = _page("worker-c", [], 0, serves=False)
     data = client.get("/api/v1/generation/models/video?offset=20&worker=worker-c").json()
-    assert data["models"] == [] and data["worker"] is None and [w for w, _ in asked] == ["worker-c"]
+    assert data["models"] == [] and data["available"] is False and [w for w, _ in asked] == ["worker-c"]
+    assert data["notice"] == "Box-c is not serving fal.ai models right now. Reload to try again."
+    # Offline: same, and no peer is asked.
+    asked = _peers(monkeypatch, replies, offline=("worker-c",))
+    data = client.get("/api/v1/generation/models/video?offset=20&worker=worker-c").json()
+    assert data["available"] is False and data["total"] == 0 and asked == [] and "Reload" in data["notice"]
 
 
 def test_older_peers_are_named_for_an_update_not_shown_as_a_whole_catalog(client, monkeypatch):
-    from dataclasses import asdict
-    remote = asdict(replace(candidate(source="fal", account="fal-ai", model="fal-ai/t2v-a"), worker="worker-b",
-                            kind="video"))
-    replies = {"worker-b": {"version": 2, "candidates": [remote]}}  # older code: no page, no echo
+    replies = {"worker-b": _legacy("worker-b")}
     _peers(monkeypatch, replies)
-    for operation in ("", "?operation=image-to-video"):
-        data = client.get(f"/api/v1/generation/models/video{operation}").json()
-        assert data["models"] == [] and data["total"] == 0 and "Update worker-b" in data["notice"]
-    fal = next(p for p in client.get("/api/v1/generation/providers/video").json()["providers"] if p["source"] == "fal")
-    assert fal["available"] is False and "Update worker-b" in fal["reason"]
-    # A paged reply for another operation (no matching echo) is not used either.
-    replies["worker-b"] = _page("worker-b", ["fal-ai/t2v-a"], 3, operation=None)
-    data = client.get("/api/v1/generation/models/video").json()
-    assert data["models"] == [] and "Update worker-b" in data["notice"]
+    for operation in ("", "&operation=image-to-video"):
+        data = client.get(f"/api/v1/generation/models/video?worker=worker-b{operation}").json()
+        assert data["models"] == [] and data["total"] == 0 and data["available"] is False
+        assert data["notice"] == "Update Box-b to browse its fal.ai models here."
+    fal = _fal_rows(client)
+    assert len(fal) == 1 and fal[0]["available"] is False and fal[0]["reason"].startswith("Update Box-b")
+    # A paged reply that echoes another operation is not used either.
+    replies["worker-b"] = _page("worker-b", ["fal-ai/t2v-a"], 3, operation="image-to-video")
+    data = client.get("/api/v1/generation/models/video?worker=worker-b").json()
+    assert data["models"] == [] and data["notice"].startswith("Update Box-b")
+    assert _fal_rows(client)[0]["reason"].startswith("Update Box-b")
 
 
 def test_fal_availability_does_not_hang_on_one_models_schema(client):
@@ -276,3 +312,47 @@ def test_fal_availability_does_not_hang_on_one_models_schema(client):
     fal = next(p for p in client.get("/api/v1/generation/providers/video").json()["providers"] if p["source"] == "fal")
     assert fal["available"] is True and fal["model_count"] == 3 and fal["reason"] is None
     client.schema_reads.assert_not_called()
+
+
+def test_a_named_detail_lookup_reads_no_listing_price(client):
+    # The card's detail lookup for a browsed row is priced fresh by /quote
+    # next; it must not read (or queue behind) a listing rate read first.
+    url = ("/api/v1/generation/catalog?kind=video&source=fal&model=fal-ai/t2v-a&limit=1"
+           "&operation=text-to-video&worker=worker-a")
+    entry = client.get(url).json()["entries"][0]
+    assert client.rate_reads == [] and entry["model"] == "fal-ai/t2v-a" and entry["worker"] == "worker-a"
+    assert entry["price"]["total"] is None and entry["options"] == {"duration": 5}
+
+
+def _edit_schema(endpoint, *fields, required=()):
+    from app.services.fal_schema import ModelSchema
+    props = {f.name: ({"type": "array", "items": {"type": "string"}, **({"minItems": f.minimum} if f.minimum else {})}
+                      if f.type == "array" else {"type": f.type}) for f in fields}
+    return ModelSchema(endpoint, [ParamField("prompt", is_primary_text=True, required=True), *fields], "prompt",
+                       input_schema={"type": "object", "properties": {"prompt": {"type": "string"}, **props},
+                                     "required": ["prompt", *required]})
+
+
+@pytest.mark.parametrize("schema,problem", [
+    # One image in image_url, as editImage sends it.
+    (_edit_schema("fal-ai/flux/edit", ParamField("image_url", type="string", required=True), required=["image_url"]),
+     None),
+    # A list field takes editImage's one image as a one-item list.
+    (_edit_schema("fal-ai/flux/edit", ParamField("image_urls", type="array", required=True), required=["image_urls"]),
+     None),
+    # Needs at least two images: editImage sends one.
+    (_edit_schema("fal-ai/flux/edit", ParamField("image_urls", type="array", required=True, minimum=2),
+                  required=["image_urls"]), "This model's declared inputs do not fit editImage."),
+    # A required field editImage never fills.
+    (_edit_schema("fal-ai/flux/edit", ParamField("image_url", type="string", required=True),
+                  ParamField("mask_url", type="string", required=True), required=["image_url", "mask_url"]),
+     "This model needs mask_url, which editImage does not send."),
+    # No image input at all.
+    (_edit_schema("fal-ai/flux/edit"), "This model does not take an image, which editImage sends."),
+])
+def test_a_browsed_models_inputs_must_fit_the_tool(client, schema, problem):
+    client.schema_reads.return_value = schema
+    url = "/api/v1/generation/catalog?kind=image&source=fal&model=fal-ai/flux/edit&limit=1&operation=edit-image"
+    entry = client.get(url).json()["entries"][0]
+    assert (entry["available"], entry["reason"]) == (problem is None, problem)
+    assert entry["status"] == ("unavailable" if problem else "unpriced")
