@@ -384,6 +384,87 @@ describe('queue handoff hold geometry', () => {
 			expect(v.read()).toMatchObject({ errorOffset: drained.errorOffset, banner: drained.banner, padding: drained.padding });
 		});
 
+		describe('giving back a narrow column\'s excess lift', () => {
+			/** An error over two queued bubbles that a narrower column wraps taller than the pane shows under the banner. */
+			async function narrowLift(anchored: boolean) {
+				const layout: Layout = { clientHeight: 400, scrollTop: 0, proseEnd: 2000, anchorTop: 1000, bubbles: [80, 80], banner: 60 };
+				const v = view(layout, anchored);
+				await v.update(turn(4, 2));
+				if (anchored) await v.place();
+				await v.grow(10);
+				await v.update(turn(4, 2, 'CLI error'));
+				Object.assign(layout, { width: 298, bubbles: [180, 180] });
+				await v.resize(400); await v.frame();
+				// At the scroll bottom, where a passive follow pins the reader (pinBelowCurrentReserve).
+				v.scroll(layout.proseEnd);
+				return { layout, v, lifted: v.read() };
+			}
+			/** A queued prompt is withdrawn: its bubble leaves and no transcript row comes. */
+			const withdraw = (v: ReturnType<typeof view>, layout: Layout, bubbles: number[]) =>
+				v.update(turn(4, bubbles.length, 'CLI error'), () => { layout.bubbles = bubbles; });
+			const bannerReserve = (offset: number) => offset + 60 + ROW_GAP + 2 * autoScroll.MIN_TRANSCRIPT_TAIL_RESERVE;
+
+			it('keeps a scrolled-up reader where they are, then gives the lift back once they follow again (S15)', async () => {
+				const { layout, v, lifted } = await narrowLift(false);
+				v.scroll(-48);
+				const away = v.read();
+				await withdraw(v, layout, [180]);
+				await v.frame(); await v.grow(0);
+				// Nothing the reader asked for: no clamp, and the banner stays where it was read.
+				expect(v.read()).toMatchObject({ scrollTop: away.scrollTop, errorOffset: lifted.errorOffset, padding: away.padding });
+				// Back at the bottom: the next pass gives the excess back with its reserve.
+				v.scroll(48);
+				await v.grow(0);
+				const followed = v.read();
+				expect(followed.errorOffset).toBeLessThan(lifted.errorOffset);
+				expect(followed.padding).toBe(bannerReserve(followed.errorOffset));
+				expect(followed.banner.top).toBeGreaterThanOrEqual(0);
+				expect(followed.banner.bottom).toBeLessThanOrEqual(layout.clientHeight);
+				// In the app, following again is what asks for that pass (wiring).
+				expect(source).toMatch(/if \(!shouldAutoScroll\) return;\s*untrack\(\(\) => \{\s*if \(!presentedTailError \|\| handoffSlotPx\) return;\s*if \(currentTurnAnchorId\) scheduleCurrentTurnAnchorMaintenance\(\);\s*else scheduleLatestTurnTailRefresh\(\);/);
+			});
+
+			it('leaves the floor of an ordinary dequeue still waiting for its transcript row', async () => {
+				const { layout, v } = await streamingTurn();
+				const before = v.read();
+				// The bubble leaves; its row lands in a later commit.
+				await v.update(turn(4, 3), () => { layout.bubbles = [80, 80, 80]; });
+				await v.frame(); await v.grow(0);
+				expect(v.read()).toMatchObject({ scrollTop: before.scrollTop, padding: before.padding });
+			});
+
+			it.each([['an active anchor', true], ['a passive follow', false]])(
+				'releases the followed floor with the lift when the queue drains by withdrawal, under %s (S16)', async (_name, anchored) => {
+					const { layout, v, lifted } = await narrowLift(anchored);
+					await withdraw(v, layout, [180]);
+					await withdraw(v, layout, []);
+					for (let i = 0; i < 3; i++) { await v.frame(); await v.grow(0); }
+					const drained = v.read();
+					expect(drained.errorOffset).toBeLessThan(lifted.errorOffset);
+					// The reserve holds the banner and no blank beyond: the floor gave the same amount back.
+					expect(drained.padding).toBe(bannerReserve(drained.errorOffset));
+					expect(drained.scrollTop).toBe(layout.proseEnd + drained.padding - layout.clientHeight);
+					expect(drained.banner.top).toBeGreaterThanOrEqual(0);
+					expect(drained.banner.bottom).toBeLessThanOrEqual(layout.clientHeight);
+				});
+
+			it.each([
+				['a zero-height pane', async (v: ReturnType<typeof view>) => { await v.resize(0); await v.frame(); await v.grow(0); },
+					async (v: ReturnType<typeof view>) => { await v.resize(400); await v.frame(); await v.grow(0); }],
+				['a hidden column', async (v: ReturnType<typeof view>, layout: Layout) => { layout.width = 0; await v.grow(0); },
+					async (v: ReturnType<typeof view>, layout: Layout) => { layout.width = 298; await v.grow(0); }]
+			])('keeps a settled lift through %s (S17)', async (_name, hide, show) => {
+				const { layout, v } = await narrowLift(true);
+				await withdraw(v, layout, [180]);
+				await withdraw(v, layout, []);
+				await v.frame(); await v.grow(0);
+				const settled = v.read();
+				await hide(v, layout);
+				await show(v, layout);
+				expect(v.read()).toMatchObject({ errorOffset: settled.errorOffset, banner: settled.banner, padding: settled.padding });
+			});
+		});
+
 		it('reserves nothing for an emptied slot while the banner steps aside for its Error row', async () => {
 			const { layout, v } = await givenBack();
 			layout.banner = 0;

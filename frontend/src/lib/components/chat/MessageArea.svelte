@@ -1376,21 +1376,10 @@
 		const row = tailControlsRef?.querySelector('.pending-messages')?.firstElementChild;
 		const blank = row ? row.getBoundingClientRect().top - box.top : box.height;
 		// An error owns the slot's painted height, not its blank: it reserves only
-		// what is docked now (none of an empty slot). A docked bubble that grows (a
-		// narrower column wraps it) lifts the banner above it.
-		// Invariant: at the followed bottom the banner is readable, wholly inside the
-		// viewport. Lift nothing docked needs (where the error put it, or what a
-		// leaving bubble left at this width) is kept only as far as that holds:
-		// moving a readable banner is a shift nothing asked for, but an offscreen
-		// one is lost. A new width keeps only the takeover offset.
+		// what is docked now (none of an empty slot); placeErrorBanner lifts it.
 		if (tailQueueSlotPx && !handoffSlotPx) {
 			const docked = box.height - blank;
-			if (presentedTailError) {
-				const clear = docked > 0 ? docked + rowGapPx() : 0;
-				const kept = Math.max(tailErrorBaselinePx, box.width === tailErrorWidthPx ? tailErrorOffsetPx : 0);
-				tailErrorOffsetPx = Math.max(clear, Math.min(kept, readableErrorOffset(box)));
-				tailErrorWidthPx = box.width;
-			}
+			if (presentedTailError) placeErrorBanner(box, docked);
 			return docked;
 		}
 		// A bubble sent into the hold docks in its blank; an unheld slot has none.
@@ -1400,14 +1389,53 @@
 		if (row && blank > heldBlankPx && handoffSlotPx && handoffPainted && tailQueueSlotPx === handoffSlotPx
 			&& !presentedTailError && shouldAutoScroll && !windowShifting && !$activeSession.stopRequestedTurnId
 			&& !restingOnNotSentRows(notSentHold.messages)) {
-			freeHeldBlank(blank - heldBlankPx);
+			freeFollowedFloor(blank - heldBlankPx);
 			heldBlankPx = blank;
 		}
 		return box.height - (tailQueueSlotPx ? heldBlankPx : 0);
 	}
 
-	/** Stop reserving px of a held slot's blank: the followed floor gives it up once. */
-	function freeHeldBlank(px: number) {
+	/**
+	 * The error banner's lift over its slot (tailErrorOffsetPx). A docked bubble
+	 * that grows (a narrower column wraps it) lifts the banner above it: clearance
+	 * for docked bubbles is always enforced. Lift nothing docked needs (where the
+	 * error put it, or what a leaving bubble left at this width) is kept only while
+	 * the banner stays readable, wholly inside the viewport at the followed bottom:
+	 * moving a readable banner is a shift nothing asked for, but an offscreen one is
+	 * lost. A new width keeps only the takeover offset.
+	 *
+	 * Rule: excess error-banner lift is given back only while the reader is
+	 * following. It is given back as a single amount that leaves the banner's lift,
+	 * the reserve and the followed floor all in the same pass. It is computed only
+	 * from usable (non-zero) geometry. Nothing else changes the lift downward
+	 * (clearing the error resets it with its slot).
+	 *
+	 * This is the one place that lowers the lift. Every reserve pass measures the
+	 * controls (transcriptContentEnd) before it reads the floor, so the reserve it
+	 * sets already leaves the amount released here. A reader who scrolled away keeps
+	 * the lift until following resumes (the effect after the pending-bubble
+	 * observer re-measures then): a give-back shrinks the reserve, and the browser's
+	 * clamp would move a reader who is not following the edge.
+	 */
+	function placeErrorBanner(box: DOMRect, docked: number) {
+		// A zero-height pane or hidden column measures nothing worth remembering.
+		if (!containerRef?.clientHeight || !chatColumnRef || box.width <= 0) return;
+		const clear = docked > 0 ? docked + rowGapPx() : 0;
+		const kept = Math.max(tailErrorBaselinePx, box.width === tailErrorWidthPx ? tailErrorOffsetPx : 0);
+		const lift = Math.max(clear, Math.min(kept, readableErrorOffset(box)));
+		const excess = tailErrorOffsetPx - lift;
+		if (excess > 0) {
+			if (!shouldAutoScroll || windowShifting) return;
+			// The floor captured the old lift. Release only that amount: the floor that
+			// protects a dequeue still waiting for its transcript row stays.
+			freeFollowedFloor(excess);
+		}
+		tailErrorOffsetPx = lift;
+		tailErrorWidthPx = box.width;
+	}
+
+	/** Stop reserving px the followed floor captured: it gives them up once. */
+	function freeFollowedFloor(px: number) {
 		if (followedViewportEnd > 0) followedViewportEnd = Math.max(0, followedViewportEnd - px);
 		// The browser clamps scrollTop as the reserve shrinks; that is not the reader.
 		markProgrammaticScrollSettling();
@@ -2273,18 +2301,29 @@
 	});
 
 	// A docked bubble that grows under a shown banner (a narrower column wraps
-	// it) lifts the banner before that paint (queueSlotExtent), then the reserve.
+	// it) lifts the banner before that paint, in a reserve pass that sizes the
+	// reserve with it (placeErrorBanner).
 	$effect(() => {
 		const list = pendingMessages.length && bannerError ? tailControlsRef?.querySelector('.pending-messages') : null;
 		if (!list) return;
 		const observer = new ResizeObserver(() => {
 			if (!presentedTailError || handoffSlotPx) return;
-			queueSlotExtent();
-			if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
-			else scheduleLatestTurnTailRefresh();
+			if (currentTurnAnchorId) void maintainCurrentTurnAnchor();
+			else refreshLatestTurnTailReserve();
 		});
 		observer.observe(list);
 		return () => observer.disconnect();
+	});
+
+	// A banner lift kept while the reader was away is given back once they
+	// follow again (placeErrorBanner): re-measure in a reserve pass.
+	$effect(() => {
+		if (!shouldAutoScroll) return;
+		untrack(() => {
+			if (!presentedTailError || handoffSlotPx) return;
+			if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
+			else scheduleLatestTurnTailRefresh();
+		});
 	});
 
 	// A browser clamp belongs to the render that caused it, not to the reader.
@@ -2385,7 +2424,7 @@
 		const follow = !unchanged && !resetFloor && untrack(() => isMounted && shouldAutoScroll) && !!containerRef;
 		const beforeTop = untrack(() => lastKnownScrollTop);
 		if (follow && containerRef) followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
-		if (takeoverBlank) freeHeldBlank(takeoverBlank);
+		if (takeoverBlank) freeFollowedFloor(takeoverBlank);
 		if (!follow) return;
 		const sessionId = s.sessionId;
 		const version = untrack(() => windowShiftVersion);
