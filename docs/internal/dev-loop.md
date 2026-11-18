@@ -330,6 +330,9 @@ It is chosen by the request alone, so it behaves the same after restarts:
   taller than the screen, then waits on a 60-second foreground `Bash`: the
   turn stays open with still content and the running-task row under it, for
   Stop with a running task (#1147). Same project and access needs as below.
+* `[script:tool-background-heavy]` is the same open, idle turn behind a log
+  reply larger than the transcript's mounted-content budget, so the turn's own
+  prompt is no longer mounted. For queued bubbles over the running-task row.
 * `[script:tool-background-stream]` starts a real session-owned `Monitor` shell
   (`sleep 120`, no inline wait), then streams a reply at six words per second
   while the task remains in `/live`'s `activeTasks` and the running-tasks list.

@@ -91,6 +91,28 @@ describe('Plan collapse passive-reserve handoff', () => {
  });
 });
 
+describe('passive reserve without a mounted latest prompt', () => {
+ // A long turn pages its own prompt out of the mounted rows. The queued
+ // bubbles dock in this reserve, so leaving their room out drew them over the
+ // running-task row above them (phone report).
+ it('keeps the queue/error room when the prompt is paged out', () => {
+  const f = reserveFixture({ controlsExtent: 135 });
+  document.getElementById('latest-user')!.remove();
+  expect(f.owner.latestTurnTailNow()).toBe(24 + 135);
+ });
+ it('keeps the same room when there is no prompt at all', () => {
+  const f = reserveFixture({ controlsExtent: 135 });
+  f.scope.transcript.latestUserTurnId = null as unknown as string;
+  expect(f.owner.latestTurnTailNow()).toBe(24 + 135);
+ });
+ it('falls back to the bare minimum with no controls, as before', () => {
+  const f = reserveFixture();
+  document.getElementById('latest-user')!.remove();
+  f.scope.readingFloorReserve = () => 300;
+  expect(f.owner.latestTurnTailNow()).toBe(24);
+ });
+});
+
 function fixture({ current = true, sameSession = true, contained = true } = {}) {
  const release = vi.fn();
  const container = document.createElement('div');
