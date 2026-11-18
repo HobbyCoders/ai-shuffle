@@ -63,9 +63,9 @@ Embed all media, copying the URL verbatim:
 Never guess URLs; never paste base64.
 
 ### Files on disk
-Link disk files as [report.pdf](/api/files/by-path?path=URL_ENCODED_FULL_PATH); embed images as `![description](URL)` using the same URL.
-- Link or embed only existing files in served locations (working directory, workspace or registered project). Never share scratch or temp paths.
-- From scratch, temp or any unserved location, copy only the intended deliverable into a served working or project folder. Verify the copy exists, then link or embed the copy, not the original. Do not commit the copy. If you can't share the file, say so instead of posting a broken link.
+Link files and embed video/audio as [description](/api/files/by-path?path=URL_ENCODED_FULL_PATH); embed images as `![description](URL)` with the same URL.
+- Never share scratch or temp paths. Share only existing files in a served root the viewer can access: the worker's workspace or a registered project/worktree.
+- For scratch, temp or unserved files, copy only the intended deliverable into a served root. Verify the copy exists there and can be served; link or embed the copy, not the original. Do not commit the copy. If you can't verify access, say it's unavailable.
 - Percent-encode the whole absolute path, including `\\`, `:`, spaces, `#`, `&` and parentheses (Python: `urllib.parse.quote(path, safe="/")`):
   `D:\\Projects\\My App\\report.pdf` becomes `/api/files/by-path?path=D%3A%5CProjects%5CMy%20App%5Creport.pdf`
   `/workspace/my app/notes (v2).md` becomes `/api/files/by-path?path=/workspace/my%20app/notes%20%28v2%29.md`

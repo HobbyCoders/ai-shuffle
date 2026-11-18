@@ -84,14 +84,14 @@ def _assert_disk_sharing_rules(text):
     section = _files_on_disk(text)
     for rule in (
         "Never share scratch or temp paths",
-        "embed images as `![description](URL)` using the same URL",
-        "Link or embed only existing files in served locations",
-        "working directory, workspace or registered project",
-        "From scratch, temp or any unserved location, copy only the intended deliverable",
-        "into a served working or project folder",
-        "Verify the copy exists, then link or embed the copy, not the original",
+        "Link files and embed video/audio as [description](/api/files/by-path?path=URL_ENCODED_FULL_PATH)",
+        "embed images as `![description](URL)` with the same URL",
+        "Share only existing files in a served root the viewer can access",
+        "the worker's workspace or a registered project/worktree",
+        "For scratch, temp or unserved files, copy only the intended deliverable into a served root",
+        "Verify the copy exists there and can be served; link or embed the copy, not the original",
         "Do not commit the copy",
-        "If you can't share the file, say so instead of posting a broken link",
+        "If you can't verify access, say it's unavailable",
         "Never copy or share secrets or credential files",
     ):
         assert rule in section, rule
