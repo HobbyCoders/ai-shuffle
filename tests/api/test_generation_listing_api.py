@@ -157,6 +157,15 @@ def test_providers_list_fal_and_accounts_with_unavailable_reasons(client, monkey
     assert data["providers"][0]["model_count"] == 2
 
 
+def test_fal_without_a_key_is_listed_unavailable_with_a_reason(client, monkeypatch):
+    from app.core import fal_credential
+    monkeypatch.setattr(fal_credential, "api_key", lambda *a: None)
+    providers = client.get("/api/v1/generation/providers/video").json()["providers"]
+    assert [(p["source"], p["available"]) for p in providers] == [("fal", False)]
+    assert "No fal.ai API key" in providers[0]["reason"] and "model_count" not in providers[0]
+    assert client.get("/api/v1/generation/models/video").json()["models"] == []
+
+
 def test_native_account_models_and_plan_image_rule(client, monkeypatch):
     from app.core.provider import subscription_images
     from app.network import generation

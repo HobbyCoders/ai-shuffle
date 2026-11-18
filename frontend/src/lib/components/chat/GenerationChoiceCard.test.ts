@@ -541,6 +541,24 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(mocks.get).toHaveBeenCalledWith(expect.stringContaining('query=nothing'));
 	});
 
+	it('labels a truly unpriced row Unknown with its reason, apart from rows only waiting for a quote', async () => {
+		const listing = mocks.get.getMockImplementation()!;
+		const odd = { ...UNKNOWN_PRICE_FIXTURE, reason: 'unit_unknown', detail: 'fal bills this in units it does not explain.', rate: { amount: '0.014', unit: 'units' } };
+		mocks.get.mockImplementation(async (url: string) =>
+			url.startsWith('/generation/models/image')
+				? { models: [row('fal-ai/recraft/v3', 'Recraft V3'), row('fal-ai/odd', 'Odd Model', { price: odd })], total: 2, offset: 0, limit: 20, has_more: false }
+				: listing(url)
+		);
+		card();
+		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));
+		const oddRow = await screen.findByRole('button', { name: /Odd Model/ });
+		expect(oddRow.textContent).toContain('Unknown');
+		expect(oddRow.getAttribute('title')).toBe('fal bills this in units it does not explain.');
+		const recraft = screen.getByRole('button', { name: /Recraft V3/ });
+		expect(recraft.textContent).not.toContain('Unknown');
+		expect(recraft.textContent).toContain('$0.04 per image');
+	});
+
 	it('loads a picked model with its declared options, quotes them live and sends that model back', async () => {
 		card();
 		await fireEvent.click(screen.getByRole('button', { name: /All models/ }));

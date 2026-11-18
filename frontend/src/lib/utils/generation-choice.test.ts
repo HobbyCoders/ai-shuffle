@@ -197,6 +197,9 @@ describe('model picker helpers', () => {
 		const option = { options: { duration: 5, aspect_ratio: '16:9', seed: null }, quick_settings: { aspect_ratio: '16:9' } };
 		expect(optionChips(option, { duration: 10, aspect_ratio: '16:9' })).toEqual(['duration 10', 'aspect ratio 16:9']);
 		expect(optionChips(option, option.options)).toEqual(['aspect ratio 16:9']);
+		// An edited quick setting past the chip limit still leads (fal's first four defaults).
+		const kling = { options: { cfg_scale: 0.5, shot_type: 'customize', aspect_ratio: '16:9', duration: '5' }, quick_settings: { cfg_scale: 0.5, shot_type: 'customize', aspect_ratio: '16:9', duration: '5' } };
+		expect(optionChips(kling, { ...kling.options, duration: '10' })).toEqual(['duration 10', 'cfg scale 0.5', 'shot type customize']);
 	});
 
 	it('reads the operation a choose result names, ignoring anything malformed', async () => {

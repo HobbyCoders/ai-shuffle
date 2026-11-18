@@ -470,8 +470,8 @@ export function quickChips(option: Pick<GenerationOption, 'quick_settings' | 'op
  */
 export function optionChips(option: Pick<GenerationOption, 'quick_settings' | 'options'>, values: Record<string, unknown>, max = 3): string[] {
 	const quick = option.quick_settings && Object.keys(option.quick_settings).length ? Object.keys(option.quick_settings) : Object.keys(values);
-	const edited = Object.keys(values).filter((k) => !quick.includes(k) && JSON.stringify(values[k]) !== JSON.stringify(option.options?.[k]));
-	const shown = [...edited, ...quick].filter((k) => Object.hasOwn(values, k));
+	const edited = Object.keys(values).filter((k) => JSON.stringify(values[k]) !== JSON.stringify(option.options?.[k]));
+	const shown = [...edited, ...quick.filter((k) => !edited.includes(k))].filter((k) => Object.hasOwn(values, k));
 	return quickChips({ options: Object.fromEntries(shown.map((k) => [k, values[k]])) }, max);
 }
 

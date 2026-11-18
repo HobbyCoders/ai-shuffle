@@ -190,6 +190,12 @@ async def list_providers(kind: str, request: Request, operation: Optional[str] =
             row["reason"] = entry.reason
         if entry.source != "fal" and entry.available:
             row["model"] = entry.model
+    if ("fal",) not in providers:
+        # Keep fal visible with the reason the user cannot pick it yet.
+        providers[("fal",)] = {
+            "source": "fal", "account": "fal-ai", "workers": [], "available": False, "native": False,
+            "reason": (f"fal.ai has no {op.label.lower()} models right now." if await backend.fal_key() else
+                       "No fal.ai API key on any worker. Add one in Settings, Providers.")}
     fal = providers.get(("fal",))
     if fal is not None and kind == "image":
         from app.core.provider import subscription_images as sub

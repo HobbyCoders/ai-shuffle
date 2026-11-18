@@ -188,6 +188,7 @@
 				{#each rows as row (row.worker + row.account + row.model)}
 					{@const view = priceView(row.price, kind)}
 					{@const title = modelRowTitle(row)}
+					{@const unpriced = !view.priced && row.price?.reason !== 'not_quoted'}
 					<li>
 						<button
 							type="button"
@@ -195,7 +196,7 @@
 							class:selected={row.model === selectedModel}
 							aria-pressed={row.model === selectedModel}
 							disabled={!row.available}
-							title={row.available ? row.description || row.model : row.reason || 'Unavailable'}
+							title={row.available ? (unpriced && view.detail) || row.description || row.model : row.reason || 'Unavailable'}
 							onclick={() => onpick(row)}
 						>
 							<span class="gmb-row-main">
@@ -206,7 +207,8 @@
 								{#if view.priced}
 									<span class="gmb-figure">{view.figure}</span>
 								{:else}
-									<span class="gmb-figure">{view.rate ?? 'Unpriced'}</span>
+									{#if unpriced}<span class="gmb-figure">Unknown</span>{/if}
+									<span class={unpriced ? 'gmb-rate' : 'gmb-figure'}>{view.rate ?? (unpriced ? '' : 'Unpriced')}</span>
 								{/if}
 							</span>
 						</button>
@@ -386,6 +388,15 @@
 		font-size: 0.75rem;
 		font-weight: 600;
 		font-variant-numeric: tabular-nums;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.gmb-rate {
+		display: block;
+		font-family: var(--font-mono);
+		font-size: 0.6875rem;
+		color: var(--muted-foreground);
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
