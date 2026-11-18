@@ -287,7 +287,7 @@ class Candidate:
 
 
 class Backend(Protocol):
-    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None, worker: str | None = None, listing_prices: bool = True) -> list[Candidate]: ...
+    async def catalog(self, kind: str, *, source: str | None = None, model: str | None = None, query: str | None = None, limit: int = 15, prompt: str | None = None, worker: str | None = None, listing_prices: bool = True, operation: str | None = None) -> list[Candidate]: ...
     async def prepare(self, candidate: Candidate, options: dict, prompt: str) -> Candidate: ...
     async def reserve(self, candidate: Candidate, context: RunContext) -> bool: ...
     async def execute(self, candidate: Candidate, prompt: str, context: RunContext) -> dict: ...
@@ -366,10 +366,17 @@ class Resolver:
         self._confirmations: dict[str, str] = {}
         self.confirmations = getattr(backend, "confirmations", None)
 
-    async def catalog(self, kind, source=None, model=None, query=None, limit=15):
+    async def catalog(self, kind, source=None, model=None, query=None, limit=15, operation=None, worker=None,
+                      listing_prices=True):
         if kind not in KINDS:
             return result("refused", error="Unknown generation kind.")
-        entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit)
+        extra = {"operation": operation} if operation else {}
+        if worker:
+            extra["worker"] = worker
+        if not listing_prices:
+            extra["listing_prices"] = False
+        entries = await self.backend.catalog(kind, source=normalize_source(source), model=model, query=query, limit=limit,
+                                             **extra)
         return result("catalog", price=entries[0].price if len(entries) == 1 else None,
                       options=[entry.view() for entry in entries])
 

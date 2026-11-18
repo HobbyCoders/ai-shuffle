@@ -332,18 +332,44 @@ def test_job_choice_save_reports_the_same_save_time_quote(
     assert priced["choice"] == entry.choice() and priced["priced"] is True
     assert priced["price"]["total"] == "0.05" and priced["warning"] is None
     assert priced["unattended_skip_reason"] is None
-    quote_backend.entries = [replace(entry, price=dict(UNKNOWN_PRICE))]
-    unpriced = client.put(route, json=entry.choice()).json()
-    assert unpriced["priced"] is False
-    assert unpriced["unattended_skip_reason"] == "stored_choice_unpriced"
-    assert "Unattended runs will skip" in unpriced["warning"]
+    # A pick the server cannot price now is never pinned: 409 says why and
+    # the job keeps the priced pin it had.
+    other = replace(entry, model="unpriced-model", price=dict(UNKNOWN_PRICE))
+    quote_backend.entries = [entry, other]
+    unpriced = client.put(route, json=other.choice())
+    assert unpriced.status_code == 409 and "no verified price" in unpriced.json()["detail"]
+    assert "not pinned" in unpriced.json()["detail"]
     quote_backend.entries = []
-    gone = client.put(route, json=entry.choice()).json()
-    assert gone["unattended_skip_reason"] == "stored_choice_unavailable"
-    assert gone["quote_error"] in gone["warning"]
+    gone = client.put(route, json=other.choice())
+    assert gone.status_code == 409 and "not pinned" in gone.json()["detail"]
     assert generation_choices.load_job(IDENTITY, "auto-12345678") == {"image": entry.choice()}
     assert client.get("/api/v1/generation/choices").json()["remembered"] == {}
     assert not any(call[0] in ("reserve", "execute") for call in quote_backend.calls)
+
+
+def test_saving_a_job_again_with_its_pin_after_the_price_went_unknown_keeps_it(
+    client: TestClient, quote_backend: QuoteBackend, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Re-saving the job editor with the pick it already has is not a new pin:
+    # the same model, now unpriced, stays pinned and the reply says why it will
+    # be skipped; a changed pick that is unpriced is still refused.
+    from app.api import generation_choices as api
+    from app.core import generation_choices
+    client.app.dependency_overrides[api.require_admin] = lambda: "owner"
+    monkeypatch.setattr(generation_choices, "validate_job_id", lambda job_id: job_id)
+    entry = quote_backend.entries[0]
+    route = "/api/v1/generation/jobs/auto-12345678/choices/image"
+    assert client.put(route, json=entry.choice()).json()["priced"] is True
+    quote_backend.entries = [replace(entry, price=dict(UNKNOWN_PRICE))]
+    again = client.put(route, json=entry.choice())
+    assert again.status_code == 200, again.text
+    body = again.json()
+    assert body["unchanged"] is True and body["priced"] is False and body["choice"] == entry.choice()
+    assert "no verified price" in body["warning"]
+    changed = {**entry.choice(), "options": {**entry.choice().get("options", {}), "quality": "high"}}
+    refused = client.put(route, json=changed)
+    assert refused.status_code == 409 and "not pinned" in refused.json()["detail"]
+    assert generation_choices.load_job(IDENTITY, "auto-12345678") == {"image": entry.choice()}
 
 
 def test_save_bounds_quote_wait_and_preserves_pick(client, quote_backend, monkeypatch):
