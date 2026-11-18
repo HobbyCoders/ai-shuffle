@@ -627,6 +627,46 @@ describe('Terminal page (no chat)', () => {
 		}
 	});
 
+	it('New terminal during a held restore wins over the saved shell when the list arrives (S33)', async () => {
+		let answer!: (value: unknown) => void;
+		api.targets.mockResolvedValue(workspace);
+		api.list.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
+		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
+		try {
+			const view = render(TerminalPage);
+			const create = await view.findByRole('button', { name: 'New terminal' });
+			await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+			await fireEvent.click(create);
+			// The pick is recorded at once, over the saved shell.
+			expect(shellHistory.place?.panel).toBe('new');
+			answer({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
+			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).loaded).toBe(true));
+			await tick();
+			expect(shellHistory.place?.panel).toBe('new');
+			expect(view.getByRole('button', { name: 'Open terminal' })).toBeTruthy();
+		} finally {
+			shellHistory.stop();
+		}
+	});
+
+	it('a failed list keeps the saved shell and Try again loads it (S34)', async () => {
+		api.targets.mockResolvedValue(workspace);
+		api.list.mockRejectedValueOnce(new Error('The terminal list is unavailable.'))
+			.mockResolvedValue({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
+		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
+		try {
+			const view = render(TerminalPage);
+			expect(await view.findByText('The terminal list is unavailable.')).toBeTruthy();
+			// A failed list is no proof that A is gone.
+			expect(shellHistory.place?.panel).toBe('a');
+			await fireEvent.click(view.getByRole('button', { name: 'Try again' }));
+			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).active).toBe('a'));
+			expect(shellHistory.place?.panel).toBe('a');
+		} finally {
+			shellHistory.stop();
+		}
+	});
+
 	it('closing the shell closes it on the worker', async () => {
 		api.close.mockResolvedValue({ closed: true });
 		const view = await mountPage([info('own', { session_id: null, cwd: '/workspace' })]);

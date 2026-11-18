@@ -82,6 +82,11 @@ export const shellHistory = {
  get traversals() { return traversals; },
  get place() { return shown?.place; },
  /**
+  * The user picked something on the page (a list row, a New action), from its
+  * own click or key handler. A restore still waiting for its data yields to it.
+  */
+ choose() { restored = null; },
+ /**
   * At mount. A saved place is shown as it is. Otherwise the arrival entry is
   * written now, before anything can push over it; boot's corrections replace it
   * while the browser is on it, or once an overlay over it closes.

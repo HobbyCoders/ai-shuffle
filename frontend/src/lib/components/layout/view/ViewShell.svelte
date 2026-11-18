@@ -151,26 +151,31 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			}
 		});
 	});
-	// Each landing is followed once; a selection still loading retries until its list settles.
+	// Each landing is followed once; a selection still loading retries until its list settles,
+	// unless the user picks something first (shellHistory.choose): then the pick is recorded.
 	let followed: typeof shellHistory.restored = null;
+	let waiting: typeof shellHistory.restored = null;
 	let previousKey: string | null | undefined;
 	$effect(() => {
 		const place = shellHistory.place;
 		if (!active || !historyType || !manageHistory || place?.type !== historyType) {
 			previousKey = undefined;
+			waiting = null;
 			return;
 		}
 		const key = detailOpen ? selection ?? null : null;
 		const changed = key !== previousKey;
 		previousKey = key;
 		const landing = shellHistory.restored;
+		const superseded = waiting !== null && landing === null;
+		waiting = null;
 		if (landing && landing !== followed && place.panel !== undefined) {
 			const current = () => shellHistory.restored === landing;
 			if (key !== place.panel) {
 				if (place.panel === null) untrack(() => onBack?.());
 				else {
 					const result = restoreSelection?.(place.panel, current);
-					if (result === 'pending') return; // retry when the list settles
+					if (result === 'pending') { waiting = landing; return; } // retry when the list settles
 					if (result === 'missing') {
 						shellHistory.detail(historyType, { panel: null }, true);
 						if (key !== null) untrack(() => onBack?.());
@@ -180,7 +185,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			followed = landing;
 			return;
 		}
-		if ((changed || place.panel === undefined) && place.panel !== key) {
+		if ((changed || superseded || place.panel === undefined) && place.panel !== key) {
 			shellHistory.detail(historyType, { panel: key }, place.panel === undefined);
 		}
 	});

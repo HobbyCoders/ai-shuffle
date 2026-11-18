@@ -134,6 +134,21 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
   await waitFor(() => expect(vi.mocked(goto)).toHaveBeenCalledTimes(1));
  });
 
+ it('widened from the index, choosing Start Here is a step of its own (S35)', async () => {
+  Object.defineProperty(window, 'innerWidth', { value: 500, configurable: true });
+  shellHistory.start({}, { type: 'docs' });
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(view.container.querySelector('[data-view-shell="Docs"]')?.getAttribute('data-pane')).toBe('panel'));
+  Object.defineProperty(window, 'innerWidth', { value: 1000, configurable: true });
+  window.dispatchEvent(new Event('resize'));
+  await new Promise((resolve) => setTimeout(resolve));
+  vi.mocked(goto).mockClear();
+  await fireEvent.click(view.getByRole('button', { name: 'Start Here' }));
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await waitFor(() => expect(vi.mocked(goto)).toHaveBeenCalledTimes(1));
+  expect(shellHistory.place?.doc).toMatch(/^getting-started\//);
+ });
+
  it('marks every search result it opens, also after a document chosen from the list', async () => {
   Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
   const view = render(DocsCard, {});

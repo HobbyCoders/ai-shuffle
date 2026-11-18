@@ -151,6 +151,19 @@ describe('a reloaded project detail (S21)', () => {
   expect(await screen.findByRole('heading', { level: 2, name: 'One' })).toBeTruthy();
   expect(shellHistory.place?.panel).toBe('one');
  });
+ it('an explicit pick while the saved project is still loading wins over it (S33)', async () => {
+  saved('two'); list.set([{ id: 'one', name: 'One', path: '/one' }]); catalogReady.set(false);
+  render(ProjectCard);
+  // Desktop's own default (One) is not a pick: the saved Two is still pending.
+  expect(await screen.findByRole('heading', { level: 2, name: 'One' })).toBeTruthy();
+  expect(shellHistory.place?.panel).toBe('two');
+  await fireEvent.click(screen.getByRole('button', { name: 'Open One' }));
+  expect(shellHistory.place?.panel).toBe('one');
+  list.set([{ id: 'one', name: 'One', path: '/one' }, { id: 'two', name: 'Two', path: '/two' }]); catalogReady.set(true);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(screen.getByRole('heading', { level: 2, name: 'One' })).toBeTruthy();
+  expect(shellHistory.place?.panel).toBe('one');
+ });
  it('finds a project saved under its local id once its overview row arrives', async () => {
   saved('two'); supported.set(true);
   overview.set([{ project_v2_id: 'v2-two', local_project_id: 'two', name: 'Two', kind: 'git', remote: null, workers: [] }]);

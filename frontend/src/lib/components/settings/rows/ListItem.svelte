@@ -27,6 +27,7 @@
 	 */
 	import type { Snippet } from 'svelte';
 	import { settingsNav } from '$lib/settings/navigation.svelte';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	import type { SettingsIcon } from '$lib/settings/categories';
 	import type { CategoryId, StatusTone } from '$lib/settings/types';
 	import { ChevronRight, Pin } from 'lucide-svelte';
@@ -90,6 +91,8 @@
 	const isSelected = $derived(selected ?? settingsNav.selectedItem(cat) === id);
 
 	function select() {
+		// An explicit pick: a page restore still waiting for its list yields to it.
+		shellHistory.choose();
 		if (onselect) onselect(id);
 		else settingsNav.selectItem(id, cat);
 	}

@@ -11,6 +11,7 @@
 	 * in the detail's danger zone.
 	 */
 	import { tick, untrack } from 'svelte';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { ViewShell, ViewPanel, PanelSearch, PanelIconButton } from '$lib/components/layout/view';
 	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -872,6 +873,7 @@
 
 	/** New agent dialog: start from a built-in's prompt and tools. */
 	async function newFromBuiltin(id: string) {
+		shellHistory.choose();
 		const source = profiles.find((p) => p.id === id);
 		showNewDialog = false;
 		await openNewForm();
@@ -1158,11 +1160,13 @@
 		busy={profileImporting}
 		onClose={() => (showNewDialog = false)}
 		onBlank={() => {
+			shellHistory.choose();
 			showNewDialog = false;
 			void openNewForm();
 		}}
 		onFromBuiltin={newFromBuiltin}
 		onDescribe={(text) => {
+			shellHistory.choose();
 			showNewDialog = false;
 			generateText = text;
 			showGenerateDialog = true;

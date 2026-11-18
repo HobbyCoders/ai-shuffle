@@ -34,25 +34,22 @@
   return cat && slug && getDocBySlug(cat, slug) ? [cat, slug] : null;
  }
  // The base Docs entry is the index on a phone, Start Here on desktop.
- function baseDoc(): [string, string] | null {
-  return !mobile && !platform.isMobile && window.innerWidth > 600 ? [categories[0].id, docsByCategory[categories[0].id][0].slug] : null;
- }
  $effect(() => {
   const place = shellHistory.place;
   if (place && place.type !== 'docs') return;
   const fullSlug = place?.doc ?? '';
   untrack(() => {
    if (initialItemId) return;
-   const target = known(fullSlug) ?? baseDoc();
+   const target = known(fullSlug) ?? (!mobile && !platform.isMobile && window.innerWidth > 600
+    ? [categories[0].id, docsByCategory[categories[0].id][0].slug] : null);
    if (!target) { activeSlug = ''; detailOpen = false; find = null; }
    else if (activeCategory !== target[0] || activeSlug !== target[1]) display(target[0], target[1]);
   });
  });
  function selectDoc(category: string, slug: string, query = '') {
   // Every explicit pick reaches the history: it skips the entry it is already on,
-  // and the base entry is already on the default article.
-  const base = baseDoc();
-  const onBase = !shellHistory.place?.doc && base?.[0] === category && base[1] === slug;
+  // including the base entry while it shows this article (never while it shows the index).
+  const onBase = !shellHistory.place?.doc && detailOpen && activeCategory === category && activeSlug === slug;
   shellHistory.detail('docs', { doc: onBase ? undefined : `${category}/${slug}` });
   // Only an explicit selection opens at the top; Back and Forward keep the pane.
   const key = ++selections;

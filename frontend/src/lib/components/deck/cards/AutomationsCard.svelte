@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
+	import { shellHistory } from '$lib/services/app-history.svelte';
 	/**
 	 * AutomationsCard - Scheduled and event-driven AI task management
 	 *
@@ -662,7 +663,7 @@
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}
-   onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={(a) => openEdit(a)}
+   onOpenCreate={() => { shellHistory.choose(); openCreate(); }} onOpenDetail={openDetail} onOpenEdit={(a) => { shellHistory.choose(); openEdit(a); }}
    onToggleEnabled={handleToggleEnabled} onTrigger={handleTrigger} onDelete={handleDelete}
    onApprove={handleApprove} onDeny={handleDeny} onClearError={() => error = ''}
    {formatCost} {triggerTypeLabel} />
@@ -752,7 +753,7 @@
    {:else}
     <ViewMain width="reading"><EmptyDetail icon={CalendarClock} title={loading ? 'Loading automations…' : automations.length ? 'Choose an automation' : 'No automations yet'}
      message={automations.length ? 'Run AI tasks on a schedule or in response to events.' : 'Create a scheduled or event-driven task.'}>
-     <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
+     <button type="button" class="st-btn primary" onclick={() => { shellHistory.choose(); openCreate(); }}><Plus size={14} />New automation</button>
     </EmptyDetail></ViewMain>
    {/if}
  {/snippet}
