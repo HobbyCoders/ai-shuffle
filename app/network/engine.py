@@ -1940,115 +1940,32 @@ def _item_incarnation(item: Mapping[str, Any]) -> int:
     return value if type(value) is int and value >= 1 else 0
 
 
-def held_incarnations(cursor, collection: str, versions: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
-    """The origin incarnation of stored versions: record id to incarnation, absent when not known.
-
-    A version stored before incarnations were kept (#1568) has none. Only a
-    retained op at its (origin, clock) that says what it holds can name it:
-    a deletion for a tombstone, otherwise an upsert whose record hashes to
-    the held content (a ``sessions`` mirror as this worker projects it). A
-    retained op that wrote something else names nothing, so neither the
-    lowest nor the latest incarnation is assumed. The same content signed in
-    two incarnations is one value, labelled by the incarnation that wins the
-    tie (the higher). No such op: the incarnation stays unknown. The one
-    shortcut is this worker's own versions while it has never been restored:
-    it signed all of them in incarnation 1.
-    """
-    found: Dict[str, int] = {}
-    ctx = require_context()
-    legacy = []
-    for version in versions:
-        if version.get("origin_incarnation") is not None:
-            found[version["record_id"]] = int(version["origin_incarnation"])
-        elif version["origin_device_id"] == ctx.device_id and ctx.identity.incarnation <= 1:
-            found[version["record_id"]] = 1
-        else:
-            legacy.append(version)
-    if not legacy:
-        return found
-    retained = store.retained_ops(cursor, collection, legacy)
-    by_content = []
-    for version in legacy:
-        ops = retained.get(version["record_id"])
-        if not ops:
-            continue  # compacted, or written by a state copy: not known
-        if bool(version["deleted"]):
-            deletions = [op["incarnation"] for op in ops if op["op"] == OP_DELETE]
-            if deletions:
-                found[version["record_id"]] = max(deletions)
-        elif version.get("content_hash") and any(op["op"] == OP_UPSERT for op in ops):
-            by_content.append(version)
-    if by_content:
-        coll = policy.collection(collection)
-        signed = store.retained_ops(cursor, collection, by_content, envelopes=True)
-        for version in by_content:
-            matching = [op["incarnation"] for op in signed.get(version["record_id"], [])
-                        if op["op"] == OP_UPSERT
-                        and version["content_hash"] in _held_hashes(cursor, ctx, coll, op["envelope"])]
-            if matching:
-                found[version["record_id"]] = max(matching)
-    return found
-
-
-def _held_hashes(cursor, ctx: NetworkContext, coll: policy.Collection, data: Mapping[str, Any]) -> set:
-    """The content hashes a retained upsert could have left in ``sync_records`` here."""
-    try:
-        env = Envelope.from_dict(data)
-        from app.network.keyring import open_envelope
-        plaintext, _key = open_envelope(ctx, env)
-        plaintext = _project_legacy_agent(coll, env.record_id, plaintext)
-        if plaintext is None:
-            return set()
-        hashes = {content_hash(coll, plaintext)}
-        if coll.name == "sessions":  # stored as the mirror kept it, owner-only fields stripped
-            for own_replay in (False, True) if env.origin_device_id == ctx.device_id else (False,):
-                hashes.add(content_hash(coll, _prepare_mirror(cursor, coll, plaintext, ctx=ctx,
-                                                              origin_device_id=env.origin_device_id,
-                                                              own_replay=own_replay)))
-        return hashes
-    except (crypto.CryptoError, envelope_mod.EnvelopeError, ApplyError, KeyError, TypeError, ValueError):
-        return set()
-
-
-def _held_incarnation(cursor, collection: str, held: Mapping[str, Any]) -> int:
-    """``held_incarnations`` of one version; 0 when not known."""
-    return held_incarnations(cursor, collection, [held]).get(held["record_id"], 0)
-
-
-def _versus_held(cursor, collection: str, clock: int, origin: str, incarnation: int,
-                 held: Mapping[str, Any], *, incoming_hash: Optional[str] = None) -> int:
+def _versus_held(clock: int, origin: str, incarnation: int, held: Mapping[str, Any]) -> int:
     """``envelope.compare`` of a version against the one held, on every path that picks a winner.
 
-    The held incarnation is read only for an exact (clock, origin) tie, the
-    one case it decides. A copy re-sending the content held without an
-    incarnation changes nothing, and a row stored before incarnations were
-    kept costs no op lookup. One that names its incarnation is compared even
-    then: it can win the tie and relabel the version (#1568).
+    The incarnation decides only an exact (clock, origin) tie (#1568). Its
+    label is recorded when a version is written, or comes with a copy, and is
+    never inferred. Without one on either side, that tie keeps the version
+    held, as before labels existed: a copy from an older build (0) loses to a
+    labelled version, and a version stored before labels were kept stays.
     """
-    held_clock, held_origin = int(held["clock"]), held["origin_device_id"]
-    held_incarnation = 0
-    if clock == held_clock and origin == held_origin:
-        if (held.get("origin_incarnation") is None and incoming_hash is not None and not incarnation
-                and incoming_hash == (held["content_hash"] or "")):
-            return 0
-        held_incarnation = _held_incarnation(cursor, collection, held)
-    return envelope_mod.compare(clock, origin, held_clock, held_origin, incarnation, held_incarnation)
+    if clock == int(held["clock"]) and origin == held["origin_device_id"] and held.get("origin_incarnation") is None:
+        return 0
+    return envelope_mod.compare(clock, origin, int(held["clock"]), held["origin_device_id"],
+                                incarnation, int(held.get("origin_incarnation") or 0))
 
 
-def _restore_fork(cursor, ctx: NetworkContext, collection: str, origin: str, incarnation: int,
-                  held: Mapping[str, Any]) -> bool:
+def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> bool:
     """Whether the held version is the same device's from another incarnation.
 
     Those are two writes on either side of a restore, not one stream moving
     on, so the one that loses is kept as a conflict like any other device's.
+    A version with no recorded incarnation is taken as the same stream, as
+    before labels were kept: never a conflict on a guess.
     """
-    if held["origin_device_id"] != origin or incarnation < 1:
-        return False
-    if held.get("origin_incarnation") is None:
-        known = ctx.identity.incarnation if origin == ctx.device_id else store.highest_incarnation(cursor, origin)
-        if max(incarnation, known) <= 1:
-            return False  # one incarnation only: no fork to look up
-    return _held_incarnation(cursor, collection, held) not in (0, incarnation)
+    held_incarnation = held.get("origin_incarnation")
+    return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
+            and int(held_incarnation) != incarnation)
 
 
 def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, result: ApplyResult) -> str:
@@ -2119,8 +2036,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # order, owner-ordered rows included. Across incarnations (a restore forks
     # the stream) the replicas still agree, which no stream-order rule can
     # promise (#1568).
-    wins = existing is None or _versus_held(cursor, env.collection, env.clock, env.origin_device_id,
-                                            env.origin_incarnation, existing) > 0
+    wins = existing is None or _versus_held(env.clock, env.origin_device_id, env.origin_incarnation, existing) > 0
     if not wins:
         merged = env.op == OP_UPSERT and _merge_losing_provider_credentials(
             cursor, coll, env.record_id, plaintext, existing)
@@ -2162,8 +2078,7 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # Read now, before the row is replaced; recorded only once this op has
     # materialized: a refused upsert (_KeepObservation) displaced nothing.
     losing_record = None
-    fork = existing is not None and existing["origin_device_id"] == env.origin_device_id and _restore_fork(
-        cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)
+    fork = existing is not None and _restore_fork(env.origin_device_id, env.origin_incarnation, existing)
     if fork and bool(existing["deleted"]):
         if env.op == OP_UPSERT:
             losing_record = {"_deleted": True}
@@ -3190,7 +3105,6 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
             "order_seq": version.get("order_seq"), "record": None}
     if version.get("origin_incarnation") is not None:
         # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
-        # Pages fill in what a legacy row's held op knows (resolve_incarnations).
         item["origin_incarnation"] = int(version["origin_incarnation"])
     if not item["deleted"]:
         if not row_known:
@@ -3199,23 +3113,6 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
         if item["record"] is None:
             item["deleted"] = True
     return item
-
-
-def resolve_incarnations(cursor, collection: str, versions: Iterable[dict]) -> None:
-    """Fill in, before export, the incarnation of versions stored without one.
-
-    A row stored before incarnations were kept (#1568) has none, but a
-    retained op that wrote it can name it (``held_incarnations``). Without
-    it in the item, the receiver reads 0 and an exact tie across a restore
-    fork can stay split between replicas.
-    """
-    legacy = [version for version in versions if version.get("origin_incarnation") is None]
-    for start in range(0, len(legacy), SNAPSHOT_SQL_BATCH):
-        batch = legacy[start:start + SNAPSHOT_SQL_BATCH]
-        found = held_incarnations(cursor, collection, batch)
-        for version in batch:
-            if found.get(version["record_id"]):
-                version["origin_incarnation"] = found[version["record_id"]]
 
 
 def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None,
@@ -3246,7 +3143,6 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
         if coll is not None and coll.map_secrets is not None:
             nested_rekey = nested_secret_sync.enabled(cursor) and (
                 recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
-        resolve_incarnations(cursor, collection, versions)
         items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
         if keyset:
             # A live record without a readable row here (lost without a
@@ -3379,11 +3275,10 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         incarnation = _item_incarnation(item)
         incoming_hash = "" if item["deleted"] else content_hash(coll, item["record"])
         comparison = 1 if existing is None else _versus_held(
-            cursor, coll.name, int(item["clock"]), item["origin_device_id"], incarnation, existing,
-            incoming_hash=incoming_hash)
+            int(item["clock"]), item["origin_device_id"], incarnation, existing)
         if existing is not None and coll.name != "membership" and (
                 existing["origin_device_id"] != item["origin_device_id"]
-                or _restore_fork(cursor, ctx, coll.name, item["origin_device_id"], incarnation, existing)):
+                or _restore_fork(item["origin_device_id"], incarnation, existing)):
             if incoming_hash != existing["content_hash"]:
                 loser, winner = (existing, item) if comparison > 0 else (item, existing)
                 if loser["deleted"]:
@@ -3404,10 +3299,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if comparison <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
-            if comparison == 0 and incarnation and existing["origin_incarnation"] is None:
-                # The same version, its incarnation now known: store it so the
-                # next copy needs no op lookup. Nothing else about it changes.
-                store.set_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
+            if (comparison == 0 and incarnation and bool(item["deleted"]) == bool(existing["deleted"])
+                    and incoming_hash == (existing["content_hash"] or "")):
+                # The content held, from a copy that names its incarnation: a
+                # missing label is filled, a recorded one never replaced. The
+                # row, its clock, hash and updated_at stay; nothing is announced.
+                store.fill_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             if not item["deleted"] and _merge_losing_provider_credentials(
                     cursor, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
@@ -3417,10 +3314,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
                 and item["origin_device_id"] == existing["origin_device_id"]
                 and bool(item["deleted"]) == bool(existing["deleted"])
                 and incoming_hash == (existing["content_hash"] or "")):
-            # The content held, signed in the incarnation that wins the exact
-            # tie (#1568): relabel the version. The row, its sync clock and
-            # updated_at stay; nothing is materialized or announced.
-            store.set_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
+            # The content held under a later label: the page vouches for the
+            # relay, not the origin, so a recorded label stays (#1568).
             continue
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))

@@ -16,7 +16,7 @@ import math
 import os
 from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.db.base import background_database_work, get_db, row_to_dict, rows_to_list, utc_now_iso as _now
 
@@ -1519,35 +1519,10 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
          origin_incarnation))
 
 
-def retained_ops(cursor, collection: str, versions: List[Mapping[str, Any]], *,
-                 envelopes: bool = False) -> Dict[str, List[dict]]:
-    """The ops this worker still holds at each version's (origin, clock): record id to ops.
-
-    Each op has ``incarnation`` and ``op``, and its ``envelope`` when asked.
-    One query for the batch; ``engine`` decides which op wrote the version (#1568).
-    """
-    wanted = {str(v["record_id"]): (v["origin_device_id"], int(v["clock"])) for v in versions}
-    if not wanted:
-        return {}
-    clocks = sorted({clock for _origin, clock in wanted.values()})
-    columns = "record_id, origin_device_id, clock, incarnation, op" + (", envelope" if envelopes else "")
-    cursor.execute(f"SELECT {columns} FROM sync_ops WHERE collection = %s "
-                   f"AND record_id IN ({', '.join(['%s'] * len(wanted))}) "
-                   f"AND clock IN ({', '.join(['%s'] * len(clocks))})", (collection, *wanted, *clocks))
-    found: Dict[str, List[dict]] = {}
-    for row in cursor.fetchall():
-        if wanted.get(row["record_id"]) == (row["origin_device_id"], int(row["clock"])):
-            op = {"incarnation": int(row["incarnation"]), "op": row["op"]}
-            if envelopes:
-                op["envelope"] = _load(row["envelope"], {})
-            found.setdefault(row["record_id"], []).append(op)
-    return found
-
-
-def set_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
-    """Relabel the version held with the incarnation that signed it; nothing else changes."""
-    cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s",
-                   (origin_incarnation, collection, record_id))
+def fill_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
+    """Label a version stored without its origin incarnation; a recorded one is never replaced."""
+    cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s "
+                   "AND origin_incarnation IS NULL", (origin_incarnation, collection, record_id))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:

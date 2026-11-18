@@ -642,17 +642,69 @@ def _state_copy(sender, receiver, collection="user_preferences"):
         return engine.apply_snapshot_chunk(page, ctx=engine.context())
 
 
-def test_a_state_copy_carries_the_incarnation_a_legacy_row_still_knows(workers):
-    """A row stored before incarnations were kept has none, but its held op
-    names it: the copy carries it, so the exact tie is broken on both sides."""
-    a, b, c = _equal_clock_fork(workers)
+def _theme_id(worker):
+    return worker.sql("SELECT record_id FROM sync_records WHERE collection = 'user_preferences' "
+                      "AND record_id LIKE ?", ("%theme",))[0]["record_id"]
+
+
+def _theme_item(worker):
+    coll = engine.policy.collection("user_preferences")
+    with worker.active(), get_db() as conn:
+        cursor = conn.cursor()
+        return engine.snapshot_item(cursor, coll, store.get_record(cursor, coll.name, _theme_id(worker)))
+
+
+def _apply_item(worker, item):
+    with worker.active(), get_db() as conn:
+        return engine.apply_snapshot_items(conn.cursor(), engine.policy.collection("user_preferences"), [item],
+                                           ctx=engine.context())
+
+
+def _theme_record(worker):
+    return worker.sql("SELECT * FROM sync_records WHERE collection = 'user_preferences' AND record_id LIKE ?",
+                      ("%theme",))[0]
+
+
+def test_a_legacy_row_exports_no_incarnation(workers):
+    """Review S13: a label is recorded when a version is written or comes with
+    a copy, never inferred. A row stored before labels were kept exports none,
+    even while this worker holds the op that wrote it, and an exact tie with
+    it keeps what each replica holds (a legacy-only limitation, as before)."""
+    from app.network import transcripts
+    a, _b, c = _equal_clock_fork(workers)
     a.sql("UPDATE sync_records SET origin_incarnation = NULL "
           "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
-    assert _theme_incarnation(a) is None
-    _state_copy(c, a)
-    assert owner_pref(a, "theme") == "new"
+    assert "origin_incarnation" not in _theme_item(a)
     _state_copy(a, c)
-    assert owner_pref(c, "theme") == "new" and _theme_incarnation(c) == 2
+    _state_copy(c, a)
+    assert owner_pref(a, "theme") == "new" and _theme_incarnation(a) is None
+    assert owner_pref(c, "theme") == "lost-1" and _theme_incarnation(c) == 1
+    _session(a, "chat", title="t", events=2)
+    a.sql("UPDATE sync_records SET origin_incarnation = NULL WHERE collection = 'session_events'")
+    with a.active(), get_db() as conn:
+        items, _, _, _ = transcripts._session_items(conn.cursor(), engine.policy.collection("session_events"),
+                                                    "chat", 0, 1 << 20)
+    assert len(items) == 2 and not any("origin_incarnation" in item for item in items)
+
+
+def test_an_equal_content_copy_fills_a_missing_label_but_never_replaces_one(workers):
+    """Review S17: a page vouches for the relay that served it, not for the
+    origin. The same value, origin and clock claiming another incarnation
+    leaves a recorded label alone; it only fills one that was never kept."""
+    a, b = _network(workers, "a", "b")
+    set_owner_pref(b, "theme", "v")
+    converge([a, b])
+    claimed = {**_theme_item(b), "origin_incarnation": 3}
+    before = _theme_record(a)
+    assert before["origin_incarnation"] == 1
+    assert _apply_item(a, claimed) == (0, [])
+    assert _theme_record(a) == before
+    a.sql("UPDATE sync_records SET origin_incarnation = NULL "
+          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    assert _apply_item(a, claimed) == (0, [])
+    # Only the label moved: clock, hash, order and updated_at stay; nothing announced.
+    assert _theme_record(a) == {**before, "origin_incarnation": 3}
+    assert owner_pref(a, "theme") == "v"
 
 
 def test_a_repeated_fork_state_copy_records_its_conflict_once(workers):
@@ -663,73 +715,10 @@ def test_a_repeated_fork_state_copy_records_its_conflict_once(workers):
     assert _lost_themes(a, b.device_id) == ["lost-0", "lost-1"]
 
 
-def test_a_transcript_copy_carries_the_incarnation_a_legacy_row_still_knows(workers):
-    from app.network import transcripts
-    a, b = _network(workers, "a", "b")
-    _session(b, "chat", title="t", events=2)
-    converge([a, b])
-    a.sql("UPDATE sync_records SET origin_incarnation = NULL WHERE collection = 'session_events'")
-    coll = engine.policy.collection("session_events")
-    with a.active(), get_db() as conn:
-        items, _, _, _ = transcripts._session_items(conn.cursor(), coll, "chat", 0, 1 << 20)
-    assert len(items) == 2 and {item.get("origin_incarnation") for item in items} == {1}
-
-
-def _copy_op(sender, receiver, origin, incarnation, clock, *, as_incarnation=None, seq_offset=0):
-    """Store on ``receiver`` the op ``sender`` holds, as an older build that kept both sides of a fork did."""
-    rows = sender.sql("SELECT * FROM sync_ops WHERE origin_device_id = ? AND incarnation = ? AND clock = ? "
-                      "AND collection = 'user_preferences' AND record_id LIKE ?",
-                      (origin, incarnation, clock, "%theme"))
-    assert len(rows) == 1
-    row = {k: v for k, v in rows[0].items() if k != "ingest_id"}
-    if as_incarnation is not None:
-        row["incarnation"] = as_incarnation
-    row["seq"] = int(row["seq"]) + seq_offset
-    receiver.sql(f"INSERT INTO sync_ops ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
-                 tuple(row.values()))
-
-
-def _held(worker):
-    with worker.active(), get_db() as conn:
-        cursor = conn.cursor()
-        held = store.get_record(cursor, "user_preferences", _theme_id(worker))
-        return engine.held_incarnations(cursor, "user_preferences", [held]).get(held["record_id"])
-
-
-def _theme_id(worker):
-    return worker.sql("SELECT record_id FROM sync_records WHERE collection = 'user_preferences' "
-                      "AND record_id LIKE ?", ("%theme",))[0]["record_id"]
-
-
-def test_a_legacy_row_takes_the_incarnation_of_the_op_that_wrote_it(workers):
-    """Review S13: an older build applied B's incarnation-1 "lost-1" and then its
-    incarnation-2 "new" at the same clock, keeping both ops. The row holds "new",
-    so it is incarnation 2, not the lowest op's; the copy carries that."""
-    a, _b, c = _equal_clock_fork(workers)
-    clock, origin = _theme(a)
-    _copy_op(c, a, origin, 1, clock)
-    a.sql("UPDATE sync_records SET origin_incarnation = NULL "
-          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
-    assert owner_pref(a, "theme") == "new" and _held(a) == 2
-    _state_copy(a, c)
-    assert owner_pref(c, "theme") == "new" and _theme_incarnation(c) == 2
-    # The same content under two incarnations is one value: the tie's winner names it.
-    _copy_op(a, a, origin, 2, clock, as_incarnation=3, seq_offset=1000)
-    assert _held(a) == 3
-    # No retained op wrote what is held: not known, never guessed from the others.
-    a.sql("DELETE FROM sync_ops WHERE origin_device_id = ? AND clock = ? AND incarnation <> 1 "
-          "AND collection = 'user_preferences'", (origin, clock))
-    assert _held(a) is None
-    # A tombstone is named only by a retained deletion at its version.
-    a.sql("UPDATE sync_records SET deleted = TRUE, content_hash = '' "
-          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
-    assert _held(a) is None
-
-
 def test_a_copy_of_the_tombstone_held_takes_the_later_incarnation(workers):
     """Review S15: C holds B's lost incarnation-1 deletion, stored by an older
-    build. B's incarnation-2 deletion at the same clock is the same content but
-    wins the tie, so C relabels it; then B's relayed later incarnation-1 write
+    build. B's incarnation-2 deletion at the same clock is the same content and
+    fills the label C never kept; then B's relayed later incarnation-1 write
     revives the theme and the incarnation-2 deletion is kept as a conflict."""
     a, b, c = _network(workers, "a", "b", "c")
     set_owner_pref(b, "theme", "v0")
@@ -748,21 +737,12 @@ def test_a_copy_of_the_tombstone_held_takes_the_later_incarnation(workers):
     assert _theme(b) == deleted_at
     c.sql("UPDATE sync_records SET origin_incarnation = NULL "
           "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
-    before = c.sql("SELECT * FROM sync_records WHERE collection = 'user_preferences' AND record_id LIKE ?",
-                   ("%theme",))[0]
-    coll = engine.policy.collection("user_preferences")
-    with b.active(), get_db() as conn:
-        cursor = conn.cursor()
-        item = engine.snapshot_item(cursor, coll, store.get_record(cursor, coll.name, _theme_id(b)))
+    before = _theme_record(c)
+    item = _theme_item(b)
     assert item["deleted"] and item["origin_incarnation"] == 2
-    with c.active(), get_db() as conn:
-        assert engine.apply_snapshot_items(conn.cursor(), coll, [item], ctx=engine.context()) == (0, [])
-    after = c.sql("SELECT * FROM sync_records WHERE collection = 'user_preferences' AND record_id LIKE ?",
-                  ("%theme",))[0]
-    # Only the label moved: no clock, hash, order or timestamp change, nothing announced.
-    assert after["origin_incarnation"] == 2
-    assert {k: v for k, v in after.items() if k != "origin_incarnation"} == \
-        {k: v for k, v in before.items() if k != "origin_incarnation"}
+    assert _apply_item(c, item) == (0, [])
+    # The missing label is filled; nothing else about the version changes.
+    assert _theme_record(c) == {**before, "origin_incarnation": 2}
     _exchange(a, c)
     assert owner_pref(c, "theme") == "lost-up"
     with c.active():
