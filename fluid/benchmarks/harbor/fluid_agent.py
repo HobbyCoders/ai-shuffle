@@ -7,6 +7,10 @@ Python 3.12), and drives ``fluid run`` in one-shot mode with
 ``--approval-policy never_ask`` — the analog of
 ``claude -p --dangerously-skip-permissions``.
 
+The default Harbor setup does not protect the metrics file from tool writes.
+The file is separate from the transcript, but Fluid and its Bash tool run
+with the same user identity by default.
+
 Usage (from the repo root; see benchmarks/harbor/README.md for the full
 comparison protocol):
 
@@ -27,6 +31,7 @@ repo root.
 
 from __future__ import annotations
 
+from collections import Counter, defaultdict
 import json
 import math
 import os
@@ -192,8 +197,18 @@ class FluidAgent(BaseInstalledAgent):
         token_fields = (
             "input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens",
         )
-        totals = dict.fromkeys(token_fields, 0)
-        saw_usage = False
+
+        def read_counts(data: object) -> dict[str, int]:
+            if not isinstance(data, dict):
+                raise ValueError("expected token counters")
+            counts = {key: data[key] for key in token_fields if key in data}
+            if any(type(n) is not int or n < 0 for n in counts.values()):
+                raise ValueError("invalid token count")
+            return counts
+
+        per_call: dict[str | int, Counter[str]] = defaultdict(Counter)
+        outside_turn_totals: Counter[str] = Counter()
+        terminal: dict[str | int, dict[str, int]] = {}
         by_turn: dict[str | int, tuple[int | None, float | None]] = {}
         stop_reason: str | None = None
         with metrics.open(encoding="utf-8", errors="replace") as stream:
@@ -202,13 +217,14 @@ class FluidAgent(BaseInstalledAgent):
                     record = json.loads(line)
                     if not isinstance(record, dict):
                         raise ValueError("expected a record")
+                    turn_id = record.get("turn_id")
+                    turn = turn_id if isinstance(turn_id, str) else i
                     if record.get("type") == "usage":
-                        counts = [record[key] for key in token_fields]
-                        if any(type(n) is not int or n < 0 for n in counts):
-                            raise ValueError("invalid token count")
-                        for key, count in zip(token_fields, counts, strict=True):
-                            totals[key] += count
-                        saw_usage = True
+                        counts = read_counts(record)
+                        if record.get("outside_turn_totals") is True:
+                            outside_turn_totals.update(counts)
+                        else:
+                            per_call[turn].update(counts)
                     elif record.get("type") == "status":
                         reason, n, usd = (
                             record["stop_reason"], record["num_model_calls"], record["cost_usd"],
@@ -221,26 +237,39 @@ class FluidAgent(BaseInstalledAgent):
                             type(usd) not in (int, float) or not math.isfinite(usd) or usd < 0
                         ):
                             raise ValueError("invalid cost")
+                        counts = read_counts(record.get("usage", {}))
                         stop_reason = reason
-                        # Some failures emit both ErrorEvent and TurnComplete
-                        # with the same turn totals. Do not bill that turn twice.
-                        turn_id = record.get("turn_id")
-                        by_turn[turn_id if isinstance(turn_id, str) else i] = (n, usd)
+                        # Some failures emit both ErrorEvent and TurnComplete.
+                        # Keep a single terminal snapshot for each turn.
+                        terminal[turn] = counts
+                        by_turn[turn] = (n, usd)
                 except (ValueError, KeyError, OverflowError):
                     # A killed process can leave a partial final line.
                     self.logger.warning(f"Ignoring invalid fluid usage record on line {i}")
 
-        cache_read = totals["cache_read_tokens"]
-        prompt_total = totals["input_tokens"] + cache_read + totals["cache_creation_tokens"]
-        if saw_usage:
+        totals = outside_turn_totals.copy()
+        for turn in per_call.keys() | terminal.keys():
+            # Terminal counters include calls that may not have emitted a
+            # record (e.g. truncated and retried). Use per-call sums only for
+            # counters the terminal did not report, or for unfinished turns.
+            totals.update({**per_call.get(turn, {}), **terminal.get(turn, {})})
+        cache_read = totals.get("cache_read_tokens")
+        prompt_counts = [
+            totals[key] for key in ("input_tokens", "cache_read_tokens", "cache_creation_tokens")
+            if key in totals
+        ]
+        prompt_total = sum(prompt_counts) if prompt_counts else None
+        if prompt_total is not None:
             context.n_input_tokens = prompt_total
+        if cache_read is not None:
             context.n_cache_tokens = cache_read
+        if "output_tokens" in totals:
             context.n_output_tokens = totals["output_tokens"]
         calls = [n for n, _ in by_turn.values() if n is not None]
         costs = [usd for _, usd in by_turn.values() if usd is not None]
         context.cost_usd = sum(costs) if costs else None
         context.metadata = {
             "num_model_calls": sum(calls) if calls else None,
-            "cache_hit_rate": cache_read / prompt_total if prompt_total else None,
+            "cache_hit_rate": cache_read / prompt_total if prompt_total and cache_read is not None else None,
             "stop_reason": stop_reason,
         }

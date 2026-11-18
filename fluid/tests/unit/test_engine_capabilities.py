@@ -6,9 +6,12 @@ import pytest
 
 from fluid.events.model import (
     ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
-    ToolUse, TurnComplete,
+    ToolResult, ToolUse, TurnComplete,
 )
 from fluid.events.ops import BackgroundTaskFinished, Interrupt, RespondPermission, Resume, UserTurn
+from fluid.messages import Message, Text
+from fluid.permissions.rules import Rule
+from fluid.store.base import SessionNode
 from fluid.tools.registry import BackgroundTaskReceipt, ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
 
 from tests.unit.test_acp_engine import _driver, _received
@@ -24,9 +27,8 @@ async def _event(loop, kind, *, since=0):
     raise AssertionError(f"no {kind} event")
 
 
-async def test_native_interrupt_and_resume_unanswered_prompt(server):
-    server.script([Messages.start(), *Messages.text_block(0, "partial"), Sleep(30)],
-                  Messages.text("resumed"))
+async def test_native_current_limitation_interrupt_then_resume_is_rejected(server):
+    server.script([Messages.start(), *Messages.text_block(0, "partial"), Sleep(30)])
     run = Harness(server)
     loop = run.loop
     try:
@@ -37,7 +39,7 @@ async def test_native_interrupt_and_resume_unanswered_prompt(server):
         await asyncio.wait_for(loop.wait_turn(), 10)
         assert isinstance(loop.bus.log(loop.session_id)[-1], Interrupted)
         # Resume targets an unanswered user node, not a partial reply kept by Stop.
-        [prompt, partial] = await loop.store.load_path(loop.session_id)
+        _, partial = await loop.store.load_path(loop.session_id)
         assert partial.message.role == "assistant"
         assert partial.message.text() and "partial".startswith(partial.message.text())
         seq = loop.bus.last_seq(loop.session_id)
@@ -45,12 +47,27 @@ async def test_native_interrupt_and_resume_unanswered_prompt(server):
         refused = await _event(loop, (ErrorEvent, TurnComplete), since=seq)
         assert isinstance(refused, ErrorEvent) and "nothing to resume" in refused.message
         await asyncio.wait_for(loop.wait_turn(), 10)
-        await loop.store.set_head(loop.session_id, prompt.node_id)
-        seq = loop.bus.last_seq(loop.session_id)
+    finally:
+        await run.aclose()
+
+
+async def _seed_unanswered_prompt(loop, text):
+    await loop.store.append(loop.session_id, SessionNode(
+        node_id="unanswered", parent_id=None, message=Message(role="user", content=[Text(text)]),
+    ))
+
+
+async def test_native_resumes_an_unanswered_prompt(server):
+    server.script(Messages.text("resumed"))
+    run = Harness(server)
+    loop = run.loop
+    try:
+        await loop._ensure_session()
+        await _seed_unanswered_prompt(loop, "original prompt")
         await loop.submit(Resume())
-        await _event(loop, TurnComplete, since=seq)
+        assert isinstance(await _event(loop, (ErrorEvent, TurnComplete)), TurnComplete)
         await asyncio.wait_for(loop.wait_turn(), 10)
-        assert len(server.requests) == 2
+        assert len(server.requests) == 1
         stored = await run.stored()
         assert [(m.role, m.text()) for m in stored] == [
             ("user", "original prompt"), ("assistant", "resumed"),
@@ -75,7 +92,7 @@ async def test_delegated_rejects_resume_but_can_interrupt(tmp_path):
         await run.aclose()
 
 
-async def test_acp_interrupt_and_resume_unanswered_prompt(tmp_path):
+async def test_acp_current_limitation_interrupt_then_resume_is_rejected(tmp_path):
     driver = await _driver(tmp_path)
     loop = driver.loop
     try:
@@ -86,24 +103,27 @@ async def test_acp_interrupt_and_resume_unanswered_prompt(tmp_path):
                           Interrupted)
         await asyncio.wait_for(loop.wait_turn(), 10)
         assert _received(tmp_path, "session/cancel")
-        [prompt, partial] = await loop.store.load_path(loop.session_id)
+        _, partial = await loop.store.load_path(loop.session_id)
         assert partial.message.text() == "working"
         await loop.submit(Resume())
         refused = await driver.until((ErrorEvent, TurnComplete), timeout=10)
         assert isinstance(refused, ErrorEvent) and "Nothing to resume" in refused.message
         await asyncio.wait_for(loop.wait_turn(), 10)
-        await loop.store.set_head(loop.session_id, prompt.node_id)
+    finally:
+        await driver.close()
+
+
+async def test_acp_resends_an_unanswered_prompt(tmp_path):
+    driver = await _driver(tmp_path)
+    loop = driver.loop
+    try:
+        await _seed_unanswered_prompt(loop, "original prompt")
         await loop.submit(Resume(context_note="\nretry note"))
-        # The fake waits again on the retried prompt; the new prompt is observable
-        # on the wire before it is cancelled, just like the first one.
-        await driver.until(TextDelta, timeout=10)
-        first, second = _received(tmp_path, "session/prompt")
-        assert [b["text"] for b in first["params"]["prompt"]] == ["slow"]
-        assert [b["text"] for b in second["params"]["prompt"]] == ["slow", "\nretry note"]
-        await loop.submit(Interrupt())
-        assert isinstance(await driver.until(Interrupted, timeout=10), Interrupted)
+        assert isinstance(await driver.until((TurnComplete, ErrorEvent), timeout=10), TurnComplete)
+        [request] = _received(tmp_path, "session/prompt")
+        assert [b["text"] for b in request["params"]["prompt"]] == ["original prompt", "\nretry note"]
         path = await loop.store.load_path(loop.session_id)
-        assert [node.message.text() for node in path if node.message.role == "user"] == ["slow"]
+        assert [node.message.text() for node in path if node.message.role == "user"] == ["original prompt"]
     finally:
         await driver.close()
 
@@ -166,6 +186,36 @@ async def test_native_advertises_and_dispatches_registry_builtins(server):
         assert run.ran == [("Echo", {"text": "hi"})]
     finally:
         await run.aclose()
+
+
+async def test_native_dispatch_deny_rule_does_not_remove_tool_schema(server):
+    server.script(tool_reply("anthropic", [{"id": "e1", "name": "Echo", "args": {"text": "denied"}}]),
+                  Messages.text("done"))
+    run = Harness(server)
+    run.loop.permissions.rules.append(Rule(tool="Echo", decision="deny"))
+    try:
+        events = await run.turn()
+        assert isinstance(events[-1], TurnComplete)
+        assert "Echo" in {tool["name"] for tool in server.requests[0].body["tools"]}
+        [result] = [event for event in events if isinstance(event, ToolResult)]
+        assert result.name == "Echo" and result.is_error
+        assert not run.ran
+    finally:
+        await run.aclose()
+
+
+async def test_acp_passes_stdio_without_advertised_mcp_transports(tmp_path):
+    driver = await _driver(tmp_path, mcp_servers={
+        "local": {"command": "unused-stdio-command"},
+        "http": {"type": "http", "url": "https://example.invalid/mcp"},
+        "sse": {"type": "sse", "url": "https://example.invalid/sse"},
+    })
+    try:
+        assert isinstance(await driver.turn("answer"), TurnComplete)
+        [session] = _received(tmp_path, "session/new")
+        assert [entry["name"] for entry in session["params"]["mcpServers"]] == ["local"]
+    finally:
+        await driver.close()
 
 
 async def test_delegated_builtins_are_announced_and_run_by_cli(tmp_path):

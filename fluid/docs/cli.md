@@ -39,6 +39,15 @@ background worker (a `Task` in background mode, or `Monitor`), `run` keeps
 streaming through the park and wake cycle and only exits once no worker is in
 flight. See [background-tasks.md](background-tasks.md).
 
+`--usage-jsonl PATH` writes UTF-8 JSON Lines to a separate file, replacing any
+existing file at that path. Console output is unchanged. `usage` records carry
+reported token counters and a turn ID; `status` records carry the turn ID, stop
+reason, terminal token totals in `usage`, model-call count and cost when reported.
+Missing token counters are omitted, not written as zero. Usage records outside
+the terminal totals, such as background checkpoint summaries, set
+`outside_turn_totals` to `true`. If the process is killed, the
+file may contain only per-call records or end with a partial line.
+
 Permission prompts in `run` depend on where it is running:
 
 - stdin and stdout are both a terminal: you get the same `[y/N/a=always]`

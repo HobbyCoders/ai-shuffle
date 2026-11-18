@@ -83,15 +83,53 @@ def _resolve_config(args: argparse.Namespace) -> HarnessConfig:
 # ─── one-shot run (testable seam) ────────────────────────────────────────────
 
 
+_TOKEN_KEYS = {
+    "input_tokens": ("input_tokens", "prompt_tokens"),
+    "output_tokens": ("output_tokens", "completion_tokens"),
+    "cache_read_tokens": ("cache_read_input_tokens", "cache_read_tokens"),
+    "cache_creation_tokens": ("cache_creation_input_tokens", "cache_creation_tokens"),
+}
+_ACP_TOKEN_KEYS = {
+    "input_tokens": "inputTokens",
+    "output_tokens": "outputTokens",
+    "cache_read_tokens": "cachedReadTokens",
+    "cache_creation_tokens": "cachedWriteTokens",
+}
+
+
+def _reported_tokens(usage: dict[str, Any]) -> dict[str, int]:
+    counts = {}
+    for field, keys in _TOKEN_KEYS.items():
+        for key in keys:
+            value = usage.get(key)
+            if type(value) is int and value >= 0:
+                counts[field] = value
+                break
+    return counts
+
+
 def _write_usage_event(out: TextIO, event: Event) -> None:
     """Write only structured accounting fields; never copy transcript text."""
     if isinstance(event, Usage):
+        # Usage defaults to zero when no counters arrived. Raw key presence
+        # (not a successful stop or the existence of a Usage event) distinguishes
+        # an observed zero from that default.
+        counts = _reported_tokens(event.raw)
+        acp = event.raw.get("acp_usage")
+        for field, wire_key in _ACP_TOKEN_KEYS.items():
+            count = getattr(event, field)
+            wire_count = acp.get(wire_key) if isinstance(acp, dict) else None
+            if count > 0 or (type(wire_count) in (int, float) and wire_count == 0):
+                counts.setdefault(field, count)
+        if not counts:
+            return
         record = {
             "type": "usage",
-            "input_tokens": event.input_tokens,
-            "output_tokens": event.output_tokens,
-            "cache_read_tokens": event.cache_read_tokens,
-            "cache_creation_tokens": event.cache_creation_tokens,
+            "turn_id": event.turn_id,
+            # A background checkpoint can finish after its turn. Native does
+            # not include it in that turn's terminal counters.
+            "outside_turn_totals": event.raw.get("auxiliary_background") is True,
+            **counts,
         }
     elif isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
         record = {
@@ -103,6 +141,7 @@ def _write_usage_event(out: TextIO, event: Event) -> None:
             ),
             "num_model_calls": event.num_model_calls,
             "cost_usd": event.cost_usd,
+            "usage": _reported_tokens(event.usage),
         }
     else:
         return

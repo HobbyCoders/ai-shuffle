@@ -28,9 +28,9 @@ uv run fluid chat
 
 `fluid run "summarize the failing tests"` does one turn and exits;
 `fluid chat --continue` picks up where the last session stopped. Switch
-provider with `--provider openrouter` (or `openai`, `local`, `claude`);
-`fluid config` prints what a run will use. Gemini is available through a provider
-entry with `kind = "gemini"`.
+provider with `--provider openrouter` (or `openai`, `local`, `claude`) after
+setting up the matching credentials, if required. `fluid config` prints what a
+run will use. Gemini is available through a provider entry with `kind = "gemini"`.
 
 - [docs/cli.md](docs/cli.md) — every subcommand, flag, slash command,
   permission prompt answer, and exit code.

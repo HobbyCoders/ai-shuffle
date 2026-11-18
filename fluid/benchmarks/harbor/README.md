@@ -127,16 +127,20 @@ task verdict plus the agent context the adapter fills in:
 `n_input_tokens` / `n_cache_tokens` / `n_output_tokens`, `cost_usd`, and
 `metadata.cache_hit_rate` / `metadata.num_model_calls` / `metadata.stop_reason`.
 The adapter passes `fluid run --usage-jsonl /logs/agent/fluid-usage.jsonl` and
-reads that file from the trial's logs. It contains per-call usage and terminal
-turn status, including partial call counts and cost when reported on error or
-interrupt. The adapter sums the reported counts and costs once per turn and takes the last
-stop reason. A missing file does not fall back to transcript parsing. Rebuild
-older wheels before running this adapter.
+reads that file from the trial's logs. For each turn, the adapter uses terminal
+token totals when available and falls back to per-call counts for fields the
+terminal did not report or if the run ended without a terminal record. It adds
+auxiliary usage not included in the turn totals, such as background checkpoint
+summaries, separately. It sums terminal model-call counts and costs once per
+turn and takes the last stop reason. Unreported counts stay unset; a reported
+zero stays zero. A missing file does not fall back to transcript parsing.
+Rebuild older wheels before running this adapter.
 
 `<job>/…/logs/agent/fluid.txt` still contains the console transcript for
 inspection. Tool text in the transcript does not count as usage or status.
-The separate file is not a sandbox against processes with direct write access
-to the trial's logs.
+The default Harbor setup does not protect the metrics file from tool writes:
+Fluid and its Bash tool run as the same user by default. Treat these metrics
+as transcript-isolated, not tamper-resistant.
 
 Compare per side:
 

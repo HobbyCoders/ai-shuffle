@@ -9,6 +9,8 @@ from unittest.mock import Mock
 import pytest
 
 from fluid.cli import __main__ as cli
+from fluid.events import TurnComplete, Usage
+from fluid.providers._transport import truncated_stream_payload
 from fluid.providers.base import ProviderCaps, StreamChunk
 
 
@@ -108,6 +110,111 @@ def test_run_writes_separate_metrics_that_harbor_reads(adapter, tmp_path, monkey
     assert context.metadata == {
         "cache_hit_rate": 40 / 70, "num_model_calls": 2, "stop_reason": "end_turn",
     }
+
+
+def _run_metrics(adapter, tmp_path, monkeypatch, provider):
+    make_engine = cli.make_engine
+    monkeypatch.setattr(cli, "make_engine", lambda *args, **kw: make_engine(
+        *args, **{**kw, "provider": provider}
+    ))
+    adapter.logs_dir = tmp_path
+    log_dir = tmp_path / "agent"
+    log_dir.mkdir()
+    metrics = log_dir / "fluid-usage.jsonl"
+    rc = cli.main([
+        "run", "--cwd", str(tmp_path), "--store", str(tmp_path / "sessions"),
+        "--usage-jsonl", str(metrics), "answer",
+    ])
+    context = SimpleNamespace(n_input_tokens=None, n_cache_tokens=None, n_output_tokens=None)
+    adapter.populate_context_post_run(context)
+    records = [json.loads(line) for line in metrics.read_text(encoding="utf-8").splitlines()]
+    return rc, context, records
+
+
+def test_terminal_counts_a_truncated_call_without_a_per_call_record(adapter, tmp_path, monkeypatch):
+    class Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+        calls = 0
+
+        async def stream(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                yield StreamChunk("message_start", {"usage": {
+                    "input_tokens": 10, "cache_read_input_tokens": 20,
+                    "cache_creation_input_tokens": 5, "cost_usd": 0.125,
+                }})
+                yield StreamChunk("block_start", {
+                    "index": 0, "block_type": "tool_use", "tool_name": "Read", "tool_use_id": "cut",
+                })
+                yield StreamChunk("tool_args_delta", {"index": 0, "partial_json": '{"file_path":'})
+                yield StreamChunk("error", truncated_stream_payload("message_stop"))
+                return
+            yield StreamChunk("message_start", {"usage": {
+                "input_tokens": 7, "cache_read_input_tokens": 11,
+            }})
+            yield StreamChunk("block_start", {"index": 0, "block_type": "text"})
+            yield StreamChunk("text_delta", {"index": 0, "text": "second try"})
+            yield StreamChunk("block_stop", {"index": 0})
+            yield StreamChunk("usage", {
+                "usage": {"output_tokens": 3, "cost_usd": 0.25}, "stop_reason": "end_turn",
+            })
+            yield StreamChunk("message_stop", {})
+
+    rc, context, records = _run_metrics(adapter, tmp_path, monkeypatch, Provider())
+    assert rc == 0
+    assert [record["type"] for record in records] == ["usage", "status"]
+    assert context.metadata["num_model_calls"] == 2
+    assert context.cost_usd == 0.375
+    assert (context.n_input_tokens, context.n_cache_tokens, context.n_output_tokens) == (53, 31, 3)
+    assert records[0]["turn_id"] == records[1]["turn_id"]
+
+
+@pytest.mark.parametrize("reported", [False, True], ids=["absent", "explicit-zero"])
+def test_provider_error_preserves_whether_counts_were_reported(adapter, tmp_path, monkeypatch, reported):
+    class Provider:
+        name = "anthropic"
+        caps = ProviderCaps()
+
+        async def stream(self, request):
+            if reported:
+                yield StreamChunk("message_start", {"usage": {
+                    "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0,
+                }})
+            yield StreamChunk("error", {"message": "Unauthorized", "status": 401})
+
+    rc, context, records = _run_metrics(adapter, tmp_path, monkeypatch, Provider())
+    assert rc == 1
+    assert context.metadata["num_model_calls"] == 1
+    assert context.metadata["stop_reason"] == "error"
+    expected = 0 if reported else None
+    assert (context.n_input_tokens, context.n_cache_tokens, context.n_output_tokens) == (expected,) * 3
+    assert [record["type"] for record in records] == (["usage", "status"] if reported else ["status"])
+
+
+def test_turn_totals_keep_background_usage_and_unfinished_turns(adapter, tmp_path):
+    adapter.logs_dir = tmp_path
+    log_dir = tmp_path / "agent"
+    log_dir.mkdir()
+    with (log_dir / "fluid-usage.jsonl").open("w", encoding="utf-8") as stream:
+        for event in (
+            Usage(session_id="s", turn_id="first", input_tokens=10, raw={"input_tokens": 10}),
+            Usage(session_id="s", turn_id="first", input_tokens=2, raw={
+                "input_tokens": 2, "auxiliary_source": "checkpoint_summary",
+            }),
+            TurnComplete(session_id="s", turn_id="first", stop_reason="end_turn",
+                         num_model_calls=2, usage={"input_tokens": 22, "output_tokens": 5}),
+            Usage(session_id="s", turn_id="first", input_tokens=3, raw={
+                "input_tokens": 3, "auxiliary_source": "checkpoint_summary",
+                "auxiliary_background": True,
+            }),
+            # The next turn was killed after one usage record; no terminal status.
+            Usage(session_id="s", turn_id="wake", input_tokens=4, raw={"input_tokens": 4}),
+        ):
+            cli._write_usage_event(stream, event)
+    context = SimpleNamespace(n_output_tokens=None)
+    adapter.populate_context_post_run(context)
+    assert (context.n_input_tokens, context.n_output_tokens) == (29, 5)
 
 
 def test_multiple_terminal_records_and_truncated_tail(adapter, tmp_path):
