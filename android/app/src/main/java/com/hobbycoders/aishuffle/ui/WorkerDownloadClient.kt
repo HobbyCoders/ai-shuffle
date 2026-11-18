@@ -91,7 +91,8 @@ internal class WorkerDownloadClient(
             require(response.code !in listOf(401, 403)) { "Your worker session expired or this worker needs an update. Refresh chat after updating the worker; pair again if needed." }
             require(response.isSuccessful) { "The worker could not send this file. Try again." }
             val body = requireNotNull(response.body) { "The worker sent an empty response." }
-            ChatDownloadPolicy.copy(body.byteStream(), output, body.contentLength(), allowed)
+            // Streamed in bounded reads, so the streamed cap applies, not the bridge's buffered one.
+            ChatDownloadPolicy.copy(body.byteStream(), output, body.contentLength(), allowed, ChatDownloadPolicy.STREAMED_MAX_BYTES)
         }
     }
 

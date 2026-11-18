@@ -20,7 +20,10 @@ class DownloadChunksTest {
         assertThrows(IllegalArgumentException::class.java) { chunks.write(1, "def".toByteArray(), out) }
         assertThrows(IllegalArgumentException::class.java) { chunks.finish(1) }
         assertEquals("abc", out.toString("UTF-8"))
-        assertThrows(IllegalArgumentException::class.java) { DownloadChunks(ChatDownloadPolicy.MAX_BYTES + 1) }
+        // The bridge carries page-buffered bytes, so it keeps the buffered cap, not the streamed one.
+        val oversize = assertThrows(IllegalArgumentException::class.java) { DownloadChunks(ChatDownloadPolicy.BUFFERED_MAX_BYTES + 1) }
+        assertEquals(ChatDownloadPolicy.BUFFERED_LIMIT_MESSAGE, oversize.message)
+        DownloadChunks(ChatDownloadPolicy.BUFFERED_MAX_BYTES)
         assertThrows(IllegalArgumentException::class.java) { DownloadChunks(100_000).write(0, ByteArray(ChatDownloadPolicy.CHUNK_BYTES + 1), out) }
     }
 }

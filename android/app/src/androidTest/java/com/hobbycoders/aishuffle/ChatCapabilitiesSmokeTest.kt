@@ -32,6 +32,8 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
+import okio.source
 import org.junit.Assert.*
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -43,8 +45,8 @@ class ChatCapabilitiesSmokeTest {
     private val context get() = ApplicationProvider.getApplicationContext<android.content.Context>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val destination = Uri.parse("content://com.hobbycoders.aishuffle.test.downloads/document/fixture")
-    private fun waitFor(message: String, predicate: () -> Boolean) = kotlinx.coroutines.runBlocking {
-        try { kotlinx.coroutines.withTimeout(12_000) { while (!predicate()) kotlinx.coroutines.delay(50) } }
+    private fun waitFor(message: String, timeout: Long = 12_000, predicate: () -> Boolean) = kotlinx.coroutines.runBlocking {
+        try { kotlinx.coroutines.withTimeout(timeout) { while (!predicate()) kotlinx.coroutines.delay(50) } }
         catch (error: kotlinx.coroutines.TimeoutCancellationException) { throw AssertionError(message, error) }
     }
     private fun web(activity: ChatActivity): WebView {
@@ -106,7 +108,7 @@ class ChatCapabilitiesSmokeTest {
             context.contentResolver.delete(destination, null, null)
         }
     }
-    private fun status(scenario: ActivityScenario<ChatActivity>, expected: String) = waitFor("Expected status: $expected") {
+    private fun status(scenario: ActivityScenario<ChatActivity>, expected: String, timeout: Long = 12_000) = waitFor("Expected status: $expected", timeout) {
         var matched = false
         scenario.onActivity { matched = it.findViewById<TextView>(R.id.screenStatus).text.toString() == expected }
         matched
@@ -295,6 +297,64 @@ class ChatCapabilitiesSmokeTest {
                 assertEquals("chat-fixture.example", it.url.host)
                 assertEquals("Bearer fixture-cookie", it.header("Authorization"))
                 assertFalse(it.url.toString().contains("fixture-cookie"))
+            }
+        }
+    }
+    /** A synthetic ZIP the size of the one the old 128 MB cap refused, sent without a length. */
+    @Test fun workerFileLinkAboveTheBufferedCapStreamsWholeIntoTheSavedDocument() {
+        val size = 524_423_638L
+        val served = java.security.MessageDigest.getInstance("SHA-256")
+        val requested = CopyOnWriteArrayList<okhttp3.Request>()
+        val body = object : java.io.InputStream() {
+            @Volatile var position = 0L
+            private fun at(index: Long) = ((index * 31) xor (index ushr 13)).toInt() and 0xFF
+            override fun read(): Int = if (position >= size) -1 else at(position++).also { served.update(it.toByte()) }
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                if (length == 0) return 0
+                if (position >= size) return -1
+                val count = minOf(length.toLong(), size - position).toInt()
+                for (i in 0 until count) buffer[offset + i] = at(position++).toByte()
+                served.update(buffer, offset, count)
+                return count
+            }
+        }
+        val http = OkHttpClient.Builder().addInterceptor { chain ->
+            requested.add(chain.request())
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
+                .header("Content-Type", "application/zip")
+                .body(object : okhttp3.ResponseBody() {
+                    override fun contentType() = "application/zip".toMediaType()
+                    override fun contentLength() = -1L
+                    override fun source() = body.source().buffer()
+                }).build()
+        }.build()
+        fixture({ _, _ -> Instrumentation.ActivityResult(Activity.RESULT_OK, Intent().setData(destination)) }) { scenario, server ->
+            scenario.onActivity { activity ->
+                val downloads = ChatActivity::class.java.getDeclaredField("downloads").apply { isAccessible = true }.get(activity)
+                downloads.javaClass.getDeclaredField("client").apply { isAccessible = true }.set(downloads, WorkerDownloadClient(http))
+                web(activity).evaluateJavascript("""
+                    (() => { const a=document.createElement('a'); a.href='/api/files/by-path?path=%2Fwork%2Fsynthetic-archive.zip';
+                    a.textContent='synthetic-archive.zip'; document.body.append(a);
+                    a.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true})); })()
+                """.trimIndent(), null)
+            }
+            // Inside run-android-ui-tests.sh's 180 s per-test limit.
+            status(scenario, "File saved.", timeout = 150_000)
+            assertEquals(size, body.position)
+            val saved = java.security.MessageDigest.getInstance("SHA-256")
+            var savedBytes = 0L
+            context.contentResolver.openInputStream(destination)!!.use { input ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) { val read = input.read(buffer); if (read == -1) break; saved.update(buffer, 0, read); savedBytes += read }
+            }
+            assertEquals(size, savedBytes)
+            assertArrayEquals(served.digest(), saved.digest())
+            assertEquals(1, requested.size)
+            requested.single().let {
+                assertEquals("chat-fixture.example", it.url.host)
+                assertEquals("/api/files/by-path", it.url.encodedPath)
+                assertEquals("/work/synthetic-archive.zip", it.url.queryParameter("path"))
+                assertEquals("Bearer fixture-cookie", it.header("Authorization"))
             }
         }
     }

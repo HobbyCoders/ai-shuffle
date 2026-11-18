@@ -10,6 +10,9 @@
     const runtime = window.__SHUFFLE_MOBILE__;
     return runtime && typeof runtime.apiOrigin === 'string' ? runtime.apiOrigin.replace(/\/+$/, '') : location.origin;
   };
+  // Blob and data URLs are held by the page and cross the bridge in chunks
+  // (ChatDownloadPolicy.BUFFERED_MAX_BYTES). Worker URLs are streamed natively
+  // and are not limited here.
   const limit = 128 * 1024 * 1024;
   const chunkSize = 32 * 1024;
   const blobs = new Map();
@@ -32,9 +35,12 @@
     clearTimeout(pending.timer);
     reply.ok ? pending.resolve(reply) : pending.reject(new Error('File save cancelled'));
   };
+  // A worker URL save replies only when the native stream ends, which for a large
+  // file can take longer than any fixed timer; native always replies (saved,
+  // failed, cancelled or expired) and owns that transfer's deadlines.
   function request(message) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = message.type === 'url' ? undefined : setTimeout(() => {
         replies.delete(message.id);
         reject(new Error('File save expired'));
       }, 310000);

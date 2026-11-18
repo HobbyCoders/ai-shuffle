@@ -5,8 +5,11 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.ResponseBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.ResponseBody.Companion.toResponseBody
+import okio.buffer
+import okio.source
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.ByteArrayOutputStream
@@ -117,6 +120,33 @@ class WorkerDownloadClientTest {
         client.open(server, "${server.baseUrl}/clip.mp4", null, "agent", { true }, {}, "Bearer paired-token", "HEAD").use {
             assertEquals(416, it.code)
             assertEquals("bytes */12", it.header("Content-Range"))
+        }
+    }
+    @Test fun aWorkerFileAboveTheBufferedCapStreamsWholeToTheDestination() {
+        // /api/files/by-path declares Content-Length, and the old cap refused it before reading
+        // a byte; a chunked response declares none and must still be saved whole.
+        val size = SyntheticFile.REPORTED_SIZE
+        val reference = SyntheticFile.digest(size)
+        for (declared in listOf(size, -1L)) {
+            val seen = mutableListOf<Request>()
+            val client = WorkerDownloadClient(OkHttpClient.Builder().addInterceptor { chain ->
+                seen.add(chain.request())
+                Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("Fixture")
+                    .body(object : ResponseBody() {
+                        override fun contentType() = "application/zip".toMediaType()
+                        override fun contentLength() = declared
+                        override fun source() = SyntheticFile(size).source().buffer()
+                    }).build()
+            }.build())
+            val sink = DigestSink()
+            client.save(server, "${server.baseUrl}/api/files/by-path?path=%2Fwork%2Fsynthetic.zip", "session=stale; CF_Authorization=fixture",
+                "agent", sink, { true }, {}, "Bearer paired-token")
+            assertEquals("declared=$declared", size, sink.count)
+            assertArrayEquals("declared=$declared", reference, sink.digest.digest())
+            assertTrue(sink.largestWrite <= ChatDownloadPolicy.CHUNK_BYTES)
+            // Larger files keep the same credential rules.
+            assertEquals("Bearer paired-token", seen.single().header("Authorization"))
+            assertEquals("CF_Authorization=fixture", seen.single().header("Cookie"))
         }
     }
     @Test fun authorizationFailureIsNotSavedAsDownloadedFile() {
