@@ -173,7 +173,7 @@ await runJourney({
 				await page.evaluate(() => window.__journeyBootHold.release());
 			};
 			await mark('a fresh load shows the chat while boot still loads');
-			await page.goto(new URL('/', status.urls.ui).toString());
+			await reloadForHistory(page, mark, new URL('/', status.urls.ui).toString());
 			await waitChat(page, { surface: 'active', session: landedOn }, { timeout: 30_000 });
 			expect(await page.evaluate(() => !window.__journeyBootHold?.releasedAt), 'boot is still loading');
 			await mark('step to Notes before boot settles');
