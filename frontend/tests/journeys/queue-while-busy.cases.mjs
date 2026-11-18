@@ -379,6 +379,106 @@ export const journey = {
 			}
 		})),
 		{
+			// #1623: a reader who scrolled away from a queue after an inline Error row
+			// is not moved by it. A queued prompt fails (HTTP 500) while two more wait;
+			// the next runs slowly, so the last stays docked. On a phone the reader
+			// scrolls far up and the column narrows (the long bubble wraps taller) and
+			// widens back: no blank above the bubbles is left over from the narrow
+			// stack. Then, 30-120px above the bottom, they unsend the docked bubble: no
+			// painted frame moves their scroll position. Here the next turn already
+			// owns the reserve, so neither step changes it; the error-owned slot's
+			// detached geometry (S18/S19) is covered in MessageArea.handoff-geometry.test.ts.
+			name: 'detached-reader-keeps-place-under-error-row',
+			expectShift: [{ step: 'unsend the docked bubble a little above the bottom', moved: /\b(input-slot|chat-island|jump-latest-layer)\b/, maxValue: 0.08,
+				reason: 'unsend puts the prompt back in the composer, which grows; the DOM click is not a recorded input' }],
+			async setup(ctx) {
+				await openNewChat(ctx);
+				await ctx.page.waitForTimeout(800);
+			},
+			async act({ page, mark, variant, log }) {
+				const needles = [`tok-${uniq()}`, `tok-${uniq()}`, `tok-${uniq()}`];
+				const docked = () => page.locator('.pending-messages [role="article"]').filter({ hasText: needles[2] });
+				const frame = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+				// The pane's scroll position, how far its bottom is, and the blank between the reply's end and the first bubble.
+				const geometry = () => page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const bubble = document.querySelector('.pending-messages [role="article"]');
+					const spacer = document.querySelector('.transcript-tail-spacer');
+					return { top: pane.scrollTop, below: pane.scrollHeight - pane.scrollTop - pane.clientHeight,
+						blank: bubble && spacer ? bubble.getBoundingClientRect().top - spacer.getBoundingClientRect().top : null,
+						// The bubbles themselves: the slot keeps its held height around them.
+						stack: [...document.querySelectorAll('.pending-messages [role="article"]')].reduce((sum, el) => sum + el.getBoundingClientRect().height, 0),
+						width: document.querySelector('.chat-column')?.getBoundingClientRect().width ?? 0 };
+				});
+				/** Wheel the transcript until its bottom is between min and max px below the view. */
+				const scrollAway = async (min, max) => {
+					await page.locator('.msg-scroll').hover();
+					for (let i = 0; i < 30; i++) {
+						const { below } = await geometry();
+						if (below >= min && below <= max) break;
+						await page.mouse.wheel(0, below < min ? -Math.min(min + 40 - below, 600) : Math.min(below - max + 20, 600));
+						await page.waitForTimeout(120);
+					}
+					await page.waitForTimeout(400);
+					const g = await geometry();
+					expect(g.below >= min && g.below <= max, `the reader scrolled ${min}-${max}px above the bottom (${JSON.stringify(g)})`);
+					return g;
+				};
+
+				await mark('send the first');
+				await typeAndSend(page, `first tok-${uniq()} ${scriptTag(variant, 'slow', { tps: 10 })}`);
+				await page.getByText(SLOW_REPLY.start, { exact: false }).first().waitFor({ timeout: 60_000 });
+				await waitChat(page, { streaming: 'true' });
+				await mark('queue a failing prompt, a slow one and a long one');
+				await quickSend(page, `queued ${needles[0]} ${scriptTag(variant, 'error-500', { latency_ms: 0 })}`);
+				await quickSend(page, `queued ${needles[1]} ${scriptTag(variant, 'slow', { tps: 1 })}`);
+				await quickSend(page, `queued ${needles[2]} a longer prompt that wraps across several lines in the docked queue bubble `
+					+ `so that narrowing the column makes it taller by at least one more line in every variant`);
+				await errorRow(page, /HTTP 500/).first().waitFor({ timeout: 120_000 });
+				await page.waitForFunction((n) => [...document.querySelectorAll('[data-user-turn-id]')].some((el) => el.textContent.includes(n)),
+					needles[1], { timeout: 120_000, polling: 'raf' });
+				await page.waitForTimeout(1000);
+				expect(await docked().count() === 1, 'the long prompt is still docked under the Error row');
+
+				if (variant.viewport === 'phone') {
+					await mark('scroll far up, narrow the column and widen it back');
+					const away = await scrollAway(500, 4000);
+					const { width, height } = page.viewportSize();
+					await page.setViewportSize({ width: 330, height });
+					await frame(); await page.waitForTimeout(400);
+					const narrow = await geometry();
+					await page.setViewportSize({ width, height });
+					await frame(); await page.waitForTimeout(400);
+					const wide = await geometry();
+					log(`detached resize: ${JSON.stringify({ away, narrow, wide })}`);
+					expect(narrow.width < away.width - 1 && narrow.stack > away.stack + 1, `the column narrowed and the stack grew (${away.stack}px -> ${narrow.stack}px)`);
+					expect(Math.abs(wide.stack - away.stack) <= 1, 'the stack is back to its wide height');
+					// The streaming reply may consume reserve meanwhile; it never adds blank.
+					expect(wide.blank <= away.blank + 1, `no blank above the bubbles is left from the narrow stack (${away.blank}px -> ${wide.blank}px)`);
+				}
+
+				await mark('unsend the docked bubble a little above the bottom');
+				const near = await scrollAway(30, 120);
+				await page.evaluate(() => {
+					const pane = document.querySelector('.msg-scroll');
+					const p = (window.__scrollProbe = { tops: [], running: true });
+					const next = () => requestAnimationFrame(() => { if (!p.running) return; p.tops.push(pane.scrollTop); next(); });
+					next();
+				});
+				// A DOM click, as a withdrawal from elsewhere would land: the last bubble's
+				// unsend button sits below a view scrolled this far up, and Playwright's own
+				// click (or hover) would scroll it into view first.
+				await docked().getByRole('button', { name: 'Unsend message and edit it' }).evaluate((b) => b.click());
+				await docked().waitFor({ state: 'detached', timeout: 5000 });
+				await page.waitForTimeout(1500);
+				const tops = await page.evaluate(() => { const p = window.__scrollProbe; p.running = false; return p.tops; });
+				const moved = tops.filter((t) => Math.abs(t - near.top) > 1);
+				log(`detached withdraw: ${JSON.stringify({ near, frames: tops.length, moved: moved.slice(0, 5), after: await geometry() })}`);
+				expect(tops.length > 10, 'frames were sampled through the withdrawal');
+				expect(moved.length === 0, `no painted frame moved the reader (${near.top} -> ${JSON.stringify(moved.slice(0, 5))})`);
+			}
+		},
+		{
 			// #1052 "rapid start": the second message goes out the moment the first
 			// shows as streaming, before any reply prose (the turn is still starting).
 			name: 'rapid-start-each-shows-once',
