@@ -2141,17 +2141,44 @@ def test_usage_parses_grouped_agent_buckets():
     ]
 
 
-def test_usage_parses_the_guessed_shape():
-    windows = ag.normalize_usage({"status": "OK", "quotas": [
-        {"model": "gemini-3.1-pro", "remainingFraction": 0.75, "resetTime": "2026-11-12T10:00:00Z"}]})
-    assert windows == [{"type": "antigravity_gemini_3_1_pro", "label": "gemini-3.1-pro",
-                        "utilization": 25.0, "resets_at": "2026-11-12T10:00:00Z"}]
+def _quota_bucket(bucket_id="gemini-weekly", **overrides):
+    return {"id": bucket_id, "window": "weekly", "remaining_fraction": 0.75,
+            "reset_time": "2026-11-25T01:04:13Z", **overrides}
+
+
+def _quota_reply(*buckets, name="Gemini Models", **data):
+    return {"command": {"data": {"groups": [{"name": name, "buckets": list(buckets)}], **data}}}
+
+
+@pytest.mark.parametrize("bucket", [
+    {"remaining": 0.5}, _quota_bucket(remaining_fraction=10**400),
+    _quota_bucket(remaining_fraction=True), _quota_bucket(remaining_fraction=float("nan")),
+    _quota_bucket(window="monthly"),
+])
+def test_invalid_grouped_buckets_do_not_hide_valid_ones_or_use_a_summary(bucket):
+    assert ag.normalize_usage(_quota_reply(bucket, summary={"remaining": 0.5})) is None
+    assert ag.normalize_usage(_quota_reply(bucket, _quota_bucket("good"))) == [
+        {"type": "antigravity_good", "label": "Gemini Models, weekly", "utilization": 25.0,
+         "resets_at": "2026-11-25T01:04:13Z"}
+    ]
+
+
+def test_duplicate_quota_ids_across_groups_invalidate_the_reading():
+    payload = _quota_reply(*(_quota_bucket(f"id-{i}") for i in range(20)))
+    payload["command"]["data"]["groups"].append({"name": "Other group", "buckets": [_quota_bucket("id-0")]})
+    assert ag.normalize_usage(payload) is None
+
+
+def test_grouped_usage_bounds_keep_the_first_twenty_windows_and_the_period():
+    windows = ag.normalize_usage(_quota_reply(*(_quota_bucket(str(i)) for i in range(22)), name="x" * 100))
+    assert [w["type"] for w in windows] == [f"antigravity_{i}" for i in range(20)]
+    assert all(w["label"] == "x" * 72 + ", weekly" for w in windows)
 
 
 @pytest.mark.parametrize("payload", [
     None, [], "text", {"status": "ERROR", "error": {"message": "Authentication required"}},
-    {"status": "ERROR", "quotas": [{"remaining_fraction": 0.5}]},
-    {"quotas": [{"remainingFraction": 7}]}, {"quotas": [{"remainingFraction": "half"}]},
+    {"status": "ERROR", **_quota_reply(_quota_bucket())},
+    {"quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.75}]},
     {"usage": {"remaining": 0.5}}, {"status": "OK"},
 ])
 def test_usage_that_does_not_parse_is_unavailable(payload):
@@ -2173,7 +2200,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     from app.core.provider_usage import ProviderUsageMonitor
 
     row = {"id": "row-1", "provider_type": "antigravity", "auth_mode": "oauth-personal",
-           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1"}}
+           "extra_env_json": {"FAKE_ACP_SIGNED_IN": "1", "FAKE_ACP_USAGE": json.dumps(_quota_reply(_quota_bucket()))}}
     calls = []
     real_read = ag.read_usage
 
@@ -2191,8 +2218,7 @@ async def test_usage_reads_only_on_demand(mock_db, fake_agy, monkeypatch):
     await monitor._poll_antigravity_provider(row)
     assert calls == ["row-1"] and writes[0][0] == "ok"
     assert writes[0][1][1] == "antigravity" and writes[0][1][3][0]["utilization"] == 25.0
-    monkeypatch.setenv("FAKE_ACP_USAGE", "not json")
-    row["extra_env_json"]["FAKE_ACP_USAGE"] = "not json"
+    row["extra_env_json"]["FAKE_ACP_USAGE"] = json.dumps(_quota_reply(_quota_bucket(remaining_fraction=10**400)))
     await monitor._poll_antigravity_provider(row)
     assert writes[1] == ("fail", ("row-1", "antigravity", "unavailable"))
 
@@ -2404,8 +2430,7 @@ async def _poll_with(monkeypatch, row, during, unparsed=False):
 
     async def read(r):
         await during()
-        return None if unparsed else {"status": "OK", "quotas": [{"model": "gemini-3.1-pro", "remainingFraction": 0.5,
-                                                                  "resetTime": "2026-11-12T10:00:00Z"}]}
+        return None if unparsed else _quota_reply(_quota_bucket(remaining_fraction=0.5))
     monkeypatch.setattr(ag, "read_usage", read)
     monitor = ProviderUsageMonitor()
     monitor._on_demand = True
@@ -2418,7 +2443,7 @@ async def test_a_reading_is_written_when_nothing_changed(mock_db, fake_agy, monk
 
     async def nothing():
         return None
-    assert await _poll_with(monkeypatch, row, nothing) is not None
+    assert await _poll_with(monkeypatch, row, nothing) == {"source": "antigravity_usage"}
     assert (await _poll_with(monkeypatch, row, nothing, unparsed=True) or {}).get("usage_error") == "unavailable"
 
 

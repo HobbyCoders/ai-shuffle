@@ -1188,11 +1188,12 @@
 	{@const pbDisplay = providerDisplayFor(pb)}
 	{@const pbOpen = isSectionOpen(sectionId)}
 	{@const pbNoFiveHour = providerNoFiveHour(pb)}
-	{@const pbWindows = planDisplayWindows(pb.windows, pbNoFiveHour, now)}
+	{@const isAntigravity = providerUsageType(pb) === 'antigravity'}
+	{@const pbWindows = isAntigravity ? Object.values(pb.windows) : planDisplayWindows(pb.windows, pbNoFiveHour, now)}
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
 	{#snippet providerSummary()}
-		{@const pbSummary = providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+		{@const pbSummary = isAntigravity ? null : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
 		{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit

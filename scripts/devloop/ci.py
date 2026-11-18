@@ -681,7 +681,7 @@ def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS
 class DevInstance:
     """``devloop up --ci`` as a child; its output goes to ``devloop.log``."""
 
-    def __init__(self, out: Path, ttl: int) -> None:
+    def __init__(self, out: Path, ttl: int, *, fake_antigravity: bool = False) -> None:
         from scripts.devloop.__main__ import FAILED_LINE, READY_LINE
 
         self.ready_line, self.failed_line = READY_LINE, FAILED_LINE
@@ -692,7 +692,7 @@ class DevInstance:
         self.failure: str | None = None
         self.process = subprocess.Popen(
             [sys.executable, "-m", "scripts.devloop", "up", "--ci", "--status", str(self.status),
-             "--ttl-seconds", str(ttl)],
+             "--ttl-seconds", str(ttl), *(["--fake-antigravity"] if fake_antigravity else [])],
             cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         self.reader = threading.Thread(target=self._read, name="devloop-log", daemon=True)
@@ -865,7 +865,7 @@ def journeys(args: argparse.Namespace) -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        instance = DevInstance(out, args.ttl_seconds)
+        instance = DevInstance(out, args.ttl_seconds, fake_antigravity="antigravity-usage.journey.mjs" in mine)
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
                "JOURNEY_OUT": str(attempt_out / "journeys")}

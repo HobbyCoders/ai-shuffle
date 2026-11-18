@@ -1652,74 +1652,54 @@ async def read_usage(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else None
 
 
-_FRACTION_KEYS = ("remaining_fraction", "remainingFraction", "remaining")
-_RESET_KEYS = ("reset_time", "resetTime", "resets_at", "resetsAt", "reset_at")
-_NAME_KEYS = ("window", "name", "label", "model", "type", "id")
+_USAGE_PERIODS = {"weekly": "weekly", "5h": "5-hour"}
+_MAX_USAGE_LABEL = 80
+_MAX_USAGE_WINDOWS = 20
 
 
-def _grouped_usage_buckets(payload: Mapping[str, Any]) -> list[tuple[Mapping[str, Any], str, str]]:
+def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
+    """Read only the agent's grouped quota envelope, not the token usage object."""
+    if not isinstance(payload, Mapping) or payload.get("status") == "ERROR":
+        return None
     command = payload.get("command")
     data = command.get("data") if isinstance(command, Mapping) else None
     groups = data.get("groups") if isinstance(data, Mapping) else None
-    candidates = []
-    for group in groups if isinstance(groups, list) else []:
+    if not isinstance(groups, list):
+        return None
+
+    windows = []
+    seen: set[str] = set()
+    for group in groups:
         if not isinstance(group, Mapping):
             continue
         name, buckets = group.get("name"), group.get("buckets")
-        if not isinstance(name, str) or not name or not isinstance(buckets, list):
+        if not isinstance(buckets, list):
             continue
         for bucket in buckets:
             if not isinstance(bucket, Mapping):
                 continue
-            bucket_id, window = bucket.get("id"), bucket.get("window")
-            if not isinstance(bucket_id, str) or not bucket_id or not isinstance(window, str) or not window:
+            bucket_id = bucket.get("id")
+            if not isinstance(bucket_id, str) or not bucket_id.strip():
                 continue
-            period = "5-hour" if window == "5h" else window
-            candidates.append((bucket, bucket_id, f"{name}, {period}"))
-    return candidates
-
-
-def normalize_usage(payload: Any) -> Optional[List[Dict[str, Any]]]:
-    """Windows from a ``/usage`` reply, or None when it is not understood."""
-    if not isinstance(payload, Mapping) or payload.get("status") == "ERROR":
-        return None
-    candidates: List[Mapping[str, Any]] = []
-
-    def walk(value: Any, depth: int = 0) -> None:
-        if depth > 4:
-            return
-        if isinstance(value, Mapping):
-            if any(k in value for k in _FRACTION_KEYS):
-                candidates.append(value)
-                return
-            for child in value.values():
-                walk(child, depth + 1)
-        elif isinstance(value, list):
-            for child in value[:50]:
-                walk(child, depth + 1)
-
-    grouped = _grouped_usage_buckets(payload)
-    if not grouped:
-        # Older, guessed shape. Never count the top-level token usage object.
-        walk({k: v for k, v in payload.items() if k != "usage"})
-        for index, item in enumerate(candidates):
-            name = next((item[k] for k in _NAME_KEYS if isinstance(item.get(k), str) and item[k]), "")
-            slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or str(index)
-            grouped.append((item, slug, name))
-
-    windows = []
-    for item, bucket_id, label in grouped:
-        fraction = next((item.get(k) for k in _FRACTION_KEYS if k in item), None)
-        if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
-            continue
-        if not 0 <= float(fraction) <= 1:
-            continue
-        reset = next((item.get(k) for k in _RESET_KEYS if item.get(k) not in (None, "")), None)
-        windows.append({
-            "type": f"antigravity_{bucket_id}",
-            "label": label or None,
-            "utilization": round((1 - float(fraction)) * 100, 2),
-            "resets_at": str(int(reset)) if isinstance(reset, (int, float)) and not isinstance(reset, bool)
-            else (str(reset) if reset is not None else None),
-        })
+            # Check even skipped buckets and those beyond the display limit.
+            if bucket_id in seen:
+                return None
+            seen.add(bucket_id)
+            if len(windows) >= _MAX_USAGE_WINDOWS or not isinstance(name, str) or not name.strip():
+                continue
+            window = bucket.get("window")
+            period = _USAGE_PERIODS.get(window) if isinstance(window, str) else None
+            fraction = bucket.get("remaining_fraction")
+            if not period or isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+                continue
+            if not 0 <= fraction <= 1:
+                continue
+            suffix = f", {period}"
+            reset = bucket.get("reset_time")
+            windows.append({
+                "type": f"antigravity_{bucket_id}",
+                "label": name[:_MAX_USAGE_LABEL - len(suffix)] + suffix,
+                "utilization": round((1 - fraction) * 100, 2),
+                "resets_at": reset if isinstance(reset, str) and reset else None,
+            })
     return windows or None
