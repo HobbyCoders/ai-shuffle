@@ -7,6 +7,14 @@
 
 import { traceNote } from './trace.mjs';
 
+/** Split a document reload at its first paint. The recorder should compare UI transitions
+ * within each document, not interpret the empty frame between documents as a reversal. */
+export async function reloadForHistory(page, mark) {
+	await page.reload({ waitUntil: 'domcontentloaded' });
+	await page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+	await mark('restore the new document');
+}
+
 export const PROJECT = 'Dev sandbox';
 export const AGENT = 'Dev agent';
 /** Seeded chat titles (scripts/devloop/seed.py) by the seed's own keys. */

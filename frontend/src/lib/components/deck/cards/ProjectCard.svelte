@@ -3,7 +3,7 @@
 	import { onDestroy, onMount, untrack } from 'svelte';
 	import { ViewShell, ViewPanel, ViewMain, PanelSearch, PanelIconButton, DetailPane, EmptyDetail, ListItem, Segmented, InlineBanner, RowGroup, SettingRow } from '$lib/components/layout/view';
 	import { platform } from '$lib/stores/platform.svelte';
-	import { appData as tabs, projects } from '$lib/stores/app-data.svelte';
+	import { appData as tabs, projectCatalogReady, projects } from '$lib/stores/app-data.svelte';
 	import { loadProjectsOverview, patchOverviewWorker, projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
 	import { Plus, FolderOpen, FolderGit2, Settings, Server, Bot, Zap, Brain, Loader2, MonitorSmartphone } from 'lucide-svelte';
 	import type ProjectMcpTabType from './ProjectMcpTab.svelte';
@@ -200,7 +200,9 @@
 
 	// Keep the mounted detail shell after deletion so child drafts remain recoverable.
 	let retainedRow = $state<ListRow | undefined>();
-	const liveRow = $derived(allRows.find((r) => r.key === selectedKey || (!!r.localId && r.localId === selectedKey)));
+	// A project is chosen by its overview key or, before its overview row arrives, its local id.
+	const rowFor = (key: string | null) => allRows.find((r) => r.key === key || (!!r.localId && r.localId === key));
+	const liveRow = $derived(rowFor(selectedKey));
 	$effect(() => { if (liveRow) retainedRow = liveRow; });
 	const selectedRow = $derived(liveRow ?? (retainedRow && (retainedRow.key === selectedKey || retainedRow.localId === selectedKey) ? retainedRow : undefined));
 	const selectedProject = $derived(selectedRow?.local);
@@ -285,7 +287,7 @@
 		const id = shown ? $activeView?.itemId : null;
 		if (!id) { handledItem = null; return; }
 		if (id === handledItem) return;
-		const row = allRows.find(r => r.key === id || r.localId === id);
+		const row = rowFor(id);
 		if (row) { handledItem = id; untrack(() => handleRowClick(row)); }
 	});
 	const detailTabs = $derived(TABS.filter(t => t.id !== 'workers' || showWorkersTab)
@@ -295,10 +297,13 @@
 
 
 	function restoreSelection(key: string) {
-		const row = allRows.find(r => r.key === key);
-		// Missing only after the overview answered: a failed first load is not the list.
-		if (!row) return overviewSettled && $projectsOverviewSupported !== null ? 'missing' : 'pending';
+		const row = rowFor(key);
+		// Missing only once the lists it can come from loaded: the overview answered
+		// (rows, or unsupported) and this worker's /projects succeeded.
+		if (!row) return $projectsOverviewSupported !== null && $projectCatalogReady ? 'missing' : 'pending';
 		handleRowClick(row);
+		// Keep the entry's own key (a local id stays one): restoring is not a new selection.
+		selectedKey = key;
 	}
 </script>
 

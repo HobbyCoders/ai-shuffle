@@ -8,7 +8,7 @@ vi.mock('$app/navigation', () => ({ pushState: vi.fn(), goto: vi.fn() }));
 vi.mock('$lib/services/watch-resources', () => ({ watchResources: vi.fn() }));
 vi.mock('$lib/stores/app-data.svelte', async () => {
  const { writable } = await import('svelte/store');
- return { projects: writable([]), appData: { deleteProject: vi.fn(), updateProject: vi.fn() } };
+ return { projects: writable([]), projectCatalogReady: writable(true), appData: { deleteProject: vi.fn(), updateProject: vi.fn() } };
 });
 vi.mock('$lib/stores/projects-overview', async () => {
  const { writable } = await import('svelte/store');
@@ -36,7 +36,7 @@ vi.mock('./ProjectHooksTab.svelte', () => import('$lib/test-stubs/EmptyRouteDepe
 vi.mock('./ProjectMemoryTab.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/components/AddProjectModal.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 import ProjectCard from './ProjectCard.svelte';
-import { appData, projects } from '$lib/stores/app-data.svelte';
+import { appData, projectCatalogReady, projects } from '$lib/stores/app-data.svelte';
 import { activeView } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
 import { projectsOverview, projectsOverviewSupported } from '$lib/stores/projects-overview';
@@ -44,13 +44,14 @@ const list = projects as unknown as Writable<any[]>;
 const view = activeView as unknown as Writable<any>;
 const overview = projectsOverview as Writable<any[]>;
 const supported = projectsOverviewSupported as Writable<boolean>;
+const catalogReady = projectCatalogReady as unknown as Writable<boolean>;
 beforeEach(() => {
  platform.set('desktop'); page.state = {};
  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
  Object.defineProperty(window, 'innerWidth', { value: 1440, configurable: true });
  list.set([{ id: 'one', name: 'One', path: '/one', session_count: 2 }, { id: 'two', name: 'Two', path: '/two' }]);
- view.set({ type: 'project' }); overview.set([]); supported.set(false);
+ view.set({ type: 'project' }); overview.set([]); supported.set(false); catalogReady.set(true);
 });
 afterEach(() => { cleanup(); shellHistory.stop(); platform.set('desktop'); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('Projects master/detail', () => {
@@ -130,5 +131,32 @@ describe('Projects master/detail', () => {
   list.set([]); render(ProjectCard); await tick();
   expect(screen.getByRole('heading', { level: 1, name: 'Projects' })).toBeTruthy();
   expect(screen.getAllByRole('button', { name: 'New project' }).some(b => b.classList.contains('primary'))).toBe(true);
+ });
+});
+describe('a reloaded project detail (S21)', () => {
+ const saved = (panel: string) => shellHistory.start({ shell: { id: 'saved', place: { type: 'project', panel } } }, { type: 'project' });
+ it('keeps the saved project until /projects loads, on a worker without the overview', async () => {
+  saved('two'); list.set([]); catalogReady.set(false);
+  render(ProjectCard); await tick(); await new Promise(resolve => setTimeout(resolve, 20));
+  // The overview answered "unsupported", but the plain list has not: no proof of deletion.
+  expect(shellHistory.place?.panel).toBe('two');
+  list.set([{ id: 'two', name: 'Two', path: '/two' }]); catalogReady.set(true);
+  expect(await screen.findByRole('heading', { level: 2, name: 'Two' })).toBeTruthy();
+  expect(shellHistory.place?.panel).toBe('two');
+ });
+ it('clears a saved project only once the loaded list lacks it', async () => {
+  saved('gone');
+  render(ProjectCard);
+  // Then desktop opens the first project, as on a fresh visit.
+  expect(await screen.findByRole('heading', { level: 2, name: 'One' })).toBeTruthy();
+  expect(shellHistory.place?.panel).toBe('one');
+ });
+ it('finds a project saved under its local id once its overview row arrives', async () => {
+  saved('two'); supported.set(true);
+  overview.set([{ project_v2_id: 'v2-two', local_project_id: 'two', name: 'Two', kind: 'git', remote: null, workers: [] }]);
+  render(ProjectCard);
+  expect(await screen.findByRole('heading', { level: 2, name: 'Two' })).toBeTruthy();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(shellHistory.place?.panel).toBe('two');
  });
 });

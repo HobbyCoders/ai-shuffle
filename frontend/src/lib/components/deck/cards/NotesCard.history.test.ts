@@ -5,6 +5,7 @@ import NotesCard from './NotesCard.svelte';
 import { shellHistory, type ShellState } from '$lib/services/app-history.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { getNote, getNoteAttachments, getNoteTags, getNotes } from '$lib/api/client';
+import { platform } from '$lib/stores/platform.svelte';
 
 vi.mock('$lib/api/client', () => ({
 	getNotes: vi.fn(), getNote: vi.fn(), createNote: vi.fn(), updateNote: vi.fn(),
@@ -49,6 +50,7 @@ beforeEach(() => {
 });
 afterEach(() => {
 	cleanup();
+	platform.set('desktop');
 	shellHistory.stop();
 	resourceSync.clear();
 	sessionStorage.clear();
@@ -98,3 +100,42 @@ it('a second Back while the discard question is open: Cancel still returns to th
 	expect((screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement).value).toBe('keep me');
 	expect(panels()).toEqual([null, 'A', 'B', 'new']);
 });
+
+it('Cancel returns to the draft’s entry even when the step it answers is still waiting for its note (S19)', async () => {
+	vi.mocked(getNotes).mockImplementation(async (params) => (params?.search ? [note('B')] : [note('A'), note('B')]));
+	render(NotesCard);
+	await fireEvent.click(await screen.findByRole('button', { name: /Note A content A/ }));
+	await fireEvent.click(await screen.findByRole('button', { name: /Note B content B/ }));
+	await fireEvent.click(screen.getAllByRole('button', { name: 'New note' })[0]);
+	await waitFor(() => expect(panels()).toEqual([null, 'A', 'B', 'new']));
+	await fireEvent.input(screen.getByPlaceholderText(/Write your note/), { target: { value: 'keep me' } });
+	// Filter the list so B is listed and A is not.
+	await fireEvent.input(screen.getByPlaceholderText('Search notes'), { target: { value: 'B' } });
+	await waitFor(() => expect(screen.queryByRole('button', { name: /Note A content A/ })).toBeNull(), { timeout: 2000 });
+
+	go(-1); // to B: asks
+	await waitFor(() => expect(dialog()).toBeTruthy());
+	go(-1); // to A, not in the filtered list: that step waits
+	await new Promise((resolve) => setTimeout(resolve));
+	await fireEvent.click(within(dialog()!).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+	await waitFor(() => expect(router.index).toBe(3));
+	expect((screen.getByPlaceholderText(/Write your note/) as HTMLTextAreaElement).value).toBe('keep me');
+	expect(panels()).toEqual([null, 'A', 'B', 'new']);
+});
+
+it('phone app: an older Notes load that answers while a newer one waits still shows, as on main (S17)', async () => {
+	shellHistory.stop();
+	platform.set('mobile');
+	const loads: { resolve: (rows: ReturnType<typeof note>[]) => void; reject: (error: Error) => void }[] = [];
+	vi.mocked(getNotes).mockImplementation(() => new Promise((resolve, reject) => loads.push({ resolve, reject })));
+	render(NotesCard);
+	await waitFor(() => expect(loads).toHaveLength(1));
+	await fireEvent.input(screen.getByPlaceholderText('Search notes'), { target: { value: 'A' } });
+	await waitFor(() => expect(loads).toHaveLength(2), { timeout: 2000 });
+	loads[0].resolve([note('A'), note('B')]);
+	expect(await screen.findByRole('button', { name: /Note A content A/ })).toBeTruthy();
+	// The newer load then fails: main's error banner with its Retry, as before.
+	loads[1].reject(new Error('503'));
+	expect(await screen.findByText('503')).toBeTruthy();
+});
+

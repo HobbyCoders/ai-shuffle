@@ -1,6 +1,6 @@
 // Real note creation, autosave, Preview and moved controls in both app shells.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, uniq } from './lib/app.mjs';
+import { expect, gotoApp, reloadForHistory, uniq } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 
@@ -155,7 +155,7 @@ function historyCase(name) {
    if (name === 'select-while-restore-pending') {
     await mark('reload B with a full first page that does not contain B');
     firstPage = [notes[0], ...Array.from({ length: 99 }, (_, i) => ({ ...notes[0], id: `other-${i}`, title: `Other ${i}` }))];
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    await reloadForHistory(page, mark);
     const row = id => page.locator('[data-settings-item]').filter({ hasText: id });
     await row(idA).waitFor(); await landed(idB);
     expect(!await heading.isVisible(), 'B is not on the first page');
@@ -170,28 +170,28 @@ function historyCase(name) {
     await landed(idA);
     expect(await heading.inputValue() === idA, 'the old result did not select B');
     await mark('reload A with both notes available');
-    firstPage = null; await page.reload({ waitUntil: 'domcontentloaded' }); await heading.waitFor();
+    firstPage = null; await reloadForHistory(page, mark); await heading.waitFor();
     expect(await heading.inputValue() === idA, 'reload follows the last explicit selection');
     expect(await page.evaluate(() => history.length) === length + 1, 'the selection pushed exactly one entry');
     await page.goBack(); await landed(idB);
     await page.waitForFunction(key => document.querySelector('textarea[aria-label="Note title"]')?.value === key, idB, { timeout: 5000 });
    } else if (name === 'unavailable-notes-list') {
     await mark('reload B while the Notes list is unavailable');
-    listUnavailable = true; await page.reload({ waitUntil: 'domcontentloaded' });
+    listUnavailable = true; await reloadForHistory(page, mark);
     await page.getByRole('button', { name: 'Retry', exact: true }).first().waitFor();
     await mark('restore the list service and reload without selecting another note');
-    listUnavailable = false; await page.reload({ waitUntil: 'domcontentloaded' });
+    listUnavailable = false; await reloadForHistory(page, mark);
     await heading.waitFor({ timeout: 5000 });
     expect(await heading.inputValue() === idB, 'a list failure did not erase B from history');
     expect(await page.evaluate(() => history.length) === length, 'recovery did not push another entry');
    } else if (name === 'deleted-note-entry') {
     await mark('reload the deleted note, then select a surviving note');
-    notes.pop(); await page.reload({ waitUntil: 'domcontentloaded' });
+    notes.pop(); await reloadForHistory(page, mark);
     await page.locator('[data-settings-item]').filter({ hasText: idA }).waitFor();
     expect(!await heading.isVisible(), 'a deleted note lands on the list');
     expect(await page.evaluate(() => history.length) === length, 'missing detail is replaced, not pushed');
     await mark('choose A from the list'); await open(idA); await landed(idA);
-    await mark('reload the new selection'); await page.reload({ waitUntil: 'domcontentloaded' });
+    await mark('reload the new selection'); await reloadForHistory(page, mark);
     await heading.waitFor(); expect(await heading.inputValue() === idA, 'the surviving selection was recorded');
    } else {
     await mark('Forward to the still-visible editor before its save settles');

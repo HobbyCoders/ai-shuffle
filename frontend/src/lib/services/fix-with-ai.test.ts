@@ -2,15 +2,12 @@
  * Tests for fix-with-ai.ts — prompt building + review-first chat start.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
 	newChat: vi.fn(),
 	setDraft: vi.fn(),
 	sendMessage: vi.fn(),
-	openChat: vi.fn(),
-	setSidebarCollapsed: vi.fn(),
-	layoutCurrent: { value: { sidebarOverlay: false, sidebarCollapsed: false } },
 }));
 
 vi.mock('$lib/stores/active-session', () => ({
@@ -20,17 +17,12 @@ vi.mock('$lib/stores/active-session', () => ({
 		sendMessage: mocks.sendMessage,
 	},
 }));
-vi.mock('$lib/stores/layout.svelte', () => ({
-	layout: {
-		get current() {
-			return mocks.layoutCurrent.value;
-		},
-		setSidebarCollapsed: mocks.setSidebarCollapsed,
-		openChat: mocks.openChat,
-	},
-}));
 
 import { buildFixPrompt, startFixChat } from './fix-with-ai';
+import { layout } from '$lib/stores/layout.svelte';
+import { shellHistory } from './app-history.svelte';
+
+const openChat = () => vi.mocked(layout.openChat);
 
 beforeEach(() => {
 	Object.values(mocks).forEach((m) => {
@@ -38,8 +30,11 @@ beforeEach(() => {
 			(m as unknown as { mockReset: () => void }).mockReset();
 		}
 	});
-	mocks.layoutCurrent.value = { sidebarOverlay: false, sidebarCollapsed: false };
+	layout.setSidebarOverlay(false);
+	layout.setSidebarCollapsed(false);
+	vi.spyOn(layout, 'openChat');
 });
+afterEach(() => { shellHistory.stop(); vi.restoreAllMocks(); });
 
 describe('buildFixPrompt', () => {
 	it('instructs the agent to use GetAppErrors', () => {
@@ -80,13 +75,14 @@ describe('startFixChat', () => {
 		expect(mocks.newChat).toHaveBeenCalledTimes(1);
 		expect(mocks.setDraft).toHaveBeenCalledTimes(1);
 		expect(mocks.setDraft.mock.calls[0][0]).toContain('GetAppErrors');
-		expect(mocks.openChat).toHaveBeenCalledWith(null);
+		expect(openChat()).toHaveBeenCalledWith(null);
 		// Review-first: must NOT auto-send.
 		expect(mocks.sendMessage).not.toHaveBeenCalled();
 	});
 
 	it('collapses an overlay sidebar before opening', () => {
-		mocks.layoutCurrent.value = { sidebarOverlay: true, sidebarCollapsed: false };
+		layout.setSidebarOverlay(true);
+		layout.setSidebarCollapsed(false);
 		const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb) => {
 			(cb as FrameRequestCallback)(0);
 			return 0;
@@ -94,8 +90,23 @@ describe('startFixChat', () => {
 
 		startFixChat({ message: 'boom' });
 
-		expect(mocks.setSidebarCollapsed).toHaveBeenCalledWith(true);
-		expect(mocks.openChat).toHaveBeenCalledWith(null);
+		expect(layout.current.sidebarCollapsed).toBe(true);
+		expect(openChat()).toHaveBeenCalledWith(null);
+		rafSpy.mockRestore();
+	});
+
+	it('a Back or Forward before the next frame wins over the deferred New Chat (S18)', () => {
+		shellHistory.start({ shell: { id: 'notes', place: { type: 'notes' } } }, { type: 'notes' });
+		layout.setSidebarOverlay(true);
+		layout.setSidebarCollapsed(false);
+		const frames: FrameRequestCallback[] = [];
+		const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb) => frames.push(cb));
+
+		startFixChat({ message: 'boom' });
+		expect(shellHistory.land({ shell: { id: 'docs', place: { type: 'docs' } } })).toBe(true);
+		for (const frame of frames.splice(0)) frame(0);
+
+		expect(openChat()).not.toHaveBeenCalled();
 		rafSpy.mockRestore();
 	});
 });

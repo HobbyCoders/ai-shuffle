@@ -1,6 +1,6 @@
 // Selected desktop details must gain a usable Back step when resized into a stack.
 import { runJourney } from './runner.mjs';
-import { SEEDED, chatState, expect, gotoApp, holdBootLoad, openFromSidebar, sidebarRow, waitChat, waitChatOpen } from './lib/app.mjs';
+import { SEEDED, chatState, expect, gotoApp, holdBootLoad, openFromSidebar, reloadForHistory, sidebarRow, waitChat, waitChatOpen } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const mobileShell = process.argv.includes('--mobile-shell');
 /** The chat the reload case's fresh load lands on, by its surface tag. */
@@ -181,7 +181,7 @@ await runJourney({
 			await notes.waitFor();
 			await releaseBoot();
 			await mark('reload on Notes');
-			await page.reload({ waitUntil: 'domcontentloaded' });
+			await reloadForHistory(page, mark);
 			await notes.waitFor({ timeout: 30_000 });
 			await releaseBoot();
 			await mark('Back returns to the chat the load landed on');
@@ -241,8 +241,78 @@ await runJourney({
 			await open('worktree');
 			await drawerClosed(page);
 		}
+	}, {
+		// Shell history is the web UI's (#1477); the phone app keeps main's history.
+		// Every expectation below is what main's /mobile/ build does, step for step,
+		// so a change in the phone's Back or Forward fails here (main-vs-branch parity).
+		name: 'native-history-matches-main-drawer-notes',
+		viewports: ['phone'],
+		async setup({ page, status }) { await openNative(page, status); },
+		async act({ page, mark }) {
+			await mark('chat A, then B, from the drawer'); await pickInDrawer(page, 'no_project'); await pickInDrawer(page, 'worktree');
+			const length = await page.evaluate(() => history.length);
+			await mark('Notes from the drawer'); await drawerTo(page, 'Notes'); await notesShown(page);
+			expect(await page.evaluate(() => history.length) === length + 1, 'Notes adds one entry');
+			await mark('Back lands on A, as on main'); await page.goBack(); await chatShown(page, 'no_project');
+			await mark('Forward reopens B, as on main'); await page.goForward(); await chatShown(page, 'worktree');
+			await mark('Back again lands on A'); await page.goBack(); await chatShown(page, 'no_project');
+			expect(await page.evaluate(() => history.length) === length + 1, 'Back and Forward add no entry');
+		}
+	}, {
+		name: 'native-history-matches-main-settings-detail',
+		viewports: ['phone'],
+		async setup({ page, status }) { await openNative(page, status); },
+		async act({ page, mark }) {
+			await mark('chat A, then B, from the drawer'); await pickInDrawer(page, 'no_project'); await pickInDrawer(page, 'worktree');
+			await mark('Settings from the drawer'); await drawerTo(page, 'Settings'); await settingsShown(page, 'index');
+			await mark('Providers, then the Claude detail');
+			await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Providers', exact: true }).click();
+			await settingsShown(page, 'page');
+			await page.locator('[data-settings-item="provider:claude"]').click(); await settingsShown(page, 'detail');
+			const length = await page.evaluate(() => history.length);
+			await mark('Back: detail, page, index, then chat A'); await page.goBack(); await settingsShown(page, 'page');
+			await page.goBack(); await settingsShown(page, 'index');
+			await page.goBack(); await chatShown(page, 'no_project');
+			await mark('Forward reopens B, as on main'); await page.goForward(); await chatShown(page, 'worktree');
+			expect(await page.evaluate(() => history.length) === length, 'Back and Forward add no entry');
+		}
 	}] : [])]
 });
+
+async function openNative(page, status) {
+	await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
+	expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
+	await menu(page).waitFor();
+}
+async function pickInDrawer(page, key) {
+	await menu(page).click();
+	const row = sidebarRow(page.getByRole('complementary', { name: 'Chats' }), SEEDED[key]);
+	await row.scrollIntoViewIfNeeded();
+	await row.click();
+	await chatShown(page, key);
+}
+async function drawerTo(page, label) {
+	await menu(page).click();
+	const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
+	const direct = nav.getByRole('button', { name: label, exact: true });
+	if (await direct.count()) await direct.click();
+	else { await nav.getByRole('button', { name: 'More', exact: true }).click(); await page.getByRole('menuitem', { name: label, exact: true }).click(); }
+}
+/** One seeded chat on screen, with the drawer closed. */
+async function chatShown(page, key) {
+	await waitOpen(page, SEEDED[key]);
+	await drawerClosed(page);
+	const others = Object.values(SEEDED).filter((title) => title !== SEEDED[key]);
+	const bar = await page.locator('.topbar').textContent();
+	expect(!others.some((title) => bar.includes(title)), `only ${SEEDED[key]} is open`);
+}
+async function notesShown(page) {
+	await page.getByPlaceholder('Search notes', { exact: true }).waitFor();
+	await drawerClosed(page);
+}
+async function settingsShown(page, view) {
+	await page.locator(`div.settings-shell[data-view="${view}"]`).waitFor({ timeout: 10_000 });
+}
 
 function menu(page) {
 	return page.getByRole('button', { name: /^Open menu(?: \(\d+ unread notifications\))?$/ });

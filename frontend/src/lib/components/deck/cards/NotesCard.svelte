@@ -51,7 +51,6 @@
 	let notes = $state<Note[]>([]);
 	let tags = $state<NoteTag[]>([]);
 	let loading = $state(true);
-	let listRequest = 0;
 	let listIsComplete = $state(false);
 	let error = $state<string | null>(null);
 
@@ -231,11 +230,21 @@
 		confirmLabel: string;
 		danger: boolean;
 		action: () => void;
-		cancel?: () => void;
-		draftEntry?: number | null;
 	} | null>(null);
+	// Where a Back or Forward that met the unsaved draft returns the browser on
+	// Cancel: the draft's own entry. Kept across further steps until answered.
+	let draftReturn: number | null = null;
+
+	function cancelPendingConfirm() {
+		const to = draftReturn;
+		draftReturn = null;
+		pendingConfirm = null;
+		// Whichever entry the browser landed on since, the draft stays on screen: go back to its entry.
+		if (shellHistory.restored) shellHistory.refuse(shellHistory.restored, to);
+	}
 
 	function runPendingConfirm() {
+		draftReturn = null;
 		const action = pendingConfirm?.action;
 		pendingConfirm = null;
 		action?.();
@@ -243,7 +252,6 @@
 
 	// Load notes and tags
 	async function loadData(quiet = false) {
-		const request = ++listRequest;
 		const filtered = !!(searchQuery || selectedTag);
 		listIsComplete = false;
 		if (!quiet) loading = true;
@@ -257,16 +265,16 @@
 				}),
 				getNoteTags()
 			]);
-			if (request !== listRequest) return;
 			notes = notesData;
 			tags = tagsData;
 			// GET /notes defaults to 100 rows. A full page or filtered list can't
-			// prove that a historical note has been deleted.
+			// prove that a historical note has been deleted. This describes the
+			// rows just shown, whichever request they answer.
 			listIsComplete = !filtered && notesData.length < 100;
 		} catch (e) {
-			if (request === listRequest) error = e instanceof Error ? e.message : 'Failed to load notes';
+			error = e instanceof Error ? e.message : 'Failed to load notes';
 		} finally {
-			if (request === listRequest) loading = false;
+			loading = false;
 		}
 	}
 
@@ -380,15 +388,12 @@
 			if (!restoredEntryCurrent) shellHistory.detail('notes', { panel: editingNote?.id ?? (isCreatingNew ? 'new' : null) });
 		};
 		if (hasUnsavedChanges) {
-			// Kept from a Back or Forward: the browser returns to the draft's entry.
-			// A step taken while an earlier one still waits keeps that entry.
-			const draftEntry = restoredEntryCurrent
-				? pendingConfirm?.draftEntry ?? shellHistory.returnPoint(landing) : null;
+			// A step taken while an earlier one still waits keeps the draft's entry.
+			if (restoredEntryCurrent && draftReturn === null) draftReturn = shellHistory.returnPoint(landing);
 			pendingConfirm = {
 				title: 'Discard changes',
 				message: 'You have unsaved changes. Discard them?',
-				confirmLabel: 'Discard', danger: true, action: apply, draftEntry,
-				cancel: restoredEntryCurrent ? () => { if (current()) shellHistory.refuse(landing, draftEntry); } : undefined
+				confirmLabel: 'Discard', danger: true, action: apply
 			};
 			return;
 		}
@@ -1019,7 +1024,7 @@
 	confirmLabel={pendingConfirm?.confirmLabel ?? 'Confirm'}
 	danger={pendingConfirm?.danger ?? false}
 	onConfirm={runPendingConfirm}
-	onCancel={() => { const cancel = pendingConfirm?.cancel; pendingConfirm = null; cancel?.(); }}
+	onCancel={cancelPendingConfirm}
 />
 
 <style>

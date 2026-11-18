@@ -71,6 +71,9 @@ function historyIndex(): number | null {
 // the user keeps) can return the browser there without adding a stop.
 let left: { landing: Entry; index: number | null } | null = null;
 let here: number | null = null;
+// Back/Forward landings on another of this module's entries, counted: a
+// navigation deferred to the next frame yields to one that happened since.
+let traversals = 0;
 // The user settled on an entry's committed place: a refinement held for it is dropped.
 function settle(on: Entry) {
  if (held?.id === on.id) held = null;
@@ -86,6 +89,7 @@ function samePlace(a: Place | undefined, b: Place | undefined): boolean {
 
 export const shellHistory = {
  get restored() { return restored; },
+ get traversals() { return traversals; },
  get place() { return shown?.place; },
  /**
   * At mount. A saved place is shown as it is. Otherwise the arrival entry is
@@ -133,6 +137,7 @@ export const shellHistory = {
    return false;
   }
   settling = false;
+  traversals++;
   entry = at;
   if (kept) at = { ...kept };
   restored = shown = at;
@@ -187,12 +192,13 @@ export const shellHistory = {
  detail(type: ViewType, patch: Partial<Place>, replace = false) {
   if (!mounted || shown?.place.type !== type) return;
   const next = { ...shown.place, ...patch };
-  if (shown.id === entry?.id && samePlace(next, shown.place)) return;
+  // Already committed: nothing to write. Otherwise a place already on screen
+  // was rejected by the router: it is written again, onto the same entry.
   if (entry && samePlace(next, entry.place)) {
    settle(entry);
    return;
   }
-  if (replace && shown.id === entry?.id) refine(next);
+  if ((replace || samePlace(next, shown.place)) && shown.id === entry?.id) refine(next);
   else push(next);
  },
  /**

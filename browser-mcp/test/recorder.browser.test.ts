@@ -521,9 +521,7 @@ describe.skipIf(!browserPath)("flight recorder in a real browser", () => {
       expect(rec.id).toBe(started.id);
       expect(rec.stats.segments).toBe(2);
       expect(rec.text).toContain('> mark "go next"');
-      // The new document's empty state is sampled before the app mounts: the
-      // baseline later frames are compared with, not a frame of the old page.
-      expect(rec.text).toMatch(/\* full page load \/next\n.*\/next {2}surface=\(gone\) composer=\(gone\) messages=\(gone\) loading=\(gone\)\n.*\+ ChatView mounted/);
+      expect(rec.text).toMatch(/\* full page load \/next\n.*\+ ChatView mounted/);
       expect(rec.anomalies).toEqual([]);
 
       const again = await start();

@@ -201,11 +201,6 @@
       const before = current;
       current = { ...current };
       for (const [field, raw] of Object.entries(entry.changes)) current[field] = raw === undefined ? null : raw;
-      if (entry.documentStart) {
-        runs.clear();
-        raised.clear();
-        return;
-      }
       for (const field of Object.keys(entry.changes)) {
         const value = current[field];
         const list = runsFor(field, before, current);
@@ -795,7 +790,7 @@
     return changes;
   }
 
-  function sample(recording, phase, documentStart) {
+  function sample(recording, phase) {
     if (!isActive(recording)) return;
     if (phase && recording.messageAreaGap && !recording.gapSampled) {
       var diagnostic = tryDiagnostic(recording, function () { return { frame: recording.frame,
@@ -810,7 +805,7 @@
     var started = root.performance && root.performance.now ? root.performance.now() : 0;
     var values = readSignature(recording.opts);
     if (!isActive(recording)) return;
-    var changes = diff(recording.last, values) || (documentStart ? {} : null);
+    var changes = diff(recording.last, values);
     if (changes) {
       var merged = {};
       var field;
@@ -818,9 +813,7 @@
       for (field in changes) merged[field] = changes[field];
       recording.last = merged;
       recording.stats.stateChanges += 1;
-      var entry = { t: elapsed(recording), kind: 'state', frame: recording.frame, changes: changes };
-      if (documentStart) entry.documentStart = true;
-      push(recording, entry);
+      push(recording, { t: elapsed(recording), kind: 'state', frame: recording.frame, changes: changes });
     }
     if (recording.rowsDirty) {
       recording.rowsDirty = false;
@@ -1915,9 +1908,6 @@
         activate(S);
         push(S, { t: elapsed(), kind: 'navigation', type: 'load', path: cleanPath(), lost: true }, true);
       }
-      // Capture the replacement document before app code paints. This state is
-      // the baseline for reversals, not another frame from the old document.
-      sample(S, null, true);
       // From an init script the document is still empty; a manual resume on a
       // loaded page records what is already there as mounted at the load.
       var present = root.document.querySelectorAll('[data-ui-mount]');

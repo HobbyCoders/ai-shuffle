@@ -165,8 +165,8 @@ function _update(fn: (s: LayoutState) => LayoutState) {
 // Exported Store
 // ============================================
 
-/** The newest afterSidebarOverlay request; an older deferred one is stale. */
-let deferredNavigation = 0;
+/** Explicit navigations so far (see afterSidebarOverlay); a deferred one is stale once another follows. */
+let navigations = 0;
 
 export const layout = {
 	get current() {
@@ -187,16 +187,16 @@ export const layout = {
 
 	/**
 	 * Navigate now, or after an open sidebar overlay closes (the next frame).
-	 * Any view change in between (Back, Forward, another pick) supersedes it.
+	 * A Back or Forward, or another explicit navigation, in between supersedes
+	 * it; a detail refining the page on screen (a saved note's id) does not.
 	 */
 	afterSidebarOverlay(navigate: () => void) {
-		const request = ++deferredNavigation;
+		const request = ++navigations;
 		if (!_state.sidebarOverlay || _state.sidebarCollapsed) return navigate();
-		// A landing (Back, Forward) or a selection replaces the shell-history place.
-		const place = shellHistory.place;
+		const traversals = shellHistory.traversals;
 		_update((s) => ({ ...s, sidebarCollapsed: true }));
 		requestAnimationFrame(() => {
-			if (request === deferredNavigation && shellHistory.place === place) navigate();
+			if (request === navigations && traversals === shellHistory.traversals) navigate();
 		});
 	},
 
@@ -206,6 +206,7 @@ export const layout = {
 	 * corrects the entry on screen instead of adding one (see shellHistory).
 	 */
 	openChat(sessionId: string | null, history: 'push' | 'reconcile' | 'replace' = 'push') {
+		if (history === 'push') navigations++;
 		if (!shellHistory.destination({ type: 'session', sessionId }, history)) return;
 		_update((s) => ({
 			...s,
@@ -225,6 +226,7 @@ export const layout = {
 			type = 'settings';
 			itemId = target;
 		}
+		navigations++;
 		shellHistory.destination({ type });
 		_update((s) => ({
 			...s,

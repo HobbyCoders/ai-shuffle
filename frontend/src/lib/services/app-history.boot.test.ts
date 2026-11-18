@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { page } from '$app/state';
 import { savedPlace, shellHistory, type ShellState } from './app-history.svelte';
-import type { ActiveView } from '$lib/stores/layout.svelte';
+import { layout, type ActiveView } from '$lib/stores/layout.svelte';
 
 // A router that keeps page state the way SvelteKit does: a shallow goto with
 // persistState survives a reload, while an overlay's pushState (Chat controls,
@@ -392,5 +392,44 @@ it('the phone app: shell history reads and writes nothing, so main’s own write
  expect(shellHistory.restored).toBeNull();
  // A reload on an entry the web UI saved boots the phone app as main does.
  expect(savedPlace(arrival)).toBeUndefined();
+});
+
+it('a detail selection whose replace was rejected is written again when chosen again (S20)', async () => {
+ const settings = (tab: string) => ({ type: 'settings' as const, settings: { category: 'general' as never, view: 'detail' as never, item: 'x', tab, depth: 1 } });
+ startOn(saved('detail', settings('one')));
+ router.outcomes = ['reject'];
+ shellHistory.detail('settings', settings('two'), true);
+ await settle(); await settle();
+ expect(here().shell?.place.settings?.tab).toBe('one');
+ // Reselecting the tab on screen retries onto the same entry, so a reload restores it.
+ shellHistory.detail('settings', settings('two'));
+ await vi.waitFor(() => expect(here().shell?.place.settings?.tab).toBe('two'));
+ expect(router.entries).toHaveLength(1);
+});
+
+it('narrow desktop: a deferred pick survives a draft note getting its id, and yields to Back or a newer pick (S18)', async () => {
+ startOn(saved('notes', { type: 'notes', panel: null }), saved('draft', { type: 'notes', panel: 'new' }));
+ const frames: FrameRequestCallback[] = [];
+ vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback));
+ const frame = () => { for (const callback of frames.splice(0)) callback(0); };
+ const deferred = () => { layout.setSidebarOverlay(true); layout.setSidebarCollapsed(false); const open = vi.fn(); layout.afterSidebarOverlay(open); return open; };
+ try {
+  const pick = deferred();
+  shellHistory.detail('notes', { panel: 'n1' }, true); // the save resolves the draft's id: not navigation
+  await settle();
+  frame();
+  expect(pick).toHaveBeenCalledOnce();
+  const beforeBack = deferred();
+  expect(go(-1)).toBe(true);
+  frame();
+  expect(beforeBack).not.toHaveBeenCalled();
+  const older = deferred();
+  const newer = deferred();
+  frame();
+  expect(older).not.toHaveBeenCalled();
+  expect(newer).toHaveBeenCalledOnce();
+ } finally {
+  layout.setSidebarOverlay(false);
+ }
 });
 

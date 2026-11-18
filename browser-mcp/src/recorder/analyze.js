@@ -168,11 +168,6 @@ export function detectReversals(recording, options = {}) {
     const before = current;
     current = { ...current };
     for (const [field, raw] of Object.entries(entry.changes)) current[field] = raw === undefined ? null : raw;
-    if (entry.documentStart) {
-      runs.clear();
-      raised.clear();
-      return;
-    }
     for (const field of Object.keys(entry.changes)) {
       const value = current[field];
       const list = runsFor(field, before, current);
