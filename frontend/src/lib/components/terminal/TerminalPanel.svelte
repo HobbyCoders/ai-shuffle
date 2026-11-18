@@ -10,7 +10,6 @@
 	 * the worker's terminals that belong to no chat.
 	 */
 	import { onMount, onDestroy, tick, untrack, type Snippet } from 'svelte';
-	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { Plus, X, Search, Copy, Check, Eraser, Square, ChevronUp, ChevronDown, LoaderCircle, MessageSquarePlus } from 'lucide-svelte';
 	import { ViewShell, ViewPanel, PanelIconButton, ListItem, EmptyDetail } from '$lib/components/layout/view';
 	import PanelRowActions from '$lib/components/layout/view/PanelRowActions.svelte';
@@ -354,7 +353,6 @@
 		if (!step || !ids.length) return;
 		event.preventDefault();
 		const next = ids[(index + step + ids.length) % ids.length];
-		shellHistory.choose();
 		terminals.select(sessionId, next);
 		document.getElementById(`terminal-tab-${next}`)?.focus();
 	}
@@ -420,14 +418,6 @@
 	function onWindowPointer(event: PointerEvent) {
 		if (pickerOpen && plusWrap && !plusWrap.contains(event.target as Node)) pickerOpen = false;
 	}
-
-	function restoreSelection(key: string) {
-		// A saved shell is selectable once the list shows it; only a successful load proves it gone.
-		if (key !== 'new' && !tabState.ids.includes(key)) return tabState.loaded && !tabState.error ? 'missing' : 'pending';
-		newTerminal = key === 'new';
-		if (!newTerminal) terminals.select(sessionId, key);
-		detailOpen = true;
-	}
 </script>
 
 <svelte:window onpointerdown={onWindowPointer} />
@@ -447,7 +437,7 @@
 					<div class="tab" class:current={id === activeId}>
 						<button id={`terminal-tab-${id}`} class="tab-select" role="tab" aria-selected={id === activeId}
 							tabindex={id === activeId ? 0 : -1} title={`${info?.shell ?? 'shell'} · ${hostName(info) !== ready.worker ? `${hostName(info)}: ${info?.cwd ?? ''}` : (info?.cwd ?? '')}`}
-							onclick={() => { shellHistory.choose(); terminals.select(sessionId, id); }} onkeydown={(e) => tabKeydown(e, index)}>
+							onclick={() => terminals.select(sessionId, id)} onkeydown={(e) => tabKeydown(e, index)}>
 							<span class="dot" data-tone={info?.state === 'exited' ? 'bad' : link.status === 'live' ? (info?.busy ? 'run' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'wait'} aria-hidden="true"></span>
 							<span class="tab-shell">{info?.shell ?? 'shell'}</span>
 							{#if hostName(info) !== ready.worker}<span class="tab-host" title={hostName(info)}>{hostName(info)}</span>{/if}
@@ -532,12 +522,11 @@
 			<div class="state"><EmptyDetail title="Terminals aren't available here" message={access.reason} /></div>
 		{:else if probe.status === 'error'}
 			<div class="state"><EmptyDetail title="Terminals aren't available right now" message={probe.message} />
-				<button class="st-btn" onclick={() => { void terminals.ensureProbe(sessionId, true); void terminals.load(sessionId); }}>Try again</button></div>
+				<button class="st-btn" onclick={() => terminals.ensureProbe(sessionId, true)}>Try again</button></div>
 		{:else if ready && (!tabState.ids.length || (chatless && newTerminal))}
 			<!-- Backstop for a missed change: using the picker re-probes once the answer is stale. -->
 			<div class="state empty" onfocusin={() => void terminals.ensureProbe(sessionId)}>
-				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>
-					<button class="st-btn" onclick={() => void terminals.load(sessionId)}>Try again</button>{/if}
+				{#if tabState.error}<p class="err" role="alert">{tabState.error}</p>{/if}
 				<NewTerminalPicker inline linkCardShownFor={blockLink} probe={ready} chatId={chatless ? null : sessionId} busy={creating} disabledReason={capReason} {blurb} onOpen={openTerminal} onTargetsChanged={() => terminals.ensureProbe(sessionId, true)} />
 			</div>
 		{/if}
@@ -593,11 +582,11 @@
 
 {/snippet}
 {#if chatless}
- <ViewShell label="Terminal" historyType="terminal" selection={newTerminal ? 'new' : activeId ?? 'new'} {restoreSelection} {detailOpen} onBack={() => detailOpen = false}>
+ <ViewShell label="Terminal" {detailOpen} onBack={() => detailOpen = false}>
   {#snippet panel()}
    <ViewPanel title="Terminal" loading={probe.status === 'loading'}>
     {#snippet actions()}
-     <PanelIconButton label="New terminal" icon={Plus} disabled={!ready || creating} onclick={() => { shellHistory.choose(); newTerminal = true; detailOpen = true; pickerOpen = false; void terminals.ensureProbe(sessionId, true); }} />
+     <PanelIconButton label="New terminal" icon={Plus} disabled={!ready || creating} onclick={() => { newTerminal = true; detailOpen = true; pickerOpen = false; void terminals.ensureProbe(sessionId, true); }} />
     {/snippet}
     {#each tabState.ids as id,index (id)}
      {@const info = terminals.terminal(id)}
@@ -606,7 +595,7 @@
       <ListItem {id} name={`${info?.shell ?? 'shell'} · ${folderName(info?.cwd)}`} summary={hostName(info)} selected={id === activeId}
        status={info?.state === 'exited' ? 'err' : link.status === 'live' ? (info?.busy ? 'busy' : 'ok') : link.status === 'reconnecting' ? 'warn' : 'off'}
        onselect={() => { newTerminal = false; terminals.select(sessionId,id); detailOpen = true; }} />
-      {#snippet actions()}<PanelIconButton label={`Close terminal ${index + 1}`} icon={X} onclick={() => { shellHistory.choose(); detailOpen = true; closeTab(id); }} />{/snippet}
+      {#snippet actions()}<PanelIconButton label={`Close terminal ${index + 1}`} icon={X} onclick={() => { detailOpen = true; closeTab(id); }} />{/snippet}
      </PanelRowActions>
     {:else}
      <ListItem id="new-terminal" name={ready ? 'Open a terminal' : 'Terminal access'} summary={ready ? 'A shell on this worker' : 'View availability and connection status'} selected={false} onselect={() => detailOpen = true} />

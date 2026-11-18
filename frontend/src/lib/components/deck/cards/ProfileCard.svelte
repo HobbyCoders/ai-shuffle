@@ -11,7 +11,6 @@
 	 * in the detail's danger zone.
 	 */
 	import { tick, untrack } from 'svelte';
-	import { shellHistory } from '$lib/services/app-history.svelte';
 	import { ViewShell, ViewPanel, PanelSearch, PanelIconButton } from '$lib/components/layout/view';
 	import { Bot, Plus, Users } from 'lucide-svelte';
 	import { watchResources } from '$lib/services/watch-resources';
@@ -112,16 +111,12 @@
 		loadData();
 	});
 
-	/** The agent list came back: only then can a saved selection be missing. */
-	let listLoaded = $state(false);
 	async function loadData(quiet = false) {
 		if (!quiet) loading = true;
-		let agentsFailed = false;
 		try {
 			const [subagentsResult, surfaceResult, templatesResult] = await Promise.all([
 				api.get<RosterAgent[]>('/agents').catch((err) => {
 					console.warn('Failed to load agents:', err);
-					agentsFailed = true;
 					return [];
 				}),
 				fetchToolSurface().catch((err) => {
@@ -135,7 +130,6 @@
 				loadSubagentDefault()
 			]);
 			allSubagents = subagentsResult;
-			listLoaded = !agentsFailed;
 			toolSurface = surfaceResult;
 			templates = templatesResult;
 		} catch (e) {
@@ -397,9 +391,8 @@
 		}
 	}
 
-	async function openNewForm(nextTab: AgentTab = 'profile', current = () => true) {
+	async function openNewForm(nextTab: AgentTab = 'profile') {
 		await flushPendingPersist();
-		if (!current()) return;
 		remoteChange = '';
 		saveState = 'idle';
 		draftId = null;
@@ -415,11 +408,10 @@
 	}
 
 	/** Open an agent, saving the open one's pending edits first. */
-	async function selectProfile(profile: Profile, nextTab?: AgentTab, current = () => true) {
+	async function selectProfile(profile: Profile, nextTab?: AgentTab) {
 		const alreadyOpen = viewMode === 'form' && editingProfile?.id === profile.id;
 		if (!alreadyOpen) {
 			await flushPendingPersist();
-			if (!current()) return;
 			remoteChange = '';
 			saveState = 'idle';
 			if (draftId !== profile.id) draftId = null;
@@ -873,7 +865,6 @@
 
 	/** New agent dialog: start from a built-in's prompt and tools. */
 	async function newFromBuiltin(id: string) {
-		shellHistory.choose();
 		const source = profiles.find((p) => p.id === id);
 		showNewDialog = false;
 		await openNewForm();
@@ -1011,13 +1002,6 @@
 		{ value: FOLDER_NONE, label: 'No folder' }
 	]);
 	const openFolder = $derived(editingProfile ? folderOf(editingProfile.id, assignments, folders) : '');
-
-	function restoreSelection(key: string, current: () => boolean) {
-		if (key === 'new') { void openNewForm('profile', current); return; }
-		const row = profiles.find(p => p.id === key);
-		if (!row) return loading || !listLoaded ? 'pending' : 'missing';
-		void untrack(() => selectProfile(row, undefined, current));
-	}
 </script>
 
 {#snippet installTeamButton(small: boolean)}
@@ -1060,7 +1044,7 @@
 	data-stacked={stacked || undefined}
 	data-view={stacked ? (pane === 'detail' ? 'detail' : 'page') : undefined}
 >
-	<ViewShell label="Agents" historyType="build" selection={selectedId ?? 'new'} {restoreSelection} inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
+	<ViewShell label="Agents" inheritScope bind:stacked detailOpen={pane === 'detail'} onBack={() => pane = 'list'}>
 		{#snippet panel()}
 		<ViewPanel title="Agents" count={loading && profiles.length === 0 ? undefined : profiles.length}
 			listLabel="Agent list" filters={hasBuiltins || folders.length > 0 ? listFilters : undefined}>
@@ -1160,13 +1144,11 @@
 		busy={profileImporting}
 		onClose={() => (showNewDialog = false)}
 		onBlank={() => {
-			shellHistory.choose();
 			showNewDialog = false;
 			void openNewForm();
 		}}
 		onFromBuiltin={newFromBuiltin}
 		onDescribe={(text) => {
-			shellHistory.choose();
 			showNewDialog = false;
 			generateText = text;
 			showGenerateDialog = true;

@@ -14,7 +14,7 @@
 	let item = $state('a');
 </script>
 <span id="probe-label">Bridged switch</span>
-<ViewShell label="Probe" historyType={contentFirst ? undefined : 'project'} selection={item} restoreSelection={(key) => { item = key; detail = true; }} {contentFirst} detailOpen={detail} detailKey={item} onBack={() => detail = false}>
+<ViewShell label="Probe" {contentFirst} detailOpen={detail} detailKey={item} onBack={() => detail = false}>
 	{#snippet panel()}
 		<ViewPanel title="Probe"><PanelProbe /><button onclick={() => detail = true}>Open detail</button><button onclick={() => { detail = true; item = 'b'; }}>Open item B</button></ViewPanel>
 	{/snippet}

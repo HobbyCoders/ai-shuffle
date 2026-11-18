@@ -34,7 +34,6 @@ vi.mock('$lib/api/toolSurface', async (original) => ({
 
 import ProfileCard from './ProfileCard.svelte';
 import { appData } from '$lib/stores/app-data.svelte';
-import { shellHistory } from '$lib/services/app-history.svelte';
 import type { Profile } from '$lib/api/client';
 
 let agents: Profile[];
@@ -106,7 +105,6 @@ beforeEach(async () => {
 });
 afterEach(() => {
 	cleanup();
-	shellHistory.stop();
 	vi.useRealTimers();
 });
 
@@ -114,29 +112,6 @@ const heading = (name: string) => screen.findByRole('heading', { level: 2, name 
 const row = (name: RegExp) => screen.getByRole('button', { name });
 const list = () => within(screen.getByRole('region', { name: 'Agent list' }));
 const tab = (name: string) => screen.getByRole('tab', { name: new RegExp(`^${name}`) });
-
-describe('a reloaded agent detail', () => {
-	const saved = () => shellHistory.start({ shell: { id: 'saved', place: { type: 'build', panel: 'frontend-designer' } } }, { type: 'build' });
-	it('opens the saved agent rather than the first one', async () => {
-		saved();
-		render(ProfileCard);
-		await heading('Frontend Designer');
-		expect(shellHistory.place?.panel).toBe('frontend-designer');
-	});
-	it('keeps the saved agent when the agent list fails to load', async () => {
-		saved();
-		const get = mocks.get.getMockImplementation()!;
-		mocks.get.mockImplementation(async (path: string) => {
-			if (path === '/agents') throw new Error('503');
-			return get(path);
-		});
-		render(ProfileCard);
-		await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('/agents'));
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		// A failed load is not proof the agent is gone: the entry keeps it.
-		expect(shellHistory.place?.panel).toBe('frontend-designer');
-	});
-});
 
 describe('list', () => {
 	it('opens the first agent beside the list and splits Yours from Built-in', async () => {

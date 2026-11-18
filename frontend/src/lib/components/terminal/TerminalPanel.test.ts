@@ -87,7 +87,6 @@ import TerminalPage from './TerminalPage.svelte';
 import { TerminalApiError, type TerminalInfo, type TerminalTargets } from '$lib/api/terminals';
 import { terminals, WORKER_TERMINALS } from '$lib/stores/terminals.svelte';
 import { peerTerminals } from '$lib/stores/peer-terminals.svelte';
-import { shellHistory } from '$lib/services/app-history.svelte';
 import { resourceSync } from '$lib/services/resource-sync';
 import { sidePanel, sessionPanelKey } from '$lib/stores/side-panel.svelte';
 import type { CommandBlock } from '$lib/terminal/commands';
@@ -606,65 +605,6 @@ describe('Terminal page (no chat)', () => {
 		await waitFor(() => expect(view.getByText('Only the owner can use terminals')).toBeTruthy());
 		expect(view.queryByText('Loading terminals…')).toBeNull();
 		expect(api.create).not.toHaveBeenCalled();
-	});
-
-	it('a reload on a saved non-default shell opens that shell once the held list arrives (S31)', async () => {
-		let answer!: (value: unknown) => void;
-		api.targets.mockResolvedValue(workspace);
-		api.list.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
-		// The browser entry saved shell A; the store's default would be the last one listed, B.
-		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
-		try {
-			render(TerminalPage);
-			await tick();
-			answer({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
-			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).loaded).toBe(true));
-			await tick();
-			expect(terminals.tabsFor(WORKER_TERMINALS).active).toBe('a');
-			expect(shellHistory.place?.panel).toBe('a');
-		} finally {
-			shellHistory.stop();
-		}
-	});
-
-	it('New terminal during a held restore wins over the saved shell when the list arrives (S33)', async () => {
-		let answer!: (value: unknown) => void;
-		api.targets.mockResolvedValue(workspace);
-		api.list.mockReturnValue(new Promise((resolve) => { answer = resolve; }));
-		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
-		try {
-			const view = render(TerminalPage);
-			const create = await view.findByRole('button', { name: 'New terminal' });
-			await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
-			await fireEvent.click(create);
-			// The pick is recorded at once, over the saved shell.
-			expect(shellHistory.place?.panel).toBe('new');
-			answer({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
-			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).loaded).toBe(true));
-			await tick();
-			expect(shellHistory.place?.panel).toBe('new');
-			expect(view.getByRole('button', { name: 'Open terminal' })).toBeTruthy();
-		} finally {
-			shellHistory.stop();
-		}
-	});
-
-	it('a failed list keeps the saved shell and Try again loads it (S34)', async () => {
-		api.targets.mockResolvedValue(workspace);
-		api.list.mockRejectedValueOnce(new Error('The terminal list is unavailable.'))
-			.mockResolvedValue({ terminals: [info('a', { session_id: null }), info('b', { session_id: null })], open: 2, running: 0, limit: 8, worker: targets.worker });
-		shellHistory.start({ shell: { id: 'saved', place: { type: 'terminal', panel: 'a' } } }, null);
-		try {
-			const view = render(TerminalPage);
-			expect(await view.findByText('The terminal list is unavailable.')).toBeTruthy();
-			// A failed list is no proof that A is gone.
-			expect(shellHistory.place?.panel).toBe('a');
-			await fireEvent.click(view.getByRole('button', { name: 'Try again' }));
-			await waitFor(() => expect(terminals.tabsFor(WORKER_TERMINALS).active).toBe('a'));
-			expect(shellHistory.place?.panel).toBe('a');
-		} finally {
-			shellHistory.stop();
-		}
 	});
 
 	it('closing the shell closes it on the worker', async () => {

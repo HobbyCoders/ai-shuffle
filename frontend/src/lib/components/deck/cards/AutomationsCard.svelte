@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { watchResources } from '$lib/services/watch-resources';
-	import { shellHistory } from '$lib/services/app-history.svelte';
 	/**
 	 * AutomationsCard - Scheduled and event-driven AI task management
 	 *
@@ -95,8 +94,6 @@
 	let connectorTypes: ConnectorTypeInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
-	/** The list came back at least once: only then can a saved selection be missing. */
-	let listLoaded = $state(false);
 
 	// A pending delete awaiting confirmation (replaces native confirm()).
 	let pendingDeleteId = $state<string | null>(null);
@@ -223,7 +220,6 @@
 			projects = projectsData;
 			connectors = connectorsData;
 			connectorTypes = connectorTypesData;
-			listLoaded = true;
 		} catch (e: any) {
 			error = e.detail || e.message || 'Failed to load automations';
 		} finally {
@@ -647,23 +643,12 @@
 		if (fresh) openEdit(fresh, true);
 		else { currentView = 'list'; selectedAutomation = null; remoteChange = 'This item was deleted elsewhere.'; }
 	});
-
-	function restoreSelection(key: string) {
-		const [view, id] = key.split(':');
-		if (view === 'create') openCreate();
-		else if (view === 'approvals') currentView = 'approvals';
-		else {
-			const row = automations.find(a => a.id === id);
-			if (!row) return loading || !listLoaded ? 'pending' : 'missing';
-			if (view === 'edit') openEdit(row); else void openDetail(row);
-		}
-	}
 </script>
-<ViewShell label="Automations" historyType="automations" selection={`${currentView}:${selectedAutomation?.id ?? ''}`} {restoreSelection} detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>
+<ViewShell label="Automations" detailOpen={currentView !== 'list'} {detailKey} onBack={backToList}>
  {#snippet panel()}
   <AutomationsStudio {automations} {pendingApprovals} {profiles} {loading} error={currentView === 'list' ? error : ''} {triggeringId}
    selectedId={currentView === 'detail' || currentView === 'edit' ? selectedAutomation?.id : null}
-   onOpenCreate={() => { shellHistory.choose(); openCreate(); }} onOpenDetail={openDetail} onOpenEdit={(a) => { shellHistory.choose(); openEdit(a); }}
+   onOpenCreate={openCreate} onOpenDetail={openDetail} onOpenEdit={(a) => openEdit(a)}
    onToggleEnabled={handleToggleEnabled} onTrigger={handleTrigger} onDelete={handleDelete}
    onApprove={handleApprove} onDeny={handleDeny} onClearError={() => error = ''}
    {formatCost} {triggerTypeLabel} />
@@ -753,7 +738,7 @@
    {:else}
     <ViewMain width="reading"><EmptyDetail icon={CalendarClock} title={loading ? 'Loading automations…' : automations.length ? 'Choose an automation' : 'No automations yet'}
      message={automations.length ? 'Run AI tasks on a schedule or in response to events.' : 'Create a scheduled or event-driven task.'}>
-     <button type="button" class="st-btn primary" onclick={() => { shellHistory.choose(); openCreate(); }}><Plus size={14} />New automation</button>
+     <button type="button" class="st-btn primary" onclick={openCreate}><Plus size={14} />New automation</button>
     </EmptyDetail></ViewMain>
    {/if}
  {/snippet}

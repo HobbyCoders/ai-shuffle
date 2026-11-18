@@ -37,8 +37,6 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	import { page } from '$app/state';
 	import { pushState } from '$app/navigation';
 	import { ignoreRouterNotReady } from '$lib/utils/shallow-history';
-	import { shellHistory } from '$lib/services/app-history.svelte';
-	import type { ViewType } from '$lib/stores/layout.svelte';
 	import { layout } from '$lib/stores/layout.svelte';
 	import { platform } from '$lib/stores/platform.svelte';
 	import { viewPanel } from '$lib/stores/view-panel.svelte';
@@ -54,10 +52,6 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		onBack?: () => void;
 		/** Settings already owns its multi-level history; other pages leave this on. */
 		manageHistory?: boolean;
-		/** The web UI records this page's selection in its shell history (the phone app keeps the entries below). */
-		historyType?: ViewType;
-		selection?: string | null;
-		restoreSelection?: (key: string, current: () => boolean) => void | 'pending' | 'missing';
 		/** Existing Settings/Agents provide their own stacked token scope. */
 		inheritScope?: boolean;
 		/** Legacy Settings owns inner page/detail panes; its outer slot is not a detail pane. */
@@ -71,7 +65,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 		detailKey?: unknown;
 	}
 	let { panel, main, label, detailOpen = false, onBack, manageHistory = true, inheritScope = false, nestedPanes = false, contentFirst = false,
-		stacked = $bindable(false), detailKey, historyType, selection, restoreSelection }: Props = $props();
+		stacked = $bindable(false), detailKey }: Props = $props();
 	const contexts = getAllContexts();
 	const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
 	const active = $derived(feature?.active ?? true);
@@ -107,8 +101,7 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 	$effect(() => {
 		const open = active && stacked && detailOpen && !contentFirst;
 		const retiring = detailHistory.retiring;
-		// The phone app's own detail entries; the web UI's shell history records the rest.
-		if (!manageHistory || !platform.isMobile) return;
+		if (!manageHistory) return;
 		// Leaving a retained destination must remove its invisible Back stop.
 		if (!active && pushed) {
 			pushed = false;
@@ -151,46 +144,8 @@ Panel contexts and tokens travel automatically. Off-screen feature pages never c
 			}
 		});
 	});
-	// Each landing is followed once; a selection still loading retries until its list settles,
-	// unless the user picks something first (shellHistory.choose): then the pick is recorded.
-	let followed: typeof shellHistory.restored = null;
-	let waiting: typeof shellHistory.restored = null;
-	let previousKey: string | null | undefined;
-	$effect(() => {
-		const place = shellHistory.place;
-		if (!active || !historyType || !manageHistory || place?.type !== historyType) {
-			previousKey = undefined;
-			waiting = null;
-			return;
-		}
-		const key = detailOpen ? selection ?? null : null;
-		const changed = key !== previousKey;
-		previousKey = key;
-		const landing = shellHistory.restored;
-		const superseded = waiting !== null && landing === null;
-		waiting = null;
-		if (landing && landing !== followed && place.panel !== undefined) {
-			const current = () => shellHistory.restored === landing;
-			if (key !== place.panel) {
-				if (place.panel === null) untrack(() => onBack?.());
-				else {
-					const result = restoreSelection?.(place.panel, current);
-					if (result === 'pending') { waiting = landing; return; } // retry when the list settles
-					if (result === 'missing') {
-						shellHistory.detail(historyType, { panel: null }, true);
-						if (key !== null) untrack(() => onBack?.());
-					}
-				}
-			}
-			followed = landing;
-			return;
-		}
-		if ((changed || superseded || place.panel === undefined) && place.panel !== key) {
-			shellHistory.detail(historyType, { panel: key }, place.panel === undefined);
-		}
-	});
 	function back() {
-		if ((manageHistory && stacked && pushed) || (historyType && shellHistory.place?.panel)) {
+		if (manageHistory && stacked && pushed) {
 			history.back();
 			return;
 		}

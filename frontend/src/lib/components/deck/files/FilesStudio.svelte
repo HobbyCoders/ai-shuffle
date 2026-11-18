@@ -297,17 +297,11 @@
 		if (d < 30) return `${d}d ago`;
 		return new Date(dateStr).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 	}
-
-	function restoreSelection(key: string) {
-		const [worker, path] = JSON.parse(key);
-		if (worker !== workerId) selectWorker(worker);
-		navigate(path);
-	}
 </script>
 
 <svelte:window onclick={onWindowClick} onkeydown={onWindowKeydown} />
 
-<ViewShell label="Files" historyType="file-browser" selection={JSON.stringify([workerId, currentPath])} {restoreSelection} {detailOpen} detailKey={`${workerId ?? ''}:${currentPath}`} onBack={() => detailOpen = false}>
+<ViewShell label="Files" {detailOpen} detailKey={`${workerId ?? ''}:${currentPath}`} onBack={() => detailOpen = false}>
 	{#snippet panel()}
 		<ViewPanel title="Files" listLabel="Folders on {workerName}">
 			{#snippet filters()}

@@ -20,7 +20,6 @@ export interface Place {
  sessionId?: string | null;
  doc?: string;
  settings?: SettingsPlace;
- panel?: string | null;
 }
 
 interface Entry { id: string; place: Place }
@@ -44,8 +43,6 @@ export function savedPlace(state: ShellState | undefined): Place | undefined {
 
 // The place on screen, with the id of the browser entry it belongs to.
 let shown = $state.raw<Entry | null>(null);
-// A place shown from the browser's history: Back, Forward, a reload on it.
-let restored = $state.raw<Entry | null>(null);
 // The entry the browser is on once queued writes land. `shown` differs from it
 // only while a write is held back (an overlay was up) or after the router
 // rejected a push; selecting the place either holds settles it (see below).
@@ -68,7 +65,6 @@ let traversals = 0;
 function settle(on: Entry) {
  if (held?.id === on.id) held = null;
  shown = { ...on };
- restored = null;
 }
 
 function samePlace(a: Place | undefined, b: Place | undefined): boolean {
@@ -78,14 +74,8 @@ function samePlace(a: Place | undefined, b: Place | undefined): boolean {
 }
 
 export const shellHistory = {
- get restored() { return restored; },
  get traversals() { return traversals; },
  get place() { return shown?.place; },
- /**
-  * The user picked something on the page (a list row, a New action), from its
-  * own click or key handler. A restore still waiting for its data yields to it.
-  */
- choose() { restored = null; },
  /**
   * At mount. A saved place is shown as it is. Otherwise the arrival entry is
   * written now, before anything can push over it; boot's corrections replace it
@@ -96,15 +86,15 @@ export const shellHistory = {
   mounted = settling = true;
   if (owned(state) && state.shell) {
    fresh = false;
-   entry = restored = shown = { ...state.shell };
+   entry = shown = { ...state.shell };
    return;
   }
   fresh = true;
-  restored = entry = null;
+  entry = null;
   shown = { id: randomUUID(), place: viewPlace(view) };
   if (owned(state)) record(shown, 'stamp');
  },
- stop() { mounted = settling = false; entry = restored = shown = held = null; },
+ stop() { mounted = settling = false; entry = shown = held = null; },
  /**
   * The chat a fresh load's arrival actually shows (this tab's restored chat
   * may differ from the shared layout snapshot), until the user's first step.
@@ -132,7 +122,7 @@ export const shellHistory = {
   traversals++;
   entry = at;
   if (kept) at = { ...kept };
-  restored = shown = at;
+  shown = at;
   if (kept) record(at, 'replace');
   return true;
  },
@@ -156,7 +146,7 @@ export const shellHistory = {
    if (!settling) return false;
    // A saved entry is a stop the user made: boot moves the screen, not the entry.
    if (fresh) refine(next);
-   else { restored = null; shown = { id: shown.id, place: next }; }
+   else shown = { id: shown.id, place: next };
    return true;
   }
   settling = false;
@@ -202,13 +192,11 @@ function viewPlace(view: ActiveView | null): Place {
 // on it; otherwise held back until it is (see land).
 function refine(place: Place) {
  if (!shown) return;
- restored = null;
  shown = { id: shown.id, place };
  if (shown.id === entry?.id) record(shown, 'replace');
 }
 
 function push(place: Place) {
- restored = null;
  shown = { id: randomUUID(), place };
  record(shown, 'push');
 }

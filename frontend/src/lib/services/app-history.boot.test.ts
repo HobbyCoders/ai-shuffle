@@ -164,14 +164,14 @@ it('keeps entries in order when a write commits late, with no timer letting a la
  shellHistory.start(arrival, null);
  router.outcomes = ['slow'];
  shellHistory.destination({ type: 'settings' });
- shellHistory.detail('settings', { panel: 'general' }, true);
+ shellHistory.detail('settings', { settings: { category: 'general', view: 'index', depth: 0, item: null, tab: null } }, true);
  shellHistory.destination({ type: 'docs' });
  // Route resolution still holds the Settings write: nothing else has gone ahead.
  await vi.advanceTimersByTimeAsync(2500);
  expect(places()).toEqual(['a']);
  await vi.advanceTimersByTimeAsync(5000);
  expect(places()).toEqual(['a', 'settings', 'docs']);
- expect(router.entries[1].state.shell?.place.panel).toBe('general');
+ expect(router.entries[1].state.shell?.place.settings?.category).toBe('general');
 });
 
 it('writes a destination again when its push was rejected, and never twice once it landed', async () => {
@@ -258,22 +258,22 @@ it('does not land boot’s view over a step the user took while it was being wri
 
 it('writes nothing onto an overlay that opened after a write was queued; the place lands once it closes', async () => {
  startOn(saved('arrival', { type: 'session', sessionId: 'a' }));
- shellHistory.destination({ type: 'session', sessionId: 'b' });
+ shellHistory.destination({ type: 'docs' });
  await vi.waitFor(() => expect(router.entries).toHaveLength(2));
  pushOverlay({ mobileDrawer: true });
  const overlay = here();
- shellHistory.detail('session', { panel: 'x' }, true);
+ shellHistory.detail('docs', { doc: 'guide/x' }, true);
  await settle(); await settle();
  expect(here()).toBe(overlay);
  expect(go(-1)).toBe(false);
- await vi.waitFor(() => expect(here().shell?.place.panel).toBe('x'));
+ await vi.waitFor(() => expect(here().shell?.place.doc).toBe('guide/x'));
  expect(router.entries).toHaveLength(3);
 });
 
 it('does not land an entry whose refining replace is still queued (a Settings deep link)', async () => {
  const landed: string[] = [];
  router.onState = (state) => { if (shellHistory.land(state)) landed.push(state.shell!.id); };
- const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'automations', panel: null } } };
+ const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'docs' } } };
  router.entries[0] = { state: arrival, persisted: true }; page.state = arrival;
  shellHistory.start(arrival, null);
  // openSettings: the destination, Settings stamping its base, then go() to a detail.
@@ -303,26 +303,26 @@ it('after a rejected push, selecting the committed place again adds no duplicate
 });
 
 it('retries an identical detail selection whose push was rejected, and settles a detail selection back on the committed one', async () => {
- startOn(saved('arrival', { type: 'project', panel: 'one' }));
+ startOn(saved('arrival', { type: 'docs', doc: 'a/one' }));
  router.outcomes = ['reject'];
- shellHistory.detail('project', { panel: 'two' });
+ shellHistory.detail('docs', { doc: 'a/two' });
  await settle(); await settle();
  expect(router.entries).toHaveLength(1);
- shellHistory.detail('project', { panel: 'two' });
- await vi.waitFor(() => expect(router.entries.map(({ state }) => state.shell?.place.panel)).toEqual(['one', 'two']));
+ shellHistory.detail('docs', { doc: 'a/two' });
+ await vi.waitFor(() => expect(router.entries.map(({ state }) => state.shell?.place.doc)).toEqual(['a/one', 'a/two']));
  shellHistory.stop();
- startOn(saved('arrival', { type: 'project', panel: 'one' }));
+ startOn(saved('arrival', { type: 'docs', doc: 'a/one' }));
  router.outcomes = ['reject'];
- shellHistory.detail('project', { panel: 'two' });
+ shellHistory.detail('docs', { doc: 'a/two' });
  await settle(); await settle();
- shellHistory.detail('project', { panel: 'one' });
+ shellHistory.detail('docs', { doc: 'a/one' });
  await settle(); await settle();
  expect(router.entries).toHaveLength(1);
- expect(shellHistory.place?.panel).toBe('one');
+ expect(shellHistory.place?.doc).toBe('a/one');
 });
 
 it('a late “chat unavailable” for a chat Back already left touches neither the view nor the entry', async () => {
- startOn(saved('notes', { type: 'notes', panel: null }), saved('chat', { type: 'session', sessionId: 'a' }));
+ startOn(saved('notes', { type: 'notes' }), saved('chat', { type: 'session', sessionId: 'a' }));
  // Back to Notes, reported to this module after the deletion arrives in the same flush.
  router.index = 0; page.state = here();
  expect(shellHistory.unavailable('a')).toBe(false);
@@ -353,8 +353,8 @@ it('the phone app: shell history reads and writes nothing, so main’s own write
  const arrival = saved('arrival', { type: 'session', sessionId: 'a' });
  startOn(arrival);
  shellHistory.destination({ type: 'session', sessionId: 'b' });
- shellHistory.destination({ type: 'project' });
- shellHistory.detail('project', { panel: 'one' });
+ shellHistory.destination({ type: 'docs' });
+ shellHistory.detail('docs', { doc: 'a/one' });
  shellHistory.shows('c');
  expect(shellHistory.unavailable('a')).toBe(false);
  pushOverlay({ mobileDrawer: true });
@@ -362,7 +362,6 @@ it('the phone app: shell history reads and writes nothing, so main’s own write
  await settle(); await settle();
  expect(router.entries).toEqual([{ state: arrival, persisted: true }, expect.anything()]);
  expect(shellHistory.place).toBeUndefined();
- expect(shellHistory.restored).toBeNull();
  // A reload on an entry the web UI saved boots the phone app as main does.
  expect(savedPlace(arrival)).toBeUndefined();
 });
@@ -381,14 +380,14 @@ it('a detail selection whose replace was rejected is written again when chosen a
 });
 
 it('narrow desktop: a deferred pick survives a detail refinement, and yields to Back or a newer pick (S18)', async () => {
- startOn(saved('list', { type: 'project', panel: null }), saved('detail', { type: 'project', panel: 'local-1' }));
+ startOn(saved('list', { type: 'docs' }), saved('detail', { type: 'docs', doc: 'a/one' }));
  const frames: FrameRequestCallback[] = [];
  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => frames.push(callback));
  const frame = () => { for (const callback of frames.splice(0)) callback(0); };
  const deferred = () => { layout.setSidebarOverlay(true); layout.setSidebarCollapsed(false); const open = vi.fn(); layout.afterSidebarOverlay(open); return open; };
  try {
   const pick = deferred();
-  shellHistory.detail('project', { panel: 'v2-1' }, true); // the row arrives under its v2 id: not navigation
+  shellHistory.detail('docs', { doc: 'a/two' }, true); // a refinement of the entry on screen: not navigation
   await settle();
   frame();
   expect(pick).toHaveBeenCalledOnce();

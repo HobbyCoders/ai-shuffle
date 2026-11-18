@@ -4,15 +4,13 @@ import { tick } from 'svelte';
 import { page } from '$app/state';
 import { layout, viewOwnsPanel } from '$lib/stores/layout.svelte';
 import { platform } from '$lib/stores/platform.svelte';
-import { shellHistory } from '$lib/services/app-history.svelte';
 import { viewPanel } from '$lib/stores/view-panel.svelte';
 import ViewHarness from './test-fixtures/ViewHarness.svelte';
 import { readFileSync } from 'node:fs';
 const desktopStyles = readFileSync('src/app.css', 'utf8');
 
 const mocks = vi.hoisted(() => ({ push: vi.fn() }));
-// The phone app's detail steps use pushState (main's); the web UI's shell history uses a shallow goto.
-vi.mock('$app/navigation', () => ({ pushState: mocks.push, goto: (_url: string, opts: { replace: boolean; state: App.PageState }) => { if (!opts.replace) mocks.push('', opts.state); } }));
+vi.mock('$app/navigation', () => ({ pushState: mocks.push, goto: vi.fn() }));
 beforeEach(() => {
 	vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
 	vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} });
@@ -126,6 +124,39 @@ describe('ViewShell', () => {
 		expect(screen.getByRole('button', { name: 'Open detail' })).toBeTruthy();
 		expect(back).toHaveBeenCalledOnce();
 	});
+	it('reuses the detail history step across desktop/stacked resize cycles', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await resize(1440); await resize(1000); await resize(390);
+		expect(mocks.push).toHaveBeenCalledOnce();
+		await fireEvent.click(screen.getByRole('button', { name: 'Back to panel' }));
+		expect(back).toHaveBeenCalledOnce();
+		page.state = {};
+		await tick();
+		expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
+	});
+	it('drops history ownership popped while wide before re-entering stacked', async () => {
+		vi.stubGlobal('innerWidth', 1440);
+		mocks.push.mockImplementation((_url, state) => { page.state = state; });
+		const view = render(ViewHarness);
+		await tick();
+		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
+		await resize(390);
+		await resize(1440);
+		page.state = {};
+		await tick();
+		// Browser Back while wide must not discard the selected desktop detail.
+		expect(view.container.querySelector('.view-main-slot[hidden]')).toBeNull();
+		await resize(390);
+		expect(mocks.push).toHaveBeenCalledTimes(2);
+		expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
+	});
 	it('retires its old entry and adopts its current entry without pushing a duplicate', async () => {
 		platform.set('mobile');
 		mocks.push.mockImplementation((_url, state) => { page.state = state; });
@@ -159,35 +190,5 @@ describe('ViewShell', () => {
 		expect(viewOwnsPanel('session')).toBe(false); expect(viewOwnsPanel('board')).toBe(false);
 		expect(viewOwnsPanel(null)).toBe(false); expect(viewOwnsPanel('build')).toBe(true);
 		expect(viewOwnsPanel('notes')).toBe(true); expect(viewOwnsPanel('settings')).toBe(true);
-	});
-});
-
-describe('ViewShell in the web UI: its selection is a shell-history entry', () => {
-	beforeEach(() => { shellHistory.start({}, { type: 'project' }); });
-	afterEach(() => { shellHistory.stop(); });
-	it('leaving a detail does not pop its entry', async () => {
-		await resize(390);
-		const back = vi.spyOn(history, 'back').mockImplementation(() => {});
-		const view = render(ViewHarness);
-		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: 'Open detail' }));
-		await view.rerender({ active: false });
-		expect(back).not.toHaveBeenCalled();
-		expect(mocks.push).toHaveBeenCalledOnce();
-	});
-	it('follows Back and Forward with selection intact; resizing writes no entry', async () => {
-		await resize(390);
-		const view = render(ViewHarness);
-		await tick();
-		await fireEvent.click(screen.getByRole('button', { name: 'Open item B' }));
-		await resize(1440); await resize(390);
-		expect(mocks.push).toHaveBeenCalledOnce();
-		const entry = mocks.push.mock.calls[0][1];
-		expect(entry.shell.place.panel).toBe('b');
-		shellHistory.land({ shell: { id: 'list', place: { type: 'project', panel: null } } });
-		await tick(); expect(view.container.querySelector('[data-pane="panel"]')).toBeTruthy();
-		shellHistory.land(entry);
-		await tick(); expect(view.container.querySelector('[data-pane="detail"]')).toBeTruthy();
-		expect(mocks.push).toHaveBeenCalledOnce();
 	});
 });

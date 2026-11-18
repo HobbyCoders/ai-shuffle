@@ -80,7 +80,8 @@
   }
  });
 </script>
-<ViewShell label="Docs" {detailOpen} detailKey={selectionKey} onBack={backToList}>
+<!-- The web UI's shell history records each article (above); the phone app keeps ViewShell's own detail entry. -->
+<ViewShell label="Docs" manageHistory={platform.isMobile} {detailOpen} detailKey={selectionKey} onBack={backToList}>
  {#snippet panel()}
   <ViewPanel title="Docs">
    {#snippet search()}<DocsSearch {searchEngine} onSelectResult={handleSearchResult} />{/snippet}
