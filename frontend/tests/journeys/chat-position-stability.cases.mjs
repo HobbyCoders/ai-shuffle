@@ -1339,16 +1339,21 @@ async function openSwitchTarget(ctx, title) {
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 300 });
 }
 
-// Run in two halves (see lib/split.mjs): one file was a whole CI shard by itself.
+// Run in parts (see lib/split.mjs) so one file does not fill a CI shard.
 export const journey = { name: 'chat-position-stability', cases, allow: [...DEV_INSTANCE_NOISE] };
 
-// The cases chat-position-stability.journey.mjs runs; chat-position-stability-2.journey.mjs runs every other
-// one, so a new case lands there. Balanced on the per-case seconds of main run 42719765869.
-export const FIRST_HALF = [
+// The first two parts were balanced on the per-case seconds of main run 42719765869.
+export const FIRST_PART = [
 	'error-rebase-keeps-visible-prompt',
 	'long-history-short-send',
 	'fast-completion',
 	'long-to-short-navigation',
 	'short-send',
 	'fresh-queued-send-releases-error-slot'
+];
+
+// Part 2 takes every case not named by parts 1 and 3.
+export const THIRD_PART = [
+	'live-run-fold-keeps-the-stream-on-screen',
+	'live-run-fold-then-queue-handoff'
 ];
