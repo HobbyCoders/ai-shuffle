@@ -1060,15 +1060,22 @@ def set_session_run_binding(
     # ``speed`` and ``fast`` are stored as one agreeing pair
     # (app/core/model_speed.stored_pair): a ``speed`` pick writes the ``fast``
     # it implies, and ``fast`` alone (an older client) is normalized against
-    # the pair it replaces, read in the same transaction below.
+    # the row's current pair inside the UPDATE itself (the right-hand side
+    # reads the old values), so no read races a concurrent write.
     from app.core.model_speed import normalize_speed, stored_pair
 
     speed_pick = normalize_speed(speed)
-    fast_only = speed_pick is None and fast is not None
     if speed_pick is not None:
         pair = stored_pair(speed=speed_pick)
         updates += [f"fast = {_ph}", f"speed = {_ph}"]
         values += [pair["fast"], pair["speed"]]
+    elif fast:
+        updates += [f"fast = {_ph}",
+                    "speed = CASE WHEN fast AND speed = 'ultrafast' THEN 'ultrafast' ELSE 'fast' END"]
+        values.append(True)
+    elif fast is not None:
+        updates += [f"fast = {_ph}", f"speed = {_ph}"]
+        values += [False, "standard"]
     # Away mode is boolean the same way: False is "the owner is back".
     if away_mode is not None:
         updates.append(f"away_mode = {_ph}")
@@ -1083,19 +1090,14 @@ def set_session_run_binding(
         updates.append(f"workspace_project_ids = {_ph}")
         values.append(json.dumps(normalize_workspace_project_ids(workspace_project_ids)))
 
-    if not updates and not fast_only:
+    if not updates:
         return
+    values.append(session_id)
     with get_db() as conn:
         cursor = get_cursor(conn)
-        if fast_only:
-            cursor.execute(f"SELECT fast, speed FROM sessions WHERE id = {_ph}", (session_id,))
-            current = cursor.fetchone()
-            pair = stored_pair(fast, prior=dict(current) if current else None)
-            updates += [f"fast = {_ph}", f"speed = {_ph}"]
-            values += [pair["fast"], pair["speed"]]
         cursor.execute(
             f"UPDATE sessions SET {', '.join(updates)} WHERE id = {_ph}",
-            [*values, session_id],
+            values,
         )
 
 

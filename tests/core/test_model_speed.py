@@ -1,5 +1,4 @@
 """Ultrafast speed tier: representation, gating, wire mapping, sync and notes."""
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -80,65 +79,60 @@ def test_codex_catalog_keeps_known_service_tiers_only():
     assert all("service_tiers" not in m for m in plain)
 
 
+ACCT = ms.tiers_account("acct-pro")
+
+
+def _bound(tiers, account=ACCT):
+    return {"service_tiers": tiers, ms.TIERS_ACCOUNT_KEY: account}
+
+
 def test_fresh_catalog_replaces_tiers_and_saved_lists_cannot_forge_them():
-    stored = [{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]},
-              {"id": "gpt-6-astra", "service_tiers": ["ultrafast"]}]
+    stored = [{"id": "gpt-6.1-sol", **_bound(["priority", "ultrafast"])},
+              {"id": "gpt-6-astra", **_bound(["ultrafast"])}]
     # A plan change: the account's catalog no longer lists Ultrafast, and a
-    # model it no longer lists loses its tiers.
-    merged = ms.merge_service_tiers(stored, [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}])
-    assert merged[0]["service_tiers"] == ["priority"]
-    assert merged[1] == {"id": "gpt-6-astra"}
-    # A client save keeps the stored tiers whatever it sends; a model with
-    # none stored (new, or a create) gets none until the next catalog fetch.
+    # model it no longer lists is left with none.
+    merged = ms.merge_service_tiers(stored, [{"id": "gpt-6.1-sol", **_bound(["priority"])}])
+    assert merged == [{"id": "gpt-6.1-sol", **_bound(["priority"])}, {"id": "gpt-6-astra", **_bound([])}]
+    # A catalog without tiers (not ChatGPT) leaves none.
+    assert ms.merge_service_tiers(stored, [{"id": "gpt-6.1-sol"}])[0] == {"id": "gpt-6.1-sol"}
+    # A client save keeps the stored tiers and account whatever it sends; a
+    # model with none stored (new, or a create) gets none until a fetch.
     saved = _keep_stored_service_tiers(
-        [{"id": "gpt-6.1-sol", "service_tiers": ["ultrafast"]},
-         {"id": "gpt-6-astra", "service_tiers": ["ultrafast"]}],
-        [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}])
-    assert saved == [{"id": "gpt-6.1-sol", "service_tiers": ["priority"]}, {"id": "gpt-6-astra"}]
-    assert _keep_stored_service_tiers([{"id": "gpt-6.1-sol", "service_tiers": ["ultrafast"]}], None) == [
+        [{"id": "gpt-6.1-sol", **_bound(["ultrafast"], "forged")},
+         {"id": "gpt-6-astra", **_bound(["ultrafast"])}],
+        [{"id": "gpt-6.1-sol", **_bound(["priority"])}])
+    assert saved == [{"id": "gpt-6.1-sol", **_bound(["priority"])}, {"id": "gpt-6-astra"}]
+    assert _keep_stored_service_tiers([{"id": "gpt-6.1-sol", **_bound(["ultrafast"])}], None) == [
         {"id": "gpt-6.1-sol"}]
 
 
-def test_signing_in_to_another_account_clears_the_tiers(mock_db):
-    from app.db import model_providers as providers_db
-
-    pid = providers_db.create_model_provider(
-        "codex-x", "ChatGPT", "chatgpt", "https://chatgpt.com/backend-api/codex", auth_mode="chatgpt",
-        models=[{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]}])["id"]
-    bundle = dict(access_token="a", refresh_token="r")
-    providers_db.set_codex_token_bundle(pid, account_id="acct-pro", **bundle)
-    # The Pro account's catalog lists Ultrafast (as a fetch would store it).
-    providers_db.update_model_provider(
-        pid, models_json=[{"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]}])
-
-    def tiers():
-        models = providers_db.get_model_provider(pid)["models_json"]
-        models = json.loads(models) if isinstance(models, str) else models
-        return [m.get("service_tiers") for m in models]
-    assert tiers() == [["priority", "ultrafast"]]
-    # The same account refreshing its token keeps them.
-    providers_db.set_codex_token_bundle(pid, account_id="acct-pro", **bundle)
-    assert tiers() == [["priority", "ultrafast"]]
-    # Another account (a Plus plan, say) has none until its own catalog is read.
-    providers_db.set_codex_token_bundle(pid, account_id="acct-plus", **bundle)
-    assert tiers() == [None]
+def test_tiers_count_only_for_the_account_that_fetched_them():
+    entry = {"id": "gpt-6.1-sol", **_bound(["priority", "ultrafast"])}
+    row = {"provider_type": "chatgpt", "codex_account_id": "acct-pro", "models_json": [entry]}
+    assert ms.ultrafast_supported_for_row(row, "gpt-6.1-sol")
+    # The row synced from a worker signed in to another account, a row with no
+    # account id, and tiers saved before the account was recorded: absent.
+    assert not ms.ultrafast_supported_for_row({**row, "codex_account_id": "acct-plus"}, "gpt-6.1-sol")
+    assert not ms.ultrafast_supported_for_row({**row, "codex_account_id": None}, "gpt-6.1-sol")
+    unbound = {**row, "models_json": [{"id": "gpt-6.1-sol", "service_tiers": ["ultrafast"]}]}
+    assert not ms.ultrafast_supported_for_row(unbound, "gpt-6.1-sol")
+    assert ms.tiers_account("acct-pro") != "acct-pro" and ms.tiers_account("") is None
 
 
 # ── who may run Ultrafast ──────────────────────────────────────────────────
 
-CHATGPT_PRO = {"provider_type": "chatgpt", "models_json": [
-    {"id": "gpt-6.1-sol", "service_tiers": ["priority", "ultrafast"]},
-    {"id": "gpt-6-luna", "service_tiers": ["priority"]}]}
-CHATGPT_PLUS = {"provider_type": "chatgpt", "models_json": [
-    {"id": "gpt-6.1-sol", "service_tiers": ["priority"]}]}
+CHATGPT_PRO = {"provider_type": "chatgpt", "codex_account_id": "acct-pro", "models_json": [
+    {"id": "gpt-6.1-sol", **_bound(["priority", "ultrafast"])},
+    {"id": "gpt-6-luna", **_bound(["priority"])}]}
+CHATGPT_PLUS = {"provider_type": "chatgpt", "codex_account_id": "acct-pro", "models_json": [
+    {"id": "gpt-6.1-sol", **_bound(["priority"])}]}
 
 
 @pytest.mark.parametrize("row,model,expected", [
     (CHATGPT_PRO, "gpt-6.1-sol", True),
     (CHATGPT_PRO, "gpt-6-luna", False),
     (CHATGPT_PLUS, "gpt-6.1-sol", False),
-    ({"provider_type": "custom", "auth_mode": "chatgpt", "models_json": CHATGPT_PRO["models_json"]},
-     "gpt-6.1-sol", True),
+    ({**CHATGPT_PRO, "provider_type": "custom", "auth_mode": "chatgpt"}, "gpt-6.1-sol", True),
     ({"provider_type": "chatgpt", "models_json": [{"id": "gpt-6.1-sol"}]}, "gpt-6.1-sol", False),
     ({"provider_type": "openai"}, "gpt-6-astra", True),
     ({"provider_type": "openai"}, "gpt-6.1-sol", True),
@@ -276,6 +270,33 @@ async def test_a_speed_pick_is_announced_to_other_devices(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_speed_staged_with_a_send_is_announced_as_saved(mock_db, monkeypatch):
+    from app.core import turn_manager
+    from app.core.sync_engine import sync_engine
+    from tests.core.helpers import make_profile
+
+    sent = []
+    monkeypatch.setattr(sync_engine, "broadcast_session_updated",
+                        AsyncMock(side_effect=lambda **kw: sent.append(kw["updates"])))
+    make_profile("agent", {})
+    db.create_session("staged", profile_id="agent", model="gpt-6-luna", speed="ultrafast")
+
+    async def send(**overrides):
+        sent.clear()
+        await turn_manager.submit_async("staged", "user", prompt="hi", profile_id="agent",
+                                        overrides={"model": "gpt-6.1-sol", **overrides}, no_kick=True)
+        return [u for u in sent if "fast" in u]
+
+    assert await send(fast=True, speed="fast") == [{"fast": True, "speed": "fast"}]
+    # The same pair again (every composer send carries it): nothing changed.
+    assert await send(fast=True, speed="fast") == []
+    # A fast-only (older) send: the pair the row stores after it.
+    assert await send(fast=False) == [{"fast": False, "speed": "standard"}]
+    # A send that picks no speed announces none.
+    assert await send() == []
+
+
+@pytest.mark.asyncio
 async def test_a_swapped_model_is_the_one_ultrafast_is_checked_against(monkeypatch):
     adapter = _live_adapter(monkeypatch, {"provider_type": "openai"})
     adapter._options.model = "gpt-6-luna"
@@ -370,6 +391,16 @@ def test_binding_writes_both_and_old_writers_keep_working(mock_db):
     db.create_session("legacy", profile_id=None, model="gpt-6.1-sol", fast=True)
     row = db.get_session("legacy")
     assert (row["fast"], row["speed"]) == (True, "fast")
+    # A disagreeing pair (off, yet still saying Ultrafast) turned on by a
+    # fast-only writer: computed in the one UPDATE from the row it replaces.
+    from app.db.base import get_db
+
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET fast = %s, speed = %s WHERE id = %s",
+                              (False, "ultrafast", "legacy"))
+    db.set_session_run_binding("legacy", fast=True)
+    row = db.get_session("legacy")
+    assert (row["fast"], row["speed"]) == (True, "fast")
 
 
 def test_session_sync_carries_speed_and_older_owner_rows_clear_it():
@@ -412,6 +443,15 @@ def test_note_says_ultrafast_was_refused():
     assert note["outcome"] == "standard"
 
 
+def test_a_refusal_midway_reads_as_ultrafast_whatever_the_ends_say():
+    # Standard at the start, Ultrafast picked and refused, Fast at the end.
+    note = fast_outcome_note({"requested": False, "requested_at_end": True, "standard_calls": 2,
+                              "speed": "standard", "speed_at_end": "fast",
+                              "disabled_reason": "ultrafast_unavailable"})
+    assert note["content"] == "Ultrafast isn't available for this account/model; ran on Standard."
+    assert note["disabled_reason"] == "ultrafast_unavailable"
+
+
 def test_fast_notes_are_unchanged():
     assert fast_outcome_note({"requested": True, "requested_at_end": True,
                               "fast_calls": 2})["content"] == "Ran on Fast."
@@ -423,6 +463,7 @@ def test_registry_flags_only_ultrafast_models(mock_db):
     db.create_model_provider(provider_id="pro", name="Pro", provider_type="chatgpt",
                              base_url="https://chatgpt.com/backend-api/codex",
                              models=CHATGPT_PRO["models_json"], enabled=True)
+    db.update_model_provider("pro", codex_account_id="acct-pro")
 
     def flags():
         return {m["id"]: m.get("ultrafast", False)
@@ -435,16 +476,29 @@ def test_registry_flags_only_ultrafast_models(mock_db):
     assert flags() == {"gpt-6.1-sol": False}
 
 
-def test_a_chatgpt_row_saved_before_tiers_asks_for_one_refresh(mock_db):
+def test_tiers_this_sign_in_did_not_fetch_ask_for_one_refresh(mock_db):
     from app.core.model_registry import registry_payload
+
+    def provider():
+        return registry_payload()["providers"][0]
 
     db.create_model_provider(provider_id="old", name="Old", provider_type="chatgpt",
                              base_url="https://chatgpt.com/backend-api/codex",
                              models=[{"id": "gpt-6.1-sol"}], enabled=True)
-    assert registry_payload()["providers"][0]["speed_tiers_stale"] is True
-    # Once a catalog fetch stored its answer (even "none"), it stops asking.
-    db.update_model_provider("old", models_json=[{"id": "gpt-6.1-sol", "service_tiers": []}])
-    assert "speed_tiers_stale" not in registry_payload()["providers"][0]
+    db.update_model_provider("old", codex_account_id="acct-pro")
+    assert provider()["speed_tiers_stale"] is True
+    # Once this account's catalog fetch stored its answer (even "none"), it stops asking.
+    db.update_model_provider("old", models_json=[{"id": "gpt-6.1-sol", **_bound(["ultrafast"])}])
+    assert "speed_tiers_stale" not in provider() and provider()["models"][0]["ultrafast"]
+    # A curated save added a model the fetch hasn't covered: ask again.
+    db.update_model_provider("old", models_json=[{"id": "gpt-6.1-sol", **_bound(["ultrafast"])},
+                                                 {"id": "gpt-6-luna"}])
+    assert provider()["speed_tiers_stale"] is True
+    # The row synced from a worker signed in to another account: its tiers
+    # are not this account's, so Ultrafast is off until this account's fetch.
+    db.update_model_provider("old", codex_account_id="acct-plus",
+                             models_json=[{"id": "gpt-6.1-sol", **_bound(["ultrafast"])}])
+    assert provider()["speed_tiers_stale"] is True and "ultrafast" not in provider()["models"][0]
 
 
 def test_ultrafast_pick_is_one_canonical_record_per_model(mock_db):

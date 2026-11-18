@@ -642,20 +642,22 @@ def _keep_stored_service_tiers(
 
     The tiers come only from the account's own catalog fetch
     (:func:`_fetch_models`), never from a client: whatever a save sends is
-    dropped, a model already saved keeps its stored tiers, and a model new to
-    the row has none until the next catalog fetch.
+    dropped, a model already saved keeps its stored tiers (with the account
+    that fetched them), and a model new to the row has none, so the registry
+    marks the row ``speed_tiers_stale`` until the next catalog fetch.
     """
-    saved = {entry.get("id"): entry.get("service_tiers") for entry in stored or []
+    from app.core.model_speed import TIERS_ACCOUNT_KEY
+
+    keys = ("service_tiers", TIERS_ACCOUNT_KEY)
+    saved = {entry.get("id"): {k: entry[k] for k in keys if k in entry} for entry in stored or []
              if isinstance(entry, dict) and isinstance(entry.get("service_tiers"), list)}
     result: List[Any] = []
     for entry in models or []:
         if not isinstance(entry, dict):
             result.append(entry)
             continue
-        updated = {k: v for k, v in entry.items() if k != "service_tiers"}
-        tiers = saved.get(entry.get("id"))
-        if tiers is not None:
-            updated["service_tiers"] = tiers
+        updated = {k: v for k, v in entry.items() if k not in keys}
+        updated.update(saved.get(entry.get("id"), {}))
         result.append(updated)
     return result
 
@@ -939,7 +941,12 @@ async def _fetch_codex_models(
     )
     if on_success:
         on_success(access_token, account_id)
-    return [m for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
+    from app.core.model_speed import TIERS_ACCOUNT_KEY, tiers_account
+
+    # The tiers are this account's: they count only while it is the row's sign-in.
+    account = tiers_account(account_id)
+    return [{**m, TIERS_ACCOUNT_KEY: account} if account else m
+            for m in models if m.get("id") not in _CODEX_EXCLUDED_MODEL_IDS]
 
 
 def _codex_visible_payload(payload: Any) -> Any:

@@ -8,8 +8,9 @@ client shows; its ``outcome`` says which kind of line it is:
 ``standard``  no request reported Fast, and at least one reported standard
 ``unknown``   no request reported a speed
 
-A turn that asked for Ultrafast (the OpenAI Responses lane, ``speed`` of
-``ultrafast``) reads its own counts instead:
+A turn that asked for Ultrafast (the OpenAI Responses lane: ``speed`` or
+``speed_at_end`` of ``ultrafast``, any ``ultrafast_calls``, or the
+``ultrafast_unavailable`` refusal) reads its own counts instead:
 
 ``ultrafast``  every request reported Ultrafast
 ``partial``    some requests reported Ultrafast, others did not
@@ -152,7 +153,10 @@ def _ultrafast_note(data: Dict[str, Any], start: Optional[str], end: Optional[st
 def fast_outcome_note(data: Dict[str, Any]) -> Dict[str, Any]:
     """The ``fast_outcome`` system note's data from a ``fast_outcome`` message."""
     start, end = _speed(data.get("speed")), _speed(data.get("speed_at_end"))
-    if "ultrafast" in (start, end):
+    # Any turn that tried Ultrafast reads the Ultrafast counts, even when it
+    # neither started nor ended on it (picked midway, then refused).
+    if ("ultrafast" in (start, end) or _count(data, "ultrafast_calls")
+            or data.get("disabled_reason") == "ultrafast_unavailable"):
         return _ultrafast_note(data, start, end)
     fast = _count(data, "fast_calls")
     standard = _count(data, "standard_calls")

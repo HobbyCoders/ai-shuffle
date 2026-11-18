@@ -21,6 +21,7 @@ own Codex model catalog lists the ``ultrafast`` service tier for the model
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 STANDARD = "standard"
@@ -34,6 +35,12 @@ SERVICE_TIERS: Dict[str, str] = {FAST: "priority", ULTRAFAST: "ultrafast"}
 #: Catalog tier ids worth keeping from a Codex ``/models`` entry. Anything else
 #: a catalog lists is dropped, so the stored row never carries arbitrary text.
 KNOWN_SERVICE_TIERS: Tuple[str, ...] = ("priority", "flex", "ultrafast")
+
+#: Saved model entry key naming the ChatGPT account whose own catalog listed the
+#: entry's ``service_tiers`` (:func:`tiers_account`, a hash, not the id). Tiers
+#: count only while it matches the row's current sign-in: provider rows sync
+#: between workers apart from their credential, so a write-time clear can't hold.
+TIERS_ACCOUNT_KEY = "service_tiers_account"
 
 # The models OpenAI documents for Ultrafast on the API
 # (developers.openai.com/api/docs/guides/ultrafast-mode), exact ids only: no
@@ -145,27 +152,50 @@ def stored_service_tiers(entry: Any) -> Optional[List[str]]:
             if tier in {t for t in tiers if isinstance(t, str)}]
 
 
+def tiers_account(account_id: Any) -> Optional[str]:
+    """The :data:`TIERS_ACCOUNT_KEY` value for a ChatGPT account id (None if none)."""
+    if not isinstance(account_id, str) or not account_id.strip():
+        return None
+    return hashlib.sha256(f"service-tiers:{account_id.strip()}".encode()).hexdigest()[:16]
+
+
+def account_service_tiers(row: Mapping[str, Any], entry: Any) -> Optional[List[str]]:
+    """A saved entry's tiers when the row's current sign-in fetched them, else None.
+
+    Tiers saved by another account, by a build before :data:`TIERS_ACCOUNT_KEY`,
+    or on a row with no account id are absent.
+    """
+    account = tiers_account(row.get("codex_account_id"))
+    if not account or not isinstance(entry, Mapping) or entry.get(TIERS_ACCOUNT_KEY) != account:
+        return None
+    return stored_service_tiers(entry)
+
+
 def merge_service_tiers(models: Iterable[Any], catalog: Iterable[Mapping[str, Any]]) -> List[Any]:
     """Saved model entries with ``service_tiers`` set from a fresh catalog only.
 
     A successful catalog fetch is the only source of tiers, so it replaces
-    them on every saved model: one it lists takes the tiers listed there, and
-    one it omits, or lists without tiers, loses any it had (a plan change can
-    take Ultrafast away). Catalogs without tiers (every non-ChatGPT row) leave
-    no tiers at all.
+    them on every saved model, with the fetching account
+    (:data:`TIERS_ACCOUNT_KEY`): one it lists takes the tiers listed there, and
+    one it omits gets none (``[]``; a plan change can take Ultrafast away).
+    Catalogs without tiers (every non-ChatGPT row) leave no tiers at all.
     """
     fresh = {}
+    account = None
     for entry in catalog or ():
         if isinstance(entry, Mapping) and isinstance(entry.get("id"), str):
             fresh[entry["id"]] = stored_service_tiers(entry)
+            account = account or entry.get(TIERS_ACCOUNT_KEY)
     merged: List[Any] = []
     for entry in models or ():
         if not isinstance(entry, Mapping):
             merged.append(entry)
             continue
-        updated = {k: v for k, v in entry.items() if k != "service_tiers"}
+        updated = {k: v for k, v in entry.items() if k not in ("service_tiers", TIERS_ACCOUNT_KEY)}
         tiers = fresh.get(entry.get("id"))
-        if tiers is not None:
+        if account:
+            updated.update({"service_tiers": tiers or [], TIERS_ACCOUNT_KEY: account})
+        elif tiers is not None:
             updated["service_tiers"] = tiers
         merged.append(updated)
     return merged
@@ -193,8 +223,8 @@ def ultrafast_supported_for_row(row: Optional[Mapping[str, Any]], model_id: Opti
     """Whether ``model_id`` on provider ``row`` can run Ultrafast.
 
     * A ChatGPT sign-in (``chatgpt`` row, or a ``custom`` row signed in with
-      ChatGPT): only when that row's saved Codex catalog lists ``ultrafast``
-      among the model's service tiers.
+      ChatGPT): only when the Codex catalog the row's current account fetched
+      lists ``ultrafast`` among the model's service tiers.
     * An OpenAI API-key row: the models OpenAI documents for Ultrafast.
     * Every other row, and no row: never.
     """
@@ -204,7 +234,7 @@ def ultrafast_supported_for_row(row: Optional[Mapping[str, Any]], model_id: Opti
     kind = _row_kind(row)
     if kind == "chatgpt":
         entry = model_entry if model_entry is not None else _row_model_entry(row, model_id)
-        return ULTRAFAST in (stored_service_tiers(entry) or [])
+        return ULTRAFAST in (account_service_tiers(row, entry) or [])
     if kind == "openai":
         return model_id in _ULTRAFAST_API_MODELS
     return False
@@ -214,5 +244,5 @@ __all__ = [
     "STANDARD", "FAST", "ULTRAFAST", "SPEEDS", "SERVICE_TIERS", "KNOWN_SERVICE_TIERS",
     "normalize_speed", "resolve_speed", "speed_fields", "stored_pair", "service_tier_for",
     "options_speed", "sanitize_service_tiers", "stored_service_tiers", "merge_service_tiers",
-    "ultrafast_supported_for_row",
+    "TIERS_ACCOUNT_KEY", "tiers_account", "account_service_tiers", "ultrafast_supported_for_row",
 ]

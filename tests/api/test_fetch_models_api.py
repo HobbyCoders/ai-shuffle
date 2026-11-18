@@ -16,8 +16,12 @@ import pytest
 
 from app.api import model_providers as mp_api
 from app.core import encryption, model_catalog_presets
+from app.core.model_speed import TIERS_ACCOUNT_KEY, tiers_account
 from app.db import database as db
 from tests.helpers import unlock_encryption
+
+# The speed tiers a ChatGPT fetch stores belong to the account that fetched them.
+ACCT_1 = tiers_account("acct-1")
 
 
 ROOT = "/api/v1/model-providers"
@@ -63,10 +67,11 @@ def test_codex_refresh_repairs_v1_null_despite_missing_curated_model(
             assert entry["reasoning_capabilities"] == {"version": 1,
                 "effort_levels": ["low", "medium", "high", "xhigh", "max"] + (["ultra"] if ultra else []),
                 "default_effort": default}
-        # The curated model the catalog no longer lists keeps its entry; a
-        # listed one also records the catalog's speed tiers (none here).
-        assert after["models_json"][-2] == before["models_json"][-2]
-        assert after["models_json"][-1] == {**before["models_json"][-1], "service_tiers": []}
+        # The curated model the catalog no longer lists keeps its entry; every
+        # one records this account's speed tiers (none here).
+        tiers = {"service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1}
+        assert after["models_json"][-2] == {**before["models_json"][-2], **tiers}
+        assert after["models_json"][-1] == {**before["models_json"][-1], **tiers}
         # Coalesced refreshes must also report the successful partial repair.
         assert authenticated_client.post(ROOT + "/refresh-capabilities", json={
             "provider_ids": [PROVIDER_ID]}).json() == response.json()
@@ -155,10 +160,10 @@ class TestLiveCatalogs:
         assert body["models"] == [
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
-             "service_tiers": []},
+             "service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1},
             {"id": "gpt-5.6-terra", "label": "GPT-5.6 Terra",
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
-             "service_tiers": []},
+             "service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1},
         ]
         assert captured["url"].startswith(
             "https://chatgpt.com/backend-api/codex/models"
@@ -234,7 +239,7 @@ class TestLiveCatalogs:
                     "default_effort": "low",
                 },
                 "context_window": 272000,
-                "service_tiers": [],
+                "service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1,
             },
             {
                 "id": "gpt-5.6-sol", "label": "GPT-5.6-Sol", "context_window": 1_000_000,
@@ -242,7 +247,7 @@ class TestLiveCatalogs:
                     "version": 1, "effort_levels": ["medium", "xhigh"],
                     "default_effort": "xhigh",
                 },
-                "service_tiers": [],
+                "service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1,
             },
         ]
 
@@ -295,7 +300,7 @@ class TestLiveCatalogs:
         assert resp.json()["models"] == [
             {"id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "context_window": 1_000_000,
              "reasoning_capabilities": {"version": 1, "effort_levels": None, "default_effort": None},
-             "service_tiers": []},
+             "service_tiers": [], TIERS_ACCOUNT_KEY: ACCT_1},
         ]
         assert calls["n"] == 2
 

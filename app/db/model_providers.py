@@ -573,18 +573,6 @@ def set_model_provider_enabled(provider_id: str, enabled: bool) -> Optional[Mode
 # (``app.core.codex_token_refresh``).
 # ---------------------------------------------------------------------------
 
-def _drop_service_tiers(cursor: Any, provider_id: str, models_json: Any) -> None:
-    """Remove every saved model's ``service_tiers`` (no-op when none has any)."""
-    models = json.loads(models_json) if isinstance(models_json, str) else models_json
-    if not isinstance(models, list) or not any(
-            isinstance(entry, dict) and "service_tiers" in entry for entry in models):
-        return
-    stripped = [{k: v for k, v in entry.items() if k != "service_tiers"}
-                if isinstance(entry, dict) else entry for entry in models]
-    cursor.execute("UPDATE model_providers SET models_json = %s WHERE id = %s",
-                   (json.dumps(stripped), provider_id))
-
-
 def set_codex_token_bundle(
     provider_id: str,
     *,
@@ -621,13 +609,8 @@ def set_codex_token_bundle(
     with get_db() as conn:
         cursor = conn.cursor()
         lock_model_provider_slots(cursor)
-        cursor.execute("SELECT provider_type, auth_mode, codex_account_id, models_json "
-                       "FROM model_providers WHERE id = %s", (provider_id,))
+        cursor.execute("SELECT provider_type, auth_mode FROM model_providers WHERE id = %s", (provider_id,))
         previous = cursor.fetchone()
-        if previous and (previous.get("codex_account_id") or None) != (account_id or None):
-            # Speed tiers belong to the account whose catalog listed them: a
-            # sign-in to another account keeps none until its own fetch.
-            _drop_service_tiers(cursor, provider_id, previous.get("models_json"))
         previous_slot = model_provider_slot(previous) if previous else None
         if not preserve_refresh_stamp:
             # Serialize with sync's guarded UPSERT as well as other writers.
