@@ -50,7 +50,7 @@ for example OpenRouter Chat Completions, OpenAI Responses, and Gemini, can
 fill missing counters with zero before the CLI receives them. The file includes
 `input_tokens_estimated`, `output_tokens_estimated`, `usage_estimated`, and
 `cost_from_table` when the engine event sets them. `cost_from_table` marks a
-cost calculated from Fluid's price table rather than reported by the backend.
+list-price estimate rather than a confirmed charge.
 Harbor ignores these flags when aggregating. Background checkpoint records set
 `outside_turn_totals` to `true` and carry their own call count and available
 cost. If the process is killed, the file may contain only per-call records or
