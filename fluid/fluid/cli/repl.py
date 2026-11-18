@@ -26,6 +26,7 @@ from typing import Any, TextIO
 
 from fluid.cli.config import host_of
 from fluid.cli.host import render_worker_event
+from fluid.engine.base import SessionBusy
 from fluid.events.model import (
     ContinualUpdate,
     ErrorEvent,
@@ -852,6 +853,9 @@ class Repl:
             self.out.write(f"{label} ok\n")
         except NotImplementedError:
             self.out.write(f"{label} not supported by this engine\n")
+        except SessionBusy as exc:
+            # A background wake turn can be streaming while the prompt is open.
+            self.out.write(f"{label} refused: the session is busy ({exc})\n")
 
     async def run(self) -> int:
         """Main loop: read lines, dispatch slash-commands or run turns.

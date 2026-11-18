@@ -122,7 +122,7 @@ from fluid.context.trim import (
 )
 from fluid.context.usage import MemoryFileUsage, build_context_usage, memory_file_usage
 from fluid.engine.background import BackgroundLifecycleMixin
-from fluid.engine.base import EngineCaps, matches_tool_pattern
+from fluid.engine.base import EngineCaps, SessionBusy, matches_tool_pattern
 from fluid.engine.guardrail import (
     GUARDRAIL_TOOL,
     anthropic_fallback,
@@ -235,6 +235,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    StoreError,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -1548,6 +1549,16 @@ class NativeLoop(BackgroundLifecycleMixin):
             registry[definition.name] = definition
 
     async def _ensure_session(self) -> SessionMeta:
+        if self._session is not None and not self._session.verified:
+            # A write may have landed that the store could not read back, so
+            # the head held here may be stale. Read it again or refuse.
+            session = await self.store.get_session(self._session.session_id)
+            if session is None or not session.verified:
+                raise StoreError(
+                    f"session {self._session.session_id} could not be read back "
+                    "after a failed write"
+                )
+            self._session = session
         if self._session is None:
             resumed = False
             if self._session_id is not None:
@@ -1796,7 +1807,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             await self._finish_background_task(op)
         elif isinstance(op, UserTurn | Resume):
             if self._turn_task and not self._turn_task.done():
-                raise RuntimeError("a turn is already running; Interrupt it first")
+                raise SessionBusy("a turn is already running; Interrupt it first")
             self._interrupted.clear()
             self._checkpoint_latched = False
             self._peer_delivery_sealed = False
@@ -1899,7 +1910,7 @@ class NativeLoop(BackgroundLifecycleMixin):
             # A running turn chains each node under the one it stored last and
             # every append moves the head, so a head move now would be silently
             # overwritten by the turn's next append. Same rule as UserTurn.
-            raise RuntimeError("a turn is already running; Interrupt it first")
+            raise SessionBusy("a turn is already running; Interrupt it first")
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays

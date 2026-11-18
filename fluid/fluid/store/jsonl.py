@@ -157,6 +157,36 @@ def _write_record(path: Path, record: dict, *, fsync: bool) -> None:
         os.close(fd)
 
 
+def _repair_file(path: Path, offset: int, fragment: bytes, complete: bool, *, fsync: bool) -> bool:
+    """Finish or cut off the unterminated last line ``fragment`` at ``offset``.
+
+    A ``complete`` fragment is a whole record that lost only its newline: the
+    newline is added, so the next record starts a line of its own. Anything
+    else is a torn half-record and is cut off. Returns False, changing
+    nothing, when the file no longer ends with ``fragment``. Raises OSError
+    when the file cannot be changed.
+    """
+    with path.open("r+b") as fh:
+        fh.seek(offset)
+        if fh.read() != fragment:
+            return False
+        if complete:
+            fh.write(b"\n")
+        else:
+            fh.truncate(offset)
+        fh.flush()
+        if fsync:
+            os.fsync(fh.fileno())
+    return True
+
+
+def _size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
 # ─── Per-session write locks ─────────────────────────────────────────────────
 #
 # One OS lock per lock file per process, reference-counted so several stores
@@ -291,8 +321,13 @@ class JsonlStore:
         # or listing touches many logs; without a bound every one of them,
         # images included, stayed in memory for the life of the process.
         self._recent: list[str] = []
-        # Torn trailing lines seen while parsing, cut off at the next write.
-        self._torn: dict[Path, tuple[int, bytes]] = {}
+        # Unterminated last lines seen while parsing, repaired at the next
+        # write to that file: (offset, bytes, whole record that lost only its
+        # newline).
+        self._torn: dict[Path, tuple[int, bytes, bool]] = {}
+        # Bytes each file had when it was last parsed: a snapshot taken
+        # before this store took the write lock is re-read if it changed.
+        self._parsed_size: dict[Path, int] = {}
         self._finalizer = weakref.finalize(self, _release_store_locks, self._dir, self._held)
 
     # ─── Paths ───────────────────────────────────────────────────────────
@@ -319,28 +354,48 @@ class JsonlStore:
             return
         _acquire_lock(self._lock_path(session_id), session_id)
         self._held.add(session_id)
+        self._refresh(session_id)
+
+    def _refresh(self, session_id: str) -> None:
+        """Re-read what was parsed before this store held the write lock.
+
+        Another process may have written in between; a decision made from
+        the old snapshot (is this append a retry? does the head need to
+        move?) would be wrong. A read that fails here raises, refusing the
+        write that took the lock.
+        """
+        for events, loaded, path in (
+            (False, self._loaded, self._log_path(session_id)),
+            (True, self._events_loaded, self._events_path(session_id)),
+        ):
+            if session_id in loaded and self._parsed_size.get(path) != _size(path):
+                self._reload(session_id, events=events, strict=True)
 
     def _writable(self, session_id: str) -> None:
         self.lock_session(session_id)
-        self._repair_tail(self._log_path(session_id))
-        self._repair_tail(self._events_path(session_id))
 
     def _repair_tail(self, path: Path) -> None:
-        """Cut a torn trailing line off, if the file still ends with it."""
-        torn = self._torn.pop(path, None)
+        """Finish an unterminated last line before writing after it.
+
+        Raises when the file cannot be repaired: writing anyway would join
+        the new record to it, and a reopen would lose both.
+        """
+        torn = self._torn.get(path)
         if torn is None:
             return
-        offset, fragment = torn
+        offset, fragment, complete = torn
         try:
-            with path.open("r+b") as fh:
-                fh.seek(offset)
-                if fh.read() != fragment:
-                    return  # someone else wrote since we looked; leave it
-                fh.truncate(offset)
+            repaired = _repair_file(path, offset, fragment, complete, fsync=self._fsync)
         except OSError as exc:
-            log.warning("%s: could not cut off the torn last line: %s", path.name, exc)
-            return
-        log.warning("%s: cut off a torn last line (%d bytes)", path.name, len(fragment))
+            log.warning("%s: could not repair the unterminated last line: %s", path.name, exc)
+            raise
+        del self._torn[path]
+        if not repaired:
+            return  # someone else wrote since we looked (an unlocked store); leave it
+        if complete:
+            log.warning("%s: ended the last record's line", path.name)
+        else:
+            log.warning("%s: cut off a torn last line (%d bytes)", path.name, len(fragment))
 
     def _append_line(self, path: Path, record: dict) -> None:
         _write_record(path, record, fsync=self._fsync)
@@ -356,16 +411,19 @@ class JsonlStore:
         error is what the caller gets.
         """
         try:
+            self._repair_tail(path)
             self._append_line(path, record)
         except BaseException:
             self._reload(session_id, events=path == self._events_path(session_id))
             raise
 
-    def _reload(self, session_id: str, *, events: bool) -> None:
+    def _reload(self, session_id: str, *, events: bool, strict: bool = False) -> None:
         """Forget the session's parsed log (or events) and parse it again now.
 
         A read that fails here leaves the session unloaded, so the next access
-        tries again, and is logged rather than raised over the write's error.
+        tries again, and marks the session's held meta unverified until then.
+        It is logged rather than raised over the write's error, unless
+        ``strict``.
         """
         if events:
             self._events_loaded.discard(session_id)
@@ -379,6 +437,11 @@ class JsonlStore:
             else:
                 self._ensure_loaded(session_id)
         except Exception as exc:  # noqa: BLE001 — retried on the next access
+            meta = self._sessions.get(session_id)
+            if not events and meta is not None:
+                meta.verified = False
+            if strict:
+                raise
             log.warning("session %s: could not re-read after a failed write: %s",
                         session_id, exc)
 
@@ -440,6 +503,8 @@ class JsonlStore:
             self._events_loaded.discard(victim)
             self._nodes.pop(victim, None)
             self._events.pop(victim, None)
+            self._parsed_size.pop(self._log_path(victim), None)
+            self._parsed_size.pop(self._events_path(victim), None)
 
     def _parse_log(
         self, session_id: str, path: Path
@@ -488,8 +553,7 @@ class JsonlStore:
                 bad.append(line_no)
                 last_bad = (line_no, offset)
         torn = last_bad is not None and last_bad[0] == last_line
-        if torn:
-            self._torn[path] = (last_bad[1], data[last_bad[1]:])
+        self._note_tail(path, data, last_bad[1] if torn else None)
         self._report_bad_lines(path, bad, torn)
         if duplicates:
             log.warning(
@@ -512,6 +576,19 @@ class JsonlStore:
         if cli_session is not _UNSET:
             meta.cli_session_id = cli_session
         return meta, nodes
+
+    def _note_tail(self, path: Path, data: bytes, torn_at: int | None) -> None:
+        """Remember what a parse saw at the end of ``path`` (see ``_torn``)."""
+        self._parsed_size[path] = len(data)
+        start = data.rfind(b"\n") + 1
+        if torn_at is not None:
+            self._torn[path] = (torn_at, data[torn_at:], False)
+        elif data[start:].strip():
+            # The last record parsed but has no newline (a write that lost
+            # only its last byte).
+            self._torn[path] = (start, data[start:], True)
+        else:
+            self._torn.pop(path, None)
 
     @staticmethod
     def _report_bad_lines(path: Path, bad: list[int], torn: bool) -> None:
@@ -541,9 +618,10 @@ class JsonlStore:
                     bad.append(line_no)
                     last_bad = (line_no, offset)
             torn = last_bad is not None and last_bad[0] == last_line
-            if torn:
-                self._torn[path] = (last_bad[1], data[last_bad[1]:])
+            self._note_tail(path, data, last_bad[1] if torn else None)
             self._report_bad_lines(path, bad, torn)
+        else:
+            self._note_tail(path, b"", None)
         self._events[session_id] = events
         self._events_loaded.add(session_id)
 
@@ -581,6 +659,9 @@ class JsonlStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         if not self._ensure_loaded(session_id):
             raise KeyError(session_id)
+        # Own the session (re-reading a snapshot taken before) before deciding
+        # anything from memory: whether this is a retry, where the head is.
+        self._writable(session_id)
         stored = self._nodes[session_id].get(node.node_id)
         if stored is not None:
             # Replay keeps the first record of an id, so live state must too.
@@ -592,7 +673,6 @@ class JsonlStore:
             if self._sessions[session_id].head_node_id != node.node_id:
                 await self.set_head(session_id, node.node_id)
             return
-        self._writable(session_id)
         # Node and head move in one record: a lost tail cannot leave the node
         # on disk with the head still pointing at its parent.
         self._commit(session_id, self._log_path(session_id), {
@@ -621,9 +701,9 @@ class JsonlStore:
     async def set_head(self, session_id: str, node_id: str | None) -> None:
         if not self._ensure_loaded(session_id):
             raise KeyError(session_id)
+        self._writable(session_id)
         if node_id is not None and node_id not in self._nodes[session_id]:
             raise ValueError(f"session {session_id} has no node {node_id}")
-        self._writable(session_id)
         self._commit(
             session_id,
             self._log_path(session_id),

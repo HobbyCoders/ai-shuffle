@@ -24,6 +24,10 @@ class EngineCaps:
     context_usage: bool = False
 
 
+class SessionBusy(RuntimeError):
+    """An op that needs an idle session was submitted while a turn runs."""
+
+
 def matches_tool_pattern(name: str, patterns: Iterable[str]) -> bool:
     """Exact name match, or a case-sensitive fnmatch pattern (ruling CE12).
 

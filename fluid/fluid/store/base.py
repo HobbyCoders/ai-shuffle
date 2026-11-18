@@ -294,6 +294,10 @@ class SessionMeta:
     # sessions stored before the field existed — recall treats those as
     # "unknown project", never as "some other project".
     project_root: str | None = None
+    # Not stored. False when a write may have landed but the store could not
+    # read the session back, so this object may disagree with disk; callers
+    # holding it must fetch the session again (``get_session``) before use.
+    verified: bool = field(default=True, compare=False, repr=False)
 
 
 @dataclass
