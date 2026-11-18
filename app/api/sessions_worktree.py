@@ -49,6 +49,7 @@ _SESSION_CREATE_OVERRIDE_KEYS = {
     "context_window",
     "voice_config",
     "fast",
+    "speed",
     "mode",
     "hidden",
 }
@@ -99,7 +100,7 @@ def _merge_session_create_overrides(
 
 
 _RUN_BINDING_KEYS = (
-    "model", "effort", "permission_mode", "context_window", "fast",
+    "model", "effort", "permission_mode", "context_window", "fast", "speed",
     "workspace_project_ids",
 )
 

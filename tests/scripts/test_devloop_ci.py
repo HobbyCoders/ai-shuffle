@@ -157,6 +157,44 @@ def test_one_shard_uses_run_all_when_it_exists(tmp_path):
     assert ci.commands_for(["b.journey.mjs"], 2, tmp_path) == [["node", str(tmp_path / files[1])]]
 
 
+@pytest.mark.parametrize("only,expected", [
+    (None, ci.RUN_ALL), ("touch-targets", "touch-targets.journey.mjs"),
+    ("antigravity-usage", "antigravity-usage.journey.mjs"),
+])
+def test_single_shard_launch_matches_its_fixture_selection(tmp_path, monkeypatch, only, expected):
+    files = ["antigravity-usage.journey.mjs", "touch-targets.journey.mjs"]
+    monkeypatch.setattr(ci, "plan", lambda shards, only=None: [files if only is None else only])
+    launched, fixtures = [], []
+
+    class Instance:
+        status = tmp_path / "status.json"
+
+        def __init__(self, out, ttl, *, fake_antigravity):
+            fixtures.append(fake_antigravity)
+
+        def wait_ready(self, timeout):
+            return None
+
+        def alive(self):
+            return True
+
+        def down(self):
+            pass
+
+    def run(command, *_):
+        launched.append(command)
+        return 0, 0.0
+
+    monkeypatch.setattr(ci, "DevInstance", Instance)
+    monkeypatch.setattr(ci, "run_command", run)
+    argv = ["journeys", "--out", str(tmp_path)]
+    if only is not None:
+        argv += ["--only", only]
+    assert ci.main(argv) == 0
+    assert launched == [["node", str(ci.JOURNEYS / expected)]]
+    assert fixtures == [only != "touch-targets"]
+
+
 def test_a_plan_with_no_journeys_fails_closed(tmp_path):
     with pytest.raises(SystemExit):
         ci.plan(2, tmp_path)

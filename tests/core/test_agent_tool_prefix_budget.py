@@ -12,6 +12,10 @@ from scripts.measure_prompt_catalog import compile_fixture, measure
 # Nov 2026: finer agent edits in the deferred app-config profile/subagent docs
 # (see test_prompt_catalog_budget.py): combined_full +2,867 on both legs
 # (native 133,602 -> 136,469; delegated 104,716 -> 107,583). Eager unchanged.
+# Nov 2026: the claude CLI leg runs the compiled prompt (uniform app blocks,
+# owner decision) instead of appending to Claude Code's: delegated
+# compiled_eager 14,825 -> 21,324 and combined_full 107,583 -> 113,872 by the
+# same growth (see test_prompt_catalog_budget.py). Native unchanged.
 FIXTURE = json.loads((Path(__file__).parents[1] / "fixtures" / "agent_tool_prefix_budget.json").read_text())
 
 

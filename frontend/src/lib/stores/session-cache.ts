@@ -24,6 +24,8 @@ export interface SessionEphemeral {
 	effortLevelOverride: string | null;
 	/** Fast service tier — part of the run binding, cached like the rest of it. */
 	fastMode?: boolean;
+	/** Fast refined to OpenAI's Ultrafast tier; meaningless while `fastMode` is off. */
+	ultrafastMode?: boolean;
 	/** Which of profile / access / Fast this entry holds as real values (#418).
 	 *  An entry without it predates the rule and is not trusted for them. */
 	bindingHydrated?: ComposerBindingFlags;

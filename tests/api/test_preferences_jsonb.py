@@ -192,3 +192,16 @@ def test_retried_write_id_is_already_applied_not_a_conflict(jsonb_client):
     assert put("b", first, second).status_code == 409
     assert jsonb_client.get(url).json()["value"] == "theirs"
     assert put("x", theirs.json()["version"], "not-a-uuid").status_code == 422
+
+
+@pytest.mark.parametrize("key", ["generation.choice.image", "generation.job.auto-12345678.image",
+                                 "generation.favourite.video"])
+def test_generation_picks_are_never_written_through_the_generic_route(jsonb_client, key):
+    # Their own writers check the model's fit and a fresh price first.
+    root = "/api/v1/preferences/"
+    pick = {"source": "fal", "account": "fal-ai", "worker": "worker-a", "model": "fal-ai/x"}
+    assert jsonb_client.put(root + key, json={"key": key, "value": pick}).status_code == 403
+    assert jsonb_client.post(root + key, json={"key": key, "value": pick}).status_code == 403
+    assert jsonb_client.get(root + key).json() is None
+    marker = "generation.choicesMigrated"
+    assert jsonb_client.put(root + marker, json={"key": marker, "value": True}).status_code == 200

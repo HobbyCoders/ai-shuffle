@@ -25,7 +25,7 @@ import { feedController, OPTIMISTIC_STREAMING_ON } from './v2/feed-controller';
 import { pendingQueue, newLocalPendingId, SEND_MAYBE_APPLIED_MESSAGE } from './pending-queue';
 import { selectedContextWindow } from './context-window';
 import { getDefaultModel, getServerDefaultModel } from '$lib/constants/models';
-import { composerPreferences } from '../composer-preferences';
+import { composerPreferences, composerSpeed } from '../composer-preferences';
 import { sendableComposerBinding } from './composer-binding';
 import { registerReloadBlocker } from '$lib/services/app-update';
 import { keepOpening, finishOpening, pendingOpening, recoveringOpening } from './worktree-opening';
@@ -346,6 +346,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 		// `true` — so turning fast mode off never reached the CLI. `false` is a
 		// real pick and has to travel; an unhydrated placeholder is not one.
 		if (binding.fast !== undefined) overrides.fast = binding.fast;
+		if (binding.speed !== undefined) overrides.speed = binding.speed;
 		const contextWindow = contextWindowOverride(_state);
 		if (contextWindow != null) {
 			overrides.context_window = contextWindow;
@@ -1256,6 +1257,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			const permissionModeOverrideSnap = _state.permissionModeOverride;
 			const effortLevelOverrideSnap = _state.effortLevelOverride;
 			const fastModeSnap = _state.fastMode;
+			const speedSnap = composerSpeed(_state);
 			const contextWindowSnap = contextWindowOverride(_state);
 			const deviceIntentSnap = _state.deviceIntent;
 			const userMsgId = `user-${Date.now()}`;
@@ -1283,6 +1285,7 @@ export function createMessageSender(deps: MessageSenderDeps) {
 			if (effortLevelOverrideSnap) overridesPayload.effort = effortLevelOverrideSnap;
 			// Explicit boolean, same reason as buildOverrides above.
 			overridesPayload.fast = fastModeSnap;
+			overridesPayload.speed = speedSnap;
 			if (contextWindowSnap != null) overridesPayload.context_window = contextWindowSnap;
 
 			update(s => {

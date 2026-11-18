@@ -71,6 +71,22 @@
 	],
 	"rules": [
 		{
+			"why": "Antigravity's grouped quota reply passes through the real parser and usage API to its ordered meters",
+			"journeys": ["antigravity-usage"],
+			"globs": [
+				"frontend/tests/journeys/antigravity-usage.journey.mjs",
+				"scripts/devloop/fake_agy.py",
+				"scripts/devloop/seed.py",
+				"app/core/antigravity.py",
+				"app/core/provider_usage.py",
+				"app/api/usage.py",
+				"frontend/src/lib/stores/rate-limit.ts",
+				"frontend/src/lib/components/chat/ContextUsageBar.svelte",
+				"frontend/src/lib/components/chat/phone/MobileComposerControlsSheet.svelte",
+				"frontend/src/lib/components/settings/providers/AntigravityDetail.svelte"
+			]
+		},
+		{
 			"why": "the Away for all chats switch, its always-on band and the per-chat control it locks: real taps, a real layout and a second browser are what these depend on",
 			"journeys": [
 				"away-all-chats"
@@ -602,7 +618,7 @@
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2"],
+			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2", "queue-over-running-tasks"],
 			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
@@ -840,6 +856,11 @@
 			"why": "in-app documentation text: no journey reads it, so it needs none (and is not an uncovered UI source file)",
 			"journeys": [],
 			"globs": ["frontend/src/lib/docs/content/**"]
+		},
+		{
+			"why": "queued bubbles stay below the running-task row when a long turn has paged its own prompt out of the mounted rows",
+			"journeys": ["queue-over-running-tasks"],
+			"globs": ["frontend/tests/journeys/queue-over-running-tasks.journey.mjs", "frontend/src/lib/components/chat/RunningTasksList*", "scripts/devloop/scenarios/tool-background-heavy.json"]
 		},
 		{
 			"why": "the queue-while-busy cases, which two journey files run in halves",

@@ -1994,6 +1994,9 @@ async def test_argv_carries_strict_mcp_config_with_the_written_config(tmp_path) 
         store=MemoryStore(), model="claude-fake", claude_cmd=_cmd(),
         registry=ToolRegistry(),
         mcp_servers={"docs": {"transport": "streamable_http", "url": "http://x/mcp"}},
+        # No compaction route: it registers the recall tools at construction
+        # and the bundled server would join the written config.
+        claude_mod_compaction=False,
     )
     try:
         await loop._start_bundled_server()

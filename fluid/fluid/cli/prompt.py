@@ -703,11 +703,10 @@ def _tools_section(p: PromptProfile) -> str | None:
         )
     if not p.code_mode:
         # Under code mode one cell carries the calls; there is no reply-level
-        # parallelism to ask for.
+        # batching to ask for. Native runs a reply's calls one at a time.
         bullets.append(
-            "- Make independent tool calls in the same reply so they run "
-            "together; serialize only when one call's input depends on "
-            "another's result."
+            "- Put independent tool calls in one reply to save round trips; "
+            "split them only when one call's input depends on another's result."
         )
     if p.delegated and t:
         example = next((n for n in ("Note", "AskUser", "Monitor", "Read") if n in t), None)

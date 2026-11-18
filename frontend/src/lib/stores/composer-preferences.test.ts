@@ -453,3 +453,28 @@ it('migrates the legacy fast flag only for the last selected model', async () =>
  expect(p.fastForModel('gpt-6.1-sol')).toBeNull();
  expect(mocks.save).not.toHaveBeenCalled();
 });
+
+it('remembers an Ultrafast pick per model as a refinement of its Fast record', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ expect(p.speedForModel('gpt-6.1-sol')).toBeNull();
+ p.rememberSpeed('prov:codex:gpt-6.1-sol', 'ultrafast');
+ expect(mocks.save).toHaveBeenCalledWith('composer.modelFast.gpt-6.1-sol', true);
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelSpeed.gpt-6.1-sol', 'ultrafast');
+ expect(p.speedForModel('gpt-6.1-sol')).toBe('ultrafast');
+ // Plain Fast on another model writes no speed record.
+ mocks.save.mockClear();
+ p.rememberSpeed('prov:codex:gpt-6-astra', 'fast');
+ expect(mocks.save.mock.calls).toEqual([['composer.modelFast.gpt-6-astra', true]]);
+ expect(p.speedForModel('gpt-6-astra')).toBe('fast');
+ vi.resetModules();
+ const {composerPreferences:reloaded} = await import('./composer-preferences');
+ expect(reloaded.speedForModel('gpt-6.1-sol')).toBe('ultrafast');
+ // Fast turned off by an older client: the chat is Standard whatever the refinement says.
+ mocks.adapters.get('composer.modelFast.gpt-6.1-sol')!.apply(false);
+ expect(reloaded.speedForModel('gpt-6.1-sol')).toBe('standard');
+ mocks.adapters.get('composer.modelFast.gpt-6.1-sol')!.apply(true);
+ // Back to Fast clears the refinement as a replicated null.
+ reloaded.rememberSpeed('gpt-6.1-sol', 'fast');
+ expect(mocks.save).toHaveBeenLastCalledWith('composer.modelSpeed.gpt-6.1-sol', null);
+ expect(reloaded.speedForModel('gpt-6.1-sol')).toBe('fast');
+});

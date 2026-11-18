@@ -327,15 +327,18 @@ async def test_without_the_optional_mod_the_output_guard_still_loads(tmp_path, c
         await loop.aclose()
 
 
-@pytest.mark.parametrize(("version", "enabled", "copy_fails", "exposed"), [
+@pytest.mark.parametrize(("version", "enabled", "copy_fails", "staged"), [
     ("2.1.286", True, False, False),
     ("2.1.287", False, False, False),
     ("2.1.287", True, True, False),
     ("2.1.287", True, False, True),
 ])
-async def test_compaction_recall_tools_require_a_staged_mod(
-    tmp_path, monkeypatch, version, enabled, copy_fails, exposed,
+async def test_compaction_recall_tools_follow_the_switches_not_the_spawn(
+    tmp_path, monkeypatch, version, enabled, copy_fails, staged,
 ) -> None:
+    """The recall tools are decided at construction from the mod and
+    compaction switches, so a host's prompt (fixed before any spawn) and the
+    bridge agree even when the spawn cannot stage the mod."""
     from fluid.tools.registry import ToolRegistry
 
     monkeypatch.setenv("FLUID_CLAUDE_MOD", "true" if enabled else "false")
@@ -343,22 +346,26 @@ async def test_compaction_recall_tools_require_a_staged_mod(
         def refuse(_tmpdir):
             raise PermissionError("read-only scratch")
         monkeypatch.setattr(delegated_mod, "_stage_claude_mod", refuse)
+    exposed = enabled
     registry = ToolRegistry()
     loop, record = _loop(tmp_path, version, registry=registry, claude_mod_compaction=True)
     try:
+        before_spawn = {spec.name for spec in registry.list_tools(loaded_only=False)}
+        assert ("HistoryExpand" in before_spawn) is exposed
         await _turn(loop)
         names = {spec.name for spec in registry.list_tools(loaded_only=False)}
+        assert names == before_spawn  # the spawn adds nothing
         assert ("HistoryExpand" in names) is exposed
         assert ("HistorySearch" in names) is exposed
         argv = _spawn_argv(record)
-        assert (loop._claude_mod_dir is not None) is exposed
-        assert (str(Path(loop._tmpdir) / "claude-mod") in argv) is exposed
+        assert (loop._claude_mod_dir is not None) is staged
+        assert (str(Path(loop._tmpdir) / "claude-mod") in argv) is staged
         assert str(Path(loop._tmpdir) / "tool-output-guard") in argv
         config = json.loads(Path(loop._mcp_config_path).read_text(encoding="utf-8"))
         assert ("fluid_bundled" in config["mcpServers"]) is exposed
         if exposed:
             assert "--mcp-config" in argv
-            assert loop._claude_mod_listed is True
+            assert loop._claude_mod_listed is (True if staged else None)
             # Read the address handed to the CLI, then query the real bridge:
             # registry membership alone misses a too-early config snapshot.
             address = config["mcpServers"]["fluid_bundled"]["args"][-1]

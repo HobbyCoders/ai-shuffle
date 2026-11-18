@@ -2278,6 +2278,24 @@ describe('ws-message-handlers', () => {
 			expect(sessionEphemeralCache.restore('elsewhere')?.effortLevelOverride).toBeNull();
 			expect(b.state.effortLevelOverride).toBe('high');
 		});
+
+		it('adopts a speed picked elsewhere, in the open chat, its cache and its row', () => {
+			const b = openAtMedium();
+			const speed = (sessionId: string, fast: boolean, value: string) => handlers.handleMessage(
+				{ event_type: 'session_updated', session_id: sessionId, data: { updates: { fast, speed: value } } });
+			speed('session-1', true, 'ultrafast');
+			expect(b.state).toMatchObject({ fastMode: true, ultrafastMode: true });
+			expect(b.state.bindingUnhydrated?.fast).toBeFalsy();
+			expect(deps.mergeSessionPatch).toHaveBeenCalledWith('session-1', { fast: true, speed: 'ultrafast' });
+			speed('session-1', true, 'fast');
+			expect(b.state).toMatchObject({ fastMode: true, ultrafastMode: false });
+
+			sessionEphemeralCache.save('elsewhere', { ...b.state, sessionId: 'elsewhere', fastMode: false } as never);
+			speed('elsewhere', true, 'ultrafast');
+			expect(sessionEphemeralCache.restore('elsewhere')).toMatchObject({ fastMode: true, ultrafastMode: true });
+			// The open chat keeps its own.
+			expect(b.state.ultrafastMode).toBe(false);
+		});
 	});
 
 	describe('user_session_updated handler (working time, #1619)', () => {

@@ -174,19 +174,21 @@ async def test_delegated_record_change_neither_respawns_nor_changes_the_prompt(m
         return await real_submit(turn)
 
     monkeypatch.setattr(adapter.engine, "submit", record)
-    append = adapter.engine.append_system_prompt
+    # The prompt the CLI is sent (--system-prompt): fixed at connect.
+    prompt = adapter.engine.system
+    assert prompt
     try:
         store.add("decision", "Ship only after review.", owner)
         assert not (await _run_turn(adapter, "turn 0")).is_error
         assert not (await _run_turn(adapter, "turn 1")).is_error
         store.add("pending", "Collect performance numbers.", owner)
         assert not (await _run_turn(adapter, "turn 2")).is_error
-        assert adapter.engine.append_system_prompt == append
+        assert adapter.engine.system == prompt
         # A compaction put-back always carries the current record.
         assert "Collect performance numbers." in "\n\n".join(s.text for s in adapter._compact_note())
     finally:
         await adapter.disconnect()
     assert len(_ArgvLoop.argvs) == 1, "a record change must not respawn the CLI"
-    assert HEADER not in append
+    assert HEADER not in prompt
     assert [HEADER in text for text in sent] == [True, False, True]
     assert "Collect performance numbers." in sent[2]

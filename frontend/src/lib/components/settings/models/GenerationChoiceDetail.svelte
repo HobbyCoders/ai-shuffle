@@ -43,11 +43,16 @@
 	let actionError = $state('');
 	/**
 	 * The server's save-time warning for "Remember" (the card shows its own).
-	 * Any later save or forget replaces it, and it hides once another pick is
-	 * remembered elsewhere.
+	 * Any later save or forget replaces it. A remembered pick's warning hides
+	 * once another pick is remembered elsewhere; a refused save (no verified
+	 * price, so not remembered) says so while that pick is still the last one.
 	 */
-	let saveWarning = $state<{ choice: GenerationChoice; text: string } | null>(null);
-	const rememberWarning = $derived(saveWarning && sameChoice(remembered, saveWarning.choice) ? saveWarning.text : '');
+	let saveWarning = $state<{ choice: GenerationChoice; text: string; remembered: boolean } | null>(null);
+	const rememberWarning = $derived.by(() => {
+		if (!saveWarning) return '';
+		if (!saveWarning.remembered) return sameChoice(last, saveWarning.choice) ? saveWarning.text : '';
+		return sameChoice(remembered, saveWarning.choice) ? `Remembered. ${saveWarning.text}` : '';
+	});
 	let generation = 0;
 
 	async function loadOptions() {
@@ -90,7 +95,9 @@
 		saveWarning = null;
 		try {
 			const saved = await generationChoices.save(kind, last, true, 'settings');
-			saveWarning = saved?.warning ? { choice: saved.choice ?? last, text: saved.warning } : null;
+			saveWarning = saved?.warning
+				? { choice: saved.choice ?? last, text: saved.warning, remembered: saved.remembered !== false }
+				: null;
 		} catch (e) {
 			actionError = getErrorMessage(e, 'Could not save this choice.');
 		} finally {
@@ -131,7 +138,7 @@
 		<InlineBanner tone="warn">{actionError}</InlineBanner>
 	{/if}
 	{#if rememberWarning}
-		<InlineBanner tone="warn">Remembered. {rememberWarning}</InlineBanner>
+		<InlineBanner tone="warn">{rememberWarning}</InlineBanner>
 	{/if}
 {/snippet}
 

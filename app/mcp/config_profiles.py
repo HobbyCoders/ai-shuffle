@@ -8,6 +8,7 @@ permission mode, system prompt, etc.).
 import logging
 from typing import Any, Dict, Optional, cast
 
+from app.core.models import profile_name_error
 from app.mcp.config_agent_edits import (
     PROMPT_EDITS_SCHEMA,
     apply_list_ops,
@@ -192,11 +193,11 @@ def _create_profile_tools(is_admin: bool) -> list:
                 },
                 "system_prompt_content": {
                     "type": "string",
-                    "description": "Custom system prompt content. If omitted, uses claude_code preset.",
+                    "description": "Custom system prompt content. If omitted, the profile has no base prompt.",
                 },
                 "system_prompt_append": {
                     "type": "string",
-                    "description": "Text to append to the preset system prompt.",
+                    "description": "Text added after the app's prompt sections when there is no custom prompt.",
                 },
                 "tool_selection_mode": {
                     **_TOOL_MODE_SCHEMA,
@@ -234,6 +235,8 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def create_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        if name_error := profile_name_error(args.get("name")):
+            return _error(name_error)
         mode_error = _tool_mode_error(args)
         if mode_error:
             return _error(mode_error)
@@ -357,12 +360,12 @@ def _create_profile_tools(is_admin: bool) -> list:
                 "max_turns": {"type": "integer"},
                 "app_config_tools": {"type": "boolean"},
                 "system_prompt_content": {"type": "string", "description": "Replace the whole prompt (custom)."},
-                "system_prompt_append": {"type": "string", "description": "Switch to the preset prompt plus this text."},
-                "reset_system_prompt": {"type": "boolean", "description": "Restore the bare preset prompt."},
+                "system_prompt_append": {"type": "string", "description": "Drop the custom prompt; add this text after the app's sections."},
+                "reset_system_prompt": {"type": "boolean", "description": "Clear the profile's own prompt text."},
                 "prompt_edits": {
                     **PROMPT_EDITS_SCHEMA,
                     "description": PROMPT_EDITS_SCHEMA["description"].replace(
-                        "the prompt", "the prompt (custom text, or text appended to the preset)", 1),
+                        "the prompt", "the prompt (custom text, or the added text)", 1),
                 },
                 "tool_selection_mode": _TOOL_MODE_SCHEMA,
                 "allowed_tools": {
@@ -386,6 +389,8 @@ def _create_profile_tools(is_admin: bool) -> list:
     async def update_profile(args: dict) -> dict:
         if not _is_admin:
             return _error("App configuration tools require admin access.")
+        if args.get("name") is not None and (name_error := profile_name_error(args["name"])):
+            return _error(name_error)
         from app.db.owner_state import AGENT_ID as ASSISTANT_AGENT_ID
         if args.get("profile_id") == ASSISTANT_AGENT_ID:
             return _error("The assistant's built-in agent cannot be changed or deleted.")

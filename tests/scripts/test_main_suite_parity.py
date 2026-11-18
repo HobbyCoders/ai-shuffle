@@ -135,12 +135,14 @@ def test_a_run_skips_only_the_areas_whose_files_already_passed():
     # No environment switch makes a recorded backend job do less on a pull request than on main.
     assert "refs/heads/main" not in (ROOT / ".github/workflows/ci-backend.yml").read_text()
     assert "for package in frontend tools browser-mcp; do" in audits
-    assert 'npx -y npm@11 audit --audit-level=high' in audits
+    assert '(cd "$package" && python3 ../scripts/npm_audit_gate.py)' in audits
     javascript_text = (ROOT / ".github/workflows/ci-frontend.yml").read_text()
-    assert javascript_text.count("npx -y npm@11 audit --audit-level=high") == 3
+    assert javascript_text.count("python3 ../scripts/npm_audit_gate.py") == 3
+    assert " audit --audit-level" not in javascript_text
     for name in suite.PROVABLE:
         text = (ROOT / ".github/workflows" / jobs[name]["uses"].rsplit("/", 1)[1]).read_text()
-        assert (" audit --audit-level" in text or "pip_audit" in text) == (name == "backend")
+        audits_here = " audit --audit-level" in text or "pip_audit" in text or "npm_audit_gate" in text
+        assert audits_here == (name == "backend")
     assert lookup["permissions"] == {"contents": "read", "actions": "read"}
     # The plan answers for exactly the areas the verdict may see skipped, and the JavaScript checks.
     areas = [*suite.PROVABLE, "javascript-checks"]

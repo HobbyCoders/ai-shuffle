@@ -17,6 +17,12 @@ def check_gate(needs, receipts, head):
             or len({r["total"] for r in receipts}) != 1
             or sum(r["count"] for r in receipts) != receipts[0]["total"]):
         raise ValueError("inconsistent partition receipts")
+    # A shard whose tests failed counts only when exactly those tests passed
+    # their one rerun (scripts/ci/backend_shard_run.py marks the receipt).
+    for r in receipts:
+        failed, passed = r.get("failed", []), r.get("rerun_passed", [])
+        if not isinstance(failed, list) or not isinstance(passed, list) or sorted(failed) != sorted(passed):
+            raise ValueError(f"backend shard {r['shard']} has failed tests without a passing rerun")
 
 
 def main():

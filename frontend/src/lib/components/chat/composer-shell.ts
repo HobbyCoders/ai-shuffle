@@ -125,6 +125,13 @@ export interface ComposerSheetProps {
 	/** The worker said the running turn keeps its speed until the next message. */
 	fastWaitsForNextMessage?: boolean;
 	onToggleFast?: () => void;
+	/** The route also carries OpenAI's Ultrafast: Fast becomes a three-way speed pick. */
+	ultrafastSupported?: boolean;
+	/** The chat's Fast runs as Ultrafast. */
+	ultrafastEnabled?: boolean;
+	/** How the model's Ultrafast is paid for (a ChatGPT plan or API pricing), for its cost line. */
+	ultrafastBilling?: 'plan' | 'api';
+	onSelectSpeed?: (speed: 'standard' | 'fast' | 'ultrafast') => void;
 	showCodeControls?: boolean;
 	/** Agent, workspace, branch and runner selectors. */
 	showSetup?: boolean;

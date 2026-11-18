@@ -165,9 +165,11 @@ WRITE_COMMANDS = [
     "curl https://example.com",
     "env rm x",  # env with arguments runs a command
     "sort -o out.txt file",  # sort -o writes
+    "sort --output=x a.txt",
     "uniq input output",  # second positional is an output file
     "date -s '2020-01-01'",  # sets the clock
     "rg --pre cmd pattern",  # rg --pre runs a command
+    "rg --pre=cmd foo",
     "ls &",  # background job
     "(ls)",  # subshell
     "ls; rm x",  # one bad simple command poisons the whole line
@@ -233,6 +235,246 @@ def test_everything_else_is_write(command: str) -> None:
 def test_globs_that_could_reach_a_credential_file_are_write(command: str) -> None:
     assert is_read_only(command), command  # read-only program, but ...
     assert classify({"command": command}) == "write"
+
+
+# Banned options in spellings the exact-token check missed, and awk program
+# forms that run or write without the literal ``system(``. Each was "safe"
+# before; a false "ask" is acceptable here, a false "safe" is not.
+ESCAPING_SPELLINGS = [
+    "awk 'BEGIN{system (\"rm x\")}'",
+    "awk 'BEGIN{f=\"sys\" \"tem\"; @f(\"rm x\")}'",  # gawk indirect call
+    "gawk '@include \"inplace\"; {print}' f",
+    "gawk '@load \"rwarray\"; BEGIN{}'",
+    "awk -Pf prog.awk f",  # -f bundled after another flag
+    "awk --fil=prog.awk f",  # abbreviated --file
+    "gawk -E prog.awk f",
+    "gawk --exec=prog.awk f",
+    "gawk -d 'BEGIN{}'",  # writes awkvars.out
+    "gawk --dump-variables=out 'BEGIN{}'",
+    "gawk -p '{print}' f",  # writes awkprof.out
+    "gawk -o '{print}' f",
+    "mawk -W exec prog.awk",
+    "sort -o/tmp/x a.txt",
+    "sort -uo/tmp/x a.txt",
+    "sort -uo /tmp/x a.txt",
+    "sort -nuo /tmp/x a.txt",
+    "sort --outp=x a.txt",
+    "sort --compress-program=./x a.txt",
+    "tree -o out.txt",
+    "tree -ao out.txt",
+    "tree -R -H . -L 1",
+    "date -s2020-01-01",
+    "date -us 2020-01-01",
+    "date --se=2020-01-01",
+    "rg --hostname-bin=./x --hyperlink-format=default foo",
+    "uniq - out.txt",
+    "uniq -- -in out.txt",
+    "sed -n '-ew out' f",
+    "sed -n -e'w out' f",
+    "sed -n --i 's/a/b/p' f",  # abbreviated --in-place
+    "sed -n --fi=script.sed f",  # abbreviated --file
+    "file -C -m magic",  # compiles magic.mgc
+    "file --compile -m magic",
+    "file --co -m magic",  # unambiguous abbreviation of --compile
+    "tree -- -o out.txt",  # tree's own parser: -- is not trusted to end options
+    # awk program text is lexed: calls and @-constructs ask, strings and
+    # regex literals do not hide them.
+    "awk 'BEGIN{@f(\"x\")}'",
+    "gawk '@namespace \"x\"; BEGIN{}'",
+    "awk '{print}' -e '@f()'",  # an option after the program (permuting awk)
+    "awk -e 'BEGIN{x=\"' -e '\"; @f()}'",  # a string split across -e values
+    "awk 'BEGIN{if (x) /@/}'",  # regex or division: not settled, so ask
+    # sed: w/W need no particular filename characters; r reads a file the
+    # credential check never sees; unparsed regex delimiters ask.
+    "sed -n 'W@x' f",
+    "sed -n 's/a/b/w@out' f",
+    "sed -n 'w$x' f",
+    "sed -n '1r x' f",
+    "sed -n 's/[/]/x/p' f",  # GNU and BSD sed end this regex differently
+    # date: only display forms; a bare operand sets the clock.
+    "date 01011200",
+    "date +%s 01011200",
+    # sed -l takes a value in GNU sed and none in BSD/macOS sed.
+    "sed -n -l 5 p f",
+    "sed -nl5 p f",
+]
+
+# Everyday read-only forms around the same programs stay "safe".
+STILL_SAFE = [
+    "sort -u file",
+    "sort -n -k2 file",
+    "sort -rn file",
+    "sort -t, -k3 -rn file",
+    "sort --parallel=2 file",
+    "awk '{print $1}' f",
+    "awk -F: '{print $1}' f",
+    "awk -F@ '{print $2}' f",
+    "awk -vline=3 'NR==line' f",
+    "awk -v n=1 '{print $n}' f",
+    "awk 'NR<5' f",
+    "tree -L 2",
+    "tree -a -I node_modules",
+    "tree -d --noreport",
+    "date -u +%s",
+    "date -Iseconds",
+    "date -d yesterday +%F",
+    "date --iso-8601=seconds",
+    "rg --pre-glob '*.pdf' foo",
+    "rg -o foo src",
+    "uniq -c f",
+    "uniq -",
+    "sed -ne '/x/p' f",
+    "sed -n -e '1,3p' f",
+    "file -b x",
+    # Only awk's program text is inspected, and only for real calls.
+    "awk -F @ '{print $2}' f",
+    "awk '/@example\\.com$/' f",
+    "awk '$2 ~ /@example\\.com$/ {print $1}' f",
+    "awk '{system_name=$1; print system_name}' f",
+    "awk '{print $1}' user@host.log",
+    "awk 'BEGIN{x=\"a@b\"; print x}'",
+    "awk '{print ($1+$2)/2}' f",
+    "awk '{gsub(/foo/, \"bar\"); print}' f",
+    "awk '!seen[$0]++' f",
+    # An ambiguous abbreviation sets nothing.
+    "sort --c file",  # --check or --compress-program: sort refuses it
+    "rg --pr=x foo",  # ripgrep rejects abbreviations, so this is not --pre
+    "sed -n '$p' f",
+    "sed -n '/a/,/b/{p}' f",
+    "sed -n '/[0-9]/p' f",
+    "sed -n '1p;$p' f",
+    "sed -n 's|/usr|/opt|p' f",
+    "date -R",
+    "date --rfc-3339=seconds",
+    "date -r f +%F",
+    "date -d @1700000000",
+    "date --help",
+    "date --version",
+    "date --resolution",
+    # s with # or ; as its delimiter (handy when the pattern has slashes).
+    "sed -n 's#a/b#c#p' f",
+    "sed -n 's;a/b;c;gp' f",
+    "sed -n 's#/usr#/opt#p;$p' f",
+]
+
+
+@pytest.mark.parametrize("command", ESCAPING_SPELLINGS)
+def test_banned_options_in_any_spelling_are_write(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", STILL_SAFE)
+def test_common_read_only_forms_stay_safe(command: str) -> None:
+    assert is_read_only(command), command
+    assert classify({"command": command}) == "safe"
+
+
+# A ``--`` that is an option's value is not end-of-options: the program keeps
+# reading options after it. Every value-taking option spelling, given ``--``
+# as its value, followed by every spelling of a banned option, must ask.
+_SORT_VALUE_SPELLINGS = ["-k", "-nk", "-t", "-S", "--key", "--ke", "--field-separator"]
+_SORT_BANNED_SPELLINGS = ["--outp=x", "--compress=x", "-ox", "-uox", "-uo x"]
+DASH_DASH_AS_VALUE = [
+    f"sort {value} -- {banned} f"
+    for value in _SORT_VALUE_SPELLINGS for banned in _SORT_BANNED_SPELLINGS
+] + [
+    "awk -v -- --fil=x f",
+    "awk -F -- --exe=x f",
+    "awk --assign -- --dump=x '{print}' f",
+    "sed -n -e -- --fi=x f",
+    "sed -n --expression -- --in=x f",
+    "date -d -- -s2020",
+    "date --date -- --se=2020",
+    "date -r -- -us 2020",
+]
+
+
+@pytest.mark.parametrize("command", DASH_DASH_AS_VALUE)
+def test_dash_dash_as_an_option_value_does_not_end_options(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+# Every sort word is scanned, ``--`` included: which word an option takes as
+# its value can differ (obsolete options take the next word only when it is
+# a number), so no end-of-options marker is trusted.
+_SORT_OBSOLETE_SPELLINGS = ["-y", "-ny"]
+SORT_UNCERTAIN_VALUE = [
+    f"sort {obsolete} {value} -- {banned} f"
+    for obsolete in _SORT_OBSOLETE_SPELLINGS
+    for value in ["-k", "-t", "-S", "--key"]
+    for banned in _SORT_BANNED_SPELLINGS
+] + ["sort -- -old.txt", "sort -k2 -- -o x f"]
+
+
+@pytest.mark.parametrize("command", SORT_UNCERTAIN_VALUE)
+def test_sort_scans_every_word(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+# Which bundled sort letters take a value differs between sorts, so a banned
+# letter anywhere in a short-option word counts, after a value-taking letter
+# or inside what one sort would read as its value. -T and its long name pick
+# the directory sort writes temporary files to.
+SORT_BUNDLED_OR_TEMP_DIR = [
+    f"sort -{lead}{banned} f"
+    for lead in ["S", "nS", "k", "t", "y", "S1"]
+    for banned in ["o x", "ox", "T x", "Tx", "uo x"]
+] + [
+    "sort -T x f", "sort -Tx f", "sort -uT x f",
+    "sort --temporary-directory=x f", "sort --temporary-directory x f",
+    "sort --temp x f", "sort --te=x f", "sort --t x f",
+]
+
+
+@pytest.mark.parametrize("command", SORT_BUNDLED_OR_TEMP_DIR)
+def test_sort_banned_letters_anywhere_and_temp_dir_ask(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "sort -S 1M file", "sort -S1M -n file", "sort --buffer-size=1M file",
+    "sort -t: -k2,2n file", "sort -k1,1 -k2nr file", "sort file",
+])
+def test_sort_default_temp_spill_and_values_stay_safe(command: str) -> None:
+    assert is_read_only(command), command
+
+
+# awk may carry only POSIX -F/-v (attached or separate) and --. Any other
+# option asks: awks differ on which options exist and on what they do with
+# one they do not know, so the word they run as the program can differ from
+# the one the classifier lexed. Each case is an otherwise harmless program.
+_AWK_NON_POSIX_OPTIONS = [
+    "-e '{print}'", "-e'{print}'", "--source '{print}'", "--source='{print}'",
+    "--exec x", "-b", "-c", "-C", "-P", "-O", "-M", "-S", "-n", "-r", "-t", "-k",
+    "-Lfatal", "-L", "--sandbox", "--csv", "--posix", "--re-interval",
+    "--traditional", "--lint", "--version", "-W version", "-Wv", "-vx=1 -b",
+]
+AWK_NON_POSIX = [f"awk {opt} '{{print $1}}' f" for opt in _AWK_NON_POSIX_OPTIONS] + [
+    "awk -e'{print}' '@f()'",  # a later word that another awk would run
+    "awk -- -W '{print}' f",  # an option-looking program
+    "awk -F, -- -d f",
+]
+
+
+@pytest.mark.parametrize("command", AWK_NON_POSIX)
+def test_awk_asks_on_options_beyond_posix(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", [
+    "awk -F, '{print $1}' f",
+    "awk -F , '{print $1}' f",
+    "awk -v n=2 -F: '{print $n}' f",
+    "awk -vn=2 '{print $n}' f",
+    "awk -- '{print $1}' f",
+])
+def test_awk_posix_options_stay_safe(command: str) -> None:
+    assert is_read_only(command), command
 
 
 def test_classify_without_command_is_write() -> None:

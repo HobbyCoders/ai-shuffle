@@ -135,6 +135,46 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     assert len(collected) == len(set(collected)) == 12
 
 
+def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tmp_path):
+    # A complete run whose only fault is failed tests keeps its evidence, for
+    # scripts/ci/backend_shard_run.py's one rerun; a collection error does not.
+    fixture = tmp_path / "test_fixture.py"
+    fixture.write_text("import pytest\n@pytest.mark.parametrize('value', range(12))\n"
+                       "def test_value(value):\n    assert value != 3\n")
+    manifest = tmp_path / "durations.json"
+    nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
+    manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": {}}))
+    shards = bs.partition(nodes, bs.manifest_weights(nodes, {"format": bs.MANIFEST_FORMAT, "durations": {}}))
+    index = next(i for i, shard in enumerate(shards, 1) if "test_fixture.py::test_value[3]" in shard)
+    env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
+
+    def run(output, target=fixture):
+        return subprocess.run([
+            sys.executable, "-m", "pytest", str(target), "--rootdir", str(tmp_path),
+            "--confcutdir", str(tmp_path), "-o", "addopts=", "-p", "scripts.ci.backend_shards", "-n", "2",
+            "--backend-shard", str(index), "--backend-durations", str(manifest),
+            "--backend-results", str(output), "-q"],
+            cwd=tmp_path, env=env, text=True, capture_output=True, timeout=60)
+
+    result = run(tmp_path / "failed")
+    assert result.returncode == 1, result.stdout + result.stderr
+    receipt = json.loads((tmp_path / "failed" / "receipt.json").read_text())
+    assert receipt["failed"] == ["test_fixture.py::test_value[3]"]
+    assert receipt["count"] == len(shards[index - 1]) and receipt["workers"] == 2
+    assert "rerun_passed" not in receipt
+    # A collection error elsewhere: both workers agree on the smaller
+    # collection and pytest still exits TESTS_FAILED, but there is no receipt.
+    (tmp_path / "test_broken.py").write_text("import not_a_module_anywhere\n\ndef test_x():\n    pass\n")
+    result = run(tmp_path / "partial", tmp_path)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert not (tmp_path / "partial" / "receipt.json").exists()
+    (tmp_path / "test_broken.py").unlink()
+    fixture.write_text("def test_x(:\n")
+    result = run(tmp_path / "broken")
+    assert result.returncode not in (0, 1), result.stdout + result.stderr
+    assert not (tmp_path / "broken" / "receipt.json").exists()
+
+
 def workflow():
     return yaml.load((ROOT / ".github/workflows/ci-backend.yml").read_text(), Loader=yaml.BaseLoader)
 
@@ -165,6 +205,14 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
         assert exclusion in text
     assert '-n 2' in text and 'scripts.ci.backend_shards' in text
+    # The shard's pytest command reruns its failed tests once, through the
+    # runner that records the rerun's pass on the receipt (#1748).
+    command = next(step["run"] for step in jobs["backend-shard"]["steps"] if step.get("name") == "Run fast test subset")
+    assert command.lstrip().startswith("python scripts/ci/backend_shard_run.py -- \\\n")
+    assert command.count("python -m pytest") == 1
+    assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
+    for job in ("backend-contracts", "backend-security"):
+        assert "backend_shard_run.py" not in json.dumps(jobs[job])
 
 
 def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():

@@ -1,7 +1,8 @@
 """The memory-correction and when-line rule rides each leg exactly once.
 
 Native: Remember's eager description carries it. Delegated: Remember's docs
-are deferred, so a line beside the memory block carries it instead. Neither
+are deferred, so a line beside the memory block carries it instead, with the
+tool names spelled as the CLI lists them. Neither
 leg pays for both copies.
 """
 from __future__ import annotations
@@ -26,7 +27,9 @@ def test_native_leg_carries_the_rule_once_in_remember():
 def test_delegated_leg_carries_the_rule_once_beside_the_memory_block():
     compiled, _, _ = compile_fixture(native=False)
     text = compiled.text
-    assert text.count(ha.DELEGATED_PREFERENCE_RULE) == 1
-    assert text.index(ha._MEMORY_BLOCK_CORE) < text.index(ha.DELEGATED_PREFERENCE_RULE)
+    rule = ha._spell_bundled(ha.DELEGATED_PREFERENCE_RULE, ha._DELEGATED_MEMORY_TOOLS)
+    memory = ha._spell_bundled(ha._MEMORY_BLOCK_CORE, ha._DELEGATED_MEMORY_TOOLS)
+    assert text.count(rule) == 1
+    assert text.index(memory) < text.index(rule)
     assert text.count(WHEN_EXAMPLE) == 1 and "pref.<topic>" not in text
     assert "always" in ha.DELEGATED_PREFERENCE_RULE

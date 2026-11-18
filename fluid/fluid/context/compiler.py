@@ -43,10 +43,10 @@ The sections exist for the context-usage breakdown (``loop.get_context_usage()``
 pricing "memory files" separately from "system prompt" needs attribution the
 joined string has already lost.
 
-The delegated (claude CLI) leg in *append* mode must NOT use this compiler for
-env/instructions — the CLI gathers its own; compiling both would duplicate.
-Callers there pass the base + extra blocks straight through as the append text
-and only switch to the compiled form under full-replace (ruling A3).
+A host that only *appends* to a vendor agent's own prompt (one that gathers
+env/instructions itself) must NOT use this compiler for those parts; compiling
+both would duplicate (ruling A3). AI Shuffle's claude CLI leg replaces the
+CLI's prompt, so it sends this compiler's output as the whole prompt.
 """
 
 from __future__ import annotations

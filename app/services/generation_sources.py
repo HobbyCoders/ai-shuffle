@@ -12,7 +12,6 @@ from dataclasses import replace
 from decimal import Decimal
 from urllib.parse import urlencode
 
-import httpx
 
 from app.core.generation_resolver import Candidate, DO_NOT_RETRY, INCLUDED_PRICE, RunContext, UNKNOWN_PRICE, price_total
 from app.db.async_database import run_sync
@@ -94,15 +93,24 @@ class Sources:
             return await run_sync(fal_credential.api_key)
         return None
 
-    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None):
+    async def catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None, worker=None,
+                      operation=None, listing_prices=True, fal=True):
+        """``operation`` (``generation_operations``) picks the fal models that
+        fit the call; None is the kind's text operation. A named model keeps
+        any category. ``listing_prices=False`` resolves a candidate that is
+        priced fresh next (prepare): no listing rate is read, so no cache or
+        its lock. ``fal=False`` skips this worker's fal rows (the provider
+        list counts fal itself)."""
         here = self.local_worker()
         entries = []
         if worker in (None, here):
-            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt)
+            entries = await self.local_catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                               operation=operation, listing_prices=listing_prices, fal=fal)
         # A request pinned to this worker never waits on peers.
         if self.context.owner and not self.local_only and worker != here:
             from app.network.generation import catalog
-            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt, worker=worker))
+            entries.extend(await catalog(kind, source=source, model=model, query=query, limit=limit, prompt=prompt,
+                                         worker=worker, operation=operation, listing_prices=listing_prices))
         # Workers are execution holders, not distinct owner choices. Keep
         # different accounts/options separate, and prefer a usable local holder.
         unique = {}
@@ -112,7 +120,71 @@ class Sources:
             unique.setdefault(key, entry)
         return list(unique.values())
 
-    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None):
+    async def fal_serves(self, kind) -> bool:
+        """Whether this worker generates ``kind`` with fal: it holds a key and,
+        for images, the ChatGPT-plan rule (#1796) does not take fal out."""
+        if not await self.fal_key():
+            return False
+        if kind == "image":
+            from app.core.provider import subscription_images as sub
+            if await run_sync(sub.plan_images_configured):
+                return False
+        return True
+
+    async def fal_models(self, kind, *, operation=None, query=None):
+        """This worker's fal catalog rows that perform ``operation``."""
+        from app.core import generation_operations
+        from app.services.fal_catalog import catalog_service
+
+        op = generation_operations.resolve(kind, operation)
+        if catalog_service.is_stale:
+            await catalog_service.refresh(await self.fal_key())
+        return [m for m in catalog_service.search(output_type=kind, q=query)
+                if generation_operations.fits(op, m.category, m.endpoint_id)]
+
+    async def fal_page(self, kind, *, operation=None, query=None, offset=0, limit=20):
+        """One page of fal models for the picker, fast: one batched rate read
+        for the page and only already cached schemas. A row without a cached
+        schema carries fal's raw rate; the card quotes the picked model.
+
+        Returns ``(candidates, total, details)``; details hold display names.
+        None means this worker does not serve fal for ``kind`` (an empty page
+        is ``([], 0, {})``).
+        """
+        from app.services import fal_pricing
+        from app.services.fal_schema import schema_service
+
+        worker = self.local_worker()
+        if not await self.fal_serves(kind):
+            return None
+        models = await self.fal_models(kind, operation=operation, query=query)
+        page = models[offset:offset + limit]
+        ids, key = [m.endpoint_id for m in page], await self.fal_key()
+        try:
+            rows = await fal_pricing.rates.rows(ids, key)
+        except fal_pricing.PricingRequestFailed:
+            rows = fal_pricing.rates.cached(ids, key)  # keep what is known
+        entries, details = [], {}
+        for m in page:
+            schema = schema_service.peek(m.endpoint_id)
+            options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
+            if m.endpoint_id not in rows:
+                price = fal_pricing.unknown("pricing_request_failed")
+            elif schema is None:
+                price = fal_pricing.price_from_row(rows.get(m.endpoint_id), None, {}, None)
+                if price.get("reason") == "schema_unavailable":
+                    price = fal_pricing.unknown("not_quoted", row=rows.get(m.endpoint_id))
+            else:
+                price = fal_pricing.price_from_row(rows.get(m.endpoint_id), schema, options, None)
+            entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False, options=options,
+                                     price=price, schema=schema.to_dict() if schema else None))
+            details[m.endpoint_id] = {"name": m.display_name, "category": m.category,
+                                      "description": (m.description or "")[:240]}
+        return entries, len(models), details
+
+    async def local_catalog(self, kind, *, source=None, model=None, query=None, limit=15, prompt=None,
+                            operation=None, listing_prices=True, fal=True):
+        from app.core import generation_operations
         from app.core import native_generation_settings as native
         from app.db import model_providers
         from app.services.fal_catalog import catalog_service
@@ -120,21 +192,37 @@ class Sources:
 
         entries = []
         worker = self.local_worker()
-        if source in (None, "fal", "fal.ai", "fal-ai") and await self.fal_key():
-            if catalog_service.is_stale:
-                await catalog_service.refresh(await self.fal_key())
-            models = catalog_service.search(output_type=kind, q=query)
-            # Discovery offers text generation endpoints only; an exactly named
-            # model (runFalModel, image-to-video, audio-to-audio...) keeps any category.
-            models = [m for m in models if (m.endpoint_id == model if model else m.category.startswith("text-to-"))]
-            for m in models[:max(1, min(limit, 50))]:
+        op = generation_operations.resolve(kind, operation)
+        if fal and source in (None, "fal", "fal.ai", "fal-ai") and await self.fal_key():
+            if model:
+                # An exactly named model (runFalModel, a picked card row) keeps any category.
+                if catalog_service.is_stale:
+                    await catalog_service.refresh(await self.fal_key())
+                models = [m for m in catalog_service.search(output_type=kind) if m.endpoint_id == model]
+            else:
+                models = await self.fal_models(kind, operation=op.id, query=query)
+            models = models[:max(1, min(limit, 50))]
+            from app.services import fal_pricing
+            rows = None
+            if listing_prices:
+                try:
+                    # One pricing request for the page; fal rate-limits per-model reads.
+                    rows = await fal_pricing.rates.rows([m.endpoint_id for m in models], await self.fal_key())
+                except fal_pricing.PricingRequestFailed:
+                    rows = None
+            for m in models:
                 schema = await schema_service.get_schema(m.endpoint_id, await self.fal_key())
                 options = {f.name: f.default for f in schema.fields if not f.is_primary_text and f.default is not None} if schema else {}
-                price = await self.fal_price(m.endpoint_id, options, prompt=prompt)
+                if listing_prices:
+                    price = await self.fal_price(m.endpoint_id, options, prompt=prompt, rows=rows)
+                else:
+                    # Not quoted here: prepare prices it from fal's current rate.
+                    price = dict(UNKNOWN_PRICE) if schema else fal_pricing.unknown("schema_unavailable")
                 entries.append(Candidate("fal", "fal-ai", worker, m.endpoint_id, kind, False,
                                          options=options, price=price, schema=schema.to_dict() if schema else None,
                                          available=schema is not None, reason=None if schema else "Model schema is unavailable."))
-        if not self.context.owner:
+        if not self.context.owner or not op.native:
+            # Subscription accounts generate from a prompt only.
             return entries
         rows = await run_sync(model_providers.list_usable_model_providers)
         for row in rows:
@@ -180,34 +268,22 @@ class Sources:
                                          available=False, reason=capability.get("reason") or "No verified media schema is available for this account."))
         return entries
 
-    async def fal_price(self, model, options, *, prompt=None):
-        """Read declared provider rates and resolve quantities with its schema."""
+    async def fal_price(self, model, options, *, prompt=None, rows=None, fresh=False):
+        """Read declared provider rates and resolve quantities with its schema.
+
+        ``rows`` is an already fetched ``{endpoint: row}`` batch (a catalog
+        page); otherwise this endpoint's row is read through the shared cache,
+        or from fal itself when ``fresh`` (admission: a failed read is unknown).
+        """
+        from app.services import fal_pricing
+        from app.services.fal_schema import schema_service
         try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                response = await client.get("https://api.fal.ai/v1/models/pricing", params={"endpoint_id": model},
-                                            headers={"Authorization": "Key " + (await self.fal_key() or "")})
-                if response.status_code != 200:
-                    return dict(UNKNOWN_PRICE)
-                rows = response.json().get("prices", [])
-            row = next((r for r in rows if isinstance(r, dict) and r.get("endpoint_id") == model), {})
-            if row.get("currency") != "USD" or not isinstance(row.get("unit"), str):
-                return dict(UNKNOWN_PRICE)
-            rate = Decimal(str(row["unit_price"]))
-            from app.services.fal_schema import schema_service
+            if fresh or rows is None or model not in rows:
+                rows = await fal_pricing.rates.rows([model], await self.fal_key(), fresh=fresh)
             schema = await schema_service.get_schema(model, await self.fal_key())
-            if schema is None or not rate.is_finite() or rate < 0:
-                return dict(UNKNOWN_PRICE)
-            # Discovery and execution must resolve exactly the same defaults.
-            # Partial validation permits models with required per-call media;
-            # missing quantities or prompt-dependent prices still stay unknown.
-            defaults = {f.name: f.default for f in schema.fields
-                        if not f.is_primary_text and f.default is not None}
-            values = schema.validate_options({**defaults, **options}, "", partial=True)
-            quantity, count = schema.pricing_quantity(row["unit"], values, prompt)
-            amount = rate * quantity
-            return {"currency": "USD", "unit": "item", "amount": str(amount), "total": str(amount * count), "status": "estimated"}
-        except (httpx.HTTPError, ValueError, TypeError, KeyError, ArithmeticError, AttributeError):
-            return dict(UNKNOWN_PRICE)
+            return fal_pricing.price_from_row(rows.get(model), schema, options, prompt)
+        except fal_pricing.PricingRequestFailed as exc:
+            return fal_pricing.unknown("pricing_request_failed", str(exc))
 
     async def prepare(self, candidate, options, prompt):
         if candidate.worker != self.local_worker():
@@ -227,7 +303,10 @@ class Sources:
                             and not chat_mode_read_permitted("Read", {"file_path": value})):
                         raise ValueError("Chat generation may read local media only from chat uploads.")
             values.pop(schema.primary_text_field)
-            return replace(candidate, options=values, price=await self.fal_price(candidate.model, values, prompt=prompt))
+            # Prepared prices admit runs (cap, confirmation, the peer's
+            # price-equality check), so they come from fal's current rate.
+            return replace(candidate, options=values,
+                           price=await self.fal_price(candidate.model, values, prompt=prompt, fresh=True))
         from app.core import native_generation_settings as native
         if "model" in options:
             raise ValueError("Pass the model separately, not in options.")
@@ -260,6 +339,11 @@ class Sources:
             return True
         from app.network.generation import reserve
         return await reserve(price_total(candidate.price))
+
+    async def reserve_amount(self, amount):
+        """Reserve a stated amount on this worker (an owner-approved unpriced run)."""
+        from app.network.generation import reserve
+        return await reserve(amount)
 
     async def execute(self, candidate, prompt, context):
         try:

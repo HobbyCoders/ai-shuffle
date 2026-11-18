@@ -15,7 +15,10 @@
 	import SettingsSearch from './SettingsSearch.svelte';
 	import ViewPanel from '../../layout/view/ViewPanel.svelte';
 
-	let { onkeydown: onPanelKeydown }: { onkeydown?: (event: KeyboardEvent) => void } = $props();
+	let { onkeydown: onPanelKeydown, onCategorySelected }: {
+		onkeydown?: (event: KeyboardEvent) => void;
+		onCategorySelected: () => void;
+	} = $props();
 	let query = $state('');
 	const searching = $derived(query.trim().length > 0);
 
@@ -40,6 +43,7 @@
 	function openCategory(id: CategoryId) {
 		if (isCurrent(id) && !settingsNav.stacked) settingsNav.clearSelection(id);
 		settingsNav.selectCategory(id);
+		onCategorySelected();
 	}
 
 	function onkeydown(event: KeyboardEvent) {

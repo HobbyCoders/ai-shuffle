@@ -153,19 +153,19 @@ def test_host_read_failure_is_quiet_fallback(monkeypatch):
     assert session_time_context("fixture", "unpark") == {}
 
 
-@pytest.mark.parametrize("preset", [True, False])
-def test_each_delegated_leg_has_time_and_standing_rule(monkeypatch, tmp_path, preset):
+@pytest.mark.parametrize("rule_in_note", [True, False])
+def test_each_delegated_leg_has_time_and_standing_rule(monkeypatch, tmp_path, rule_in_note):
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.core.provider.types import SessionOptions
     from fluid.context.time_awareness import RELATIVE_TIME_RULE
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(cwd=str(tmp_path), model="fake-model")
     adapter._is_delegated = True
-    adapter._delegated_replaces_preset = not preset
+    adapter._time_rule_in_prompt = not rule_in_note
     monkeypatch.setattr(adapter, "_time_context", lambda source="user": {"zone": "America/New_York"})
     note = adapter._env_note()
     assert "Current time:" in note and "America/New_York" in note
-    assert (RELATIVE_TIME_RULE in note) is preset  # replaced-preset rule lives in the fixed compiler section
+    assert (RELATIVE_TIME_RULE in note) is rule_in_note  # else it lives in the compiled prompt's environment section
 
 @pytest.mark.parametrize("worker", [False, True])
 @pytest.mark.parametrize("explicit,resolved,expected", [
@@ -327,14 +327,14 @@ def test_timezone_sync_materializes_in_receiving_worker_owner_namespace(monkeypa
                         "value": "America/New_York"}
 
 
-@pytest.mark.parametrize("preset", [True, False])
-def test_post_compaction_note_uses_internal_turn_source(monkeypatch, tmp_path, preset):
+@pytest.mark.parametrize("rule_in_note", [True, False])
+def test_post_compaction_note_uses_internal_turn_source(monkeypatch, tmp_path, rule_in_note):
     from app.core.provider.harness_adapter import HarnessAdapter
     from app.core.provider.types import SessionOptions
     adapter = HarnessAdapter()
     adapter._options = SessionOptions(cwd=str(tmp_path), model="fake-model")
     adapter._is_delegated = True
-    adapter._delegated_replaces_preset = not preset
+    adapter._time_rule_in_prompt = not rule_in_note
     adapter._time_source = "user"  # stale source of the earlier host submit
     adapter._engine = SimpleNamespace(ctx=SimpleNamespace(extra={"time_turn_source": "unpark"}))
     seen = []

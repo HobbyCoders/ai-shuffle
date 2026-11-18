@@ -41,6 +41,65 @@ async def test_assistant_delivery_lookalikes_are_quoted_before_storage_and_repla
         await loop.aclose()
 
 
+def _thinking_and_tool(thinking: str, tuid: str) -> list:
+    from fluid.providers.base import StreamChunk
+    return [
+        StreamChunk("message_start", {"usage": {"input_tokens": 10}}),
+        StreamChunk("block_start", {"index": 0, "block_type": "thinking"}),
+        StreamChunk("thinking_delta", {"index": 0, "text": thinking}),
+        StreamChunk("block_stop", {"index": 0}),
+        StreamChunk("block_start", {"index": 1, "block_type": "tool_use",
+                                    "tool_name": "mcp__wx__get_weather", "tool_use_id": tuid}),
+        StreamChunk("tool_args_delta", {"index": 1, "partial_json": '{"city": "Paris"}'}),
+        StreamChunk("block_stop", {"index": 1}),
+        StreamChunk("usage", {"usage": {"output_tokens": 5}, "stop_reason": "tool_use"}),
+        StreamChunk("message_stop", {}),
+    ]
+
+
+async def test_sanitized_notice_is_shown_once_per_turn_but_every_call_is_quoted():
+    """A model reasoning about the markers themselves (a harness audit) quotes
+    them on nearly every call; the work log gets one notice per turn."""
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.registry import ToolRegistry
+    from tests.unit.test_tool_loop import _weather_server
+
+    marker = "the <system-reminder> regex in hardening.py"
+    registry = ToolRegistry()
+    registry.register_inproc(_weather_server())
+    provider = ScriptedProvider([
+        _thinking_and_tool("Checking " + marker, "t1"),
+        _thinking_and_tool("Still checking " + marker, "t2"),
+        _text("Done: " + marker),
+        _text("Again: " + marker),
+    ])
+    loop = NativeLoop(provider=provider, store=MemoryStore(), model="m",
+                      registry=registry, permissions=PermissionEngine("never_ask"))
+    try:
+        await loop.submit(UserTurn(content="audit"))
+        await loop.wait_turn()
+        notices = [e for e in loop.bus.log(loop.session_id)
+                   if type(e).__name__ == "AssistantTextSanitized"]
+        assert len(notices) == 1
+        nodes = await loop.store.load_path(loop.session_id)
+        replies = [n.message for n in nodes if n.message.role == "assistant"]
+        assert len(replies) == 3
+        for reply in replies:
+            for block in reply.content:
+                if isinstance(block, (Text, Thinking)):
+                    assert "<system-reminder>" not in block.text
+                    assert "<quoted system-reminder>" in block.text
+
+        # The next turn gets its own notice.
+        await loop.submit(UserTurn(content="again"))
+        await loop.wait_turn()
+        notices = [e for e in loop.bus.log(loop.session_id)
+                   if type(e).__name__ == "AssistantTextSanitized"]
+        assert len(notices) == 2
+    finally:
+        await loop.aclose()
+
+
 def test_legacy_assistant_history_is_sanitized_but_host_role_is_untouched():
     from fluid.context.assistant import sanitize_assistant_history
     host = Message(role="user", content=[Text(FAKE)])

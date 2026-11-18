@@ -570,10 +570,30 @@ Full coverage runs four `ubuntu-24.04` shards with two xdist workers apiece and
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
 proves exact union, no duplicates and no empty shard. Workers must agree on the
-collection and assignment. Successful controllers also verify executed node IDs,
-then upload per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
+collection and assignment. Controllers also verify executed node IDs, then upload
+per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
 still run with their stronger real-environment prerequisites. The legacy dispatch
 input remains accepted; shard parallelism is fixed at two workers.
+
+A shard whose tests fail reruns only those tests, once, serially
+(`scripts/ci/backend_shard_run.py`, the same `local_ci.run` retry with
+`LOCAL_CI_RETRY_FAILED=1` as the hosted Windows parts). Tests that pass the
+second time pass the shard but are listed under "Flaky tests (failed once, passed
+on a rerun)" in the job summary and as `Flaky test` warnings, so they still get
+fixed. A test that fails again, more than 20 failed tests, or any fault besides
+failed tests fails the shard without a rerun: a collection error anywhere, an
+interrupted, crashed or killed run, a worker restart, or a failed scratch cleanup
+(`scripts/ci/record_failures.py` lists the failed tests only after the whole
+pytest process, cleanup included, ended with just test failures, and the runner
+retries only on pytest's test-failure exit code 1). The receipt of
+a complete run that had failed tests lists them under `failed`. After the rerun
+the runner records them under `rerun_passed` only when the rerun was a completely
+clean run of exactly those tests: setup, call and teardown of each one passed and
+nothing else was reported. A skip, xfail, xpass, error or deselection in any phase
+of the rerun is not a pass. The gate refuses a receipt whose failed tests have no recorded passing
+rerun. The first run's JUnit file and
+`--durations` report keep its failures; the rerun's result is in the job log.
+`backend-security` and `backend-contracts` keep a single attempt.
 
 `backend-security` always runs the blocking-DB guard,
 required root/real-account isolation, real PostgreSQL pool/transaction cases,
@@ -590,13 +610,28 @@ subprocess/backoff budget and a 30s HTTP timeout. Timed-out resolver descendants
 are terminated too, with separate bounded cleanup (up to 30s on Windows).
 Findings, other errors, exhausted retries and process deadlines fail the job;
 both output streams are preserved.
+
+The blocking JavaScript audits (frontend, tools and browser-mcp, in their CI jobs
+and again in `supply-chain`) run `scripts/npm_audit_gate.py` from the package
+directory. It runs the full `npx -y npm@11 audit --audit-level=high --json`, dev
+dependencies included, and fails on any high or critical advisory, like the plain
+audit, except one listed in `scripts/npm_audit_exceptions.json` for the named
+package while every locked copy of it is a dev dependency. An exception is only
+for an advisory with no patched release: it records the reason and an expiry
+date, and an expired exception blocks again.
+Packages flagged only because they depend on the excepted package pass with it;
+any other advisory on them still blocks. When a fix ships, lock it and delete the
+entry; the gate prints a notice for an entry a package no longer reports.
+Unreadable npm output, or an exit status the report does not account for, fails
+closed.
 The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
 contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
 succeed and all four successful shard receipts. Failed, cancelled, missing or
 skipped jobs, missing/duplicate receipts, inconsistent collection/partition
-digests and incomplete counts all fail closed. No classifier output can approve
+digests, incomplete counts and failed tests without a recorded passing rerun all
+fail closed. No classifier output can approve
 a skipped job.
 
 `tests/backend-durations.json` is versioned scheduling data, never execution
@@ -1163,8 +1198,10 @@ also independently supports safe ancestors and rechecks its own pointer.
   so it takes the time of the slowest part. A failed part does not stop the
   others: `gh run rerun <run id> --failed` reruns only the failed parts, and the
   run's newest attempt counts. A failed pytest command there reruns just its
-  failed tests once; a test that then passes is reported as flaky in the job
-  summary and should still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
+  failed tests once, and only when test failures were its sole fault (not a
+  collection error, an interrupted or killed run, or a failed scratch cleanup);
+  a test that then passes is reported as flaky in the job summary and should
+  still be fixed. Local gates never retry. Otherwise the release waits, or the owner ships it with
   `ship_release_status.py --skip-windows "<reason>"`, which puts the reason in
   the release notes. Edge never waits for Windows.
 - Main stays open during a release. A suite run starts on main's tip and can

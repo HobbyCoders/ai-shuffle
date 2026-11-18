@@ -1005,6 +1005,28 @@ describe('live effort and Fast mode selection', () => {
 		expect(activeSession.current.isStreaming).toBe(true);
 	});
 
+	it('stages a speed picked with an unsent model switch for the send', async () => {
+		const rows = appData.current.sessions;
+		appData.current.sessions = [{ id: 'live-knobs', model: 'opus' }] as never;
+		try {
+			Object.assign(activeSession.current, { modelOverride: 'fable', bindingPicks: {} });
+			const put = vi.spyOn(api, 'put');
+			await activeSession.setFastMode(true, false);
+			// Not checked against the running Opus binding: it rides the next send.
+			expect(put).not.toHaveBeenCalled();
+			expect(activeSession.current.fastMode).toBe(true);
+			expect(activeSession.current.bindingPicks?.fast).toBe(true);
+			// Without a model switch the pick goes to the worker as before.
+			activeSession.current.modelOverride = 'opus';
+			put.mockResolvedValueOnce({ effort: 'high', fast: false });
+			await activeSession.setFastMode(false, false);
+			expect(put).toHaveBeenCalledWith('/sessions/live-knobs/run-settings', { fast: false });
+		} finally {
+			appData.current.sessions = rows;
+			Object.assign(activeSession.current, { modelOverride: null, bindingPicks: {} });
+		}
+	});
+
 	it('does not apply replies to another open session', async () => {
 		let acknowledge!: (value: { effort: string; fast: boolean }) => void;
 		vi.spyOn(api, 'put').mockImplementationOnce(() => new Promise(resolve => { acknowledge = resolve; }));

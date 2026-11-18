@@ -55,8 +55,13 @@
 		decodeProviderModel,
 		supportsAutoPermission,
 		isFastModeCapable,
+		isUltrafastCapable,
+		ultrafastBilling,
+		isRegistryHydrated,
 		isReroute
 	} from '$lib/constants/models';
+	import SpeedLabel from './SpeedLabel.svelte';
+	import { effortSpeedLabel, shownSpeed, type ComposerSpeed } from './speed-tier';
 	import { rerouteTooltip } from '$lib/utils/guardrail';
 	import { getUsageLimits } from '$lib/api/client';
 	import {
@@ -314,6 +319,28 @@
 	$effect(() => {
 		if (fastMode && !fastSupported) activeSession.setFastMode(false, false);
 	});
+
+	// OpenAI's Ultrafast refines Fast on routes that carry it (the registry's
+	// per-model flag: a ChatGPT plan whose catalog lists it, or a documented
+	// API model). Elsewhere the plain Fast toggle stays as it is.
+	const ultrafastMode = $derived(!!$activeSession.ultrafastMode);
+	const ultrafastSupported = $derived(fastSupported && isUltrafastCapable(modelValue));
+	const speedBilling = $derived(ultrafastBilling(modelValue));
+	// The same reset for the dearer tier: a model without it runs the chat on
+	// Fast (Standard where Fast is gone too, which the effect above handles).
+	// Not before the registry has answered, which would drop every pick on load.
+	$effect(() => {
+		if (ultrafastMode && fastMode && fastSupported && !fastPending && isRegistryHydrated() && !ultrafastSupported) {
+			activeSession.setSpeed('fast', false);
+		}
+	});
+	/** The tier the effort label shows: only one the next turn will ask for. */
+	const labelSpeed = $derived(shownSpeed({
+		fastSupported, fastEnabled: fastMode, fastPending, ultrafastSupported, ultrafastEnabled: ultrafastMode
+	}));
+	function selectSpeed(speed: ComposerSpeed) {
+		if (!fastPending) activeSession.setSpeed(speed);
+	}
 
 	// Live reroute detection: the backend `model_info` note tells us which model
 	// the MAIN lane is ACTUALLY running, and (newer backends) whether that is a
@@ -719,11 +746,11 @@
 				class:open={openPopover === 'effort'}
 				disabled={modelLocked}
 				onclick={() => { if (!modelLocked) togglePopover('effort'); }}
-				title={effortCapability.explanation ?? (effortValue ? `Reasoning effort: ${effortLabel}` : 'Reasoning effort: model default')}
+				title={effortCapability.explanation ?? effortSpeedLabel('Reasoning effort: ', effortValue ? effortLabel : 'model default', labelSpeed)}
 				aria-haspopup="dialog"
 				aria-expanded={openPopover === 'effort'}
-				aria-label="Effort: {effortLabel}"
-			>{effortLabel}</button>
+				aria-label={effortSpeedLabel('Effort: ', effortLabel, labelSpeed)}
+			><SpeedLabel text={effortLabel} speed={labelSpeed} bolt={fastSupported} /></button>
 
 			{#if openPopover === 'effort'}
 				<div
@@ -744,6 +771,10 @@
 						{fastPending}
 						{fastWaitsForNextMessage}
 						onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
+						{ultrafastSupported}
+						ultrafastEnabled={ultrafastMode}
+						ultrafastBilling={speedBilling}
+						onSelectSpeed={selectSpeed}
 					/>
 				</div>
 			{/if}
@@ -786,6 +817,10 @@
 	{fastPending}
 	{fastWaitsForNextMessage}
 	onToggleFast={() => { if (!fastPending) activeSession.setFastMode(!fastMode); }}
+	{ultrafastSupported}
+	ultrafastEnabled={ultrafastMode}
+	ultrafastBilling={speedBilling}
+	onSelectSpeed={selectSpeed}
 	permissionOptions={permissionModes}
 	permissionValue={permissionValue}
 	{permissionPending}

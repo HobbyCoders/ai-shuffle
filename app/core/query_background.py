@@ -832,15 +832,26 @@ async def _start_background_turn(
     # provider, and fail on the wrong leg with the wrong credentials.
     if overrides:
         try:
-            await run_sync(
-                database.set_session_run_binding,
-                session_id,
-                model=overrides.get("model"),
-                effort=overrides.get("effort"),
-                permission_mode=overrides.get("permission_mode"),
-                fast=overrides.get("fast"),
-                workspace_project_ids=overrides.get("workspace_project_ids"),
-            )
+            from app.api.sessions_permissions import _announce_run_settings, settings_lock
+            from app.core.model_speed import stored_pair
+            from app.core.turn_manager import _to_the_end
+
+            # Saved and announced under the chat's settings lock, as a send's pick is.
+            async with settings_lock(session_id):
+                before = stored_pair(prior=await run_sync(database.get_session, session_id) or {})
+                await _to_the_end(run_sync(
+                    database.set_session_run_binding,
+                    session_id,
+                    model=overrides.get("model"),
+                    effort=overrides.get("effort"),
+                    permission_mode=overrides.get("permission_mode"),
+                    fast=overrides.get("fast"),
+                    speed=overrides.get("speed"),
+                    workspace_project_ids=overrides.get("workspace_project_ids"),
+                ))
+                saved = stored_pair(prior=await run_sync(database.get_session, session_id) or {})
+                if saved != before:
+                    await _announce_run_settings(session_id, saved, effort_asked=False, speed_asked=True)
             if overrides.get("context_window"):
                 # The picker's check, against the model just saved: a window
                 # the model does not offer is ignored, neither saved as the pin

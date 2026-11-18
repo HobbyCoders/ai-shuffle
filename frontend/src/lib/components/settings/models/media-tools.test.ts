@@ -129,10 +129,11 @@ describe('MediaTools', () => {
 		expect(tools.saving).toBeNull();
 	});
 
-	it('says when a remembered catalog pick has no verified price, keeping the pick (#513)', async () => {
-		const warning = 'This saved choice has no verified price. Unattended runs will skip it until a price is available.';
+	it('says when a catalog pick has no verified price and so was not remembered (#513)', async () => {
+		const warning = 'This choice has no verified price. It was not remembered and is used for this pick only.';
 		mocks.put.mockImplementation(async (_url: string, body: { choice: unknown }) => ({
 			choice: body.choice,
+			remembered: false,
 			price: { currency: 'USD', unit: 'item', amount: null, total: null, status: 'unknown' },
 			priced: false,
 			quote_error: null,
@@ -141,8 +142,8 @@ describe('MediaTools', () => {
 		}));
 		const tools = await loaded();
 		expect(await tools.selectFromCatalog(catalog[0])).toBe(true);
-		expect(mocks.warning).toHaveBeenCalledWith(warning, { title: 'Remembered New Image', category: 'generation-choice' });
-		expect(tools.isDefault('fal-ai/new-image')).toBe(true);
+		expect(mocks.warning).toHaveBeenCalledWith(warning, { title: 'Not remembered New Image', category: 'generation-choice' });
+		expect(tools.isDefault('fal-ai/new-image')).toBe(false);
 		expect(mocks.error).not.toHaveBeenCalled();
 	});
 

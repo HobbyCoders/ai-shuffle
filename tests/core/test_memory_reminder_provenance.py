@@ -55,9 +55,13 @@ async def test_owner_turn_preserves_app_authored_markers(monkeypatch, tmp_path, 
         # when the delegated fixture suppresses the adapter's environment note.
         expected = prompt + "\n\n"
         if leg == "delegated":
+            # The compiled --system-prompt carries the relative-time rule (its
+            # environment section), so the per-turn clock leaves it out.
+            assert loop.system.count(RELATIVE_TIME_RULE) == 1
             tag = "system" + "-" + "reminder"
-            expected += f"<{tag}>\n" + "\n".join([*turn_time_lines(**clock), RELATIVE_TIME_RULE]) + f"\n</{tag}>\n\n"
+            expected += f"<{tag}>\n" + "\n".join(turn_time_lines(**clock)) + f"\n</{tag}>\n\n"
         assert message.text()[:message.context_pin[0]] == expected
+        assert RELATIVE_TIME_RULE not in message.text()
     finally:
         await adapter.disconnect()
 

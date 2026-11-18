@@ -40,6 +40,7 @@ import { createStore } from './store-utils';
 /** A single rate-limit window, utilization normalised to 0–100 percent. */
 export interface UsageWindow {
 	type: string;
+	label?: string | null;
 	/** 0–100 percent. */
 	utilization: number;
 	resets_at: string | null;
@@ -206,6 +207,7 @@ export interface LiveRateLimitEvent {
 /** One window from a polled snapshot (utilization already 0–100). */
 export interface SnapshotWindow {
 	type: string;
+	label?: string | null;
 	utilization: number;
 	resets_at?: string | null;
 	/** Epoch ms the CLI last reported this window (Claude windows only). */
@@ -387,13 +389,14 @@ const WINDOW_ORDER = [
 	'output_tokens',
 ];
 
-export function windowLabel(type: string): string {
+export function windowLabel(type: string, label?: string | null): string {
+	if (label) return label;
 	if (WINDOW_LABELS[type]) return WINDOW_LABELS[type];
 	// Provider rolling windows come through as `window_<minutes>m`.
 	const m = /^window_(\d+)m$/.exec(type);
 	if (m) return `${m[1]}m window`;
-	// Google Antigravity's /usage names a quota per model: `antigravity_<name>`,
-	// with the model id's dots folded to `_` (gemini_3_1_pro → Gemini 3.1 Pro).
+	// Fallback for older Antigravity snapshots without an agent-supplied label.
+	// The guessed shape used a model slug (gemini_3_1_pro → Gemini 3.1 Pro).
 	const ag = /^antigravity_(.+)$/.exec(type);
 	if (ag) {
 		return ag[1]
@@ -454,7 +457,7 @@ function _displayPct(value: number): number {
  * never come — Claude's weekly Fable bucket is reported only on Fable turns)
  * describes the new one.
  */
-export function windowRolledOver(w: Pick<UsageWindow, 'resets_at'>, nowMs: number): boolean {
+export function windowRolledOver(w: { resets_at?: string | null }, nowMs: number): boolean {
 	const resetMs = parseResetMs(w.resets_at);
 	return resetMs != null && resetMs <= nowMs;
 }
@@ -509,7 +512,7 @@ export function reportedRemainingPct(w: UsageWindow, nowMs: number): number {
 }
 
 /** Remaining quota from a used-quota report; full once the window has reset. */
-export function remainingFromUsedPct(w: UsageWindow, nowMs: number): number {
+export function remainingFromUsedPct(w: { utilization: number; resets_at?: string | null }, nowMs: number): number {
 	if (windowRolledOver(w, nowMs)) return 100;
 	return _displayPct(100 - _clampPct(w.utilization));
 }
@@ -941,6 +944,7 @@ function _windowsFromSnapshot(
 			typeof w.observed_at === 'number' && Number.isFinite(w.observed_at) ? w.observed_at : null;
 		windows[w.type] = {
 			type: w.type,
+			...(w.label ? { label: w.label } : {}),
 			utilization: _clampPct(w.utilization),
 			resets_at: w.resets_at ?? null,
 			received_at: observed ?? (perWindowDates ? null : (fetchedAt ?? now)),

@@ -2,8 +2,8 @@
 
 PYTHONPATH=fluid python scripts/measure_time_awareness_prefix.py --baseline 10b9ea081
 No provider, database, credential or live session. Uses the shipped catalog fixture,
-production compiler and environment renderer. The CLI's proprietary preset is NOT
-measured. Deferred schemas remain deferred. Tokens are ceil(chars/4), not billing.
+production compiler and environment renderer. The delegated number is the claude CLI's
+--system-prompt. Deferred schemas remain deferred. Tokens are ceil(chars/4), not billing.
 The optional baseline loads only the changed prompt producers from the specified
 local git revision, in memory; it never switches branches or touches a worktree.
 """
