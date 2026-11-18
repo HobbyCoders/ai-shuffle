@@ -248,7 +248,9 @@ async def test_a_top_level_chat_gets_the_shipped_prompt(db, tmp_path, monkeypatc
             assert engine.system_sections is not None  # Not the fallback string.
             text = engine.system
         elif leg == "delegated":
-            text = engine.append_system_prompt
+            # The compiled prompt replaces Claude Code's (--system-prompt).
+            assert engine.append_system_prompt is None
+            text = engine.system
         else:
             text = engine.system_append
         _assert_disk_sharing_rules(text)
