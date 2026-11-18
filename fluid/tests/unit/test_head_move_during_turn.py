@@ -15,13 +15,13 @@ import asyncio
 import io
 
 import pytest
-
 from fluid.cli.repl import Repl
 from fluid.engine.base import SessionBusy
 from fluid.events import Fork, Rewind, UserTurn
 from fluid.store import jsonl
 from fluid.store.base import MemoryStore
 from fluid.store.jsonl import JsonlStore
+
 from tests.unit.test_background_tasks import _loop
 from tests.unit.test_tool_loop import ScriptedProvider, _text
 

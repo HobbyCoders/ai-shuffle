@@ -64,10 +64,10 @@ from fluid.events.model import Event, event_from_dict, event_to_dict
 from fluid.messages import Message
 from fluid.messages.content import Text
 from fluid.store.base import (
+    NodeConflict,
     RECONSTRUCTIBLE_EVENTS,
     SessionMeta,
     SessionNode,
-    check_node_retry,
     new_id,
     project_root_for,
 )
@@ -467,14 +467,18 @@ def _owner_check(generation: Optional[int]) -> tuple[str, tuple]:
 def _append_node_sync(
     session_id: str, node: SessionNode, *,
     measure_bytes: bool = True, generation: Optional[int] = None,
-) -> Optional[int]:
+) -> Optional[tuple[int, Optional[SessionNode]]]:
     """Insert the node and advance the head in one transaction (JsonlStore
     parity: append implies head-move). None when another writer took over: the
     head is updated first so a refused node leaves nothing behind.
 
-    An id the session already holds follows fluid's one duplicate rule
-    (``check_node_retry``): the same parent and message is a retry and only
-    moves the head; anything else raises NodeConflict and rolls back."""
+    An id the session already holds follows fluid's one duplicate rule: the
+    same parent and message is a retry and only moves the head; anything else
+    raises NodeConflict and rolls back. The message is compared as JSONB in
+    SQL, so a resend whose numbers the database normalised (``1e20``) is still
+    the same message. Returns ``(cached bytes, stored)``: ``stored`` is the row
+    the table already held when this was a retry, which callers cache instead
+    of the resend (its ``ts`` differs)."""
     message = _scrub_pg_illegal(scrub_url_credentials(node.message.to_dict()))
     if node.message.context_pin is not None:
         # The privacy transforms can change lengths before or inside the
@@ -498,22 +502,26 @@ def _append_node_sync(
             "ON CONFLICT (session_id, node_id) DO NOTHING",
             (session_id, node.node_id, node.parent_id, node.ts, Json(message)),
         )
+        stored = None
         if cur.rowcount == 0:
             cur.execute(
-                "SELECT parent_id, message FROM fluid_session_nodes "
-                "WHERE session_id = %s AND node_id = %s",
-                (session_id, node.node_id),
+                "SELECT parent_id, ts, message, "
+                "(parent_id IS NOT DISTINCT FROM %s AND message = %s::jsonb) AS same "
+                "FROM fluid_session_nodes WHERE session_id = %s AND node_id = %s",
+                (node.parent_id, Json(message), session_id, node.node_id),
             )
             row = cur.fetchone()
             if row is not None:
-                check_node_retry(
-                    session_id, node.node_id,
-                    (row["parent_id"], _as_dict(row["message"])),
-                    (node.parent_id, message),
+                if not row["same"]:
+                    raise NodeConflict(session_id, node.node_id)
+                stored = SessionNode(
+                    node_id=node.node_id, parent_id=row["parent_id"], ts=row["ts"],
+                    message=Message.from_dict(_as_dict(row["message"])),
                 )
     # Count raw cached payload off-loop as well as the SQL serialization. A
     # delegated metadata-only store needs neither the count nor another copy.
-    return len(json.dumps(node.message.to_dict())) if measure_bytes else 0
+    size = len(json.dumps((stored or node).message.to_dict())) if measure_bytes else 0
+    return size, stored
 
 
 def _set_head_sync(
@@ -1924,17 +1932,21 @@ class PgFluidStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
-        size = await run_sync(
+        written = await run_sync(
             _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
             generation=self._generations.get(session_id),
         )
-        if size is None:
+        if written is None:
             self._note_replaced(session_id)
             # Not saved, but the old engine's turn still builds its next prompt
             # from this cache, so it carries on as if the write had landed.
             size = len(json.dumps(node.message.to_dict())) if self.cache_nodes else 0
+        else:
+            size, stored = written
+            # A retried append keeps the stored node, as the table does, even
+            # when the live window had evicted it from the cache.
+            node = stored or node
         if self.cache_nodes:
-            # A retried append keeps the stored node, as the table does.
             if node.node_id not in self._nodes.get(session_id, {}):
                 self._cache_node(session_id, node, size)
         elif session_id in self._memory_paths:

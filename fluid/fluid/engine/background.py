@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -23,6 +24,8 @@ from fluid.engine.questions import QuestionLifecycleMixin
 from fluid.store.base import iter_events_of_class
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
+
+log = logging.getLogger(__name__)
 
 _TERMINAL_EVENTS = (TurnComplete, Interrupted, ErrorEvent)
 # How much of a long worker report rides the wake turn when the rest is one
@@ -106,6 +109,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
 
     async def _rehydrate_background_lifecycle_unlocked(self) -> None:
         if self._background_rehydrated:
+            await self._drain_held_completions_unlocked()
             return
         meta = await self._ensure_session()
         try:
@@ -154,12 +158,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 for task_id in event.task_ids:
                     self._background_completions.pop(task_id, None)
         self._background_rehydrated = True
-
-        for task_id in tuple(self._background_early):
-            if task_id in self._background_pending:
-                await self._finalize_background_task_unlocked(
-                    self._background_early[task_id]
-                )
+        await self._drain_held_completions_unlocked()
 
         recover_host = self.ctx.extra.get("recover_background")
         if recover_host is not None:
@@ -171,6 +170,24 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     and op.status in _TERMINAL_TASK_KINDS
                 ):
                     await self._finalize_background_task_unlocked(op)
+
+    async def _drain_held_completions_unlocked(self) -> None:
+        """Finalize every held completion whose task is recorded as started.
+
+        Runs on every lifecycle access, not only the first replay: a pair
+        whose terminal write failed stays held, and the next access (a
+        receipt, a completion, a turn's end) tries it again. A failure here
+        is logged, not raised over the caller's own work.
+        """
+        for task_id in tuple(self._background_early):
+            op = self._background_early.get(task_id)
+            if op is None or task_id not in self._background_pending:
+                continue
+            try:
+                await self._finalize_background_task_unlocked(op)
+            except Exception as exc:  # noqa: BLE001 — retried on the next access
+                log.warning("background task %s: could not record its completion "
+                            "yet: %s", task_id, exc)
 
     def _park_pending_ids(self) -> tuple[str, ...]:
         """The pending task ids a park is actually WAITING on.
@@ -214,11 +231,10 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     serves=receipt.serves,
                 ))
                 self._background_pending[receipt.task_id] = receipt
-                # Finalize pops it once the terminal record is written.
-                early = self._background_early.get(receipt.task_id)
-                if early is not None:
-                    await self._finalize_background_task_unlocked(early)
-                elif self._background_turn_terminal:
+                if (
+                    receipt.task_id not in self._background_early
+                    and self._background_turn_terminal
+                ):
                     parked_on = self._park_pending_ids()
                     if parked_on:
                         await self._emit(SessionParked(
@@ -227,6 +243,12 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                             pending_task_ids=parked_on,
                             reason="background_tasks",
                         ))
+            # A completion that arrived first is finalized now, and again on a
+            # resent receipt if its terminal write failed (finalize pops it
+            # once the record is written). Its failure is the caller's.
+            early = self._background_early.get(receipt.task_id)
+            if early is not None and receipt.task_id in self._background_pending:
+                await self._finalize_background_task_unlocked(early)
             should_wake = bool(self._background_completions)
         if should_wake:
             self._kick_background_wake()
@@ -272,11 +294,15 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     ) -> None:
         """Record a task's terminal event, then retire it in memory.
 
-        Every state change waits for the write: if ``_emit`` raises, the task
-        is still pending (and any early completion still held), so the host's
-        resubmission finalizes it and its wake is armed exactly once. A write
-        that failed but landed leaves two identical terminal records; no wake
-        can settle the task between them, so replay reaches the same state.
+        Every state change waits for the write. A write that raised may still
+        have landed (fsync failed after the bytes went out, a lost commit
+        acknowledgement): the store is asked, and a record it holds is applied
+        now, so live state matches a reopen and the event, already published,
+        is not published again by a resend. Otherwise the task is still
+        pending (and any early completion still held), so the host's
+        resubmission finalizes it and its wake is armed exactly once. If the
+        store cannot answer, the same holds; a resend after a write that did
+        land leaves two identical terminal records, and replay honours one.
         """
         meta = await self._ensure_session()
         if op.is_current is not None and not op.is_current():
@@ -285,7 +311,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         worker_session_id = op.worker_session_id or (
             receipt.worker_session_id if receipt is not None else None
         )
-        await self._emit(SubagentEvent(
+        before = self.bus.last_seq(meta.session_id)
+        try:
+            await self._emit(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
             task_id=op.task_id,
@@ -299,7 +327,12 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
             # host performs it instead of us.
             wake_disposition=WAKE_AUTO if op.wake else WAKE_SUPPRESSED,
             report_path=op.report_path,
-        ))
+            ))
+        except Exception:
+            if not await self._terminal_recorded(meta.session_id, op.task_id, before):
+                raise
+            log.warning("background task %s: its terminal record landed although "
+                        "the write reported an error; applying it", op.task_id)
         self._background_pending.pop(op.task_id, None)
         self._background_early.pop(op.task_id, None)
         self._background_terminal.add(op.task_id)
@@ -312,6 +345,23 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 wake=True,
                 report_path=op.report_path,
             )
+
+    async def _terminal_recorded(self, sid: str, task_id: str, after_seq: int) -> bool:
+        """Whether the store holds a terminal record for ``task_id`` past ``after_seq``.
+
+        A store that cannot be read answers no: the caller then keeps the
+        task retryable, the safe side.
+        """
+        try:
+            async for event in iter_events_of_class(
+                self.store, sid, after_seq, (SubagentEvent,)
+            ):
+                if event.task_id == task_id and event.kind in _TERMINAL_TASK_KINDS:
+                    return True
+        except Exception as exc:  # noqa: BLE001 — see docstring
+            log.warning("background task %s: could not read back its terminal "
+                        "record: %s", task_id, exc)
+        return False
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
         if not isinstance(event, _TERMINAL_EVENTS):

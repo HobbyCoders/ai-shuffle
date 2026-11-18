@@ -88,6 +88,11 @@ log = logging.getLogger(__name__)
 
 PermissionResponder = Callable[[PermissionRequest], Awaitable[str]]
 
+# A worker's result the parent engine refused (its store failed to record it)
+# is offered this many times, the delay doubling from the base between tries.
+_REPORT_ATTEMPTS = 3
+_REPORT_RETRY_BASE_SECONDS = 0.5
+
 # Output kept for a Monitor summary: this many characters from the start and
 # from the end of the stream, the middle dropped with a marker.
 MONITOR_HEAD_CHARS = 4_000
@@ -418,7 +423,9 @@ class CliHost:
 
         The worker counts as running until the parent has accepted the result,
         so ``busy()`` never reports idle in the gap between process exit and
-        the completion being queued for a wake.
+        the completion being queued for a wake. A refusal (the store failed to
+        record it) is retried a few times with backoff: this is the worker's
+        only report, and a resubmission is a no-op once one is recorded.
         """
         worker.summary = summary
         if worker.swarm_launch is not None:
@@ -426,15 +433,24 @@ class CliHost:
             worker.swarm_launch.finish(status, summary)
             return
         try:
-            if self.engine is not None and not self._closed:
-                await self.engine.submit(BackgroundTaskFinished(
-                    task_id=worker.task_id,
-                    worker_session_id=worker.worker_session_id,
-                    status=status,
-                    summary=summary,
-                ))
-        except Exception as exc:  # noqa: BLE001 — the parent may already be closed
-            log.warning("could not deliver result of %s: %s", worker.task_id, exc)
+            for attempt in range(_REPORT_ATTEMPTS):
+                if self.engine is None or self._closed:
+                    return
+                try:
+                    await self.engine.submit(BackgroundTaskFinished(
+                        task_id=worker.task_id,
+                        worker_session_id=worker.worker_session_id,
+                        status=status,
+                        summary=summary,
+                    ))
+                    return
+                except Exception as exc:  # noqa: BLE001 — the parent may already be closed
+                    if attempt + 1 >= _REPORT_ATTEMPTS:
+                        log.warning("could not deliver result of %s: %s", worker.task_id, exc)
+                        return
+                    log.info("result of %s not delivered (%s); retrying",
+                             worker.task_id, exc)
+                await asyncio.sleep(_REPORT_RETRY_BASE_SECONDS * 2 ** attempt)
         finally:
             worker.status = status
 

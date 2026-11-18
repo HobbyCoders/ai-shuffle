@@ -329,3 +329,24 @@ async def test_resumed_engine_renders_the_same_view_from_a_windowed_store(mock_d
     assert fresh._compactor.view(await store.load_path(sid)) == expected
     assert await fresh._context_path(sid) == window
     await fresh.aclose()
+
+
+# ── Retried appends keep the stored row, cached or not ───────────────────────
+
+async def test_a_retry_of_an_evicted_node_caches_the_stored_row(mock_db):
+    """The table keeps the first row of an id. A resend of an evicted node at a
+    later time must not put the resend's copy in the cache, or ``get_node``
+    and a reopen disagree."""
+    store = PgFluidStore()
+    await chain(store, "evr", 20)
+    stored = await store.get_node("evr", "n7")
+    await store.evict_prefix("evr", "n15", {"n0"})
+    assert "n7" not in store._nodes["evr"]
+
+    await store.append("evr", replace(node("n7", "n6", role="assistant"), ts=stored.ts + 60))
+    assert (await store.get_node("evr", "n7")).ts == stored.ts
+    assert (await PgFluidStore().get_node("evr", "n7")).ts == stored.ts
+    assert (await store.get_session("evr")).head_node_id == "n7"
+    assert [n.ts for n in await store.load_path("evr")] == [
+        n.ts for n in await PgFluidStore().load_path("evr")]
+

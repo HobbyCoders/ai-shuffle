@@ -32,11 +32,13 @@ Durability rules:
   Windows, ``O_APPEND`` elsewhere), so two writers cannot tear a line.
 * A session is write-locked per process the first time a store writes to it.
   A second process gets :class:`SessionLocked`; a second store in the same
-  process shares the lock.
+  process shares the lock. Taking the lock re-reads anything parsed before it,
+  so no write decides from a snapshot another process has since changed.
 * A line that does not parse is skipped with one warning per file. When it is
   the last line of the file it is a torn append (the process died mid-write);
-  the store cuts it off at its next write to that session so the log is clean
-  again.
+  the store cuts it off before its next write to that file. A last record that
+  parses but lost its newline gets the newline instead. If the repair fails,
+  the write is refused rather than joined onto the old line.
 * ``FLUID_STORE_FSYNC=1`` (or ``fsync=True``) fsyncs after every record.
 * Memory changes only after its record is written. A write that fails may
   still have landed, so the session is then parsed again from disk: live state
@@ -436,7 +438,7 @@ class JsonlStore:
                 self._ensure_events_loaded(session_id)
             else:
                 self._ensure_loaded(session_id)
-        except Exception as exc:  # noqa: BLE001 — retried on the next access
+        except Exception as exc:
             meta = self._sessions.get(session_id)
             if not events and meta is not None:
                 meta.verified = False

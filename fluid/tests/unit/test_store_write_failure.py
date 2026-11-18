@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from fluid.events.model import TurnStarted
 from fluid.messages import Message
 from fluid.messages.content import Text
