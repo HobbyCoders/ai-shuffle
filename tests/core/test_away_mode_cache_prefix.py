@@ -123,18 +123,20 @@ async def test_delegated_toggle_neither_respawns_the_cli_nor_changes_its_prompt(
         return await real_submit(turn)
 
     monkeypatch.setattr(adapter.engine, "submit", record)
-    append = adapter.engine.append_system_prompt
+    # The prompt the CLI is sent (--system-prompt): fixed at connect.
+    prompt = adapter.engine.system
+    assert prompt
     try:
         for n, away in enumerate(SEQUENCE):
             database.set_session_run_binding(away_state, away_mode=away)
             result = await _run_turn(adapter, f"turn {n}")
             assert not result.is_error
-            assert adapter.engine.append_system_prompt == append
+            assert adapter.engine.system == prompt
     finally:
         await adapter.disconnect()
 
     assert len(_ArgvLoop.argvs) == 1, "a toggle must not respawn the CLI"
-    assert "owner is away" not in append.lower()
+    assert "owner is away" not in prompt.lower()
     assert [("The owner is away" in text) for text in sent] == list(SEQUENCE)
     assert [("The owner is back" in text) for text in sent] == [False, False, False, True, False]
     for n, text in enumerate(sent):
