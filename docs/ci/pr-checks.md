@@ -584,11 +584,13 @@ fixed. A test that fails again, more than 20 failed tests, or any fault besides
 failed tests fails the shard without a rerun: a collection error anywhere, an
 interrupted, crashed or killed run, a worker restart, or a failed scratch cleanup
 (`scripts/ci/record_failures.py` lists the failed tests only after the whole
-pytest process, cleanup included, ended with just test failures). The receipt of
+pytest process, cleanup included, ended with just test failures, and the runner
+retries only on pytest's test-failure exit code 1). The receipt of
 a complete run that had failed tests lists them under `failed`. After the rerun
-the runner records them under `rerun_passed` only when the rerun ran exactly
-those tests and each one passed; a skip, xfail or deselection on the rerun is not
-a pass. The gate refuses a receipt whose failed tests have no recorded passing
+the runner records them under `rerun_passed` only when the rerun was a completely
+clean run of exactly those tests: setup, call and teardown of each one passed and
+nothing else was reported. A skip, xfail, xpass, error or deselection in any phase
+of the rerun is not a pass. The gate refuses a receipt whose failed tests have no recorded passing
 rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
 `backend-security` and `backend-contracts` keep a single attempt.

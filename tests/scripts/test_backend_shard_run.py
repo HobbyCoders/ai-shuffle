@@ -110,6 +110,48 @@ def test_a_test_that_fails_then_skips_on_the_rerun_has_not_passed(shard):
     assert "rerun_passed" not in receipt
 
 
+def guard(tmp_path: Path, body: str) -> None:
+    """An autouse fixture around test_value[3]; ``body`` uses TORN and value."""
+    (tmp_path / "conftest.py").write_text(
+        "from pathlib import Path\nimport pytest\n"
+        f"TORN = Path({str(tmp_path / 'torn-once')!r})\n"
+        f"MARKER = Path({str(tmp_path / 'ran-once')!r})\n\n"
+        "@pytest.fixture(autouse=True)\n"
+        "def guard(request):\n"
+        "    value = request.node.callspec.params['value']\n" + body)
+
+
+def test_a_test_that_fails_in_teardown_then_skips_there_has_not_passed(shard, tmp_path):
+    # The body passes both times; the rerun's teardown skips before its check.
+    guard(tmp_path, "    yield\n"
+                    "    if value == 3 and not TORN.exists():\n"
+                    "        TORN.write_text('x')\n"
+                    "        raise AssertionError('teardown fails once')\n"
+                    "    if value == 3:\n"
+                    "        pytest.skip('teardown skips on the rerun')\n")
+    run, results = shard
+    assert run("    pass\n") == 1
+    receipt = json.loads((results / "receipt.json").read_text())
+    assert receipt["failed"] == [FLAKY_NODE] and "rerun_passed" not in receipt
+    assert local_ci.RERUN_PASSED == []
+
+
+def test_a_test_skipped_in_setup_on_the_rerun_has_not_passed(shard, tmp_path):
+    guard(tmp_path, "    if value == 3 and MARKER.exists():\n"
+                    "        pytest.skip('setup skips on the rerun')\n"
+                    "    yield\n")
+    run, results = shard
+    assert run(FAILS_ONCE) == 1
+    assert "rerun_passed" not in json.loads((results / "receipt.json").read_text())
+    assert local_ci.RERUN_PASSED == []
+
+
+def test_a_warning_on_the_rerun_is_still_a_pass(shard):
+    run, results = shard
+    assert run(FAILS_ONCE + "    import warnings\n    warnings.warn('only a warning')\n") == 0
+    assert json.loads((results / "receipt.json").read_text())["rerun_passed"] == [FLAKY_NODE]
+
+
 def test_a_failed_scratch_cleanup_is_not_rerun(shard, tmp_path):
     # test_scratch's cleanup raises after the session finished (and after the
     # receipt was written): that run must not be recoverable by a clean rerun.

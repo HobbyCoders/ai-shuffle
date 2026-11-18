@@ -12,10 +12,11 @@ The shard plugin (scripts/ci/backend_shards.py) writes its receipt for a
 complete run whose only fault was failed tests, listing them under ``failed``.
 scripts/ci/record_failures.py lists them for the rerun only after that pytest
 process, its config cleanup included, returned normally. After the rerun this
-marks the receipt with ``rerun_passed``, and only when the rerun ran exactly
-the tests the receipt lists and each one passed its call phase (a skip or an
-xfail is not a pass); backend_gate.py refuses a receipt whose failed tests
-have no passing rerun. The first run's
+marks the receipt with ``rerun_passed``, and only when the rerun was a
+completely clean run of exactly the tests the receipt lists: every phase of
+every test passed and nothing else (a skip, xfail, error, deselection) was
+reported; backend_gate.py refuses a receipt whose failed tests have no
+passing rerun. The first run's
 JUnit report and --durations output stay as they were, failures included.
 
     python scripts/ci/backend_shard_run.py -- python -m pytest ... -p scripts.ci.backend_shards --backend-shard 3
@@ -39,9 +40,9 @@ from windows_parts import _shown, report_flaky  # noqa: E402
 def mark_rerun(receipt_path: Path, rerun: list[str], passed: list[str]) -> None:
     """Record on the shard receipt that its failed tests passed their rerun.
 
-    ``rerun`` is what was rerun; ``passed`` is what passed its call phase there.
-    Both must equal the receipt's failed tests: a rerun exits 0 when a test
-    skips, xfails or is not collected, and none of those is a pass.
+    ``rerun`` is what was rerun; ``passed`` is what record_failures listed for a
+    completely clean rerun (empty otherwise). Both must equal the receipt's
+    failed tests: a rerun exits 0 when a test skips or xfails in any phase.
     """
     if not receipt_path.is_file():
         raise ValueError(f"no shard receipt at {receipt_path} to record the rerun on")

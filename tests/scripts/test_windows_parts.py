@@ -121,6 +121,7 @@ def test_rest_runs_every_suite_after_a_failure(monkeypatch):
 def retrying(monkeypatch):
     monkeypatch.setenv(local_ci.RETRY_FAILED_ENV, "1")
     monkeypatch.setattr(local_ci, "FLAKY", [])
+    monkeypatch.setattr(local_ci, "RERUN_PASSED", [])
 
 
 def pytest_command(*targets):
@@ -190,6 +191,32 @@ def test_a_collection_error_is_not_retried(tmp_path, retrying):
     with pytest.raises(local_ci.Failure, match="exited") as raised:
         local_ci.run(pytest_command(tests), env=local_ci.python_env())
     assert "failed again" not in str(raised.value)
+
+
+def test_a_run_killed_after_listing_its_failures_is_not_retried(tmp_path, retrying):
+    # The failed-test list is written when pytest returns; the process then
+    # dies in interpreter shutdown. Only exit code 1 may be retried.
+    write(tmp_path / "conftest.py",
+          "import atexit, os, signal\nfrom pathlib import Path\n"
+          "KILLED = Path(__file__).with_name('killed-once')\n"
+          "def _die():\n"
+          "    if hasattr(signal, 'SIGKILL'):\n"
+          "        os.kill(os.getpid(), signal.SIGKILL)\n"
+          "    os._exit(3)\n"
+          "if not KILLED.exists():\n"
+          "    KILLED.write_text('x')\n"
+          "    atexit.register(_die)\n")
+    tests = write(tmp_path / "test_once.py",
+                  "from pathlib import Path\n"
+                  "MARKER = Path(__file__).with_name('ran-once')\n\n"
+                  "def test_once():\n"
+                  "    if not MARKER.exists():\n"
+                  "        MARKER.write_text('x')\n"
+                  "        raise AssertionError('first run fails')\n")
+    with pytest.raises(local_ci.Failure, match="exited") as raised:
+        local_ci.run(pytest_command(tests), env=local_ci.python_env())
+    assert "failed again" not in str(raised.value)
+    assert (tmp_path / "killed-once").exists() and local_ci.FLAKY == []
 
 
 def test_many_failures_are_not_retried(tmp_path, retrying, monkeypatch):

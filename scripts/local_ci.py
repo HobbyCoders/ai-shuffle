@@ -59,8 +59,9 @@ RETRY_FAILED_ENV = "LOCAL_CI_RETRY_FAILED"
 MAX_RETRIED = 20
 # Tests that failed and then passed on that rerun, in this process.
 FLAKY: list[str] = []
-# Tests whose call phase passed on those reruns (scripts/ci/record_failures.py):
-# a rerun that skips or xfails a failed test still exits 0.
+# The tests of those reruns that were completely clean (every phase of every
+# test passed, nothing else happened; scripts/ci/record_failures.py). A rerun
+# that skips or xfails a failed test still exits 0, and lists nothing here.
 RERUN_PASSED: list[str] = []
 
 # The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
@@ -258,7 +259,10 @@ def _run(argv: list[str], cwd: Path = ROOT, env: dict | None = None,
         # Ctrl-C, or SIGTERM turned into SystemExit by full --step: leave no orphans.
         kill_tree(process)
         raise
-    if returncode and failed_file is not None:
+    # Only pytest's TESTS_FAILED exit (1, on Windows too) can be retried: a
+    # signal, a crash in interpreter shutdown or any other code is a real break,
+    # even when the failed-test list was already written.
+    if returncode == 1 and failed_file is not None:
         failed = (list(dict.fromkeys(failed_file.read_text(encoding="utf-8").splitlines()))
                   if failed_file.exists() else [])
         # Nothing recorded (a collection error, a crash) or many failures: a real break.
