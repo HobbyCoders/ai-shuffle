@@ -229,7 +229,16 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   far as its values are: it is the serving member's claim, not a signed
   proof. A copy of the very version held (same clock, device and content)
   can raise the incarnation held, so every replica ends on the highest one
-  known for it, but never lowers it. A version stored before the
+  known for it, but never lowers it. That holds only where a member stores
+  a version exactly as it was signed (preferences, member names, tags,
+  network projects, credential policies, plugins, memory and the working
+  record). Elsewhere a member can store less than was signed: a chat whose
+  project it lacks loses its project, for example. Equal content there does
+  not show the same signed version, so the incarnation held stays. In those
+  collections, two replicas can still end on different values when the
+  device signed one value, then another, then the first again at one clock
+  across two restores, and the middle version arrives late at a replica that
+  took a copy of the third instead of the signed op. A version stored before the
   upgrade, or copied from a member on an older build, has none, and an
   upgraded member that relays it passes it on without one. An exact tie
   between such a version and the device's version from the other side of a

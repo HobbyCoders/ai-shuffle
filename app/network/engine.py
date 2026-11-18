@@ -3299,7 +3299,8 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if comparison <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
-            if comparison == 0 and incarnation and _same_version(item, incoming_hash, existing):
+            if (comparison == 0 and incarnation and coll.name in _SIGNED_AS_STORED
+                    and _same_version(item, incoming_hash, existing)):
                 # The content held, from a copy that names its incarnation: a
                 # missing label is filled (see the raise below).
                 store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
@@ -3315,7 +3316,9 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
             # is trusted as far as its values are (the serving member's claim,
             # not a signed proof) and never lowers one. Only the label moves:
             # the row, clock, hash and updated_at stay; nothing is announced.
-            store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
+            # Where the copy may be a projection, the label held stays.
+            if coll.name in _SIGNED_AS_STORED:
+                store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             continue
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
@@ -3380,6 +3383,17 @@ def _same_version(item: Mapping[str, Any], incoming_hash: str, held: Mapping[str
     """Whether a copy item is the version held: same (clock, origin) and the same content."""
     return (int(item["clock"]) == int(held["clock"]) and item["origin_device_id"] == held["origin_device_id"]
             and bool(item["deleted"]) == bool(held["deleted"]) and incoming_hash == (held["content_hash"] or ""))
+
+
+# Rows stored exactly as signed: no mirror step, hook, credential merge,
+# reference check or foreign key here drops or rewrites a field by what this
+# worker holds. Elsewhere (a chat whose project is missing here loses its
+# ``project_id``, say) two different signed versions can store the same
+# content, so equal content does not name the version (S19).
+_SIGNED_AS_STORED = frozenset({
+    "user_preferences", "member_names", "tags", "projects_v2", "credential_policies", "plugins_desired",
+    "memory", "working_record", "working_record_acknowledgements",
+})
 
 
 def _records_by_id(cursor, collection: str, record_ids: Sequence[str]) -> Dict[str, dict]:

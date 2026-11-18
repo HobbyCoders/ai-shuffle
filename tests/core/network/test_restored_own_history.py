@@ -731,6 +731,46 @@ def test_a_copy_of_the_value_held_outranks_an_incarnation_in_between(workers):
     assert _lost_themes(c, b.device_id) == ["new"]
 
 
+def test_a_projected_copy_does_not_raise_the_label_of_the_chat_held(workers):
+    """Review S19: C holds B's chat V/1. Across a restore B signs W/2 at the same
+    clock: the same chat in project P. A lacks P, so its mirror stores W without
+    it, and A's state copy has the content C holds under label 2. That says
+    nothing about what B signed: C keeps label 1 and takes W/2 when it comes."""
+    a, b, c = _network(workers, "a", "b", "c")
+    for worker in (b, c):
+        with worker.active():
+            database.create_project(project_id="p", name="P", description=None, path="/srv/p")
+    _session(b, "chat", title="t", events=0)
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    _rename(b, "lost-0")
+    _exchange(b, a)
+    _rename(b, "v")
+    _exchange(b, c)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    v = c.sql("SELECT clock, origin_incarnation FROM sync_records WHERE collection = 'sessions' "
+              "AND record_id = 'chat'")[0]
+    held = c.sql("SELECT title, updated_at FROM sessions WHERE id = 'chat'")[0]
+    _observe(b, int(v["clock"]) - 1)
+    b.sql("UPDATE sessions SET title = ?, project_id = 'p', updated_at = ? WHERE id = 'chat'",
+          (held["title"], held["updated_at"]))
+    with b.active():
+        engine.scan_all()
+    _exchange(b, a)
+    w = a.sql("SELECT clock, origin_device_id, origin_incarnation FROM sync_records "
+              "WHERE collection = 'sessions' AND record_id = 'chat'")[0]
+    assert (int(w["clock"]), w["origin_device_id"], w["origin_incarnation"]) == (int(v["clock"]), b.device_id, 2)
+    with a.active():
+        assert database.get_session("chat")["project_id"] is None  # A's mirror dropped it
+    _state_copy(a, c, "sessions")
+    assert c.sql("SELECT origin_incarnation FROM sync_records WHERE collection = 'sessions' "
+                 "AND record_id = 'chat'")[0]["origin_incarnation"] == 1
+    _exchange(a, c)  # B's signed W/2, relayed
+    with c.active():
+        assert database.get_session("chat")["project_id"] == "p"
+
+
 def test_a_repeated_fork_state_copy_records_its_conflict_once(workers):
     a, b, c = _equal_clock_fork(workers)
     for _ in range(3):
