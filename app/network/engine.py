@@ -2082,9 +2082,17 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
     # Keep the local loser (a concurrent local edit) for the conflicts list:
     # another device's version, or this device's from the other side of a
     # restore fork. A newer op of the same stream simply supersedes its own.
-    if existing is not None and not bool(existing["deleted"]) and (
-            existing["origin_device_id"] != env.origin_device_id
-            or _restore_fork(cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)):
+    # A fork's displaced deletion is kept too, as the state-copy path keeps it.
+    fork = existing is not None and existing["origin_device_id"] == env.origin_device_id and _restore_fork(
+        cursor, ctx, env.collection, env.origin_device_id, env.origin_incarnation, existing)
+    if fork and bool(existing["deleted"]):
+        if env.op == OP_UPSERT:
+            store.add_conflict(cursor, collection=env.collection, record_id=env.record_id,
+                               losing_clock=int(existing["clock"]), losing_device_id=existing["origin_device_id"],
+                               losing_record={"_deleted": True}, winning_clock=env.clock,
+                               winning_device_id=env.origin_device_id)
+    elif existing is not None and not bool(existing["deleted"]) and (
+            existing["origin_device_id"] != env.origin_device_id or fork):
         local_row = _read_row(cursor, coll, env.record_id)
         if local_row is not None:
             try:
@@ -3104,6 +3112,7 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
             "order_seq": version.get("order_seq"), "record": None}
     if version.get("origin_incarnation") is not None:
         # Decides an exact (clock, origin) tie (#1568); older readers ignore it.
+        # Pages fill in what a legacy row's held op knows (resolve_incarnations).
         item["origin_incarnation"] = int(version["origin_incarnation"])
     if not item["deleted"]:
         if not row_known:
@@ -3112,6 +3121,23 @@ def snapshot_item(cursor, coll: policy.Collection, version: Mapping[str, Any], *
         if item["record"] is None:
             item["deleted"] = True
     return item
+
+
+def resolve_incarnations(cursor, collection: str, versions: Iterable[dict]) -> None:
+    """Fill in, before export, the incarnation of versions stored without one.
+
+    A row stored before incarnations were kept (#1568) has none, but while
+    this worker holds the op that wrote it, ``store.version_incarnation``
+    knows it. Without it in the item, the receiver reads 0 and an exact tie
+    across a restore fork can stay split between replicas.
+    """
+    legacy = [version for version in versions if version.get("origin_incarnation") is None]
+    for start in range(0, len(legacy), SNAPSHOT_SQL_BATCH):
+        batch = legacy[start:start + SNAPSHOT_SQL_BATCH]
+        found = store.version_incarnations(cursor, collection, batch)
+        for version in batch:
+            if found.get(version["record_id"]):
+                version["origin_incarnation"] = found[version["record_id"]]
 
 
 def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after_record_id=None, encoding=None,
@@ -3142,6 +3168,7 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
         if coll is not None and coll.map_secrets is not None:
             nested_rekey = nested_secret_sync.enabled(cursor) and (
                 recipient is None or nested_secret_sync.enabled(cursor, recipient=recipient))
+        resolve_incarnations(cursor, collection, versions)
         items = [snapshot_item(cursor, coll, version, nested_rekey=nested_rekey) for version in versions]
         if keyset:
             # A live record without a readable row here (lost without a

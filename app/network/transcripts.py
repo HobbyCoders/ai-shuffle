@@ -318,6 +318,7 @@ def _session_items(cursor, coll: policy.Collection, session_id: str, after: int,
         ids = [f"{session_id}|{seq}" for seq in probes]
         for start in range(0, len(ids), engine.SNAPSHOT_SQL_BATCH):
             found = store.records_for_ids(cursor, coll.name, ids[start:start + engine.SNAPSHOT_SQL_BATCH])
+            engine.resolve_incarnations(cursor, coll.name, [v for v in found.values() if v["deleted"]])
             for record_id in ids[start:start + engine.SNAPSHOT_SQL_BATCH]:
                 version = found.get(record_id)
                 if version is not None and version["deleted"]:
@@ -334,6 +335,7 @@ def _session_items(cursor, coll: policy.Collection, session_id: str, after: int,
         versions: Dict[str, dict] = {}
         for start in range(0, len(ids), engine.SNAPSHOT_SQL_BATCH):
             versions.update(store.records_for_ids(cursor, coll.name, ids[start:start + engine.SNAPSHOT_SQL_BATCH]))
+        engine.resolve_incarnations(cursor, coll.name, [v for v in versions.values() if not v["deleted"]])
         for row, record_id in zip(rows, ids):
             if used >= budget and (items or probes):
                 return finish(True)

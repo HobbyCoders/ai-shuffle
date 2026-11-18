@@ -1537,6 +1537,23 @@ def version_incarnation(cursor, collection: str, version: Mapping[str, Any]) -> 
     return int(row["incarnation"]) if row and row["incarnation"] is not None else 0
 
 
+def version_incarnations(cursor, collection: str, versions: List[Mapping[str, Any]]) -> Dict[str, int]:
+    """``version_incarnation`` of many stored versions in one query: record id to incarnation.
+
+    Only versions whose incarnation a held op still names are in the result.
+    """
+    wanted = {str(v["record_id"]): (v["origin_device_id"], int(v["clock"])) for v in versions}
+    if not wanted:
+        return {}
+    placeholders = ", ".join(["%s"] * len(wanted))
+    cursor.execute(f"SELECT record_id, origin_device_id, clock, MIN(incarnation) AS incarnation FROM sync_ops "
+                   f"WHERE collection = %s AND record_id IN ({placeholders}) "
+                   "GROUP BY record_id, origin_device_id, clock", (collection, *wanted))
+    return {row["record_id"]: int(row["incarnation"]) for row in cursor.fetchall()
+            if row["incarnation"] is not None
+            and wanted.get(row["record_id"]) == (row["origin_device_id"], int(row["clock"]))}
+
+
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
     """Record, in the owner's delete transaction, that it deleted this chat (#1308)."""
     cursor.execute(

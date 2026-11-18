@@ -596,3 +596,80 @@ def test_another_worker_cannot_replay_owner_fields_into_a_chat(workers):
         prepared = catalog.prepare_session_mirror(conn.cursor(), record, origin_device_id=a.device_id,
                                                   device_id=b.device_id, own_replay=True)
     assert "permission_mode" not in prepared
+
+
+def _unset_owner_pref(worker, key):
+    with worker.active():
+        from app.core import owner_auth
+        database.delete_user_preference("admin", owner_auth.preference_identity(), key)
+        engine.scan_all()
+
+
+def test_a_replay_keeps_the_post_restore_deletion_it_displaces(workers):
+    """B deletes after the restore; a later lost version it gets back revives the
+    record, and B's deletion is kept as a conflict, not silently dropped."""
+    a, b = _network(workers, "a", "b")
+    set_owner_pref(b, "theme", "v0")
+    converge([a, b])
+    backup = b.raw.serialize()
+    for n in range(30):
+        set_owner_pref(b, "theme", f"lost-{n}")
+    converge([a, b])
+    _restore(b, backup)
+    _detect_restore(a, b, 1)  # proves only B's first op past the backup
+    _unset_owner_pref(b, "theme")
+    assert owner_pref(b, "theme") is None
+    tombstone = b.sql("SELECT clock, deleted, origin_incarnation FROM sync_records "
+                      "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))[0]
+    assert tombstone["deleted"] and tombstone["origin_incarnation"] == 2
+    for _ in range(2):
+        _exchange(a, b)
+    assert owner_pref(b, "theme") == "lost-29"
+    with b.active():
+        deletions = [conflict for conflict in store.list_conflicts() if conflict["record_id"].endswith("theme")
+                     and conflict["losing_record"] == {"_deleted": True}]
+    assert [(c["losing_device_id"], c["losing_clock"]) for c in deletions] == \
+        [(b.device_id, int(tombstone["clock"]))]
+    _converge([a, b])
+    assert owner_pref(a, "theme") == owner_pref(b, "theme") == "lost-29"
+
+
+def _state_copy(sender, receiver, collection="user_preferences"):
+    """One state-copy page of ``collection`` from ``sender``, applied on ``receiver``."""
+    with sender.active(), get_db() as conn:
+        page, _ = engine._snapshot_page(collection, 0, ctx=engine.context(), limit=1000, _conn=conn, keyset=True)
+    with receiver.active():
+        return engine.apply_snapshot_chunk(page, ctx=engine.context())
+
+
+def test_a_state_copy_carries_the_incarnation_a_legacy_row_still_knows(workers):
+    """A row stored before incarnations were kept has none, but its held op
+    names it: the copy carries it, so the exact tie is broken on both sides."""
+    a, b, c = _equal_clock_fork(workers)
+    a.sql("UPDATE sync_records SET origin_incarnation = NULL "
+          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    assert _theme_incarnation(a) is None
+    _state_copy(c, a)
+    assert owner_pref(a, "theme") == "new"
+    _state_copy(a, c)
+    assert owner_pref(c, "theme") == "new" and _theme_incarnation(c) == 2
+
+
+def test_a_repeated_fork_state_copy_records_its_conflict_once(workers):
+    a, b, c = _equal_clock_fork(workers)
+    for _ in range(3):
+        _state_copy(c, a)
+    assert owner_pref(a, "theme") == "new"
+    assert _lost_themes(a, b.device_id) == ["lost-0", "lost-1"]
+
+
+def test_a_transcript_copy_carries_the_incarnation_a_legacy_row_still_knows(workers):
+    from app.network import transcripts
+    a, b = _network(workers, "a", "b")
+    _session(b, "chat", title="t", events=2)
+    converge([a, b])
+    a.sql("UPDATE sync_records SET origin_incarnation = NULL WHERE collection = 'session_events'")
+    coll = engine.policy.collection("session_events")
+    with a.active(), get_db() as conn:
+        items, _, _, _ = transcripts._session_items(conn.cursor(), coll, "chat", 0, 1 << 20)
+    assert len(items) == 2 and {item.get("origin_incarnation") for item in items} == {1}
