@@ -175,8 +175,12 @@ app never opens the files inside.
 ## Unverified (needs a real Google sign-in or key)
 
 - Turns after `session/new` against the real binary with valid credentials:
-  streamed chunk and tool-call shapes, the title format of bridged tool calls,
-  permission option ids, and whether turns report usage.
+  streamed chunk and tool-call shapes, permission option ids, and whether
+  turns report usage. One bridged call was seen live (agy 1.5.9, issue
+  #1751): titled `Run mcp_fluid_bundled_Glob`, outside the kind map, with a
+  permission request even for a tool the bridge serves; a rejected request
+  ends the turn with no reply. The exact `kind` and `_meta` it sent are not
+  recorded.
 - Whether a stored sign-in still needs an explicit `authenticate` call.
 - The signed-in `/usage` JSON shape.
 - Completing a real sign-in with a real code.
