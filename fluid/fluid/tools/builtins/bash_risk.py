@@ -34,28 +34,37 @@ counts when any file it could expand to is a credential file (``cat .env*``,
 (``grep -r``, ``rg``) rooted at ``/``, ``/proc`` or a process directory is
 ``write`` too, since it reads that file without naming it.
 
-Programs with extra rules:
+Programs with extra rules. A banned option is refused in every spelling the
+program's parser accepts (see :func:`_no_flags`): bare, with its value glued
+on (``-oFILE``), inside combined short flags (``-uo FILE``), as
+``--opt=value`` and as an abbreviated long option (``--out``):
 
 - ``find``: none of ``-exec``, ``-execdir``, ``-ok``, ``-okdir``, ``-delete``,
   ``-fprint*``, ``-fls``.
 - ``awk``/``gawk``/``mawk``: no ``system(``, ``getline`` or ``|`` in any
-  argument (those run or write to commands), and no ``-f``/``--file``,
-  ``-i``/``--include`` or ``-l``/``--load`` (script files and extension
-  libraries the classifier cannot read).
+  argument (those run or write to commands), and none of ``-f``/``--file``,
+  ``-i``/``--include``, ``-l``/``--load``, ``-E``/``--exec`` (script files and
+  extension libraries the classifier cannot read), ``-o``, ``-p``, ``-d``
+  (they write a file), ``-D`` (the debugger) or ``-W`` (options by name).
 - ``sed``: must carry ``-n``/``--quiet``/``--silent``, must not carry ``-i`` or
   ``--in-place`` or ``-f``/``--file`` (an unread script file), and no script
-  argument that looks like a ``w`` file-write command or a GNU ``e`` command
-  or ``s///e`` flag (both run the text as a shell command).
-- ``sort``: no ``-o``/``--output``. ``uniq``: at most one positional argument
-  (the second is an output file). ``date``: no ``-s``/``--set``. ``env``: no
-  arguments (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` (runs a command).
+  argument (``-e`` glued or not) that looks like a ``w`` file-write command or
+  a GNU ``e`` command or ``s///e`` flag (both run the text as a shell command).
+- ``sort``: no ``-o``/``--output`` or ``--compress-program``. ``uniq``: at most
+  one operand (the second is an output file). ``date``: no ``-s``/``--set``.
+  ``tree``: no ``-o`` or ``-R`` (both write files). ``file``: no
+  ``-C``/``--compile`` (writes a compiled magic file). ``printf``: no ``-v``
+  (assigns a shell variable). ``env``: no arguments (``env cmd`` runs
+  ``cmd``). ``rg``: no ``--pre`` or ``--hostname-bin`` (both run a command).
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
-  external program); any ``--output*`` argument is rejected.
+  external program); any ``--output*`` argument or abbreviation of it is
+  rejected.
 - ``uv``/``pip``/``npm``/``pnpm``/``yarn``/``cargo``: only the informational
   subcommands in :data:`PACKAGE_MANAGER_READ_ONLY` (``uv pip list`` is handled
-  by skipping the ``pip`` word).
+  by skipping the ``pip`` word), without ``pip --log``, ``pip``/``uv
+  --python``, ``npm --logs-dir`` or ``cargo --config``.
 - ``go``: only ``go version``. ``node``: only ``--version``/``-v``.
 
 Everything is table-driven so the allowlist can grow without touching the
@@ -89,7 +98,6 @@ _SED_WRITE_CMD = re.compile(r"(?<![A-Za-z\\])[wW]\s*[\w./\\~-]")
 _SED_EXEC_CMD = re.compile(r"(?<![A-Za-z\\])[gpiImM0-9]*[eE]")
 _SED_ADDRESS_RE = re.compile(r"/[^/]*/")
 _FIND_EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls"}
-_AWK_FILE_FLAGS = {"-f", "--file", "-i", "--include", "-l", "--load"}
 
 # Variables a leading ``VAR=value`` may set without changing the command's
 # class. Everything here only affects locale, time zone or colour output.
@@ -105,44 +113,107 @@ def _inert_assignment(token: str) -> bool:
     return bool(m) and token[: m.end() - 1] in INERT_ENV_VARS
 
 
-def _no_flags(*banned: str) -> Check:
-    return lambda args: not any(a in banned or a.split("=", 1)[0] in banned for a in args)
+def _abbreviates(name: str, options: tuple[str, ...]) -> bool:
+    """``--name`` spells one of ``options``: in full, or as the unambiguous
+    prefix GNU ``getopt_long`` (and git, optparse) accept (``--out`` for
+    ``--output``). An ambiguous prefix counts too: it can only make the
+    command ask."""
+    return len(name) > 2 and any(option.startswith(name) for option in options)
+
+
+def _no_flags(*banned: str, values: str = "", optional: str = "") -> Check:
+    """Refuse every spelling of the ``banned`` options, GNU style.
+
+    A short option (``"-o"``) is caught bare, with its value glued on
+    (``-oFILE``) and inside a run of combined flags (``-uo FILE``, ``-uoFILE``);
+    a long option (``"--output"``) with ``=value`` and as any abbreviation.
+    ``values`` names short options known to take a required value and
+    ``optional`` those whose value can only be glued on: the rest of the token
+    (and, for ``values``, the next argument when nothing is glued) is that
+    value, not more flags. A short option in neither list is read as a flag,
+    so its glued value is scanned as flags too: options the check does not
+    know can only make the command ask, never hide a banned one. Everything
+    after ``--`` is an operand.
+    """
+    short = {b[1] for b in banned if len(b) == 2 and b[0] == "-" and b[1] != "-"}
+    long = tuple(b for b in banned if b.startswith("--"))
+
+    def check(args: list[str]) -> bool:
+        skip_value = False
+        for a in args:
+            if skip_value:
+                skip_value = False
+                continue
+            if a == "--":
+                return True
+            if a.startswith("--"):
+                if _abbreviates(a.split("=", 1)[0], long):
+                    return False
+                continue
+            if not a.startswith("-") or len(a) < 2:
+                continue
+            for j, ch in enumerate(a[1:], 1):
+                if ch in short:
+                    return False
+                if ch in values or ch in optional:
+                    skip_value = ch in values and j == len(a) - 1
+                    break
+        return True
+
+    return check
 
 
 def _find_ok(args: list[str]) -> bool:
     return not any(a in _FIND_EXEC_FLAGS or a.startswith("-fprint") for a in args)
 
 
+# Options that load a program file the classifier never sees (-f, -i, -l,
+# -E/--exec), write a file (-o pretty print, -p profile, -d variable dump),
+# start the debugger (-D, which runs commands read from stdin), or pass an
+# implementation option by name (-W profile, -W exec ...). -F, -v and -e take
+# a value.
+_awk_options_ok = _no_flags(
+    "-f", "-i", "-l", "-E", "-o", "-p", "-d", "-D", "-W",
+    "--file", "--include", "--load", "--exec", "--pretty-print", "--profile",
+    "--dump-variables", "--debug",
+    values="Fve",
+)
+
+
 def _awk_ok(args: list[str]) -> bool:
     for a in args:
         if "system(" in a or "getline" in a or "|" in a:
             return False
-        # -f prog.awk, -fprog.awk, --file=prog.awk: a script we never see.
-        if a.split("=", 1)[0] in _AWK_FILE_FLAGS or (
-            a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
-        ):
-            return False
-    return True
+    return _awk_options_ok(args)
 
 
 def _sed_ok(args: list[str]) -> bool:
     quiet = False
     scripts: list[str] = []
+    operands = False
     for a in args:
-        if a in ("--quiet", "--silent"):
-            quiet = True
-        elif a.startswith(("--in-place", "--file")):
-            return False
-        elif a.startswith("--expression="):
-            scripts.append(a.split("=", 1)[1])
-        elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
-            flags = a[1:]
-            if "i" in flags or "f" in flags:
-                return False
-            if "n" in flags:
-                quiet = True
-        else:
+        if operands or a == "-" or not a.startswith("-"):
             scripts.append(a)
+        elif a == "--":
+            operands = True
+        elif a.startswith("--"):
+            name, _, value = a.partition("=")
+            if _abbreviates(name, ("--in-place", "--file")):
+                return False
+            if name in ("--quiet", "--silent"):
+                quiet = True
+            if value:  # --expression=..., or a value scanned to be safe
+                scripts.append(value)
+        else:
+            for j, ch in enumerate(a[1:], 1):
+                if ch in "if":
+                    return False
+                if ch == "n":
+                    quiet = True
+                elif ch in "el":  # -e SCRIPT, -l N: the rest is the value
+                    if a[j + 1:]:
+                        scripts.append(a[j + 1:])
+                    break
     if not quiet:
         return False
     return not any(_sed_script_runs_or_writes(s) for s in scripts)
@@ -155,7 +226,12 @@ def _sed_script_runs_or_writes(script: str) -> bool:
 
 
 def _uniq_ok(args: list[str]) -> bool:
-    return len([a for a in args if not a.startswith("-")]) <= 1
+    if "--" in args:  # after it every argument is an operand, ``-x`` included
+        cut = args.index("--")
+        operands = [a for a in args[:cut] if not a.startswith("-")] + args[cut + 1:]
+    else:
+        operands = [a for a in args if not a.startswith("-")]
+    return len(operands) <= 1
 
 
 def _env_ok(args: list[str]) -> bool:
@@ -173,14 +249,21 @@ def _exact(*allowed: tuple[str, ...]) -> Check:
 READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
     "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
-    "grep": None, "egrep": None, "fgrep": None, "rg": _no_flags("--pre"),
-    "find": _find_ok, "file": None, "stat": None, "du": None, "df": None,
-    "pwd": None, "echo": None, "printf": None, "true": None,
+    # rg --pre and --hostname-bin run a program.
+    "grep": None, "egrep": None, "fgrep": None, "rg": _no_flags("--pre", "--hostname-bin"),
+    "find": _find_ok, "file": _no_flags("-C", "--compile", values="eFfmP"), "stat": None, "du": None, "df": None,
+    # file -C compiles a magic file and writes NAME.mgc. printf -v assigns a
+    # shell variable (PATH included) for the commands after it.
+    "pwd": None, "echo": None, "printf": _no_flags("-v"), "true": None,
     "which": None, "where": None, "type": None,
     "env": _env_ok, "printenv": None,
-    "date": _no_flags("-s", "--set"), "whoami": None, "uname": None, "tree": None,
+    # tree -o writes its listing to a file; -R reruns it with -o 00Tree.html
+    # in every directory.
+    "date": _no_flags("-s", "--set", values="dfr", optional="I"),
+    "whoami": None, "uname": None, "tree": _no_flags("-o", "-R", "--output"),
     "diff": None, "cmp": None,
-    "sort": _no_flags("-o", "--output"), "uniq": _uniq_ok, "cut": None, "tr": None,
+    # sort -o writes; --compress-program runs a program.
+    "sort": _no_flags("-o", "--output", "--compress-program", values="kStT"), "uniq": _uniq_ok, "cut": None, "tr": None,
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,
     "sed": _sed_ok,
     "basename": None, "dirname": None, "realpath": None, "readlink": None,
@@ -208,7 +291,10 @@ PACKAGE_MANAGER_READ_ONLY = {
 
 
 def _git_ok(args: list[str]) -> bool:
-    if any(a.startswith("--output") for a in args):
+    # --output=FILE writes; git accepts abbreviations (--out=FILE) too.
+    if any(
+        a.startswith("--output") or _abbreviates(a.split("=", 1)[0], ("--output",)) for a in args
+    ):
         return False
     i = 0
     while i < len(args):
@@ -238,11 +324,22 @@ def _package_manager_ok(args: list[str]) -> bool:
     return bool(args) and args[0] in PACKAGE_MANAGER_READ_ONLY
 
 
+def _package_manager(*banned: str) -> Check:
+    """An informational subcommand, without the options that write or run:
+    pip --log writes a log file, pip/uv --python run the named interpreter,
+    npm --logs-dir writes its debug log there, cargo --config can name the
+    rustc that cargo runs to read target information."""
+    options_ok = _no_flags(*banned)
+    return lambda args: _package_manager_ok(args) and options_ok(args)
+
+
+_pip_ok = _package_manager("--log", "--log-file", "--python")
+
 READ_ONLY_PROGRAMS.update({
     "git": _git_ok,
-    "uv": _package_manager_ok, "pip": _package_manager_ok, "pip3": _package_manager_ok,
-    "npm": _package_manager_ok, "pnpm": _package_manager_ok, "yarn": _package_manager_ok,
-    "cargo": _package_manager_ok,
+    "uv": _package_manager("--python", "-p"), "pip": _pip_ok, "pip3": _pip_ok,
+    "npm": _package_manager("--logs-dir"), "pnpm": _package_manager_ok, "yarn": _package_manager_ok,
+    "cargo": _package_manager("--config"),
     "go": _exact(("version",)),
     "node": _exact(("--version",), ("-v",)),
 })

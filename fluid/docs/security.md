@@ -111,7 +111,11 @@ model *reads* framing tokens even when they can't structurally escape.
   call runs in (`grep -r x .` from `/proc`, `/proc/../proc`). This is a
   best-effort text check, not an isolation boundary: a path built while the
   command runs (`cat $(echo ~/.kube)/config`, a variable, a script that opens
-  the file) is not seen.
+  the file) is not seen. An option on the read-only list that writes a file
+  or runs a program (`sort -o`, `tree -o`, `rg --pre`, `git log --output`) makes
+  the command `write` in every spelling the program accepts: value glued on
+  (`sort -oFILE`), inside combined flags (`sort -uo FILE`), `--opt=value` and
+  abbreviated (`git log --out=FILE`).
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,

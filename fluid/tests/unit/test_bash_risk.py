@@ -235,6 +235,98 @@ def test_globs_that_could_reach_a_credential_file_are_write(command: str) -> Non
     assert classify({"command": command}) == "write"
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The value glued on, inside combined short flags, --opt=value and
+        # abbreviated long options all write (or run) like the bare option.
+        "sort -oout.txt in.txt",
+        "sort -uo out.txt in.txt",
+        "sort -uoout.txt in.txt",
+        "sort --out=out.txt in.txt",
+        "sort --compress-program=sh in.txt",  # runs a program
+        "sort --compress=sh in.txt",
+        "date -s2020-01-01",
+        "date -us 2020-01-01",
+        "date --se=2020-01-01",
+        "tree -o out.txt",
+        "tree -aoout.txt",
+        "tree -R -H . -L 1",  # reruns tree with -o 00Tree.html in every folder
+        "file -C -m magic",  # writes magic.mgc
+        "file -zC -m magic",
+        "uniq -- -in -out",  # after --, -out is the output file
+        "rg --hostname-bin=sh pattern",  # runs a program
+        "rg --pre=sh pattern",
+        "printf -v PATH %s /tmp/x",  # reassigns PATH for what follows
+        "awk -o out.awk '{print}' f",  # pretty print to a file
+        "gawk -p '{print}' f",  # writes awkprof.out
+        "gawk -dvars.out '{print}' f",  # writes a variable dump
+        "gawk --pro '{print}' f",
+        "gawk -E prog.awk f",
+        "gawk -W profile '{print}' f",
+        "gawk -D '{print}' f",
+        "awk -vx=1 -fprog.awk f",
+        "sed -n --in=.bak s/a/b/ f",
+        "sed -n --fi=script.sed f",
+        "sed -n -es/a/b/w/tmp/out f",  # glued -e script with a w command
+        "sed -ne1e/bin/true f",
+        "git log --out=out.txt",
+        "git diff --outp=out.txt",
+        "pip list --log out.txt",
+        "pip3 list --lo=out.txt",
+        "pip list --python /tmp/x/python",
+        "uv pip list -p /tmp/x/python",
+        "npm list --logs-dir=/tmp/x",
+        "cargo tree --config build.rustc=/tmp/x/rustc",
+    ],
+)
+def test_write_options_are_write_in_every_spelling(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "find . -fprintf out.txt %p",
+        "find . -fprint out.txt",
+        "find . -fprint0 out.txt",
+        "find . -fls out.txt",
+        "find . -delete",
+        "find . -exec ls ;",
+        "find . -execdir ls ;",
+        "find . -ok ls ;",
+        "find . -okdir ls ;",
+    ],
+)
+def test_find_actions_that_write_or_run_are_write(command: str) -> None:
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Values of options that take one are not read as more flags.
+        "sort -t: -k2 file.txt",
+        "sort -to file.txt",  # -t's value is "o", not -o
+        "date -Iseconds",
+        "date -d tomorrow +%s",
+        "date -dsunday",
+        "awk -F, '{print $1}' data.csv",
+        "awk -vout=1 '{print out}' f",
+        "file -m magic archive.zip",
+        "sed -n -e 's/is/are/p' f",
+        "sed -n -es/is/are/p f",  # glued script: its i is not -i
+        "uniq -c file.txt",
+        "git log --oneline",
+        "pip list --local",
+        "rg --pre-glob '*.gz' pattern",
+    ],
+)
+def test_option_values_do_not_trip_the_write_option_check(command: str) -> None:
+    assert classify({"command": command}) == "safe", command
+
+
 def test_classify_without_command_is_write() -> None:
     assert classify({}) == "write"
     assert classify({"command": 42}) == "write"
