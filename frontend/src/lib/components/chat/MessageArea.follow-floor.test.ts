@@ -33,6 +33,7 @@ const transaction = between("let layoutBoundary = '';", '// Rendered geometry ha
 const reserve = between('function readingFloorReserve()', 'async function maintainCurrentTurnAnchor').replaceAll('(): number', '()');
 const beginShift = between('windowShifting = true;', 'mountedRange = next;');
 const beginTurn = between('function startCurrentTurnAnchor(', '/**\n\t * Where a stopped turn').replace('messageId: string', 'messageId');
+const freeFloor = between('/** Stop reserving px the followed floor captured', '/** The highest banner offset').replace('px: number', 'px');
 const handoffRelease = between("\t// Give a queue handoff's held slot back", '\t// Keep a freshly-sent pending bubble in view')
 	.replace(': number | null', '');
 
@@ -60,8 +61,9 @@ function probe() {
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
 		const clearJumpRevealTimer = () => {};
-		const containerRef = { clientHeight: 600, scrollTop: 0, getBoundingClientRect: () => ({ top: 0 }) };
-		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd }) };
+		// One painted layout: the live scrollTop, and the prose end (scroll coordinates) under it.
+		const containerRef = { clientHeight: 600, get scrollTop() { return env.scrollTop; }, getBoundingClientRect: () => ({ top: 0 }) };
+		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd - env.scrollTop }) };
 		// Painted height: the queue's own height, or the slot holding it open.
 		const painted = () => Math.max(env.pendingHeight, tailQueueSlotPx);
 		// The queue's bubbles dock at the slot's bottom; an empty queue docks none.
@@ -87,6 +89,7 @@ function probe() {
 		const effects = [];
 		const $effect = { pre: fn => { effects.push(fn); } };
 		${reserve}
+		${freeFloor}
 		${transaction}
 		${beginTurn}
 		${handoffRelease}
@@ -107,6 +110,7 @@ function probe() {
 			endShift() { windowShifting = false; },
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
+			free: px => freeFollowedFloor(px),
 			queueSlot: () => tailQueueSlotPx,
 			handoffSlot: () => handoffSlotPx,
 			errorOffset: () => tailErrorOffsetPx,
@@ -114,7 +118,7 @@ function probe() {
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; free(px: number): void; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
 	const settle = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
 	return {
 		env, ...state,
@@ -409,20 +413,80 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		p.env.proseEnd = 5560;
 		captureLongFloor(p);
 		expect(p.reserve()).toBe(40);
-		p.env.proseEnd = 5560 - 900;
+		p.env.proseEnd = 4660;
 		expect(p.reserve()).toBe(40);
 		// The browser clamps to the shorter transcript; the next boundary must not
-		// recapture the shrink against the ratcheted floor.
-		p.env.scrollTop = 5000 - 900;
+		// recapture the collapsed prose, even from a stale scroll baseline.
+		p.env.scrollTop = 4100;
 		p.env.session = session('long', 4); p.run();
-		expect(p.floor()).toBe(5600);
+		expect(p.floor()).toBe(4700);
 		expect(p.reserve()).toBe(40);
 		// Growth (a delivered row landing after its bubble left) still consumes it.
-		p.env.proseEnd = 5590;
+		p.env.proseEnd = 4690;
 		expect(p.reserve()).toBe(10);
 		// A reader who is not following is still owed their own viewport end.
-		p.env.follows = false; p.env.proseEnd = 100; p.run();
-		expect(p.reserve()).toBe(500);
+		p.env.follows = false; p.env.proseEnd = 4500; p.run();
+		expect(p.reserve()).toBe(4100 + 600 - 4500);
+	});
+
+	it('owes a queue bubble that docks after a fold its whole room through dequeue', () => {
+		// Round-1 review order: fold from 5600/5560, then a fresh 144px bubble
+		// takes the follower to a 4844 viewport end over 4660 prose. Its dequeue
+		// lands before the transcript row: the floor must still owe 184px, or
+		// the follower clamps 144px up and back down.
+		const p = probe();
+		p.env.proseEnd = 5560;
+		captureLongFloor(p);
+		p.env.proseEnd = 4660; p.env.scrollTop = 4100;
+		const queued = (status: string) => ({ ...session('long', 3), isStreaming: true, queuedMessages: [{ id: 'q1', status }] } as unknown as Session);
+		p.env.session = queued('sending'); p.env.pendingHeight = 144; p.run();
+		expect(p.floor()).toBe(4700);
+		p.env.scrollTop = 4244; // The follower followed the painted bubble down.
+		p.env.session = queued('queued'); p.run();
+		expect(p.floor()).toBe(4844);
+		// Dequeue: the bubble leaves the reserve; its row is not delivered yet.
+		p.env.session = { ...session('long', 3), isStreaming: true }; p.env.pendingHeight = 0; p.run();
+		expect(p.floor()).toBe(4844);
+		expect(p.reserve()).toBe(184);
+		// The delivered row consumes the held room, not more.
+		p.env.session = { ...session('long', 4), isStreaming: true }; p.env.proseEnd = 4760; p.run();
+		expect(p.reserve()).toBe(84);
+	});
+
+	it('gives each repeated fold back once and never resurrects collapsed prose', () => {
+		const p = probe();
+		p.env.proseEnd = 5560;
+		captureLongFloor(p);
+		for (const [prose, top] of [[4660, 4100], [3900, 3340], [3100, 2540]]) {
+			p.env.proseEnd = prose;
+			expect(p.reserve()).toBe(40);
+			p.env.scrollTop = top;
+			p.env.session = { ...p.env.session, messages: [...p.env.session.messages, {}] } as Session; p.run();
+			expect(p.floor()).toBe(prose + 40);
+			expect(p.reserve()).toBe(40);
+		}
+		// A later, larger painted end over the same prose is owed in full.
+		p.env.scrollTop = 2700; p.env.session = { ...p.env.session, liveTurnId: 'live' } as Session; p.run();
+		expect(p.floor()).toBe(3300);
+		expect(p.reserve()).toBe(200);
+	});
+
+	it('frees error room from the shrink-adjusted floor, and every floor reset clears its prose end', () => {
+		const p = probe();
+		p.env.proseEnd = 5500;
+		captureLongFloor(p);
+		expect(p.reserve()).toBe(100);
+		p.env.proseEnd = 4600;
+		p.free(30);
+		expect(p.reserve()).toBe(70);
+		p.env.scrollTop = 4000 - 30; p.env.session = session('long', 4); p.run();
+		expect(p.reserve()).toBe(70);
+		// Detach, switch, clear, eviction and fresh sends reset the floor; the
+		// prose end it was read over must go with it, or a later capture would
+		// carry a phantom shrink.
+		const resets = source.match(/(?<!let )followedViewportEnd = [^;]*0;/g) ?? [];
+		expect(resets.length).toBeGreaterThan(4);
+		expect(resets.every(line => line === 'followedViewportEnd = followedProseEnd = 0;')).toBe(true);
 	});
 
 	it('clears the floor without recapturing old coordinates when the transcript is cleared', () => {

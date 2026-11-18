@@ -1518,6 +1518,21 @@
 		return Math.max(0, containerRef.scrollTop + containerRef.clientHeight - proseEnd);
 	}
 
+	/**
+	 * Pre-render, while following: owe the painted viewport end over the painted
+	 * prose end, both read from this one layout (lastKnownScrollTop can still be
+	 * the end before a clamp). The floor already owed carries over less the prose
+	 * that collapsed under it since its capture: a later queue bubble's room is
+	 * owed in full, and a fold's collapsed prose is not held again.
+	 */
+	function captureFollowedFloor() {
+		if (!containerRef) return;
+		const proseEnd = proseEndNow();
+		const carried = followedViewportEnd - Math.max(0, followedProseEnd - proseEnd);
+		followedViewportEnd = Math.max(carried, containerRef.scrollTop + containerRef.clientHeight);
+		followedProseEnd = proseEnd;
+	}
+
 	/** Where the prose ends in scroll coordinates (the tail reserve starts there). */
 	function proseEndNow(): number {
 		if (!containerRef || !tailSpacerRef) return 0;
@@ -2467,12 +2482,7 @@
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
 		const follow = !unchanged && !resetFloor && untrack(() => isMounted && shouldAutoScroll) && !!containerRef;
 		const beforeTop = untrack(() => lastKnownScrollTop);
-		if (follow && containerRef) {
-			followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
-			// Pre-render: the prose this floor was read over. Both only ratchet, so a
-			// shrink the browser already clamped is not taken back at the next boundary.
-			followedProseEnd = Math.max(followedProseEnd, proseEndNow());
-		}
+		if (follow && containerRef) captureFollowedFloor();
 		if (takeoverBlank) freeFollowedFloor(takeoverBlank);
 		if (!follow) return;
 		const sessionId = s.sessionId;

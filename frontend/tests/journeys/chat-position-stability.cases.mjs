@@ -886,68 +886,125 @@ cases.push({
 // followed floor held that shrink as padding: scrollTop stayed on the old end and
 // the whole transcript sat above a blank view, Stop live and the scrollbar near
 // the bottom. Every painted frame must keep transcript content on screen.
+async function openFoldChat(ctx) {
+	const { page, status, variant } = ctx;
+	// Bash needs a project chat; Bypass is picked in the shared UI (the phone
+	// sheet's picker stays open), then the chat reopens in the real /mobile/.
+	await openNewChat(ctx, { project: PROJECT });
+	await pickAccess(page, 'Bypass');
+	const token = `fold-history-${uniq()}`;
+	await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 400 })}`);
+	await waitTurnSettled(page, { hold: 500, timeout: 120_000 });
+	if (prefix(variant) !== '/') {
+		const id = await chatIdByToken(page, token);
+		await gotoApp(page, status, `${prefix(variant)}?session=${encodeURIComponent(id)}`);
+		await waitChatOpen(page, { messagesAtLeast: 2, hold: 800 });
+	}
+}
+
+/** Per painted frame: blank-viewport runs while streaming, the largest prose-end
+ * drop (the fold), and once `track(key)` is called, every downward step of that
+ * row on screen (a follower's clamp-and-return bounce). */
+async function watchFold(page) {
+	await page.evaluate(() => {
+		const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null,
+			track: null, lastTop: null, tracked: 0, maxDown: 0, down: [] };
+		const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+		const sample = () => {
+			if (!watch.running) return;
+			const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+			const spacer = log?.querySelector('.transcript-tail-spacer');
+			const box = log?.getBoundingClientRect();
+			if (log && spacer && document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true') {
+				const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+				const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')];
+				watch.streaming++;
+				// The prose end in scroll coordinates: proves the fold really shrank it.
+				const proseEnd = log.scrollTop + spacer.getBoundingClientRect().top - box.top;
+				if (watch.lastProseEnd !== null) watch.proseDrop = Math.max(watch.proseDrop, watch.lastProseEnd - proseEnd);
+				watch.lastProseEnd = proseEnd;
+				if (rows.length && !rows.some(el => visible(el, box)) && !controls.some(el => visible(el, box))) {
+					watch.run++;
+					watch.longest = Math.max(watch.longest, watch.run);
+					if (watch.blank.length < 5) watch.blank.push({ scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight, viewport: log.clientHeight,
+						padding: getComputedStyle(log.querySelector('.chat-column')).paddingBottom, lastRowBottom: Math.round(rows.at(-1).getBoundingClientRect().bottom - box.top) });
+				} else watch.run = 0;
+			}
+			const row = watch.track && log?.querySelector(`.chat-column > [data-transcript-key="${CSS.escape(watch.track)}"]`);
+			if (row) {
+				const top = row.getBoundingClientRect().top - box.top;
+				watch.tracked++;
+				if (watch.lastTop !== null && top - watch.lastTop > watch.maxDown) {
+					watch.maxDown = top - watch.lastTop;
+					watch.down.push({ by: Math.round(top - watch.lastTop), scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight,
+						pending: !!log.querySelector('.pending-messages .userrow'), users: log.querySelectorAll('[data-user-turn-id]').length });
+				}
+				watch.lastTop = top;
+			}
+			watch.frames++;
+			requestAnimationFrame(sample);
+		};
+		requestAnimationFrame(sample);
+	});
+	return {
+		track: key => page.evaluate(key => { window.__foldFrames.track = key; }, key),
+		stop: () => page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames; })
+	};
+}
+
+async function checkFold(page, log, watch, label) {
+	const viewport = await page.locator(LOG).evaluate(el => el.clientHeight);
+	log(`${label} ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length,
+		longest: watch.longest, blank: watch.blank, tracked: watch.tracked, maxDown: Math.round(watch.maxDown), down: watch.down.slice(-3) })}`);
+	expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
+	expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
+	expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
+	const settled = await page.locator(LOG).evaluate(el => {
+		const box = el.getBoundingClientRect();
+		const last = [...el.querySelectorAll('.chat-column > [data-transcript-key]')].at(-1).getBoundingClientRect();
+		return { rowTop: last.top - box.top, rowBottom: last.bottom - box.top, viewport: el.clientHeight };
+	});
+	expect(settled.rowBottom > 8 && settled.rowTop < settled.viewport - 8, `the settled reply stays on screen (${JSON.stringify(settled)})`);
+}
+
 cases.push({
 	name: 'live-run-fold-keeps-the-stream-on-screen', viewports: ['phone'], throttles: ['slow'],
-	async setup(ctx) {
-		const { page, status, variant } = ctx;
-		// Bash needs a project chat; Bypass is picked in the shared UI (the phone
-		// sheet's picker stays open), then the chat reopens in the real /mobile/.
-		await openNewChat(ctx, { project: PROJECT });
-		await pickAccess(page, 'Bypass');
-		const token = `fold-history-${uniq()}`;
-		await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 400 })}`);
-		await waitTurnSettled(page, { hold: 500, timeout: 120_000 });
-		if (prefix(variant) !== '/') {
-			const id = await chatIdByToken(page, token);
-			await gotoApp(page, status, `${prefix(variant)}?session=${encodeURIComponent(id)}`);
-			await waitChatOpen(page, { messagesAtLeast: 2, hold: 800 });
-		}
-	},
+	setup: openFoldChat,
 	async act({ page, variant, mark, log }) {
-		await page.evaluate(() => {
-			const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null };
-			const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
-			const sample = () => {
-				if (!watch.running) return;
-				const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
-				const spacer = log?.querySelector('.transcript-tail-spacer');
-				if (log && spacer && document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true') {
-					const box = log.getBoundingClientRect();
-					const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
-					const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')];
-					watch.streaming++;
-					// The prose end in scroll coordinates: proves the fold really shrank it.
-					const proseEnd = log.scrollTop + spacer.getBoundingClientRect().top - box.top;
-					if (watch.lastProseEnd !== null) watch.proseDrop = Math.max(watch.proseDrop, watch.lastProseEnd - proseEnd);
-					watch.lastProseEnd = proseEnd;
-					if (rows.length && !rows.some(el => visible(el, box)) && !controls.some(el => visible(el, box))) {
-						watch.run++;
-						watch.longest = Math.max(watch.longest, watch.run);
-						if (watch.blank.length < 5) watch.blank.push({ scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight, viewport: log.clientHeight,
-							padding: getComputedStyle(log.querySelector('.chat-column')).paddingBottom, lastRowBottom: Math.round(rows.at(-1).getBoundingClientRect().bottom - box.top) });
-					} else watch.run = 0;
-				}
-				watch.frames++;
-				requestAnimationFrame(sample);
-			};
-			requestAnimationFrame(sample);
-		});
+		const { stop } = await watchFold(page);
 		await mark('a long flat tool run folds above the follower as new prose streams');
 		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
 		await waitChat(page, { streaming: 'true' });
 		await waitTurnSettled(page, { hold: 800, timeout: 120_000 });
-		const watch = await page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames; });
-		const viewport = await page.locator(LOG).evaluate(el => el.clientHeight);
-		log(`live run fold ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length, longest: watch.longest, blank: watch.blank })}`);
-		expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
-		expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
-		expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
-		const settled = await page.locator(LOG).evaluate(el => {
-			const box = el.getBoundingClientRect();
-			const last = [...el.querySelectorAll('.chat-column > [data-transcript-key]')].at(-1).getBoundingClientRect();
-			return { rowTop: last.top - box.top, rowBottom: last.bottom - box.top, viewport: el.clientHeight };
-		});
-		expect(settled.rowBottom > 8 && settled.rowTop < settled.viewport - 8, `the settled reply stays on screen (${JSON.stringify(settled)})`);
+		await checkFold(page, log, await stop(), 'live run fold');
+	}
+});
+
+// Round-1 review order: the fold first, then a fresh queued bubble docks under
+// the follower, then it dequeues before its transcript row is delivered. The
+// floor captured over the bubble must owe its whole room (not only the room from
+// before the fold), or the follower clamps up by the bubble and comes back.
+cases.push({
+	name: 'live-run-fold-then-queue-handoff', viewports: ['phone'], throttles: ['slow'],
+	setup: openFoldChat,
+	async act({ page, variant, mark, log }) {
+		const { track, stop } = await watchFold(page);
+		await mark('fold a long tool run above the follower');
+		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+		await waitChat(page, { streaming: 'true' });
+		const key = await page.waitForFunction(() => [...document.querySelectorAll('.chat-column > [data-transcript-key]')]
+			.findLast(row => row.querySelector('.prose')?.textContent.includes('All sixteen checks ran'))?.dataset.transcriptKey, null, { timeout: 120_000 })
+			.then(handle => handle.jsonValue());
+		await mark('queue a prompt after the fold, while the new prose streams');
+		await typeAndSend(page, `queued after fold ${uniq()} [script:default tps=300]`);
+		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+		await track(key);
+		await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
+		await waitTurnSettled(page, { hold: 3000, timeout: 120_000 });
+		const watch = await stop();
+		await checkFold(page, log, watch, 'fold then queue handoff');
+		expect(watch.tracked > 20, `the folded reply was tracked through the handoff (${watch.tracked} frames)`);
+		expect(watch.maxDown <= 2, `the follower never clamps back over the dequeued bubble (${Math.round(watch.maxDown)}px down)`);
 	}
 });
 
