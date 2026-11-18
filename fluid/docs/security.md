@@ -83,20 +83,30 @@ model *reads* framing tokens even when they can't structurally escape.
   `write` (→ prompts under `on_write`) when any argument names a credential
   file — `cat .env` does not sail under the read-only fast path. A command
   that passes that check still asks when any of these extra rules matches
-  (they can only add prompts): the command is over 4,096 characters or 512
-  words, or an argument over 1,024 characters; it contains `#`, a newline or a carriage return; it
-  mentions `environ`, `cmdline` or `auxv`, or `/dev/fd` or `/dev/std*`, or
-  mentions `/proc` together with `mem`, `maps`, `fd`, `cwd`, `root`, `task`,
-  a quote, a backslash, `$` or a glob or brace character; an argument with a
-  `/` uses `$` or has a glob or brace before its last `/`; it runs a
-  recursive `grep` (`-r`, `-R`, bundles such as `-rn`, `--recursive`,
-  `--dereference-recursive`, `-d recurse`, `--directories=…`, anywhere on
-  the line), `rg`, `diff`, `git diff` with `--no-index`, `--ext-diff`,
-  `--textconv` or two operands not joined by `..` (every word after `--`
-  counts), or `file -p`/`--preserve-date`; or the call's `cwd` is relative,
-  has a `..` part, or is under `/proc` or `/dev`. This is a name-based
-  preflight, not a sandbox: link targets, what a glob matches and paths
-  relative to the session directory are not resolved (#1778).
+  (they can only add prompts). Program names and options are read after the
+  shell's quote removal (`'r'g` is `rg`), and path names also on a copy with
+  every quote and backslash dropped and `//` and `/./` collapsed. A command
+  asks when it is over 4,096 characters or 512 words, has an argument over
+  1,024 characters, or the call's `cwd` is over 4,096 characters; it contains
+  `#` or a line break; it mentions `environ`, `cmdline` or `auxv`, or
+  `/dev/fd` or `/dev/std*`; it mentions `/proc` or `/dev` together with a
+  `mem`, `maps`, `fd`, `cwd`, `root`, `task`, `stdin` or similar path
+  component or `thread-self` (`/proc/meminfo` stays safe), or `/proc`
+  together with a quote, a backslash, `$` or a glob or brace character; an
+  argument with a `/` uses `$` or has a glob before a later `/`; it uses an
+  unquoted brace, `${…}` with an operator, `$_`, `$'…'` or `printf -v`; a
+  credential name sits behind a glued separator (`cat x;.env`) or after
+  `rev:` or `--opt=`; it runs a recursive `grep` (`-r`, `-R`, bundles such
+  as `-rn`, `--recursive`, `--dereference-recursive`, `-d recurse`,
+  `--directories=…`, anywhere on the line), or, as the program of a command,
+  `rg`, `diff`, `git diff` with `--no-index`, `--ext-diff`, `--textconv` or
+  two operands not joined by `..` (every word after `--` counts), or
+  `file -p`/`--preserve-date`; or the call's `cwd` does not start with `/`
+  (a drive letter on Windows), has a `..` part, or is under `/proc` or
+  `/dev`. These are name-based heuristics, a preflight and not a sandbox:
+  they do not cover every shell spelling, and link targets, what a glob
+  matches and paths relative to the session directory are not resolved
+  (#1778).
 - **Grep withholds matches from credential-pattern files** during tree-wide
   searches, with a visible note — a search for "TOKEN" cannot quietly print
   `.env` contents into context. Reading such a file explicitly still works,
@@ -156,11 +166,9 @@ can't know (path allowlists, secret scanners, audit logging).
   and hooks.
 - The code-mode kernel is not a container. The audit hook covers the
   operations the interpreter reports; it does not cover memory exhaustion
-  inside the process (the memory cap does), CPU spin (the timeout does), or
-  code that runs after every cell frame has left the stack, such as an
-  `atexit` callback compiled under a different filename. Reading the
-  interpreter's own `.py` sources under `sys.path` stays possible because
-  imports need it. A container-grade kernel remains future work
+  inside the process (the memory cap does) or CPU spin (the timeout does).
+  Reading the interpreter's own `.py` sources under `sys.path` stays
+  possible because imports need it. A container-grade kernel remains future work
   (`docs/agent-experience.md`).
 
 ## Override reference

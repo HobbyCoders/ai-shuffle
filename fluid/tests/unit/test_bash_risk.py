@@ -8,6 +8,7 @@ and auto-denied because the run cannot prompt.
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 
 import pytest
@@ -573,6 +574,48 @@ EXTRA_ASKS = [
     'cat "$HOME/notes"',
     "ls */x.py",
     "ls src/*/x.py",
+    "ls src/{a,b}.py",  # brace expansion asks; nothing is expanded here
+    "cat file{1,2}.txt",
+    # Quoting inside a word: names and options are read after the shell's
+    # quote removal, paths also on a copy with every quote dropped.
+    "cat '/pr''oc/self/e'nviron",
+    "head -c 100 '/pr''oc/self/e'nviron",
+    "cat '.en'v",
+    "cat .e\\nv",
+    "grep '-'r X .",
+    "grep -'R' X .",
+    "'r'g X src",
+    "r\\g X src",
+    "/usr/bin/rg X src",
+    "'fi'le -p notes.txt",
+    "file '-'p notes.txt",
+    "file -'-preserve-date' notes.txt",
+    "git 'di'ff --no-index a b",
+    "git diff '--no-index' a b",
+    "'di'ff -r dir1 dir2",
+    "cat x;.env",
+    "cat x;.env*",
+    "grep x '|' cat -r .",  # main's split breaks at the quoted '|'; the shell does not
+    "grep x ';' cat -r .",
+    # Equivalent descriptor and /proc spellings.
+    "cat /dev/./fd/0",
+    "cat /dev//stdin",
+    "cat /dev/.//./fd/0",
+    "cat /proc//self/./environ",
+    "cat //proc/self/./mem",
+    "cat /proc/./1/./maps",
+    "ls /proc/thread-self",
+    "cat /proc/self/map_files/x",
+    # Expansions that build a word the text does not show.
+    "cat ${HOME:+.env}",
+    "cat \"${X:-.env}\"",
+    "cat ${!x}",
+    "cat $'\\x2e'env",
+    'cat $".env"',
+    "echo .e'n'v; cat $_",
+    "printf -v x %s%s .e nv",
+    "cat '/x'$HOME",
+    "cat ${HOME}/x",
 ]
 
 
@@ -607,7 +650,6 @@ EXTRA_STILL_SAFE = [
     "echo \"$PATH\"",
     "ls src/*.py",
     "wc -l src/*.py",
-    "ls src/{a,b}.py",
     "awk '{print $1/2}' data.txt",
     "awk '{print ($1+$2)/2}' data.txt",
     "sed -n 's/a\\/b/c/p' f",
@@ -617,6 +659,21 @@ EXTRA_STILL_SAFE = [
     "cat README.md; echo done",
     "git show HEAD:README.md",
     "grep --color=auto x f.py",
+    "cat /proc/meminfo",
+    "cat /proc/loadavg",
+    "cat /proc/self/status",
+    "echo rg",
+    "echo diff a b",
+    "echo file -p",
+    "echo git diff a b",
+    "echo ${HOME}",
+    "echo $_x",
+    "grep -n 'foo$' f.py",
+    'grep -n "foo$" f.py',
+    "grep -n '\\$x' f.py",
+    "awk '{print ${1}}' data.txt",
+    "printf '%s\\n' a b",
+    "git diff 'HEAD~1..HEAD'",
 ]
 
 
@@ -627,15 +684,31 @@ def test_everyday_reads_stay_safe_next_to_the_extra_checks(command: str) -> None
 
 @pytest.mark.parametrize("cwd", [
     "src", "./src", "..", "a/../b", "/repo/../x", "/proc", "/proc/1", "/PROC/self",
-    "//proc/1", "/./proc", "/dev/fd", "/dev", 7,
+    "//proc/1", "/./proc", "/.//dev/./fd", "/srv//x/./../y", "~/x", "/dev/fd", "/dev", 7,
+    ["/srv"], "/" + "a" * 5000,
 ])
 def test_an_unsure_call_cwd_asks(cwd: object) -> None:
     assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
 
 
-@pytest.mark.parametrize("cwd", [None, "", "/srv/repo", "/home/u/proj", "C:\\Users\\dev\\proj", "/devices"])
+@pytest.mark.skipif(os.name == "nt", reason="drive paths are absolute on Windows")
+@pytest.mark.parametrize("cwd", ["C:/src", "C:\\src"])
+def test_a_drive_cwd_is_relative_on_posix(cwd: str) -> None:
+    assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
+
+
+@pytest.mark.parametrize("cwd", [None, "", "/srv/repo", "/home/u/proj", "/devices", "/srv/a.b/c"])
 def test_an_absolute_call_cwd_keeps_the_verdict(cwd: object) -> None:
     assert classify({"command": "cat README.md", "cwd": cwd}) == "safe"
+
+
+def test_a_huge_cwd_is_refused_before_any_work() -> None:
+    import time
+
+    cwd = "/" + "a" * (4 * 1024 * 1024)
+    start = time.perf_counter()
+    assert classify({"command": "cat README.md", "cwd": cwd}) == "write"
+    assert time.perf_counter() - start < 0.05
 
 
 def test_the_extra_checks_never_make_a_command_safer() -> None:
@@ -650,9 +723,11 @@ def test_the_extra_checks_never_make_a_command_safer() -> None:
         return "write" if bash_risk._touches_sensitive_path(command) else "safe"
 
     atoms = (".env", ".env.example;", "/proc/self/environ", "src/*.py", "-r", "--",
-             "$HOME/x", "file#name", "HEAD:.env", "'x/y'")
-    verbs = ("cat", "echo", "grep -n x", "grep -r x", "rg x", "git diff", "diff",
-             "ls", "file -p", "awk 1", "sed -n 1p", "rm", "python")
+             "$HOME/x", "file#name", "HEAD:.env", "'x/y'", "'.en'v", "'-'r",
+             "/dev//stdin", "{a,b}", "${X:-.env}", "/proc/meminfo")
+    verbs = ("cat", "echo", "grep -n x", "grep -r x", "rg x", "'r'g x", "git diff",
+             "git 'di'ff", "diff", "ls", "file -p", "'fi'le", "awk 1", "sed -n 1p", "rm",
+             "python")
     tails = ("", "; cat .env", " # note\ncat .env", " 2>&1")
     cwds = (None, "src")
     for verb, a, b, tail, cwd in itertools.product(verbs, atoms, atoms, tails, cwds):
@@ -665,7 +740,8 @@ def test_long_input_is_bounded() -> None:
     import time
 
     for command in ("cat -" + "q" * 4096, "cat -" + "q" * 2048, "cat " + "a/" * 2000,
-                    "echo " + "a " * 600, "grep " + "-e x " * 800):
+                    "echo " + "a " * 600, "grep " + "-e x " * 800, "cat " + "${" * 2000,
+                    "cat " + "*/" * 2000, "cat " + "/./" * 1300):
         start = time.perf_counter()
         assert classify({"command": command}) == "write"
         assert time.perf_counter() - start < 0.05, command[:20]
