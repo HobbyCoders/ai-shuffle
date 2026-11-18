@@ -185,6 +185,9 @@ class HostBridge:
 
     def _tool_hook_payload(self, **fields: Any) -> dict[str, Any]:
         if self._hook_payload is None:
+            # No engine builder: the bare payload this bridge always sent
+            # (no tool_use_id key, not even as None).
+            fields.pop("tool_use_id", None)
             return fields
         return self._hook_payload(**fields)
 

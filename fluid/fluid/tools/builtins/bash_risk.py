@@ -35,24 +35,36 @@ Programs with extra rules:
 
 - ``find``: none of ``-exec``, ``-execdir``, ``-ok``, ``-okdir``, ``-delete``,
   ``-fprint*``, ``-fls``.
-- ``awk``/``gawk``/``mawk``: no ``system``, ``getline``, ``|`` or ``@`` in
-  any argument (those run or write to commands, or reach code indirectly), and
-  no ``-f``/``-E``/``-i``/``-l``/``-D``/``-W`` (script files and extension
-  libraries the classifier cannot read) or ``-d``/``-p``/``-o`` (write files).
+- ``awk``/``gawk``/``mawk``: no ``system(``, ``getline`` or ``|`` in any
+  argument, and the options are parsed (gawk's set; anything else asks):
+  none that read a script file or extension the classifier cannot see
+  (``-f``/``-E``/``-i``/``-l``/``-W``), start the debugger (``-D``) or write a
+  file (``-d``/``-p``/``-o``). The program text itself (the first operand, or
+  the ``-e``/``--source`` values) is lexed: a ``system`` call, ``getline``, a
+  pipe or any ``@`` construct (``@include``, ``@load``, indirect ``@f()``)
+  outside strings and regex literals asks, and so does a ``/`` the lexer
+  cannot place as division or regex. See :func:`_awk_program_ok`.
 - ``sed``: must carry ``-n``/``--quiet``/``--silent``, must not carry ``-i`` or
-  ``--in-place`` or ``-f``/``--file`` (an unread script file), and no script
-  argument (``-e`` value included) that looks like a ``w`` file-write command
-  or a GNU ``e`` command or ``s///e`` flag (both run the text as a shell
-  command).
+  ``--in-place`` or ``-f``/``--file`` (an unread script file), and every
+  script must parse as commands that only print or edit the pattern space;
+  ``w``/``W``/``r``/``R``/``e``/``a``/``i``/``c``, an ``s`` flag other than
+  ``g``/``p``/``i``/``m``/a number, or anything unparsed asks. See
+  :func:`_sed_script_ok`.
+- ``date``: display only, see :func:`_date_ok`: at most one operand, a
+  ``+FORMAT``, and only ``-d``/``-u``/``-I``/``-R``/``--rfc-3339``/``-r``/``-f``
+  (and their long names).
 - ``sort``: no ``-o``/``--output`` or ``--compress-program``. ``uniq``: at
-  most one positional argument (the second is an output file). ``date``: no
-  ``-s``/``--set``. ``tree``: no ``-o`` or ``-R``. ``file``: no
-  ``-C``/``--compile``. ``env``: no arguments (``env cmd`` runs ``cmd``).
-  ``rg``: no ``--pre`` or ``--hostname-bin`` (both run a command).
+  most one positional argument (the second is an output file). ``tree``: no
+  ``-o`` or ``-R``. ``file``: no ``-C``/``--compile``. ``env``: no arguments
+  (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` or ``--hostname-bin`` (both
+  run a command).
 
-A banned option counts in every spelling getopt accepts: attached
-(``-ofile``), bundled (``-uo file``) and, for long options, abbreviated
-(``--outp=file``); see :func:`_sets_flag`.
+A banned option counts when attached (``-ofile``) or bundled (``-uo file``),
+and for programs that parse long options with getopt_long (sort, file, sed,
+date, gawk) when abbreviated to a prefix that names it unambiguously
+(``--outp=file``; ``sort --c`` is ambiguous and getopt_long refuses it).
+ripgrep and tree reject abbreviations, so their long options match exactly.
+Words after ``--`` are operands; see :func:`_no_flags`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
@@ -108,20 +120,48 @@ def _inert_assignment(token: str) -> bool:
     return bool(m) and token[: m.end() - 1] in INERT_ENV_VARS
 
 
-def _sets_flag(arg: str, banned: tuple[str, ...], takes_value: str = "") -> bool:
-    """True when ``arg`` sets one of the ``banned`` options in any getopt spelling.
+def _legacy_banned(args: list[str], banned: tuple[str, ...]) -> bool:
+    """The exact-token rule these checks started from, over every word.
 
-    ``banned`` holds short (``-o``) and long (``--output``) names. A long
-    option also counts when abbreviated (``--outp=x``): getopt_long accepts
-    any unambiguous prefix. A short one counts on its own, with a value
-    attached (``-ofile``) or bundled after other flags (``-uo file``,
-    ``-uofile``). The scan of a bundle stops at the first letter in
-    ``takes_value``: the rest of that word is the option's value, not flags
-    (``sort -t,`` or ``date -Iseconds`` set no ``-s``).
+    Kept under the stricter parsing below so that tightening a program's
+    check can only add prompts, never drop one (``-o`` after ``--`` still asks).
+    """
+    return any(a in banned or a.split("=", 1)[0] in banned for a in args)
+
+
+def _resolve_long(name: str, options: tuple[str, ...] | None) -> str | None:
+    """The long option ``name`` (``--outp``) selects, or None.
+
+    ``options`` None means the program matches long options exactly
+    (ripgrep, tree), so ``name`` stands for itself. Otherwise getopt_long's
+    rule: an exact name, else the one option ``name`` is a prefix of. None
+    when it is a prefix of no option or of several: getopt_long refuses an
+    ambiguous abbreviation, so ``sort --c`` (``--check`` or
+    ``--compress-program``) runs nothing.
+    """
+    if options is None or name in options:
+        return name
+    matches = [o for o in options if o.startswith(name)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _sets_flag(
+    arg: str, banned: tuple[str, ...], takes_value: str = "",
+    long_options: tuple[str, ...] | None = None,
+) -> bool:
+    """True when ``arg`` sets one of the ``banned`` options.
+
+    ``banned`` holds short (``-o``) and long (``--output``) names. A long one
+    counts exactly, or abbreviated when ``long_options`` lists the program's
+    real long options (see :func:`_resolve_long`). A short one counts on its
+    own, with a value attached (``-ofile``) or bundled after other flags
+    (``-uo file``, ``-uofile``). The scan of a bundle stops at the first
+    letter in ``takes_value``: the rest of that word is the option's value,
+    not flags (``sort -t,`` sets no ``-,``).
     """
     if arg.startswith("--"):
         name = arg.split("=", 1)[0]
-        return len(name) > 2 and any(b.startswith(name) for b in banned if b.startswith("--"))
+        return len(name) > 2 and _resolve_long(name, long_options) in banned
     if arg.startswith("-") and len(arg) > 1:
         for ch in arg[1:]:
             if f"-{ch}" in banned:
@@ -131,55 +171,358 @@ def _sets_flag(arg: str, banned: tuple[str, ...], takes_value: str = "") -> bool
     return False
 
 
-def _no_flags(*banned: str, takes_value: str = "") -> Check:
-    return lambda args: not any(_sets_flag(a, banned, takes_value) for a in args)
+def _no_flags(
+    *banned: str, takes_value: str = "", long_options: tuple[str, ...] | None = None,
+    double_dash_ends_options: bool = True,
+) -> Check:
+    """Check: none of ``banned`` is set, in any spelling :func:`_sets_flag` knows.
+
+    Words after ``--`` are operands (``sort -- -old.txt`` reads a file named
+    ``-old.txt``), except where ``double_dash_ends_options`` is off.
+    """
+    def check(args: list[str]) -> bool:
+        if _legacy_banned(args, banned):
+            return False
+        for a in args:
+            if a == "--" and double_dash_ends_options:
+                return True
+            if _sets_flag(a, banned, takes_value, long_options):
+                return False
+        return True
+    return check
 
 
 def _find_ok(args: list[str]) -> bool:
     return not any(a in _FIND_EXEC_FLAGS or a.startswith("-fprint") for a in args)
 
 
-# awk options that read a program the classifier never sees (-f, -E, -i, -l,
-# -D), write a file (gawk -d, -p, -o write awkvars.out / awkprof.out), or
-# reach either through gawk's and mawk's -W spellings (``-W exec file``).
-_AWK_BANNED_FLAGS = (
-    "-f", "--file", "-i", "--include", "-l", "--load", "-E", "--exec",
-    "-d", "--dump-variables", "-p", "--profile", "-o", "--pretty-print",
-    "-D", "--debug", "-W",
+# Real long options, for getopt_long abbreviation (GNU coreutils / libmagic).
+_SORT_LONG_OPTIONS = (
+    "--batch-size", "--buffer-size", "--check", "--compress-program", "--debug",
+    "--dictionary-order", "--field-separator", "--files0-from", "--general-numeric-sort",
+    "--help", "--human-numeric-sort", "--ignore-case", "--ignore-leading-blanks",
+    "--ignore-nonprinting", "--key", "--merge", "--month-sort", "--numeric-sort",
+    "--output", "--parallel", "--random-sort", "--random-source", "--reverse", "--sort",
+    "--stable", "--temporary-directory", "--unique", "--version", "--version-sort",
+    "--zero-terminated",
 )
-# Short awk options whose value may be attached (``-F:``, ``-vn=1``, ``-e'…'``).
-_AWK_VALUE_FLAGS = "FveL"
+_FILE_LONG_OPTIONS = (
+    "--apple", "--brief", "--checking-printout", "--compile", "--debug", "--dereference",
+    "--exclude", "--exclude-quiet", "--extension", "--files-from", "--help", "--keep-going",
+    "--list", "--magic-file", "--mime", "--mime-encoding", "--mime-type", "--no-buffer",
+    "--no-dereference", "--no-pad", "--no-sandbox", "--parameter", "--preserve-date",
+    "--print0", "--raw", "--separator", "--special-files", "--uncompress",
+    "--uncompress-noreport", "--version",
+)
+
+# How a long option takes its value: "none", "required" (``=v`` or the next
+# word) or "optional" (``=v`` only). The option parsers below need this to
+# tell an option's value from the program text or an operand.
+_DATE_LONG_OPTIONS = {
+    "--date": "required", "--debug": "none", "--file": "required", "--help": "none",
+    "--iso-8601": "optional", "--reference": "required", "--resolution": "none",
+    "--rfc-3339": "required", "--rfc-email": "none", "--set": "required",
+    "--universal": "none", "--utc": "none", "--version": "none",
+}
+_DATE_DISPLAY_LONG = frozenset({
+    "--date", "--file", "--iso-8601", "--reference", "--rfc-3339", "--rfc-email",
+    "--universal", "--utc",
+})
+
+
+def _long_value(
+    arg: str, args: list[str], i: int, table: dict[str, str],
+) -> tuple[str, str, int] | None:
+    """Parse long option ``arg`` against ``table``: (option, value, next index).
+
+    ``i`` indexes the word after ``arg``; a required value not given with
+    ``=`` is that word. None when the option is unknown or an ambiguous
+    abbreviation, takes no value but was given one, or lacks its value.
+    """
+    name, eq, value = arg.partition("=")
+    option = _resolve_long(name, tuple(table))
+    if option is None:
+        return None
+    kind = table[option]
+    if kind == "none" and eq:
+        return None
+    if kind == "required" and not eq:
+        if i >= len(args):
+            return None
+        value, i = args[i], i + 1
+    return option, value, i
+
+
+def _date_ok(args: list[str]) -> bool:
+    """Display forms only: ``date [-u] [-d STR|-r FILE|-f FILE] [+FORMAT]``.
+
+    Any operand other than one ``+FORMAT`` (``date MMDDhhmm`` sets the clock)
+    and any option outside the read-only set asks.
+    """
+    if _legacy_banned(args, ("-s", "--set")):
+        return False
+    operands: list[str] = []
+    i = 0
+    options_done = False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if options_done or a == "-" or not a.startswith("-"):
+            operands.append(a)
+        elif a == "--":
+            options_done = True
+        elif a.startswith("--"):
+            parsed = _long_value(a, args, i, _DATE_LONG_OPTIONS)
+            if parsed is None or parsed[0] not in _DATE_DISPLAY_LONG:
+                return False
+            i = parsed[2]
+        else:
+            for j, ch in enumerate(a[1:], 1):
+                if ch in "uR":
+                    continue
+                if ch == "I":  # optional value, attached only (-Iseconds)
+                    break
+                if ch in "dfr":  # required value: the rest of the word or the next
+                    if j == len(a) - 1:
+                        if i >= len(args):
+                            return False
+                        i += 1
+                    break
+                return False
+    return len(operands) <= 1 and all(o.startswith("+") for o in operands)
+
+
+# gawk's options (mawk and BusyBox awk take a subset). Banned ones read a
+# script file or extension the classifier never sees (-f, -E, -i, -l, -W),
+# start the debugger (-D) or write a file (-d, -p, -o write awkvars.out /
+# awkprof.out). Unknown options ask: another awk could give one a value and
+# so shift which word is the program.
+_AWK_LONG_OPTIONS = {
+    "--assign": "required", "--bignum": "none", "--characters-as-bytes": "none",
+    "--copyright": "none", "--csv": "none", "--debug": "optional",
+    "--dump-variables": "optional", "--exec": "required", "--field-separator": "required",
+    "--file": "required", "--gen-pot": "none", "--help": "none", "--include": "required",
+    "--lint": "optional", "--lint-old": "none", "--load": "required",
+    "--no-optimize": "none", "--non-decimal-data": "none", "--optimize": "none",
+    "--posix": "none", "--pretty-print": "optional", "--profile": "optional",
+    "--re-interval": "none", "--sandbox": "none", "--source": "required",
+    "--trace": "none", "--traditional": "none", "--use-lc-numeric": "none",
+    "--version": "none",
+}
+_AWK_BANNED_LONG = frozenset({
+    "--debug", "--dump-variables", "--exec", "--file", "--include", "--load",
+    "--pretty-print", "--profile",
+})
+_AWK_BANNED_SHORT = "fEilWdDop"
+_AWK_FLAG_SHORT = "bcCghIkMnNOPrsStVY"
+_AWK_VALUE_SHORT = "FveZ"  # value attached (-F:) or the next word (-F :)
+_AWK_OPTIONAL_SHORT = "L"  # value attached only (-Lfatal)
+# The exact-token rule awk started from, kept over every word.
+_AWK_FILE_FLAGS = {"-f", "--file", "-i", "--include", "-l", "--load"}
 
 
 def _awk_ok(args: list[str]) -> bool:
-    # The program text is not parsed, so the rule is textual and errs towards
-    # asking. ``system`` anywhere (awk allows space, newlines or a comment
-    # before its ``(``), ``getline`` (reads files and commands) and ``|``
-    # (pipes to and from commands) refuse the command, even where they only
-    # appear in a regex or a file name. ``@`` refuses it too: gawk's
-    # ``@include``/``@load`` pull in code or extensions and an indirect call
-    # (``@f()``) can reach ``system`` without spelling it; only an attached
-    # ``-F``/``-v`` value, which is never program text, may carry one. Output
-    # redirection (``print > "f"``, ``>>``) needs a ``>``, which
-    # :func:`is_read_only` already refuses in any token.
     for a in args:
-        if "system" in a or "getline" in a or "|" in a:
+        if "system(" in a or "getline" in a or "|" in a:
             return False
-        if "@" in a and not a.startswith(("-F", "-v")):
+        if a.split("=", 1)[0] in _AWK_FILE_FLAGS or (
+            a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
+        ):
             return False
-        if _sets_flag(a, _AWK_BANNED_FLAGS, _AWK_VALUE_FLAGS):
+    sources: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            i += 1
+            break
+        if a == "-" or not a.startswith("-"):
+            break
+        i += 1
+        if a.startswith("--"):
+            parsed = _long_value(a, args, i, _AWK_LONG_OPTIONS)
+            if parsed is None or parsed[0] in _AWK_BANNED_LONG:
+                return False
+            option, value, i = parsed
+            if option == "--source":
+                sources.append(value)
+            continue
+        for j, ch in enumerate(a[1:], 1):
+            if ch in _AWK_BANNED_SHORT:
+                return False
+            if ch in _AWK_FLAG_SHORT:
+                continue
+            if ch in _AWK_OPTIONAL_SHORT:
+                break
+            if ch in _AWK_VALUE_SHORT:
+                value = a[j + 1:]
+                if not value:
+                    if i >= len(args):
+                        return False
+                    value, i = args[i], i + 1
+                if ch == "e":
+                    sources.append(value)
+                break
             return False
+    operands = args[i:]
+    if not sources:
+        if not operands:
+            return True  # no program: awk prints its usage
+        sources, operands = [operands[0]], operands[1:]
+    # gawk and mawk stop reading options at the program; an awk that kept
+    # going would read an option-looking word here as an option (``-e …``).
+    if any(o.startswith("-") and o != "-" for o in operands):
+        return False
+    # Several -e/--source texts: lex them joined both ways, as separate
+    # lines and run together, so a construct split across two values is
+    # seen whichever way the awk at hand joins them.
+    return all(_awk_program_ok(p) for p in {"\n".join(sources), "".join(sources)})
+
+
+_AWK_KEYWORDS = frozenset({
+    "BEGIN", "END", "BEGINFILE", "ENDFILE", "function", "func", "if", "else", "while",
+    "for", "do", "break", "continue", "next", "nextfile", "exit", "return", "delete",
+    "in", "getline", "print", "printf", "case", "default", "switch", "length",
+})
+_AWK_CONTROL = frozenset({"if", "while", "for", "switch"})
+# After these an operand is expected, so ``/`` opens a regex literal.
+_AWK_REGEX_AFTER = frozenset({
+    "", "(", ",", "{", "}", ";", "\n", "!", "~", "&&", "||",
+    "=", "+", "-", "*", "%", "^", "<", "?", ":",
+})
+# After these an operand just ended, so ``/`` divides.
+_AWK_DIVIDE_AFTER = frozenset({"name", "number", "string", "regex", "]", ")", "++", "--"})
+_AWK_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_AWK_NUMBER = re.compile(r"\.?[0-9][0-9A-Za-z_.]*")
+
+
+def _awk_literal_end(text: str, i: int, close: str, brackets: bool) -> int | None:
+    """Index just past the literal opened before ``i`` and closed by ``close``.
+
+    Backslash escapes the next character. With ``brackets``, a ``close``
+    inside a bracket expression (``/[/]/``) does not end it, as in gawk. None
+    when the literal does not end on its line.
+    """
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "\n":
+            return None
+        if ch == close:
+            return i + 1
+        if brackets and ch == "[":
+            j = i + 1
+            if j < n and text[j] == "^":
+                j += 1
+            if j < n and text[j] == "]":
+                j += 1
+            while j < n and text[j] != "]":
+                if text[j] == "\n":
+                    return None
+                if text[j] == "[" and text[j + 1:j + 2] in (":", "=", "."):
+                    end = text.find(text[j + 1] + "]", j + 2)
+                    if end < 0:
+                        return None
+                    j = end + 2
+                    continue
+                j += 1
+            if j >= n:
+                return None
+            i = j
+        i += 1
+    return None
+
+
+def _awk_program_ok(text: str) -> bool:
+    """True when an awk program cannot run a command, write a file or load code.
+
+    A small lexer: strings, regex literals and comments are skipped, so
+    ``"a@b"``, ``/@example\\.com$/`` and a field named ``system_name`` pass.
+    Outside them a ``system`` or ``getline`` name, ``|`` (pipes), ``>``
+    (output redirection), ``@`` (gawk's ``@include``/``@load``/``@namespace``
+    and indirect calls like ``@f()``, which reach ``system`` without spelling
+    it) or a character awk has no use for asks. ``/`` is division or a regex
+    depending on the grammar; where the previous token does not settle it
+    (after a keyword such as ``print``, after ``if (…)``) the program asks.
+    """
+    prev = ""  # previous significant token's class: "", an operator, "name", ...
+    parens: list[str] = []  # for each open "(", the token before it
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in " \t\r":
+            i += 1
+        elif ch == "\\" and text[i + 1:i + 2] in ("\n", "\r"):
+            i += 2  # line continuation
+        elif ch == "#":
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif ch == "\n":
+            prev, i = "\n", i + 1
+        elif ch == '"':
+            end = _awk_literal_end(text, i + 1, '"', brackets=False)
+            if end is None:
+                return False
+            prev, i = "string", end
+        elif ch == "/":
+            if prev in _AWK_DIVIDE_AFTER:
+                prev, i = "/", i + 1
+                continue
+            if prev not in _AWK_REGEX_AFTER:
+                return False  # cannot tell a regex literal from division
+            end = _awk_literal_end(text, i + 1, "/", brackets=True)
+            if end is None or end != _awk_literal_end(text, i + 1, "/", brackets=False):
+                return False  # an awk without bracket handling would end it elsewhere
+            prev, i = "regex", end
+        elif m := _AWK_NAME.match(text, i):
+            word = m.group()
+            if word in ("system", "getline"):
+                return False
+            prev = word if word in _AWK_KEYWORDS else "name"
+            i = m.end()
+        elif m := _AWK_NUMBER.match(text, i):
+            prev, i = "number", m.end()
+        elif text.startswith(("&&", "||", "++", "--"), i):
+            if text[i] == "|":
+                return False
+            prev, i = text[i:i + 2], i + 2
+        elif ch == "(":
+            parens.append(prev if prev in _AWK_CONTROL else "")
+            prev, i = "(", i + 1
+        elif ch == ")":
+            # ``if (x) /re/`` starts a statement; ``(a) / 2`` divides.
+            prev = "control)" if parens and parens.pop() else ")"
+            i += 1
+        elif ch in "{};,!~=+-*%^<?:[]$":
+            prev, i = ch, i + 1
+        else:
+            return False  # @, |, >, & and anything else awk does not take here
     return True
 
 
-def _sed_ok(args: list[str]) -> bool:
+# sed's long options (GNU) and how each takes its value.
+_SED_LONG_OPTIONS = {
+    "--debug": "none", "--expression": "required", "--file": "required",
+    "--follow-symlinks": "none", "--help": "none", "--in-place": "optional",
+    "--line-length": "required", "--null-data": "none", "--posix": "none",
+    "--quiet": "none", "--regexp-extended": "none", "--sandbox": "none",
+    "--separate": "none", "--silent": "none", "--unbuffered": "none",
+    "--version": "none",
+}
+
+
+def _sed_tokens_ok(args: list[str]) -> bool:
+    """The word-level rule sed started from, kept so the parser only adds prompts."""
     quiet = False
     scripts: list[str] = []
     for a in args:
         if a in ("--quiet", "--silent"):
             quiet = True
-        elif a.startswith(("--in-place", "--file")) or _sets_flag(a, ("--in-place", "--file")):
-            return False  # also abbreviated: ``--i``, ``--fi=x.sed``
+        elif a.startswith(("--in-place", "--file")):
+            return False
         elif a.startswith("--expression="):
             scripts.append(a.split("=", 1)[1])
         elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
@@ -188,10 +531,6 @@ def _sed_ok(args: list[str]) -> bool:
                 return False
             if "n" in flags:
                 quiet = True
-            # ``-e`` takes the rest of the word as its script: ``-ew out``.
-            attached = flags.partition("e")[2]
-            if attached:
-                scripts.append(attached)
         else:
             scripts.append(a)
     if not quiet:
@@ -203,6 +542,175 @@ def _sed_script_runs_or_writes(script: str) -> bool:
     if _SED_WRITE_CMD.search(script):
         return True
     return bool(_SED_EXEC_CMD.search(_SED_ADDRESS_RE.sub("", script)))
+
+
+def _sed_ok(args: list[str]) -> bool:
+    if not _sed_tokens_ok(args):
+        return False
+    quiet = False
+    scripts: list[str] = []
+    operands: list[str] = []
+    i = 0
+    options_done = False
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if options_done or a == "-" or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if operands:
+            # GNU sed reads options after operands; BSD sed stops at the
+            # first one, so the two would disagree on which word is the script.
+            return False
+        if a == "--":
+            options_done = True
+            continue
+        if a.startswith("--"):
+            parsed = _long_value(a, args, i, _SED_LONG_OPTIONS)
+            if parsed is None or parsed[0] in ("--in-place", "--file"):
+                return False
+            option, value, i = parsed
+            if option in ("--quiet", "--silent"):
+                quiet = True
+            elif option == "--expression":
+                scripts.append(value)
+            continue
+        for j, ch in enumerate(a[1:], 1):
+            if ch == "n":
+                quiet = True
+            elif ch in "rzuEsb":
+                continue
+            elif ch in "el":  # value: the rest of the word or the next
+                value = a[j + 1:]
+                if not value:
+                    if i >= len(args):
+                        return False
+                    value, i = args[i], i + 1
+                if ch == "e":
+                    scripts.append(value)
+                break
+            else:
+                return False  # -i, -f and anything unknown
+    if not scripts and operands:
+        scripts = [operands[0]]  # no -e: the first operand is the script
+    return quiet and all(_sed_script_ok(s) for s in scripts)
+
+
+# sed commands that only print, move or edit the pattern/hold space.
+_SED_PLAIN_COMMANDS = frozenset("pP=dDgGhHxnNzF")
+_SED_NUMBER_COMMANDS = frozenset("lqQ")  # optional number
+_SED_LABEL_COMMANDS = frozenset("btT")  # optional label
+_SED_S_FLAGS = frozenset("gpiImM0123456789")
+_SED_LABEL = re.compile(r"[A-Za-z0-9_]*")
+
+
+def _sed_regex_end(script: str, i: int, delim: str) -> int | None:
+    """Index past the regex closing at ``delim``; None if seds could disagree.
+
+    GNU sed ends it at the first unescaped ``delim``; BSD sed skips bracket
+    expressions (``/[/]/``). Both readings must agree.
+    """
+    end = _awk_literal_end(script, i, delim, brackets=False)
+    if end is None or end != _awk_literal_end(script, i, delim, brackets=True):
+        return None
+    return end
+
+
+def _sed_address(script: str, i: int, second: bool) -> int | None:
+    """Index past one address at ``i`` (possibly empty), or None if unparsed."""
+    n = len(script)
+    if i < n and second and script[i] in "+~":
+        i += 1
+        if i >= n or not script[i].isdigit():
+            return None
+    if i < n and script[i].isdigit():
+        while i < n and script[i].isdigit():
+            i += 1
+        if not second and i < n and script[i] == "~":  # GNU first~step
+            i += 1
+            while i < n and script[i].isdigit():
+                i += 1
+    elif i < n and script[i] == "$":
+        i += 1
+    elif i < n and script[i] == "/":
+        end = _sed_regex_end(script, i + 1, "/")
+        if end is None:
+            return None
+        i = end
+        while i < n and script[i] in "IM":
+            i += 1
+    elif i < n and script[i] == "\\":
+        return None  # \cREGEXc custom delimiter: not parsed
+    return i
+
+
+def _sed_script_ok(script: str) -> bool:
+    """True when every command in a sed script only prints or edits text.
+
+    A conservative parser for the common subset: addresses (numbers, ``$``,
+    ``/re/``, ``first~step``, ``+N``), ``!``, blocks, comments, labels, the
+    commands in :data:`_SED_PLAIN_COMMANDS`, ``l``/``q``/``Q`` with a number,
+    ``b``/``t``/``T``, and ``s``/``y``. ``w``/``W`` and ``s///w`` write files,
+    ``e`` and ``s///e`` run commands, ``r``/``R`` read files the credential
+    check never sees; those, ``a``/``i``/``c`` text and anything else the
+    parser does not know ask.
+    """
+    i, n = 0, len(script)
+    while True:
+        while i < n and script[i] in " \t\n;}":
+            i += 1
+        if i >= n:
+            return True
+        if script[i] == "#":
+            end = script.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        start = i
+        i = _sed_address(script, i, second=False)
+        if i is not None and i > start and i < n and script[i] == ",":
+            i = _sed_address(script, i + 1, second=True)
+        if i is None:
+            return False
+        while i < n and script[i] in " \t!":
+            i += 1
+        if i >= n:
+            return False
+        cmd = script[i]
+        i += 1
+        if cmd == "{":
+            continue
+        if cmd in _SED_NUMBER_COMMANDS:
+            while i < n and script[i] in " \t":
+                i += 1
+            while i < n and script[i].isdigit():
+                i += 1
+        elif cmd in _SED_LABEL_COMMANDS or cmd == ":":
+            while i < n and script[i] in " \t":
+                i += 1
+            label = _SED_LABEL.match(script, i)
+            if cmd == ":" and not label.group():
+                return False
+            i = label.end()
+        elif cmd in "sy":
+            delim = script[i:i + 1]
+            if not delim or delim.isalnum() or delim in " \t\n\\;}#":
+                return False
+            i = (_sed_regex_end(script, i + 1, delim) if cmd == "s"
+                 else _awk_literal_end(script, i + 1, delim, brackets=False))
+            if i is None:
+                return False
+            i = _awk_literal_end(script, i, delim, brackets=False)
+            if i is None:
+                return False
+            if cmd == "s":
+                while i < n and script[i] in _SED_S_FLAGS:
+                    i += 1
+        elif cmd not in _SED_PLAIN_COMMANDS:
+            return False
+        while i < n and script[i] in " \t":
+            i += 1
+        if i < n and script[i] not in ";\n}#":
+            return False  # w/e flag, a filename, or extra text after a command
 
 
 def _uniq_ok(args: list[str]) -> bool:
@@ -234,19 +742,27 @@ READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
     "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
     "grep": None, "egrep": None, "fgrep": None,
-    "rg": _no_flags("--pre", "--hostname-bin"),  # both run a program
-    "find": _find_ok, "file": _no_flags("-C", "--compile", takes_value="efFmP"),
+    # Both run a program. ripgrep rejects abbreviated long options, so exact.
+    "rg": _no_flags("--pre", "--hostname-bin"),
+    "find": _find_ok,
+    "file": _no_flags(
+        "-C", "--compile", takes_value="efFmP", long_options=_FILE_LONG_OPTIONS,
+    ),
     "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
     "which": None, "where": None, "type": None,
     "env": _env_ok, "printenv": None,
-    "date": _no_flags("-s", "--set", takes_value="dfrI"), "whoami": None, "uname": None,
+    "date": _date_ok, "whoami": None, "uname": None,
     # tree -o writes its listing to a file; -R (with -H) writes 00Tree.html
     # into every directory. tree takes option values from the next word, so
-    # every letter of a bundle is a flag.
-    "tree": _no_flags("-o", "-R"),
+    # every letter of a bundle is a flag. tree has its own parser, not
+    # getopt, so every word is scanned, ``--`` or not.
+    "tree": _no_flags("-o", "-R", double_dash_ends_options=False),
     "diff": None, "cmp": None,
-    "sort": _no_flags("-o", "--output", "--compress-program", takes_value="ktSTy"),
+    "sort": _no_flags(
+        "-o", "--output", "--compress-program", takes_value="ktSTy",
+        long_options=_SORT_LONG_OPTIONS,
+    ),
     "uniq": _uniq_ok, "cut": None, "tr": None,
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,
     "sed": _sed_ok,

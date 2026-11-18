@@ -275,6 +275,25 @@ ESCAPING_SPELLINGS = [
     "sed -n --fi=script.sed f",  # abbreviated --file
     "file -C -m magic",  # compiles magic.mgc
     "file --compile -m magic",
+    "file --co -m magic",  # unambiguous abbreviation of --compile
+    "tree -- -o out.txt",  # tree's own parser: -- is not trusted to end options
+    # awk program text is lexed: calls and @-constructs ask, strings and
+    # regex literals do not hide them.
+    "awk 'BEGIN{@f(\"x\")}'",
+    "gawk '@namespace \"x\"; BEGIN{}'",
+    "awk '{print}' -e '@f()'",  # an option after the program (permuting awk)
+    "awk -e 'BEGIN{x=\"' -e '\"; @f()}'",  # a string split across -e values
+    "awk 'BEGIN{if (x) /@/}'",  # regex or division: not settled, so ask
+    # sed: w/W need no particular filename characters; r reads a file the
+    # credential check never sees; unparsed regex delimiters ask.
+    "sed -n 'W@x' f",
+    "sed -n 's/a/b/w@out' f",
+    "sed -n 'w$x' f",
+    "sed -n '1r x' f",
+    "sed -n 's/[/]/x/p' f",  # GNU and BSD sed end this regex differently
+    # date: only display forms; a bare operand sets the clock.
+    "date 01011200",
+    "date +%s 01011200",
 ]
 
 # Everyday read-only forms around the same programs stay "safe".
@@ -305,6 +324,29 @@ STILL_SAFE = [
     "sed -ne '/x/p' f",
     "sed -n -e '1,3p' f",
     "file -b x",
+    # Only awk's program text is inspected, and only for real calls.
+    "awk -F @ '{print $2}' f",
+    "awk '/@example\\.com$/' f",
+    "awk '$2 ~ /@example\\.com$/ {print $1}' f",
+    "awk '{system_name=$1; print system_name}' f",
+    "awk '{print $1}' user@host.log",
+    "awk 'BEGIN{x=\"a@b\"; print x}'",
+    "awk '{print ($1+$2)/2}' f",
+    "awk '{gsub(/foo/, \"bar\"); print}' f",
+    "awk '!seen[$0]++' f",
+    # -- ends options; an ambiguous abbreviation sets nothing.
+    "sort -- -old.txt",
+    "sort --c file",  # --check or --compress-program: sort refuses it
+    "rg --pr=x foo",  # ripgrep rejects abbreviations, so this is not --pre
+    "sed -n '$p' f",
+    "sed -n '/a/,/b/{p}' f",
+    "sed -n '/[0-9]/p' f",
+    "sed -n '1p;$p' f",
+    "sed -n 's|/usr|/opt|p' f",
+    "date -R",
+    "date --rfc-3339=seconds",
+    "date -r f +%F",
+    "date -d @1700000000",
 ]
 
 
