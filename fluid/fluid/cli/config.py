@@ -93,6 +93,12 @@ def resolved_prompt(
     if addendum:
         base = "\n\n".join(b for b in (base, addendum) if b)
     enabled = config.instruction_files.enabled
+    # Under the isolated profile the environment block's git status must not
+    # run in a writable root; making the policy registers that (see
+    # fluid.context.environment.skip_git_probes).
+    from fluid.tools.isolation import policy_from_config
+
+    policy_from_config(config.sandbox, config.cwd)
     return compile_prompt(
         PromptInputs(
             base=base,

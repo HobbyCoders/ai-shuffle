@@ -102,8 +102,8 @@ BUILTIN_DEFAULTS: dict[str, Any] = {
         "allowed": None,
         "disallowed": [],
     },
-    # The opt-in isolated execution profile for model-driven child processes
-    # (Bash, Monitor, the code-mode kernel); see fluid.tools.isolation and
+    # The opt-in isolated execution profile for the Bash tool's and Monitor's
+    # commands; see fluid.tools.isolation and
     # docs/security.md. "off" changes nothing.
     "sandbox": {
         "mode": "off",
@@ -1001,9 +1001,8 @@ def build_engine(
         # the child only. Never written to os.environ.
         ctx.extra.setdefault("settings_env", child_env)
     # The opt-in isolated execution profile ([sandbox] mode = "isolated"),
-    # resolved once here: this one object goes on the ctx (Bash, Monitor,
-    # Task and Swarm workers read it there), to the command hooks and to the
-    # code-mode kernel. A policy the host put on its ctx before this call
+    # resolved once here: this one object goes on the ctx, where Bash and
+    # Monitor read it. A policy the host put on its ctx before this call
     # wins; a host None never turns a configured profile off. Off (the
     # default) leaves only the record that nothing was set, so a policy a
     # host adds after the build is refused rather than half applied.
@@ -1018,6 +1017,13 @@ def build_engine(
         if reason:
             logger.warning("isolated execution profile cannot be enforced; commands will be "
                         "refused: %s", reason)
+        if config.code_mode:
+            # Fail closed: the profile confines Bash and Monitor only, and a
+            # code-mode cell is arbitrary Python in an unconfined kernel.
+            raise _isolation.IsolationUnavailable(
+                "the isolated execution profile ([sandbox] mode = \"isolated\") confines Bash and "
+                "Monitor only; code mode runs model-written Python outside it. Set code_mode = "
+                "false, or turn the profile off.")
     _enabled_json, disabled_mcp = mcp_toggles(settings)
     # Builtin wiring that rides the tool context: the recall builtins borrow
     # the store's own optional hooks when it has them (a store with no durable
@@ -1052,7 +1058,7 @@ def build_engine(
 
             if hooks is None:
                 hooks = HookBus()
-            register_config_hooks(hooks, config.hooks, cwd=config.cwd, isolation=isolation_policy)
+            register_config_hooks(hooks, config.hooks, cwd=config.cwd)
         if permissions is None:
             permissions = _build_permissions(config, settings)
         if bus is None:
@@ -1120,7 +1126,7 @@ def build_engine(
 
         if hooks is None:
             hooks = HookBus()
-        register_config_hooks(hooks, config.hooks, cwd=config.cwd, isolation=isolation_policy)
+        register_config_hooks(hooks, config.hooks, cwd=config.cwd)
 
     client = provider if provider is not None else _build_provider_client(config, provider_name)
     if permissions is None:
@@ -1139,13 +1145,7 @@ def build_engine(
     if config.code_mode:
         from fluid.codemode.session import CodeModeSession
 
-        kernel_config = None
-        if isolation_policy is not None:
-            from fluid.codemode.subprocess_kernel import KernelConfig
-
-            kernel_config = KernelConfig(isolation=isolation_policy)
-        codemode = CodeModeSession(
-            registry, config=kernel_config, skills=skills, synthesizer=synthesizer)
+        codemode = CodeModeSession(registry, skills=skills, synthesizer=synthesizer)
     elif config.continual:
         # JSON-mode leg of the learning loop: same journal file, same
         # synthesizer, fed from the engine's turn/tool seams.

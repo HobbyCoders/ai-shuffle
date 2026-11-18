@@ -395,15 +395,17 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         env.update(NO_COLOR="1", FORCE_COLOR="0")
     else:
         argv, cwd, env = launch.argv, launch.cwd, launch.env
-    # Under Docker agent isolation the command starts through the spawn
-    # runner as the agent account; otherwise all three come back unchanged.
-    argv, cwd, env = agent_runner.wrap(argv, cwd, env)
     try:
+        # Under Docker agent isolation the command starts through the spawn
+        # runner as the agent account; otherwise all three come back unchanged.
+        argv, cwd, env = agent_runner.wrap(argv, cwd, env)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             # No stdin, as the description promises: a command that reads it
-            # gets EOF instead of the user's next keystrokes.
-            stdin=asyncio.subprocess.DEVNULL,
+            # gets EOF instead of the user's next keystrokes. Under the
+            # isolated profile the launcher reads its handoff from stdin and
+            # gives the command /dev/null in its place.
+            stdin=asyncio.subprocess.DEVNULL if launch is None else launch.stdin,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd,
@@ -414,6 +416,8 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         if launch is not None:
             launch.finish()
         raise
+    if launch is not None:
+        launch.started()
     # Below the host's priority so a test run or build cannot starve the
     # host's event loop; it still gets all idle CPU. No-op on Windows (the
     # creationflags above do it there) and when FLUID_CHILD_NICE=0.
@@ -474,6 +478,10 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # No acknowledgement from the launcher: confinement failed after the
         # probe passed, and the command never ran.
         return ToolOutcome(text=launch.not_run(text), is_error=True)
+    if launch is not None and launch.exec_error:
+        # Confined, but the command itself could not be started (a missing
+        # shell, say): it ran under the profile and failed, as exit 127.
+        return ToolOutcome(text=launch.exec_failed(text), is_error=True)
     if not text.strip():
         # A bare "(no output)" is the one result that says nothing about what
         # happened: a silent success and a silent failure read identically, and

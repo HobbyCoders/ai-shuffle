@@ -33,6 +33,10 @@ _KEYS = ("linked", "installed", "synced", "skipped", "errors")
 
 
 def _receipt_path(root: Path) -> Path | None:
+    from fluid.context.environment import git_probes_skipped
+
+    if git_probes_skipped(root):
+        return None  # an isolated profile's writable root (see there)
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--git-path", _RECEIPT], cwd=root,

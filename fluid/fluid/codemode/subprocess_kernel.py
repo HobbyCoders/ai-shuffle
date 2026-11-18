@@ -20,16 +20,13 @@ open. Time the host spent
 waiting on a *human* is credited back, so an approval nobody answers for ten
 minutes is never mistaken for a hung tool.
 
-There is no OS-level sandbox by default. The in-process guards are defence in
-depth, not a trust boundary; hosts must permission-gate each Python cell. With
-the opt-in isolated profile (``KernelConfig.isolation``) the child starts
-under the kernel-enforced policy of :mod:`fluid.tools.isolation`.
+There is no OS-level sandbox. The in-process guards are defence in depth,
+not a trust boundary; hosts must permission-gate each Python cell.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import os
 import re
@@ -50,7 +47,6 @@ from fluid.codemode.kernel import (
 )
 from fluid.codemode.truncate import DEFAULT_LIMIT, DEFAULT_STDOUT_CAP
 from fluid.codemode.vfs import DEFAULT_ALLOWLIST
-from fluid.tools.isolation import IsolationUnavailable
 from fluid.tools.registry import current_call_time_left
 
 _RUNNER = os.path.join(os.path.dirname(__file__), "_runner.py")
@@ -111,9 +107,6 @@ class KernelConfig:
     # turn open until the session ends.
     host_call_timeout: float = 900.0
     python: str = field(default_factory=lambda: sys.executable)
-    # The opt-in isolated execution profile (fluid.tools.isolation.IsolationPolicy).
-    # None, the default, spawns the kernel exactly as before.
-    isolation: Any = None
 
     def boot_payload(self) -> dict:
         return {
@@ -192,31 +185,14 @@ class SubprocessKernel:
             # Own process group, so a kill reaches whatever the cell spawned
             # through an allowed route; on Windows the Job Object does this.
             spawn_kwargs["start_new_session"] = True
-        argv = [self.config.python, "-I", "-S", _RUNNER]
-        env = scrub_env(os.environ)
-        cwd = None
-        launch = None
-        if self.config.isolation is not None:
-            # The opt-in isolated profile: the kernel starts confined by the
-            # OS (its own sources stay readable), or does not start at all.
-            launch = self.config.isolation.launch(
-                argv, self.config.isolation.workspace, env,
-                readable=(os.path.dirname(_RUNNER), os.path.dirname(os.path.realpath(self.config.python))))
-            argv, cwd, env = launch.argv, launch.cwd, launch.env
-        try:
-            self._proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=cwd,
-                **spawn_kwargs,
-            )
-        except BaseException:
-            if launch is not None:
-                launch.finish()
-            raise
+        self._proc = await asyncio.create_subprocess_exec(
+            self.config.python, "-I", "-S", _RUNNER,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=scrub_env(os.environ),
+            **spawn_kwargs,
+        )
         self._stderr_tail = bytearray()
         self._stderr_task = asyncio.create_task(
             self._drain_stderr(self._proc), name="fluid-kernel-stderr"
@@ -229,39 +205,11 @@ class SubprocessKernel:
             )
         self._nonce = secrets.token_hex(16)
         boot_config = {**self.config.boot_payload(), "nonce": self._nonce}
-        if launch is None:
-            await self._send({"kind": "boot", "config": boot_config})
-            await self._read_frame()  # {"kind": "ready"}
-        else:
-            # The launcher writes its ack before it execs the kernel, so a
-            # kernel that reached ``ready`` has one; without it the kernel
-            # never ran confined, whatever came down the pipe.
-            try:
-                await self._send({"kind": "boot", "config": boot_config})
-                await self._read_frame()  # {"kind": "ready"}
-            except asyncio.CancelledError:
-                launch.finish()
-                raise
-            except Exception as exc:
-                if launch.finish():
-                    raise
-                raise IsolationUnavailable(await self._not_run(launch)) from exc
-            if not launch.finish():
-                raise IsolationUnavailable(await self._not_run(launch))
+        await self._send({"kind": "boot", "config": boot_config})
+        await self._read_frame()  # {"kind": "ready"}
         self._ever_started = True
         if self._vfs_sources or self._skill_sources:
             await self._send_vfs()
-
-    async def _not_run(self, launch) -> str:
-        """The "not run" message for a kernel the launcher never confirmed,
-        with the launcher's own refusal when it printed one."""
-        proc = self._proc
-        with contextlib.suppress(TimeoutError, ProcessLookupError):
-            if proc.returncode is None:
-                proc.kill()
-            await asyncio.wait_for(proc.wait(), 5)
-            await asyncio.wait_for(self._stderr_task, 5)
-        return launch.not_run(self._stderr_tail.decode("utf-8", errors="replace"), "the code-mode kernel")
 
     async def _send_vfs(self) -> None:
         await self._send({

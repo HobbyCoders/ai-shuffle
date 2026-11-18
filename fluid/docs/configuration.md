@@ -249,17 +249,19 @@ back often are cutting too much.
 
 ### `[sandbox]`
 
-The opt-in isolated execution profile for the processes Fluid starts for the
-model (Bash, Monitor, the code-mode kernel, `[[hooks]]` commands). Off by
-default; with it off nothing changes. What it guarantees on each platform,
+The opt-in isolated execution profile for the commands the Bash tool and
+Monitor run. Nothing else is confined: `[[hooks]]` commands, MCP stdio
+servers, ripgrep, provider helpers and the app's own spawners run as before,
+and code mode cannot be combined with the profile. Off by default; with it
+off nothing changes. What it guarantees on each platform,
 and what it does not, is in [security.md](security.md#isolated-execution-profile-opt-in).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `"off"` | `"isolated"` confines every model-driven child with Landlock and seccomp (Linux 5.13 or newer, Landlock ABI up to 12). When that cannot be enforced here, commands are refused with the reason; they never run unconfined. Other platforms have no backend yet and refuse. A `delegated_claude` provider is refused under the profile. A confined command can still change permission bits and timestamps of same-user files outside the writable roots (Landlock does not mediate `chmod` or `utimensat`; closing that needs a separate user id or a read-only view); ownership and extended attributes cannot be changed at all. A host injecting its own policy does so on the context passed to `build_engine`; a host `None` does not turn a configured profile off. |
+| `mode` | `"off"` | `"isolated"` confines Bash and Monitor commands with Landlock and seccomp (Linux 5.13 or newer, Landlock ABI up to 12). When that cannot be enforced here, they are refused with the reason; they never run unconfined. Other platforms have no backend yet and refuse. Building a session with `code_mode = true` or a `delegated_claude` provider fails under the profile. Fluid's own automatic git probes (the prompt's git status) do not run in the workspace or a writable root, since a confined command can write `.git/config`. A confined command can still change permission bits and timestamps of same-user files outside the writable roots (Landlock does not mediate `chmod` or `utimensat`; closing that needs a separate user id or a read-only view); ownership and extended attributes cannot be changed at all. A host injecting its own policy does so on the context passed to `build_engine`; a host `None` does not turn a configured profile off. |
 | `network` | `false` | `false` makes new sockets fail (seccomp, every address family; `socketpair` only for `AF_UNIX` stream or seqpacket pairs, datagram pairs fail) and, on Landlock ABI 4 (Linux 6.7), also denies TCP bind/connect through Landlock (UDP too from ABI 10). `true` leaves the network fully open; there is no per-host allowlist, and before Landlock ABI 9 pathname Unix sockets the user can write stay reachable. |
-| `writable_roots` | `[]` | Directories writable in addition to the session's working directory and its private home and temp directory. A root that would make the Python interpreter, its standard library or the loader's directories writable is refused. `/dev` and paths under it are rejected. |
-| `readable_roots` | `[]` | Directories readable (and executable) in addition to the system directories and the Python installation. `/dev` and paths under it are rejected: devices are reachable only through the profile's fixed list. |
+| `writable_roots` | `[]` | Directories writable in addition to the session's working directory and its private home and temp directory. Each must be a directory; an existing file fails config loading. A root that would make the Python interpreter, its standard library, the loader's directories or the launcher copy writable is refused. `/dev` and paths under it are rejected. A leading `//` is folded to `/`. |
+| `readable_roots` | `[]` | Paths readable (and executable) in addition to the system directories and the Python installation. `/dev` and paths under it are rejected: devices are reachable only through the profile's fixed list. A leading `//` is folded to `/`. |
 | `env_allow` | `[]` | Inherited environment variable names passed to a confined child on top of the built-in allowlist (`PATH`, locale, terminal, user name); `NAME_*` matches a prefix. The settings `env` is always passed. |
 | `protect` | `[]` | Extra credential paths no root may contain or sit inside, on top of the built-in list (`~/.ssh`, cloud CLI credentials, Fluid's token files, ...). |
 
@@ -269,8 +271,8 @@ Only the system and user layers can set these keys. A project
 that file. For the same reason, while the profile is on a project file's
 top-level `cwd` is ignored with a warning: the workspace stays the launch
 directory or the `cwd` a trusted layer sets. Invalid values (an unknown `mode`, a non-boolean `network`, a
-root list that is not a list of non-empty strings, a root under `/dev`) fail
-config loading.
+root list that is not a list of non-empty strings, a root under `/dev`, a
+writable root that is an existing file) fail config loading.
 
 ### `[context]`
 

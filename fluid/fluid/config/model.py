@@ -280,24 +280,35 @@ def _path_list(d: dict[str, Any], key: str) -> tuple[str, ...]:
     return tuple(raw)
 
 
-def _no_device_roots(key: str, roots: tuple[str, ...]) -> tuple[str, ...]:
+def _roots(d: dict[str, Any], key: str, *, directories: bool = False) -> tuple[str, ...]:
+    """A root list with leading slashes folded (``//dev`` is ``/dev`` on
+    Linux, though ``normpath`` keeps two), never under ``/dev``, and, for
+    ``directories``, never an existing non-directory."""
+    import os
     import posixpath
 
-    for root in roots:
+    out = []
+    for root in _path_list(d, key):
+        if root.startswith("//"):
+            root = "/" + root.lstrip("/")
         folded = posixpath.normpath(root)
         if folded == "/dev" or folded.startswith("/dev/"):
             raise ValueError(
                 f"[sandbox] {key} cannot include {root}: device nodes are reachable only "
                 "through the profile's fixed device list (/dev/null, /dev/zero, /dev/urandom, ...)")
-    return roots
+        expanded = os.path.expanduser(root)
+        if directories and os.path.lexists(expanded) and not os.path.isdir(expanded):
+            raise ValueError(f"[sandbox] {key} entries must be directories: {root} is not")
+        out.append(root)
+    return tuple(out)
 
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxConfig:
     """The opt-in isolated execution profile, from ``[sandbox]``.
 
-    ``mode = "isolated"`` runs every model-driven child process (Bash, Monitor,
-    the code-mode kernel) under a kernel-enforced filesystem and network policy
+    ``mode = "isolated"`` runs the Bash tool's and Monitor's commands under a
+    kernel-enforced filesystem and network policy
     (see :mod:`fluid.tools.isolation` and docs/security.md), and refuses to run
     them when that policy cannot be enforced here. ``"off"``, the default,
     changes nothing. ``network`` is enforced by seccomp (no new sockets of any
@@ -328,8 +339,8 @@ class SandboxConfig:
         return cls(
             mode=mode,
             network=network,
-            writable_roots=_no_device_roots("writable_roots", _path_list(d, "writable_roots")),
-            readable_roots=_no_device_roots("readable_roots", _path_list(d, "readable_roots")),
+            writable_roots=_roots(d, "writable_roots", directories=True),
+            readable_roots=_roots(d, "readable_roots"),
             env_allow=_path_list(d, "env_allow"),
             protect=_path_list(d, "protect"),
         )

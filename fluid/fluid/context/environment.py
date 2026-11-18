@@ -21,8 +21,29 @@ from fluid.tools.shell import describe as describe_shell
 
 _GIT_TIMEOUT = 3.0  # seconds; env gathering must never stall a session start
 
+# Directories whose repositories Fluid's own git probes leave alone: the
+# writable roots of an isolated execution profile. A confined command can
+# write .git/config there (core.fsmonitor, for one, is a program `git status`
+# runs), and these probes run unconfined. Process-wide and only ever added
+# to, so a second session in the same process errs towards skipping.
+_UNPROBED: set[str] = set()
+
+
+def skip_git_probes(*roots: str) -> None:
+    """Never run git for a working directory inside any of ``roots``."""
+    _UNPROBED.update(os.path.realpath(r) for r in roots)
+
+
+def git_probes_skipped(cwd: str | os.PathLike[str]) -> bool:
+    if not _UNPROBED:
+        return False
+    real = os.path.realpath(cwd)
+    return any(real == root or real.startswith(root.rstrip("/") + "/") for root in _UNPROBED)
+
 
 def _run_git(cwd: str, *args: str) -> str | None:
+    if git_probes_skipped(cwd):
+        return None
     try:
         proc = subprocess.run(
             ["git", *args],

@@ -478,7 +478,9 @@ class CliHost:
             process = await asyncio.create_subprocess_exec(
                 *argv,
                 cwd=cwd,
-                stdin=asyncio.subprocess.DEVNULL,
+                # The launcher reads its handoff here and gives the command
+                # /dev/null instead (fluid.tools.isolation.Launch).
+                stdin=asyncio.subprocess.DEVNULL if launch is None else launch.stdin,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 env=env,
@@ -488,6 +490,8 @@ class CliHost:
             if launch is not None:
                 launch.finish()
             raise
+        if launch is not None:
+            launch.started()
         # POSIX: the new process group runs below the host's priority so a
         # monitored test run cannot starve the host's event loop.
         lower_process_group_priority(process.pid)
@@ -541,6 +545,9 @@ class CliHost:
             # No acknowledgement: the launcher could not confine the command,
             # which never ran (whatever it exited with).
             await self._report(worker, "failed", worker.launch.not_run(worker.output()))
+            return
+        if worker.launch is not None and worker.launch.exec_error:
+            await self._report(worker, "failed", worker.launch.exec_failed(worker.output()))
             return
         if worker.status == "cancelled":
             worker.summary = _monitor_summary(worker, code, cancelled=True)
@@ -953,12 +960,6 @@ class CliHost:
                 parent_perms.approval_policy, rules=list(parent_perms.rules)
             )
 
-        child_ctx = ToolCtx(cwd=self.config.cwd, session_id=session_id)
-        # The isolated profile the parent runs under (from config or put on
-        # its ctx by a host) binds the worker too, with its own private dirs.
-        policy = isolation.policy_of(getattr(self.engine, "ctx", None))
-        if policy is not None:
-            child_ctx.extra[isolation.EXTRA_KEY] = policy.for_session()
         child = build_engine(
             self.config,
             self.store,
@@ -969,7 +970,7 @@ class CliHost:
             system_sections=compiled,
             registry=registry,
             permissions=permissions,
-            ctx=child_ctx,
+            ctx=ToolCtx(cwd=self.config.cwd, session_id=session_id),
             allowed_tools=allowed,
             disallowed_tools=disallowed,
             # One learner per store: the worker journals into the parent's

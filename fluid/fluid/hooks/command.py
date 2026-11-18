@@ -45,7 +45,6 @@ from fluid.hooks.bus import (
     HookDecision,
 )
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.isolation import IsolationUnavailable
 
 log = logging.getLogger(__name__)
 
@@ -164,10 +163,6 @@ class CommandHook:
     matcher: str | None = None
     timeout: float = DEFAULT_TIMEOUT
     cwd: str = "."
-    # The opt-in isolated execution profile (fluid.tools.isolation). A hook's
-    # stdin carries model-chosen tool input, and a project hook can be written
-    # by a confined command, so under the profile hooks run confined too.
-    isolation: Any = None
 
     @property
     def label(self) -> str:
@@ -190,12 +185,6 @@ class CommandHook:
         stdin = json.dumps(self.build_payload(event, payload), default=str).encode("utf-8")
         try:
             code, stdout, stderr = await self._run(stdin)
-        except IsolationUnavailable as exc:
-            # Fail closed: a gate that cannot run confined denies the tool
-            # rather than letting it through unchecked.
-            if event == PRE_TOOL_USE:
-                return HookDecision(action="deny", note=f"{self.label} not run: {exc}")
-            return HookDecision(warnings=(f"{self.label} not run: {exc}",))
         except TimeoutError:
             return HookDecision(
                 warnings=(f"{self.label} timed out after {self.timeout:g}s; continuing",)
@@ -214,32 +203,10 @@ class CommandHook:
         if os.name != "nt":
             # Own process group so a timeout can kill the whole tree.
             spawn_kwargs["start_new_session"] = True
-        argv, cwd, env = [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env()
-        if self.isolation is None:
-            return await self._spawn(argv, cwd, env, stdin, spawn_kwargs)
-        # The isolated profile: the hook ran only if the launcher acknowledged
-        # confinement. Without the ack (any exit, a timeout, a failure to
-        # start or to talk to it) it never ran, and __call__ fails closed.
-        launch = self.isolation.launch(argv, cwd, env)
-        stderr = ""
-        try:
-            code, out, stderr = await self._spawn(launch.argv, launch.cwd, launch.env, stdin, spawn_kwargs)
-        except asyncio.CancelledError:
-            launch.finish()
-            raise
-        except BaseException as exc:
-            if launch.finish():
-                raise  # the hook ran, then timed out or failed: as before
-            raise IsolationUnavailable(launch.not_run(stderr, "the hook").removeprefix("Not run: ")
-                                       + f" [{type(exc).__name__}]") from exc
-        if not launch.finish():
-            raise IsolationUnavailable(launch.not_run(stderr, "the hook").removeprefix("Not run: "))
-        return code, out, stderr
-
-    async def _spawn(self, argv, cwd, env, stdin: bytes, spawn_kwargs) -> tuple[int, str, str]:
         from fluid.tools import agent_runner
 
-        argv, cwd, env = agent_runner.wrap(argv, cwd, env)
+        argv, cwd, env = agent_runner.wrap(
+            [*resolve_shell().argv_prefix, self.command], self.cwd or None, scrub_child_env())
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -254,8 +221,11 @@ class CommandHook:
         except TimeoutError:
             await _kill_tree(proc)
             raise
-        code = proc.returncode or 0
-        return code, out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
+        return (
+            proc.returncode or 0,
+            out.decode("utf-8", errors="replace"),
+            err.decode("utf-8", errors="replace"),
+        )
 
     def interpret(self, event: str, code: int, stdout: str, stderr: str) -> HookDecision:
         """Map an exit code plus its streams onto a :class:`HookDecision`.
@@ -412,9 +382,7 @@ def _object_line_starts(text: str) -> list[int]:
     return offsets
 
 
-def register_config_hooks(
-    bus: Any, hooks: Iterable[Any], *, cwd: str = ".", isolation: Any = None,
-) -> list[CommandHook]:
+def register_config_hooks(bus: Any, hooks: Iterable[Any], *, cwd: str = ".") -> list[CommandHook]:
     """Register every :class:`~fluid.config.model.HookConfig` on ``bus``.
 
     ``bus`` only needs an ``on(event, callback)`` method, so embedding hosts
@@ -429,7 +397,6 @@ def register_config_hooks(
             matcher=entry.matcher,
             timeout=float(entry.timeout),
             cwd=cwd,
-            isolation=isolation,
         )
         bus.on(hook.event, hook)
         registered.append(hook)
