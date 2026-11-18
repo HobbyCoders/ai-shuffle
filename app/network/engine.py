@@ -1573,11 +1573,6 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
         member = ctx.member(ctx.device_id)
         if member is None:
             return "duplicate"
-        # The restored outbox still holds that stream up to its last op, and
-        # peers resume it from there (#1568): count that prefix as received.
-        held = store.own_watermark(cursor, ctx.device_id, env.origin_incarnation)
-        if held > store.get_watermark(cursor, ctx.device_id, env.origin_incarnation):
-            store.set_watermark(cursor, ctx.device_id, env.origin_incarnation, held)
     else:
         refused: Optional[str] = None
         try:
@@ -1602,10 +1597,27 @@ def apply_envelope(cursor, data: Mapping[str, Any], *, ctx: Optional[NetworkCont
     if env.key_version not in ctx.keyring:
         raise TransientApplyError("unknown key version %d" % env.key_version)
 
-    # Stream ordering per (origin, incarnation). An active member's older
-    # incarnation is not stale: after a restore from backup, a peer may still
-    # relay what it signed there, and versions order by (clock, origin) on
-    # every replica alike, whichever stream carried them (#1568).
+    # Stream ordering per (origin, incarnation). Before #1568 an op from an
+    # incarnation older than the newest seen of its origin (own device too)
+    # was refused here as stale. An active member's older stream now applies:
+    # after a restore from backup, peers relay what the device signed there,
+    # and versions order by (clock, origin, incarnation) on every replica.
+    # Design rule: for an envelope meeting a version with no incarnation (from
+    # a state or transcript copy, or stored before labels were kept), the
+    # outcome is the old one in every observable: the row, conflicts, op log,
+    # served ops, watermarks, retention acknowledgements and payload side
+    # effects (credential merges). So the old refusal stands for it, by the
+    # same test, before anything is stored or observed. Its stream then stops
+    # on this worker at that op, as before (#1792).
+    if env.origin_incarnation < store.highest_incarnation(cursor, env.origin_device_id) and \
+            _meets_unlabelled(cursor, env):
+        raise ApplyError("stale incarnation")
+    if env.origin_device_id == ctx.device_id:
+        # The restored outbox still holds that stream up to its last op, and
+        # peers resume it from there (#1568): count that prefix as received.
+        held = store.own_watermark(cursor, ctx.device_id, env.origin_incarnation)
+        if held > store.get_watermark(cursor, ctx.device_id, env.origin_incarnation):
+            store.set_watermark(cursor, ctx.device_id, env.origin_incarnation, held)
     watermark = store.get_watermark(cursor, env.origin_device_id, env.origin_incarnation)
     if env.origin_seq <= watermark:
         # A previous catch-up may have stopped between committed chunks.
@@ -1950,14 +1962,10 @@ def _displaced_local(cursor, coll: policy.Collection, env: Envelope,
     return redact_secrets(local_plain)
 
 
-def _older_stream(cursor, ctx: NetworkContext, env: Envelope) -> bool:
-    """Whether ``env`` comes from an incarnation older than its origin's newest
-    in this device's stream state: what main refuses outright as a stale
-    incarnation (#1568). Read from the same watermarks main's gate reads, so
-    it holds exactly where main would have refused the op."""
-    if env.origin_device_id == ctx.device_id:
-        return env.origin_incarnation < ctx.identity.incarnation
-    return env.origin_incarnation < store.highest_incarnation(cursor, env.origin_device_id)
+def _meets_unlabelled(cursor, env: Envelope) -> bool:
+    """Whether ``env``'s record holds a version with no incarnation label."""
+    existing = store.get_record(cursor, env.collection, env.record_id)
+    return existing is not None and existing.get("origin_incarnation") is None
 
 
 def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> bool:
@@ -1971,10 +1979,8 @@ def _restore_fork(origin: str, incarnation: int, held: Mapping[str, Any]) -> boo
     nothing about the origin) and never inferred. A version with no label
     (stored before labels were kept, or from a copy) is taken as the same
     stream, so everything else orders exactly as before labels existed. A
-    fork reached only through a copy is therefore not seen (#1792). Main
-    refuses an op from an incarnation older than its origin's newest seen;
-    here such an op (``_older_stream``) competes only with labelled versions:
-    an unlabelled one stays, as main keeps it (#1792).
+    fork reached only through a copy is therefore not seen (#1792), and an
+    op main refuses as stale is refused before it meets one (``apply_envelope``).
     """
     held_incarnation = held.get("origin_incarnation")
     return (held["origin_device_id"] == origin and incarnation >= 1 and held_incarnation is not None
@@ -2042,16 +2048,13 @@ def _apply_in_order(cursor, ctx: NetworkContext, env: Envelope, member: Member, 
             if record(cursor, coll.name, env.record_id, local, ctx=ctx, force=True) is None:
                 raise TransientApplyError("Local session membership is waiting for publishing")
     existing = store.get_record(cursor, env.collection, env.record_id)
-    replay = env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
+    # This device's own op from before a restore restores the chat's
+    # owner-only fields only over a version that carries an incarnation (or
+    # none held): over one without, the op's payload is taken as before.
+    replay = (env.origin_device_id == ctx.device_id and env.origin_incarnation < ctx.identity.incarnation
+              and (existing is None or existing.get("origin_incarnation") is not None))
     fork = existing is not None and _restore_fork(env.origin_device_id, env.origin_incarnation, existing)
-    if existing is not None and existing.get("origin_incarnation") is None and _older_stream(cursor, ctx, env):
-        # Main refuses this op as a stale incarnation and keeps the version
-        # held. One with no label (from a state copy, or stored before labels
-        # were kept) proves nothing about which side of the restore it is
-        # from, so it stays, as on main: same as main until copies carry
-        # origin proofs (#1792).
-        wins = False
-    elif fork:
+    if fork:
         # Across a restore the stream order is gone: every replica picks the
         # same winner from (clock, origin, incarnation) instead (#1568).
         wins = envelope_mod.compare(env.clock, env.origin_device_id, int(existing["clock"]),
@@ -2583,6 +2586,7 @@ class _WireStream:
     origin: str
     incarnation: int
     first_seq: int
+    highest: int
     watermark: int
     pending: int
 
@@ -2605,14 +2609,15 @@ def _wire_stream(cursor, chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext
     # Fetch them together to retain the existing per-chunk round-trip budget
     # while keeping the counter reservation's separate fresh existence check.
     cursor.execute(
-        "SELECT COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
+        "SELECT COALESCE(MAX(incarnation), 0) AS highest, "
+        "COALESCE(MAX(CASE WHEN incarnation = %s THEN last_seq END), 0) AS watermark, "
         "(SELECT COUNT(*) FROM sync_pending WHERE origin_device_id = %s AND incarnation = %s) AS pending "
         "FROM sync_watermarks WHERE origin_device_id = %s",
         (first.origin_incarnation, first.origin_device_id, first.origin_incarnation, first.origin_device_id),
     )
     stream = cursor.fetchone()
     return _WireStream(first.origin_device_id, first.origin_incarnation, first.origin_seq,
-                       int(stream["watermark"]), int(stream["pending"]))
+                       int(stream["highest"]), int(stream["watermark"]), int(stream["pending"]))
 
 
 def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
@@ -2625,7 +2630,8 @@ def _duplicate_prefix(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext,
     network, member, incarnation, key and signature gates. Unusual runs retain
     the per-envelope path, including its revocation/backup and pending evidence.
     """
-    if stream.first_seq > stream.watermark or stream.pending:
+    if (stream.first_seq > stream.watermark or stream.incarnation < stream.highest
+            or stream.pending):
         return 0
     member = ctx.member(stream.origin)
     if (stream.origin == ctx.device_id or member is None
@@ -2655,7 +2661,7 @@ def _buffer_pending_chunk(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Netwo
     existing duplicate-at-cap behavior. Payload validation still happens when
     the missing head arrives, exactly as for single-row buffering.
     """
-    if (stream.first_seq <= stream.watermark + 1
+    if (stream.first_seq <= stream.watermark + 1 or stream.incarnation < stream.highest
             or stream.pending + len(chunk) > PENDING_CAP_PER_STREAM):
         return False  # Ordered appends must not parse the entire chunk twice.
     member = ctx.member(stream.origin)
@@ -2702,13 +2708,15 @@ def _apply_event_append(cursor, chunk: Sequence[Mapping[str, Any]], ctx: Network
         if origin == ctx.device_id or member is None or member.status != membership.STATUS_ACTIVE:
             return False
         if _stream is None:
+            highest = store.highest_incarnation(cursor, origin)
             watermark = store.get_watermark(cursor, origin, incarnation)
             pending = 0 if _from_pending else store.count_pending(cursor, origin, incarnation)
         else:
             if (_stream.origin, _stream.incarnation) != (origin, incarnation):
                 return False
-            watermark, pending = _stream.watermark, _stream.pending
-        if not _from_pending and pending:
+            highest, watermark, pending = _stream.highest, _stream.watermark, _stream.pending
+        if incarnation < highest or (not _from_pending and pending):
+            # An older stream takes the per-envelope path and its stale gate.
             return False
         rows = []
         for index, env in enumerate(envs):
@@ -2810,7 +2818,8 @@ def _apply_chunk(chunk: Sequence[Mapping[str, Any]], ctx: NetworkContext, result
                 part._pending_drains.add((stream.origin, stream.incarnation))
                 chunk = chunk[skipped:]
                 stream = _WireStream(stream.origin, stream.incarnation,
-                                     stream.first_seq + skipped, stream.watermark, stream.pending)
+                                     stream.first_seq + skipped, stream.highest,
+                                     stream.watermark, stream.pending)
             appended = not chunk or (stream is not None and _buffer_pending_chunk(cursor, chunk, ctx, part, stream))
             if not appended:
                 # Fast append reserves the whole chunk itself. Pure gap

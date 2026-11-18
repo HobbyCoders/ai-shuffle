@@ -127,7 +127,7 @@ def test_duplicate_prefix_statement_ratchet(receiver, monkeypatch, fresh):
     # One locked frontier read plus the unchanged post-commit readiness probe.
     frontier_reads = [q for q in statements if q.startswith("SELECT") and "sync_watermarks" in q]
     assert len(frontier_reads) == 2
-    assert sum(q.startswith("SELECT COALESCE(MAX(CASE WHEN incarnation") for q in frontier_reads) == 1
+    assert sum(q.startswith("SELECT COALESCE(MAX(incarnation)") for q in frontier_reads) == 1
     if fresh:
         _assert_complete(connect, ops)
 

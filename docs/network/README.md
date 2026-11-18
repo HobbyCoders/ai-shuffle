@@ -94,7 +94,9 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
 4. **Applying.** Verify signature against the members table, reject a revoked
    origin past its `last_seq_accepted` (and in an incarnation older than the
    newest one seen), order per stream (holes wait in `sync_pending`; an active
-   member's older incarnation is an ordinary stream), decrypt, last-writer-wins
+   member's older incarnation is an ordinary stream, except that an op from it
+   meeting a version with no incarnation is refused as stale, as before),
+   decrypt, last-writer-wins
    on (clock, device id), materialize
    into the domain table, keep the loser in `sync_conflicts` for 30 days
    (columns encrypted at rest are stored as `<secret>`, never in plaintext),
@@ -230,24 +232,35 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   Only a signed op carries an incarnation. A state copy or transcript copy is
   the serving member's claim, not the device's signature, and a member may
   store less than was signed (a chat whose project it lacks loses it), so a
-  copy carries none and sets none, and it orders exactly as before the
-  upgrade. A version a copy installs, like one stored before the upgrade, has
-  no incarnation, and every row with none orders exactly as before the
-  upgrade: a signed op meeting it is taken as the same stream (an
-  owner-ordered row takes it; any other row keeps the version held on a
-  tie), and one from an incarnation older than the newest this worker has
-  seen, which a worker on an older build refuses as stale, leaves it as it
-  stands. Only versions that both carry an incarnation order across a
-  restore. So where a copy is involved the outcome is the same as before the
-  upgrade until copies carry origin proofs (#1792): a restore fork reached
-  through a copy is not seen, an exact tie across it may keep either side,
-  a copy of a lost write that left out the owner's own fields (a chat's
-  permission mode) keeps them out until the record next changes, a row a
-  copy installed keeps its version against the device's older stream
-  whatever its clock, and a version replaced across a restore is not kept as
-  a conflict when it has no incarnation.
+  copy carries none and sets none. A version a copy installs, like one stored
+  before the upgrade, has no incarnation, and an op that meets such a version
+  is handled exactly as before the upgrade, in everything anyone can see: the
+  row, the conflicts kept, the op log, what is served on, the stream heads,
+  and side effects such as a merged credential bundle. An op from an
+  incarnation older than the newest this worker has seen of its device is
+  refused as stale before anything is stored, as before; that stream then
+  stops on this worker at that op, as it did before. Otherwise a signed op
+  meeting it is taken as the same stream (an owner-ordered row takes it; any
+  other row keeps the version held on a tie). Only versions that both carry
+  an incarnation order across a restore. Right after the upgrade, then, a
+  backup's rows have none: the restored device takes its replayed ops over
+  them as the old rules order them (a later update or a deletion comes back),
+  but without a chat's owner-only fields and without keeping the replaced
+  version as a conflict, while other members that have seen its newer
+  incarnation refuse those ops over rows they hold without one. Rows the
+  backup lacks entirely come back whole. Where a copy is involved the
+  outcome is the same as before the upgrade until copies carry origin
+  proofs (#1792): a restore fork reached through a copy is not seen, an
+  exact tie across it may keep either side, an op of the device's older
+  incarnation meeting a copied version is refused once a newer incarnation
+  was seen, and a version replaced across a restore is not kept as a
+  conflict when it has no incarnation. A write the restored device made
+  after the restore on an older build (with no incarnation) gives way there
+  to its own replayed op of the same row, as the old rules order it, while
+  members that hold that write signed keep it, until the row next changes.
   A version it gets back for a chat it runs restores the chat's owner-only
-  fields (permission mode and ceiling, account label) too; no other copy can.
+  fields (permission mode and ceiling, account label) too, over a version
+  that carries an incarnation; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement
   that reads it so a compaction running meanwhile cannot open a hole: past an
   op already compacted out of the log the replay stops, and no state copy stands in for

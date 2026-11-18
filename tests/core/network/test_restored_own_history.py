@@ -861,6 +861,33 @@ def _download(publisher, receiver, name):
     return manifest, directory
 
 
+def _seen(worker, origin, record_id="chat"):
+    """Every observable a peer or the user has of ``origin``'s ``record_id``
+    on ``worker``: the row's version, the versions kept as conflicts, the ops
+    of ``origin`` in the log, what it serves a fifth peer with no frontier,
+    and its stream heads for ``origin``."""
+    collection = "sessions" if record_id == "chat" else "user_preferences"
+    with worker.active():
+        ops, _, snapshot = store.exchange_batch({}, limit=10000)
+        conflicts = sorted(
+            [c["losing_device_id"] == origin, c["losing_clock"],
+             (c["losing_record"] or {}).get("title" if record_id == "chat" else "value", "<deleted>")]
+            for c in store.list_conflicts() if c["record_id"] == record_id)
+        heads = {k: int(v) for k, v in store.local_watermarks().get(origin, {}).items()}
+    row = worker.sql("SELECT clock, origin_device_id, deleted FROM sync_records "
+                     "WHERE collection = ? AND record_id = ?", (collection, record_id))[0]
+    log = worker.sql("SELECT incarnation, seq FROM sync_ops WHERE origin_device_id = ? "
+                     "AND collection = ? ORDER BY incarnation, seq", (origin, collection))
+    return {
+        "row": [int(row["clock"]), row["origin_device_id"] == origin, bool(row["deleted"])],
+        "conflicts": conflicts,
+        "log": [[int(r["incarnation"]), int(r["seq"])] for r in log],
+        "served": [snapshot, sorted([op["origin_incarnation"], op["origin_seq"]] for op in ops
+                                    if op["origin_device_id"] == origin and op["collection"] == collection)],
+        "heads": heads,
+    }
+
+
 def _chat_clock(worker):
     return int(worker.sql("SELECT clock FROM sync_records WHERE collection = 'sessions' "
                           "AND record_id = 'chat'")[0]["clock"])
@@ -879,7 +906,8 @@ def _copied_row_outcome(workers, monkeypatch, kind, moment):
     commit, and D relays "lost-1" after the copy, between its pages, or while
     it is stopped past the chat page, before C resumes it; ``re-served``: E
     takes a copy from C while C's is stopped, and both get "lost-1". Returns
-    the chat's title on C and E. Uses only what main has too."""
+    the chat's title on C and E, and every other observable of it on both
+    (``_seen``). Uses only what main has too."""
     from app.network import peer_snapshot
     a, b, c, d, e = _network(workers, "a", "b", "c", "d", "e")
     _session(b, "chat", title="t", events=0)
@@ -942,11 +970,12 @@ def _copied_row_outcome(workers, monkeypatch, kind, moment):
             peer_snapshot.apply(manifest, directory, a.device_id)
     with c.active():
         title_c = database.get_session("chat")["title"]
-    title_e = None
+    title_e, seen_e = None, None
     if moment == "re-served":
         with e.active():
             title_e = database.get_session("chat")["title"]
-    return [title_c, title_e]
+        seen_e = _seen(e, b.device_id)
+    return [title_c, title_e], {"c": _seen(c, b.device_id), "e": seen_e}
 
 
 # Recorded by running _copied_row_outcome on origin/main's app code
@@ -980,12 +1009,297 @@ MAIN_OUTCOMES = {
 }
 
 
+# The same runs on origin/main's app code (6e61683dc), every other observable
+# of the chat on C and E (_seen). B's identity is a boolean: True when
+# the version or loser is B's. A fifth peer with no frontier needs a copy.
+MAIN_OBSERVED = {
+    "no-restore/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 4]]],
+        },
+        "e": None,
+    },
+    "no-restore/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "no-restore/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "no-restore/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+    "copy-later/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 3, "2": 1},
+            "log": [[1, 1]],
+            "row": [15, True, False],
+            "served": [True, [[1, 1]]],
+        },
+        "e": None,
+    },
+    "copy-later/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "copy-later/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "copy-later/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+    "tie/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 3, "2": 1},
+            "log": [[1, 1]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1]]],
+        },
+        "e": None,
+    },
+    "tie/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "tie/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "tie/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+    "op-later/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 3, "2": 1},
+            "log": [[1, 1]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1]]],
+        },
+        "e": None,
+    },
+    "op-later/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [24, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "op-later/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [24, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "op-later/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 1},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [24, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [24, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+    "claim/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 3, "2": 5},
+            "log": [[1, 1]],
+            "row": [13, True, False],
+            "served": [True, [[1, 1]]],
+        },
+        "e": None,
+    },
+    "claim/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 5},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "claim/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 5},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "claim/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4, "2": 5},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+    "zero-claim/after": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 4]]],
+        },
+        "e": None,
+    },
+    "zero-claim/between": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "zero-claim/stopped": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": None,
+    },
+    "zero-claim/re-served": {
+        "c": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+        "e": {
+            "conflicts": [],
+            "heads": {"1": 4},
+            "log": [[1, 1], [1, 3], [1, 4]],
+            "row": [14, True, False],
+            "served": [True, [[1, 1], [1, 3], [1, 4]]],
+        },
+    },
+}
+
+
 @pytest.mark.parametrize("moment", COPY_MOMENTS)
 @pytest.mark.parametrize("kind", COPY_KINDS)
 def test_a_copied_row_ends_as_on_main(workers, monkeypatch, kind, moment):
     """Owner decision on #1568, reviews S25, S29, S30: a row a state copy
     installed, and every op that later meets it, end as on main."""
-    assert _copied_row_outcome(workers, monkeypatch, kind, moment) == MAIN_OUTCOMES[f"{kind}/{moment}"]
+    titles, seen = _copied_row_outcome(workers, monkeypatch, kind, moment)
+    assert titles == MAIN_OUTCOMES[f"{kind}/{moment}"]
+    assert seen == MAIN_OBSERVED[f"{kind}/{moment}"]
 
 
 def test_a_link_relayed_while_a_copy_is_verified_applies_as_on_main(workers, monkeypatch):
@@ -1039,14 +1353,165 @@ def test_a_link_relayed_while_a_copy_is_verified_applies_as_on_main(workers, mon
     assert _streams(c, b.device_id)["1"] == _streams(d, b.device_id)["1"]
 
 
+def _copied_after_the_restore(workers):
+    """B renames its chat "lost-0", which A takes, then "lost-1", which only
+    D takes; B restores, and writes something else in incarnation 2, which A
+    takes. C and E each apply A's state copy: the chat as "lost-0" with no
+    label, and B's streams at A's heads, incarnation 2 included."""
+    from app.network import peer_snapshot
+    a, b, c, d, e = _network(workers, "a", "b", "c", "d", "e")
+    _session(b, "chat", title="t", events=0)
+    for sender in (a, b, c, d, e):
+        for receiver in (a, b, c, d, e):
+            if sender is not receiver:
+                _relay(sender, receiver)
+    backup = b.raw.serialize()
+    _rename(b, "lost-0")
+    _relay(b, a)
+    _rename(b, "lost-1")
+    _relay(b, d)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    set_owner_pref(b, "gap", "x")
+    _relay(b, a)
+    for worker in (c, e):
+        manifest, directory = _download(a, worker, "copy")
+        with worker.active():
+            peer_snapshot.apply(manifest, directory, a.device_id)
+        assert _sweep_value(worker, "sessions") == "lost-0" and _streams(worker, b.device_id).get("2")
+    return a, b, c, d, e
+
+
+def test_a_stale_op_meeting_a_copy_is_refused_and_never_forwarded(workers):
+    """Review S33: D relays "lost-1", B's next op of incarnation 1, to C,
+    which has seen incarnation 2 and holds the chat unlabelled. Main refuses
+    it as a stale incarnation before storing anything, and so does this
+    build: C keeps the row, keeps no conflict, logs nothing, serves nothing
+    new and its head stays, so E, pulling from C, never gets the rename."""
+    a, b, c, d, e = _copied_after_the_restore(workers)
+    seen_c, seen_e = _seen(c, b.device_id), _seen(e, b.device_id)
+    with c.active():
+        result = engine.apply_batch(_offer_relay(d, c))
+    assert "stale incarnation" in result.reasons
+    assert _seen(c, b.device_id) == seen_c
+    _relay(c, e)
+    assert _seen(e, b.device_id) == seen_e
+    assert [_sweep_value(w, "sessions") for w in (c, e)] == ["lost-0", "lost-0"]
+
+
+def _offer_relay(sender, receiver):
+    with receiver.active():
+        marks = store.local_watermarks()
+    with sender.active():
+        ops, _, _ = store.exchange_batch(marks, exclude_origin=receiver.device_id)
+    return ops
+
+
+def _unlabel(worker, collection):
+    """Drop ``collection``'s labels on ``worker``, as a copy or a row stored
+    before labels were kept has none (main keeps none at all)."""
+    if any(col["name"] == "origin_incarnation" for col in worker.sql("PRAGMA table_info(sync_records)")):
+        worker.sql("UPDATE sync_records SET origin_incarnation = NULL WHERE collection = ?", (collection,))
+
+
+PROVIDER = "subscription"
+
+
+def _provider(worker):
+    return worker.sql("SELECT revision, codex_access_token, codex_last_refresh FROM model_providers "
+                      "WHERE id = ?", (PROVIDER,))[0]
+
+
+def _rotate(worker, stamp, generation):
+    from app.core import encryption
+    from app.db import model_providers
+    with worker.active():
+        model_providers.set_codex_token_bundle(
+            PROVIDER, access_token=encryption.encrypt_value("access-" + generation),
+            refresh_token=encryption.encrypt_value("refresh-" + generation),
+            account_id="account-" + generation, id_token_expires_at=stamp,
+            last_refresh=stamp, needs_reauth=False, auth_mode="chatgpt")
+        engine.scan_all(include_catalog=False, collections=["model_providers"])
+
+
+def test_a_stale_credential_bundle_meeting_a_copy_changes_nothing(workers, monkeypatch):
+    """Review S34: C holds B's provider row with no label (a copy, or a row
+    stored before labels were kept) and has seen B's incarnation 2. B's
+    newer credential bundle, signed in incarnation 1, arrives from D. Main
+    refuses it before reading the payload, so the credentials, the row's
+    revision, the conflicts and the log stay as they were, here too."""
+    from app.core import encryption
+    monkeypatch.setattr(encryption, "_encryption_key", encryption.Fernet.generate_key())
+    a, b, c, d = _network(workers, "a", "b", "c", "d")
+    with b.active():
+        database.create_model_provider(PROVIDER, "Original", "openai", "https://example.com")
+    _rotate(b, "2026-10-18T12:00:00+00:00", "old")
+    for sender in (a, b, c, d):
+        for receiver in (a, b, c, d):
+            if sender is not receiver:
+                _relay(sender, receiver)
+    backup = b.raw.serialize()
+    _rotate(b, "2026-10-19T12:00:00+00:00", "new")
+    _relay(b, d)
+    _restore(b, backup)
+    _detect_restore(d, b, 1)
+    set_owner_pref(b, "gap", "x")
+    _relay(b, a)
+    _relay(a, c)
+    _unlabel(c, "model_providers")
+    before = _provider(c)
+    with c.active():
+        conflicts = store.list_conflicts()
+    log = c.sql("SELECT incarnation, seq FROM sync_ops WHERE collection = 'model_providers'")
+    heads = _streams(c, b.device_id)
+    with c.active():
+        result = engine.apply_batch(_offer_relay(d, c))
+    assert "stale incarnation" in result.reasons
+    assert _provider(c) == before
+    with c.active():
+        assert encryption.decrypt_value(_provider(c)["codex_access_token"]) == "access-old"
+        assert store.list_conflicts() == conflicts
+    assert c.sql("SELECT incarnation, seq FROM sync_ops WHERE collection = 'model_providers'") == log
+    assert _streams(c, b.device_id) == heads
+
+
+def test_a_restored_worker_takes_its_own_op_over_a_copy_as_main_does(workers):
+    """Review S35: restored B, now in incarnation 2, holds A's theme with no
+    label (a copy, or a row stored before labels were kept) and is handed
+    the later theme it signed as its first op, B/1 seq 1. B has no receive
+    head for its own streams, so main's gate admits it and the later
+    version wins, here too: being restored is not a reason to refuse it."""
+    a, b = _network(workers, "a", "b")
+    set_owner_pref(a, "theme", "v0")
+    converge([a, b])
+    backup = b.raw.serialize()
+    set_owner_pref(b, "theme", "lost")
+    _relay(b, a)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)
+    _unlabel(b, "user_preferences")
+    assert owner_pref(b, "theme") == "v0"
+    with a.active(), get_db() as conn:
+        op = store.get_op(conn.cursor(), b.device_id, 1, 1)
+    assert op["record_id"].endswith("theme")
+    with b.active(), get_db() as conn:
+        assert store.get_watermark(conn.cursor(), b.device_id, 1) == 0  # no receive head
+    with b.active():
+        assert engine.apply_batch([op]).applied == 1
+    assert owner_pref(b, "theme") == "lost"
+
+
 @pytest.mark.parametrize("pruned", [False, True], ids=["logged", "pruned"])
-def test_a_restored_worker_keeps_its_own_unlabelled_write_at_the_replayed_clock(workers, pruned):
-    """Reviews S25 and S27 on the restored worker itself: B restored before it
-    had this build, so its write "new" after the restore has no label, and it
-    took the clock of a rename it lost. The replayed rename is from B's older
-    incarnation and meets a version with no label, so B keeps "new", as main
-    does and every replica does, also once retention dropped the signed op of
-    "new" from B's log."""
+def test_a_restored_worker_takes_its_replay_over_its_own_unlabelled_write(workers, pruned):
+    """Reviews S25, S27, S35, a known limit (#1792): B restored before it had
+    this build, so its write "new" after the restore has no label, and it
+    took the clock of a rename it lost. The replayed rename is B's own op
+    from its older incarnation, and B has no receive head past it, so the
+    gate admits it as before the upgrade, and the old order applies an op of
+    the held version's origin: B takes "lost-1". A and D hold "new" signed
+    in incarnation 2 and keep it, so B differs until the chat is written
+    again, whether or not retention dropped the signed op of "new" from B's
+    log."""
     a, b, d = _network(workers, "a", "b", "d")
     _session(b, "chat", title="t", events=0)
     _converge([a, b, d])
@@ -1065,21 +1530,26 @@ def test_a_restored_worker_keeps_its_own_unlabelled_write_at_the_replayed_clock(
     if pruned:
         b.sql("DELETE FROM sync_ops WHERE origin_device_id = ? AND incarnation = 2", (b.device_id,))
     _exchange(d, b)
-    assert _sweep_value(b, "sessions") == "new"
+    assert _sweep_value(b, "sessions") == "lost-1"
     _converge([a, b, d])
-    assert {_sweep_value(w, "sessions") for w in (a, b, d)} == {"new"}
+    assert [_sweep_value(w, "sessions") for w in (a, b, d)] == ["new", "lost-1", "new"]
+    if pruned:
+        return  # B's own log is emptied here, so it would reuse incarnation 2's numbers
+    _rename(b, "later")
+    _converge([a, b, d])
+    assert {_sweep_value(w, "sessions") for w in (a, b, d)} == {"later"}
 
 
 @pytest.mark.asyncio
-async def test_a_copy_of_a_lost_chat_update_blocks_its_signed_replay(workers):
-    """Review S23, S27, a known limit (#1792): B changes its chat's permission
-    mode after its backup, then restores and moves to incarnation 2 without
-    touching the chat. A gap in D's stream makes A hand B a state copy,
-    applied before the ops of the same exchange: it installs that very
-    version without the owner's own fields. B's signed op for it ties the
-    copy, and nothing proves the copy is that write rather than a later one
-    at the same clock (a pruned log does not), so B keeps the copy: the mode
-    stays as backed up until B sets it again."""
+async def test_a_copy_of_a_lost_chat_update_keeps_the_owner_fields_out(workers):
+    """Reviews S23, S27, S35, a known limit (#1792): B changes its chat's
+    permission mode after its backup, then restores and moves to incarnation
+    2 without touching the chat. A gap in D's stream makes A hand B a state
+    copy, applied before the ops of the same exchange: it installs that very
+    version without the owner's own fields, and with no incarnation. B's
+    signed op for it meets that copy, so it is taken as before the upgrade:
+    an op from B's own device sets no owner-only field, so the mode stays as
+    backed up until B sets it again."""
     from app.network import peer_snapshot
     a, b, d = _network(workers, "a", "b", "d")
     _session(b, "chat", title="t", events=0)
