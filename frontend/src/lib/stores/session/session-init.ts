@@ -290,6 +290,7 @@ export function createSessionInit(deps: SessionInitDeps) {
 				// placeholders that are neither shown as its binding nor sent.
 				profile: '',
 				fastMode: false,
+				ultrafastMode: false,
 				bindingUnhydrated: { ...ALL_BINDING_UNHYDRATED },
 				bindingPicks: {},
 			}));
@@ -415,6 +416,9 @@ export function createSessionInit(deps: SessionInitDeps) {
 						effortLevelOverride:
 							persisted.effortLevelOverride ?? (persisted.sessionId ? null : s.effortLevelOverride),
 						fastMode: binding ? binding.fastMode : (persisted.fastMode ?? s.fastMode),
+						ultrafastMode: binding
+							? binding.ultrafastMode
+							: persisted.fastMode != null ? !!persisted.fastMode && persisted.ultrafastMode === true : s.ultrafastMode,
 						workspaceProjectIds: persisted.workspaceProjectIds ?? [],
 						contextWindowChoice:
 							persisted.contextWindowChoice ??

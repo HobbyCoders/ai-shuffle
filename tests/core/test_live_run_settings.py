@@ -44,10 +44,10 @@ def live(monkeypatch):
 @pytest.mark.asyncio
 async def test_live_sparse_picks_update_engine_binding_and_active_turn(live):
     state, runtime, save = live
-    for changes, expected in [({"effort": "low"}, {"effort": "low", "fast": False}),
-                              ({"fast": True}, {"effort": "low", "fast": True}),
-                              ({"fast": False}, {"effort": "low", "fast": False}),
-                              ({"effort": None}, {"effort": None, "fast": False})]:
+    for changes, expected in [({"effort": "low"}, {"effort": "low", "fast": False, "speed": "standard"}),
+                              ({"fast": True}, {"effort": "low", "fast": True, "speed": "fast"}),
+                              ({"fast": False}, {"effort": "low", "fast": False, "speed": "standard"}),
+                              ({"effort": None}, {"effort": None, "fast": False, "speed": "standard"})]:
         assert await api.apply_run_settings("s", api.RunSettingsUpdate(**changes)) == expected
         assert state.adapter._engine.effort == expected["effort"]
         assert state.connect_options.effort == expected["effort"]
@@ -55,7 +55,7 @@ async def test_live_sparse_picks_update_engine_binding_and_active_turn(live):
         assert runtime.turn["overrides"] == expected
         assert state.is_streaming
     assert state.adapter._engine.request_extra == {"keep": 1}
-    save.assert_called_with("s", effort=None, fast=False, clear_effort=True)
+    save.assert_called_with("s", effort=None, fast=False, speed="standard", clear_effort=True)
 
 
 @pytest.mark.asyncio
@@ -129,7 +129,7 @@ async def test_http_validation_and_remote_owner_routing(live, monkeypatch):
         assert (await client.put(url, json={"effort": "bogus"})).status_code == 422
         assert (await client.put(url, json={})).status_code == 409
         assert (await client.put(url, json={"fast": None})).status_code == 409
-        assert (await client.put(url, json={"fast": True})).json() == {"effort": "high", "fast": True}
+        assert (await client.put(url, json={"fast": True})).json() == {"effort": "high", "fast": True, "speed": "fast"}
     monkeypatch.setattr(api.control, "owner_of", lambda row: "remote")
     remote = AsyncMock(return_value={"effort": "low", "fast": False})
     monkeypatch.setattr(api.control, "call", remote)
@@ -159,7 +159,8 @@ async def test_idle_session_and_explicit_default_persist_without_spawning(mock_d
     db.set_session_run_binding("idle-knobs", effort="high")
     db.set_session_run_binding("idle-knobs", fast=True)
     assert db.get_session("idle-knobs")["effort"] == "high"
-    assert await api.apply_run_settings("idle-knobs", api.RunSettingsUpdate(fast=True)) == {"effort": "high", "fast": True}
+    assert await api.apply_run_settings("idle-knobs", api.RunSettingsUpdate(fast=True)) == {"effort": "high", "fast": True,
+                                                                                         "speed": "fast"}
 
 
 @pytest.mark.asyncio
@@ -338,11 +339,13 @@ async def test_context_pick_is_announced_to_open_clients(mock_db, monkeypatch):
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"context_window": 200_000}, source_device_id=None)
 
-    # A Fast change says nothing new about effort.
+    # A Fast change says nothing new about effort; it announces the speed pair
+    # (an owner older than ``speed`` answers without it: Fast).
     broadcast.reset_mock()
     monkeypatch.setattr(api.control, "call", AsyncMock(return_value={"effort": "low", "fast": True}))
     await api.update_run_settings(None, "announce", api.RunSettingsUpdate(fast=True))
-    broadcast.assert_not_awaited()
+    broadcast.assert_awaited_once_with(
+        session_id="announce", updates={"fast": True, "speed": "fast"}, source_device_id=None)
 
 
 @pytest.mark.asyncio
@@ -369,8 +372,14 @@ async def test_effort_pick_and_auto_are_announced_to_open_clients(mock_db, monke
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"effort": None}, source_device_id=None)
 
+    # The owner announces what it saved, under the chat's lock.
     broadcast.reset_mock()
-    monkeypatch.setattr(api, "apply_run_settings", AsyncMock(return_value={"effort": None, "fast": False}))
+    db.create_profile("role", "Role", None, {"model": "fable"})
+    db.create_session(session_id="announce", profile_id="role", model="fable", effort="medium")
+    monkeypatch.setattr(api.control, "_require_owned", db.get_session)
+    monkeypatch.setattr("app.core.session_pool.get_session_pool",
+                        lambda: SimpleNamespace(peek=lambda _: None))
+    monkeypatch.setattr("app.core.session_runtime.get_live_runtime", lambda _: None)
     await api.handle_run_settings({"session_id": "announce", "effort": None}, "peer")
     broadcast.assert_awaited_once_with(
         session_id="announce", updates={"effort": None}, source_device_id=None)
@@ -493,10 +502,10 @@ async def test_handed_down_change_skips_a_pinned_or_unsupported_subagent(tree):
 async def test_a_failing_subagent_does_not_stop_the_others(tree, monkeypatch):
     real = api._apply_run_settings
 
-    async def flaky(session_id, body, *, inherited):
+    async def flaky(session_id, body, *, inherited, announce=False):
         if session_id == "w1":
             raise ValueError("The session is still connecting. Try again in a moment.")
-        return await real(session_id, body, inherited=inherited)
+        return await real(session_id, body, inherited=inherited, announce=announce)
 
     monkeypatch.setattr(api, "_apply_run_settings", flaky)
     db.create_session("w3", parent_session_id="p", model="opus", profile_id="agent", hidden=True, is_worker=True)

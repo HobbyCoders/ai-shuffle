@@ -7,14 +7,17 @@
 	 * Header "Effort · <level>" with a model-specific slider, tick marks, the stop
 	 * names, and Faster / Smarter end labels. The Fast service tier rides along
 	 * in the header when the picked model carries it, so the compact card never
-	 * hides a knob the full controls popover offers.
+	 * hides a knob the full controls popover offers. Where the route also offers
+	 * OpenAI's Ultrafast, the bolt becomes a Standard / Fast / Ultrafast picker
+	 * under the header; everywhere else the bolt stays as it is.
 	 *
 	 * `value === null` means no level is pinned for the chat — the model runs at
 	 * its own default. The slider still needs a resting position, so the thumb
 	 * sits on the declared default (or first stop) without selecting it; the first
 	 * drag pins a level. The header's Auto toggle unpins it again (#1579).
 	 */
-	import { fastAppliesNotice } from '$lib/utils/fast-outcome';
+	import { fastAppliesNotice, speedAppliesNotice } from '$lib/utils/fast-outcome';
+	import { SPEED_OPTIONS, pickedSpeed, ultrafastCost, type ComposerSpeed, type UltrafastBilling } from './speed-tier';
 	import { Zap } from 'lucide-svelte';
 	import { NO_ADJUSTABLE_EFFORT, autoEffortLabel } from '$lib/constants/model-effort';
 
@@ -40,6 +43,13 @@
 		/** The worker said the running turn keeps its speed until the next message. */
 		fastWaitsForNextMessage?: boolean;
 		onToggleFast?: () => void;
+		/** The route also carries Ultrafast: show the three-way speed picker. */
+		ultrafastSupported?: boolean;
+		/** The chat's Fast runs as Ultrafast. */
+		ultrafastEnabled?: boolean;
+		/** How the model's Ultrafast is paid for, which words its cost line. */
+		ultrafastBilling?: UltrafastBilling;
+		onSelectSpeed?: (speed: ComposerSpeed) => void;
 	}
 
 	let {
@@ -53,8 +63,15 @@
 		fastEnabled = false,
 		fastPending = false,
 		fastWaitsForNextMessage = false,
-		onToggleFast
+		onToggleFast,
+		ultrafastSupported = false,
+		ultrafastEnabled = false,
+		ultrafastBilling = 'api',
+		onSelectSpeed
 	}: Props = $props();
+
+	const speedPicker = $derived(fastSupported && ultrafastSupported);
+	const speed = $derived(pickedSpeed({ fastEnabled, ultrafastSupported, ultrafastEnabled }));
 
 	const pinnedIndex = $derived(options.findIndex((option) => option.value === value));
 	const pinned = $derived(pinnedIndex >= 0);
@@ -75,7 +92,8 @@
 	}
 </script>
 
-<div class="effort-pop-card" class:fast-active={fastSupported && fastEnabled && !fastPending}>
+<div class="effort-pop-card" class:fast-active={fastSupported && fastEnabled && !fastPending}
+	class:ultrafast-active={speedPicker && speed === 'ultrafast' && !fastPending}>
 	<div class="pop-head">
 		<span class="pop-title">Effort</span>
 		<span class="pop-value-slot">
@@ -93,7 +111,7 @@
 				onclick={() => { if (pinned) onSelect(null); }}
 			>Auto</button>
 		{/if}
-		{#if fastSupported}
+		{#if fastSupported && !speedPicker}
 			<button
 				type="button"
 				class="fast-toggle"
@@ -111,9 +129,29 @@
 		{/if}
 	</div>
 
+	{#if speedPicker}
+		<!-- One pick among three; while the chat's own value loads, none is. -->
+		<div class="speed-seg" role="radiogroup" aria-label="Speed" aria-busy={fastPending || undefined}
+			class:pending={fastPending} data-testid="speed-picker">
+			{#each SPEED_OPTIONS as option (option.value)}
+				<button
+					type="button"
+					role="radio"
+					aria-checked={!fastPending && speed === option.value}
+					disabled={fastPending}
+					title={fastPending ? "Speed: loading this chat's own setting" : option.title}
+					data-speed={option.value}
+					onclick={() => { if (!fastPending && option.value !== speed) onSelectSpeed?.(option.value); }}
+				>{#if option.value !== 'standard'}<span class="seg-bolts" aria-hidden="true"><Zap size={11} strokeWidth={2} />{#if option.value === 'ultrafast'}<Zap size={11} strokeWidth={2} />{/if}</span>{/if}{option.label}</button>
+			{/each}
+		</div>
+		<!-- The cost is said before any pick, for as long as the picker shows. -->
+		<p class="speed-cost" data-testid="ultrafast-cost">{ultrafastCost(ultrafastBilling)}</p>
+	{/if}
+
 	<div aria-live="polite">
 		{#if fastSupported && fastWaitsForNextMessage}
-			<p class="fast-applies" data-testid="fast-applies-notice">{fastAppliesNotice(fastEnabled)}</p>
+			<p class="fast-applies" data-testid="fast-applies-notice">{speedPicker ? speedAppliesNotice(speed) : fastAppliesNotice(fastEnabled)}</p>
 		{/if}
 	</div>
 
@@ -197,6 +235,11 @@
 		background: linear-gradient(110deg, transparent 35%, color-mix(in oklch, var(--primary) 12%, transparent) 49%, color-mix(in oklch, var(--primary) 24%, transparent) 50%, transparent 65%);
 		background-size: 300% 100%;
 		animation: fast-energy-sweep 1.6s ease-out 3;
+	}
+
+	/* Ultrafast: the same sweep, quicker. */
+	.ultrafast-active::after {
+		animation-duration: 1s;
 	}
 
 	@keyframes fast-energy-sweep {
@@ -332,6 +375,76 @@
 	.fast-toggle:focus-visible {
 		outline: 1px solid var(--primary);
 		outline-offset: 2px;
+	}
+
+	/* ── Speed picker (Ultrafast routes) ────────────────────────────────
+	   Neutral: the selected tier is raised, not coloured, so Ultrafast does
+	   not read as a recommendation. */
+	.speed-seg {
+		display: grid;
+		grid-template-columns: repeat(3, 1fr);
+		gap: 2px;
+		margin: -4px 0 12px;
+		padding: 2px;
+		border-radius: 8px;
+		background: var(--muted);
+	}
+
+	.speed-seg button {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 3px;
+		min-height: 24px;
+		padding: 2px 6px;
+		border: 0;
+		border-radius: 6px;
+		background: transparent;
+		color: var(--muted-foreground);
+		font-size: 12px;
+		line-height: 18px;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: background-color 0.12s ease, color 0.12s ease;
+	}
+
+	.speed-seg button:hover:not(:disabled) {
+		color: var(--foreground);
+	}
+
+	.speed-seg button[aria-checked='true'] {
+		background: var(--segment-selected, var(--card));
+		color: var(--foreground);
+		box-shadow: 0 1px 2px color-mix(in oklch, #000 22%, transparent);
+	}
+
+	.seg-bolts {
+		display: inline-flex;
+	}
+
+	.seg-bolts :global(svg + svg) {
+		margin-left: -4px;
+	}
+
+	.speed-seg button[aria-checked='true'] .seg-bolts :global(svg) {
+		fill: currentColor;
+	}
+
+	.speed-seg.pending button {
+		cursor: progress;
+		animation: fast-pending 1.4s ease-in-out infinite;
+	}
+
+	.speed-seg button:focus-visible {
+		outline: 1px solid var(--primary);
+		outline-offset: 1px;
+	}
+
+	.speed-cost {
+		margin: -6px 0 12px;
+		font-size: 11.5px;
+		line-height: 1.4;
+		color: var(--muted-foreground);
 	}
 
 	/* ── Slider ─────────────────────────────────────────────────────────── */
@@ -478,11 +591,13 @@
 		.pop-value,
 		.fast-active::after,
 		.fast-toggle.on :global(svg),
-		.fast-toggle.pending {
+		.fast-toggle.pending,
+		.speed-seg.pending button {
 			animation: none;
 		}
 
 		.fast-toggle,
+		.speed-seg button,
 		.auto-toggle,
 		.fill {
 			transition: none;

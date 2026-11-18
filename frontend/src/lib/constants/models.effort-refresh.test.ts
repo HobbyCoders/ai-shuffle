@@ -179,6 +179,26 @@ describe('bounded capability discovery recovery', () => {
   await vi.advanceTimersByTimeAsync(120_000);
   expect(mocks.post).toHaveBeenCalledTimes(2);
  });
+ it('keeps speed tiers that are still stale after a refresh retryable under the backoff', async () => {
+  vi.useFakeTimers();
+  mocks.post.mockClear().mockResolvedValue({ refreshed: ['tiers'], failed: [] });
+  const p = payload('tiers', [{ id: 'm', effort_levels: ['low'], effort_metadata_version: 1 }]);
+  const stale = (generation: string) => ({ ...p, providers: [{ ...p.providers[0], speed_tiers_stale: true, capability_generation: generation }] });
+  mocks.get.mockResolvedValue(stale('g1'));
+  await hydrateModelRegistry();
+  // Another tab added a model before the follow-up read: a newer, still-stale generation.
+  mocks.get.mockResolvedValue(stale('g2'));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(mocks.post).toHaveBeenCalledTimes(1);
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(mocks.post).toHaveBeenCalledTimes(2);
+  // A catalog that keeps answering stale is retried a bounded number of times
+  // (the newer generation gets the usual first try plus three backoff retries).
+  await vi.advanceTimersByTimeAsync(3_600_000);
+  expect(mocks.post).toHaveBeenCalledTimes(5);
+  await vi.advanceTimersByTimeAsync(3_600_000);
+  expect(mocks.post).toHaveBeenCalledTimes(5);
+ });
  it('retries a changed provider revision despite prior successful unknown metadata', async () => {
   vi.useFakeTimers();
   mocks.post.mockClear().mockResolvedValue({ refreshed: ['changed-binding'], failed: [] });

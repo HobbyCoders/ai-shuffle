@@ -2050,6 +2050,12 @@ def reconnect_option_names(state: SessionState, new_options: AgentOptions) -> li
         getattr(new_options, "aih_fast", None)
     ):
         changed.append("aih_fast")
+    # The speed tier inside fast mode (Fast vs Ultrafast) is the same
+    # connect-time ``service_tier``; compared as the resolved tier.
+    from app.core.model_speed import options_speed
+
+    if options_speed(old, prefix="aih_") != options_speed(new_options, prefix="aih_"):
+        changed.append("aih_speed")
 
     # The ai-tools MCP server owns a persistent Node worker whose FAL_KEY is
     # captured at spawn. Compare only the non-secret fingerprint stamped by

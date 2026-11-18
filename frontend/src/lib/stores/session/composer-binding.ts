@@ -35,6 +35,8 @@ export interface ComposerBindingValues {
 	profile: string;
 	permissionModeOverride: string | null;
 	fastMode: boolean;
+	/** Fast refined to Ultrafast; rides with the `fast` field's flags. */
+	ultrafastMode?: boolean;
 }
 
 export interface ComposerBindingState extends ComposerBindingValues {
@@ -47,6 +49,7 @@ export interface CachedComposerBinding {
 	profile?: string;
 	permissionModeOverride?: string | null;
 	fastMode?: boolean;
+	ultrafastMode?: boolean;
 	bindingHydrated?: ComposerBindingFlags;
 	bindingPicks?: ComposerBindingFlags;
 }
@@ -56,6 +59,8 @@ export interface ComposerBindingRow {
 	profile_id?: string | null;
 	permission_mode?: string | null;
 	fast?: boolean | null;
+	/** The speed tier; absent from an older owner (whose `fast` alone decides). */
+	speed?: string | null;
 }
 
 export function isBindingUnhydrated(state: Pick<ComposerBindingState, 'bindingUnhydrated'>, field: ComposerBindingField): boolean {
@@ -93,6 +98,7 @@ export function cacheComposerBinding(state: ComposerBindingState): CachedCompose
 		profile: state.profile,
 		permissionModeOverride: state.permissionModeOverride,
 		fastMode: state.fastMode,
+		ultrafastMode: !!state.fastMode && !!state.ultrafastMode,
 		bindingHydrated: hydrated,
 		bindingPicks: { ...(state.bindingPicks ?? {}) },
 	};
@@ -144,16 +150,19 @@ export function restoreComposerBinding(
 	}
 
 	let fastMode = false;
+	let ultrafastMode = false;
 	if (trusted(cache, 'fast') && typeof cache!.fastMode === 'boolean') {
 		fastMode = cache!.fastMode;
+		ultrafastMode = fastMode && cache!.ultrafastMode === true;
 		if (cache!.bindingPicks?.fast) picks.fast = true;
 	} else if (row && typeof row.fast === 'boolean') {
 		fastMode = row.fast;
+		ultrafastMode = row.fast && row.speed === 'ultrafast';
 	} else {
 		unhydrated.fast = true;
 	}
 
-	return { profile, permissionModeOverride, fastMode, bindingUnhydrated: unhydrated, bindingPicks: picks };
+	return { profile, permissionModeOverride, fastMode, ultrafastMode, bindingUnhydrated: unhydrated, bindingPicks: picks };
 }
 
 /** The `/live` binding fields; `undefined` means an older worker that does not send them. */
@@ -161,6 +170,8 @@ export interface LiveComposerBinding {
 	profile_id?: string | null;
 	permission_mode?: string | null;
 	fast?: boolean | null;
+	/** Absent from an older worker: its `fast` alone decides (Fast). */
+	speed?: string | null;
 }
 
 /**
@@ -189,8 +200,10 @@ export function liveComposerBindingPatch(
 		patch.permissionModeOverride = normalizePermission(meta.permission_mode);
 		unhydrated = withFlag(unhydrated, 'permission', false);
 	}
-	if (typeof meta.fast === 'boolean' && !picks.fast && current.fastMode === initial.fastMode) {
+	if (typeof meta.fast === 'boolean' && !picks.fast && current.fastMode === initial.fastMode
+		&& !!current.ultrafastMode === !!initial.ultrafastMode) {
 		patch.fastMode = meta.fast;
+		patch.ultrafastMode = meta.fast && meta.speed === 'ultrafast';
 		unhydrated = withFlag(unhydrated, 'fast', false);
 	}
 	if (unhydrated !== (current.bindingUnhydrated ?? {})) patch.bindingUnhydrated = unhydrated;
@@ -205,12 +218,17 @@ export function sendableComposerBinding(state: ComposerBindingState & { sessionI
 	profile: string | undefined;
 	permissionMode: string | undefined;
 	fast: boolean | undefined;
+	speed: 'standard' | 'fast' | 'ultrafast' | undefined;
 } {
 	const existing = !!state.sessionId;
+	const fast = existing && isBindingUnhydrated(state, 'fast') ? undefined : state.fastMode;
 	return {
 		// An existing session resolves an omitted agent to its own (chat_ws_handler).
 		profile: existing && (isBindingUnhydrated(state, 'profile') || !state.profile) ? undefined : state.profile,
 		permissionMode: existing && isBindingUnhydrated(state, 'permission') ? undefined : (state.permissionModeOverride || undefined),
-		fast: existing && isBindingUnhydrated(state, 'fast') ? undefined : state.fastMode,
+		fast,
+		// Sent with `fast` so the turn runs the shown tier; an older worker
+		// ignores it and runs `fast` as Fast.
+		speed: fast === undefined ? undefined : !fast ? 'standard' : state.ultrafastMode ? 'ultrafast' : 'fast',
 	};
 }

@@ -1327,7 +1327,8 @@ async def test_real_native_answer_reaches_the_running_turn_after_a_fast_mode_swi
         question, = handler.get_pending_questions(sid)
         assert question["nonblocking"] is True
         assert await control.handle("run-settings", {"session_id": sid, "fast": True},
-                                    from_device="dev_desktopworker") == {"effort": "high", "fast": True}
+                                    from_device="dev_desktopworker") == {"effort": "high", "fast": True,
+                                                                             "speed": "fast"}
         assert (await control.handle("question", {
             "session_id": sid, "request_id": question["request_id"],
             "answers": {"Route?": "Deploy from ServerWorker"},

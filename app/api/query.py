@@ -489,6 +489,7 @@ async def conversation(
                 permission_mode=(overrides or {}).get("permission_mode"),
                 context_window=create_window,
                 fast=(overrides or {}).get("fast"),
+                speed=(overrides or {}).get("speed"),
             )
             # Best-effort: surface the new session on connected devices right
             # away rather than on the next sidebar poll.

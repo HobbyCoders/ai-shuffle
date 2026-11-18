@@ -15,7 +15,7 @@ vi.mock('$lib/api/client', () => ({
 	api: { get: mocks.get }
 }));
 
-import { encodeProviderModel, hydrateModelRegistry, isFastModeCapable } from './models';
+import { encodeProviderModel, hydrateModelRegistry, isFastModeCapable, isUltrafastCapable } from './models';
 
 describe('isFastModeCapable — native Claude models', () => {
 	it('accepts the opus family', () => {
@@ -116,5 +116,34 @@ describe('isFastModeCapable — provider composites', () => {
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-6-astra'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'gpt-6.1-sol'))).toBe(true);
 		expect(isFastModeCapable(encodeProviderModel('not-hydrated-yet', 'claude-3'))).toBe(false);
+	});
+});
+
+describe('isUltrafastCapable — the registry decides per model', () => {
+	it('offers Ultrafast only on models the worker flagged', async () => {
+		mocks.get.mockResolvedValueOnce({
+			models: [{ value: 'opus', label: 'Opus', family: 'opus', context_window: 1_000_000 }],
+			default: 'opus',
+			legacy_map: {},
+			providers: [
+				{ id: 'pro', name: 'ChatGPT Pro', provider_type: 'chatgpt', default_model: 'gpt-6.1-sol',
+					models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', ultrafast: true }, { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' }] },
+				{ id: 'plus', name: 'ChatGPT Plus', provider_type: 'chatgpt', default_model: 'gpt-6.1-sol',
+					models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' }] },
+				{ id: 'or', name: 'OpenRouter', provider_type: 'openrouter', default_model: 'gpt-6.1-sol',
+					models: [{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' }] }
+			]
+		});
+		await hydrateModelRegistry();
+		expect(isUltrafastCapable(encodeProviderModel('pro', 'gpt-6.1-sol'))).toBe(true);
+		expect(isUltrafastCapable(encodeProviderModel('pro', 'gpt-6.1-terra'))).toBe(false);
+		// A Plus plan's catalog does not list the tier.
+		expect(isUltrafastCapable(encodeProviderModel('plus', 'gpt-6.1-sol'))).toBe(false);
+		expect(isUltrafastCapable(encodeProviderModel('or', 'gpt-6.1-sol'))).toBe(false);
+		// Native Claude, bare ids and unknown rows never offer it.
+		expect(isUltrafastCapable('opus')).toBe(false);
+		expect(isUltrafastCapable('gpt-6.1-sol')).toBe(false);
+		expect(isUltrafastCapable(encodeProviderModel('gone', 'gpt-6.1-sol'))).toBe(false);
+		expect(isUltrafastCapable(null)).toBe(false);
 	});
 });
