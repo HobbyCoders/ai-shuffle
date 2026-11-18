@@ -1349,12 +1349,13 @@ def test_the_native_leg_prompt_teaches_the_steering_marker():
     assert PROMPT_BLOCK in _compiled_text(native=True)
 
 
-def test_the_delegated_leg_prompt_leaves_steering_alone():
-    """Delegated steers are real user frames on the CLI's stdin — no marker, so
-    nothing to explain."""
+def test_the_delegated_leg_prompt_teaches_the_steering_marker_once():
+    """Delegated steers ride a PostToolUse hook's additionalContext in the same
+    marker (DelegatedLoop._deliver_steer), and the compiled prompt replaces
+    Claude Code's, so ours must vouch for the marker — exactly once."""
     from fluid.context.steering import PROMPT_BLOCK
 
-    assert PROMPT_BLOCK not in _compiled_text(native=False)
+    assert _compiled_text(native=False).count(PROMPT_BLOCK) == 1
 
 
 # ---------------------------------------------------------------------------
