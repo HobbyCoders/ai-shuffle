@@ -256,7 +256,35 @@ _RETRY_CASES = [
     pytest.param({"l": [1, 2]}, {"l": [2, 1]}, False, id="list-order"),
     pytest.param({"n": None}, {}, False, id="null-vs-missing"),
     pytest.param({"n": "1"}, {"n": 1}, False, id="string-vs-number"),
+    pytest.param({"n": 1e23}, {"n": 1e23}, True, id="large-float-resend"),
+    pytest.param({"n": {"a": [1e23, True]}}, {"n": {"a": [1e23, 1]}}, False,
+                 id="nested-bool-vs-number"),
 ]
+
+
+# What PostgreSQL hands back for a stored float: JSONB keeps the number's
+# exact decimal value and prints it without an exponent, so ``1e23`` returns as
+# 100000000000000000000000 (``float(1e23)`` is not that integer) and
+# ``float(2**63)`` as 9223372036854776000. A resend of the same message must
+# still be a retry, whether the row is read as JSONB text or decoded to a dict.
+_PG_RENDERED = [
+    pytest.param(1e23, "100000000000000000000000", id="1e23"),
+    pytest.param(float(2**63), "9223372036854776000", id="2**63"),
+    pytest.param(1e20, "100000000000000000000", id="1e20"),
+    pytest.param(1.5e-7, "0.00000015", id="small"),
+]
+
+
+@pytest.mark.parametrize("sent, rendered", _PG_RENDERED)
+@pytest.mark.parametrize("as_text", [True, False], ids=["jsonb-text", "decoded"])
+def test_a_resend_matches_the_number_postgres_stored(sent, rendered, as_text):
+    from fluid.store.base import NodeConflict, check_node_retry
+
+    text = f'{{"input": {{"n": {rendered}, "flag": true}}}}'
+    stored = text if as_text else json.loads(text)
+    check_node_retry("s", "n1", (None, stored), (None, {"input": {"flag": True, "n": sent}}))
+    with pytest.raises(NodeConflict):  # bool versus number still differs
+        check_node_retry("s", "n1", (None, stored), (None, {"input": {"flag": 1, "n": sent}}))
 
 
 def _tool_node(node_id: str, tool_input: dict) -> SessionNode:

@@ -505,15 +505,15 @@ def _append_node_sync(
         stored = None
         if cur.rowcount == 0:
             cur.execute(
-                "SELECT parent_id, ts, message FROM fluid_session_nodes "
-                "WHERE session_id = %s AND node_id = %s",
+                "SELECT parent_id, ts, message, message::text AS message_text "
+                "FROM fluid_session_nodes WHERE session_id = %s AND node_id = %s",
                 (session_id, node.node_id),
             )
             row = cur.fetchone()
             if row is not None:
                 check_node_retry(
                     session_id, node.node_id,
-                    (row["parent_id"], _as_dict(row["message"])),
+                    (row["parent_id"], row["message_text"]),
                     (node.parent_id, message),
                 )
                 stored = SessionNode(

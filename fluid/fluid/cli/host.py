@@ -253,9 +253,6 @@ class CliHost:
         self.identity = identity
         self.engine: Any | None = None
         self.workers: dict[str, Worker] = {}
-        # Results the parent engine refused (its store could not record them),
-        # by task id, offered again on each later report and at close.
-        self._undelivered: dict[str, BackgroundTaskFinished] = {}
         self._closed = False
         self._swarm = None
         self._swarm_lock = asyncio.Lock()
@@ -410,13 +407,6 @@ class CliHost:
     async def aclose(self) -> None:
         if self._swarm:
             await self._swarm.aclose()
-        await self._deliver_undelivered()
-        for task_id in self._undelivered:
-            log.warning(
-                "result of %s was never delivered: the session's store refused it "
-                "until close; a reopened session counts the task as lost", task_id,
-            )
-        self._undelivered.clear()
         self._closed = True
         live = [w for w in self.workers.values() if not w.done]
         for worker in live:
@@ -426,13 +416,9 @@ class CliHost:
     async def _report(self, worker: Worker, status: str, summary: str) -> None:
         """Hand a terminal result to the parent engine (idempotent by task_id).
 
-        The worker counts as running until this returns, so ``busy()`` never
-        reports idle in the gap between process exit and the completion being
-        queued for a wake. Its process having exited is not its result having
-        been delivered: a result the engine refuses (the store failed to
-        record it) stays queued and is offered again, before the next one, on
-        every later report and at close, until the engine accepts it. Results
-        already queued go first, so the parent sees them in finishing order.
+        The worker counts as running until the parent has accepted the result,
+        so ``busy()`` never reports idle in the gap between process exit and
+        the completion being queued for a wake.
         """
         worker.summary = summary
         if worker.swarm_launch is not None:
@@ -440,29 +426,17 @@ class CliHost:
             worker.swarm_launch.finish(status, summary)
             return
         try:
-            self._undelivered[worker.task_id] = BackgroundTaskFinished(
-                task_id=worker.task_id,
-                worker_session_id=worker.worker_session_id,
-                status=status,
-                summary=summary,
-            )
-            await self._deliver_undelivered()
+            if self.engine is not None and not self._closed:
+                await self.engine.submit(BackgroundTaskFinished(
+                    task_id=worker.task_id,
+                    worker_session_id=worker.worker_session_id,
+                    status=status,
+                    summary=summary,
+                ))
+        except Exception as exc:  # noqa: BLE001 — the parent may already be closed
+            log.warning("could not deliver result of %s: %s", worker.task_id, exc)
         finally:
             worker.status = status
-
-    async def _deliver_undelivered(self) -> None:
-        """Offer each queued result to the engine, oldest first, until one fails."""
-        while self._undelivered and self.engine is not None and not self._closed:
-            task_id, op = next(iter(self._undelivered.items()))
-            try:
-                await self.engine.submit(op)
-            except Exception as exc:  # noqa: BLE001 — kept and offered again later
-                log.warning("result of %s not delivered yet (%s); it stays queued",
-                            task_id, exc)
-                return
-            # A resubmission of a recorded result is a no-op in the engine, so
-            # dropping it only after the submit returns cannot lose or double it.
-            self._undelivered.pop(task_id, None)
 
     # ── Monitor ──
 

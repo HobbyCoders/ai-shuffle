@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Protocol
 
@@ -231,12 +232,14 @@ class NodeConflict(StoreError, ValueError):
 def check_node_retry(
     session_id: str,
     node_id: str,
-    stored: tuple[str | None, Mapping[str, Any]],
-    incoming: tuple[str | None, Mapping[str, Any]],
+    stored: tuple[str | None, Mapping[str, Any] | str],
+    incoming: tuple[str | None, Mapping[str, Any] | str],
 ) -> None:
     """The one duplicate-id rule every store applies, live and on reload.
 
-    ``stored`` and ``incoming`` are ``(parent_id, message dict)``. The same
+    ``stored`` and ``incoming`` are ``(parent_id, message)``, the message a
+    dict or its JSON text (the PostgreSQL store passes the row as JSONB
+    prints it, so no number goes through a float on the way). The same
     parent and message again is a retry of an append whose outcome was unknown:
     the stored node stays and the append only moves the head. Anything else
     raises :class:`NodeConflict` before a byte is written, so a live store can
@@ -244,8 +247,11 @@ def check_node_retry(
     first record's timestamp stands. "The same message" is
     :func:`json_values_equal` of the two as JSON values.
     """
-    def value(message: Mapping[str, Any]) -> Any:
-        return json.loads(json.dumps(message, default=str))
+    def value(message: Mapping[str, Any] | str) -> Any:
+        text = message if isinstance(message, str) else json.dumps(message, default=str)
+        # Every number as its exact decimal value: JSONB prints a stored 1e23
+        # as 100000000000000000000000, which a float would not equal.
+        return json.loads(text, parse_float=Decimal, parse_int=Decimal)
 
     if stored[0] != incoming[0] or not json_values_equal(
         value(stored[1]), value(incoming[1])
@@ -257,19 +263,17 @@ def json_values_equal(a: Any, b: Any) -> bool:
     """Equality of two parsed JSON values, as PostgreSQL's ``jsonb =`` decides it.
 
     Every store uses this for a node retry, so one resend is a retry in all of
-    them or in none. Numbers compare by value (``1``, ``1.0`` and ``1e0`` are
-    equal; ``1e20`` equals ``100000000000000000000``), booleans are not
-    numbers (``true`` is not ``1``), object keys are unordered, arrays are
-    ordered, and strings compare code point by code point (escapes already
-    resolved by parsing; no Unicode normalisation, so NFC and NFD differ).
-    Where JSONB keeps more decimal digits than a binary float holds, two
-    numbers it tells apart can compare equal here; ``json.dumps`` writes the
-    shortest text for a float, so a resend of the same Python value never
-    meets that case.
+    them or in none. Numbers compare by exact decimal value, as JSONB's
+    ``numeric`` does, when parsed as :class:`~decimal.Decimal` (what
+    ``check_node_retry`` does): ``1``, ``1.0`` and ``1e0`` are equal, and so
+    are ``1e23`` and ``100000000000000000000000``. Booleans are not numbers
+    (``true`` is not ``1``), object keys are unordered, arrays are ordered,
+    and strings compare code point by code point (escapes already resolved by
+    parsing; no Unicode normalisation, so NFC and NFD differ).
     """
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
-    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+    if isinstance(a, (int, float, Decimal)) and isinstance(b, (int, float, Decimal)):
         return a == b
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(json_values_equal(a[k], b[k]) for k in a)
