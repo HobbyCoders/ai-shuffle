@@ -95,20 +95,27 @@ _RESOLUTION_LINES = re.compile(r"(\d{3,4})p")
 # a range of its values ("4 to 30 seconds", "4-30s", "(0.5-22)s"), or a
 # sentence whose subject is the field ("Clip length (seconds)", "Duration of
 # the video in seconds", "How long the audio is, in seconds", "Number of
-# seconds ...", "Seconds of video"). A unit elsewhere ("Generation takes 30 seconds") is not.
+# seconds ...", "Seconds of video"). Sentences about how long the work takes
+# are dropped first (``_value_sentences``), so no form or range ever reads them.
 _DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?|hrs?|s"
 _RANGE = re.compile(
     rf"(?<![\d.])(\d+(?:\.\d+)?)\s*({_DURATION_WORDS})?\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*\)?\s*({_DURATION_WORDS})\b", re.I)
 _SUBJECT = r"(?:[\w'-]+\s+){0,4}?(?:duration|length)"
 _SUBJECT_UNIT = [
     re.compile(rf"^{_SUBJECT}\s*\(\s*(?:in\s+)?({_DURATION_WORDS})\s*\)", re.I),
-    re.compile(rf"^(?:{_SUBJECT}\b|how\s+long\b)(?P<gap>[^.;!?]{{0,60}}?)\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
+    re.compile(rf"^(?:{_SUBJECT}\b|how\s+long\b)[^.;!?]{{0,60}}?\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
     re.compile(rf"^(?:the\s+)?(?:number\s+of\s+({_DURATION_WORDS})\b|({_DURATION_WORDS})\s+(?:of|for)\b)", re.I),
     # The noun and its unit side by side: "... audio length in seconds".
     re.compile(rf"\b(?:duration|length)\s+in\s+(?:whole\s+)?({_DURATION_WORDS})\b", re.I),
 ]
-# Words about how long the work takes, never about the value.
-_WORK_TIME = re.compile(r"\b(?:render\w*|process\w*|complet\w*|finish\w*|takes?|took|wait\w*|latency)\b", re.I)
+# A sentence with any of these is about how long the work takes, not the value.
+_WORK_TIME = re.compile(r"\b(?:render\w*|process\w*|complet\w*|finish\w*|takes?|took|taking|wait\w*|retr(?:y|ies|ied|ying)"
+                        r"|time\s*outs?|timeouts?|queue\w*|latency|runtime)\b", re.I)
+
+
+def _value_sentences(text: str | None) -> list[str]:
+    """The sentences of ``text`` that are not about work time."""
+    return [s for s in re.split(r"(?<=[.;!?])\s+", (text or "").strip()) if s and not _WORK_TIME.search(s)]
 
 
 def _unit_of(word: str) -> str:
@@ -341,7 +348,7 @@ class ModelSchema:
     def _prose_range(field: "ParamField"):
         """A range stated in prose: unit-bearing ("4 to 30s") or a bare
         parenthesised one ("Duration in seconds (0.5-30)")."""
-        text = field.description or ""
+        text = " ".join(_value_sentences(field.description))
         return _RANGE.search(text) or re.search(r"\((\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\)", text)
 
     def _bound(self, field: "ParamField", value):
@@ -387,20 +394,17 @@ class ModelSchema:
         above) and which form matched, for the catalog audit."""
         units, forms = set(), []
         top = self._declared_max(field)
-        first = _RANGE.search(field.description or "")
-        for m in _RANGE.finditer(field.description or ""):
+        description = " ".join(_value_sentences(field.description))
+        first = _RANGE.search(description)
+        for m in _RANGE.finditer(description):
             # The range agrees with the declared maximum or, with none, is the
             # bound itself (the one ``_bound`` reads).
             if (Decimal(m[3]) == top) if top is not None else m.start() == first.start():
                 units.update(_unit_of(u) for u in (m[2], m[4]) if u)
                 forms.append(("range", m[0]))
-        for text in (field.title or "", field.description or ""):
-            for sentence in re.split(r"(?<=[.;!?])\s+", text.strip()):
-                for index, form in enumerate(_SUBJECT_UNIT):
-                    if not (m := form.search(sentence)):
-                        continue
-                    if (index == 1 and _WORK_TIME.search(m["gap"])) or (index == 3 and _WORK_TIME.search(sentence)):
-                        continue
+        for sentence in _value_sentences(field.title) + _value_sentences(field.description):
+            for index, form in enumerate(_SUBJECT_UNIT):
+                if m := form.search(sentence):
                     units.add(_unit_of(next(g for g in reversed(m.groups()) if g)))
                     forms.append((("subject (unit)", "subject … in unit", "number of unit / unit of",
                                    "noun in unit")[index], m[0]))

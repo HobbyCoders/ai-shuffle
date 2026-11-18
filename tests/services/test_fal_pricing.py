@@ -137,6 +137,9 @@ def test_a_unit_tied_to_the_field_prices(field, seconds):
     # 30 equals the declared maximum: a coincidental number is not a unit.
     "Clip length. Generation takes 30 seconds.",
     "Long clips finish rendering in seconds.",
+    # A work-time range or "Number of seconds" never sets the unit or bound.
+    "Clip length. Rendering usually takes 4 to 30 seconds.",
+    "Clip length. Number of seconds to wait before retrying.",
     "Generation completes in seconds.",
     "Duration. Most clips render in under 10 seconds.",
 ])
