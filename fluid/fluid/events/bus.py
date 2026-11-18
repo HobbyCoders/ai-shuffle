@@ -24,12 +24,6 @@ Semantics:
   is ever lost — only buffered late).
 - ``subscribe(since_seq=N)`` replays the log from N before streaming live —
   reconnect support for WS bridges and TUIs.
-- ``reserve`` / ``deliver`` / ``release`` let an engine write an event before
-  anyone sees it: ``reserve`` numbers it without publishing, ``deliver``
-  publishes it once the store has it, ``release`` gives the number up after a
-  failed write. A subscriber waits at a reserved seq for as long as it is
-  held (the grace period does not apply), then skips a released one like any
-  other permanent hole. Needs a replay source, which is what handles holes.
 - A ``LIVE_ONLY_EVENTS`` signal is outside all of that: it goes to the current
   subscribers with ``seq`` left at -1, takes no number, enters no log and is
   never replayed. A subscriber that has moved past the point it was sent at
@@ -140,8 +134,6 @@ class EventBus:
         self._log_bytes: dict[str, int] = {}
         self._ring_max_bytes = max(1, int(log_ring_max_bytes))
         self._last_seq: dict[str, int] = {}
-        # Seqs numbered by ``reserve`` whose write has not settled yet.
-        self._reserved: dict[str, set[int]] = {}
         self._subs: dict[str, list[_Subscriber]] = {}
         self._maxsize = subscriber_queue_size
         self._ring_size = max(1, int(log_ring_size))
@@ -206,47 +198,14 @@ class EventBus:
         """Assign seq and ts, append to the log, fan out. Returns the sequenced event."""
         if isinstance(event, LIVE_ONLY_EVENTS):
             return self._hand_to_listeners(event)
-        return self._append(self._number(event))
-
-    def reserve(self, event: Event) -> Event:
-        """Number ``event`` without publishing it, so it can be persisted first.
-
-        The caller must end the reservation with ``deliver`` (the write
-        landed) or ``release`` (it did not). Until then subscribers wait at
-        this seq instead of skipping it after the grace period.
-        """
-        sequenced = self._number(event)
-        self._reserved.setdefault(sequenced.session_id, set()).add(sequenced.seq)
-        return sequenced
-
-    def deliver(self, sequenced: Event) -> Event:
-        """Publish an event numbered by ``reserve``."""
-        self._unreserve(sequenced)
-        return self._append(sequenced)
-
-    def release(self, sequenced: Event) -> None:
-        """Give up a reserved seq whose write failed: it becomes a hole."""
-        self._unreserve(sequenced)
-
-    def _unreserve(self, sequenced: Event) -> None:
-        held = self._reserved.get(sequenced.session_id)
-        if held is not None:
-            held.discard(sequenced.seq)
-            if not held:
-                del self._reserved[sequenced.session_id]
-
-    def _number(self, event: Event) -> Event:
         sid = event.session_id
         seq = self._last_seq.get(sid, 0) + 1
-        self._last_seq[sid] = seq
         # Stamp both facts about the event's place in the stream together: its
         # order (seq) and when it happened (ts, epoch seconds). An emitter that
         # already set ts — a replayed or reconstructed event carrying its
         # original time — keeps it; only an unstamped 0.0 is filled in.
-        return replace(event, seq=seq, ts=event.ts or time.time())
-
-    def _append(self, sequenced: Event) -> Event:
-        sid = sequenced.session_id
+        sequenced = replace(event, seq=seq, ts=event.ts or time.time())
+        self._last_seq[sid] = seq
         ring = self._logs.get(sid)
         if ring is None:
             ring = self._logs[sid] = deque()
@@ -254,17 +213,12 @@ class EventBus:
             self._log_bytes[sid] = 0
         size = _retained_size(sequenced)
         sizes = self._log_sizes[sid]
-        # A delivered reservation can land after later seqs: keep the ring
-        # in seq order.
-        index = len(ring)
-        while index and ring[index - 1].seq > sequenced.seq:
-            index -= 1
-        ring.insert(index, sequenced)
-        sizes.insert(index, size)
+        ring.append(sequenced)
+        sizes.append(size)
         self._log_bytes[sid] += size
         self._trim_log(sid)
         # Even an event larger than the entire ring budget is delivered live
-        # below and persisted by the engine. The ring remains a seq-ordered
+        # below and persisted by the engine. The ring remains a contiguous
         # suffix (possibly empty), so durable gap replay still works.
         for sub in self._subs.get(sid, ()):
             if sub.lagging:
@@ -398,21 +352,13 @@ class EventBus:
                         gap_cursor = sub.cursor
                         gap_started = time.monotonic()
                     closing = sub.generation < self._close_generation
-                    reserved = self._reserved.get(session_id, ())
-                    if closing or (
-                        sub.cursor + 1 not in reserved
-                        and time.monotonic() - gap_started >= REPLAY_GAP_GRACE_SECONDS
-                    ):
+                    if closing or time.monotonic() - gap_started >= REPLAY_GAP_GRACE_SECONDS:
                         # A permanent hole must not hide later durable events or
                         # a queued terminal. Closing drains without another wait.
-                        # A seq still being written is not a hole: stop before it.
                         available = await self._after(session_id, sub.cursor, allow_gap=True)
                         next_seq = available[0].seq if available else self.last_seq(session_id) + 1
                         if pending is not None:
                             next_seq = min(next_seq, pending.seq)
-                        if not closing:
-                            next_seq = min((next_seq, *(
-                                seq for seq in reserved if seq > sub.cursor)))
                         sub.cursor = next_seq - 1
                         continue
                     # Retry even without another publish: a commit can finish

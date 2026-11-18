@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Iterable
 from typing import Any
 
@@ -21,7 +22,7 @@ from fluid.events.model import (
 )
 from fluid.events.ops import BackgroundTaskFinished, UserTurn
 from fluid.engine.questions import QuestionLifecycleMixin
-from fluid.store.base import iter_events_of_class, persist_event
+from fluid.store.base import iter_events_of_class
 from fluid.tools.hardening import defang_harness_markers, fence_shell_output
 from fluid.tools.registry import BackgroundTaskReceipt
 
@@ -39,6 +40,17 @@ _BACKGROUND_SPAWN_SETTLE_TIMEOUT = 5.0
 # later completion for the life of the process.
 _BACKGROUND_WAKE_MAX_ATTEMPTS = 3
 _BACKGROUND_WAKE_RETRY_BASE_SECONDS = 0.5
+# A failed read of the lifecycle history is retried by a later lifecycle call,
+# but not before this backoff (doubling per failure, capped); in between the
+# lifecycle runs from memory. The warning repeats at most once per interval.
+_REPLAY_RETRY_BASE_SECONDS = 0.5
+_REPLAY_RETRY_MAX_SECONDS = 30.0
+_REPLAY_WARN_INTERVAL_SECONDS = 60.0
+
+
+def _kind_group(kind: str) -> str:
+    """A task has one event per group: started, completion_pending, terminal."""
+    return "terminal" if kind in _TERMINAL_TASK_KINDS else kind
 
 
 async def await_cancelled_child(task: asyncio.Task[Any]) -> None:
@@ -93,7 +105,17 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self._background_terminal: set[str] = set()
         self._background_early: dict[str, BackgroundTaskFinished] = {}
         self._background_completions: dict[str, BackgroundTaskFinished] = {}
+        # History loaded, and the recovery it calls for done: separate, so a
+        # refused write during recovery is retried by the next lifecycle call.
         self._background_rehydrated = False
+        self._background_recovered = False
+        self._background_replay_failures = 0
+        self._background_replay_retry_at = 0.0
+        self._background_replay_warned_at: float | None = None
+        # Lifecycle writes that raised, so may or may not have committed, by
+        # (task id, kind group): the bus seq before the write, where a retry
+        # looks for it in the store before writing again.
+        self._background_uncertain: dict[tuple[str, str], int] = {}
         self._background_lock = asyncio.Lock()
         self._background_wake_task: asyncio.Task | None = None
         self._background_waiting_on: asyncio.Task | None = None
@@ -108,8 +130,18 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         self.ctx.extra["background_spawn_tasks"] = self._background_spawn_tasks
 
     async def _rehydrate_background_lifecycle_unlocked(self) -> None:
-        if self._background_rehydrated:
+        if (
+            not self._background_rehydrated
+            and not await self._load_background_history_unlocked()
+        ):
             return
+        if not self._background_recovered:
+            await self._recover_background_unlocked()
+
+    async def _load_background_history_unlocked(self) -> bool:
+        """Rebuild lifecycle state from the store. False when it was not read."""
+        if time.monotonic() < self._background_replay_retry_at:
+            return False  # backing off after a failed read
         meta = await self._ensure_session()
         try:
             events = [event async for event in iter_events_of_class(
@@ -117,16 +149,16 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         except NotImplementedError:
             # A store without an event log: the lifecycle runs from memory.
             self._background_rehydrated = True
-            return
-        except Exception as exc:  # noqa: BLE001 — retried by the next lifecycle call
-            # A failed read is not an empty log: leave the latch down so the
-            # next call reads again and finds what is still owed. Until then
+            self._background_recovered = True
+            return False
+        except Exception as exc:  # noqa: BLE001 — retried by a later lifecycle call
+            # A failed read is not an empty log: leave the latch down so a
+            # later call reads again and finds what is still owed. Until then
             # the lifecycle runs from memory, as for a store without a log.
-            log.warning(
-                "could not read session %s's background task history (%s); "
-                "the next lifecycle call retries", meta.session_id, type(exc).__name__,
-            )
-            return
+            self._note_replay_failure(meta.session_id, exc)
+            return False
+        self._background_replay_failures = 0
+        self._background_replay_retry_at = 0.0
 
         for event in events:
             if isinstance(event, SubagentEvent):
@@ -167,7 +199,31 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 for task_id in event.task_ids:
                     self._background_completions.pop(task_id, None)
         self._background_rehydrated = True
+        return True
 
+    def _note_replay_failure(self, session_id: str, exc: BaseException) -> None:
+        """Back off before the next read and warn, at most once an interval."""
+        self._background_replay_failures += 1
+        now = time.monotonic()
+        self._background_replay_retry_at = now + min(
+            _REPLAY_RETRY_MAX_SECONDS,
+            _REPLAY_RETRY_BASE_SECONDS * 2 ** (self._background_replay_failures - 1),
+        )
+        warned = self._background_replay_warned_at
+        if warned is None or now - warned >= _REPLAY_WARN_INTERVAL_SECONDS:
+            self._background_replay_warned_at = now
+            log.warning(
+                "could not read session %s's background task history (%s, %d "
+                "failure(s) in a row); a later lifecycle call retries",
+                session_id, type(exc).__name__, self._background_replay_failures,
+            )
+
+    async def _recover_background_unlocked(self) -> None:
+        """Finish what the history left open, once it has been read.
+
+        Marked done only when every step got through: a refused terminal write
+        here leaves it to the next lifecycle call to try again.
+        """
         for task_id in tuple(self._background_early):
             if task_id in self._background_pending:
                 # Finalizing pops it, once its terminal event is stored.
@@ -184,6 +240,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     and op.status in _TERMINAL_TASK_KINDS
                 ):
                     await self._finalize_background_task_unlocked(op)
+        self._background_recovered = True
 
     def _park_pending_ids(self) -> tuple[str, ...]:
         """The pending task ids a park is actually WAITING on.
@@ -215,7 +272,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 meta = await self._ensure_session()
                 # State changes only once the event is stored, so a refused
                 # write leaves the receipt retryable.
-                await self._emit_committed(SubagentEvent(
+                await self._emit_lifecycle(SubagentEvent(
                     session_id=meta.session_id,
                     turn_id=self._active_turn_id,
                     task_id=receipt.task_id,
@@ -265,7 +322,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                     meta = await self._ensure_session()
                     if op.is_current is not None and not op.is_current():
                         return
-                    await self._emit_committed(SubagentEvent(
+                    await self._emit_lifecycle(SubagentEvent(
                         session_id=meta.session_id,
                         turn_id=self._active_turn_id,
                         task_id=op.task_id,
@@ -289,6 +346,9 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
     ) -> None:
         meta = await self._ensure_session()
         if op.is_current is not None and not op.is_current():
+            # A superseded completion is dropped, not kept for a later retry.
+            if self._background_early.get(op.task_id) is op:
+                del self._background_early[op.task_id]
             return
         receipt = self._background_pending.get(op.task_id)
         worker_session_id = op.worker_session_id or (
@@ -297,7 +357,7 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
         # Store the terminal event before the task leaves pending: a refused
         # write must leave the completion retryable, and the next attempt
         # must not find the task already terminal and skip it (#1769).
-        await self._emit_committed(SubagentEvent(
+        await self._emit_lifecycle(SubagentEvent(
             session_id=meta.session_id,
             turn_id=self._active_turn_id,
             task_id=op.task_id,
@@ -325,29 +385,46 @@ class BackgroundLifecycleMixin(QuestionLifecycleMixin):
                 report_path=op.report_path,
             )
 
-    async def _emit_committed(self, event: Event) -> Event:
-        """Persist a background lifecycle event, then publish it.
+    async def _emit_lifecycle(self, event: SubagentEvent) -> None:
+        """Write a task's started, completion-pending or terminal event once.
 
-        ``_emit`` publishes first, so a refused write would leave live
-        subscribers holding an event the store never got, and a successful
-        retry would show them a second copy (#1769 case 4). Here the bus
-        numbers the event, the store writes it, and only then does anyone see
-        it; a refused write gives the number back as a hole. A bus without a
-        replay source cannot bridge holes, and a host without a bus of its
-        own only has ``_emit``, so both keep the ordinary path.
+        The callers change state only after this returns, so a write that
+        raises leaves the step retryable (#1769 case 1). A write can raise and
+        still have committed (a lost acknowledgement, or a cancellation while
+        it ran), and the retry would be a second copy under a new seq. So a
+        write that raised is remembered, and the next attempt first looks for
+        the event in the store, from the bus seq before that write, and skips
+        writing it again when it is there. A lookup that fails raises, so the
+        step stays retryable rather than guessing.
+
+        Still publish-first through ``_emit``: a refused write was already
+        seen live, and its retry is seen again (#1769 case 4 stays open).
         """
-        if getattr(self, "_abandoned", False):
-            return event  # an abandoned delegated loop writes nothing
+        key = (event.task_id, _kind_group(event.kind))
+        since = self._background_uncertain.get(key)
+        if since is not None and await self._lifecycle_event_stored(event, since):
+            del self._background_uncertain[key]
+            return
         bus = getattr(self, "bus", None)
-        if bus is None or bus.replay_source is None:
-            return await self._emit(event)
-        sequenced = bus.reserve(event)
+        before = bus.last_seq(event.session_id) if bus is not None else 0
         try:
-            await persist_event(self.store, sequenced)
+            await self._emit(event)
         except BaseException:
-            bus.release(sequenced)
+            self._background_uncertain[key] = before if since is None else min(since, before)
             raise
-        return bus.deliver(sequenced)
+        self._background_uncertain.pop(key, None)
+
+    async def _lifecycle_event_stored(self, event: SubagentEvent, since: int) -> bool:
+        group = _kind_group(event.kind)
+        try:
+            async for stored in iter_events_of_class(
+                self.store, event.session_id, since, (SubagentEvent,)
+            ):
+                if stored.task_id == event.task_id and _kind_group(stored.kind) == group:
+                    return True
+        except NotImplementedError:
+            return False  # no event log to look in: nothing was stored there
+        return False
 
     async def _emit_terminal_with_park(self, event: Event) -> Event:
         if not isinstance(event, _TERMINAL_EVENTS):

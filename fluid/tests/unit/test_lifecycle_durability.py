@@ -1,18 +1,19 @@
-"""Lifecycle writes that fail must stay retryable (issue #1769 cases 1 and 4),
-a failed replay read must not count as rehydrated, and a handoff's model call
-is billed, interruptible and sees the session's tool activity."""
+"""Lifecycle writes that fail must stay retryable without being written twice
+(issue #1769 case 1), a failed replay read must not count as rehydrated, and a
+handoff's model call is billed, interruptible, admitted one at a time and sees
+which tools the session used without their arguments or output."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
 
 import fluid.engine.background as background_mod
-import fluid.events.bus as bus_mod
-from fluid.engine.native import NativeLoop
+import fluid.engine.native as native_mod
+from fluid.engine.native import NativeLoop, _clip, _handoff_transcript
 from fluid.events import (
     BackgroundTaskFinished,
     Handoff,
@@ -23,8 +24,6 @@ from fluid.events import (
     Usage,
     UserTurn,
 )
-from fluid.events.bus import EventBus
-from fluid.events.model import TextDelta
 from fluid.messages import Message, Text, ToolResultBlock, ToolUseBlock
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore, SessionNode
@@ -34,21 +33,38 @@ from tests.unit.test_background_rehydrate import _loop, _rehydrate, _store_with,
 from tests.unit.test_tool_loop import ScriptedProvider, _text
 
 SID = "parent"
+SECRET = "sk-test-SECRET-0123456789"
 
 
 class FailOnce(MemoryStore):
-    """Refuses the first event that matches ``predicate``, before committing it."""
+    """Fails the first event matching ``predicate``.
 
-    def __init__(self, predicate) -> None:
+    ``mode`` says how: ``refuse`` raises before committing, ``commit_then_raise``
+    commits and then raises (a lost acknowledgement), and ``hang_after_commit``
+    / ``hang_before_commit`` stall until cancelled, after or before the commit.
+    """
+
+    def __init__(self, predicate, mode: str = "refuse") -> None:
         super().__init__()
         self.predicate = predicate
-        self.refused = 0
+        self.mode = mode
+        self.failed = 0
+        self.entered = asyncio.Event()
 
     async def append_event(self, session_id, event):
-        if not self.refused and self.predicate(event):
-            self.refused += 1
+        if self.failed or not self.predicate(event):
+            await super().append_event(session_id, event)
+            return
+        self.failed += 1
+        self.entered.set()
+        if self.mode == "refuse":
             raise OSError("store unavailable")
-        await super().append_event(session_id, event)
+        if self.mode == "commit_then_raise":
+            await super().append_event(session_id, event)
+            raise OSError("commit acknowledgement lost")
+        if self.mode == "hang_after_commit":
+            await super().append_event(session_id, event)
+        await asyncio.sleep(3600)
 
 
 def _is_terminal(task_id: str):
@@ -65,7 +81,11 @@ async def _stored(store, sid=SID):
     return await store.events_since(sid, 0)
 
 
-# ─── #1769 case 1 + 4: a refused terminal write ──────────────────────────────
+async def _woken(store) -> list[tuple[str, ...]]:
+    return [e.task_ids for e in await _stored(store) if isinstance(e, SessionWoken)]
+
+
+# ─── #1769 case 1: a terminal write that fails ──────────────────────────────
 
 
 async def test_refused_terminal_write_stays_retryable_and_wakes_once() -> None:
@@ -78,45 +98,77 @@ async def test_refused_terminal_write_stays_retryable_and_wakes_once() -> None:
     with pytest.raises(OSError):
         await loop.submit(done)
 
-    # Nothing claims the task ended: not memory, not the live bus.
+    # Nothing in memory claims the task ended.
     assert "t" in loop._background_pending
     assert "t" not in loop._background_terminal
     assert "t" not in loop._background_completions
-    assert _subagent(loop.bus.log(SID), "t", "finished") == []
 
     await loop.submit(done)  # the host retries; this write lands
     await loop.wait_turn()
 
     assert len(_subagent(await _stored(store), "t", "finished")) == 1
-    assert len(_subagent(loop.bus.log(SID), "t", "finished")) == 1
-    woken = [e for e in await _stored(store) if isinstance(e, SessionWoken)]
-    assert [w.task_ids for w in woken] == [("t",)]
+    assert await _woken(store) == [("t",)]
     await loop.aclose()
 
 
-async def test_live_subscriber_sees_one_terminal_after_a_refused_write() -> None:
-    store = FailOnce(_is_terminal("t"))
+async def test_terminal_that_committed_before_its_write_raised_is_not_written_again() -> None:
+    store = FailOnce(_is_terminal("t"), mode="commit_then_raise")
     await store.create_session(SID)
-    loop = _loop(store)
+    loop = _loop(store, provider=ScriptedProvider([_text("picked it up")]))
     await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
-    seen: list = []
+    done = BackgroundTaskFinished(task_id="t", status="finished", summary="42", wake=True)
 
-    async def watch() -> None:
-        async for event in loop.events(since_seq=0):
-            seen.append(event)
-
-    watcher = asyncio.create_task(watch())
-    await asyncio.sleep(0)
-    done = BackgroundTaskFinished(task_id="t", status="finished", wake=False)
     with pytest.raises(OSError):
         await loop.submit(done)
-    await loop.submit(done)
-    await loop.aclose()
-    await asyncio.wait_for(watcher, 5)
+    assert "t" in loop._background_pending  # unknown outcome: still retryable
 
-    terminals = _subagent(seen, "t", "finished")
-    assert len(terminals) == 1
-    assert [e.seq for e in _subagent(await _stored(store), "t", "finished")] == [terminals[0].seq]
+    await loop.submit(done)
+    await loop.wait_turn()
+
+    assert len(_subagent(await _stored(store), "t", "finished")) == 1
+    assert len(_subagent(loop.bus.log(SID), "t", "finished")) == 1
+    assert "t" in loop._background_terminal and loop._background_uncertain == {}
+    assert await _woken(store) == [("t",)]
+    await loop.aclose()
+
+
+@pytest.mark.parametrize("mode", ["hang_after_commit", "hang_before_commit"])
+async def test_terminal_write_cancelled_in_flight_is_stored_once(mode) -> None:
+    store = FailOnce(_is_terminal("t"), mode=mode)
+    await store.create_session(SID)
+    loop = _loop(store, provider=ScriptedProvider([_text("picked it up")]))
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
+    done = BackgroundTaskFinished(task_id="t", status="finished", wake=True)
+
+    first = asyncio.create_task(loop.submit(done))
+    await asyncio.wait_for(store.entered.wait(), 5)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert "t" in loop._background_pending
+
+    await loop.submit(done)
+    await loop.wait_turn()
+
+    assert len(_subagent(await _stored(store), "t", "finished")) == 1
+    assert await _woken(store) == [("t",)]
+    await loop.aclose()
+
+
+async def test_started_that_committed_before_its_write_raised_is_not_written_again() -> None:
+    store = FailOnce(lambda e: isinstance(e, SubagentEvent) and e.kind == "started",
+                     mode="commit_then_raise")
+    await store.create_session(SID)
+    loop = _loop(store)
+    receipt = BackgroundTaskReceipt(task_id="t")
+    with pytest.raises(OSError):
+        await loop._background_task_started(receipt)
+    assert "t" not in loop._background_pending
+
+    await loop._background_task_started(receipt)
+    assert "t" in loop._background_pending
+    assert len(_subagent(await _stored(store), "t", "started")) == 1
+    await loop.aclose()
 
 
 async def test_refused_terminal_on_early_completion_path_is_retried_by_the_receipt() -> None:
@@ -135,7 +187,6 @@ async def test_refused_terminal_on_early_completion_path_is_retried_by_the_recei
     await loop._background_task_started(receipt)  # retried spawn handshake
     assert "t" in loop._background_terminal and "t" not in loop._background_early
     assert len(_subagent(await _stored(store), "t", "failed")) == 1
-    assert len(_subagent(loop.bus.log(SID), "t", "failed")) == 1
     await loop.aclose()
 
 
@@ -154,55 +205,72 @@ async def test_refused_completion_pending_write_is_retried() -> None:
     await loop.aclose()
 
 
-# ─── the bus: persist first, then publish ───────────────────────────────────
-
-
-async def test_reserved_seq_is_awaited_past_the_grace_period(monkeypatch) -> None:
-    monkeypatch.setattr(bus_mod, "REPLAY_GAP_GRACE_SECONDS", 0.05)
+async def test_superseded_early_completion_is_dropped() -> None:
     store = MemoryStore()
-    bus = EventBus(replay_source=store.events_since)
-    async with contextlib.aclosing(bus.subscribe("s")) as sub:
-        first = asyncio.create_task(anext(sub))
-        await asyncio.sleep(0)
-        held = bus.reserve(TextDelta(session_id="s", index=0, text="slow write"))
-        later = await bus.publish(TextDelta(session_id="s", index=0, text="later"))
-        await asyncio.sleep(0.2)  # well past the grace period
-        assert not first.done(), "a reserved seq must not be skipped while its write runs"
-        bus.deliver(held)
-        assert [(await asyncio.wait_for(first, 1)).seq,
-                (await asyncio.wait_for(anext(sub), 1)).seq] == [held.seq, later.seq]
-    assert [e.seq for e in bus.log("s")] == [1, 2]
+    await store.create_session(SID)
+    loop = _loop(store)
+    current = {"yes": True}
+    await loop.submit(BackgroundTaskFinished(
+        task_id="t", status="finished", wake=False, is_current=lambda: current["yes"]))
+    assert "t" in loop._background_early
+
+    current["yes"] = False  # a newer incarnation of the task took over
+    await loop._background_task_started(BackgroundTaskReceipt(task_id="t"))
+    assert "t" not in loop._background_early
+    assert _subagent(await _stored(store), "t", "finished") == []
+    await loop.aclose()
 
 
-async def test_released_seq_is_skipped() -> None:
-    store = MemoryStore()
-    bus = EventBus(replay_source=store.events_since)
-    async with contextlib.aclosing(bus.subscribe("s")) as sub:
-        first = asyncio.create_task(anext(sub))
-        await asyncio.sleep(0)
-        bus.release(bus.reserve(TextDelta(session_id="s", index=0, text="refused")))
-        later = await bus.publish(TextDelta(session_id="s", index=0, text="later"))
-        assert (await asyncio.wait_for(first, 2)).seq == later.seq
+# ─── recovery after a restart ───────────────────────────────────────────────
+
+
+async def test_refused_terminal_during_recovery_is_retried_by_a_later_call() -> None:
+    store = FailOnce(_is_terminal("t"))
+    await _store_with(
+        _sub("t", "started"),
+        _sub("t", "completion_pending", status="finished", summary="done", wake=False),
+        store=store,
+    )
+    loop = _loop(store)
+
+    with pytest.raises(OSError):
+        await _rehydrate(loop)
+    assert loop._background_rehydrated and not loop._background_recovered
+    assert "t" in loop._background_early
+
+    await _rehydrate(loop)  # the next lifecycle call finishes the recovery
+    assert loop._background_recovered
+    assert "t" in loop._background_terminal and "t" not in loop._background_early
+    assert len(_subagent(await _stored(store), "t", "finished")) == 1
+    await loop.aclose()
 
 
 # ─── a failed replay read is not a rehydration ──────────────────────────────
 
 
+def _flaky_replay(monkeypatch, failures: int) -> dict[str, int]:
+    real = background_mod.iter_events_of_class
+    state = {"left": failures, "reads": 0}
+
+    def flaky(store, sid, seq, classes):
+        if SessionWoken in classes:  # the history read, not a reconcile lookup
+            state["reads"] += 1
+            if state["left"]:
+                state["left"] -= 1
+                raise OSError("store unavailable")
+        return real(store, sid, seq, classes)
+
+    monkeypatch.setattr(background_mod, "iter_events_of_class", flaky)
+    return state
+
+
 async def test_failed_replay_read_is_retried_and_owed_wake_delivered(monkeypatch) -> None:
+    monkeypatch.setattr(background_mod, "_REPLAY_RETRY_BASE_SECONDS", 0.0)
     store = await _store_with(
         _sub("owed", "started"),
         _sub("owed", "finished", summary="the result", wake=True),
     )
-    real = background_mod.iter_events_of_class
-    failures = {"left": 1}
-
-    def flaky(*args, **kwargs):
-        if failures["left"]:
-            failures["left"] -= 1
-            raise OSError("store unavailable")
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(background_mod, "iter_events_of_class", flaky)
+    _flaky_replay(monkeypatch, failures=1)
     provider = ScriptedProvider([_text("first"), _text("second"), _text("woken")])
     loop = _loop(store, provider=provider)
 
@@ -219,7 +287,25 @@ async def test_failed_replay_read_is_retried_and_owed_wake_delivered(monkeypatch
     await loop.aclose()
 
 
-# ─── handoff: billed, interruptible, sees tool activity ─────────────────────
+async def test_failing_replay_backs_off_and_warns_once(monkeypatch, caplog) -> None:
+    store = await _store_with(_sub("t", "started"))
+    state = _flaky_replay(monkeypatch, failures=10)
+    loop = _loop(store)
+
+    with caplog.at_level(logging.WARNING, logger=background_mod.__name__):
+        for _ in range(5):  # a burst of lifecycle calls during an outage
+            await _rehydrate(loop)
+        assert state["reads"] == 1
+        loop._background_replay_retry_at = 0.0  # the backoff has elapsed
+        await _rehydrate(loop)
+        assert state["reads"] == 2
+    assert loop._background_rehydrated is False
+    assert loop._background_replay_failures == 2
+    assert len([r for r in caplog.records if "background task history" in r.message]) == 1
+    await loop.aclose()
+
+
+# ─── handoff: billed, interruptible, one at a time, tool names only ─────────
 
 
 class _HandoffProvider:
@@ -257,9 +343,11 @@ async def _tool_heavy_session(store: MemoryStore) -> str:
     await add(Message(role="user", content=[Text("migrate the billing tables")]))
     for i in range(60):
         await add(Message(role="assistant", content=[ToolUseBlock(
-            id=f"tu{i}", name="Bash", input={"command": f"psql -c 'step {i}'" + " x" * 400})]))
+            id=f"tu{i}", name="Bash",
+            input={"command": f"PGPASSWORD={SECRET} psql -c 'step {i}'"})]))
         await add(Message(role="user", content=[ToolResultBlock(
-            tool_use_id=f"tu{i}", content=[Text(f"ALTER TABLE ok {i}" + " y" * 4000)])]))
+            tool_use_id=f"tu{i}", is_error=i == 59,
+            content=[Text(f"token={SECRET} ALTER TABLE ok {i}")])]))
     return sid
 
 
@@ -282,7 +370,7 @@ async def test_handoff_usage_is_recorded_and_booked() -> None:
     await loop.aclose()
 
 
-async def test_handoff_transcript_keeps_tool_activity_within_a_bound() -> None:
+async def test_handoff_transcript_names_tools_but_never_their_payloads() -> None:
     store = MemoryStore()
     sid = await _tool_heavy_session(store)
     provider = _HandoffProvider()
@@ -290,10 +378,26 @@ async def test_handoff_transcript_keeps_tool_activity_within_a_bound() -> None:
     await loop.submit(Handoff())
 
     prompt = provider.requests[-1].messages[0].content[0].text
-    assert "Bash" in prompt and "step 59" in prompt and "ALTER TABLE ok 59" in prompt
-    assert len(prompt) <= 70_000
+    transcript = prompt.split("--- transcript ---\n", 1)[1]
+    assert "migrate the billing tables" in transcript
+    assert transcript.count("[tool call: Bash]") == 60
+    assert "[Bash result: ok, " in transcript and "[Bash result: error, " in transcript
+    assert SECRET not in prompt
+    assert "psql" not in prompt and "ALTER TABLE" not in prompt
     assert [e for e in loop.bus.log(sid) if isinstance(e, HandoffCreated)]
     await loop.aclose()
+
+
+def test_handoff_transcript_never_exceeds_its_budget(monkeypatch) -> None:
+    assert len(_clip("x" * 10, 5)) == 5 and _clip("x" * 10, 5).endswith("…")
+    monkeypatch.setattr(native_mod, "_HANDOFF_TRANSCRIPT_CHARS", 100)
+    huge = SessionNode(node_id="n1", parent_id=None,
+                       message=Message(role="user", content=[Text("y" * 5000)]))
+    assert len(_handoff_transcript([huge])) == 100
+    small = [SessionNode(node_id=f"s{i}", parent_id=None,
+                         message=Message(role="user", content=[Text("z" * 30)]))
+             for i in range(10)]
+    assert len(_handoff_transcript(small)) <= 100
 
 
 async def test_interrupt_cancels_the_handoff_call_and_still_bills_it() -> None:
@@ -312,6 +416,57 @@ async def test_interrupt_cancels_the_handoff_call_and_still_bills_it() -> None:
     assert set(store._sessions) == sessions_before
     usage = [e for e in await store.events_since(sid, 0) if isinstance(e, Usage)]
     assert [(u.input_tokens, u.raw.get("auxiliary_source")) for u in usage] == [(700, "handoff")]
+    await loop.aclose()
+
+
+async def test_a_second_handoff_while_one_runs_fails_fast() -> None:
+    store = MemoryStore()
+    sid = await _tool_heavy_session(store)
+    provider = _HandoffProvider(hang=True)
+    loop = NativeLoop(provider=provider, store=store, model="m", session_id=sid)
+    sessions_before = set(store._sessions)
+
+    first = asyncio.create_task(loop.submit(Handoff()))
+    await asyncio.wait_for(provider.started.wait(), 5)
+    with pytest.raises(RuntimeError, match="another handoff is already running"):
+        await loop.submit(Handoff())
+    assert len(provider.requests) == 1
+
+    await loop.submit(Interrupt())  # still reaches the one handoff running
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await asyncio.wait_for(first, 5)
+    assert set(store._sessions) == sessions_before
+    assert loop._handoff_running is False
+    await loop.aclose()
+
+
+async def test_interrupt_after_the_document_arrived_does_not_undo_the_handoff() -> None:
+    class SlowCreate(MemoryStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.creating = asyncio.Event()
+            self.release = asyncio.Event()
+            self.hold = False
+
+        async def create_session(self, session_id=None, *, cwd=None):
+            if self.hold:
+                self.creating.set()
+                await self.release.wait()
+            return await super().create_session(session_id, cwd=cwd)
+
+    store = SlowCreate()
+    sid = await _tool_heavy_session(store)
+    store.hold = True
+    loop = NativeLoop(provider=_HandoffProvider(), store=store, model="m", session_id=sid)
+
+    handoff = asyncio.create_task(loop.submit(Handoff()))
+    await asyncio.wait_for(store.creating.wait(), 5)
+    await loop.submit(Interrupt())  # past the cutoff: the session is made
+    store.release.set()
+    await asyncio.wait_for(handoff, 5)
+
+    created = [e for e in loop.bus.log(sid) if isinstance(e, HandoffCreated)]
+    assert len(created) == 1 and created[0].new_session_id in store._sessions
     await loop.aclose()
 
 

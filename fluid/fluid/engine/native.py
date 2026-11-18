@@ -112,11 +112,11 @@ _REHYDRATE_ATTEMPTS = 3
 _ADMISSION_MIN_RESULT_CHARS = 2_000
 _REHYDRATE_BACKOFF_S = 0.2
 # The handoff call's transcript: newest nodes first until the budget is spent.
-# Text is clipped per node, and each tool call and result to a short excerpt,
-# so a tool-heavy session still hands over what it did.
+# Text is clipped per node. Tool activity appears as the tool's name and the
+# result's status and size, never its arguments or output, which can carry
+# credentials the new session must not inherit.
 _HANDOFF_TRANSCRIPT_CHARS = 60_000
 _HANDOFF_NODE_TEXT_CHARS = 2_000
-_HANDOFF_TOOL_CHARS = 300
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -398,12 +398,17 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
 
 
 def _clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+    """``text`` cut to at most ``limit`` characters, the ellipsis included."""
+    return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
 
 
-def _handoff_line(node: SessionNode) -> str:
-    """One node of the handoff transcript: its text and a compact line per
-    tool call and result, or "" when it carries neither."""
+def _handoff_line(node: SessionNode, tool_names: dict[str, str]) -> str:
+    """One node of the handoff transcript, or "" when it has nothing to show.
+
+    Its text, clipped, then a marker per tool call and result: the tool's name
+    and the result's status and size. Arguments and output stay out; they can
+    hold credentials, and the new session must not inherit them.
+    """
     message = node.message
     parts: list[str] = []
     text = message.text().strip()
@@ -411,23 +416,26 @@ def _handoff_line(node: SessionNode) -> str:
         parts.append(_clip(text, _HANDOFF_NODE_TEXT_CHARS))
     for block in message.content:
         if isinstance(block, ToolUseBlock):
-            args = json.dumps(block.input, ensure_ascii=False, default=str)
-            parts.append(f"[tool call {block.name}: {_clip(args, _HANDOFF_TOOL_CHARS)}]")
+            parts.append(f"[tool call: {block.name}]")
         elif isinstance(block, ToolResultBlock):
-            output = "".join(
-                b.text for b in block.content if isinstance(b, Text)
-            ).strip() or "(no text output)"
-            label = "tool error" if block.is_error else "tool result"
-            parts.append(f"[{label}: {_clip(output, _HANDOFF_TOOL_CHARS)}]")
+            size = sum(len(b.text) for b in block.content if isinstance(b, Text))
+            name = tool_names.get(block.tool_use_id, "tool")
+            status = "error" if block.is_error else "ok"
+            parts.append(f"[{name} result: {status}, {size} chars]")
     return f"{message.role}: " + " ".join(parts) if parts else ""
 
 
 def _handoff_transcript(nodes: list[SessionNode]) -> str:
     """The newest nodes that fit ``_HANDOFF_TRANSCRIPT_CHARS``, oldest first."""
+    tool_names = {
+        block.id: block.name
+        for node in nodes for block in node.message.content
+        if isinstance(block, ToolUseBlock)
+    }
     lines: list[str] = []
     budget = _HANDOFF_TRANSCRIPT_CHARS
     for node in reversed(nodes):
-        line = _handoff_line(node)
+        line = _handoff_line(node, tool_names)
         if not line:
             continue
         if len(line) + 1 > budget:
@@ -1513,8 +1521,10 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
-        # A Handoff's document call: Interrupt and close cancel it.
+        # A Handoff's document call: Interrupt and close cancel it. Only one
+        # handoff runs at a time.
         self._handoff_call: asyncio.Task | None = None
+        self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -2039,36 +2049,44 @@ class NativeLoop(BackgroundLifecycleMixin):
         user message. Nothing is summarized in place — the old session stays
         intact; the new one starts small, with a fresh cacheable prefix.
 
-        The document call is billed like the checkpoint side call, and an
-        Interrupt or close cancels it; either way no session is made.
+        The document call is billed like the checkpoint side call. One handoff
+        runs at a time; a second one fails at once. Interrupt and close cancel
+        the document call, and then no session is made. That is the cutoff:
+        once the document is in hand the new session is created and reported,
+        and an Interrupt arriving after that point does not undo it.
         """
-        meta = await self._ensure_session()
-        call = asyncio.create_task(self._handoff_document(meta.session_id, op))
-        self._handoff_call = call
+        if self._handoff_running:
+            raise RuntimeError("handoff not created: another handoff is already running")
+        self._handoff_running = True
         try:
-            content = await call
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                await await_cancelled_child(call)
-                raise
-            raise RuntimeError("handoff not created: interrupted") from None
-        finally:
-            if self._handoff_call is call:
+            meta = await self._ensure_session()
+            call = asyncio.create_task(self._handoff_document(meta.session_id, op))
+            self._handoff_call = call
+            try:
+                content = await call
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    await await_cancelled_child(call)
+                    raise
+                raise RuntimeError("handoff not created: interrupted") from None
+            finally:
                 self._handoff_call = None
 
-        new_meta = await self.store.create_session(cwd=self.ctx.cwd)
-        first = SessionNode(
-            node_id=new_id("node"), parent_id=None,
-            message=Message(role="user", content=[Text(content)]),
-        )
-        await self.store.append(new_meta.session_id, first)
-        await self._emit(HandoffCreated(
-            session_id=meta.session_id,
-            new_session_id=new_meta.session_id,
-            content=content,
-            goal=op.goal,
-        ))
+            new_meta = await self.store.create_session(cwd=self.ctx.cwd)
+            first = SessionNode(
+                node_id=new_id("node"), parent_id=None,
+                message=Message(role="user", content=[Text(content)]),
+            )
+            await self.store.append(new_meta.session_id, first)
+            await self._emit(HandoffCreated(
+                session_id=meta.session_id,
+                new_session_id=new_meta.session_id,
+                content=content,
+                goal=op.goal,
+            ))
+        finally:
+            self._handoff_running = False
 
     async def _handoff_document(self, sid: str, op: Handoff) -> str:
         """Generate the handoff document; raises when it cannot be had."""
