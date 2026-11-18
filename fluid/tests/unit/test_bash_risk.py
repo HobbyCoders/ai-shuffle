@@ -165,9 +165,11 @@ WRITE_COMMANDS = [
     "curl https://example.com",
     "env rm x",  # env with arguments runs a command
     "sort -o out.txt file",  # sort -o writes
+    "sort --output=x a.txt",
     "uniq input output",  # second positional is an output file
     "date -s '2020-01-01'",  # sets the clock
     "rg --pre cmd pattern",  # rg --pre runs a command
+    "rg --pre=cmd foo",
     "ls &",  # background job
     "(ls)",  # subshell
     "ls; rm x",  # one bad simple command poisons the whole line
@@ -233,6 +235,89 @@ def test_everything_else_is_write(command: str) -> None:
 def test_globs_that_could_reach_a_credential_file_are_write(command: str) -> None:
     assert is_read_only(command), command  # read-only program, but ...
     assert classify({"command": command}) == "write"
+
+
+# Banned options in spellings the exact-token check missed, and awk program
+# forms that run or write without the literal ``system(``. Each was "safe"
+# before; a false "ask" is acceptable here, a false "safe" is not.
+ESCAPING_SPELLINGS = [
+    "awk 'BEGIN{system (\"rm x\")}'",
+    "awk 'BEGIN{f=\"sys\" \"tem\"; @f(\"rm x\")}'",  # gawk indirect call
+    "gawk '@include \"inplace\"; {print}' f",
+    "gawk '@load \"rwarray\"; BEGIN{}'",
+    "awk -Pf prog.awk f",  # -f bundled after another flag
+    "awk --fil=prog.awk f",  # abbreviated --file
+    "gawk -E prog.awk f",
+    "gawk --exec=prog.awk f",
+    "gawk -d 'BEGIN{}'",  # writes awkvars.out
+    "gawk --dump-variables=out 'BEGIN{}'",
+    "gawk -p '{print}' f",  # writes awkprof.out
+    "gawk -o '{print}' f",
+    "mawk -W exec prog.awk",
+    "sort -o/tmp/x a.txt",
+    "sort -uo/tmp/x a.txt",
+    "sort -uo /tmp/x a.txt",
+    "sort -nuo /tmp/x a.txt",
+    "sort --outp=x a.txt",
+    "sort --compress-program=./x a.txt",
+    "tree -o out.txt",
+    "tree -ao out.txt",
+    "tree -R -H . -L 1",
+    "date -s2020-01-01",
+    "date -us 2020-01-01",
+    "date --se=2020-01-01",
+    "rg --hostname-bin=./x --hyperlink-format=default foo",
+    "uniq - out.txt",
+    "uniq -- -in out.txt",
+    "sed -n '-ew out' f",
+    "sed -n -e'w out' f",
+    "sed -n --i 's/a/b/p' f",  # abbreviated --in-place
+    "sed -n --fi=script.sed f",  # abbreviated --file
+    "file -C -m magic",  # compiles magic.mgc
+    "file --compile -m magic",
+]
+
+# Everyday read-only forms around the same programs stay "safe".
+STILL_SAFE = [
+    "sort -u file",
+    "sort -n -k2 file",
+    "sort -rn file",
+    "sort -t, -k3 -rn file",
+    "sort --parallel=2 file",
+    "awk '{print $1}' f",
+    "awk -F: '{print $1}' f",
+    "awk -F@ '{print $2}' f",
+    "awk -vline=3 'NR==line' f",
+    "awk -v n=1 '{print $n}' f",
+    "awk 'NR<5' f",
+    "awk -e '{print}' f",
+    "tree -L 2",
+    "tree -a -I node_modules",
+    "tree -d --noreport",
+    "date -u +%s",
+    "date -Iseconds",
+    "date -d yesterday +%F",
+    "date --iso-8601=seconds",
+    "rg --pre-glob '*.pdf' foo",
+    "rg -o foo src",
+    "uniq -c f",
+    "uniq -",
+    "sed -ne '/x/p' f",
+    "sed -n -e '1,3p' f",
+    "file -b x",
+]
+
+
+@pytest.mark.parametrize("command", ESCAPING_SPELLINGS)
+def test_banned_options_in_any_spelling_are_write(command: str) -> None:
+    assert not is_read_only(command), command
+    assert classify({"command": command}) == "write"
+
+
+@pytest.mark.parametrize("command", STILL_SAFE)
+def test_common_read_only_forms_stay_safe(command: str) -> None:
+    assert is_read_only(command), command
+    assert classify({"command": command}) == "safe"
 
 
 def test_classify_without_command_is_write() -> None:

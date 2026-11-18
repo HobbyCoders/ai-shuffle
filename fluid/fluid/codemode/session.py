@@ -584,12 +584,22 @@ class CodeModeSession:
             def on_stop(reason: str) -> None:
                 loop._hook_stop_reason = reason
 
+        # Tool hooks get the engine's payload (session id, transcript path,
+        # turn id), as a JSON-path call does. Loops without the builder keep
+        # the bridge's bare name/input payload.
+        hook_payload = None
+        build_payload = getattr(loop, "_hook_payload", None)
+        if callable(build_payload):
+            def hook_payload(**fields: Any) -> dict[str, Any]:
+                return build_payload(sid, turn_id=turn_id, **fields)
+
         bridge = HostBridge(
             self._registry, permissions,
             hooks=loop.hooks, on_permission=_on_permission,
             on_input_required=on_input_required, ctx=loop.ctx,
             tool_filter=self.tool_filter,
             on_stop=on_stop,
+            hook_payload=hook_payload,
             # What this surface actually delivers: a result over the ref
             # threshold reaches the cell as a ResultRef stub, not as text the
             # model reads (see ToolCtx.result_budget).

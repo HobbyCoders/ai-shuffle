@@ -162,8 +162,13 @@ class HostBridge:
         tool_filter: Callable[[str], bool] | None = None,
         result_budget: int | None = None,
         on_stop: OnStop | None = None,
+        hook_payload: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         self._registry = registry
+        # The engine's own tool-hook payload builder (session id, transcript
+        # path, turn id), so an in-kernel call reaches PreToolUse/PostToolUse
+        # hooks with the same fields as a JSON-path call. Absent: name/input only.
+        self._hook_payload = hook_payload
         self._permissions = permissions
         self._hooks = hooks
         self._on_stop = on_stop
@@ -177,6 +182,11 @@ class HostBridge:
         # from "the kernel has this" — see ToolCtx.read_delivered.
         if result_budget is not None:
             self._ctx.result_budget = result_budget
+
+    def _tool_hook_payload(self, **fields: Any) -> dict[str, Any]:
+        if self._hook_payload is None:
+            return fields
+        return self._hook_payload(**fields)
 
     async def on_host_call(
         self, tool_name: str, kwargs: dict[str, Any], *,
@@ -230,7 +240,10 @@ class HostBridge:
         hook_permission: str | None = None
         if self._hooks is not None:
             decision = await self._hooks.emit(
-                PRE_TOOL_USE, {"name": tool_name, "input": tool_input}
+                PRE_TOOL_USE,
+                self._tool_hook_payload(
+                    name=tool_name, input=tool_input, tool_use_id=tool_use_id
+                ),
             )
             if decision.action == "deny" or decision.stop:
                 reason = decision.note or ("stopped by hook" if decision.stop else "denied")
@@ -362,13 +375,14 @@ class HostBridge:
                 ))
             decision = await self._hooks.emit(
                 POST_TOOL_USE,
-                {
-                    "name": tool_name,
-                    "input": tool_input,
-                    "output": outcome.text,
-                    "result": outcome.text,
-                    "is_error": outcome.is_error,
-                },
+                self._tool_hook_payload(
+                    name=tool_name,
+                    tool_use_id=tool_use_id,
+                    input=tool_input,
+                    output=outcome.text,
+                    result=outcome.text,
+                    is_error=outcome.is_error,
+                ),
             )
             # Same contract as the JSON path: a block's reason and any added
             # context ride back to the model on the result; a stop ends the

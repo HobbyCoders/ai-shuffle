@@ -35,17 +35,24 @@ Programs with extra rules:
 
 - ``find``: none of ``-exec``, ``-execdir``, ``-ok``, ``-okdir``, ``-delete``,
   ``-fprint*``, ``-fls``.
-- ``awk``/``gawk``/``mawk``: no ``system(``, ``getline`` or ``|`` in any
-  argument (those run or write to commands), and no ``-f``/``--file``,
-  ``-i``/``--include`` or ``-l``/``--load`` (script files and extension
-  libraries the classifier cannot read).
+- ``awk``/``gawk``/``mawk``: no ``system``, ``getline``, ``|`` or ``@`` in
+  any argument (those run or write to commands, or reach code indirectly), and
+  no ``-f``/``-E``/``-i``/``-l``/``-D``/``-W`` (script files and extension
+  libraries the classifier cannot read) or ``-d``/``-p``/``-o`` (write files).
 - ``sed``: must carry ``-n``/``--quiet``/``--silent``, must not carry ``-i`` or
   ``--in-place`` or ``-f``/``--file`` (an unread script file), and no script
-  argument that looks like a ``w`` file-write command or a GNU ``e`` command
-  or ``s///e`` flag (both run the text as a shell command).
-- ``sort``: no ``-o``/``--output``. ``uniq``: at most one positional argument
-  (the second is an output file). ``date``: no ``-s``/``--set``. ``env``: no
-  arguments (``env cmd`` runs ``cmd``). ``rg``: no ``--pre`` (runs a command).
+  argument (``-e`` value included) that looks like a ``w`` file-write command
+  or a GNU ``e`` command or ``s///e`` flag (both run the text as a shell
+  command).
+- ``sort``: no ``-o``/``--output`` or ``--compress-program``. ``uniq``: at
+  most one positional argument (the second is an output file). ``date``: no
+  ``-s``/``--set``. ``tree``: no ``-o`` or ``-R``. ``file``: no
+  ``-C``/``--compile``. ``env``: no arguments (``env cmd`` runs ``cmd``).
+  ``rg``: no ``--pre`` or ``--hostname-bin`` (both run a command).
+
+A banned option counts in every spelling getopt accepts: attached
+(``-ofile``), bundled (``-uo file``) and, for long options, abbreviated
+(``--outp=file``); see :func:`_sets_flag`.
 - ``git``: read-only subcommands only, listed in :data:`GIT_READ_ONLY` with
   their per-subcommand argument constraints; ``-C <dir>`` and ``--no-pager``
   global options are accepted, ``-c key=value`` is not (it can point git at an
@@ -86,7 +93,6 @@ _SED_WRITE_CMD = re.compile(r"(?<![A-Za-z\\])[wW]\s*[\w./\\~-]")
 _SED_EXEC_CMD = re.compile(r"(?<![A-Za-z\\])[gpiImM0-9]*[eE]")
 _SED_ADDRESS_RE = re.compile(r"/[^/]*/")
 _FIND_EXEC_FLAGS = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fls"}
-_AWK_FILE_FLAGS = {"-f", "--file", "-i", "--include", "-l", "--load"}
 
 # Variables a leading ``VAR=value`` may set without changing the command's
 # class. Everything here only affects locale, time zone or colour output.
@@ -102,22 +108,66 @@ def _inert_assignment(token: str) -> bool:
     return bool(m) and token[: m.end() - 1] in INERT_ENV_VARS
 
 
-def _no_flags(*banned: str) -> Check:
-    return lambda args: not any(a in banned or a.split("=", 1)[0] in banned for a in args)
+def _sets_flag(arg: str, banned: tuple[str, ...], takes_value: str = "") -> bool:
+    """True when ``arg`` sets one of the ``banned`` options in any getopt spelling.
+
+    ``banned`` holds short (``-o``) and long (``--output``) names. A long
+    option also counts when abbreviated (``--outp=x``): getopt_long accepts
+    any unambiguous prefix. A short one counts on its own, with a value
+    attached (``-ofile``) or bundled after other flags (``-uo file``,
+    ``-uofile``). The scan of a bundle stops at the first letter in
+    ``takes_value``: the rest of that word is the option's value, not flags
+    (``sort -t,`` or ``date -Iseconds`` set no ``-s``).
+    """
+    if arg.startswith("--"):
+        name = arg.split("=", 1)[0]
+        return len(name) > 2 and any(b.startswith(name) for b in banned if b.startswith("--"))
+    if arg.startswith("-") and len(arg) > 1:
+        for ch in arg[1:]:
+            if f"-{ch}" in banned:
+                return True
+            if ch in takes_value:
+                return False
+    return False
+
+
+def _no_flags(*banned: str, takes_value: str = "") -> Check:
+    return lambda args: not any(_sets_flag(a, banned, takes_value) for a in args)
 
 
 def _find_ok(args: list[str]) -> bool:
     return not any(a in _FIND_EXEC_FLAGS or a.startswith("-fprint") for a in args)
 
 
+# awk options that read a program the classifier never sees (-f, -E, -i, -l,
+# -D), write a file (gawk -d, -p, -o write awkvars.out / awkprof.out), or
+# reach either through gawk's and mawk's -W spellings (``-W exec file``).
+_AWK_BANNED_FLAGS = (
+    "-f", "--file", "-i", "--include", "-l", "--load", "-E", "--exec",
+    "-d", "--dump-variables", "-p", "--profile", "-o", "--pretty-print",
+    "-D", "--debug", "-W",
+)
+# Short awk options whose value may be attached (``-F:``, ``-vn=1``, ``-e'…'``).
+_AWK_VALUE_FLAGS = "FveL"
+
+
 def _awk_ok(args: list[str]) -> bool:
+    # The program text is not parsed, so the rule is textual and errs towards
+    # asking. ``system`` anywhere (awk allows space, newlines or a comment
+    # before its ``(``), ``getline`` (reads files and commands) and ``|``
+    # (pipes to and from commands) refuse the command, even where they only
+    # appear in a regex or a file name. ``@`` refuses it too: gawk's
+    # ``@include``/``@load`` pull in code or extensions and an indirect call
+    # (``@f()``) can reach ``system`` without spelling it; only an attached
+    # ``-F``/``-v`` value, which is never program text, may carry one. Output
+    # redirection (``print > "f"``, ``>>``) needs a ``>``, which
+    # :func:`is_read_only` already refuses in any token.
     for a in args:
-        if "system(" in a or "getline" in a or "|" in a:
+        if "system" in a or "getline" in a or "|" in a:
             return False
-        # -f prog.awk, -fprog.awk, --file=prog.awk: a script we never see.
-        if a.split("=", 1)[0] in _AWK_FILE_FLAGS or (
-            a.startswith(("-f", "-i", "-l")) and not a.startswith("--") and len(a) > 2
-        ):
+        if "@" in a and not a.startswith(("-F", "-v")):
+            return False
+        if _sets_flag(a, _AWK_BANNED_FLAGS, _AWK_VALUE_FLAGS):
             return False
     return True
 
@@ -128,8 +178,8 @@ def _sed_ok(args: list[str]) -> bool:
     for a in args:
         if a in ("--quiet", "--silent"):
             quiet = True
-        elif a.startswith(("--in-place", "--file")):
-            return False
+        elif a.startswith(("--in-place", "--file")) or _sets_flag(a, ("--in-place", "--file")):
+            return False  # also abbreviated: ``--i``, ``--fi=x.sed``
         elif a.startswith("--expression="):
             scripts.append(a.split("=", 1)[1])
         elif a.startswith("-") and not a.startswith("--") and len(a) > 1:
@@ -138,6 +188,10 @@ def _sed_ok(args: list[str]) -> bool:
                 return False
             if "n" in flags:
                 quiet = True
+            # ``-e`` takes the rest of the word as its script: ``-ew out``.
+            attached = flags.partition("e")[2]
+            if attached:
+                scripts.append(attached)
         else:
             scripts.append(a)
     if not quiet:
@@ -152,7 +206,16 @@ def _sed_script_runs_or_writes(script: str) -> bool:
 
 
 def _uniq_ok(args: list[str]) -> bool:
-    return len([a for a in args if not a.startswith("-")]) <= 1
+    # A second positional is the output file. ``-`` (stdin) and anything
+    # after ``--`` are positionals too: ``uniq - out`` writes ``out``.
+    positional = 0
+    options_done = False
+    for a in args:
+        if options_done or a == "-" or not a.startswith("-"):
+            positional += 1
+        elif a == "--":
+            options_done = True
+    return positional <= 1
 
 
 def _env_ok(args: list[str]) -> bool:
@@ -170,14 +233,21 @@ def _exact(*allowed: tuple[str, ...]) -> Check:
 READ_ONLY_PROGRAMS: dict[str, Check | None] = {
     "ls": None, "dir": None, "cat": None, "head": None, "tail": None,
     "more": None, "wc": None,  # not less: LESSOPEN/LESSCLOSE run commands
-    "grep": None, "egrep": None, "fgrep": None, "rg": _no_flags("--pre"),
-    "find": _find_ok, "file": None, "stat": None, "du": None, "df": None,
+    "grep": None, "egrep": None, "fgrep": None,
+    "rg": _no_flags("--pre", "--hostname-bin"),  # both run a program
+    "find": _find_ok, "file": _no_flags("-C", "--compile", takes_value="efFmP"),
+    "stat": None, "du": None, "df": None,
     "pwd": None, "echo": None, "printf": None, "true": None,
     "which": None, "where": None, "type": None,
     "env": _env_ok, "printenv": None,
-    "date": _no_flags("-s", "--set"), "whoami": None, "uname": None, "tree": None,
+    "date": _no_flags("-s", "--set", takes_value="dfrI"), "whoami": None, "uname": None,
+    # tree -o writes its listing to a file; -R (with -H) writes 00Tree.html
+    # into every directory. tree takes option values from the next word, so
+    # every letter of a bundle is a flag.
+    "tree": _no_flags("-o", "-R"),
     "diff": None, "cmp": None,
-    "sort": _no_flags("-o", "--output"), "uniq": _uniq_ok, "cut": None, "tr": None,
+    "sort": _no_flags("-o", "--output", "--compress-program", takes_value="ktSTy"),
+    "uniq": _uniq_ok, "cut": None, "tr": None,
     "awk": _awk_ok, "gawk": _awk_ok, "mawk": _awk_ok,
     "sed": _sed_ok,
     "basename": None, "dirname": None, "realpath": None, "readlink": None,
