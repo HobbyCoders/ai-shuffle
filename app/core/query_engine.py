@@ -3464,10 +3464,15 @@ async def _stream_to_websocket_turn(
                     # A compact_boundary (and a compaction's progress) is the
                     # parent conversation's: the adapter only emits the main
                     # thread's compaction, which may land while a subagent is
-                    # still tracked here.
+                    # still tracked here. So is assistant_text_sanitized: fluid
+                    # subagents reach this stream only as task messages, and
+                    # the engine sends the notice once per turn, so dropping it
+                    # here would leave the turn with none.
                     is_from_subagent = is_subagent_lane or (
                         len(task_tool_uses) > 0
-                        and message.subtype not in ("compact_boundary", "compaction_status")
+                        and message.subtype not in (
+                            "compact_boundary", "compaction_status", "assistant_text_sanitized",
+                        )
                     )
 
                     # Suppress no-op "status" system messages emitted by the SDK
