@@ -25,9 +25,11 @@ import argparse
 import asyncio
 import json
 import sys
+from contextlib import nullcontext
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _dist_version
-from typing import Any
+from pathlib import Path
+from typing import Any, TextIO
 
 from fluid.cli.config import (
     format_sessions,
@@ -52,6 +54,7 @@ from fluid.cli.repl import (
 )
 from fluid.config.loader import load_config
 from fluid.config.model import HarnessConfig
+from fluid.events import ErrorEvent, Event, Interrupted, TurnComplete, Usage
 from fluid.store.base import SessionLocked
 
 
@@ -80,6 +83,33 @@ def _resolve_config(args: argparse.Namespace) -> HarnessConfig:
 # ─── one-shot run (testable seam) ────────────────────────────────────────────
 
 
+def _write_usage_event(out: TextIO, event: Event) -> None:
+    """Write only structured accounting fields; never copy transcript text."""
+    if isinstance(event, Usage):
+        record = {
+            "type": "usage",
+            "input_tokens": event.input_tokens,
+            "output_tokens": event.output_tokens,
+            "cache_read_tokens": event.cache_read_tokens,
+            "cache_creation_tokens": event.cache_creation_tokens,
+        }
+    elif isinstance(event, (TurnComplete, Interrupted, ErrorEvent)):
+        record = {
+            "type": "status",
+            "turn_id": event.turn_id,
+            "stop_reason": (
+                event.stop_reason if isinstance(event, TurnComplete)
+                else "interrupted" if isinstance(event, Interrupted) else "error"
+            ),
+            "num_model_calls": event.num_model_calls,
+            "cost_usd": event.cost_usd,
+        }
+    else:
+        return
+    out.write(json.dumps(record) + "\n")
+    out.flush()
+
+
 async def run_once(
     config: HarnessConfig,
     store,
@@ -89,12 +119,14 @@ async def run_once(
     out=None,
     on_permission=auto_deny,
     session_id: str | None = None,
+    usage_out: TextIO | None = None,
 ) -> int:
     """Run a single turn and stream it to ``out``. Returns a process exit code.
 
     ``provider`` injects a ProviderClient (offline test hook); when omitted the
     engine is built from ``config`` (real provider). ``session_id`` resumes an
-    existing session instead of creating a fresh one.
+    existing session instead of creating a fresh one. ``usage_out`` receives
+    JSONL accounting events separately from the console transcript.
     """
     out = out or sys.stdout
     meta = await open_session(store, session_id, cwd=config.cwd)
@@ -117,6 +149,10 @@ async def run_once(
         request_interrupt(engine)
         abandon_stdin_read()
 
+    def on_event(event: Event) -> None:
+        if usage_out is not None:
+            _write_usage_event(usage_out, event)
+
     try:
         # Background work (Task/Monitor) parks the session instead of ending
         # it; the one-shot run keeps streaming through park and wake until
@@ -125,7 +161,7 @@ async def run_once(
             stop = await stream_turn(
                 engine, meta.session_id, prompt, out=out, on_permission=on_permission,
                 on_question=tty_question_responder() or auto_answer,
-                wait_background=True,
+                wait_background=True, on_event=on_event if usage_out is not None else None,
             )
     finally:
         if host is not None:
@@ -246,6 +282,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="one-shot: run a single prompt and exit")
     _add_common(p_run)
+    p_run.add_argument(
+        "--usage-jsonl", type=Path, metavar="PATH",
+        help="write usage and turn status as JSON lines to PATH (replaces existing file)",
+    )
     p_run.add_argument("prompt", help="the prompt to run")
 
     p_sessions = sub.add_parser("sessions", help="list persisted sessions")
@@ -462,10 +502,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         session_id = _resume_target(args, store_dir)
         if args.command == "run":
-            return asyncio.run(run_once(
-                config, store, args.prompt, session_id=session_id,
-                on_permission=tty_permission_responder(),
-            ))
+            with (args.usage_jsonl.open("w", encoding="utf-8")
+                  if args.usage_jsonl is not None else nullcontext()) as usage_out:
+                return asyncio.run(run_once(
+                    config, store, args.prompt, session_id=session_id,
+                    on_permission=tty_permission_responder(), usage_out=usage_out,
+                ))
         if args.command == "chat":
             return asyncio.run(
                 chat_session(config, store, use_tui=args.tui, session_id=session_id)

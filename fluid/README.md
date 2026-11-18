@@ -4,7 +4,7 @@
 
 Most agent harnesses are one app welded to one provider, with context management
 bolted on as an afterthought. fluid is the opposite: a headless, provider-agnostic
-engine built around the ideas that actually make agents fast, cheap, and durable —
+engine built around four ideas —
 aggressive prompt caching, sessions you can branch like git, an agent that writes
 code instead of clicking through tool calls one at a time, and a memory that turns
 repeated work into reusable skills.
@@ -16,9 +16,11 @@ copied with `fluid import-settings`; it is never silently loaded or executed.
 
 ## Getting started
 
-fluid needs Python 3.12+ and [uv](https://docs.astral.sh/uv/). From a clone:
+fluid needs Python 3.12+ and [uv](https://docs.astral.sh/uv/). From a clone,
+enter the `fluid/` directory:
 
 ```sh
+cd fluid
 uv sync --extra mcp          # add --extra tui for the Textual interface
 export ANTHROPIC_API_KEY=sk-ant-...
 uv run fluid chat
@@ -26,11 +28,14 @@ uv run fluid chat
 
 `fluid run "summarize the failing tests"` does one turn and exits;
 `fluid chat --continue` picks up where the last session stopped. Switch
-provider with `--provider openrouter` (or `openai`, `local`, `claude`) after
-setting the matching key; `fluid config` prints what a run will use.
+provider with `--provider openrouter` (or `openai`, `local`, `claude`);
+`fluid config` prints what a run will use. Gemini is available through a provider
+entry with `kind = "gemini"`.
 
 - [docs/cli.md](docs/cli.md) — every subcommand, flag, slash command,
   permission prompt answer, and exit code.
+- [docs/engines.md](docs/engines.md) — what each engine supports.
+- [docs/architecture.md](docs/architecture.md) — the native turn loop, state, and module map.
 - [docs/configuration.md](docs/configuration.md) — every config key and
   default, the layer order, `FLUID_*` variables, `[[hooks]]` and
   `[[permission.rules]]`, provider blocks with an OpenRouter example.
@@ -58,11 +63,11 @@ setting the matching key; `fluid config` prints what a run will use.
 - **Built to be embedded.** The core is headless and event-driven — the bundled
   TUI is just one subscriber. Wire the same engine into a server, a bot, or your
   own app.
-- **Cheap by design.** Cache hit rate is a first-class metric, not an accident.
-  The prompt is engineered so providers can reuse almost everything between turns.
-- **Never lose work.** Sessions are branching trees — fork from any point, rewind
-  without paying the cache penalty again. The code kernel checkpoints itself, so
-  even a crash restores your data.
+- **Cache-first by design.** Cache hit rate is a first-class metric, not an accident.
+  The prompt is engineered so providers can reuse stable prefixes between turns.
+  The cost impact has not yet been benchmarked; see the [Harbor guide](benchmarks/harbor/README.md).
+- **Branching sessions.** Fork or rewind without copying the shared prefix.
+  The code kernel checkpoints itself so it can restore saved state.
 
 **Provider backends**
 
@@ -71,6 +76,7 @@ setting the matching key; `fluid config` prints what a run will use.
 | Anthropic Messages API | native loop | API key |
 | OpenAI Responses API | native loop | API key or Codex/ChatGPT-subscription OAuth |
 | OpenRouter / OpenAI-compatible | native loop | API key |
+| Gemini Interactions API | native loop | API key |
 | Local (llama.cpp `llama-server`, Ollama, any OpenAI-compatible server) | native loop | optional API key (`--api-key` servers) |
 | Claude Pro/Max subscription | delegated (official `claude` CLI as subprocess) | the CLI's own OAuth |
 
@@ -113,16 +119,14 @@ the UI; `GetUsage` deliberately does not.
 
 A few of the ideas that make fluid different, in plain terms:
 
-**Cache-first context.** Providers give huge discounts when the start of your
-prompt is identical to the last request. Most harnesses squander this by
-shuffling the prompt around. fluid treats the prompt as append-only with
-deliberate cache breakpoints — nothing mutates the prefix mid-session — so
-nearly every turn is a cache hit. You see the hit rate reported like any other
-metric.
+**Cache-first context.** Providers can reuse a prompt prefix that matches the
+last request. fluid appends new messages and places cache breakpoints where the
+provider supports them; compaction can rewrite the request view. You see the hit
+rate reported like any other metric.
 
 **Sessions as trees, not tapes.** A conversation isn't a straight line — you try
 things, back up, try again. fluid stores sessions as branching trees: fork at
-any message, explore, and come back, with the cache preserved along the way.
+any message, explore, and come back without copying the shared history.
 
 **Prevention over compaction — and recoverable when it happens.** When context
 fills up, most tools summarize the conversation and hope nothing important gets
@@ -139,10 +143,11 @@ lifetime cap; sessions age instead of dying.
 **Code-as-actions.** Instead of the model requesting tools one JSON call at a
 time, fluid projects tools as typed Python functions into a persistent,
 subprocess kernel. The model writes a few lines of code that loop, filter, and
-combine tools in one shot — dramatically fewer round trips, and tool schemas
-stay out of the prompt until needed. In-process guards block network and direct
-file access (files go through permission-gated tools); they are defence in depth,
-not an OS sandbox. Every cell is write-class: Ask and Accept Edits prompt, while
+combine tools in one shot, and tool schemas stay out of the prompt until needed.
+The effect on round trips has not yet been benchmarked; see the
+[Harbor guide](benchmarks/harbor/README.md). In-process guards block network and
+direct file access (files go through permission-gated tools); they are defence
+in depth, not an OS sandbox. Every cell is write-class: Ask and Accept Edits prompt, while
 Bypass approves. Memory limits hold on Linux/macOS and Windows.
 
 **A harness that learns.** With the continual mode on, fluid keeps an episodic
@@ -195,9 +200,10 @@ for free.
 
 Early development, moving fast. Working today:
 
-- Both engine legs: the native API loop and the delegated `claude` CLI.
-- Five provider backends (Anthropic, OpenAI Responses, OpenRouter, local
-  OpenAI-compatible servers, Claude subscription via the CLI).
+- Three engine legs: the native API loop, the delegated `claude` CLI, and ACP
+  for Antigravity in the AI Shuffle embedding.
+- Six provider kinds in Fluid config: Anthropic, OpenAI Responses, OpenRouter,
+  local OpenAI-compatible servers, Gemini, and Claude subscription via the CLI.
 - The CLI: `fluid chat` (REPL and `--tui`), `fluid run`, `fluid sessions
   --limit`, `fluid config`, `fluid anchors`, `fluid evolve`,
   `fluid import-settings`, `--version`; `--resume <id>` and `--continue`

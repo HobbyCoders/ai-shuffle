@@ -125,19 +125,30 @@ Useful variants:
 Harbor prints a job directory at the end of each run. Per trial it stores the
 task verdict plus the agent context the adapter fills in:
 `n_input_tokens` / `n_cache_tokens` / `n_output_tokens`, `cost_usd`, and
-`metadata.cache_hit_rate` / `metadata.num_model_calls` (parsed from fluid's
-`[usage]` and `[done]` output lines, saved verbatim at
-`<job>/…/logs/agent/fluid.txt`). Compare per side:
+`metadata.cache_hit_rate` / `metadata.num_model_calls` / `metadata.stop_reason`.
+The adapter passes `fluid run --usage-jsonl /logs/agent/fluid-usage.jsonl` and
+reads that file from the trial's logs. It contains per-call usage and terminal
+turn status, including partial call counts and cost when reported on error or
+interrupt. The adapter sums the reported counts and costs once per turn and takes the last
+stop reason. A missing file does not fall back to transcript parsing. Rebuild
+older wheels before running this adapter.
+
+`<job>/…/logs/agent/fluid.txt` still contains the console transcript for
+inspection. Tool text in the transcript does not count as usage or status.
+The separate file is not a sandbox against processes with direct write access
+to the trial's logs.
+
+Compare per side:
 
 - **resolve rate** (Harbor's headline number)
 - **cost per solved task** and total tokens
 - **cache hit rate** (fluid's first-class metric)
-- **model calls per task** (code-mode should drive this down)
+- **model calls per task** (compare with and without code mode)
 
-fluid's `[usage]` line reports `cache_write` (cache-creation) tokens, and the
-adapter includes them in `n_input_tokens`, so the prompt total is complete.
-For cross-side cost comparisons still prefer `cost_usd`, which is
-provider-reported.
+`n_input_tokens` includes uncached input, cache reads and cache creation;
+`n_cache_tokens` counts only cache reads. `cache_hit_rate` divides cache reads
+by the full prompt total. `cost_usd` is the cost reported by the engine when
+available, not inferred from the transcript.
 
 ## Cost warning
 
