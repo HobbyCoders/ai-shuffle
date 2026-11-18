@@ -53,8 +53,18 @@ def require_enforcement(reason: str | None, *, environ=os.environ, platform: str
 
 
 @pytest.fixture
-def _enforceable():
+def _enforceable(request):
     require_enforcement(NOT_ENFORCEABLE)
+    # Under `pytest -q` passes are not listed, so on GitHub Actions each
+    # enforcement test that got past the gate names itself and the kernel's
+    # Landlock ABI in the job summary.
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary and os.environ.get("GITHUB_ACTIONS") == "true":
+        import platform
+
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write(f"- isolation enforcement test ran: `{request.node.name}` "
+                         f"(Landlock ABI {ABI}, kernel {platform.release()})\n")
 
 
 needs_landlock = pytest.mark.usefixtures("_enforceable")
@@ -556,14 +566,21 @@ def test_loader_carries_the_policy_only_when_asked(tmp_path):
     assert engine._codemode._config.isolation is policy
 
 
-@pytest.mark.skipif(not LINUX or bool(ABI), reason="needs a Linux kernel without Landlock")
-def test_launcher_refuses_without_landlock(tmp_path):
+@pytest.mark.skipif(not LINUX, reason="the launcher is Linux only")
+def test_launcher_refuses_when_landlock_is_unusable(tmp_path):
+    # Without Landlock the kernel refuses; with it, a reviewed-ABI ceiling of
+    # 0 makes this kernel's ABI "too new". Either way nothing may run.
     marker = tmp_path / "ran"
+    probe = ("import sys; sys.path.insert(0, sys.argv[1]); import isolation\n"
+             "isolation.MAX_ABI = 0\n"
+             "sys.exit(isolation.main(sys.argv[2:]))\n")
     proc = subprocess.run(
-        [sys.executable, "-I", "-S", isolation.SCRIPT, "--rw", str(tmp_path), "--net", "on", "--",
-         "touch", str(marker)], capture_output=True, text=True, timeout=30, check=False)
-    assert proc.returncode == isolation.REFUSED
+        [sys.executable, "-I", "-c", probe, os.path.dirname(isolation.SCRIPT),
+         "--rw", str(tmp_path), "--net", "on", "--", "touch", str(marker)],
+        capture_output=True, text=True, timeout=30, check=False)
+    assert proc.returncode == isolation.REFUSED, proc.stderr
     assert isolation.REFUSAL_PREFIX in proc.stderr and not marker.exists()
+    assert ("newer than" in proc.stderr) == bool(ABI), proc.stderr
 
 
 @pytest.mark.skipif(not LINUX, reason="the launcher is Linux only")
