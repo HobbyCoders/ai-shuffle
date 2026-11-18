@@ -7764,6 +7764,11 @@ def _screen_tool_repeat_threshold(name: str) -> Optional[int]:
     return None
 
 
+# Pure (reads only its argument): fluid's look-ahead may ignore it
+# (fluid.permissions.engine.PURE_THRESHOLD).
+_screen_tool_repeat_threshold.fluid_pure_threshold = True  # type: ignore[attr-defined]
+
+
 def _mcp_instructions_block(registry: Any, permitted: Optional[frozenset]) -> Optional[str]:
     """The servers' own MCP ``instructions`` as one prompt block, or None.
 

@@ -248,7 +248,15 @@ from fluid.tools.builtins.tool_search import (
 )
 from fluid.tools.images import condition_image
 from fluid.tools.mrtr import resolve_input_required
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, prefetched
+from fluid.tools.registry import (
+    STOPPED,
+    FetchStopped,
+    ToolCtx,
+    ToolOutcome,
+    ToolRegistry,
+    prefetched,
+    spill_generation,
+)
 from fluid.tools.view import commit_delivery, settle_pointers, verbatim_tool_results
 
 log = logging.getLogger(__name__)
@@ -1250,7 +1258,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         self.max_model_calls_per_turn = max_model_calls_per_turn
         # Fetches of one reply's calls that may run at once (_prefetch); 1 = none.
         self.max_concurrent_tools = max(1, max_concurrent_tools)
-        self._prefetches: dict[str, tuple[dict[str, Any], asyncio.Task[Any]]] = {}
+        self._prefetches: dict[str, tuple[dict[str, Any], asyncio.Task[Any], int]] = {}
         self.max_continuations_per_turn = max_continuations_per_turn
         # Runaway tool-argument streams. Pass
         # ``ToolArgStreamGuard(max_bytes=None, stall_bytes=None,
@@ -4825,7 +4833,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     # Whatever ended the round, no early fetch outlives it.
                     if self._prefetches:
                         early, self._prefetches = self._prefetches, {}
-                        await _cancel_and_join(t for _, t in early.values())
+                        await _cancel_and_join(e[1] for e in early.values())
             answers = await self.pending_question_answers()
             if answers and blocks and not self._interrupted.is_set():
                 blocks[-1] = replace(
@@ -6102,8 +6110,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         raw input the gate sees: the tool registered a fetch, permissions allow
         the call without asking, no PreToolUse or PostToolUse hook could act on
         it, it repeats neither the repeat guard's last call nor any earlier
-        call of the reply, whatever lies between (``PermissionEngine.would_guard``),
-        and it cannot see what a spill writes.
+        call of the reply, whatever lies between (``PermissionEngine.would_guard``).
+        No path is examined here beyond the permission check the gate makes
+        too, and the first ineligible call ends the scan, so a call that will
+        prompt is never passed over to look at later ones. A spill written after a fetch
+        started (one of an earlier call of the reply, say) makes its call fetch
+        again at its turn (``fetch_once``), so it sees what main would.
         Fetches of calls the loop has passed are cancelled; once the turn is
         interrupted, all are and none start (checked again after the cleanup
         await, when a fetch task begins and when its worker job starts).
@@ -6115,17 +6127,16 @@ class NativeLoop(BackgroundLifecycleMixin):
         await _cancel_and_join(self._prefetches.pop(k)[1] for k in stale)
         if self._interrupted.is_set():  # it may have landed during that await
             early, self._prefetches = self._prefetches, {}
-            await _cancel_and_join(t for _, t in early.values())
+            await _cancel_and_join(e[1] for e in early.values())
             return
         if not live or self.max_concurrent_tools <= 1 or self.registry is None:
             return
         from fluid.tools.hardening import coerce_args
         from fluid.tools.registry import early_fetch
-        from fluid.tools.spill import may_see_spills
 
         async def start(fetch: Any, input: dict[str, Any]) -> Any:
             if self._interrupted.is_set():
-                return None  # not fetched: the handler fetches, if it runs at all
+                return STOPPED  # not fetched; the call gets the interrupted result
             return await early_fetch(fetch, input, self.ctx, stop=self._interrupted.is_set)
 
         for idx in range(at, len(tool_uses)):
@@ -6138,7 +6149,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             if (
                 spec is None or fetch is None or tu.get("arg_error")
                 or not isinstance(raw, dict) or not self._tool_permitted(name)
-                or may_see_spills(name, raw, self.ctx)
                 or (self.hooks is not None and (
                     self.hooks.may_act(PRE_TOOL_USE, name)
                     or self.hooks.may_act(POST_TOOL_USE, name)
@@ -6155,8 +6165,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 input = coerce_args(raw, spec.input_schema)  # what dispatch will pass
             except Exception:  # noqa: BLE001 — the serial step reports it
                 return
+            # The spill count before the task exists: a spill written after it
+            # sends the call back to fetching at its turn (fetch_once).
+            generation = spill_generation()
             self._prefetches[tool_use_id] = (
-                input, asyncio.create_task(start(fetch, input)),
+                input, asyncio.create_task(start(fetch, input)), generation,
             )
 
     async def _dispatch_tool_interruptible(
@@ -6191,8 +6204,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 with suppress(asyncio.CancelledError):
                     await interrupt_wait
             # Prefer the finished dispatch even when the interrupt landed in the
-            # same tick — a real result beats a synthesized cancellation.
-            if dispatch in done:
+            # same tick — a real result beats a synthesized cancellation. A
+            # call whose early fetch stopped for the interrupt has none.
+            if dispatch in done and not (
+                not dispatch.cancelled()
+                and isinstance(dispatch.exception(), FetchStopped)
+            ):
                 return dispatch.result()
             detached_spawn = (
                 tu.get("name") == "Task"
@@ -6572,7 +6589,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     outcome = await self.registry.dispatch(name, input, self.ctx)
                 finally:
                     prefetched.reset(token)
-                    await _cancel_and_join(task for _, task in held)  # one the handler never took
+                    await _cancel_and_join(e[1] for e in held)  # one the handler never took
 
         # MRTR (MCP spec 2026-07-28): a tools/call can pause on input_required.
         # Collect answers via QuestionRequest/RespondQuestion round-trips, then

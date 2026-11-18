@@ -73,6 +73,11 @@ def non_interactive_denial(name: str, reason: str | None = None) -> str:
     return f"{text} ({reason})" if reason else text
 
 
+# Set (true) on a ``doom_loop_threshold_for`` callback that only maps a tool
+# name to a number, touching no state, so ``would_guard`` may reason without it.
+PURE_THRESHOLD = "fluid_pure_threshold"
+
+
 class PermissionEngine:
     def __init__(
         self,
@@ -198,11 +203,16 @@ class PermissionEngine:
     ) -> bool:
         """Could ``note_execution(name, input)`` force-ask this call, whatever
         is noted before it? Conservative, and changes nothing (the native loop's
-        look-ahead asks it; no threshold callback runs): True when the call
-        repeats the last call noted or any call in ``before``, or when the base
-        threshold trips on a single call. A call that repeats none of them
-        starts a streak of 1, which only a threshold of 1 trips (an override
-        can only raise the threshold)."""
+        look-ahead asks it; no threshold callback runs): True when a threshold
+        callback not marked ``pure_threshold`` is set (it could change the
+        streak), when the call repeats the last call noted or any call in
+        ``before``, or when the base threshold trips on a single call. A call
+        that repeats none of them starts a streak of 1, which only a threshold
+        of 1 trips (an override can only raise the threshold)."""
+        if self._threshold_for is not None and not getattr(
+            self._threshold_for, PURE_THRESHOLD, False
+        ):
+            return True
         key = (name, _input_hash(input))
         if key == self._last_key or any(
             key == (n, _input_hash(i)) for n, i in before

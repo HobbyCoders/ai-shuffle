@@ -51,11 +51,32 @@ current_call_in_cell: ContextVar[bool] = ContextVar(
 )
 
 # The native loop's early run of this call's fetch (register_builtin's
-# ``fetch``): a list holding one ``(input, task)`` pair, emptied by the first
-# ``fetch_once``. The task is ``early_fetch``'s.
-prefetched: ContextVar[list[tuple[dict[str, Any], asyncio.Task[Any]]] | None] = ContextVar(
+# ``fetch``): a list holding one ``(input, task, spill generation when it was
+# started)``, emptied by the first ``fetch_once``. The task is ``early_fetch``'s.
+prefetched: ContextVar[list[tuple[dict[str, Any], asyncio.Task[Any], int]] | None] = ContextVar(
     "fluid_prefetched", default=None,
 )
+# An early fetch that stopped for the interrupt before its I/O (``early_fetch``).
+STOPPED = object()
+
+# Counts the spill writes of this process (spill.write_spill and the stats
+# file's spill._bump, the only writers of the spill and spill-stats folders),
+# bumped after each write. An early fetch started at one count is used only if
+# the count is unchanged at its call's turn (``fetch_once``): nothing it might
+# have seen was written in between. Process-wide, as the stats folder is shared
+# by sessions; a write elsewhere costs only a refetch.
+_spill_generation = 0
+_spill_generation_lock = threading.Lock()
+
+
+def spill_generation() -> int:
+    return _spill_generation
+
+
+def bump_spill_generation() -> None:
+    global _spill_generation
+    with _spill_generation_lock:
+        _spill_generation += 1
 # Inside an early fetch, the writes it would make (spill files and their
 # counters), held as callables for the call's own turn; None everywhere else.
 deferred_writes: ContextVar[list[Callable[[], Any]] | None] = ContextVar(
@@ -71,7 +92,9 @@ fetch_stopped: ContextVar[Callable[[], bool] | None] = ContextVar(
 
 
 class FetchStopped(Exception):
-    """An early fetch's worker job found the fetch stopped before its I/O."""
+    """An early fetch's worker job found the fetch stopped before its I/O; out
+    of ``fetch_once``, the call's early fetch stopped for the interrupt, and
+    the native loop gives it the interrupted-tool result."""
 
 
 async def off_loop(fn: Callable[..., Any], *args: Any) -> Any:
@@ -93,13 +116,14 @@ async def off_loop(fn: Callable[..., Any], *args: Any) -> Any:
 async def early_fetch(
     fetch: Fetch, input: dict[str, Any], ctx: ToolCtx,
     *, stop: Callable[[], bool] = lambda: False,
-) -> tuple[Any, list] | None:
+) -> Any:
     """Run ``fetch`` ahead of its call's turn: its result and the writes it
-    deferred, or None when ``stop`` (or a cancel) came first and its worker
-    job did nothing. Nothing is written here, so a fetch that is cancelled or
-    dropped leaves no trace. Cancelling the task does not stop work already
-    in a worker thread (``asyncio.to_thread``); that thread runs to its end,
-    and since its writes are only deferred, it cannot write anything either."""
+    deferred, or ``STOPPED`` when ``stop`` (or a cancel) came first and its
+    worker job did nothing. Nothing is written here, so a fetch that is
+    cancelled or dropped leaves no trace. Cancelling the task does not stop
+    work already in a worker thread (``asyncio.to_thread``); that thread runs
+    to its end, and since its writes are only deferred, it cannot write
+    anything either."""
     writes: list[Callable[[], Any]] = []
     cancelled = threading.Event()
     token = deferred_writes.set(writes)
@@ -107,7 +131,7 @@ async def early_fetch(
     try:
         return await fetch(input, ctx), writes
     except FetchStopped:
-        return None
+        return STOPPED
     except asyncio.CancelledError:
         cancelled.set()
         raise
@@ -121,23 +145,33 @@ async def fetch_once(
     *, inline: Callable[[dict[str, Any], ToolCtx], Any] | None = None,
 ) -> Any:
     """The handler's fetch: the early run the native loop started for this
-    call, or the fetch itself. The early run is used only when it had exactly
-    this input and its deferred writes succeed now; otherwise it is dropped and
-    the fetch runs here. Either way its exception surfaces here, at the call's
-    own turn. Without an early run, ``inline`` (the fetch's synchronous body)
-    runs in place, so the call keeps the handler's exact timing."""
+    call, or the fetch itself. The early run ends one of three ways:
+
+    - stopped for the interrupt (``STOPPED``): raises ``FetchStopped``, and
+      nothing is fetched here;
+    - a result that had exactly this input, with no spill written since it
+      started (``spill_generation``) and whose deferred writes succeed now,
+      off the event loop: that result is used;
+    - anything else (other input, a spill since, an exception, a failed
+      write): it is dropped and the fetch runs here, as without one.
+
+    Without an early run, ``inline`` (the fetch's synchronous body) runs in
+    place, so the call keeps the handler's exact timing."""
     held = prefetched.get()
     if held:
-        early_input, task = held.pop()
-        got = await task if early_input == input else None
-        if got is not None:  # None: the task found the turn interrupted
-            result, writes = got
-            written = [write() for write in writes]  # each attempted
-            if None not in written:
-                return result
-        elif early_input != input:
+        early_input, task, generation = held.pop()
+        if early_input != input:
             task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+        [got] = await asyncio.gather(task, return_exceptions=True)
+        if early_input == input:
+            if got is STOPPED:
+                raise FetchStopped
+            if generation == spill_generation() and isinstance(got, tuple):
+                result, writes = got
+                if not writes or None not in await asyncio.to_thread(
+                    lambda: [write() for write in writes]  # each attempted
+                ):
+                    return result
     return inline(input, ctx) if inline is not None else await fetch(input, ctx)
 
 # Seconds left before the code-mode kernel cancels the host call being served
@@ -826,6 +860,8 @@ class ToolRegistry:
                     )
                 else:
                     outcome = _normalize(await call)
+        except FetchStopped:  # the native loop answers it as interrupted
+            raise
         except Exception as exc:  # keep tool errors in-context, never crash the loop
             text = scrub_error_text(f"{type(exc).__name__}: {exc}")
             if name in {"Bash", "Monitor"} and not raw_shell_output:

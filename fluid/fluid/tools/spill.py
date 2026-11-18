@@ -26,7 +26,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -35,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from fluid.state import project_state_root, safe_key, scratch_dir
-from fluid.tools.registry import ToolCtx, deferred_writes
+from fluid.tools.registry import ToolCtx, bump_spill_generation, deferred_writes
 
 _log = logging.getLogger(__name__)
 
@@ -87,6 +86,8 @@ def write_spill(text: str, *, ctx: ToolCtx | None, tool: str) -> Path | None:
     except Exception:  # noqa: BLE001 — a failed spill falls back to truncation
         _log.debug("tool-output spill failed", exc_info=True)
         return None
+    finally:
+        bump_spill_generation()  # after the write: early fetches refetch
     _bump(ctx, "spilled", tool)
     return path
 
@@ -181,39 +182,12 @@ def _bump(ctx: ToolCtx | None, bucket: str, key: str) -> None:
             tmp.replace(path)
     except Exception:  # noqa: BLE001 — telemetry never fails a call
         _log.debug("spill stats write failed", exc_info=True)
+    finally:
+        bump_spill_generation()  # after the write: early fetches refetch
 
 
 # Reader tool -> the input key holding the path it reads or searches.
 _READERS = {"Read": "file_path", "Grep": "path", "Glob": "path"}
-
-
-def may_see_spills(name: str, input: Any, ctx: ToolCtx | None) -> bool:
-    """Could this Read, Grep or Glob see what a spill writes: this session's
-    spill folder or the spill-stats folder? True when its path (Grep and Glob
-    default to the cwd), taken as written or resolved, is inside or contains
-    either folder, taken as written or resolved (a stats file that is a
-    symlink is replaced, not followed), or cannot be resolved; False for other
-    tools. Such a call is never fetched early: an earlier call of the same
-    reply may still write there."""
-    key = _READERS.get(name)
-    stats = _stats_path(ctx) if ctx is not None else None
-    folders = [d for d in (spill_dir(ctx), stats and stats.parent) if d]
-    if key is None or not folders:
-        return False
-    raw = input.get(key) if isinstance(input, dict) else None
-    if not raw and name != "Read":
-        raw = ctx.cwd
-    if not isinstance(raw, str):
-        return True
-    try:
-        target = Path(raw)
-        if not target.is_absolute():
-            target = Path(ctx.cwd) / target
-        targets = [Path(os.path.abspath(target)), target.resolve()]
-        roots = [r for d in folders for r in (Path(os.path.abspath(d)), d.resolve())]
-    except (OSError, RuntimeError, ValueError):
-        return True
-    return any(t.is_relative_to(r) or r.is_relative_to(t) for t in targets for r in roots)
 
 
 def note_access(name: str, input: Any, ctx: ToolCtx | None) -> None:

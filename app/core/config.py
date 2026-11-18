@@ -1065,6 +1065,25 @@ class Settings(BaseSettings):
             return default
         return nice if 0 <= nice <= 19 else default
 
+    @field_validator("fluid_max_concurrent_tools", mode="before")
+    @classmethod
+    def _max_concurrent_tools_or_one(cls, value):
+        """Anything but a whole number of at least 1 means 1 (off), with a
+        warning, instead of stopping start-up. Blank is unset: 1, quietly."""
+        if value is None or not str(value).strip():
+            return 1
+        try:
+            count = int(str(value).strip())
+        except (TypeError, ValueError):
+            count = 0
+        if count < 1:
+            logger.warning(
+                "FLUID_MAX_CONCURRENT_TOOLS=%r is not a whole number of at least 1; using 1",
+                value,
+            )
+            return 1
+        return count
+
     @field_validator("version", mode="before")
     @classmethod
     def _normalise_version(cls, value):

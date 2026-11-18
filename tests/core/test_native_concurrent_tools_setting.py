@@ -55,6 +55,22 @@ def test_the_setting_defaults_to_one_and_reads_the_fluid_env(monkeypatch):
     assert Settings().fluid_max_concurrent_tools == 4
 
 
+@pytest.mark.parametrize("raw", ["oops", "0", "-3"])
+def test_an_invalid_value_is_one_with_a_warning(monkeypatch, caplog, raw):
+    monkeypatch.setenv("FLUID_MAX_CONCURRENT_TOOLS", raw)
+    with caplog.at_level("WARNING", logger="app.core.config"):
+        assert Settings().fluid_max_concurrent_tools == 1  # never a ValidationError
+    assert "FLUID_MAX_CONCURRENT_TOOLS" in caplog.text
+
+
+def test_the_pure_screen_threshold_is_marked_for_the_look_ahead():
+    from fluid.permissions.engine import PURE_THRESHOLD
+
+    from app.core.provider.harness_adapter import _screen_tool_repeat_threshold
+
+    assert getattr(_screen_tool_repeat_threshold, PURE_THRESHOLD) is True
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("value", "expected"), [(1, 1), (4, 4), (0, 1)])
 async def test_native_loop_gets_the_setting(monkeypatch, tmp_path, value, expected):
