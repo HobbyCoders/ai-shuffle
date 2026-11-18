@@ -21,6 +21,8 @@ The prompt text picks the behaviour:
   stopReason cancelled); ``agyhold``, rejected, waits for session/cancel.
 * ``slow`` — streams, then waits for ``session/cancel`` (stopReason
   cancelled) or a second prompt (steering, answered in the same turn).
+* ``slowonce`` / ``slowonce tool`` — ``slow`` the first time (the second after
+  a finished ``Read`` call); sent again, answers "resumed" at once.
 * ``ask`` — sends ``elicitation/create`` and echoes the answer.
 * ``plan`` — a plan update.
 * ``error`` — Antigravity's in-band error text.
@@ -349,6 +351,19 @@ class Agent:
                                     "content": {"type": "text", "text": "notes"}}]})
             await self.say(sid, f"chose={outcome.get('optionId')} mcp said: " + result)
             return {"stopReason": "end_turn"}
+        if word == "slowonce":
+            # ``slow`` the first time; resent (a Resume), it answers at once.
+            # ``slowonce tool`` runs a finished tool call before streaming.
+            if getattr(self, "slowonce_seen", False):
+                await self.say(sid, "resumed")
+                return {"stopReason": "end_turn"}
+            self.slowonce_seen = True
+            if text == "slowonce tool":
+                await self.update(sid, {"sessionUpdate": "tool_call", "toolCallId": "read-1",
+                                        "title": "Read notes.txt", "kind": "read", "status": "completed",
+                                        "rawInput": {"file_path": "notes.txt"}, "content": [
+                                            {"type": "content", "content": {"type": "text", "text": "notes"}}]})
+            word = "slow"
         if word == "slow":
             await self.say(sid, "working")
             assert self.turn is not None

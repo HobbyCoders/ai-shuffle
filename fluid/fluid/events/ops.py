@@ -204,6 +204,8 @@ class Handoff(Op):
     """Start a fresh session seeded with a model-written handoff document
     (Amp-style): structured goal/state/next-steps instead of cumulative
     summarization. The engine emits ``HandoffCreated`` with the new session id.
+    When the document cannot be generated, ``submit`` raises and no session
+    is created.
     """
 
     goal: str | None = None

@@ -8,7 +8,9 @@ from fluid.events.model import (
     ErrorEvent, Interrupted, PermissionRequest, SessionParked, SessionWoken, SubagentEvent, TextDelta,
     ToolResult, ToolUse, TurnComplete,
 )
-from fluid.events.ops import BackgroundTaskFinished, Interrupt, RespondPermission, Resume, UserTurn
+from fluid.events.ops import (
+    BackgroundTaskFinished, Fork, Interrupt, RespondPermission, Resume, Rewind, UserTurn,
+)
 from fluid.messages import Message, Text
 from fluid.permissions.rules import Rule
 from fluid.store.base import SessionNode
@@ -27,8 +29,9 @@ async def _event(loop, kind, *, since=0):
     raise AssertionError(f"no {kind} event")
 
 
-async def test_native_current_limitation_interrupt_then_resume_is_rejected(server):
-    server.script([Messages.start(), *Messages.text_block(0, "partial"), Sleep(30)])
+async def test_native_resume_after_interrupt_reruns_the_prompt(server):
+    server.script([Messages.start(), *Messages.text_block(0, "partial"), Sleep(30)],
+                  Messages.text("resumed"))
     run = Harness(server)
     loop = run.loop
     try:
@@ -38,15 +41,47 @@ async def test_native_current_limitation_interrupt_then_resume_is_rejected(serve
         await loop.submit(Interrupt())
         await asyncio.wait_for(loop.wait_turn(), 10)
         assert isinstance(loop.bus.log(loop.session_id)[-1], Interrupted)
-        # Resume targets an unanswered user node, not a partial reply kept by Stop.
-        _, partial = await loop.store.load_path(loop.session_id)
+        prompt, partial = await loop.store.load_path(loop.session_id)
         assert partial.message.role == "assistant"
         assert partial.message.text() and "partial".startswith(partial.message.text())
+        assert partial.message.provider_meta.get("interrupted")
         seq = loop.bus.last_seq(loop.session_id)
         await loop.submit(Resume())
-        refused = await _event(loop, (ErrorEvent, TurnComplete), since=seq)
-        assert isinstance(refused, ErrorEvent) and "nothing to resume" in refused.message
+        assert isinstance(await _event(loop, (ErrorEvent, TurnComplete), since=seq), TurnComplete)
         await asyncio.wait_for(loop.wait_turn(), 10)
+        # The re-run sends the interrupted call's history, without the partial reply.
+        assert len(server.requests) == 2
+        assert server.requests[1].body["messages"] == server.requests[0].body["messages"]
+        path = await loop.store.load_path(loop.session_id)
+        assert [(n.node_id, n.message.role, n.message.text()) for n in path] == [
+            (prompt.node_id, "user", "original prompt"), (path[-1].node_id, "assistant", "resumed"),
+        ]
+        assert path[-1].parent_id == partial.parent_id == prompt.node_id
+    finally:
+        await run.aclose()
+
+
+async def test_native_refuses_fork_and_rewind_while_a_turn_runs(server):
+    server.script(Messages.text("first"), [Messages.start(), *Messages.text_block(0, "second"), Sleep(1)])
+    run = Harness(server)
+    loop = run.loop
+    try:
+        assert isinstance((await run.turn("one"))[-1], TurnComplete)
+        first_prompt = (await loop.store.load_path(loop.session_id))[0]
+        await loop.submit(UserTurn(content="two"))
+        await _event(loop, TextDelta)
+        for op in (Fork(from_node_id=first_prompt.node_id), Rewind(to_node_id=first_prompt.node_id)):
+            with pytest.raises(RuntimeError, match="a turn is running"):
+                await loop.submit(op)
+        await asyncio.wait_for(loop.wait_turn(), 10)
+        path = await loop.store.load_path(loop.session_id)
+        assert [n.message.text() for n in path] == ["one", "first", "two", "second"]
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == path[-1].node_id
+        # Between turns both still move the head.
+        await loop.submit(Rewind(to_node_id=path[1].node_id))
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == path[1].node_id
+        await loop.submit(Fork(from_node_id=first_prompt.node_id))
+        assert (await loop.store.get_session(loop.session_id)).head_node_id == first_prompt.node_id
     finally:
         await run.aclose()
 
@@ -92,23 +127,34 @@ async def test_delegated_rejects_resume_but_can_interrupt(tmp_path):
         await run.aclose()
 
 
-async def test_acp_current_limitation_interrupt_then_resume_is_rejected(tmp_path):
+@pytest.mark.parametrize("prompt", ["slowonce", "slowonce tool"])
+async def test_acp_resume_after_interrupt_resends_the_prompt(tmp_path, prompt):
     driver = await _driver(tmp_path)
     loop = driver.loop
     try:
-        await loop.submit(UserTurn(content="slow"))
+        await loop.submit(UserTurn(content=prompt))
         await driver.until(TextDelta, timeout=10)
         await loop.submit(Interrupt())
         assert isinstance(await driver.until((Interrupted, ErrorEvent, TurnComplete), timeout=10),
                           Interrupted)
         await asyncio.wait_for(loop.wait_turn(), 10)
         assert _received(tmp_path, "session/cancel")
-        _, partial = await loop.store.load_path(loop.session_id)
-        assert partial.message.text() == "working"
+        user, *kept = await loop.store.load_path(loop.session_id)
+        assert kept[-1].message.text() == "working"
+        # With a tool call: assistant call, tool result, assistant text.
+        assert len(kept) == (3 if "tool" in prompt else 1)
+        assert all(node.message.provider_meta.get("interrupted") for node in kept)
         await loop.submit(Resume())
-        refused = await driver.until((ErrorEvent, TurnComplete), timeout=10)
-        assert isinstance(refused, ErrorEvent) and "Nothing to resume" in refused.message
+        assert isinstance(await driver.until((ErrorEvent, TurnComplete), timeout=10), TurnComplete)
         await asyncio.wait_for(loop.wait_turn(), 10)
+        assert [r["params"]["prompt"][0]["text"] for r in _received(tmp_path, "session/prompt")] == [
+            prompt, prompt,
+        ]
+        path = await loop.store.load_path(loop.session_id)
+        assert [(n.message.role, n.message.text()) for n in path] == [
+            ("user", prompt), ("assistant", "resumed"),
+        ]
+        assert path[0].node_id == user.node_id
     finally:
         await driver.close()
 

@@ -47,7 +47,9 @@ the head itself: Resume steps back to the prompt under it, and the new reply
 branches beside the partial text. When a tool call closed before the error,
 the head is the user node holding that call's error result, so the partial
 reply (its text and tool calls) stays on the re-sent path and the model reads
-it, followed by the error results. Resume on a head that is a completed assistant reply has nothing to continue
+it, followed by the error results. A reply the user stopped with Interrupt is
+stored with the same marker, so Resume steps back past it the same way.
+Resume on a head that is a completed assistant reply has nothing to continue
 and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
 failed call are retained as a new unanswered user-role node and included in an
 explicit later resume.
@@ -1897,6 +1899,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 self.permissions.set_mode_rules(mode_rules(mode))
         elif isinstance(op, Handoff):
             await self._do_handoff(op)
+        elif isinstance(op, Fork | Rewind) and self.turn_running:
+            # The running turn appends to the head it started from, which
+            # would silently undo the move.
+            raise RuntimeError(
+                f"{type(op).__name__} refused: a turn is running; wait for it to end or Interrupt it first"
+            )
         elif isinstance(op, Fork):
             # Move the head to an earlier node; the next parent-less UserTurn
             # continues from there. Nothing is copied — the shared prefix stays
@@ -1946,10 +1954,19 @@ class NativeLoop(BackgroundLifecycleMixin):
             cache_breakpoints=0,
         )
         parts: list[str] = []
+        error: str | None = None
         async for chunk in self.provider.stream(request):
             if chunk.kind == "text_delta":
                 parts.append(chunk.payload["text"])
-        content = "".join(parts).strip() or "(handoff document generation failed)"
+            elif chunk.kind == "error" and error is None:
+                error = str(chunk.payload.get("message") or "provider error")
+        content = "".join(parts).strip()
+        if error is not None or not content:
+            # A cut-off or empty document is no handoff: no session is made.
+            raise RuntimeError(
+                "handoff not created: the handoff document could not be generated"
+                + (f" ({error})" if error else " (empty reply)")
+            )
 
         new_meta = await self.store.create_session(cwd=self.ctx.cwd)
         first = SessionNode(
@@ -2715,8 +2732,8 @@ class NativeLoop(BackgroundLifecycleMixin):
                 and (head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
                 and path[-2].message.role == "user"
             ):
-                # A reply cut off by a provider error is not an answer: the
-                # prompt under it is still unanswered. Resume from that node,
+                # A reply cut off by a provider error or an Interrupt is not
+                # an answer: the prompt under it is still unanswered. Resume from that node,
                 # so the request is the one the failed call sent and the new
                 # reply branches beside the kept partial text.
                 head = path[-2]
@@ -4646,6 +4663,12 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
 
+            if result.interrupted:
+                # A reply the user stopped is not an answer: marked like a
+                # failed call's partial reply, so Resume re-runs its prompt.
+                result.message.provider_meta = {
+                    **result.message.provider_meta, INTERRUPTED_META_KEY: "interrupt",
+                }
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )
