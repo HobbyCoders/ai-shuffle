@@ -207,21 +207,31 @@ class SwarmCoordinator:
             swarm["status"] = "running"
             await self.emit(key)
             while True:
-                for task in rows.values():
-                    if task["status"] != "queued":
-                        continue
-                    if key in self.cancelled:
-                        task.update(status="cancelled", finished_at=now())
-                    elif any(rows[d]["status"] in TERMINAL - {"completed"} for d in task["depends_on"]):
-                        task.update(status="blocked", error="Dependency did not complete", finished_at=now())
-                    elif len(running) < cap and all(rows[d]["status"] == "completed" for d in task["depends_on"]):
-                        task.update(status="running", started_at=now())
-                        # Durably record launch intent before entering the dispatcher.
-                        await self.emit(key)
-                        job = asyncio.create_task(self._task(
-                            key, task, prompts[task["id"]], rows, ctx,
-                            model=models[task["id"]], worker=placements[task["id"]], effort=efforts[task["id"]]))
-                        running[job] = task
+                # Blocking is transitive and the input order is arbitrary: a
+                # task listed before the dependency that just became blocked
+                # must see it too, so rescan until no task becomes blocked or
+                # cancelled before deciding the run is over. A rescan follows
+                # only a pass that ended a queued task, so this terminates.
+                settled = False
+                while not settled:
+                    settled = True
+                    for task in rows.values():
+                        if task["status"] != "queued":
+                            continue
+                        if key in self.cancelled:
+                            task.update(status="cancelled", finished_at=now())
+                            settled = False
+                        elif any(rows[d]["status"] in TERMINAL - {"completed"} for d in task["depends_on"]):
+                            task.update(status="blocked", error="Dependency did not complete", finished_at=now())
+                            settled = False
+                        elif len(running) < cap and all(rows[d]["status"] == "completed" for d in task["depends_on"]):
+                            task.update(status="running", started_at=now())
+                            # Durably record launch intent before entering the dispatcher.
+                            await self.emit(key)
+                            job = asyncio.create_task(self._task(
+                                key, task, prompts[task["id"]], rows, ctx,
+                                model=models[task["id"]], worker=placements[task["id"]], effort=efforts[task["id"]]))
+                            running[job] = task
                 if not running:
                     break
                 done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)

@@ -111,6 +111,12 @@ _REHYDRATE_ATTEMPTS = 3
 # placeholder would save next to nothing.
 _ADMISSION_MIN_RESULT_CHARS = 2_000
 _REHYDRATE_BACKOFF_S = 0.2
+# The handoff call's transcript: newest nodes first until the budget is spent.
+# Text is clipped per node. Tool activity appears as the tool's name and the
+# result's status and size, never its arguments or output, which can carry
+# credentials the new session must not inherit.
+_HANDOFF_TRANSCRIPT_CHARS = 60_000
+_HANDOFF_NODE_TEXT_CHARS = 2_000
 from fluid.context.assistant import sanitize_assistant_history
 from fluid.context.compiler import CompiledPrompt
 from fluid.context.recall import HistoryRecall
@@ -389,6 +395,56 @@ def _render_interjection(text: str, sender: str | None, origin: str) -> str:
     wrote plainly does not.
     """
     return SteerDelivery(text=text, sender=sender, origin=origin).render()
+
+
+def _clip(text: str, limit: int) -> str:
+    """``text`` cut to at most ``limit`` characters, the ellipsis included."""
+    return text if len(text) <= limit else text[:max(0, limit - 1)].rstrip() + "…"
+
+
+def _handoff_line(node: SessionNode, tool_names: dict[str, str]) -> str:
+    """One node of the handoff transcript, or "" when it has nothing to show.
+
+    Its text, clipped, then a marker per tool call and result: the tool's name
+    and the result's status and size. Arguments and output stay out; they can
+    hold credentials, and the new session must not inherit them.
+    """
+    message = node.message
+    parts: list[str] = []
+    text = message.text().strip()
+    if text:
+        parts.append(_clip(text, _HANDOFF_NODE_TEXT_CHARS))
+    for block in message.content:
+        if isinstance(block, ToolUseBlock):
+            parts.append(f"[tool call: {block.name}]")
+        elif isinstance(block, ToolResultBlock):
+            size = sum(len(b.text) for b in block.content if isinstance(b, Text))
+            name = tool_names.get(block.tool_use_id, "tool")
+            status = "error" if block.is_error else "ok"
+            parts.append(f"[{name} result: {status}, {size} chars]")
+    return f"{message.role}: " + " ".join(parts) if parts else ""
+
+
+def _handoff_transcript(nodes: list[SessionNode]) -> str:
+    """The newest nodes that fit ``_HANDOFF_TRANSCRIPT_CHARS``, oldest first."""
+    tool_names = {
+        block.id: block.name
+        for node in nodes for block in node.message.content
+        if isinstance(block, ToolUseBlock)
+    }
+    lines: list[str] = []
+    budget = _HANDOFF_TRANSCRIPT_CHARS
+    for node in reversed(nodes):
+        line = _handoff_line(node, tool_names)
+        if not line:
+            continue
+        if len(line) + 1 > budget:
+            if not lines:  # the newest node alone is over budget: keep its head
+                lines.append(_clip(line, budget))
+            break
+        lines.append(line)
+        budget -= len(line) + 1
+    return "\n".join(reversed(lines))
 
 
 def _steer_receipt(
@@ -1465,6 +1521,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # A manual compaction's own build: only an Interrupt (or the turn's
         # own cancellation) ends it, never a host teardown of background work.
         self._manual_summary_task: asyncio.Task | None = None
+        # Only one handoff runs at a time.
+        self._handoff_running = False
         self._pending_summary: tuple[str, str, str] | None = None
         # Set by a host Stop/archive teardown: no new background checkpoint
         # until the next turn the owner or host starts.
@@ -1985,29 +2043,52 @@ class NativeLoop(BackgroundLifecycleMixin):
         over the current session, then seed a NEW session with it as the first
         user message. Nothing is summarized in place — the old session stays
         intact; the new one starts small, with a fresh cacheable prefix.
-        """
-        meta = await self._ensure_session()
-        nodes = await self.store.load_path(meta.session_id)
 
-        # Bounded plain-text transcript for the summary call (newest last).
-        lines: list[str] = []
-        for node in nodes[-40:]:
-            text = node.message.text().strip()
-            if text:
-                lines.append(f"{node.message.role}: {text[:2000]}")
+        One handoff runs at a time; a second one, or one on a closing engine,
+        fails at once.
+        """
+        if getattr(self, "_close_task", None) is not None:
+            raise RuntimeError("handoff not created: the engine is closing")
+        if self._handoff_running:
+            raise RuntimeError("handoff not created: another handoff is already running")
+        self._handoff_running = True
+        try:
+            meta = await self._ensure_session()
+            if getattr(self, "_close_task", None) is not None:
+                raise RuntimeError("handoff not created: the engine is closing")
+            content = await self._handoff_document(meta.session_id, op)
+
+            new_meta = await self.store.create_session(cwd=self.ctx.cwd)
+            first = SessionNode(
+                node_id=new_id("node"), parent_id=None,
+                message=Message(role="user", content=[Text(content)]),
+            )
+            await self.store.append(new_meta.session_id, first)
+            await self._emit(HandoffCreated(
+                session_id=meta.session_id,
+                new_session_id=new_meta.session_id,
+                content=content,
+                goal=op.goal,
+            ))
+        finally:
+            self._handoff_running = False
+
+    async def _handoff_document(self, sid: str, op: Handoff) -> str:
+        """Generate the handoff document; raises when it cannot be had."""
+        nodes = await self.store.load_path(sid)
         goal_line = f"\nThe stated goal for the next session: {op.goal}" if op.goal else ""
         prompt = (
             "Write a handoff document for a fresh agent session continuing this "
             "work. Structure it as: Goal, Current state (what is done and "
             "verified), Key decisions and constraints, Relevant files/paths, "
             "Next steps (ordered). Be specific; the reader has NO other "
-            f"context.{goal_line}\n\n--- transcript ---\n" + "\n".join(lines)
+            f"context.{goal_line}\n\n--- transcript ---\n" + _handoff_transcript(nodes)
         )
         request = ProviderRequest(
             model=self.model,
             messages=[Message(role="user", content=[Text(prompt)])],
             system="You write precise engineering handoff documents.",
-            session_id=meta.session_id,
+            session_id=sid,
             tools=[],
             max_tokens=self.max_tokens,
             cache_breakpoints=0,
@@ -2026,19 +2107,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 "handoff not created: the handoff document could not be generated"
                 + (f" ({error})" if error else " (empty reply)")
             )
-
-        new_meta = await self.store.create_session(cwd=self.ctx.cwd)
-        first = SessionNode(
-            node_id=new_id("node"), parent_id=None,
-            message=Message(role="user", content=[Text(content)]),
-        )
-        await self.store.append(new_meta.session_id, first)
-        await self._emit(HandoffCreated(
-            session_id=meta.session_id,
-            new_session_id=new_meta.session_id,
-            content=content,
-            goal=op.goal,
-        ))
+        return content
 
     async def _emit(self, event: Event) -> Event:
         """Publish to the bus (assigns seq) and persist for durable replay.
