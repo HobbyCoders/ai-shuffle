@@ -1486,10 +1486,10 @@
 		const latestTurnId = transcript.latestUserTurnId;
 		const anchor = latestTurnId ? document.getElementById(turnAnchorId(latestTurnId)) : null;
 		if (!anchor || !containerRef.contains(anchor)) {
-			// No prompt is mounted: none yet, or a long turn paged it out above the
-			// window. Every mounted row is after it, so no prompt-first room is owed,
-			// but queued and error controls dock in this reserve and still need it;
-			// without them the queue grows up over the rows above it.
+			// No prompt is mounted: none yet, or the window paged it out. Without
+			// its anchor there is no prompt-first room to calculate, but queued and
+			// error controls dock in this reserve and still need it; without them
+			// the queue grows up over the rows above it.
 			return MIN_TRANSCRIPT_TAIL_RESERVE + tailControlsExtent();
 		}
 		const containerBox = containerRef.getBoundingClientRect();
