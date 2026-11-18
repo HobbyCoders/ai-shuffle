@@ -9,10 +9,22 @@ import java.net.URLEncoder
 import java.util.concurrent.CancellationException
 
 internal object ChatDownloadPolicy {
-    const val MAX_BYTES = 128L * 1024 * 1024
+    /**
+     * Files the page already holds (Blob and data URLs) cross the message bridge in
+     * acknowledged base64 chunks, so the page keeps the whole file in memory.
+     */
+    const val BUFFERED_MAX_BYTES = 128L * 1024 * 1024
+    /**
+     * A worker URL is streamed by [WorkerDownloadClient] in [CHUNK_BYTES] reads
+     * straight into the chosen document; memory use does not grow with the file. The
+     * cap still bounds a response that never ends, whether or not it declares a length.
+     */
+    const val STREAMED_MAX_BYTES = 8L * 1024 * 1024 * 1024
     const val CHUNK_BYTES = 32 * 1024
     const val MAX_MESSAGE = 48 * 1024
-    const val LIMIT_MESSAGE = "This file is too large. Shuffle can save files up to 128 MB."
+    const val BUFFERED_LIMIT_MESSAGE = "This file is too large. Shuffle can save files prepared in chat up to 128 MB."
+    const val STREAMED_LIMIT_MESSAGE = "This file is too large. Shuffle can save worker files up to 8 GB."
+    fun limitMessage(message: String?) = message == BUFFERED_LIMIT_MESSAGE || message == STREAMED_LIMIT_MESSAGE
 
     private fun workerUri(base: String, target: String): URI? = runCatching {
         require(target.length <= 8192 && PairingInput.sameOrigin(base, target))
@@ -67,10 +79,13 @@ internal object ChatDownloadPolicy {
     fun mime(raw: String?): String = raw.orEmpty().substringBefore(';').trim().lowercase()
         .takeIf { it.matches(Regex("[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+")) } ?: "application/octet-stream"
 
-    fun length(size: Long) { require(size in 0..MAX_BYTES) { LIMIT_MESSAGE } }
+    /** A file declared by the page for the chunked bridge. */
+    fun length(size: Long) { require(size in 0..BUFFERED_MAX_BYTES) { BUFFERED_LIMIT_MESSAGE } }
 
-    fun copy(input: InputStream, output: OutputStream, expected: Long = -1, allowed: () -> Boolean = { true }, limit: Long = MAX_BYTES): Long {
-        require(expected <= limit) { LIMIT_MESSAGE }
+    /** Streams a worker response; counts every byte against [limit] even when no length was declared. */
+    fun copy(input: InputStream, output: OutputStream, expected: Long = -1, allowed: () -> Boolean = { true },
+             limit: Long = STREAMED_MAX_BYTES): Long {
+        require(expected <= limit) { STREAMED_LIMIT_MESSAGE }
         var count = 0L
         val buffer = ByteArray(CHUNK_BYTES)
         while (true) {
@@ -78,7 +93,7 @@ internal object ChatDownloadPolicy {
             val size = input.read(buffer)
             if (size == -1) break
             count += size
-            require(count <= limit) { LIMIT_MESSAGE }
+            require(count <= limit) { STREAMED_LIMIT_MESSAGE }
             if (!allowed()) throw CancellationException("Download cancelled")
             output.write(buffer, 0, size)
         }

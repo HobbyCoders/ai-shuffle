@@ -103,6 +103,29 @@ class ChatDownloadPolicyTest {
         assertThrows(IllegalArgumentException::class.java) { ChatDownloadPolicy.copy(ByteArrayInputStream(byteArrayOf()), ByteArrayOutputStream(), 11, limit = 10) }
         assertThrows(IllegalArgumentException::class.java) { ChatDownloadPolicy.copy(ByteArrayInputStream(ByteArray(11)), ByteArrayOutputStream(), limit = 10) }
         assertThrows(IllegalArgumentException::class.java) { ChatDownloadPolicy.copy(ByteArrayInputStream(ByteArray(4)), ByteArrayOutputStream(), 5) }
+        val announced = assertThrows(IllegalArgumentException::class.java) {
+            ChatDownloadPolicy.copy(ByteArrayInputStream(byteArrayOf()), ByteArrayOutputStream(), ChatDownloadPolicy.STREAMED_MAX_BYTES + 1)
+        }
+        assertEquals(ChatDownloadPolicy.STREAMED_LIMIT_MESSAGE, announced.message)
+        assertTrue(ChatDownloadPolicy.limitMessage(announced.message))
+    }
+
+    @Test fun streamsFarAboveTheBufferedCapSaveCompletelyWithoutADeclaredLength() {
+        val size = SyntheticFile.REPORTED_SIZE
+        assertTrue(size > ChatDownloadPolicy.BUFFERED_MAX_BYTES && size < ChatDownloadPolicy.STREAMED_MAX_BYTES)
+        val sink = DigestSink()
+        assertEquals(size, ChatDownloadPolicy.copy(SyntheticFile(size), sink))
+        assertEquals(size, sink.count)
+        assertArrayEquals(SyntheticFile.digest(size), sink.digest.digest())
+        // Memory stays at one read buffer, however large the file.
+        assertTrue(sink.largestWrite <= ChatDownloadPolicy.CHUNK_BYTES)
+        // Undeclared lengths are still counted against the cap as they arrive.
+        val source = SyntheticFile(size)
+        val overflow = assertThrows(IllegalArgumentException::class.java) {
+            ChatDownloadPolicy.copy(source, DigestSink(), limit = ChatDownloadPolicy.BUFFERED_MAX_BYTES)
+        }
+        assertEquals(ChatDownloadPolicy.STREAMED_LIMIT_MESSAGE, overflow.message)
+        assertTrue(source.position <= ChatDownloadPolicy.BUFFERED_MAX_BYTES + ChatDownloadPolicy.CHUNK_BYTES)
     }
     @Test fun revokedOwnershipStopsBeforeBytesAreWritten() {
         val sink = ByteArrayOutputStream()

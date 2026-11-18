@@ -64,7 +64,7 @@ function fixture(rejectType, options = {}) {
   };
   const context = vm.createContext({window, URL: FixtureURL, Blob, HTMLAnchorElement: Anchor, Element: Anchor,
     document: {addEventListener(type, handler) { handlers[type] = handler; }}, location: options.location || {origin: 'https://worker.example', href: 'https://worker.example/'},
-    crypto: require('node:crypto').webcrypto, setTimeout, clearTimeout, Uint8Array, atob, btoa, decodeURIComponent});
+    crypto: require('node:crypto').webcrypto, setTimeout: options.setTimeout || setTimeout, clearTimeout, Uint8Array, atob, btoa, decodeURIComponent});
   vm.runInContext(script, context);
   return {messages, handlers, Anchor, URL: FixtureURL, window};
 }
@@ -111,6 +111,23 @@ test('empty blob finishes and declared oversize is reported without copying data
   const large = fixture(); const blob = new Blob([]); Object.defineProperty(blob, 'size', {value: 128 * 1024 * 1024 + 1});
   new large.Anchor(large.URL.createObjectURL(blob)).click(); await settled();
   assert.equal(large.messages[0].type, 'error'); assert.equal(large.messages[0].reason, 'size');
+});
+
+test('a streamed worker file has no page-side deadline that would abort a long native save', async () => {
+  // Fire every page timer at once: a 310 s timer on the url request would post 'abort'
+  // and cancel a large native stream midway. Bridge chunks keep their deadline.
+  const fired = [];
+  const setTimeout = (callback, delay) => { fired.push(delay); callback(); return 0; };
+  const f = fixture('url', {setTimeout});
+  new f.Anchor('https://worker.example/api/files/by-path?path=%2Fwork%2Fbig.zip', null).click();
+  await settled();
+  assert.deepEqual(fired, []);
+  assert.deepEqual(f.messages.map(m => m.type), ['url', 'abort']);
+  const g = fixture(undefined, {setTimeout});
+  new g.Anchor(g.URL.createObjectURL(new Blob(['fixture']))).click();
+  await settled();
+  assert.deepEqual(fired, [310000]);
+  assert.equal(g.messages[0].type, 'begin'); assert.equal(g.messages.at(-1).type, 'abort');
 });
 
 test('on the worker-served phone UI, worker files stay native and the UI\'s own routes stay navigation', async () => {

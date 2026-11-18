@@ -3,6 +3,7 @@ package com.hobbycoders.aishuffle.ui
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.webkit.CookieManager
 import android.webkit.URLUtil
@@ -35,6 +36,8 @@ internal class ChatDownloads(
 ) {
     companion object {
         const val SAVED_MESSAGE = "File saved."
+        private const val STALL_MS = 2 * 60_000L
+        private const val STALL_CHECK_MS = 10_000L
     }
     private class Transfer(val id: String, val page: Int, val size: Long, val url: String?, val reply: ((Boolean) -> Unit)?) {
         val output = AtomicReference<OutputStream?>()
@@ -43,6 +46,8 @@ internal class ChatDownloads(
         var job: Job? = null
         var timeout: Job? = null
         @Volatile var call: Call? = null
+        /** elapsedRealtime of the last chunk a streamed save read or wrote. */
+        @Volatile var progressAt = 0L
     }
     @Volatile private var active: Transfer? = null
     private var page = 0
@@ -133,10 +138,11 @@ internal class ChatDownloads(
                     }
                 }
                 "abort" -> if (active?.id == id) cancel("The file could not be saved. Try again.")
-                "error" -> { status(if (message.optString("reason") == "size") ChatDownloadPolicy.LIMIT_MESSAGE else "This file could not be saved."); reply(false) }
+                // The page reports size only for a Blob or data URL it would have to buffer.
+                "error" -> { status(if (message.optString("reason") == "size") ChatDownloadPolicy.BUFFERED_LIMIT_MESSAGE else "This file could not be saved."); reply(false) }
             }
         } catch (error: Exception) {
-            val message = if (error.message == ChatDownloadPolicy.LIMIT_MESSAGE) ChatDownloadPolicy.LIMIT_MESSAGE else "The file could not be saved. Try again."
+            val message = error.message.takeIf(ChatDownloadPolicy::limitMessage) ?: "The file could not be saved. Try again."
             cancel(message)
             status(message)
         }
@@ -149,7 +155,8 @@ internal class ChatDownloads(
                 "Update Android System WebView, then refresh chat and try downloading again." else "Only files from this worker can be saved.")
             return
         }
-        if (length > ChatDownloadPolicy.MAX_BYTES) { status(ChatDownloadPolicy.LIMIT_MESSAGE); return }
+        // Worker URLs are streamed (saveUrl), never buffered: only the streamed cap applies.
+        if (length > ChatDownloadPolicy.STREAMED_MAX_BYTES) { status(ChatDownloadPolicy.STREAMED_LIMIT_MESSAGE); return }
         if (active != null || chooserOpen) { status("Finish the current download first."); return }
         start(Transfer(java.util.UUID.randomUUID().toString(), page, -1, url, null), URLUtil.guessFileName(url, disposition, mime), mime)
     }
@@ -169,9 +176,23 @@ internal class ChatDownloads(
         val cookies = CookieManager.getInstance().getCookie(server.baseUrl)
         val userAgent = web.settings.userAgentString
         status("Saving file…")
+        // A large worker file can outlast the five-minute window for choosing a destination.
+        // Once streaming starts, the save ends on cancellation (navigation, closing chat,
+        // account change), on OkHttp's read timeout, or when no chunk has moved for
+        // STALL_MS (a stuck document provider), never on total elapsed time.
+        transfer.progressAt = SystemClock.elapsedRealtime()
+        transfer.timeout?.cancel()
+        transfer.timeout = activity.lifecycleScope.launch {
+            while (active === transfer) {
+                delay(STALL_CHECK_MS)
+                if (active === transfer && SystemClock.elapsedRealtime() - transfer.progressAt > STALL_MS)
+                    cancel("The download stopped. Check your connection and try again.")
+            }
+        }
         withContext(Dispatchers.IO) {
             client.save(server, requireNotNull(transfer.url), cookies, userAgent, requireNotNull(transfer.output.get()),
-                { active === transfer && authorized() }, { transfer.call = it }, sessionToken()?.let { "Bearer $it" })
+                { transfer.progressAt = SystemClock.elapsedRealtime(); active === transfer && authorized() },
+                { transfer.call = it }, sessionToken()?.let { "Bearer $it" })
         }
         val saved = finish(transfer)
         transfer.reply?.invoke(saved)
@@ -194,7 +215,7 @@ internal class ChatDownloads(
     private fun failed(transfer: Transfer, error: Exception) {
         if (active !== transfer) { cleanup(transfer); return }
         val message = error.message.takeIf { error is IllegalArgumentException && it != null &&
-            (it == ChatDownloadPolicy.LIMIT_MESSAGE || it.startsWith("Your worker session") || it.startsWith("The download was incomplete") ||
+            (ChatDownloadPolicy.limitMessage(it) || it.startsWith("Your worker session") || it.startsWith("The download was incomplete") ||
                 it.startsWith("The file redirects") || it.startsWith("The file redirected") || it.startsWith("The worker could not")) }
         cancel(message ?: "The file could not be saved. Check your connection and try again.")
     }
