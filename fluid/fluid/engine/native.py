@@ -48,7 +48,8 @@ branches beside the partial text. When a tool call closed before the error,
 the head is the user node holding that call's error result, so the partial
 reply (its text and tool calls) stays on the re-sent path and the model reads
 it, followed by the error results. A reply the user stopped with Interrupt is
-stored with the same marker, so Resume steps back past it the same way.
+stored unmarked; Resume steps back past it the same way only while the
+session's last stored terminal event is the Interrupted naming it.
 Resume on a head that is a completed assistant reply has nothing to continue
 and ends the turn with an ErrorEvent saying so. Peer messages accepted during a
 failed call are retained as a new unanswered user-role node and included in an
@@ -237,6 +238,7 @@ from fluid.store.base import (
     SessionMeta,
     SessionNode,
     SessionStore,
+    interrupted_prompt_id,
     iter_events_of_class,
     new_id,
     persist_event,
@@ -2729,8 +2731,11 @@ class NativeLoop(BackgroundLifecycleMixin):
             if (
                 head is not None and len(path) > 1
                 and head.message.role == "assistant"
-                and (head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
                 and path[-2].message.role == "user"
+                and ((head.message.provider_meta or {}).get(INTERRUPTED_META_KEY)
+                     # An Interrupt's partial reply is unmarked; only the
+                     # turn's stored Interrupted naming it makes it resumable.
+                     or await interrupted_prompt_id(self.store, sid, head.node_id))
             ):
                 # A reply cut off by a provider error or an Interrupt is not
                 # an answer: the prompt under it is still unanswered. Resume from that node,
@@ -4663,12 +4668,6 @@ class NativeLoop(BackgroundLifecycleMixin):
                 return  # leave the turn open-ended
             self._fold_call_usage(total_usage, result.usage)
 
-            if result.interrupted:
-                # A reply the user stopped is not an answer: marked like a
-                # failed call's partial reply, so Resume re-runs its prompt.
-                result.message.provider_meta = {
-                    **result.message.provider_meta, INTERRUPTED_META_KEY: "interrupt",
-                }
             node = SessionNode(
                 node_id=new_id("node"), parent_id=parent.node_id, message=result.message
             )

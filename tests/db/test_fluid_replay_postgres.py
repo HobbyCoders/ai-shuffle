@@ -96,3 +96,26 @@ async def test_filtered_replay_flushes_events_from_producing_path(replay_db):
     assert [e.seq async for e in iter_events_of_class(store, "pending", 0, (TextDelta,))] == [3]
     assert not store._pending_events
     assert [e.seq async for e in iter_events_of_class(store, "pending", 0, (Usage,))] == [1]
+
+
+@pytest.mark.asyncio
+async def test_resume_authority_reads_the_committed_interrupted_event(replay_db, private_pg, monkeypatch):
+    from fluid.events import ErrorEvent, Interrupted, TextDelta, TurnStarted
+    from fluid.store.base import flush_events, interrupted_prompt_id
+    writer = lifecycle.pg_connect(private_pg)
+    @contextmanager
+    def get_event_db():
+        yield writer
+    # Commit on a connection of its own; readers see only committed rows.
+    monkeypatch.setattr(replay_db, "get_event_db", get_event_db)
+    store = replay_db.PgFluidStore()
+    await store.append_event("stopped", TurnStarted(session_id="stopped", seq=1, node_id="prompt", turn_id="t1",
+                                                    model="synthetic", provider="synthetic"))
+    await store.append_stream_event("stopped", TextDelta(session_id="stopped", seq=2, index=0, text="part"))
+    await store.append_event("stopped", Interrupted(session_id="stopped", seq=3, node_id="reply", turn_id="t1"))
+    await flush_events(store, "stopped")
+    # A restarted process sees only what was committed.
+    assert await interrupted_prompt_id(replay_db.PgFluidStore(), "stopped", "reply") == "prompt"
+    await store.append_event("stopped", ErrorEvent(session_id="stopped", seq=4, turn_id="t2", message="failed"))
+    assert await interrupted_prompt_id(replay_db.PgFluidStore(), "stopped", "reply") is None
+    writer.close()
