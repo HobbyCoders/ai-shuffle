@@ -342,6 +342,75 @@ async def test_failed_head_and_handle_writes_leave_live_meta_as_stored(mock_db, 
     assert meta.cli_session_id == reloaded.cli_session_id is None
 
 
+# A write whose outcome is unknown: PG either committed it before the
+# connection dropped ("landed") or never received it ("rejected"). Either way
+# the store must answer from the row, as a reopen does, never from its cache.
+_META_WRITES = [
+    pytest.param("_set_head_sync", lambda s: s.set_head("ses_amb", "n1"),
+                 "head_node_id", "n1", "n2", id="head"),
+    pytest.param("_set_cli_session_id_sync", lambda s: s.set_cli_session_id("ses_amb", "cli-2"),
+                 "cli_session_id", "cli-2", None, id="cli_session_id"),
+    pytest.param("_append_node_sync", lambda s: s.append("ses_amb", _node("n3", "n2", "next")),
+                 "head_node_id", "n3", "n2", id="append"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landed", [True, False], ids=["committed-then-raised", "raised-before-commit"])
+@pytest.mark.parametrize("helper, write, field, landed_value, old_value", _META_WRITES)
+async def test_a_meta_write_with_an_unknown_outcome_is_read_back(
+    mock_db, monkeypatch, helper, write, field, landed_value, old_value, landed
+):
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_amb")
+    await store.append("ses_amb", _node("n1", None, "root"))
+    await store.append("ses_amb", _node("n2", "n1", "leaf"))
+    real = getattr(module, helper)
+
+    def ack_lost(*args, **kwargs):
+        if landed:
+            real(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    monkeypatch.setattr(module, helper, ack_lost)
+    with pytest.raises(ConnectionError):
+        await write(store)
+    monkeypatch.setattr(module, helper, real)
+
+    expected = landed_value if landed else old_value
+    assert getattr(await PgFluidStore().get_session("ses_amb"), field) == expected
+    assert getattr(await store.get_session("ses_amb"), field) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_back_leaves_no_stale_meta(mock_db, monkeypatch):
+    from app.core.provider import fluid_pg_store as module
+
+    store = PgFluidStore()
+    await store.create_session("ses_amb2")
+    await store.append("ses_amb2", _node("n1", None, "root"))
+    await store.append("ses_amb2", _node("n2", "n1", "leaf"))
+    real_set, real_load = module._set_head_sync, module._load_session_sync
+
+    def ack_lost(*args, **kwargs):
+        real_set(*args, **kwargs)
+        raise ConnectionError("server closed the connection unexpectedly")
+
+    def unreachable(*args, **kwargs):
+        raise ConnectionError("database unreachable")
+
+    monkeypatch.setattr(module, "_set_head_sync", ack_lost)
+    monkeypatch.setattr(module, "_load_session_sync", unreachable)
+    with pytest.raises(ConnectionError):
+        await store.set_head("ses_amb2", "n1")
+    with pytest.raises(ConnectionError):
+        await store.get_session("ses_amb2")  # refused, never the stale n2
+    monkeypatch.setattr(module, "_load_session_sync", real_load)
+    assert (await store.get_session("ses_amb2")).head_node_id == "n1"
+
+
 @pytest.mark.asyncio
 async def test_event_append_is_idempotent_per_seq(mock_db):
     store = PgFluidStore()

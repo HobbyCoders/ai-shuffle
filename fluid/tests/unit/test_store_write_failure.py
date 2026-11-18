@@ -436,3 +436,36 @@ async def test_a_retry_after_a_same_size_replacement_rereads_the_log(tmp_path) -
     assert (await fresh.get_session(SID)).head_node_id == "x1"
     assert await fresh.get_node(SID, "x1") is not None
     await _assert_same_tree(reader, tmp_path)
+
+
+_NAN, _INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("kind", ["memory", "jsonl"])
+@pytest.mark.parametrize("first, again, retry", [
+    pytest.param(_NAN, _NAN, True, id="nan-resend"),
+    pytest.param(_INF, _INF, True, id="inf-resend"),
+    pytest.param(-_INF, -_INF, True, id="minus-inf-resend"),
+    pytest.param(_NAN, _INF, False, id="nan-vs-inf"),
+    pytest.param(_INF, -_INF, False, id="inf-vs-minus-inf"),
+    pytest.param(_NAN, 0.0, False, id="nan-vs-finite"),
+    pytest.param(_INF, 1e308, False, id="inf-vs-finite"),
+])
+async def test_a_resend_with_a_non_finite_number_matches_only_itself(
+    tmp_path, kind, first, again, retry
+) -> None:
+    from fluid.messages.content import ToolUseBlock
+    from fluid.store.base import NodeConflict
+
+    def node(value):
+        return SessionNode("n1", None, Message(role="assistant", content=[
+            ToolUseBlock(id="call-1", name="Read", input={"n": value})]))
+
+    store = MemoryStore() if kind == "memory" else JsonlStore(tmp_path)
+    await store.create_session(SID)
+    await store.append(SID, node(first))
+    if retry:
+        await store.append(SID, node(again))
+    else:
+        with pytest.raises(NodeConflict):
+            await store.append(SID, node(again))

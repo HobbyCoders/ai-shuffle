@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -259,6 +260,12 @@ def check_node_retry(
         raise NodeConflict(session_id, node_id)
 
 
+def _is_nan(number: int | float | Decimal) -> bool:
+    if isinstance(number, Decimal):
+        return number.is_nan()
+    return isinstance(number, float) and math.isnan(number)
+
+
 def json_values_equal(a: Any, b: Any) -> bool:
     """Equality of two parsed JSON values, as PostgreSQL's ``jsonb =`` decides it.
 
@@ -274,6 +281,11 @@ def json_values_equal(a: Any, b: Any) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     if isinstance(a, (int, float, Decimal)) and isinstance(b, (int, float, Decimal)):
+        # Not JSON and refused by JSONB, but the local stores accept NaN and
+        # Infinity: a NaN matches only a NaN; an infinity only the same sign.
+        a_nan, b_nan = _is_nan(a), _is_nan(b)
+        if a_nan or b_nan:
+            return a_nan and b_nan
         return a == b
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(json_values_equal(a[k], b[k]) for k in a)

@@ -1783,6 +1783,17 @@ class PgFluidStore:
             self._loaded.add(session_id)
             return data is not None
 
+    def _forget_session(self, session_id: str) -> None:
+        """Drop the cached session after a write whose outcome is unknown.
+
+        PG may have committed it before the connection failed, or never seen
+        it. The next access reads the row again, as a reopen would; if that
+        read fails it raises, so the stale value is never served.
+        """
+        self._loaded.discard(session_id)
+        self._sessions.pop(session_id, None)
+        self._memory_paths.pop(session_id, None)
+
     def _cache_node(self, session_id: str, node: SessionNode, size: int) -> None:
         nodes = self._nodes.setdefault(session_id, {})
         sizes = self._node_sizes.setdefault(session_id, {})
@@ -1934,10 +1945,14 @@ class PgFluidStore:
     async def append(self, session_id: str, node: SessionNode) -> None:
         await self.flush_events(session_id)
         await self._ensure_loaded(session_id)
-        written = await run_sync(
-            _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
-            generation=self._generations.get(session_id),
-        )
+        try:
+            written = await run_sync(
+                _append_node_sync, session_id, node, measure_bytes=self.cache_nodes,
+                generation=self._generations.get(session_id),
+            )
+        except BaseException:
+            self._forget_session(session_id)
+            raise
         if written is None:
             self._note_replaced(session_id)
             # Not saved, but the old engine's turn still builds its next prompt
@@ -2099,12 +2114,17 @@ class PgFluidStore:
     async def set_head(self, session_id: str, node_id: Optional[str]) -> None:
         await self._ensure_loaded(session_id)
         self._memory_paths.pop(session_id, None)
-        # Memory follows the write: a failed UPDATE leaves the old head live,
-        # as a reload would. A replaced writer carries on as if it landed.
-        if not await run_sync(
-            _set_head_sync, session_id, node_id,
-            generation=self._generations.get(session_id),
-        ):
+        # Memory follows the write; a failed one is read back from the row.
+        # A replaced writer carries on as if it landed.
+        try:
+            applied = await run_sync(
+                _set_head_sync, session_id, node_id,
+                generation=self._generations.get(session_id),
+            )
+        except BaseException:
+            self._forget_session(session_id)
+            raise
+        if not applied:
             self._note_replaced(session_id)
         if session_id in self._sessions:
             self._sessions[session_id].head_node_id = node_id
@@ -2120,10 +2140,15 @@ class PgFluidStore:
         """
         async with self._handle_lock:
             await self._ensure_loaded(session_id)
-            if not await run_sync(
-                _set_cli_session_id_sync, session_id, cli_session_id,
-                generation=self._generations.get(session_id),
-            ):
+            try:
+                applied = await run_sync(
+                    _set_cli_session_id_sync, session_id, cli_session_id,
+                    generation=self._generations.get(session_id),
+                )
+            except BaseException:
+                self._forget_session(session_id)
+                raise
+            if not applied:
                 self._note_replaced(session_id)
             meta = self._sessions.get(session_id)
             if meta is not None:
