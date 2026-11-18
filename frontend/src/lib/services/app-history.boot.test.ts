@@ -4,11 +4,13 @@ import { shellHistory, type ShellState } from './app-history.svelte';
 
 // A router whose entries are what a phone overlay and the shell history write:
 // a landed write also becomes page.state, as SvelteKit does.
-const router = vi.hoisted(() => ({ entries: [] as ShellState[], index: 0 }));
+const router = vi.hoisted(() => ({ entries: [] as ShellState[], index: 0, onState: null as ((state: ShellState) => void) | null }));
 vi.mock('$app/navigation', () => ({ goto: async (_url: string, options: { replace: boolean; state: ShellState }) => {
  if (options.replace) router.entries[router.index] = options.state;
  else router.entries.splice(++router.index, Infinity, options.state);
  page.state = options.state;
+ // AppPage's page.state effect, which runs before the navigation resolves.
+ router.onState?.(options.state);
 } }));
 const here = () => router.entries[router.index];
 /** An overlay's own entry, as the Chat controls sheet and the drawer push it. */
@@ -23,7 +25,7 @@ function back() {
 }
 
 beforeEach(() => {
- router.index = 0; router.entries = [{}]; page.state = {};
+ router.index = 0; router.entries = [{}]; page.state = {}; router.onState = null;
  shellHistory.stop();
 });
 
@@ -96,4 +98,21 @@ it('keeps an overlay that landed after the write was queued', async () => {
  shellHistory.detail('session', { panel: 'x' }, true);
  await vi.waitFor(() => expect(here().shell?.place.panel).toBe('x'));
  expect(here().mobileDrawer).toBe(true);
+});
+
+it('does not land an entry whose refining replace is still queued (a Settings deep link)', async () => {
+ const landed: string[] = [];
+ router.onState = (state) => { if (shellHistory.land(state)) landed.push(state.shell!.id); };
+ const arrival: ShellState = { shell: { id: 'arrival', place: { type: 'automations', panel: null } } };
+ router.entries[0] = page.state = arrival;
+ shellHistory.start(arrival, null);
+ // openSettings: the destination, Settings stamping its base, then go() to a detail.
+ shellHistory.destination({ type: 'settings' });
+ shellHistory.detail('settings', { settings: { category: 'general', view: 'index', depth: 0, item: null, tab: null } }, true);
+ shellHistory.detail('settings', { settings: { category: 'providers', view: 'page', depth: 1, item: null, tab: null } });
+ shellHistory.detail('settings', { settings: { category: 'providers', view: 'detail', depth: 2, item: 'provider:claude', tab: null } });
+ await vi.waitFor(() => expect(router.entries).toHaveLength(4));
+ await new Promise(resolve => setTimeout(resolve));
+ expect(landed).toEqual([]);
+ expect(shellHistory.place?.settings).toMatchObject({ view: 'detail', depth: 2 });
 });

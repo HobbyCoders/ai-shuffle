@@ -30,7 +30,9 @@ export type ShellState = App.PageState & { shell?: Entry };
 let current = $state.raw<Entry | null>(null);
 let restored = $state.raw<Entry | null>(null);
 let writes = Promise.resolve();
-const pending = new Set<string>();
+// Writes still queued per entry id. A replace reuses its entry's id, so an id
+// stays pending until its last write lands, not its first.
+const pending = new Map<string, number>();
 let mounted = false;
 // The entry this load stamped, with the state keys it carries. Null when the
 // browser already had one (a reload): that entry is where the user is.
@@ -104,13 +106,16 @@ function write(place: Place, replace = false) {
  current = entry;
  // Refining the arrival under an overlay: the waiting correction is this place.
  if (stale?.id === id) stale = entry;
- pending.add(id);
+ pending.set(id, (pending.get(id) ?? 0) + 1);
  queue(async () => {
   try {
    const kept: ShellState = replace ? { ...page.state } : {};
    delete kept.shell;
    await goto(location.href, { shallow: true, replace, persistState: true, state: { ...kept, shell: entry } as ShellState });
-  } finally { pending.delete(id); }
+  } finally {
+   const left = (pending.get(id) ?? 1) - 1;
+   if (left) pending.set(id, left); else pending.delete(id);
+  }
  });
 }
 
