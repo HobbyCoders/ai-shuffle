@@ -17,7 +17,9 @@ Three content paths, in order of dispatch:
 
 from __future__ import annotations
 
+import asyncio
 import base64
+from dataclasses import dataclass
 from io import BytesIO
 from itertools import islice
 from pathlib import Path
@@ -38,6 +40,7 @@ from fluid.tools.registry import (
     ToolImage,
     ToolOutcome,
     ToolSpec,
+    in_call_order,
 )
 
 # Media types the Anthropic/OpenAI vision APIs accept as base64 images.
@@ -193,23 +196,33 @@ def _read_text(path: Path, offset: int, limit: int | None) -> tuple[str, bool, i
     return numbered, more, len(out)
 
 
-async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
-    path: Path = resolve(input["file_path"], ctx)
+@dataclass(frozen=True)
+class _Page:
+    """What a text Read found on disk, before any session bookkeeping."""
+
+    numbered: str
+    more: bool
+    window_len: int
+    stamp: tuple[int, int] | None
+    no_lines_note: str
+
+
+def _load(path: Path, input: dict[str, Any]) -> ToolOutcome | _Page:
+    """Every filesystem touch of a Read, run on a worker thread: a slow mount
+    must not hold the event loop, so Reads of one reply overlap their I/O.
+
+    Returns the finished outcome for a missing path, an image or a binary
+    file, and the text page otherwise.
+    """
     if not path.exists() or not path.is_file():
         note = missing_path_note(str(input["file_path"]), path)
         return ToolOutcome(
             text=f"file not found: {path}{note}", is_error=True,
             error_code="missing_path" if not path.exists() else None,
         )
-
     media_type = IMAGE_MEDIA_TYPES.get(path.suffix.lower())
     if media_type is not None:
-        outcome = _read_image(path, media_type)
-        if not outcome.is_error:
-            ctx.read_files.add(str(path))
-            read_window.record_whole(ctx, str(path))
-        return outcome
-
+        return _read_image(path, media_type)
     if is_binary(path):
         return ToolOutcome(
             text=(
@@ -218,10 +231,37 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
             ),
             is_error=True,
         )
+    offset = max(1, int(input.get("offset", 1)))
+    numbered, more, window_len = _read_text(path, offset, input.get("limit"))
+    return _Page(
+        numbered=numbered, more=more, window_len=window_len, stamp=_stamp(path),
+        no_lines_note="" if numbered else _no_lines_note(path, offset),
+    )
 
+
+async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
+    path: Path = resolve(input["file_path"], ctx)
+    loaded = await asyncio.to_thread(_load, path, input)
+    # The session's record of what the model has seen is updated in call order
+    # when Reads of one reply run together (see in_call_order).
+    async with in_call_order(ctx):
+        return _record(path, input, loaded, ctx)
+
+
+def _record(
+    path: Path, input: dict[str, Any], loaded: ToolOutcome | _Page, ctx: ToolCtx,
+) -> ToolOutcome:
+    """Session bookkeeping for a finished Read: read-before-edit, repeat-read
+    detection and the repeat pointer. Synchronous, with no file I/O."""
+    if isinstance(loaded, ToolOutcome):
+        # A missing or binary file is an error; a successful image is recorded.
+        if not loaded.is_error and path.suffix.lower() in IMAGE_MEDIA_TYPES:
+            ctx.read_files.add(str(path))
+            read_window.record_whole(ctx, str(path))
+        return loaded
+    numbered, more, window_len = loaded.numbered, loaded.more, loaded.window_len
     offset = max(1, int(input.get("offset", 1)))
     limit = input.get("limit")
-    numbered, more, window_len = _read_text(path, offset, limit)
     ctx.read_files.add(str(path))
     # The lines actually delivered, for Edit's window check: a windowed read
     # that stopped short owns exactly its window; one that reached the end of
@@ -232,7 +272,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # the conversation. A write elsewhere moves mtime_ns, so the entry stops
     # matching without any explicit invalidation.
     key = (str(path), offset, int(limit) if limit else None)
-    stamp = _stamp(path)
+    stamp = loaded.stamp
     prior_stamp = ctx.read_seen.get(key)
     # …but "already in the conversation" is a claim about the MODEL's context,
     # not about this process's memory. In code mode an oversized result never
@@ -261,7 +301,7 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
         # no window claim, which would otherwise let a later read be answered
         # by slicing a ref for lines this call never saw.
         return ToolOutcome(
-            text=_no_lines_note(path, offset) + unchanged_read_note(repeat)
+            text=loaded.no_lines_note + unchanged_read_note(repeat)
         )
 
     # The native JSON surface goes further than the note: while the earlier

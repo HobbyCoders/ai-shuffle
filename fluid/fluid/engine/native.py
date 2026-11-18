@@ -63,7 +63,7 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
-from contextlib import nullcontext, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -282,14 +282,16 @@ class _ToolRun:
 
     ``gates[i]`` settles when call ``i`` has passed its gate (PreToolUse hook,
     permission decision, doom-loop count) and is free to execute, or, for a
-    call that turned into a barrier, when it has finished. ``dones[i]`` settles
-    when call ``i`` is over, however it ended. Gates are passed in call order;
-    execution is bounded by ``limit``.
+    call that turned into a barrier, when it has finished. ``ordered[i]``
+    settles when call ``i`` is past its ``in_call_order`` step (or will never
+    take one). ``dones[i]`` settles when call ``i`` is over, however it ended.
+    Gates are passed in call order; execution is bounded by ``limit``.
     """
 
     def __init__(self, size: int, limit: int) -> None:
         loop = asyncio.get_running_loop()
         self.gates: list[asyncio.Future[None]] = [loop.create_future() for _ in range(size)]
+        self.ordered: list[asyncio.Future[None]] = [loop.create_future() for _ in range(size)]
         self.dones: list[asyncio.Future[None]] = [loop.create_future() for _ in range(size)]
         self.limit = asyncio.Semaphore(max(1, limit))
 
@@ -300,8 +302,8 @@ class _RunSlot:
     through :data:`_RUN_SLOT` for the duration of that call.
 
     ``ctx`` is the call's own shallow copy of the session ctx (its
-    ``tool_use_id``, ``view_results`` and ``staged_delivery`` are per call; the
-    registries are shared), and ``deliveries`` the steers its result carries.
+    ``tool_use_id``, ``view_results``, ``staged_delivery`` and ``call_order``
+    are per call; the registries are shared).
     """
 
     run: _ToolRun
@@ -312,7 +314,6 @@ class _RunSlot:
     owner: Any = None
     tool_use_id: str = ""
     ctx: ToolCtx | None = None
-    deliveries: list[SteerDelivery] = field(default_factory=list)
     barrier: bool = False
 
     async def enter_gate(self) -> None:
@@ -335,9 +336,50 @@ class _RunSlot:
         if not self.barrier:
             _settle(self.run.gates[self.index])
 
+    @asynccontextmanager
+    async def in_call_order(self) -> AsyncIterator[None]:
+        """``ToolCtx.call_order`` for this call (see registry.in_call_order).
+
+        No deadlock with ``limit``: permits are taken in gate order, so every
+        earlier call this one waits for already holds a permit or is over.
+        """
+        if self.index:
+            await asyncio.wait(self.run.ordered[: self.index])
+        try:
+            yield
+        finally:
+            self.release_order()
+
+    def release_order(self) -> None:
+        _settle(self.run.ordered[self.index])
+
     def finish(self) -> None:
         _settle(self.run.gates[self.index])
+        self.release_order()
         _settle(self.run.dones[self.index])
+
+
+@dataclass(eq=False)
+class _ToolDone:
+    """A call that is over, holding the result it will publish.
+
+    Execution builds this and publishes nothing; :meth:`NativeLoop._settle_result`
+    publishes it, in call order, exactly once. ``content`` is the block content
+    without steers: the outcome's text, then its images. ``ran`` is False for a
+    result the engine made up (unparsed arguments, an interrupt, engine close,
+    the model-call cap): such a result carries no steers and is not journaled.
+    ``ctx`` is the one the call ran with, for ``commit_delivery``.
+    """
+
+    tu: dict[str, Any]
+    outcome: ToolOutcome
+    content: list[Any]
+    ctx: ToolCtx | None = None
+    ran: bool = True
+
+
+_INTERRUPTED_TOOL_TEXT = "Tool execution cancelled: the turn was interrupted."
+_CLOSED_TOOL_TEXT = "Tool cancelled: engine closed."
 
 
 # The run slot of the call being dispatched, when it belongs to a concurrent
@@ -1335,7 +1377,8 @@ class NativeLoop(BackgroundLifecycleMixin):
         # into, by reference, for the same reason: a turn that dies outside the
         # loop still bills what it spent.
         self._turn_usage: dict[str, Any] = {}
-        self._tool_deliveries = []  # Includes nested code-mode tool completions.
+        # Steers published by direct ``_finish_tool`` calls (see there).
+        self._tool_deliveries: list[SteerDelivery] = []
         # Per session: ids of the tool results its latest request carried
         # verbatim (fluid.tools.view; set before each model call).
         self._request_views: dict[str, frozenset[str]] = {}
@@ -4859,26 +4902,29 @@ class NativeLoop(BackgroundLifecycleMixin):
                 # every one with a deterministic ToolResult before stopping, so
                 # the stream keeps its one-result-per-use invariant.
                 for tu in result.tool_uses:
-                    text = (
+                    await self._settle_result(sid, turn_id, self._unrun(tu, (
                         "Tool not executed: the configured maximum number of "
                         "model calls for this turn was reached."
-                    )
-                    await self._emit(ToolResult(
-                        session_id=sid, turn_id=turn_id,
-                        tool_use_id=tu["tool_use_id"], name=tu["name"],
-                        output=text, is_error=True,
-                    ))
-                    blocks.append(ToolResultBlock(
-                        tool_use_id=tu["tool_use_id"], content=[Text(text)],
-                        is_error=True,
-                    ))
+                    )), blocks)
             else:
                 for tu in result.tool_uses:
                     if tu.get("arg_error"):
                         tu["arg_error"] = _explain_truncation(
                             tu["arg_error"], result.stop_reason
                         )
-                blocks = await self._dispatch_batch(sid, turn_id, result.tool_uses)
+                try:
+                    await self._dispatch_batch(sid, turn_id, result.tool_uses, blocks)
+                except asyncio.CancelledError:
+                    # Engine close: _dispatch_batch gave every call of the
+                    # reply its result before letting the cancellation go on.
+                    # Keep them, as an interrupt would, so the finished
+                    # results the client saw are the ones history holds.
+                    if blocks:
+                        await self._append_node(sid, SessionNode(
+                            node_id=new_id("node"), parent_id=parent.node_id,
+                            message=Message(role="user", content=blocks),
+                        ))
+                    raise
             answers = await self.pending_question_answers()
             if answers and blocks and not self._interrupted.is_set():
                 blocks[-1] = replace(
@@ -6144,35 +6190,86 @@ class NativeLoop(BackgroundLifecycleMixin):
     # ─── Tool dispatch ───────────────────────────────────────────────────
 
     async def _dispatch_batch(
-        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]]
-    ) -> list[ToolResultBlock]:
-        """Dispatch one reply's tool calls; results come back in call order.
+        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]],
+        blocks: list[ToolResultBlock],
+    ) -> None:
+        """Dispatch one reply's tool calls, appending one result per call to
+        ``blocks`` (empty on entry) in call order.
 
         A run of two or more consecutive calls that :meth:`_runs_concurrently`
-        accepts executes together (:meth:`_dispatch_run`). Every other call is
-        a barrier: it runs alone on the serial path, after the calls before it
-        have finished and before the calls after it start. A run member whose
-        gate turns out to need more than a silent allow becomes a barrier
-        inside the run (see ``_RunSlot.become_barrier``).
+        accepts executes together. Every other call is a barrier: it runs
+        alone, after the calls before it are over and before the calls after
+        it start. A run member whose gate needs more than a silent allow
+        becomes a barrier inside the run (see ``_RunSlot.become_barrier``).
 
-        ToolResult events go out as each call finishes, so inside a run they
-        can arrive out of call order; every consumer pairs a result with its
-        ToolUse by ``tool_use_id``. The transcript keeps call order.
+        Execution publishes nothing. :meth:`_settle_result` publishes each
+        result in call order, as soon as that call and every call before it
+        are over, so ToolResult events, the steers each result carries,
+        ``blocks`` and stored history all follow call order whichever call
+        finished first. When the turn is cancelled mid-reply (engine close),
+        every call still settles before the cancellation goes on: a call that
+        is over keeps its result, the rest end as cancelled.
         """
-        blocks: list[ToolResultBlock] = []
-        i = 0
-        while i < len(tool_uses):
-            end = i
-            if self.max_concurrent_tools > 1:
-                while end < len(tool_uses) and self._runs_concurrently(tool_uses[end]):
-                    end += 1
-            if end - i >= 2:
-                blocks.extend(await self._dispatch_run(sid, turn_id, tool_uses[i:end]))
-                i = end
-            else:
-                blocks.append(await self._dispatch_tool_interruptible(sid, turn_id, tool_uses[i]))
-                i += 1
-        return blocks
+        group: dict[int, asyncio.Task[_ToolDone]] = {}
+        try:
+            start = 0
+            while start < len(tool_uses):
+                end = start + 1
+                if self.max_concurrent_tools > 1 and self._runs_concurrently(tool_uses[start]):
+                    while end < len(tool_uses) and self._runs_concurrently(tool_uses[end]):
+                        end += 1
+                group = self._start_calls(sid, turn_id, tool_uses, start, end)
+                failure: BaseException | None = None
+                for index in range(start, end):
+                    task = group[index]
+                    # asyncio.wait, not await: a cancellation here must reach
+                    # the handler below, not the call it is waiting for.
+                    await asyncio.wait({task})
+                    if not task.cancelled() and task.exception() is not None:
+                        failure = failure or task.exception()
+                    done = self._finished(task, tool_uses[index], "Tool failed: internal error.")
+                    await self._settle_result(sid, turn_id, done, blocks)
+                if failure is not None:
+                    # The serial loop raised this too; every call that started
+                    # has its result first.
+                    raise failure
+                start = end
+        except asyncio.CancelledError:
+            for task in group.values():
+                task.cancel()
+            if group:
+                await asyncio.wait(group.values())
+            for index in range(len(blocks), len(tool_uses)):
+                task = group.get(index)
+                done = (
+                    self._finished(task, tool_uses[index], _CLOSED_TOOL_TEXT)
+                    if task is not None
+                    else self._unrun(tool_uses[index], _CLOSED_TOOL_TEXT)
+                )
+                # No steers: the turn ends here and may not reach history.
+                await self._settle_result(sid, turn_id, done, blocks, steers=False)
+            raise
+
+    def _start_calls(
+        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]], start: int, end: int,
+    ) -> dict[int, asyncio.Task[_ToolDone]]:
+        """Start calls ``start`` to ``end - 1``: one alone, or several as a run."""
+        if end - start == 1:
+            return {start: asyncio.create_task(self._race_tool(sid, turn_id, tool_uses[start]))}
+        run = _ToolRun(end - start, self.max_concurrent_tools)
+
+        async def member(index: int, tu: dict[str, Any]) -> _ToolDone:
+            slot = _RunSlot(run, index, owner=self, tool_use_id=tu.get("tool_use_id", ""))
+            _RUN_SLOT.set(slot)
+            try:
+                return await self._race_tool(sid, turn_id, tu)
+            finally:
+                slot.finish()
+
+        return {
+            start + offset: asyncio.create_task(member(offset, tool_uses[start + offset]))
+            for offset in range(end - start)
+        }
 
     def _run_slot(self, tool_use_id: str) -> _RunSlot | None:
         """This call's slot when it is a member of one of this loop's
@@ -6206,143 +6303,176 @@ class NativeLoop(BackgroundLifecycleMixin):
             return self.permissions.decide(spec, input, cwd=self.ctx.cwd).decision == "allow"
         return True
 
-    async def _dispatch_run(
-        self, sid: str, turn_id: str, tool_uses: list[dict[str, Any]]
-    ) -> list[ToolResultBlock]:
-        """Run consecutive read-only calls together; results in call order.
+    @staticmethod
+    def _unrun(tu: dict[str, Any], text: str) -> _ToolDone:
+        """A result the engine makes up for a call that did not run to the end."""
+        return _ToolDone(
+            tu=tu, outcome=ToolOutcome(text=text, is_error=True), content=[Text(text)], ran=False,
+        )
 
-        Each call keeps the serial path's guarantees: it races the interrupt
-        on its own (:meth:`_dispatch_tool_interruptible`), so every call gets
-        exactly one result, and one call failing never cancels the others.
-        """
-        run = _ToolRun(len(tool_uses), self.max_concurrent_tools)
+    def _finished(self, task: asyncio.Task[_ToolDone], tu: dict[str, Any], text: str) -> _ToolDone:
+        """The task's result when it has one, else a made-up ``text`` result."""
+        if task.done() and not task.cancelled() and task.exception() is None:
+            return task.result()
+        return self._unrun(tu, text)
 
-        async def one(index: int, tu: dict[str, Any]) -> ToolResultBlock:
-            slot = _RunSlot(run, index, owner=self, tool_use_id=tu.get("tool_use_id", ""))
-            _RUN_SLOT.set(slot)
-            try:
-                return await self._dispatch_tool_interruptible(sid, turn_id, tu)
-            finally:
-                slot.finish()
-
-        tasks = [asyncio.create_task(one(i, tu)) for i, tu in enumerate(tool_uses)]
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            # The engine is closing. gather has cancelled every call; let each
-            # emit its "engine closed" result before the cancellation goes on.
-            for task in tasks:
-                task.cancel()
-            with suppress(asyncio.CancelledError):
-                await asyncio.wait(tasks)
-            raise
-        for outcome in results:
-            if isinstance(outcome, BaseException):
-                # What the serial loop would have raised; the siblings have
-                # finished and recorded their results first.
-                raise outcome
-        return results  # type: ignore[return-value]
-
-    async def _dispatch_tool_interruptible(
-        self, sid: str, turn_id: str, tu: dict[str, Any]
-    ) -> ToolResultBlock:
-        """Dispatch one tool call, racing it against the interrupt flag.
+    async def _race_tool(self, sid: str, turn_id: str, tu: dict[str, Any]) -> _ToolDone:
+        """Run one call, racing it against the interrupt flag; publish nothing.
 
         An interrupt cancels the in-flight dispatch, so a long-running tool (a
-        sync Task worker, a slow shell command) cannot pin the turn. The cancelled call still surfaces as an
-        is_error ToolResult — every tool_use must get a result or the
-        transcript is malformed for the next model call — and the agent loop's
-        existing post-dispatch interrupt check then ends the turn.
+        sync Task worker, a slow shell command) cannot pin the turn. The call
+        still ends with a result, a made-up cancellation (every tool_use must
+        get one or the transcript is malformed for the next model call), and
+        the agent loop's post-dispatch interrupt check then ends the turn. A
+        dispatch that finished first, even in the same tick, wins: a real
+        result beats a synthetic cancellation. Being cancelled (engine close)
+        ends the call the same way and keeps a result that was already built.
         """
-        if not self._interrupted.is_set():
-            dispatch = asyncio.create_task(self._dispatch_tool(sid, turn_id, tu))
-            interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        if self._interrupted.is_set():
+            return self._unrun(tu, _INTERRUPTED_TOOL_TEXT)
+        dispatch = asyncio.create_task(self._dispatch_tool(sid, turn_id, tu))
+        try:
+            return await self._await_dispatch(dispatch, tu)
+        except asyncio.CancelledError:
+            dispatch.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await dispatch
+            return self._finished(dispatch, tu, _CLOSED_TOOL_TEXT)
+
+    async def _await_dispatch(
+        self, dispatch: asyncio.Task[_ToolDone], tu: dict[str, Any],
+    ) -> _ToolDone:
+        interrupt_wait = asyncio.create_task(self._interrupted.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {dispatch, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            interrupt_wait.cancel()
+            with suppress(asyncio.CancelledError):
+                await interrupt_wait
+        if dispatch in done:
+            return dispatch.result()
+        detached_spawn = (
+            tu.get("name") == "Task"
+            and isinstance(tu.get("input"), dict)
+            and tu["input"].get("mode", "sync") == "background"
+        )
+        if detached_spawn:
+            # Give the short spawn handshake a bounded chance to cross its
+            # atomic detach boundary. The handler's inner spawn task is
+            # shielded and lifecycle-tracked, so timing out this tool call
+            # does not cancel a worker the host may already have created.
             try:
-                done, _ = await asyncio.wait(
-                    {dispatch, interrupt_wait}, return_when=asyncio.FIRST_COMPLETED
+                return await asyncio.wait_for(
+                    asyncio.shield(dispatch),
+                    timeout=_BACKGROUND_SPAWN_INTERRUPT_GRACE,
                 )
-            except asyncio.CancelledError:
+            except TimeoutError:
                 dispatch.cancel()
                 with suppress(asyncio.CancelledError, Exception):
                     await dispatch
-                await self._emit(ToolResult(
-                    session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
-                    name=tu["name"], output="Tool cancelled: engine closed.", is_error=True,
-                ))
-                raise
-            finally:
-                interrupt_wait.cancel()
-                with suppress(asyncio.CancelledError):
-                    await interrupt_wait
-            # Prefer the finished dispatch even when the interrupt landed in the
-            # same tick — a real result beats a synthesized cancellation.
-            if dispatch in done:
-                return dispatch.result()
-            detached_spawn = (
-                tu.get("name") == "Task"
-                and isinstance(tu.get("input"), dict)
-                and tu["input"].get("mode", "sync") == "background"
-            )
-            if detached_spawn:
-                # Give the short spawn handshake a bounded chance to cross its
-                # atomic detach boundary. The handler's inner spawn task is
-                # shielded and lifecycle-tracked, so timing out this tool call
-                # does not cancel a worker the host may already have created.
-                try:
-                    return await asyncio.wait_for(
-                        asyncio.shield(dispatch),
-                        timeout=_BACKGROUND_SPAWN_INTERRUPT_GRACE,
-                    )
-                except TimeoutError:
-                    dispatch.cancel()
-                    try:
-                        await dispatch
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
-                except Exception:  # noqa: BLE001
-                    pass
-            else:
-                dispatch.cancel()
-                try:
-                    await dispatch
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
-        text = "Tool execution cancelled: the turn was interrupted."
-        await self._emit(ToolResult(
-            session_id=sid, turn_id=turn_id, tool_use_id=tu["tool_use_id"],
-            name=tu["name"], output=text, is_error=True,
-        ))
-        return ToolResultBlock(
-            tool_use_id=tu["tool_use_id"], content=[Text(text)], is_error=True,
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            dispatch.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await dispatch
+        return self._unrun(tu, _INTERRUPTED_TOOL_TEXT)
+
+    async def _settle_result(
+        self, sid: str, turn_id: str, done: _ToolDone, blocks: list[ToolResultBlock],
+        *, steers: bool = True,
+    ) -> None:
+        """Publish one call's result and append its block to ``blocks``.
+
+        The one place a native tool result reaches the bus, the transcript and
+        the repeat-pointer registry, after the call's outcome is decided.
+        Publication runs to the end even if the turn is cancelled meanwhile:
+        a client may already have the ToolResult, so the block is recorded
+        before the cancellation goes on and the call is never answered twice.
+        """
+        publishing = asyncio.create_task(self._publish_result(sid, turn_id, done, steers=steers))
+        try:
+            block = await asyncio.shield(publishing)
+        except asyncio.CancelledError:
+            blocks.append(await publishing)
+            raise
+        blocks.append(block)
+
+    async def _publish_result(
+        self, sid: str, turn_id: str, done: _ToolDone, *, steers: bool,
+    ) -> ToolResultBlock:
+        tu = done.tu
+        tool_use_id = tu["tool_use_id"]
+        outcome, delivered = await self._deliver(
+            sid, turn_id, tu["name"], tool_use_id, done.outcome,
+            ran=done.ran, steers=steers,
         )
+        # Steers that nested completions (code-mode cells, in-process MCP
+        # tools calling back into _finish_tool) already published while this
+        # call ran. Nested calls only happen under barrier tools, so they
+        # belong to this block; kept even on a cancellation, since their
+        # receipts went out.
+        nested, self._tool_deliveries = self._tool_deliveries, []
+        delivered = [*nested, *delivered]
+        if not done.ran:
+            return ToolResultBlock(
+                tool_use_id=tool_use_id, content=[Text(outcome.text)], is_error=True,
+                delivered_steers=delivered,
+            )
+        content: list[Any] = [Text(outcome.text), *done.content[1:]]
+        # Nested-instruction injection (instruction-file seam): when a tool
+        # touches a path whose own directory carries an AGENTS-family file not
+        # in the project stack, ride those instructions into context on this
+        # tool result — model-facing only, once per file per session.
+        reminder = self._nested_instruction_reminder(tu["input"])
+        if reminder:
+            content.append(Text(reminder))
+        # Reflection nudge: at most one per turn, appended to the first result
+        # that follows the turn's first friction (or its first detached Task).
+        nudge = self._reflection_nudge()
+        if nudge:
+            content.append(Text(nudge))
+        block = ToolResultBlock(
+            tool_use_id=tool_use_id,
+            content=content,
+            is_error=outcome.is_error,
+            delivered_steers=delivered,
+            delivery_metadata_version=1,
+        )
+        if done.ctx is not None:
+            # Only now is the result that will be stored known, so only now
+            # may the handler's offer become a target for a later repeat.
+            commit_delivery(done.ctx, block)
+        return block
 
     async def _dispatch_tool(
         self, sid: str, turn_id: str, tu: dict[str, Any]
-    ) -> ToolResultBlock:
+    ) -> _ToolDone:
+        """Run one call to its end and build the result it will publish.
+
+        Publishes nothing: :meth:`_settle_result` does, once the interrupt race
+        has a winner (see :meth:`_race_tool`).
+        """
         tool_use_id = tu["tool_use_id"]
         arg_error = tu.get("arg_error")
         if arg_error:
             # Arguments that never parsed: fail this call, not the turn. The
             # model reissues the call; the transcript keeps its
             # one-result-per-use invariant either way.
-            await self._emit(ToolResult(
-                session_id=sid, turn_id=turn_id, tool_use_id=tool_use_id,
-                name=tu["name"], output=arg_error, is_error=True,
-            ))
-            return ToolResultBlock(
-                tool_use_id=tool_use_id, content=[Text(arg_error)], is_error=True,
-            )
+            return self._unrun(tu, arg_error)
         slot = self._run_slot(tool_use_id)
         if slot is not None:
             # A member of a concurrent run: the per-call fields below live on
             # its own shallow ctx copy (shared registries, own tool_use_id,
-            # view_results and staged offer), never on the session ctx its
-            # siblings are using at the same time.
+            # view_results, staged offer and call-order step), never on the
+            # session ctx its siblings are using at the same time.
             ctx = slot.ctx = replace(
                 call_ctx(self.ctx, tool_use_id),
                 view_results=self._request_views.get(sid), staged_delivery=None,
+                call_order=slot.in_call_order,
             )
-            deliveries = slot.deliveries
             outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
         else:
             # Expose the call's id to handlers for the duration of the dispatch
@@ -6357,7 +6487,6 @@ class NativeLoop(BackgroundLifecycleMixin):
             # A call cancelled before its result was built (an interrupt during
             # PostToolUse) leaves its offer here; it must never be committed.
             self.ctx.staged_delivery = None
-            deliveries = self._tool_deliveries = []
             try:
                 outcome = await self._gated_call(sid, turn_id, tu["name"], tool_use_id, tu["input"])
             finally:
@@ -6383,29 +6512,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 condition_image, img.media_type, img.data,
             )
             content.append(Image(media_type=media_type, data=data_b64))
-        # Nested-instruction injection (instruction-file seam): when a tool
-        # touches a path whose own directory carries an AGENTS-family file not
-        # in the project stack, ride those instructions into context on this
-        # tool result — model-facing only, once per file per session.
-        reminder = self._nested_instruction_reminder(tu["input"])
-        if reminder:
-            content.append(Text(reminder))
-        # Reflection nudge: at most one per turn, appended to the first result
-        # that follows the turn's first friction (or its first detached Task).
-        nudge = self._reflection_nudge()
-        if nudge:
-            content.append(Text(nudge))
-        block = ToolResultBlock(
-            tool_use_id=tool_use_id,
-            content=content,
-            is_error=outcome.is_error,
-            delivered_steers=deliveries,
-            delivery_metadata_version=1,
-        )
-        # Only now is the result that will be stored known, so only now may
-        # the handler's offer become a target for a later repeat.
-        commit_delivery(ctx, block)
-        return block
+        return _ToolDone(tu=tu, outcome=outcome, content=content, ctx=ctx)
 
     # ── end-of-turn reflection nudge ─────────────────────────────────────
     def _friction_source(self) -> Any | None:
@@ -6547,7 +6654,7 @@ class NativeLoop(BackgroundLifecycleMixin):
         # instead of crashing the turn. Placed ahead of the hook and permission
         # gates. Code mode enforces the same predicate in its own bridge.
         if not self._tool_permitted(name):
-            return await self._finish_tool(
+            return await self._after_tool(
                 sid, turn_id, name, tool_use_id,
                 ToolOutcome(
                     text=(self.ctx.extra.get("tool_surface_denial")
@@ -6560,7 +6667,7 @@ class NativeLoop(BackgroundLifecycleMixin):
 
         guidance = guard_input(name, input, self.registry, ctx, self._tool_wired, self.permissions)
         if guidance:
-            return await self._finish_tool(
+            return await self._after_tool(
                 sid, turn_id, name, tool_use_id,
                 ToolOutcome(text=guidance, is_error=True), input=input,
             )
@@ -6589,7 +6696,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     session_id=sid, turn_id=turn_id, level="deny",
                     message=reason, hook_event=PRE_TOOL_USE, tool_name=name,
                 ))
-                return await self._finish_tool(
+                return await self._after_tool(
                     sid, turn_id, name, tool_use_id,
                     ToolOutcome(text=f"blocked by hook: {reason}", is_error=True),
                     input=input,
@@ -6624,7 +6731,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if slot is not None:
                     await slot.become_barrier()
                 if self.permissions.approval_policy == "never_ask":
-                    return await self._finish_tool(
+                    return await self._after_tool(
                         sid, turn_id, name, tool_use_id,
                         ToolOutcome(text=_DOOM_LOOP_DENIAL, is_error=True),
                         input=input,
@@ -6649,7 +6756,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if verdict != "deny" and updated_input is not None:
                     input = updated_input
             if verdict == "deny":
-                return await self._finish_tool(
+                return await self._after_tool(
                     sid, turn_id, name, tool_use_id,
                     ToolOutcome(text=deny_message or "permission denied", is_error=True),
                     input=input,
@@ -6699,7 +6806,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     input_responses=answers, request_state=request_state,
                 ),
             )
-        return await self._finish_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
+        return await self._after_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
 
     async def _collect_input_responses(
         self, sid: str, turn_id: str, name: str, tool_use_id: str, marker: Any
@@ -6959,12 +7066,31 @@ class NativeLoop(BackgroundLifecycleMixin):
         self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome,
         input: dict[str, Any] | None = None,
     ) -> ToolOutcome:
+        """Post-process one outcome and publish it at once, steers included.
+
+        The dispatch path does the two halves separately (:meth:`_after_tool`
+        while the call runs, :meth:`_deliver` when its result settles); this
+        joins them for a caller that has a finished outcome in hand.
+        """
+        outcome = await self._after_tool(sid, turn_id, name, tool_use_id, outcome, input=input)
+        outcome, delivered = await self._deliver(sid, turn_id, name, tool_use_id, outcome)
+        # Ride the enclosing call's block (see _publish_result).
+        self._tool_deliveries.extend(delivered)
+        return outcome
+
+    async def _after_tool(
+        self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome,
+        input: dict[str, Any] | None = None,
+    ) -> ToolOutcome:
+        """What follows a call's execution and precedes its publication:
+        marker defanging, PostToolUse hooks, the continual journal. Publishes
+        no result (see :meth:`_deliver`)."""
         if outcome.text:
             # Spoofing defense: neutralize fluid's own control markers
             # (system-reminders, steering markers) inside result text from ANY
             # source — a file the model Read, kernel stdout, an MCP payload.
-            # Genuine instances are appended AFTER this point (steers below,
-            # nested-instruction reminders in _dispatch_tool), so they are
+            # Genuine instances are appended AFTER this point (steers in _deliver,
+            # nested-instruction reminders in _publish_result), so they are
             # never touched.
             defanged = defang_harness_markers(outcome.text)
             if defanged is not outcome.text:
@@ -7014,8 +7140,25 @@ class NativeLoop(BackgroundLifecycleMixin):
             self._journal.record_tool(
                 name, input or {}, outcome.text, outcome.is_error
             )
+        return outcome
+
+    async def _deliver(
+        self, sid: str, turn_id: str, name: str, tool_use_id: str, outcome: ToolOutcome,
+        *, ran: bool = True, steers: bool = True,
+    ) -> tuple[ToolOutcome, list[SteerDelivery]]:
+        """Publish one finished result: the only place a native tool result
+        reaches the bus.
+
+        A result of a call that ran (``ran``) carries every steer queued at
+        this moment, appended to its text, and a SteerDelivered receipt
+        follows its ToolResult. Dispatch calls this in call order, after the
+        call's interrupt race has a winner and its block content is final, so
+        steers ride results in the order the transcript shows them. Returns the
+        outcome as published and the steers it carries.
+        """
         delivered: list[tuple[str | None, str, str | None, str]] = []
-        if self._pending_steers:
+        deliveries: list[SteerDelivery] = []
+        if ran and steers and self._pending_steers:
             accepted = {pending.id: pending.accepted_at for pending in self._pending_steers
                         if isinstance(pending, Steer)}
             delivered = [_steer_parts(pending) for pending in self._pending_steers]
@@ -7025,13 +7168,10 @@ class NativeLoop(BackgroundLifecycleMixin):
             for _, text, sender, origin in delivered:
                 if origin == "user" and sender is None:
                     self.ctx.extra["bash_file_guard_user_text"] = text
-            # A run member's steers ride its own result block, not whichever
-            # sibling's list ``_tool_deliveries`` would name at this moment.
-            slot = self._run_slot(tool_use_id)
-            (slot.deliveries if slot is not None else self._tool_deliveries).extend(
+            deliveries = [
                 SteerDelivery(id=steer_id, text=text, sender=sender, origin=origin, accepted_at=accepted.get(steer_id))
                 for steer_id, text, sender, origin in delivered
-            )
+            ]
             steers = "".join(
                 _render_interjection(text, sender, origin)
                 for _, text, sender, origin in delivered
@@ -7063,7 +7203,7 @@ class NativeLoop(BackgroundLifecycleMixin):
                     for steer_id, text, sender, origin in delivered
                 ],
             ))
-        return outcome
+        return outcome, deliveries
 
     @staticmethod
     def _merge_usage(

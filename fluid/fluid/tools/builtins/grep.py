@@ -37,7 +37,7 @@ from fluid.tools.builtins._util import (
 )
 from fluid.tools import view
 from fluid.tools.child_env import scrub_child_env
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, in_call_order
 
 MAX_MATCHES = 200
 MAX_LIMIT = 5000
@@ -172,6 +172,16 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # delivered in full and becomes the one later repeats are compared with.
     if outcome.is_error:
         return outcome
+    # The searches of one reply run together; which one may point at an
+    # earlier copy is decided in the order the model made them.
+    async with in_call_order(ctx):
+        return _repeat_or_deliver(outcome, pattern, root, glob, no_ignore, limit, ctx)
+
+
+def _repeat_or_deliver(
+    outcome: ToolOutcome, pattern: str, root: Path, glob: str | None,
+    no_ignore: bool, limit: int, ctx: ToolCtx,
+) -> ToolOutcome:
     key = (pattern, str(root), glob, no_ignore, limit)
     # Line order is ignored: ripgrep searches files in parallel, so the same
     # matches can come back in a different file order on an unchanged tree.

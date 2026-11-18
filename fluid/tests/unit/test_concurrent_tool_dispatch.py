@@ -3,14 +3,20 @@ is a barrier that runs alone, in its place.
 
 The native loop dispatches a run of consecutive calls that opted in
 (``ToolSpec.concurrent``), whose effective risk is ``safe`` and that the
-permission engine allows without a prompt, together. Results reach the model in
-call order whatever order they finish in.
+permission engine allows without a prompt, together. Each result is published
+(ToolResult event, steers, transcript block) in call order whatever order the
+calls finish in, after its call's interrupt race has a winner.
 """
 
 import asyncio
+import base64
 import json
+import os
+import re
+import threading
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +25,7 @@ from fluid.events import (
     Interrupt,
     PermissionRequest,
     RespondPermission,
+    SteerDelivered,
     ToolResult,
     TurnComplete,
     UserTurn,
@@ -30,7 +37,13 @@ from fluid.permissions.engine import PermissionEngine
 from fluid.permissions.rules import Rule
 from fluid.providers.base import ProviderCaps, ProviderRequest, StreamChunk
 from fluid.store.base import MemoryStore
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolRegistry, ToolSpec
+from fluid.tools.registry import (
+    ToolCtx,
+    ToolOutcome,
+    ToolRegistry,
+    ToolSpec,
+    current_tool_use_id,
+)
 
 _SCHEMA = {"type": "object", "properties": {"id": {"type": "string"}}}
 
@@ -182,10 +195,11 @@ async def test_two_slow_reads_take_about_the_time_of_one() -> None:
 
     assert timeline.max_active == 2
     assert elapsed < 0.55  # one-at-a-time would be at least 0.6s
-    # Live results arrive as each call finishes; the model sees call order.
-    assert [r.tool_use_id for r in _results(loop)] == ["b", "a"]
+    # b finished first, yet results are published in call order.
+    assert timeline.index("end", "b") < timeline.index("end", "a")
+    assert [r.tool_use_id for r in _results(loop)] == ["a", "b"]
     assert _result_order(provider) == ["a", "b"]
-    assert [r.output for r in _results(loop)] == ["probe:b", "probe:a"]
+    assert [r.output for r in _results(loop)] == ["probe:a", "probe:b"]
     # Each call saw its own id although they ran on one session ctx.
     assert timeline.ids_seen == {"a": "a", "b": "b"}
     assert "tool_use_id" not in loop.ctx.extra
@@ -503,3 +517,343 @@ async def test_an_inherited_run_slot_is_ignored_by_other_loops_and_calls() -> No
         assert child._run_slot("t1") is None
     finally:
         _RUN_SLOT.reset(token)
+
+
+# ── the real tools and the settlement boundary ─────────────────────────────
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+def _builtins(*modules) -> ToolRegistry:
+    registry = ToolRegistry()
+    for module in modules:
+        registry.register_builtin(module.SPEC, module.handler)
+    return registry
+
+
+async def _session(store: MemoryStore, cwd: Path) -> str:
+    return (await store.create_session(cwd=str(cwd))).session_id
+
+
+def _real_loop(provider, registry, store, sid, cwd: Path, **kwargs) -> NativeLoop:
+    loop = _loop(provider, registry, store=store, sid=sid, **kwargs)
+    loop.ctx.cwd = str(cwd)
+    return loop
+
+
+def _delay_by_call(delays: dict[str, float]) -> None:
+    """Sleep ``delays[<tool_use_id of the running call>]`` seconds. Called from
+    the tools' own I/O (a worker thread or a coroutine): the call's id travels
+    in the context the dispatch copies into both."""
+    call = current_tool_use_id.get()
+    time.sleep(delays.get(call or "", 0.0))
+
+
+async def _stored_results(store: MemoryStore, sid: str) -> dict[str, ToolResultBlock]:
+    path = await store.load_path(sid)
+    return {
+        b.tool_use_id: b
+        for node in path for b in node.message.content if isinstance(b, ToolResultBlock)
+    }
+
+
+def _one_result_each(events) -> dict[str, ToolResult]:
+    results = [e for e in events if isinstance(e, ToolResult)]
+    ids = [r.tool_use_id for r in results]
+    assert len(ids) == len(set(ids)), f"a call was answered twice: {ids}"
+    return {r.tool_use_id: r for r in results}
+
+
+async def test_real_reads_overlap_their_file_io(tmp_path, monkeypatch) -> None:
+    """Read's file I/O runs off the event loop, so two Reads on a slow mount
+    cost one wait, not two."""
+    from fluid.tools.builtins import read
+
+    for name in ("one.txt", "two.txt"):
+        (tmp_path / name).write_text(f"{name}\n", encoding="utf-8")
+    original = read._read_text
+
+    def slow_read_text(*args):
+        time.sleep(0.4)  # a blocking read on a slow mount
+        return original(*args)
+
+    monkeypatch.setattr(read, "_read_text", slow_read_text)
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("toolu_1", "Read", {"file_path": str(tmp_path / "one.txt")}),
+               ("toolu_2", "Read", {"file_path": str(tmp_path / "two.txt")})),
+        _text("done"),
+    ])
+    loop = _real_loop(provider, _builtins(read), store, sid, tmp_path)
+    began = time.monotonic()
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    assert time.monotonic() - began < 0.75  # one at a time is at least 0.8s
+    blocks = provider.requests[1].messages[-1].content
+    assert "one.txt" in blocks[0].content[0].text and "two.txt" in blocks[1].content[0].text
+    assert {str(tmp_path / "one.txt"), str(tmp_path / "two.txt")} <= loop.ctx.read_files
+
+
+@pytest.mark.parametrize("tool", ["Read", "Grep", "Glob"])
+async def test_repeat_pointer_goes_to_the_earlier_call_whatever_finishes_first(
+    tool: str, tmp_path, monkeypatch,
+) -> None:
+    """A long result is already in the model's request; the next reply makes
+    the same call twice and the first of them is the slower. The one-use
+    pointer goes to the first call, the second gets the full result: exactly
+    what one-at-a-time dispatch does."""
+    from fluid.tools.builtins import glob, grep, read
+
+    for index in range(60):
+        (tmp_path / f"file_{index:03d}_with_a_long_enough_name.txt").write_text(
+            # One match per file: under Grep's match cap, so the result is
+            # whole and the same on every run.
+            "needle on a line long enough to pass the pointer threshold\n"
+            + "filler line\n" * 30,
+            encoding="utf-8",
+        )
+    target = tmp_path / "long.md"  # not a Glob or Grep hit
+    target.write_text("a line long enough to pass the pointer threshold\n" * 40, encoding="utf-8")
+    input = {
+        "Read": {"file_path": str(target)},
+        "Grep": {"pattern": "needle", "path": str(tmp_path)},
+        "Glob": {"pattern": "*.txt", "path": str(tmp_path)},
+    }[tool]
+    # A different call between the first and the repeats, so three identical
+    # calls are not in a row (the doom-loop guard would take the third).
+    other = {
+        "Read": {"file_path": str(tmp_path / "file_001_with_a_long_enough_name.txt")},
+        "Grep": {"pattern": "filler", "path": str(tmp_path), "limit": 1},
+        "Glob": {"pattern": "*.md", "path": str(tmp_path)},
+    }[tool]
+    delays = {"toolu_b1": 0.4}  # the first call of the second reply is slower
+    if tool == "Grep":
+        original_rg = grep._ripgrep
+
+        async def slow_rg(*args, **kwargs):
+            await asyncio.to_thread(_delay_by_call, delays)
+            return await original_rg(*args, **kwargs)
+
+        monkeypatch.setattr(grep, "_ripgrep", slow_rg)
+    else:
+        module, attr = (read, "_read_text") if tool == "Read" else (glob, "_glob")
+        original = getattr(module, attr)
+
+        def slow(*args, **kwargs):
+            _delay_by_call(delays)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(module, attr, slow)
+
+    async def run(limit: int) -> list[str]:
+        store = MemoryStore()
+        sid = await _session(store, tmp_path)
+        provider = ScriptedProvider([
+            _calls(("toolu_a", tool, input), ("toolu_x", tool, other)),
+            _calls(("toolu_b1", tool, input), ("toolu_b2", tool, input)),
+            _text("done"),
+        ])
+        loop = _real_loop(provider, _builtins(read, grep, glob), store, sid, tmp_path,
+                          max_concurrent_tools=limit)
+        await loop.submit(UserTurn(content="go"))
+        await asyncio.wait_for(loop.wait_turn(), timeout=20)
+        blocks = provider.requests[2].messages[-1].content
+        return [b.content[0].text for b in blocks]
+
+    serial = await run(1)
+    assert "toolu_a" in serial[0] and "toolu_a" not in serial[1]  # pointer, then full
+    assert "doom-loop" not in serial[1]
+    together = await run(8)
+    # ripgrep lists files in whatever order its threads finish; compare lines.
+    assert [sorted(t.splitlines()) for t in together] == [sorted(t.splitlines()) for t in serial]
+
+
+async def test_interrupt_while_a_finished_read_is_conditioned_answers_it_once(
+    tmp_path, monkeypatch,
+) -> None:
+    """The Read has its outcome and is conditioning its image when the
+    interrupt lands. Nothing about it was published yet, so it ends with one
+    result, and what the client saw is what history holds."""
+    from fluid.engine import native
+    from fluid.tools.builtins import grep, read
+
+    (tmp_path / "pic.png").write_bytes(_PNG)
+    (tmp_path / "notes.txt").write_text("needle\n", encoding="utf-8")
+    conditioning = threading.Event()
+
+    def slow_condition(media_type, data):
+        conditioning.set()
+        time.sleep(0.5)
+        return media_type, data
+
+    monkeypatch.setattr(native, "condition_image", slow_condition)
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("toolu_r", "Read", {"file_path": str(tmp_path / "pic.png")}),
+               ("toolu_g", "Grep", {"pattern": "needle", "path": str(tmp_path)})),
+        _text("never reached"),
+    ])
+    loop = _real_loop(provider, _builtins(read, grep), store, sid, tmp_path)
+    await loop.submit(UserTurn(content="go"))
+    assert await asyncio.to_thread(conditioning.wait, 5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    published = _one_result_each(loop.bus.log(sid))
+    stored = await _stored_results(store, sid)
+    assert set(published) == set(stored) == {"toolu_r", "toolu_g"}
+    for call in published:
+        assert published[call].output == stored[call].content[0].text
+    assert "interrupted" in published["toolu_r"].output
+    assert provider.calls == 1
+
+
+async def test_interrupt_while_a_result_is_being_persisted_keeps_it(tmp_path) -> None:
+    """The interrupt lands while a real result is on its way to the store: the
+    result stands, alone, and no cancellation follows it."""
+    entered = asyncio.Event()
+
+    class SlowStore(MemoryStore):
+        async def append_event(self, session_id, event):
+            if isinstance(event, ToolResult) and event.tool_use_id == "a":
+                entered.set()
+                await asyncio.sleep(0.3)
+            await super().append_event(session_id, event)
+
+    timeline = Timeline()
+    store = SlowStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {"a": 0.05, "b": 0.05}), store=store, sid=sid)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    await loop.submit(Interrupt())
+    await asyncio.wait_for(loop.wait_turn(), timeout=5)
+
+    published = _one_result_each(loop.bus.log(sid))
+    stored = await _stored_results(store, sid)
+    assert published["a"].output == stored["a"].content[0].text == "probe:a"
+    assert published["b"].output == stored["b"].content[0].text
+
+
+async def test_engine_close_answers_every_call_of_the_reply(tmp_path) -> None:
+    """Close lands while a run is in flight and a write waits behind it. The
+    finished call keeps its result, the running one and the write end as
+    cancelled, all published before the bus closes and all kept in history."""
+    timeline = Timeline()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("p1", "Probe", {"id": "p1"}), ("p2", "Probe", {"id": "p2"}),
+               ("w", "Touch", {"id": "w"})),
+        _text("never reached"),
+    ])
+    loop = _loop(provider, _registry(timeline, {"p1": 0.05, "p2": 30}), store=store, sid=sid)
+    await loop.submit(UserTurn(content="go"))
+    await asyncio.wait_for(timeline.started_event("p2").wait(), timeout=5)
+    while ("end", "p1") not in timeline.events:
+        await asyncio.sleep(0.01)
+    await asyncio.wait_for(loop.aclose(), timeout=10)
+
+    events = await store.events_since(sid, 0)
+    published = _one_result_each(events)
+    assert [e.tool_use_id for e in events if isinstance(e, ToolResult)] == ["p1", "p2", "w"]
+    assert published["p1"].output == "probe:p1" and not published["p1"].is_error
+    for call in ("p2", "w"):
+        assert published[call].is_error and "engine closed" in published[call].output
+    assert ("start", "w") not in timeline.events
+    stored = await _stored_results(store, sid)
+    assert list(stored) == ["p1", "p2", "w"]
+    for call in stored:
+        assert stored[call].content[0].text == published[call].output
+
+
+async def test_opposing_steers_settle_in_call_order(tmp_path) -> None:
+    """b finishes first; the user sends a steer, then corrects it, while a is
+    still running. Both ride a's result (the first in call order), in the
+    order sent; the receipt follows a's result; the latest user intent the
+    file guard holds, live and after a resume, is the correction."""
+    from fluid.tools.bash_file_guard import resumed_user_text
+
+    timeline = Timeline()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("a", "Probe", {"id": "a"}), ("b", "Probe", {"id": "b"})),
+        _text("done"),
+    ])
+    loop = _loop(provider, _registry(timeline, {"a": 0.6, "b": 0.05}), store=store, sid=sid)
+    await loop.submit(UserTurn(content="go"))
+    while ("end", "b") not in timeline.events:
+        await asyncio.sleep(0.01)
+    await loop.submit(Steer(text="use staging", id="s1"))
+    await asyncio.sleep(0.05)
+    await loop.submit(Steer(text="correction: use local", id="s2"))
+    await asyncio.wait_for(loop.wait_turn(), timeout=10)
+
+    blocks = {b.tool_use_id: b for b in provider.requests[1].messages[-1].content}
+    assert [d.id for d in blocks["a"].delivered_steers] == ["s1", "s2"]
+    assert blocks["b"].delivered_steers == []
+    order = [
+        ("result", e.tool_use_id) if isinstance(e, ToolResult) else ("receipt", None)
+        for e in loop.bus.log(sid) if isinstance(e, (ToolResult, SteerDelivered))
+    ]
+    assert order == [("result", "a"), ("receipt", None), ("result", "b")]
+    assert loop.ctx.extra["bash_file_guard_user_text"] == "correction: use local"
+    assert resumed_user_text(await store.load_path(sid), {}) == "correction: use local"
+
+
+async def test_read_only_bash_commands_run_together_and_spill_apart(tmp_path) -> None:
+    """Two read-only commands, each blocked until the other has started: they
+    only finish if they run at the same time. Each large output lands in its
+    own spill file."""
+    from fluid.tools.builtins import bash
+
+    fifo_a, fifo_b = tmp_path / "a.fifo", tmp_path / "b.fifo"
+    os.mkfifo(fifo_a)
+    os.mkfifo(fifo_b)
+    payload = {fifo_a: "alpha line\n" * 20_000, fifo_b: "bravo line\n" * 20_000}
+
+    def feed() -> None:
+        # b's reader must be open before a is fed: one-at-a-time dispatch
+        # would sit in ``cat a.fifo`` forever.
+        for fifo in (fifo_b, fifo_a):
+            with open(fifo, "w", encoding="utf-8") as fh:
+                fh.write(payload[fifo])
+
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    store = MemoryStore()
+    sid = await _session(store, tmp_path)
+    provider = ScriptedProvider([
+        _calls(("toolu_a", "Bash", {"command": f"cat {fifo_a}"}),
+               ("toolu_b", "Bash", {"command": f"cat {fifo_b}"})),
+        _text("done"),
+    ])
+    loop = _real_loop(provider, _builtins(bash), store, sid, tmp_path)
+    assert all(loop._runs_concurrently(
+        {"tool_use_id": "t", "name": "Bash", "input": {"command": f"cat {f}"}}
+    ) for f in (fifo_a, fifo_b))
+    await loop.submit(UserTurn(content="go"))
+    try:
+        await asyncio.wait_for(loop.wait_turn(), timeout=15)
+    finally:
+        await loop.submit(Interrupt())
+
+    blocks = {b.tool_use_id: b.content[0].text for b in provider.requests[1].messages[-1].content}
+    spilled = {}
+    for call, word in (("toolu_a", "alpha"), ("toolu_b", "bravo")):
+        match = re.search(r"\S*tool-output\S*Bash-[0-9a-f]{12}\.txt", blocks[call])
+        assert match, blocks[call][-400:]
+        spilled[call] = Path(match.group(0).strip("`'\"()"))
+        assert word in blocks[call]
+        assert spilled[call].read_text(encoding="utf-8").count(f"{word} line") == 20_000
+    assert spilled["toolu_a"] != spilled["toolu_b"]

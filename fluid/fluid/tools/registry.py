@@ -21,6 +21,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterator, Mapping, MutableMapping
+from contextlib import AbstractAsyncContextManager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -147,6 +148,9 @@ class ToolCtx:
     deliveries: dict[Any, tuple[str, Any]] = field(default_factory=dict)
     staged_delivery: tuple[str, Any, Any, str] | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    # Set by the engine on a call that runs alongside others of the same model
+    # reply; handlers reach it through :func:`in_call_order`, never directly.
+    call_order: Callable[[], AbstractAsyncContextManager[None]] | None = None
 
 
 class CallExtra(MutableMapping[str, Any]):
@@ -202,6 +206,20 @@ def call_ctx(ctx: ToolCtx, tool_use_id: str | None) -> ToolCtx:
     return replace(ctx, extra=extra)  # type: ignore[arg-type]
 
 
+def in_call_order(ctx: ToolCtx) -> AbstractAsyncContextManager[None]:
+    """Run the body in the order the model made the calls.
+
+    Calls that run together (``ToolSpec.concurrent``) finish their I/O in any
+    order. A handler wraps the step that reads and then updates shared
+    repeat-work state (``read_seen``, ``grep_seen``, a pointer decision through
+    :mod:`fluid.tools.view`) in this, so that step happens in call order: the
+    body waits until every earlier call of the run has passed the same step or
+    finished. On a call that runs alone it does nothing.
+    """
+    section = ctx.call_order
+    return section() if section is not None else nullcontext()
+
+
 @dataclass(frozen=True, kw_only=True)
 class ToolSpec:
     name: str
@@ -247,9 +265,10 @@ class ToolSpec:
     # prompt; anything else waits its turn. Set it only on a handler that keeps
     # no per-call state outside the ctx it is given (concurrent calls each get
     # a shallow copy; see ``call_ctx``), holds no module-level mutable state,
-    # and updates the shared ctx registries (read_seen, grep_seen, deliveries,
-    # extra) in synchronous steps, with no await between a lookup and the
-    # write that depends on it. Default off: an unaudited tool runs in order.
+    # does its blocking I/O off the event loop, and updates the shared ctx
+    # registries (read_seen, grep_seen, deliveries, extra) inside
+    # ``in_call_order`` with no await between a lookup and the write that
+    # depends on it. Default off: an unaudited tool runs in order.
     concurrent: bool = False
 
     def scope_of(self, input: dict[str, Any]) -> frozenset[str] | None:

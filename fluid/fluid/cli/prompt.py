@@ -517,6 +517,9 @@ class PromptProfile:
     # the session model — resolved once at profile build, appended after the
     # shipped guidance blocks.
     extra_guidance: tuple[str, ...] = ()
+    # The native loop may run read-only calls of one reply concurrently
+    # (``max_concurrent_tools`` above 1).
+    concurrent_tools: bool = True
 
 
 def profile_for(
@@ -574,6 +577,7 @@ def profile_for(
         model=model,
         model_guidance=config.model_guidance,
         extra_guidance=extra_guidance,
+        concurrent_tools=config.max_concurrent_tools > 1,
     )
 
 
@@ -705,18 +709,19 @@ def _tools_section(p: PromptProfile) -> str | None:
         # Under code mode one cell carries the calls; there is no reply-level
         # parallelism to ask for. What runs concurrently is the native loop's
         # rule (NativeLoop._dispatch_batch); under the delegated leg the claude
-        # CLI decides, so the bullet makes no claim about it there.
+        # CLI decides, so the bullet makes no claim about it there, nor when
+        # max_concurrent_tools turns concurrency off.
         reads = bool(t & {"Read", "Grep", "Glob", "WebSearch"})
         subject = (
-            "Reads, searches and read-only Bash commands" if reads and "Bash" in t
-            else "Reads and searches" if reads
-            else "Read-only Bash commands" if "Bash" in t
+            "reads, searches and read-only Bash commands" if reads and "Bash" in t
+            else "reads and searches" if reads
+            else "read-only Bash commands" if "Bash" in t
             else ""
         )
         how = (
-            "" if p.delegated or not subject else
-            f" {subject} among them run concurrently; any other call runs "
-            "alone, in order."
+            "" if p.delegated or not p.concurrent_tools or not subject else
+            f" Consecutive {subject} that need no permission prompt run "
+            "concurrently; every other call runs alone, in order."
         )
         bullets.append(
             "- Make independent tool calls in the same reply." + how +

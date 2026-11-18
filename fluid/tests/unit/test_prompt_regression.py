@@ -557,19 +557,28 @@ def test_code_mode_prompt_drops_the_bullets_the_addendum_contradicts() -> None:
 
 
 def test_parallel_calls_bullet_says_what_the_native_loop_does() -> None:
-    """The native loop runs read-only calls of one reply concurrently and
-    every other call alone, in order (NativeLoop._dispatch_batch). The claude
-    CLI decides that for the delegated leg, so its bullet makes no claim."""
-    from fluid.cli.prompt import PromptProfile, compose_base_prompt
+    """The native loop runs consecutive read-only calls of one reply that need
+    no prompt concurrently and every other call alone, in order
+    (NativeLoop._dispatch_batch). The claude CLI decides that for the
+    delegated leg, and ``max_concurrent_tools = 1`` turns it off, so neither
+    bullet makes the claim."""
+    from fluid.cli.prompt import PromptProfile, compose_base_prompt, profile_for
+    from fluid.config.model import HarnessConfig
 
     native = compose_base_prompt(PromptProfile(model="claude"))
     delegated = compose_base_prompt(PromptProfile(model="claude", delegated=True))
-    claim = "read-only Bash commands among them run concurrently"
-    assert claim in native and "any other call runs alone, in order" in native
-    assert claim not in delegated
-    for text in (native, delegated):
+    disabled = compose_base_prompt(profile_for(HarnessConfig(max_concurrent_tools=1)))
+    claim = (
+        "Consecutive reads, searches and read-only Bash commands that need no "
+        "permission prompt run concurrently; every other call runs alone, in order."
+    )
+    assert claim in native
+    for text in (delegated, disabled):
+        assert "concurrently" not in text
+    for text in (native, delegated, disabled):
         assert "Make independent tool calls in the same reply." in text
         assert "so they run together" not in text
+    assert profile_for(HarnessConfig()).concurrent_tools
 
 
 def test_addendum_teaches_the_import_spelling_the_kernel_prefers() -> None:

@@ -25,7 +25,7 @@ from fluid.tools.builtins._util import (
     truncate,
 )
 from fluid.tools import view
-from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec
+from fluid.tools.registry import ToolCtx, ToolOutcome, ToolSpec, in_call_order
 
 MAX_RESULTS = 200
 MAX_LIMIT = 5000
@@ -116,16 +116,18 @@ async def handler(input: dict[str, Any], ctx: ToolCtx) -> ToolOutcome:
     # in the model's request (same files, same order), a pointer stands in for
     # it; any added, removed or re-dated file changes the text and it is
     # delivered in full (fluid.tools.view).
+    # Decided in call order when Globs of one reply run together.
     view_key = ("Glob", input["pattern"], str(root), limit)
     version = result_digest(outcome.text)
-    target = view.answer_from_view(ctx, view_key, version, len(outcome.text))
-    if target is not None:
-        return ToolOutcome(text=view.pointer(
-            f"the listing for {input['pattern']!r} under {root}",
-            "your earlier identical Glob", target,
-        ))
-    view.record_delivery(ctx, view_key, version, outcome.text)
-    return outcome
+    async with in_call_order(ctx):
+        target = view.answer_from_view(ctx, view_key, version, len(outcome.text))
+        if target is not None:
+            return ToolOutcome(text=view.pointer(
+                f"the listing for {input['pattern']!r} under {root}",
+                "your earlier identical Glob", target,
+            ))
+        view.record_delivery(ctx, view_key, version, outcome.text)
+        return outcome
 
 
 def _glob(
