@@ -1519,10 +1519,11 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
          origin_incarnation))
 
 
-def fill_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
-    """Label a version stored without its origin incarnation; a recorded one is never replaced."""
+def raise_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
+    """Label the version held with a later origin incarnation; a missing one is filled, none is lowered."""
     cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s "
-                   "AND origin_incarnation IS NULL", (origin_incarnation, collection, record_id))
+                   "AND (origin_incarnation IS NULL OR origin_incarnation < %s)",
+                   (origin_incarnation, collection, record_id, origin_incarnation))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:

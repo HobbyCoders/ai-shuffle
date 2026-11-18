@@ -3299,23 +3299,23 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if comparison <= 0:
             if conflict:
                 store.add_conflict(cursor, **conflict)
-            if (comparison == 0 and incarnation and bool(item["deleted"]) == bool(existing["deleted"])
-                    and incoming_hash == (existing["content_hash"] or "")):
+            if comparison == 0 and incarnation and _same_version(item, incoming_hash, existing):
                 # The content held, from a copy that names its incarnation: a
-                # missing label is filled, a recorded one never replaced. The
-                # row, its clock, hash and updated_at stay; nothing is announced.
-                store.fill_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
+                # missing label is filled (see the raise below).
+                store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             if not item["deleted"] and _merge_losing_provider_credentials(
                     cursor, coll, item["record_id"], item["record"], existing):
                 touched.append((coll.name, item["record_id"], OP_UPSERT))
                 applied += 1
             continue
-        if (existing is not None and int(item["clock"]) == int(existing["clock"])
-                and item["origin_device_id"] == existing["origin_device_id"]
-                and bool(item["deleted"]) == bool(existing["deleted"])
-                and incoming_hash == (existing["content_hash"] or "")):
-            # The content held under a later label: the page vouches for the
-            # relay, not the origin, so a recorded label stays (#1568).
+        if existing is not None and _same_version(item, incoming_hash, existing):
+            # The content held, under a later label: the label rises, so every
+            # replica ends on the highest one known for it, and a delayed op of
+            # an incarnation in between loses everywhere (#1568). A copy's label
+            # is trusted as far as its values are (the serving member's claim,
+            # not a signed proof) and never lowers one. Only the label moves:
+            # the row, clock, hash and updated_at stay; nothing is announced.
+            store.raise_record_incarnation(cursor, coll.name, item["record_id"], incarnation)
             continue
         if coll.name == "membership" and not item["deleted"] and not validated_membership:
             record_data = _parse_json((item["record"] or {}).get("record"))
@@ -3374,6 +3374,12 @@ def apply_snapshot_items(cursor, coll: policy.Collection, items: Sequence[Mappin
         if not item["deleted"] and refresh_billing:
             touched.append(("provider_billing", item["record_id"], OP_UPSERT))
     return applied, touched
+
+
+def _same_version(item: Mapping[str, Any], incoming_hash: str, held: Mapping[str, Any]) -> bool:
+    """Whether a copy item is the version held: same (clock, origin) and the same content."""
+    return (int(item["clock"]) == int(held["clock"]) and item["origin_device_id"] == held["origin_device_id"]
+            and bool(item["deleted"]) == bool(held["deleted"]) and incoming_hash == (held["content_hash"] or ""))
 
 
 def _records_by_id(cursor, collection: str, record_ids: Sequence[str]) -> Dict[str, dict]:

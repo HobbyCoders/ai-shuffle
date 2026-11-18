@@ -687,24 +687,48 @@ def test_a_legacy_row_exports_no_incarnation(workers):
     assert len(items) == 2 and not any("origin_incarnation" in item for item in items)
 
 
-def test_an_equal_content_copy_fills_a_missing_label_but_never_replaces_one(workers):
-    """Review S17: a page vouches for the relay that served it, not for the
-    origin. The same value, origin and clock claiming another incarnation
-    leaves a recorded label alone; it only fills one that was never kept."""
-    a, b = _network(workers, "a", "b")
+def test_an_equal_content_copy_only_ever_raises_the_label(workers):
+    """A copy's label is trusted as far as its values are: the same value,
+    origin and clock under a later incarnation raises the label held, fills a
+    missing one and never lowers one. Only the label moves; nothing announced."""
+    a, b, c = _network(workers, "a", "b", "c")
     set_owner_pref(b, "theme", "v")
-    converge([a, b])
-    claimed = {**_theme_item(b), "origin_incarnation": 3}
+    _exchange(b, a)
+    item = _theme_item(a)
     before = _theme_record(a)
     assert before["origin_incarnation"] == 1
-    assert _apply_item(a, claimed) == (0, [])
-    assert _theme_record(a) == before
+    assert _apply_item(a, {**item, "origin_incarnation": 3}) == (0, [])
+    raised = {**before, "origin_incarnation": 3}
+    assert _theme_record(a) == raised
+    assert _apply_item(a, {**item, "origin_incarnation": 1}) == (0, [])
+    assert _theme_record(a) == raised
     a.sql("UPDATE sync_records SET origin_incarnation = NULL "
           "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
-    assert _apply_item(a, claimed) == (0, [])
-    # Only the label moved: clock, hash, order and updated_at stay; nothing announced.
-    assert _theme_record(a) == {**before, "origin_incarnation": 3}
+    assert _apply_item(a, {**item, "origin_incarnation": 2}) == (0, [])
+    assert _theme_record(a) == {**before, "origin_incarnation": 2}
     assert owner_pref(a, "theme") == "v"
+    # B's signed incarnation-1 op, after a copy labelled 3: it loses the tie and
+    # is consumed, and saying the same thing it leaves no conflict.
+    _apply_item(c, {**item, "origin_incarnation": 3})
+    _exchange(b, c)
+    assert owner_pref(c, "theme") == "v" and _theme_incarnation(c) == 3
+    assert _lost_themes(c, b.device_id) == []
+    assert _streams(c, b.device_id) == _streams(b, b.device_id)
+
+
+def test_a_copy_of_the_value_held_outranks_an_incarnation_in_between(workers):
+    """Review S18: B signed V in incarnation 1, W in 2 and V again in 3, at one
+    clock. C holds V/1; a replica holding V/3 copies it to C, then B's delayed
+    W/2 arrives. C takes the label 3, so it rejects W/2 exactly as that replica
+    does, and both keep V."""
+    a, b, c = _equal_clock_fork(workers)  # A holds W ("new"/2), C holds V ("lost-1"/1)
+    v3 = {**_theme_item(c), "origin_incarnation": 3}  # what a replica holding V/3 serves
+    assert _apply_item(c, v3) == (0, [])
+    held = _theme_record(c)
+    assert held["origin_incarnation"] == 3
+    _exchange(a, c)  # the delayed W/2
+    assert owner_pref(c, "theme") == "lost-1" and _theme_record(c) == held
+    assert _lost_themes(c, b.device_id) == ["new"]
 
 
 def test_a_repeated_fork_state_copy_records_its_conflict_once(workers):
