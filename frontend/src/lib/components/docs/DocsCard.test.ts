@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, waitFor, within } from '@testing-library/sv
 import { tick } from 'svelte';
 import { page } from '$app/state';
 import { preloadAllDocs } from '$lib/docs/index';
+import { SvelteMap } from 'svelte/reactivity';
 import { FEATURE_PANEL_CONTEXT } from '$lib/components/layout/feature-panel-context';
 import DocsCard from './DocsCard.svelte';
 afterEach(() => { cleanup(); sessionStorage.clear(); });
@@ -42,28 +43,60 @@ describe('Docs shared navigation', () => {
  });
 });
 
-// The router, as SvelteKit's: a shallow goto pushes an entry with its state
-// (persistState keeps it across a reload, so page.state survives a remount);
+// The router, as SvelteKit's: a shallow goto first resolves its route (so the
+// entry lands after the click has returned; `hold` keeps it from landing until
+// released), then pushes the entry and sets page.state. SvelteKit numbers each
+// entry by its position (`historyIndex`, kept across a reload); persistState
+// keeps an entry's state across a reload, any other entry reloads empty.
 // Back/Forward set page.state to the entry's. ViewShell's own pushState is never
 // reached here (no layout, so never stacked): it throws if it were.
-const router = vi.hoisted(() => ({ entries: [{}] as Record<string, unknown>[], index: 0 }));
+type Entry = { state: Record<string, unknown>; persist: boolean };
+const router = vi.hoisted(() => {
+ const r = {
+  entries: [] as Entry[],
+  index: 0,
+  hold: null as null | (() => void)[],
+  mark() { history.replaceState({ 'sveltekit:metadata': { historyIndex: r.index } }, ''); },
+ };
+ return r;
+});
 vi.mock('$app/navigation', async () => {
  const { page } = await import('$app/state');
  return {
   pushState: () => { throw new Error('No ViewShell stop in this component test'); },
   goto: async (_url: string, opts: { shallow?: boolean; persistState?: boolean; state?: Record<string, unknown> }) => {
    if (!opts?.shallow || !opts.persistState) throw new Error('Docs writes persisted shallow entries only');
-   router.entries.splice(router.index + 1, Infinity, opts.state ?? {});
+   if (router.hold) await new Promise<void>(land => router.hold!.push(land));
+   else await Promise.resolve();
+   router.entries.splice(router.index + 1, Infinity, { state: opts.state ?? {}, persist: true });
    router.index++;
+   router.mark();
    page.state = opts.state ?? {};
   }
  };
 });
+/** Start on these entries (persisted unless listed in `volatile`), standing on the last. */
+function startOn(states: Record<string, unknown>[] = [{}], volatile: number[] = []) {
+ router.entries = states.map((state, i) => ({ state, persist: !volatile.includes(i) }));
+ router.index = states.length - 1;
+ router.hold = null;
+ router.mark();
+ page.state = router.entries[router.index].state;
+}
 async function go(delta: number) {
  router.index += delta;
- page.state = router.entries[router.index];
+ router.mark();
+ page.state = router.entries[router.index].state;
  await tick();
 }
+/** A document reload on the current entry: SvelteKit keeps only a persisted entry's state. */
+function reload() {
+ cleanup();
+ const entry = router.entries[router.index];
+ page.state = entry.persist ? entry.state : {};
+}
+/** Lets queued router writes land. */
+const landed = () => new Promise(resolve => setTimeout(resolve, 0));
 
 describe('Docs headings, search marks and reload (#1476, #1478)', () => {
  const width = window.innerWidth;
@@ -71,7 +104,7 @@ describe('Docs headings, search marks and reload (#1476, #1478)', () => {
  beforeEach(async () => {
   await preloadAllDocs();
   sessionStorage.clear();
-  router.entries = [{}]; router.index = 0; page.state = {};
+  startOn();
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
  });
  afterEach(() => {
@@ -143,12 +176,20 @@ describe('Docs browser history in the web UI (#1477)', () => {
  const width = window.innerWidth;
  const START = 'getting-started/_index', FAQ = 'getting-started/faq', CHANGELOG = 'getting-started/changelog';
  const title = (view: { container: HTMLElement }) => view.container.querySelector('.docs-content h1')?.textContent ?? null;
- const articles = () => router.entries.map(e => e.docsArticle ?? null);
+ const REQUIREMENTS = 'getting-started/requirements';
+ const articles = () => router.entries.map(e => e.state.docsArticle ?? null);
  const at = (w: number) => Object.defineProperty(window, 'innerWidth', { value: w, configurable: true });
+ // FEATURE_PANEL_CONTEXT as AppPage gives it: whether Docs is the view on screen, reactive.
+ function panel(active = true) {
+  const on = new SvelteMap([['active', active]]);
+  return { get active() { return on.get('active')!; }, set active(value: boolean) { on.set('active', value); } };
+ }
+ const inPanel = (feature: { active: boolean }, props: Record<string, unknown> = {}) =>
+  render(DocsCard, { props, context: new Map([[FEATURE_PANEL_CONTEXT, feature]]) });
  beforeEach(async () => {
   await preloadAllDocs();
   sessionStorage.clear();
-  router.entries = [{}]; router.index = 0; page.state = {};
+  startOn();
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   vi.spyOn(window.history, 'back').mockImplementation(() => { void go(-1); });
  });
@@ -166,7 +207,9 @@ describe('Docs browser history in the web UI (#1477)', () => {
   expect(articles()).toEqual([null]);
   await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
   await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
-  expect(articles()).toEqual([null, FAQ, CHANGELOG]);
+  await waitFor(() => expect(articles()).toEqual([null, FAQ, CHANGELOG]));
+  // Its own entries landing were no step: the last pick stays on screen.
+  expect(title(view)).toBe('Changelog');
   await go(-1);
   expect(title(view)).toBe('Frequently asked questions');
   await go(-1);
@@ -175,51 +218,115 @@ describe('Docs browser history in the web UI (#1477)', () => {
   expect(title(view)).toBe('Frequently asked questions');
  });
 
+ it('two picks before the router writes either: the second stays on screen, and Back still reaches the first', async () => {
+  at(1440);
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  router.hold = [];
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
+  const queued = router.hold;
+  router.hold = null;
+  queued.shift()!();
+  await landed();
+  // The first entry landed; the pick after it is what shows.
+  expect(articles()).toEqual([null, FAQ]);
+  expect(title(view)).toBe('Changelog');
+  queued.shift()!();
+  await waitFor(() => expect(articles()).toEqual([null, FAQ, CHANGELOG]));
+  expect(title(view)).toBe('Changelog');
+  await go(-1);
+  expect(title(view)).toBe('Frequently asked questions');
+  await go(-1);
+  expect(title(view)).toBe('AI Shuffle documentation');
+ });
+
  it('in a narrow window Back from the first article shows the list, and the pane Back is the browser Back', async () => {
   at(500);
   const view = render(DocsCard, {});
   expect(title(view)).toBeNull();
-  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
-  // A link in the article opens another: a step inside Docs.
-  await view.rerender({ initialItemId: CHANGELOG });
-  await waitFor(() => expect(title(view)).toBe('Changelog'));
-  expect(articles()).toEqual([null, FAQ, CHANGELOG]);
+  await fireEvent.click(view.getByRole('button', { name: 'Start Here' }));
+  // A link in the article opens another: a pick inside Docs, so a step.
+  await fireEvent.click(within(view.container.querySelector('.docs-content') as HTMLElement).getByRole('link', { name: 'Requirements' }));
+  await waitFor(() => expect(title(view)).toBe('Requirements'));
+  await waitFor(() => expect(articles()).toEqual([null, START, REQUIREMENTS]));
   await fireEvent.click(view.getByRole('button', { name: 'Back to Docs' }));
-  await waitFor(() => expect(title(view)).toBe('Frequently asked questions'));
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
   expect(router.index).toBe(1);
   await fireEvent.click(view.getByRole('button', { name: 'Back to Docs' }));
   await waitFor(() => expect(title(view)).toBeNull());
   expect(router.index).toBe(0);
   expect(view.getByRole('button', { name: 'FAQ' })).toBeTruthy();
   await go(1);
-  expect(title(view)).toBe('Frequently asked questions');
+  expect(title(view)).toBe('AI Shuffle documentation');
  });
 
- it('copies the state under it, but never a panel’s Back-stop marker', async () => {
+ it('carries only Settings’ place from the entry under it: no chat marker, no overlay or panel marker', async () => {
   at(1440);
-  const under: Record<string, unknown> = { mobileDrawer: false, viewPanelDetail: 'other-panel' };
-  router.entries = [under]; page.state = under;
+  const settings = { settingsView: 'page', settingsDepth: 1, settingsCategory: 'general' };
+  startOn([{ chatSession: 'chat-b', mobileDrawer: false, ...settings }]);
   const view = render(DocsCard, {});
   await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
   await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
-  expect(router.entries[1]).toEqual({ mobileDrawer: false, docsArticle: FAQ });
+  await waitFor(() => expect(router.entries).toHaveLength(2));
+  expect(router.entries[1].state).toEqual({ docsArticle: FAQ, docsBase: START, ...settings });
+  await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
+  await waitFor(() => expect(router.entries).toHaveLength(3));
+  expect(router.entries[2].state).toEqual({ docsArticle: CHANGELOG, docsBase: START, ...settings });
  });
 
- it('a reload on an article’s entry reopens that article, at any width', async () => {
+ it('while another panel’s Back stop is the entry (its pop pending), a pick shows in place: no entry for that pop to take', async () => {
+  at(1440);
+  // Notes in a narrow window left its detail open: leaving it pops that stop, later.
+  startOn([{}, { viewPanelDetail: 'notes' }]);
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await landed();
+  expect(title(view)).toBe('Frequently asked questions');
+  expect(articles()).toEqual([null, null]);
+  // Notes' pop lands on the entry under its stop: still FAQ, and still no Docs entry.
+  await go(-1);
+  expect(title(view)).toBe('Frequently asked questions');
+  expect(articles()).toEqual([null, null]);
+  // A reload there shows what Docs showed on it.
+  reload();
+  const reloaded = render(DocsCard, {});
+  await waitFor(() => expect(title(reloaded)).toBe('Frequently asked questions'));
+ });
+
+ it('a reload on an article’s entry reopens that article, at any width; Back then shows what the entry under them showed', async () => {
   at(1440);
   const view = render(DocsCard, {});
   await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
   await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
   await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
+  await waitFor(() => expect(articles()).toEqual([null, FAQ, CHANGELOG]));
   await go(-1);
-  cleanup();
+  // A reload empties the entry under Docs' steps (written by no one here): Docs' own entries keep what it showed.
+  router.entries[0].persist = false;
+  reload();
   at(500);
   const reloaded = render(DocsCard, {});
   await waitFor(() => expect(title(reloaded)).toBe('Frequently asked questions'));
   expect(articles()).toEqual([null, FAQ, CHANGELOG]);
-  // …and Back from it still steps inside Docs, to the list (what showed under it is not known after a reload).
   await go(-1);
-  expect(title(reloaded)).toBeNull();
+  expect(title(reloaded)).toBe('AI Shuffle documentation');
+  await go(1); await go(1);
+  expect(title(reloaded)).toBe('Changelog');
+ });
+
+ it('a keyless entry’s article survives a reload on the step above it (Start Here → FAQ → reload → Back)', async () => {
+  at(1440);
+  const view = render(DocsCard, {});
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(articles()).toEqual([null, FAQ]));
+  reload();
+  const reloaded = render(DocsCard, {});
+  await waitFor(() => expect(title(reloaded)).toBe('Frequently asked questions'));
+  await go(-1);
+  expect(title(reloaded)).toBe('AI Shuffle documentation');
  });
 
  it('choosing the article on screen is no step: the wide default, or the entry’s own article', async () => {
@@ -247,29 +354,88 @@ describe('Docs browser history in the web UI (#1477)', () => {
   expect(title(view)).toBeNull();
  });
 
- it('off screen, Docs ignores Back/Forward to its entries', async () => {
+ it('Back while Docs is hidden changes nothing there; shown again, Docs shows the entry it finds', async () => {
   at(1440);
-  const view = render(DocsCard, { props: {}, context: new Map([[FEATURE_PANEL_CONTEXT, { active: false }]]) });
+  const feature = panel();
+  const view = inPanel(feature);
   await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
-  router.entries.push({ docsArticle: FAQ });
-  await go(1);
-  expect(title(view)).toBe('AI Shuffle documentation');
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await fireEvent.click(view.getByRole('button', { name: 'Changelog' }));
+  await waitFor(() => expect(articles()).toEqual([null, FAQ, CHANGELOG]));
+  // Another view (Notes) on screen; Back to FAQ's entry there.
+  feature.active = false;
+  await tick();
   await go(-1);
-  expect(title(view)).toBe('AI Shuffle documentation');
+  expect(title(view)).toBe('Changelog');
+  feature.active = true;
+  await tick();
+  expect(title(view)).toBe('Frequently asked questions');
+  // And Forward again while hidden, then shown: Changelog.
+  feature.active = false;
+  await tick();
+  await go(1);
+  feature.active = true;
+  await tick();
+  expect(title(view)).toBe('Changelog');
  });
 
- it('a link arriving from elsewhere shows its article on the entry it is on; a link inside Docs is a step', async () => {
+ it('a reload while Docs is hidden restores nothing until it is shown, then shows the entry it is on', async () => {
+  at(1440);
+  // Reloaded on FAQ's entry (Docs showed Changelog before, in this tab), with another view on screen.
+  sessionStorage.setItem('docs.open', CHANGELOG);
+  startOn([{}, { docsArticle: FAQ, docsBase: '' }], [0]);
+  const feature = panel(false);
+  const view = inPanel(feature);
+  await tick();
+  expect(title(view)).toBeNull();
+  expect(sessionStorage.getItem('docs.open')).toBe(CHANGELOG);
+  // Back to the entry under it while hidden; then Docs is opened.
+  await go(-1);
+  feature.active = true;
+  await tick();
+  // That entry names nothing: main's wide reload, the article the tab last had open.
+  await waitFor(() => expect(title(view)).toBe('Changelog'));
+  expect(articles()).toEqual([null, FAQ]);
+ });
+
+ it('an article a link from elsewhere showed in place is what a reload on that entry shows', async () => {
+  at(1440);
+  const feature = panel();
+  const view = inPanel(feature);
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
+  await waitFor(() => expect(articles()).toEqual([null, FAQ]));
+  // Wide Settings (no step), then its "How Cloud works" link opens Docs.
+  feature.active = false;
+  await tick();
+  await view.rerender({ initialItemId: 'getting-started/cloud' });
+  feature.active = true;
+  await tick();
+  await waitFor(() => expect(view.container.querySelector('.docs-content h1')?.textContent).not.toBe('Frequently asked questions'));
+  const cloud = title(view);
+  await landed();
+  expect(articles()).toEqual([null, FAQ]);
+  reload();
+  const reloaded = render(DocsCard, {});
+  await waitFor(() => expect(title(reloaded)).toBe(cloud));
+ });
+
+ it('a link from elsewhere is never a step, even with Docs on screen; a link inside an article is', async () => {
   at(1440);
   const view = render(DocsCard, { initialItemId: FAQ });
   await waitFor(() => expect(title(view)).toBe('Frequently asked questions'));
-  expect(articles()).toEqual([null]);
   await view.rerender({ initialItemId: null });
-  await view.rerender({ initialItemId: CHANGELOG });
-  await waitFor(() => expect(title(view)).toBe('Changelog'));
-  expect(articles()).toEqual([null, CHANGELOG]);
+  // Global Spotlight, with Docs on screen.
+  await view.rerender({ initialItemId: START });
+  await waitFor(() => expect(title(view)).toBe('AI Shuffle documentation'));
+  await landed();
+  expect(articles()).toEqual([null]);
+  await fireEvent.click(within(view.container.querySelector('.docs-content') as HTMLElement).getByRole('link', { name: 'Requirements' }));
+  await waitFor(() => expect(articles()).toEqual([null, REQUIREMENTS]));
+  expect(title(view)).toBe('Requirements');
   // Back shows the linked article again: what Docs showed on the entry under the step.
   await go(-1);
-  expect(title(view)).toBe('Frequently asked questions');
+  expect(title(view)).toBe('AI Shuffle documentation');
  });
 
  it('the phone app writes no Docs entries (ViewShell keeps its own detail stop, as on main)', async () => {
@@ -278,9 +444,16 @@ describe('Docs browser history in the web UI (#1477)', () => {
   await fireEvent.click(view.getByRole('button', { name: 'FAQ' }));
   await waitFor(() => expect(title(view)).toBe('Frequently asked questions'));
   expect(articles()).toEqual([null]);
+  // A link inside the article opens it as before, with no Docs entry either.
+  await fireEvent.click(view.getByRole('button', { name: 'Back to Docs' }));
+  await fireEvent.click(view.getByRole('button', { name: 'Start Here' }));
+  await fireEvent.click(within(view.container.querySelector('.docs-content') as HTMLElement).getByRole('link', { name: 'Requirements' }));
+  await waitFor(() => expect(title(view)).toBe('Requirements'));
+  await landed();
+  expect(articles()).toEqual([null]);
   const linked: Record<string, unknown> = { docsArticle: CHANGELOG };
   page.state = linked;
   await tick();
-  expect(title(view)).toBe('Frequently asked questions');
+  expect(title(view)).toBe('Requirements');
  });
 });

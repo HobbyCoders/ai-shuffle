@@ -22,9 +22,11 @@
 		framed?: boolean;
 		/** A search to reveal: the first match is scrolled to and marked. A new `key` repeats it. */
 		find?: { query: string; key: number } | null;
+		/** A link to another article, followed by the page showing this one (Docs: a pick of its own). */
+		onDocLink?: (fullSlug: string) => void;
 	}
 
-	let { content, framed = false, find = null }: Props = $props();
+	let { content, framed = false, find = null, onDocLink }: Props = $props();
 
 	let contentEl = $state<HTMLDivElement | null>(null);
 
@@ -74,7 +76,8 @@
 		if (!match) return false;
 		e.preventDefault();
 		const [, category, slug = '_index', anchor = ''] = match;
-		layout.openFeaturePage('docs', `${category}/${slug}`);
+		if (onDocLink) onDocLink(`${category}/${slug}`);
+		else layout.openFeaturePage('docs', `${category}/${slug}`);
 		await tick();
 		if (anchor) requestAnimationFrame(() => scrollToAnchor(anchor));
 		return true;

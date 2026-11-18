@@ -1,5 +1,5 @@
 <script lang="ts">
- import { getContext, onMount, untrack } from 'svelte';
+ import { getContext, untrack } from 'svelte';
  import { goto } from '$app/navigation';
  import { page } from '$app/state';
  import { FEATURE_PANEL_CONTEXT, type FeaturePanelContext } from '$lib/components/layout/feature-panel-context';
@@ -32,10 +32,11 @@
  // paint and on every reopen of the same document (#1476).
  const headings = $derived(currentDoc ? extractHeadings(currentDoc.content) : []);
  // The tab remembers the open document, so a reload reopens it where list and
- // document show side by side. A phone opens on the list, as before, because
- // opening the stacked detail on load would add ViewShell's Back entry on top
- // of the one the reloaded page already stands on. (In the web UI a reload on
- // an article's own entry reopens it at any width: see below.)
+ // document show side by side. The phone app opens on the list, as before,
+ // because opening the stacked detail on load would add ViewShell's Back entry
+ // on top of the one the reloaded page already stands on. (In the web UI the
+ // restore waits until Docs is on screen, and a reload on an entry Docs showed
+ // an article on reopens it at any width: see below.)
  const OPEN_KEY = 'docs.open';
  function remember(doc: string) {
   try { sessionStorage.setItem(OPEN_KEY, doc); } catch { /* Storage blocked: a reload starts over. */ }
@@ -48,25 +49,49 @@
   try { return known(sessionStorage.getItem(OPEN_KEY) ?? ''); } catch { return null; }
  }
  // Browser history, in the web UI only (#1477). Each article picked inside Docs
- // is an entry of Docs' own: the state under it plus `docsArticle`. Docs writes
- // nothing else, never waits on another writer, and reads only that key, only
- // while it is on screen. The phone app keeps ViewShell's detail entry (main).
+ // (its list, its search, a link in an article) pushes an entry of Docs' own:
+ // `docsArticle`, and `docsBase`, what the entry under Docs' first step showed
+ // ('' for the list). From the entry under it, only Settings' place is carried,
+ // so a Settings kept open behind Docs reads its own place unchanged, as it does
+ // under every other writer. Never a chat marker (Back onto it after a reload
+ // would open that chat) and never an overlay's or panel's Back-stop marker
+ // (its owner pops the entry carrying it). Docs never waits on another writer:
+ // while such a marker is on the entry (its pop pending, or left behind), a pick
+ // shows in place. Docs reads only its own keys and acts on them only while it
+ // is on screen; on coming back it shows what the entry it finds names. The
+ // phone app keeps ViewShell's detail entry (main).
  const ownHistory = $derived(!mobile && !platform.isMobile);
- type DocsState = App.PageState & { docsArticle?: string; viewPanelDetail?: string };
+ type DocsState = App.PageState & { docsArticle?: string; docsBase?: string; viewPanelDetail?: string };
+ const CARRIED = ['settingsView', 'settingsDepth', 'settingsCategory', 'settingsItem', 'settingsStaleBelow'] as const;
+ const STOPS = ['viewPanelDetail', 'mobileDrawer', 'mobileControls', 'mobileControlsPage'] as const;
+ const onStop = (state: Record<string, unknown>) => STOPS.some(key => state[key]);
  const entryArticle = () => (page.state as DocsState | undefined)?.docsArticle;
+ const shownDoc = () => detailOpen && activeSlug ? `${activeCategory}/${activeSlug}` : '';
  const feature = getContext<FeaturePanelContext | undefined>(FEATURE_PANEL_CONTEXT);
  const onScreen = $derived(feature?.active ?? true);
- // What a keyless entry under Docs' first step showed: Back to it shows that again.
- let base: [string, string] | null = null;
- onMount(() => {
-  if (activeSlug || initialItemId || !ownHistory) return;
-  // A reload on an article's own entry reopens that article, at any width.
-  const saved = known(entryArticle() ?? '');
+ // A reload shows what Docs last showed if that was on this very entry (an
+ // article a link opened in place included); otherwise what the entry names.
+ // SvelteKit numbers each entry, and the number survives a reload.
+ const OPEN_ON_KEY = 'docs.openOn';
+ function entryId(): number | null {
+  const id = (history.state as { 'sveltekit:metadata'?: { historyIndex?: unknown } } | null)?.['sveltekit:metadata']?.historyIndex;
+  return typeof id === 'number' ? id : null;
+ }
+ function shownHere(): [string, string] | null {
+  try {
+   const id = entryId();
+   return id !== null && sessionStorage.getItem(OPEN_ON_KEY) === String(id) ? lastOpen() : null;
+  } catch { return null; }
+ }
+ /** The first time Docs is on screen: what this entry showed, or names; else main's reload. */
+ function restore() {
+  if (activeSlug || initialItemId) return;
+  const saved = shownHere() ?? known(entryArticle() ?? '');
   if (saved) return display(saved[0], saved[1]);
   if (window.innerWidth <= 600) return;
   const [category, slug] = lastOpen() ?? [activeCategory, docsByCategory[activeCategory]?.[0]?.slug];
   if (slug) selectDoc(category, slug, '', false);
- });
+ }
  /** An explicit selection: it opens at the top, and in the web UI it is a step when `record`. */
  function selectDoc(category: string, slug: string, query = '', record = true) {
   if (record && ownHistory) step(`${category}/${slug}`);
@@ -83,37 +108,66 @@
   remember(`${category}/${slug}`);
  }
  function step(article: string) {
-  const current = entryArticle();
+  const state = (page.state ?? {}) as DocsState;
+  const current = state.docsArticle;
+  const shown = shownDoc();
   // The article on screen, on an entry naming it or naming none (the default a
   // wide Docs opens on): choosing it again is no step. On an entry naming
   // another article (one a link showed in place), choosing it is a step.
-  if (detailOpen && `${activeCategory}/${activeSlug}` === article && (current ?? article) === article) return;
-  if (current === undefined) base = detailOpen && activeSlug ? [activeCategory, activeSlug] : null;
-  seen = article;
-  // A panel's Back-stop marker is that panel's alone: never copied onto Docs' entry.
-  const { viewPanelDetail: _stop, ...under } = (page.state ?? {}) as DocsState;
+  if (shown === article && (current ?? article) === article) return;
+  // Another owner's Back stop is this entry: its owner pops it, maybe already
+  // has. A push now could be the entry that pop takes, so the pick shows in place.
+  if (onStop(state)) return;
+  writes++;
+  const next: Record<string, unknown> = { docsArticle: article, docsBase: current === undefined ? shown : state.docsBase ?? '' };
+  for (const key of CARRIED) if ((state as Record<string, unknown>)[key] !== undefined) next[key] = (state as Record<string, unknown>)[key];
+  // Landed, refused or cancelled: the article shows on whatever entry is now current.
+  const settle = () => { if (--writes === 0) applied = entryArticle(); };
   // persistState: a reload on this entry still names the article (main's pushState does not persist).
-  goto(location.href, { shallow: true, persistState: true, state: { ...under, docsArticle: article } as App.PageState })
-   .catch(() => { seen = entryArticle(); /* Router not ready: the article shows on the entry it is on. */ });
+  goto(location.href, { shallow: true, persistState: true, state: next as App.PageState }).then(settle, settle);
  }
- // Back/Forward while Docs is on screen: show the article the entry names, or
- // what the entry under Docs' first step showed. Off screen, a change is only noted.
- let seen = untrack(entryArticle);
+ // The entry Docs last showed (its `docsArticle`, undefined for a keyless one),
+ // and what the keyless entry under the Docs entries last seen showed. Back,
+ // Forward or a pick elsewhere while Docs is hidden change nothing on screen:
+ // whatever entry Docs finds when it is shown again, it shows that. While its
+ // own pushes are landing (`writes`), page.state is their echo, not a step.
+ let restored = false;
+ let applied: string | undefined;
+ let base: string | undefined;
+ let writes = 0;
  $effect(() => {
-  const article = entryArticle();
+  const state = (page.state ?? {}) as DocsState;
   const on = onScreen;
   untrack(() => {
-   if (!ownHistory || article === seen) return;
-   seen = article;
-   if (!on) return;
-   const target = known(article ?? '') ?? base;
+   if (!ownHistory) return;
+   if (state.docsArticle !== undefined) base = state.docsBase;
+   if (!on || writes) return;
+   const article = state.docsArticle;
+   if (!restored) { restored = true; applied = article; return restore(); }
+   if (article === applied) return;
+   applied = article;
+   const target = known(article ?? '') ?? known(base ?? '');
    if (target) display(target[0], target[1]);
    else { activeSlug = ''; detailOpen = false; find = null; remember(''); }
   });
  });
+ // What Docs shows, and on which entry, for the reload above. Only while on screen.
+ $effect(() => {
+  void page.state;
+  const doc = shownDoc();
+  if (!ownHistory || !onScreen || !restored) return;
+  untrack(() => {
+   const id = entryId();
+   try {
+    sessionStorage.setItem(OPEN_KEY, doc);
+    if (id === null) sessionStorage.removeItem(OPEN_ON_KEY);
+    else sessionStorage.setItem(OPEN_ON_KEY, String(id));
+   } catch { /* Storage blocked: a reload starts over. */ }
+  });
+ });
  function backToList() {
-  // On an article's entry, Back to Docs is the browser's Back.
-  if (ownHistory && detailOpen && entryArticle() === `${activeCategory}/${activeSlug}`) {
+  // On an article's own entry, Back to Docs is the browser's Back.
+  if (ownHistory && detailOpen && !onStop(page.state ?? {}) && entryArticle() === shownDoc()) {
    history.back();
    return;
   }
@@ -124,18 +178,13 @@
   const target = known(fullSlug);
   if (target) selectDoc(target[0], target[1], query, record);
  }
- // A link to an article: from inside Docs (one article to another) it is a step;
- // arriving from elsewhere it shows the article on the entry already there.
- let wasOnScreen = false;
+ // A deep link from elsewhere (Spotlight, Settings, a chat) shows its article on
+ // the entry already there. A link inside an article is a pick (onDocLink).
  $effect(() => {
-  const item = initialItemId;
-  const on = onScreen;
-  const linkedInDocs = wasOnScreen && on;
-  wasOnScreen = on;
-  if (!item) { consumedItemId = null; return; }
-  if (item !== consumedItemId) {
-   consumedItemId = item;
-   untrack(() => handleSearchResult(item, '', linkedInDocs));
+  if (!initialItemId) { consumedItemId = null; return; }
+  if (initialItemId !== consumedItemId) {
+   consumedItemId = initialItemId;
+   handleSearchResult(initialItemId, '', false);
    layout.clearFeatureItemId();
   }
  });
@@ -170,7 +219,7 @@
         {#if tocOpen}<div id={tocId} class="doc-inline-list"><DocsTableOfContents {headings} showTitle={false} onSelect={() => tocOpen = false} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></div>{/if}
        </div>
       {/if}
-      <DocsContent framed content={currentDoc.content} {find} />
+      <DocsContent framed content={currentDoc.content} {find} onDocLink={(fullSlug) => handleSearchResult(fullSlug)} />
      {:else}<EmptyDetail title="Choose a document" message="Browse the guides or search the docs to get started." />{/if}
     </article>
     <aside class="doc-toc"><DocsTableOfContents {headings} scrollContainer={articleEl?.closest('.view-main-slot') as HTMLElement | null} /></aside>
