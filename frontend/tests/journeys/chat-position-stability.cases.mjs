@@ -903,12 +903,12 @@ async function openFoldChat(ctx) {
 }
 
 /** Per painted frame: blank-viewport runs while streaming, the largest prose-end
- * drop (the fold), and once `track(key)` is called, every downward step of that
- * row on screen (a follower's clamp-and-return bounce). */
+ * drop (the fold), and once `track(key)` is called, that row's geometry for
+ * `foldClamp`. */
 async function watchFold(page) {
 	await page.evaluate(() => {
 		const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null,
-			track: null, lastTop: null, tracked: 0, maxDown: 0, down: [] };
+			track: null, tracked: 0, trace: [] };
 		const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
 		const sample = () => {
 			if (!watch.running) return;
@@ -932,14 +932,11 @@ async function watchFold(page) {
 			}
 			const row = watch.track && log?.querySelector(`.chat-column > [data-transcript-key="${CSS.escape(watch.track)}"]`);
 			if (row) {
-				const top = row.getBoundingClientRect().top - box.top;
 				watch.tracked++;
-				if (watch.lastTop !== null && top - watch.lastTop > watch.maxDown) {
-					watch.maxDown = top - watch.lastTop;
-					watch.down.push({ by: Math.round(top - watch.lastTop), scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight,
-						pending: !!log.querySelector('.pending-messages .userrow'), users: log.querySelectorAll('[data-user-turn-id]').length });
-				}
-				watch.lastTop = top;
+				// [rowTop, scrollTop, scrollHeight, proseEnd on screen, column padding, queued bubbles, user rows]
+				watch.trace.push([row.getBoundingClientRect().top - box.top, log.scrollTop, log.scrollHeight, spacer.getBoundingClientRect().top - box.top,
+					parseFloat(getComputedStyle(log.querySelector('.chat-column')).paddingBottom), log.querySelectorAll('.pending-messages .userrow').length,
+					log.querySelectorAll('[data-user-turn-id]').length]);
 			}
 			watch.frames++;
 			requestAnimationFrame(sample);
@@ -952,10 +949,31 @@ async function watchFold(page) {
 	};
 }
 
+/** A follower at the live edge gives prose that collapsed above it back as
+ * scroll, keeping the edge still. Scroll lost beyond that shrink is a clamp: the
+ * reserve fell (a dequeued bubble's room released before its row landed) and
+ * the browser pulled the follower up into content it already passed. */
+function foldClamp(trace) {
+	let worst = { by: 0, at: -1 };
+	for (let i = 1; i < trace.length; i++) {
+		const [, top0, , edge0] = trace[i - 1], [, top1, , edge1] = trace[i];
+		const shrink = Math.max(0, (top0 + edge0) - (top1 + edge1));
+		const by = (top0 - top1) - shrink;
+		if (by > worst.by) worst = { by, at: i };
+	}
+	// The order under test: the bubble left before its transcript row landed.
+	const left = trace.findLastIndex(f => f[5] > 0), users = left < 0 ? 0 : trace[left][6];
+	const landed = left < 0 ? -1 : trace.findIndex((f, i) => i > left && f[6] > users);
+	const round = rows => rows.map(f => f.map(v => Math.round(v)));
+	return { by: worst.by, gapFrames: left < 0 || landed < 0 ? 0 : landed - left - 1,
+		around: worst.at < 0 ? [] : round(trace.slice(Math.max(0, worst.at - 3), worst.at + 4)),
+		handoff: left < 0 ? [] : round(trace.slice(Math.max(0, left - 2), left + 6)) };
+}
+
 async function checkFold(page, log, watch, label) {
 	const viewport = await page.locator(LOG).evaluate(el => el.clientHeight);
 	log(`${label} ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length,
-		longest: watch.longest, blank: watch.blank, tracked: watch.tracked, maxDown: Math.round(watch.maxDown), down: watch.down.slice(-3) })}`);
+		longest: watch.longest, blank: watch.blank, tracked: watch.tracked, clamp: foldClamp(watch.trace) })}`);
 	expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
 	expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
 	expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
@@ -981,31 +999,39 @@ cases.push({
 });
 
 // Round-1 review order: the fold first, then a fresh queued bubble docks under
-// the follower, then it dequeues before its transcript row is delivered. The
-// floor captured over the bubble must owe its whole room (not only the room from
-// before the fold), or the follower clamps up by the bubble and comes back.
+// the follower, then it leaves the queue. Native delivery retires the bubble in
+// the same commit its row lands (#1052); the fake Claude CLI's queue snapshot
+// (WebSocket) and delivered row (events feed) can arrive apart, so the bubble
+// leaves before its transcript row. The floor captured over the bubble must owe
+// its whole room (not only the room from before the fold), or the follower is
+// clamped up by the bubble and comes back when the row lands. Local phone runs
+// on both paths delivered atomically, so the split order is pinned by
+// MessageArea.follow-floor.test.ts and this case guards the combined flow.
+async function foldThenQueue({ page, variant, mark, log }, label) {
+	const { track, stop } = await watchFold(page);
+	await mark('fold a long tool run above the follower');
+	await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+	await waitChat(page, { streaming: 'true' });
+	const key = await page.waitForFunction(() => [...document.querySelectorAll('.chat-column > [data-transcript-key]')]
+		.findLast(row => row.querySelector('.prose')?.textContent.includes('All sixteen checks ran'))?.dataset.transcriptKey, null, { timeout: 120_000 })
+		.then(handle => handle.jsonValue());
+	await mark('queue a prompt after the fold, while the new prose streams');
+	await typeAndSend(page, `queued after fold ${uniq()} [script:default tps=300]`);
+	await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+	await track(key);
+	await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
+	await waitTurnSettled(page, { hold: 3000, timeout: 120_000 });
+	const watch = await stop();
+	await checkFold(page, log, watch, label);
+	expect(watch.tracked > 20, `the folded reply was tracked through the handoff (${watch.tracked} frames)`);
+	const clamp = foldClamp(watch.trace);
+	expect(clamp.by <= 2, `the follower is never clamped back over the dequeued bubble's room (${clamp.by.toFixed(1)}px beyond collapsed prose)`);
+}
+
 cases.push({
 	name: 'live-run-fold-then-queue-handoff', viewports: ['phone'], throttles: ['slow'],
 	setup: openFoldChat,
-	async act({ page, variant, mark, log }) {
-		const { track, stop } = await watchFold(page);
-		await mark('fold a long tool run above the follower');
-		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
-		await waitChat(page, { streaming: 'true' });
-		const key = await page.waitForFunction(() => [...document.querySelectorAll('.chat-column > [data-transcript-key]')]
-			.findLast(row => row.querySelector('.prose')?.textContent.includes('All sixteen checks ran'))?.dataset.transcriptKey, null, { timeout: 120_000 })
-			.then(handle => handle.jsonValue());
-		await mark('queue a prompt after the fold, while the new prose streams');
-		await typeAndSend(page, `queued after fold ${uniq()} [script:default tps=300]`);
-		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
-		await track(key);
-		await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
-		await waitTurnSettled(page, { hold: 3000, timeout: 120_000 });
-		const watch = await stop();
-		await checkFold(page, log, watch, 'fold then queue handoff');
-		expect(watch.tracked > 20, `the folded reply was tracked through the handoff (${watch.tracked} frames)`);
-		expect(watch.maxDown <= 2, `the follower never clamps back over the dequeued bubble (${Math.round(watch.maxDown)}px down)`);
-	}
+	act: ctx => foldThenQueue(ctx, 'fold then queue handoff')
 });
 
 async function openSwitchTarget(ctx, title) {
