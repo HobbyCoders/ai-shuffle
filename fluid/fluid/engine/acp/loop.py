@@ -1226,15 +1226,19 @@ class AcpLoop:
         # it remembers. The host's saved rule keys on the real tool.
         once_only = titled or self._is_call_proxy(call)
 
-        def allow() -> dict[str, Any]:
-            return chose("allow_once") if once_only else chose("allow_once", "allow_always")
+        def allow(*kinds: str) -> dict[str, Any]:
+            answer = chose(*kinds or (("allow_once",) if once_only else ("allow_once", "allow_always")))
+            if answer is cancelled:
+                # No allow the agent offered may be given: as good as a "no".
+                self._note_refusal(mapper, "the permission request for {} could not be allowed", name)
+            return answer
 
         if self._interrupted.is_set():
             return cancelled
         if self._is_load_proxy(name):
             # Reads schemas of tools this session is served, nothing else:
             # the counterpart of ToolSearch, which no leg asks the owner about.
-            return chose("allow_once", "allow_always")
+            return allow("allow_once", "allow_always")
         denial = await self._policy_denial(name, data)
         if denial:
             logger.info("ACP permission for %s refused by policy: %s", name, denial)
@@ -1277,7 +1281,7 @@ class AcpLoop:
         finally:
             self._pending_permissions.pop(request_id, None)
         if response.decision == "allow_always" and not once_only:
-            return chose("allow_always", "allow_once")
+            return allow("allow_always", "allow_once")
         if response.decision in ("allow", "allow_always"):
             return allow()
         self._note_refusal(mapper, "the permission request for {} was refused", name)

@@ -387,6 +387,15 @@ async def test_a_turn_that_ends_silently_after_a_refusal_is_a_failure(tmp_path: 
         assert isinstance(end, ErrorEvent), end
         assert end.message == ("The agent ended its turn without a reply after the permission request "
                                "for mcp__fluid_bundled__Glob was refused.")
+        # Allowed, but the agent offers only "always", which a title-only
+        # name never gets: no allow reached the agent, so the same failure.
+        await d.loop.submit(UserTurn(content='agyalways Glob {"pattern": "*.txt"}'))
+        ask = await d.until(PermissionRequest)
+        await d.loop.submit(RespondPermission(request_id=ask.request_id, decision="allow"))
+        end = await d.until(TERMINAL)
+        assert isinstance(end, ErrorEvent), end
+        assert end.message == ("The agent ended its turn without a reply after the permission request "
+                               "for mcp__fluid_bundled__Glob could not be allowed.")
         # A refused call the agent then answers about is an ordinary turn.
         await d.loop.submit(UserTurn(content="tool"))
         ask = await d.until(PermissionRequest)
