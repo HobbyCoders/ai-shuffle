@@ -514,6 +514,36 @@ async def test_host_bridge_honours_hook_stop_and_permission_decisions(tmp_path) 
     assert stops == ["halt", "done"]
 
 
+async def test_host_bridge_without_payload_builder_sends_the_bare_payload(tmp_path) -> None:
+    """With no engine payload builder, PreToolUse gets exactly ``{name,
+    input}`` and PostToolUse ``{name, input, output, result, is_error}``:
+    no ``tool_use_id`` key, not even as None."""
+    from fluid.codemode.bridge import HostBridge
+    from fluid.hooks.bus import POST_TOOL_USE, PRE_TOOL_USE, HookBus
+    from fluid.permissions.engine import PermissionEngine
+    from fluid.tools.builtins import register_builtins
+    from fluid.tools.registry import ToolCtx, ToolRegistry
+
+    reg = ToolRegistry()
+    register_builtins(reg)
+    (tmp_path / "hello.txt").write_text("hi")
+    args = {"file_path": str(tmp_path / "hello.txt")}
+    seen: dict[str, dict] = {}
+
+    async def record(event: str, payload: dict) -> None:
+        seen[event] = dict(payload)
+
+    bus = HookBus()
+    bus.on(PRE_TOOL_USE, record)
+    bus.on(POST_TOOL_USE, record)
+    bridge = HostBridge(reg, PermissionEngine("never_ask"), hooks=bus, ctx=ToolCtx(cwd=str(tmp_path)))
+    reply = await bridge.on_host_call("Read", args, tool_use_id="toolu_1")
+    assert not reply.denied
+    assert list(seen[PRE_TOOL_USE]) == ["name", "input"]
+    assert list(seen[POST_TOOL_USE]) == ["name", "input", "output", "result", "is_error"]
+    assert seen[PRE_TOOL_USE] == {"name": "Read", "input": args}
+
+
 # ─── shell-like results carry their raw pieces (#2004) ────────────────────────
 
 # Tab, backslashes, quotes, non-ASCII and a fence-tag lookalike: everything a
