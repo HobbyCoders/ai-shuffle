@@ -27,7 +27,9 @@ def _expired(value, now):
 
 def spend_request(kind, candidate, prompt) -> dict:
     """The request the owner approves, which also identifies its retry (#523)."""
-    price = candidate.price or {}
+    from app.core.generation_resolver import canonical_price
+
+    price = canonical_price(candidate.price or {})
     request = {"kind": kind, "prompt": prompt, "model": candidate.model, "account": candidate.account,
                "worker": candidate.worker, "options": candidate.options,
                "price": str(price.get("total") or price.get("amount") or "?")}
@@ -41,10 +43,19 @@ def spend_request(kind, candidate, prompt) -> dict:
 
 def rate_text(rate) -> str:
     """fal's raw rate, e.g. "$0.30 per second" or "$0.0214 per 1000 tokens"."""
+    from decimal import Decimal, InvalidOperation
+
     unit = str(rate.get("unit") or "").strip() or "unit"
     if re.fullmatch(r"[a-z]+s", unit):
         unit = unit[:-1]
-    return f"${rate.get('amount')} per {unit}"
+    amount = rate.get("amount")
+    try:
+        # One text per amount ("0.30" and "0.300" match an approval), cents kept.
+        value = Decimal(str(amount)).normalize()
+        amount = f"{value.quantize(Decimal('0.01')) if value.as_tuple().exponent > -2 else value:f}"
+    except (InvalidOperation, ValueError, TypeError):
+        pass
+    return f"${amount} per {unit}"
 
 
 def unpriced_question(kind, candidate) -> str:

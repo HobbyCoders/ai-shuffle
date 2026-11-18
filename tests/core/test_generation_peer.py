@@ -107,9 +107,13 @@ async def test_peer_receiver_rechecks_options_price_budget_and_claim(monkeypatch
     output = await peer.handle(body, "origin-worker")
     assert output["result"]["success"]
     execute.assert_awaited_once()
-    with pytest.raises(ValueError, match="price changed"):
-        await peer.handle({**body, "price": {**PRICE, "total": "0"}}, "origin-worker")
+    for changed in ("0", "0.04", "0.06"):
+        with pytest.raises(ValueError, match="price changed"):
+            await peer.handle({**body, "price": {**PRICE, "total": changed}}, "origin-worker")
     execute.assert_awaited_once()
+    # The same money written differently ("0.050") is the same price.
+    output = await peer.handle({**body, "price": {**PRICE, "amount": "0.050", "total": "0.0500"}}, "origin-worker")
+    assert output["result"]["success"] and execute.await_count == 2
 
 
 async def test_reported_overrun_goes_to_founder_not_each_account_worker(network, monkeypatch):

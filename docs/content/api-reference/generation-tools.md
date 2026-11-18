@@ -195,7 +195,10 @@ Owner sessions with the app-config tools enabled can call
 `get` returns remembered picks (optionally filtered by `kind`) without migrating
 legacy settings. Writes require a kind and `confirm: true` after the user's
 acknowledgment; `remember` also requires a `choice` using discovered source/account,
-model, worker and declared options. No caller-supplied preference identity is used.
+model, worker and declared options. Like the card, `remember` first takes a fresh
+quote: a pick without a verified price is not remembered, the current default stays,
+and the result is `success: false` with the price `reason`. No caller-supplied
+preference identity is used.
 Only interactive owner turns can write: unattended runs (including automation,
 background, delegated, hidden and voice sessions) cannot save their own choices,
 even with `confirm: true`. Discovery callers default to read-only.
@@ -399,7 +402,11 @@ can use the largest allowed preset only when every enum option has known
 dimensions. Fractional billing units round up for each output. A catalog-only
 character price has unknown total until text is supplied. Unsupported units
 (including tokens and compute time), unbounded dimensions or ambiguous
-duration/count parameters refuse submission rather than guess. Conditional
+duration/count parameters refuse submission rather than guess. A duration's unit
+counts only when it belongs to the field's own value: its name (`duration_seconds`),
+units on its enum values (`"5s"`), a phrase about it ("duration in seconds",
+"(seconds)") or a unit on one of its declared numbers ("4 to 30s"). Other
+mentions of seconds in its description do not count. Conditional
 pricing formulas are not inferred from arbitrary resolution names.
 
 OpenAI/xAI API-key images run only with the exact reviewed record above, priced

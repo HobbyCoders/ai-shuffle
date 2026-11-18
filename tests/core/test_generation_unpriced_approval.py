@@ -108,6 +108,7 @@ async def test_only_an_unknown_quantity_at_an_applicable_rate_is_approvable(reas
 
 
 @pytest.mark.parametrize("later", [{**UNPRICED, "rate": {"amount": "3.00", "unit": "seconds"}},
+                                   {**UNPRICED, "rate": {"amount": "0.29", "unit": "seconds"}},
                                    {"currency": "USD", "unit": "video", "amount": "5", "total": "5", "status": "estimated"}])
 async def test_a_price_change_while_waiting_for_approval_is_requoted_not_submitted(later):
     backend, asked = Backend(), AsyncMock(return_value=None)
@@ -115,6 +116,14 @@ async def test_a_price_change_while_waiting_for_approval_is_requoted_not_submitt
     output = await Resolver(backend).generate("video", ARGS, chat(asked))
     assert output["status"] == "refused" and output["reason"] == "price_changed" and output["price"] == later
     assert not any(c[0] in ("reserve", "execute") for c in backend.calls)
+
+
+async def test_the_same_rate_written_differently_is_not_a_price_change():
+    # fal answering 0.30 and then "0.300" is one rate: the approved run goes ahead.
+    backend, asked = Backend(), AsyncMock(return_value=None)
+    backend.reprice = {**UNPRICED, "rate": {"amount": "0.300", "unit": "seconds"}}
+    output = await Resolver(backend).generate("video", ARGS, chat(asked))
+    assert output["status"] == "completed" and ("execute", "vendor/model") in backend.calls
 
 
 def test_permission_prompt_states_the_rate_and_no_bound():

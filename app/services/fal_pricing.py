@@ -22,6 +22,11 @@ PRICING_URL = "https://api.fal.ai/v1/models/pricing"
 BATCH = 50
 FOUND_TTL = 6 * 3600
 MISSING_TTL = 3600
+# A 429 is retried after each of these pauses (4 attempts in all).
+RETRY_DELAYS = (0.5, 1.0, 2.0)
+# The most one fresh (admission or save-time) read may take: every retry
+# pause plus four replies. Past it the read fails; it never uses the cache.
+FRESH_READ_SECONDS = 20
 
 REASONS = {
     "no_pricing_row": "fal lists no price for this model.",
@@ -127,32 +132,44 @@ class FalRates:
                 wanted.append(endpoint)
         if not wanted:
             return found
+        if fresh:
+            # One endpoint, bounded, and not queued behind a catalog page's
+            # batches on the lock.
+            try:
+                async with asyncio.timeout(FRESH_READ_SECONDS):
+                    return await self._fetch(wanted, api_key, scope)
+            except TimeoutError:
+                raise PricingRequestFailed(f"fal pricing did not answer within {FRESH_READ_SECONDS} s.") from None
         async with self._lock:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
-                queue = [wanted[i:i + BATCH] for i in range(0, len(wanted), BATCH)]
-                while queue:
-                    chunk = queue.pop(0)
-                    response = await self._get(client, chunk, api_key)
-                    if response.status_code == 404 and len(chunk) > 1:
-                        # fal answers 404 for a whole batch naming one retired
-                        # endpoint; split it so the rest still price.
-                        half = len(chunk) // 2
-                        queue[:0] = [chunk[:half], chunk[half:]]
-                        continue
-                    if response.status_code == 404:
-                        rows = {}
-                    elif response.status_code != 200:
-                        raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")
-                    else:
-                        rows = self._parse(response)
-                    stamp = time.time()
-                    for endpoint in chunk:
-                        row = rows.get(endpoint)
-                        found[endpoint] = row
-                        if row is None or rate_of(row) is not None:
-                            # A listed row fal answered with no usable rate is
-                            # read again next time, not remembered.
-                            self._cache[(scope, endpoint)] = (stamp + (FOUND_TTL if row else MISSING_TTL), row)
+            return {**found, **await self._fetch(wanted, api_key, scope)}
+
+    async def _fetch(self, wanted, api_key, scope) -> dict[str, dict | None]:
+        found: dict[str, dict | None] = {}
+        async with httpx.AsyncClient(timeout=10, follow_redirects=False) as client:
+            queue = [wanted[i:i + BATCH] for i in range(0, len(wanted), BATCH)]
+            while queue:
+                chunk = queue.pop(0)
+                response = await self._get(client, chunk, api_key)
+                if response.status_code == 404 and len(chunk) > 1:
+                    # fal answers 404 for a whole batch naming one retired
+                    # endpoint; split it so the rest still price.
+                    half = len(chunk) // 2
+                    queue[:0] = [chunk[:half], chunk[half:]]
+                    continue
+                if response.status_code == 404:
+                    rows = {}
+                elif response.status_code != 200:
+                    raise PricingRequestFailed(f"fal pricing returned HTTP {response.status_code}.")
+                else:
+                    rows = self._parse(response)
+                stamp = time.time()
+                for endpoint in chunk:
+                    row = rows.get(endpoint)
+                    found[endpoint] = row
+                    if row is None or rate_of(row) is not None:
+                        # A listed row fal answered with no usable rate is
+                        # read again next time, not remembered.
+                        self._cache[(scope, endpoint)] = (stamp + (FOUND_TTL if row else MISSING_TTL), row)
         return found
 
     @staticmethod
@@ -170,17 +187,15 @@ class FalRates:
 
     @staticmethod
     async def _get(client, chunk, api_key):
-        delay = 0.5
-        for attempt in range(4):
+        for delay in (*RETRY_DELAYS, None):
             try:
                 response = await client.get(PRICING_URL, params=[("endpoint_id", e) for e in chunk],
                                             headers={"Authorization": "Key " + (api_key or "")})
             except httpx.HTTPError:
                 raise PricingRequestFailed("fal pricing could not be reached.") from None
-            if response.status_code != 429 or attempt == 3:
+            if response.status_code != 429 or delay is None:
                 return response
             await asyncio.sleep(delay)
-            delay *= 2
         return response
 
 

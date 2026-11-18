@@ -118,6 +118,31 @@ def test_a_duration_naming_no_seconds_unit_stays_unknown(description):
     assert Decimal(price(per_second, {"prompt": {"type": "string"}, "duration_seconds": named})["total"]) == Decimal("0.006")
 
 
+@pytest.mark.parametrize("field,seconds", [
+    # The unit sits on the prose range that bounds "auto" (no enum, no maximum).
+    ({"type": "string", "default": "auto", "description": "Supports 4 to 30s"}, 30),
+    ({"type": "number", "default": 5, "description": "Clip length (seconds)."}, 5),
+    ({"type": "number", "default": 8, "description": "How long the audio should be, in seconds (0.5 to 180)."}, 8),
+])
+def test_a_unit_tied_to_the_field_prices(field, seconds):
+    per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
+    p = price(per_second, {"prompt": {"type": "string"}, "duration": field})
+    assert Decimal(p["total"]) == Decimal("0.001") * seconds
+
+
+@pytest.mark.parametrize("description", [
+    "Clip length. Generation takes 30 seconds.",
+    "Generation completes in seconds.",
+    "Duration. Most clips render in under 10 seconds.",
+])
+def test_a_seconds_word_not_about_the_fields_value_stays_unknown(description):
+    # A "seconds" elsewhere in the text says nothing about this field's unit.
+    per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
+    field = {"type": "number", "default": 5, "maximum": 20, "description": description}
+    p = price(per_second, {"prompt": {"type": "string"}, "duration": field})
+    assert p["status"] == "unknown" and p["reason"] == "needs_option"
+
+
 def test_input_matched_length_depends_on_input():
     per_second = {"unit_price": 0.001, "unit": "seconds", "currency": "USD"}
     edit = {"prompt": {"type": "string"}, "video_url": {"type": "string"},
@@ -229,3 +254,25 @@ async def test_rate_limit_retries_then_failure_is_a_reason_not_a_cache(transport
     with pytest.raises(fal_pricing.PricingRequestFailed):
         await rates.rows(["b"], "key")
     assert ("b" not in {endpoint for _scope, endpoint in rates._cache})
+
+
+async def test_a_fresh_read_fits_the_save_deadline_and_is_bounded_on_its_own(transport, monkeypatch):
+    import asyncio
+
+    from app.api import generation_choices
+    # Remembering waits long enough for every 429 retry pause of a fresh read
+    # (the old two-second limit cancelled it after the second retry).
+    assert generation_choices._SAVE_QUOTE_TIMEOUT_SECONDS > fal_pricing.FRESH_READ_SECONDS > sum(fal_pricing.RETRY_DELAYS)
+    row = {"endpoint_id": "a", "unit_price": 1, "unit": "images", "currency": "USD"}
+    t = transport((429, {}), (429, {}), (429, {}), (200, {"prices": [row]}))
+    rates = fal_pricing.FalRates()
+    # Not queued behind a catalog page holding the batch lock.
+    async with rates._lock:
+        assert (await rates.rows(["a"], "key", fresh=True))["a"] == row and len(t.requests) == 4
+    # A read that outlives its bound fails (never falls back to the cache).
+    monkeypatch.setattr(fal_pricing, "FRESH_READ_SECONDS", 0.05)
+    async def stalled(*a, **kw):
+        await asyncio.Event().wait()
+    monkeypatch.setattr(fal_pricing.FalRates, "_get", staticmethod(stalled))
+    with pytest.raises(fal_pricing.PricingRequestFailed, match="did not answer"):
+        await rates.rows(["a"], "key", fresh=True)

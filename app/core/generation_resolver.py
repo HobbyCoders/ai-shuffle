@@ -307,6 +307,29 @@ def price_total(price: dict) -> Decimal | None:
         return None
 
 
+def money_text(value) -> str:
+    """One text per amount: ``0.28``, ``"0.280"`` and ``"2.80E-1"`` are all ``"0.28"``."""
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return str(value)
+    return f"{amount.normalize():f}" if amount.is_finite() else str(value)
+
+
+def canonical_price(price):
+    """A price with its money fields normalised, for comparing and fingerprinting.
+    Every other field (status, unit, reason, basis) still has to match exactly."""
+    if not isinstance(price, dict):
+        return price
+    return {key: canonical_price(value) if isinstance(value, dict)
+            else money_text(value) if key in ("amount", "total") and type(value) in (str, int, float) else value
+            for key, value in price.items()}
+
+
+def same_price(a, b) -> bool:
+    return canonical_price(a) == canonical_price(b)
+
+
 def matches(candidate: Candidate, choice: dict) -> bool:
     return all(not choice.get(key) or choice[key] == getattr(candidate, key)
                for key in ("source", "account", "worker", "model"))
@@ -377,7 +400,7 @@ class Resolver:
             again = await self.backend.prepare(candidate, candidate.options, prompt)
         except ValueError as exc:
             return result("refused", price=candidate.price, reason="invalid_request", error=str(exc))
-        if again.price == candidate.price:
+        if same_price(again.price, candidate.price):
             return None
         return result("refused", price=again.price, reason="price_changed", kind=kind, choice=candidate.choice(),
                       error="fal's price changed while waiting for approval; nothing was submitted. Ask again for the new price.")
@@ -617,7 +640,7 @@ class Resolver:
                                                       spend_request(kind, candidate, prompt)):
                     return await context.not_the_approved_call()
             fingerprint = hashlib.sha256(json.dumps(
-                [kind, prompt, context.session_id, candidate.choice(), candidate.price],
+                [kind, prompt, context.session_id, candidate.choice(), canonical_price(candidate.price)],
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             expensive = max(total, Decimal(str(candidate.price["amount"]))) > CONFIRM_ABOVE_USD
             if expensive:

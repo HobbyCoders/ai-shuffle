@@ -10,7 +10,7 @@ import asyncio
 from dataclasses import asdict
 from uuid import uuid4
 
-from app.core.generation_resolver import Candidate, RunContext, price_total
+from app.core.generation_resolver import Candidate, RunContext, price_total, same_price
 from app.db.async_database import run_sync
 from app.network import control, engine, runners
 
@@ -176,7 +176,7 @@ async def handle(body, from_device):
     candidate = await backend.prepare(candidate, options, prompt)
     if operation == "prepare":
         return {"version": WIRE_VERSION, "candidate": asdict(candidate)}
-    if price_total(candidate.price) is None or candidate.price != body.get("price"):
+    if price_total(candidate.price) is None or not same_price(candidate.price, body.get("price")):
         raise ValueError("The generation price changed or is unavailable. Request a new quote before submitting.")
     if not await run_sync(claim, body.get("command_id")):
         raise ValueError("This generation command was already submitted; its outcome may be unknown. No retry was made.")

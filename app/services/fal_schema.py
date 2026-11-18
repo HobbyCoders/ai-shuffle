@@ -91,6 +91,23 @@ _INPUT_UNITS = re.compile(r"(?:\d+ )?(?:frames?|input seconds?|processed seconds
 # Short side in pixels for the resolution labels fal video models declare.
 _FOLLOWS_INPUT = re.compile(r"\bmatch(?:es|ing)?\b[^.]{0,30}\b(?:input|source)\b")
 _RESOLUTION_LINES = re.compile(r"(\d{3,4})p")
+# A duration's unit, stated about the field itself ("duration in seconds",
+# "(seconds)", "Seconds of …") or on a number the field declares ("4 to 30s").
+_DURATION_WORDS = r"milliseconds?|ms|seconds?|secs?|minutes?|mins?|hours?"
+_UNIT_PHRASE = re.compile(
+    rf"\b(?:duration|length|long)\b[^.;:]{{0,40}}?\bin\s+(?:whole\s+)?({_DURATION_WORDS})\b"
+    rf"|\(\s*(?:in\s+)?(s|{_DURATION_WORDS})\s*\)|^\s*(?:number\s+of\s+)?({_DURATION_WORDS})\b", re.I)
+_UNIT_NUMBER = re.compile(
+    rf"(?<![\d.])(\d+(?:\.\d+)?)\s*(?:(?:-|–|to|through|and|or)\s*(\d+(?:\.\d+)?)\s*)?(s|{_DURATION_WORDS})\b", re.I)
+
+
+def _unit_of(word: str) -> str:
+    word = word.casefold()
+    if word == "ms" or word.startswith("mil"):
+        return "ms"
+    return "h" if word.startswith("h") else "min" if word.startswith("m") else "s"
+
+
 # The widest aspect ratio any fal video model declares; used when the model
 # chooses ("auto") and declares no list to bound it.
 _WIDEST_RATIO = Decimal(21) / Decimal(9)
@@ -330,6 +347,35 @@ class ModelSchema:
         return units.pop() if len(units) == 1 and values and all(
             re.fullmatch(r"[0-9]+(?:\.[0-9]+)?\s*[a-z]+", str(i)) for i in values) else None
 
+    def _value_units(self, field: "ParamField", name: str, bound) -> set:
+        """Units stated for this field's own value, never just nearby words:
+        (a) the field's name, (b) a unit every enum value carries, (c) a phrase
+        about the field ("duration in seconds", "(seconds)", "Seconds of …"),
+        (d) a unit on a number or range the field itself declares (default,
+        enum member, minimum/maximum, or the prose bound ``bound``)."""
+        units = set()
+        if name in ("duration_seconds", "duration_sec", "seconds"):
+            units.add("s")
+        elif name == "duration_minutes":
+            units.add("min")
+        elif name.endswith("_ms"):
+            units.add("ms")
+        if suffix := self._enum_suffix(field):
+            units.add(_unit_of(suffix))
+        raw = ((self.input_schema or {}).get("properties") or {}).get(field.name) or {}
+        declared = set()
+        for item in [field.default, field.minimum, field.maximum, bound, *(field.enum or []),
+                     *(v.get(k) for v in [raw, *(raw.get("anyOf") or []), *(raw.get("oneOf") or [])]
+                       if isinstance(v, dict) for k in ("minimum", "maximum", "default"))]:
+            found = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*[a-z]*", str(item).strip()) if type(item) in (int, float, str, Decimal) else None
+            if found:
+                declared.add(Decimal(found[1]))
+        for text in (field.title or "", field.description or ""):
+            units.update(_unit_of(word) for groups in _UNIT_PHRASE.findall(text) for word in groups if word)
+            units.update(_unit_of(m[3]) for m in _UNIT_NUMBER.finditer(text)
+                         if {Decimal(n) for n in (m[1], m[2]) if n} & declared)
+        return units
+
     def _seconds(self, options: dict, notes: list) -> Decimal:
         fields = {f.name: f for f in self.fields}
         durations = []
@@ -348,30 +394,15 @@ class ModelSchema:
             match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)\s*(s|sec|seconds?|m|min|minutes?)?", str(value))
             if not match:
                 continue
-            suffix = match[2] or self._enum_suffix(field)
-            if name.endswith("_ms") and not suffix:
-                # Named in milliseconds by the model itself.
-                seconds = Decimal(match[1]) / 1000
-                if seconds.is_finite() and seconds > 0:
-                    if bounded:
-                        notes.append(f"length up to {seconds.normalize():f} s (the model picks it)")
-                    durations.append(seconds)
+            units = self._value_units(field, name, value if bounded else None)
+            if match[2]:
+                units.add(_unit_of(match[2]))
+            # Exactly one unit, tied to this field's value; milliseconds only
+            # where the model names the field so, never hours.
+            scale = {"s": Decimal(1), "min": Decimal(60), "ms": Decimal("0.001")}
+            if len(units) != 1 or (unit := units.pop()) not in scale or (unit == "ms" and not name.endswith("_ms")):
                 continue
-            # The unit must be stated: on the value, in the field's name or in
-            # its own words. A "duration" that names none (or names hours or
-            # milliseconds) is not guessed, so its price stays unknown.
-            words = set(re.findall(r"[a-z]+", re.sub(r"\b(?:frames?|fps)\s+per\s+second\b", " ", declaration)))
-            if suffix:
-                in_minutes = suffix.startswith("m")
-            elif words & {"millisecond", "milliseconds", "ms", "hour", "hours"}:
-                continue
-            elif name == "duration_minutes" or words & {"minute", "minutes"}:
-                in_minutes = True
-            elif name in ("duration_seconds", "duration_sec", "seconds") or words & {"second", "seconds", "sec", "secs"}:
-                in_minutes = False
-            else:
-                continue
-            seconds = Decimal(match[1]) * (60 if in_minutes else 1)
+            seconds = Decimal(match[1]) * scale[unit]
             if not seconds.is_finite() or seconds <= 0:
                 continue
             if bounded:
