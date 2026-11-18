@@ -224,6 +224,16 @@ enrolled). Recovery keys, conflicts and advertised addresses have API routes
   device's would be. Members on an older build still refuse an older
   incarnation once they have seen a newer one and keep the first version on a
   tie, so until they update they can disagree in those cases.
+  The incarnation is recorded when a version is written, or comes with a
+  copy; it is never worked out afterwards. A version stored before the
+  upgrade, or copied from a member on an older build, has none, and an
+  upgraded member that relays it passes it on without one. An exact tie
+  between such a version and the device's version from the other side of a
+  restore keeps whatever each replica holds, as before the upgrade, so two
+  replicas can keep different values until the record next changes. And when
+  the device's version with no incarnation is replaced across a restore, it
+  is not kept as a conflict: nothing says which side of the restore it came
+  from.
   A version it gets back for a chat it runs restores the chat's owner-only
   fields (permission mode and ceiling, account label) too; no other copy can.
   Only the unbroken part of an old stream is sent, decided in the statement
