@@ -1042,8 +1042,20 @@ cases.push({
 // while the reply keeps streaming. Emulated by holding those callbacks. This
 // order did not leave a blank viewport on main d2fe0a710 either: a guard for
 // the transition, not a reproduction of the owner's report.
+//
+// A stopped page also paints nothing, but headless Chromium keeps painting a
+// page that only reports itself hidden, and scores layout shifts in those
+// frames. The held ResizeObserver defers the follower's correction for the
+// reflow until the next DOM change, past the browser's 500ms excuse for the
+// resize, so a frame no closed device shows scored the docked queue scrolling
+// into view (#1824 CI). While paused the page is drawn invisible (layout,
+// scroll and hit-boxes unchanged); resume shows it in the same frame as the
+// held callbacks, as onResume does, and every frame from there is scored.
 function holdFramesWhilePaused() {
 	const r = (window.__render = { paused: false, rafQ: [], ros: new Set(), scrolls: new Set() });
+	const unseen = new CSSStyleSheet();
+	unseen.replaceSync('*, *::before, *::after { visibility: hidden !important; }');
+	const painted = on => { document.adoptedStyleSheets = on ? document.adoptedStyleSheets.filter(s => s !== unseen) : [...document.adoptedStyleSheets, unseen]; };
 	const raf = window.requestAnimationFrame.bind(window), caf = window.cancelAnimationFrame.bind(window);
 	window.requestAnimationFrame = cb => { if (!r.paused) return raf(cb); r.rafQ.push(cb); return -r.rafQ.length; };
 	window.cancelAnimationFrame = id => { if (id < 0) r.rafQ[-id - 1] = null; else caf(id); };
@@ -1064,8 +1076,9 @@ function holdFramesWhilePaused() {
 		Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
 		document.dispatchEvent(new Event('visibilitychange'));
 	};
-	r.stop = () => { visibility(true); r.paused = true; };
+	r.stop = () => { visibility(true); r.paused = true; painted(false); };
 	r.resume = () => {
+		painted(true);
 		visibility(false);
 		r.paused = false;
 		const queued = r.rafQ.splice(0);
