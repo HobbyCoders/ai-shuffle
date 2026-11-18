@@ -673,3 +673,127 @@ def test_a_transcript_copy_carries_the_incarnation_a_legacy_row_still_knows(work
     with a.active(), get_db() as conn:
         items, _, _, _ = transcripts._session_items(conn.cursor(), coll, "chat", 0, 1 << 20)
     assert len(items) == 2 and {item.get("origin_incarnation") for item in items} == {1}
+
+
+def _copy_op(sender, receiver, origin, incarnation, clock, *, as_incarnation=None, seq_offset=0):
+    """Store on ``receiver`` the op ``sender`` holds, as an older build that kept both sides of a fork did."""
+    rows = sender.sql("SELECT * FROM sync_ops WHERE origin_device_id = ? AND incarnation = ? AND clock = ? "
+                      "AND collection = 'user_preferences' AND record_id LIKE ?",
+                      (origin, incarnation, clock, "%theme"))
+    assert len(rows) == 1
+    row = {k: v for k, v in rows[0].items() if k != "ingest_id"}
+    if as_incarnation is not None:
+        row["incarnation"] = as_incarnation
+    row["seq"] = int(row["seq"]) + seq_offset
+    receiver.sql(f"INSERT INTO sync_ops ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+                 tuple(row.values()))
+
+
+def _held(worker):
+    with worker.active(), get_db() as conn:
+        cursor = conn.cursor()
+        held = store.get_record(cursor, "user_preferences", _theme_id(worker))
+        return engine.held_incarnations(cursor, "user_preferences", [held]).get(held["record_id"])
+
+
+def _theme_id(worker):
+    return worker.sql("SELECT record_id FROM sync_records WHERE collection = 'user_preferences' "
+                      "AND record_id LIKE ?", ("%theme",))[0]["record_id"]
+
+
+def test_a_legacy_row_takes_the_incarnation_of_the_op_that_wrote_it(workers):
+    """Review S13: an older build applied B's incarnation-1 "lost-1" and then its
+    incarnation-2 "new" at the same clock, keeping both ops. The row holds "new",
+    so it is incarnation 2, not the lowest op's; the copy carries that."""
+    a, _b, c = _equal_clock_fork(workers)
+    clock, origin = _theme(a)
+    _copy_op(c, a, origin, 1, clock)
+    a.sql("UPDATE sync_records SET origin_incarnation = NULL "
+          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    assert owner_pref(a, "theme") == "new" and _held(a) == 2
+    _state_copy(a, c)
+    assert owner_pref(c, "theme") == "new" and _theme_incarnation(c) == 2
+    # The same content under two incarnations is one value: the tie's winner names it.
+    _copy_op(a, a, origin, 2, clock, as_incarnation=3, seq_offset=1000)
+    assert _held(a) == 3
+    # No retained op wrote what is held: not known, never guessed from the others.
+    a.sql("DELETE FROM sync_ops WHERE origin_device_id = ? AND clock = ? AND incarnation <> 1 "
+          "AND collection = 'user_preferences'", (origin, clock))
+    assert _held(a) is None
+    # A tombstone is named only by a retained deletion at its version.
+    a.sql("UPDATE sync_records SET deleted = TRUE, content_hash = '' "
+          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    assert _held(a) is None
+
+
+def test_a_copy_of_the_tombstone_held_takes_the_later_incarnation(workers):
+    """Review S15: C holds B's lost incarnation-1 deletion, stored by an older
+    build. B's incarnation-2 deletion at the same clock is the same content but
+    wins the tie, so C relabels it; then B's relayed later incarnation-1 write
+    revives the theme and the incarnation-2 deletion is kept as a conflict."""
+    a, b, c = _network(workers, "a", "b", "c")
+    set_owner_pref(b, "theme", "v0")
+    _converge([a, b, c])
+    backup = b.raw.serialize()
+    set_owner_pref(b, "theme", "lost-0")
+    _unset_owner_pref(b, "theme")
+    deleted_at = _theme(b)
+    _exchange(b, c)
+    set_owner_pref(b, "theme", "lost-up")
+    _exchange(b, a)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)  # hands B only "lost-0"
+    _observe(b, deleted_at[0] - 1)
+    _unset_owner_pref(b, "theme")
+    assert _theme(b) == deleted_at
+    c.sql("UPDATE sync_records SET origin_incarnation = NULL "
+          "WHERE collection = 'user_preferences' AND record_id LIKE ?", ("%theme",))
+    before = c.sql("SELECT * FROM sync_records WHERE collection = 'user_preferences' AND record_id LIKE ?",
+                   ("%theme",))[0]
+    coll = engine.policy.collection("user_preferences")
+    with b.active(), get_db() as conn:
+        cursor = conn.cursor()
+        item = engine.snapshot_item(cursor, coll, store.get_record(cursor, coll.name, _theme_id(b)))
+    assert item["deleted"] and item["origin_incarnation"] == 2
+    with c.active(), get_db() as conn:
+        assert engine.apply_snapshot_items(conn.cursor(), coll, [item], ctx=engine.context()) == (0, [])
+    after = c.sql("SELECT * FROM sync_records WHERE collection = 'user_preferences' AND record_id LIKE ?",
+                  ("%theme",))[0]
+    # Only the label moved: no clock, hash, order or timestamp change, nothing announced.
+    assert after["origin_incarnation"] == 2
+    assert {k: v for k, v in after.items() if k != "origin_incarnation"} == \
+        {k: v for k, v in before.items() if k != "origin_incarnation"}
+    _exchange(a, c)
+    assert owner_pref(c, "theme") == "lost-up"
+    with c.active():
+        deletions = [(conflict["losing_device_id"], conflict["losing_clock"]) for conflict in store.list_conflicts()
+                     if conflict["record_id"].endswith("theme") and conflict["losing_record"] == {"_deleted": True}]
+    assert deletions == [(b.device_id, deleted_at[0])]
+
+
+def test_a_refused_replay_keeps_no_conflict_for_the_deletion_it_could_not_undo(workers):
+    """Review S16: B restores and deletes its chat; its own later rename from
+    before the restore comes back. The chat stays deleted (#1308), so the
+    deletion did not lose and no conflict says it did."""
+    a, b = _network(workers, "a", "b")
+    _session(b, "chat", title="t", events=0)
+    converge([a, b])
+    backup = b.raw.serialize()
+    for n in range(5):
+        _rename(b, f"lost-{n}")
+    _exchange(b, a)
+    _restore(b, backup)
+    _detect_restore(a, b, 1)  # proves only B's first op past the backup
+    with b.active():
+        assert database.delete_session("chat")
+        engine.publish_session_deletions()
+    tombstone = b.sql("SELECT deleted, origin_incarnation FROM sync_records "
+                      "WHERE collection = 'sessions' AND record_id = 'chat'")[0]
+    assert tombstone["deleted"] and tombstone["origin_incarnation"] == 2
+    for _ in range(2):
+        _exchange(a, b)
+    with b.active():
+        assert database.get_session("chat") is None
+        # B's renames that lost to the deletion are kept; the deletion is no loser.
+        assert [conflict for conflict in store.list_conflicts() if conflict["record_id"] == "chat"
+                and conflict["losing_record"] == {"_deleted": True}] == []

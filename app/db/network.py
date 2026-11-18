@@ -1519,39 +1519,35 @@ def put_record(cursor, collection: str, record_id: str, *, clock: int, origin_de
          origin_incarnation))
 
 
-def version_incarnation(cursor, collection: str, version: Mapping[str, Any]) -> int:
-    """The origin incarnation of a stored record version (0 when not known).
+def retained_ops(cursor, collection: str, versions: List[Mapping[str, Any]], *,
+                 envelopes: bool = False) -> Dict[str, List[dict]]:
+    """The ops this worker still holds at each version's (origin, clock): record id to ops.
 
-    Versions stored before it was kept (#1568) have none; the op that
-    carried one names it while this worker still holds that op. Two held
-    ops of one (record, origin, clock) are a restore fork stored by an older
-    build, which refused the earlier incarnation's op once it held a later
-    one and kept the version it held on a tie: the version kept is the lowest.
-    """
-    if version.get("origin_incarnation") is not None:
-        return int(version["origin_incarnation"])
-    cursor.execute("SELECT MIN(incarnation) AS incarnation FROM sync_ops WHERE collection = %s AND record_id = %s "
-                   "AND origin_device_id = %s AND clock = %s",
-                   (collection, version["record_id"], version["origin_device_id"], int(version["clock"])))
-    row = cursor.fetchone()
-    return int(row["incarnation"]) if row and row["incarnation"] is not None else 0
-
-
-def version_incarnations(cursor, collection: str, versions: List[Mapping[str, Any]]) -> Dict[str, int]:
-    """``version_incarnation`` of many stored versions in one query: record id to incarnation.
-
-    Only versions whose incarnation a held op still names are in the result.
+    Each op has ``incarnation`` and ``op``, and its ``envelope`` when asked.
+    One query for the batch; ``engine`` decides which op wrote the version (#1568).
     """
     wanted = {str(v["record_id"]): (v["origin_device_id"], int(v["clock"])) for v in versions}
     if not wanted:
         return {}
-    placeholders = ", ".join(["%s"] * len(wanted))
-    cursor.execute(f"SELECT record_id, origin_device_id, clock, MIN(incarnation) AS incarnation FROM sync_ops "
-                   f"WHERE collection = %s AND record_id IN ({placeholders}) "
-                   "GROUP BY record_id, origin_device_id, clock", (collection, *wanted))
-    return {row["record_id"]: int(row["incarnation"]) for row in cursor.fetchall()
-            if row["incarnation"] is not None
-            and wanted.get(row["record_id"]) == (row["origin_device_id"], int(row["clock"]))}
+    clocks = sorted({clock for _origin, clock in wanted.values()})
+    columns = "record_id, origin_device_id, clock, incarnation, op" + (", envelope" if envelopes else "")
+    cursor.execute(f"SELECT {columns} FROM sync_ops WHERE collection = %s "
+                   f"AND record_id IN ({', '.join(['%s'] * len(wanted))}) "
+                   f"AND clock IN ({', '.join(['%s'] * len(clocks))})", (collection, *wanted, *clocks))
+    found: Dict[str, List[dict]] = {}
+    for row in cursor.fetchall():
+        if wanted.get(row["record_id"]) == (row["origin_device_id"], int(row["clock"])):
+            op = {"incarnation": int(row["incarnation"]), "op": row["op"]}
+            if envelopes:
+                op["envelope"] = _load(row["envelope"], {})
+            found.setdefault(row["record_id"], []).append(op)
+    return found
+
+
+def set_record_incarnation(cursor, collection: str, record_id: str, origin_incarnation: int) -> None:
+    """Relabel the version held with the incarnation that signed it; nothing else changes."""
+    cursor.execute("UPDATE sync_records SET origin_incarnation = %s WHERE collection = %s AND record_id = %s",
+                   (origin_incarnation, collection, record_id))
 
 
 def remember_session_deletion(cursor, session_id: str, *, network_id: str) -> None:
