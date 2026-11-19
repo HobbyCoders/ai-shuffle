@@ -38,7 +38,9 @@ const compensate = new Function('container', 'delta', 'anchor', 'previous', 'pre
 	let anchorRounding = previous;
 	${statement('if (!preserveAnchor)', applyRange).getText()}
 	${statement('const roundingError =', applyRange).getText()}
-	${statements('const previousScrollTop =', 'anchorRounding =', applyRange)}
+	${statements('const scrollDelta =', 'const targetTop =', applyRange)}
+	${statements('container.scrollTop = targetTop;', 'const error =', applyRange)}
+	${statement('anchorRounding = anchor?.isConnected', applyRange).getText()}
 	return anchorRounding;
 `) as (container: HTMLElement, delta: number, anchor: HTMLElement | null, previous: Remainder, preserveAnchor: boolean) => Remainder;
 const scroll = new Function('containerRef', 'previous', `
@@ -65,7 +67,7 @@ function viewport(quantize = Math.round, initial = 10_000_000) {
 describe('MessageArea subpixel anchor compensation', () => {
 	it('rejects missing statements and delimiters outside the compensation block', () => {
 		expect(() => statement('const missingCompensation =', applyRange)).toThrow('Expected one MessageArea statement');
-		expect(() => statements('const previousScrollTop =', 'lastKnownScrollTop =', applyRange))
+		expect(() => statements('const scrollDelta =', 'lastKnownScrollTop =', applyRange))
 			.toThrow('Missing or misplaced MessageArea sibling');
 	});
 	it('clears the scroll remainder before scheduling the rotation reading-anchor capture', () => {

@@ -100,7 +100,9 @@ describe('MessageArea reading position', () => {
 		expect(mount).toContain('restoreReadingPosition(storedPosition);');
 		const restore = block('function restoreReadingPosition(position: number) {', '// Restore scroll position only on mount');
 		expect(restore).toContain('shouldAutoScroll = false;');
-		expect(restore).toContain('containerRef.scrollTop = position;');
+		expect(restore).toContain('const container = containerRef;');
+		expect(restore).toContain('container && container === containerRef');
+		expect(restore).toContain('container.scrollTop = position;');
 	});
 
 	it('brings a reader who scrolled up back to the same spot after a switch (#805)', () => {
