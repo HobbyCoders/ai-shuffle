@@ -186,13 +186,16 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always() && inputs.gated_by_caller != true"
-    assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
-    assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
+    required = {"backend-shard", "backend-contracts", "backend-security", "backend-postgres"}
+    assert set(jobs["backend"]["needs"]) == required
+    assert set(jobs) == required | {"backend"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
     assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
-    assert jobs["backend-security"]["if"] == "always()"
-    assert "needs" not in jobs["backend-security"]
+    for name in ("backend-security", "backend-postgres"):
+        assert jobs[name]["if"] == "always()"
+        assert "needs" not in jobs[name]
+        assert all("if" not in step for step in jobs[name]["steps"][:-1])
     for job in ("backend-shard", "backend-contracts"):
         assert "if" not in jobs[job]
         assert "needs" not in jobs[job]
@@ -211,29 +214,32 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert command.lstrip().startswith("python scripts/ci/backend_shard_run.py -- \\\n")
     assert command.count("python -m pytest") == 1
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
-    for job in ("backend-contracts", "backend-security"):
+    for job in ("backend-contracts", "backend-security", "backend-postgres"):
         assert "backend_shard_run.py" not in json.dumps(jobs[job])
 
 
 def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():
     jobs = workflow()["jobs"]
     security = jobs["backend-security"]
-    text = json.dumps(security)
+    postgres = jobs["backend-postgres"]
+    policy_steps = json.dumps(security)
+    postgres_steps = json.dumps(postgres)
     for command in ("tests/test_scan_blocking_db.py", "scripts/scan_blocking_db.py",
                     "tests/core/test_agent_isolation_root.py",
-                    "tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
-                    "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py",
                     "python scripts/pip_audit_retry.py --skip-editable",
                     "python scripts/pip_audit_retry.py -r requirements-voice.lock",
                     "tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"):
-        assert command in text
-    for flag in ("AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):
-        assert any(step.get("env", {}).get(flag) == "1" for step in security["steps"])
-    assert 'chmod -R go-w' in text
+        assert command in policy_steps
+    for command in ("tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
+                    "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py"):
+        assert command in postgres_steps
+    for job, flag in ((security, "AGENT_ISOLATION_ROOT_REQUIRED"), (postgres, "PG_SAFETY_TEST")):
+        assert any(step.get("env", {}).get(flag) == "1" for step in job["steps"])
+        assert 'chmod -R go-w' in json.dumps(job)
     contracts = json.dumps(jobs["backend-contracts"])
     for flag in ("BOOT_SMOKE_REQUIRED", "CONTAINER_RUNTIME_TEST_PG", "CONTAINER_RUNTIME_TEST_PRESSURE", "MOBILE_POSTGRES_TEST", "NETWORK_POSTGRES_TEST"):
         assert flag in contracts
-    for name in ("backend-security", "backend-contracts", "backend-shard"):
+    for name in ("backend-security", "backend-postgres", "backend-contracts", "backend-shard"):
         for step in jobs[name]["steps"]:
             run = step.get("run", "")
             if "python -m pytest" in run:
@@ -243,7 +249,7 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
 
 
 def test_large_fold_ratchets_repeat_everywhere_but_controls_run_once():
-    steps = workflow()["jobs"]["backend-security"]["steps"]
+    steps = workflow()["jobs"]["backend-postgres"]["steps"]
     step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
     assert "if" not in step and "continue-on-error" not in step
     assert step["env"]["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] == "1"

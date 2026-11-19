@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def healthy_gate():
     needs = {name: {"result": "success"} for name in
-             ("backend-shard", "backend-contracts", "backend-security")}
+             ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
     receipts = [{"shard": i, "head": "head", "count": 2, "total": 8,
                  "collection": "collection", "partition": "partition", "workers": 2} for i in range(1, 5)]
     return needs, receipts
@@ -24,7 +24,7 @@ def test_gate_requires_complete_coverage():
     check_gate(needs, receipts, "head")
 
 
-@pytest.mark.parametrize("job", ["backend-shard", "backend-contracts", "backend-security"])
+@pytest.mark.parametrize("job", ["backend-shard", "backend-contracts", "backend-security", "backend-postgres"])
 @pytest.mark.parametrize("result", ["failure", "cancelled", "skipped", "", None])
 def test_fault_injected_gate_blocks_unsuccessful_jobs(job, result):
     needs, receipts = healthy_gate()
@@ -62,6 +62,13 @@ def test_gate_cli_exits_nonzero_on_unsuccessful_shard(tmp_path, result):
                               env={**os.environ, "BACKEND_NEEDS": json.dumps(needs)}, capture_output=True)
     assert response.returncode != 0
     assert b"cancelled" in response.stderr
+
+
+def test_gate_rejects_previous_backend_job_set_without_postgres():
+    needs, receipts = healthy_gate()
+    needs.pop("backend-postgres", None)
+    with pytest.raises(ValueError, match="required backend job"):
+        check_gate(needs, receipts, "head")
 
 
 def test_skip_approval_cannot_bypass_gate():

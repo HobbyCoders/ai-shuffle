@@ -77,7 +77,7 @@ def test_a_test_that_passes_its_rerun_passes_the_shard_as_flaky(shard, tmp_path,
 
 def gate(receipt):
     """backend_gate.check_gate on this receipt plus three clean shards."""
-    needs = {name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security")}
+    needs = {name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
     others = [{**receipt, "shard": i, "failed": [], "rerun_passed": []} for i in range(1, 5) if i != receipt["shard"]]
     for other in others:
         other["count"] = (receipt["total"] - receipt["count"]) // 3

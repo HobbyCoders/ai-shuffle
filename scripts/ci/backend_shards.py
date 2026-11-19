@@ -198,9 +198,8 @@ def refresh(run_id, directory, output):
         if durations.keys() & timings.keys():
             raise ValueError("duplicate timing nodes")
         durations.update(timings)
-    from scripts.ci.backend_gate import check_gate
-    needs = {name: {"result": "success"} for name in
-             ("backend-shard", "backend-contracts", "backend-security")}
+    from scripts.ci.backend_gate import REQUIRED_JOBS, check_gate
+    needs = {name: {"result": "success"} for name in REQUIRED_JOBS}
     check_gate(needs, receipts, run["headSha"])
     if (len(durations) != sum(r["count"] for r in receipts)
             or digest(sorted(durations)) != receipts[0]["collection"]):

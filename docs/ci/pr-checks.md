@@ -556,7 +556,8 @@ probes materialize lazy protected keys through application helpers before
 checking access denial. These repairs cover #389, #390 and #391; those jobs are
 required to pass, not temporary exceptions. Network migration and mobile contracts
 run in the parallel backend-contracts job for backend/shared changes. Pool safety
-and both Python dependency audits remain unconditional in backend-security.
+remains unconditional in `backend-postgres`; both Python dependency audits remain
+unconditional in `backend-security`.
 
 ### Unconditional backend shards and contracts
 
@@ -593,12 +594,14 @@ nothing else was reported. A skip, xfail, xpass, error or deselection in any pha
 of the rerun is not a pass. The gate refuses a receipt whose failed tests have no recorded passing
 rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
-`backend-security` and `backend-contracts` keep a single attempt.
+`backend-security`, `backend-postgres`, and `backend-contracts` keep a single attempt.
 
-`backend-security` always runs the blocking-DB guard,
-required root/real-account isolation, real PostgreSQL pool/transaction cases,
-Python public and voice-lock audits, pinned workflow syntax/action lint, and the
-full workflow/publication/security/docs policy regression suite. Required flags,
+`backend-security` always runs the blocking-DB guard, required root/real-account
+isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
+and the full workflow/publication/security/docs policy regression suite.
+`backend-postgres` runs alongside it with the real PostgreSQL pool/transaction
+checks and the large-fold contention tests on both databases. Both jobs must
+pass for the backend verdict. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
 Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI
