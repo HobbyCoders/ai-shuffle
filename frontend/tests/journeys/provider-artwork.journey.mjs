@@ -23,7 +23,7 @@ runJourney({
 	allow: DEV_INSTANCE_NOISE,
 	recorder: { selectors: ['providers=button[data-settings-item^="provider:"]', 'logo=.st-identity [data-provider-logo]'] },
 	cases: [{
-		name: 'built-in marks in the list and Antigravity detail',
+		name: 'built-in-marks-list-and-antigravity-detail',
 		async setup({ page, status }) {
 			await gotoApp(page, status);
 			await showSidebar(page);
