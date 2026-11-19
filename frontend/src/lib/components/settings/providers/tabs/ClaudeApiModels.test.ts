@@ -34,9 +34,16 @@ it('clears the previous catalog if refreshing the same key is rejected', async (
 	expect(screen.queryByText('Claude Test')).toBeNull();
 });
 
-it('distinguishes an empty upstream list from loading', async () => {
-	get.mockResolvedValueOnce({ models: [] });
+it('distinguishes an empty upstream list from loading and permits refresh after the response', async () => {
+	let respond!: (result: { models: [] }) => void;
+	get.mockReturnValueOnce(new Promise((resolve) => { respond = resolve; }));
 	render(ClaudeApiModels, { props: { accountId: 'selected' } });
+	const refresh = screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh models' });
+	expect(screen.getByRole('status').textContent).toBe('Loading Anthropic models…');
+	expect(screen.queryByText('Anthropic did not list any models for this key.')).toBeNull();
+	expect(refresh.disabled).toBe(true);
+	respond({ models: [] });
 	expect(await screen.findByText('Anthropic did not list any models for this key.')).toBeTruthy();
 	await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
+	expect(refresh.disabled).toBe(false);
 });

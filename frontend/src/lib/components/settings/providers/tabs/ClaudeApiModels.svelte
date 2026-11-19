@@ -2,6 +2,7 @@
 	import { RefreshCw } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import RowGroup from '../../rows/RowGroup.svelte';
+	import AvailableModelList from './AvailableModelList.svelte';
 
 	type ApiModel = { id: string; label: string };
 	let { accountId }: { accountId: string } = $props();
@@ -46,28 +47,6 @@
 	{#if loading}<p class="pv-msg" role="status">Loading Anthropic models…</p>{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	{#if models}
-		<div class="st-card pv-card">
-			<div class="pv-mlist">
-				{#each models as model (model.id)}
-					<div class="pv-mrow static api-model-row">
-						<span class="id">{model.id}</span>
-						<span class="lbl">{model.label}</span>
-					</div>
-				{:else}
-					<p class="pv-empty">Anthropic did not list any models for this key.</p>
-				{/each}
-			</div>
-		</div>
+		<AvailableModelList {models} emptyMessage="Anthropic did not list any models for this key." />
 	{/if}
 </RowGroup>
-
-<style>
-	:global(.settings-shell) .api-model-row {
-		grid-template-columns: repeat(2, minmax(0, 1fr));
-	}
-	:global(.settings-shell) .api-model-row > span {
-		max-width: none;
-		white-space: normal;
-		overflow-wrap: anywhere;
-	}
-</style>
