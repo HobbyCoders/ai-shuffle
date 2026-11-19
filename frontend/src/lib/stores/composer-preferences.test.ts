@@ -454,6 +454,20 @@ it('migrates the legacy fast flag only for the last selected model', async () =>
  expect(mocks.save).not.toHaveBeenCalled();
 });
 
+it('forgets a known Ultrafast refinement when explicitly resetting or picking Fast on a Fast-only route', async () => {
+ const {composerPreferences:p} = await import('./composer-preferences');
+ const model = 'gpt-6.1-sol';
+ for (const on of [null, true]) {
+  p.rememberSpeed(model, 'ultrafast');
+  mocks.save.mockClear();
+  p.rememberFast(model, on);
+  expect(mocks.save.mock.calls).toEqual([
+   ['composer.modelFast.gpt-6.1-sol', on], ['composer.modelSpeed.gpt-6.1-sol', null]
+  ]);
+  expect(p.speedForModel(model)).toBe(on ? 'fast' : null);
+ }
+});
+
 it('remembers an Ultrafast pick per model as a refinement of its Fast record', async () => {
  const {composerPreferences:p} = await import('./composer-preferences');
  expect(p.speedForModel('gpt-6.1-sol')).toBeNull();

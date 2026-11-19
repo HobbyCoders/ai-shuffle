@@ -20,11 +20,13 @@ import {
 	decodeProviderModel,
 	getProviders,
 	isFastModeCapable,
-	isRegistryHydrated
+	isRegistryHydrated,
+	isUltrafastCapable
 } from '$lib/constants/models.svelte';
 import { EFFORT_OPTIONS, reconcileModelEffort, resolveModelEffort } from '$lib/constants/model-effort';
 import { formatContextTokens, getModelContextControl, standardCapPresets, type ModelContextControl } from '$lib/constants/model-context';
 import { composerPreferences, effortModelKey } from '$lib/stores/composer-preferences';
+import { SPEED_NAMES } from '$lib/components/chat/speed-tier';
 import { providerGlyphKind, type ProviderGlyphKind } from '../ProviderGlyph.svelte';
 import type { ModelProvider } from '$lib/api/model-providers';
 import { supportsLocalTuning } from '../providers/local-tuning';
@@ -50,6 +52,7 @@ export interface TuningRoute {
 	modelId: string;
 	effort: EffortCapability;
 	fast: boolean;
+	ultrafast: boolean;
 	context: ModelContextControl | null;
 	/** False when the worker says this route cannot run now. */
 	usable: boolean;
@@ -85,6 +88,7 @@ export function collectTuningModels(): TuningModel[] {
 			modelId: composite?.modelId ?? option.value,
 			effort: resolveModelEffort(option.value),
 			fast: isFastModeCapable(option.value),
+			ultrafast: isUltrafastCapable(option.value),
 			context: getModelContextControl(option.value),
 			usable: row ? row.usable !== false : true
 		};
@@ -224,7 +228,11 @@ export function tuningSummary(model: TuningModel, rows: readonly ModelProvider[]
 	const effort = effortState(model);
 	if (effort.kind === 'adjustable') parts.push(`Effort ${effortText(effort, selectedEffort(model))}`);
 	else if (effort.kind === 'unknown') parts.push('Effort not known yet');
-	if (fastRoutes(model).length && composerPreferences.fastForModel(model.routes[0].value) === true) parts.push('Fast');
+	const speed = composerPreferences.speedForModel(model.routes[0].value);
+	if (speed && fastRoutes(model).length) {
+		const tier = speed === 'ultrafast' && !model.routes.some((r) => r.fast && r.ultrafast) ? 'fast' : speed;
+		parts.push(SPEED_NAMES[tier]);
+	}
 	const cap = composerPreferences.contextCapForModel(model.routes[0].value);
 	if (cap != null && contextControl(model)) parts.push(formatContextTokens(cap));
 	if (localRows(model, rows).some(({ row, modelId }) => row.models.find((m) => m.id === modelId)?.local_settings)) {

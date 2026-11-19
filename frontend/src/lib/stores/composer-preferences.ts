@@ -440,11 +440,9 @@ export const composerPreferences = {
  fastForModel(model: string | null): boolean | null {
   return modelFast[effortModelKey(model)] ?? null;
  },
+ /** An explicit Fast-only pick also replaces any remembered Ultrafast tier. */
  rememberFast(model: string | null, on: boolean | null) {
-  const key = effortModelKey(model);
-  registerFast(key);
-  applyFast(key, on);
-  preferenceSync.save(fastPreferenceKey(key), on);
+  composerPreferences.rememberSpeed(model, on === null ? null : on ? 'fast' : 'standard');
  },
  /** The owner's last speed pick for this model (Fast's record refined by
   *  Ultrafast's); null when Fast was never picked. */
@@ -456,9 +454,12 @@ export const composerPreferences = {
  },
  /** Remember a speed pick: Fast's on/off record, plus the Ultrafast record
   *  (written only when it changes, so plain Fast use adds no records). */
- rememberSpeed(model: string | null, speed: ComposerSpeed) {
-  composerPreferences.rememberFast(model, speed !== 'standard');
+ rememberSpeed(model: string | null, speed: ComposerSpeed | null) {
   const key = effortModelKey(model);
+  const fast = speed === null ? null : speed !== 'standard';
+  registerFast(key);
+  applyFast(key, fast);
+  preferenceSync.save(fastPreferenceKey(key), fast);
   const ultrafast = speed === 'ultrafast';
   if (!!modelUltrafast[key] === ultrafast) return;
   registerSpeed(key);
