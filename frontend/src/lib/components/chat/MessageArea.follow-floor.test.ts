@@ -47,7 +47,7 @@ function probe() {
 	slot.innerHTML = '<div class="tail-controls"></div>';
 	const tail = slot.firstElementChild as HTMLElement;
 	const env = {
-		session: session('long'), scrollTop: 5000, proseEnd: 200,
+		session: session('long'), scrollTop: 5000, proseEnd: 200, taskExtent: 0,
 		follows: true, pendingHeight: 0, gap: 18, calls: [] as string[], ticks: [] as (() => void)[],
 		frames: [] as (() => void)[], restingRows: false,
 		landedFromQueue, visibleTurnError
@@ -63,7 +63,13 @@ function probe() {
 		const clearJumpRevealTimer = () => {};
 		// One painted layout: the live scrollTop, and the prose end (scroll coordinates) under it.
 		const containerRef = { clientHeight: 600, get scrollTop() { return env.scrollTop; }, getBoundingClientRect: () => ({ top: 0 }) };
-		const tailSpacerRef = { getBoundingClientRect: () => ({ top: env.proseEnd - env.scrollTop }) };
+		const tailSpacerRef = {
+			get previousElementSibling() { return env.taskExtent ? {
+				hasAttribute: name => name === 'data-transcript-task-row',
+				getBoundingClientRect: () => ({ top: env.proseEnd - env.scrollTop })
+			} : null; },
+			getBoundingClientRect: () => ({ top: env.proseEnd + env.taskExtent - env.scrollTop })
+		};
 		// Painted height: the queue's own height, or the slot holding it open.
 		const painted = () => Math.max(env.pendingHeight, tailQueueSlotPx);
 		// The queue's bubbles dock at the slot's bottom; an empty queue docks none.
@@ -427,6 +433,18 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		// A reader who is not following is still owed their own viewport end.
 		p.env.follows = false; p.env.proseEnd = 4500; p.run();
 		expect(p.reserve()).toBe(4100 + 600 - 4500);
+	});
+
+	it('holds the departing running-task row, but not prose folding above it, on Stop', () => {
+		const p = probe();
+		p.env.proseEnd = 5469;
+		p.env.taskExtent = 91;
+		captureLongFloor(p);
+		expect(p.reserve()).toBe(40);
+		p.env.taskExtent = 0;
+		expect(p.reserve()).toBe(131);
+		p.env.proseEnd -= 900;
+		expect(p.reserve()).toBe(131);
 	});
 
 	it('owes a queue bubble that docks after a fold its whole room through dequeue', () => {

@@ -1513,9 +1513,11 @@
 	function readingFloorReserve(): number {
 		if (!containerRef || !tailSpacerRef || windowShifting) return 0;
 		if (!shouldAutoScroll && !containerRef.clientHeight) return Math.max(tailReservePx, latestTurnTailPx);
-		const proseEnd = proseEndNow();
-		if (shouldAutoScroll) return Math.max(0, followedViewportEnd - Math.max(proseEnd, followedProseEnd));
-		return Math.max(0, containerRef.scrollTop + containerRef.clientHeight - proseEnd);
+		const { proseEnd, reserveStart } = floorGeometry();
+		const owedEnd = shouldAutoScroll
+			? followedViewportEnd - Math.max(0, followedProseEnd - proseEnd)
+			: containerRef.scrollTop + containerRef.clientHeight;
+		return Math.max(0, owedEnd - reserveStart);
 	}
 
 	/**
@@ -1527,16 +1529,23 @@
 	 */
 	function captureFollowedFloor() {
 		if (!containerRef) return;
-		const proseEnd = proseEndNow();
+		const { proseEnd } = floorGeometry();
 		const carried = followedViewportEnd - Math.max(0, followedProseEnd - proseEnd);
 		followedViewportEnd = Math.max(carried, containerRef.scrollTop + containerRef.clientHeight);
 		followedProseEnd = proseEnd;
 	}
 
-	/** Where the prose ends in scroll coordinates (the tail reserve starts there). */
-	function proseEndNow(): number {
-		if (!containerRef || !tailSpacerRef) return 0;
-		return containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
+	/** The in-flow task row is a control, not prose: when Stop removes it, keep
+	 * its room just like a departing queued bubble. Only shrinkage above that
+	 * row (e.g. a folding tool list) should shorten the followed viewport. */
+	function floorGeometry() {
+		if (!containerRef || !tailSpacerRef) return { proseEnd: 0, reserveStart: 0 };
+		const origin = containerRef.scrollTop - containerRef.getBoundingClientRect().top;
+		const reserveStart = origin + tailSpacerRef.getBoundingClientRect().top;
+		const previous = tailSpacerRef.previousElementSibling;
+		const proseEnd = previous?.hasAttribute('data-transcript-task-row')
+			? origin + previous.getBoundingClientRect().top : reserveStart;
+		return { proseEnd, reserveStart };
 	}
 
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {

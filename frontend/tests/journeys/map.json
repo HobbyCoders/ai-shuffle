@@ -785,6 +785,11 @@
 			]
 		},
 		{
+			"why": "stopping removes the inline task row without moving the line being read",
+			"journeys": ["stop-holds-the-reader"],
+			"globs": ["frontend/src/lib/components/chat/MessageArea.svelte", "frontend/src/lib/components/chat/MessageArea.follow-floor.test.ts", "frontend/src/lib/components/chat/RunningTasksList.svelte"]
+		},
+		{
 			"why": "per-frame transcript/composer stability regression cases",
 			"journeys": ["chat-position-stability", "chat-position-stability-2", "chat-position-stability-3"],
 			"globs": ["frontend/tests/journeys/chat-position-stability*", "scripts/devloop/scenarios/tool-run-fold.json"]
