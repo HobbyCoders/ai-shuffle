@@ -5,6 +5,9 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 await runJourney({
 	name: 'claude-api-models',
+	// The built app’s service worker handles GETs before Playwright can inject the rejected refresh.
+	// Keep interception in this journey only; the successful requests still reach the app.
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	throttles: ['fast'],
 	allow: [...DEV_INSTANCE_NOISE, {
 		kind: 'failed_requests', status: 502, url: /\/models\/claude\/api-key\/[^/]+$/,
