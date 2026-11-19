@@ -598,7 +598,8 @@ rerun. The first run's JUnit file and
 
 `backend-security` always runs the blocking-DB guard, required root/real-account
 isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
-and the full workflow/publication/security/docs policy regression suite.
+and the full workflow/publication/security/docs policy regression suite. The policy
+suite runs here once, not again in the hermetic shards.
 `backend-postgres` runs alongside it with the real PostgreSQL pool/transaction
 checks and the large-fold contention tests on both databases. Both jobs must
 pass for the backend verdict. Required flags,

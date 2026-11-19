@@ -64,7 +64,8 @@ FLAKY: list[str] = []
 # that skips or xfails a failed test still exits 0, and lists nothing here.
 RERUN_PASSED: list[str] = []
 
-# The CI Backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
+# The local backend fast subset; scripts/ci/backend_test_map.py keeps the same list.
+# Hosted CI runs tests/scripts separately in its required policy job.
 FAST_SUBSET = [
     "tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract",
     "tests/performance", "tests/mcp", "tests/services", "tests/unit", "tests/scripts",

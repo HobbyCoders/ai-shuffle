@@ -203,7 +203,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
         assert jobs[job]["timeout-minutes"] == "35"
     text = json.dumps(jobs["backend-shard"])
     for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",
-                   "tests/mcp", "tests/services", "tests/unit", "tests/scripts", "tests/test_*.py"):
+                   "tests/mcp", "tests/services", "tests/unit", "tests/test_*.py"):
         assert target in text
     for exclusion in ("--deselect=tests/test_scan_blocking_db.py",
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
@@ -217,6 +217,20 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
     for job in ("backend-contracts", "backend-security", "backend-postgres"):
         assert "backend_shard_run.py" not in json.dumps(jobs[job])
+
+
+def test_policy_suite_runs_once_in_the_required_security_job():
+    jobs = workflow()["jobs"]
+    shard = next(s["run"] for s in jobs["backend-shard"]["steps"] if s.get("name") == "Run fast test subset")
+    security = jobs["backend-security"]
+    policy = next(s for s in security["steps"] if s.get("name") == "Full workflow, publication, security and docs policy regressions")
+    assert "backend-security" in jobs["backend"]["needs"]
+    assert "if" not in policy and "continue-on-error" not in policy
+    for flag, path in (("--ignore", "tests/scripts"), ("--deselect", "tests/test_buyer_docs.py"),
+                       ("--ignore", "tests/core/test_docs_content.py")):
+        assert f"{flag}={path}" in shard.split()
+        assert path not in shard.split()
+        assert path in policy["run"].split()
 
 
 def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():

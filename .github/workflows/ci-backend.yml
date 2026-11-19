@@ -87,12 +87,10 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the job
         # timeout with no diagnosis.
-        # Eight deterministic partitions of the actual full collection, two workers each.
-        # tests/mcp, services, unit, scripts and top-level tests/test_*.py are hermetic too (~45s at -n 4).
-        # The excluded files run in full in a step of this job with the same
-        # or a stronger setup (named in each step's comment), so they are not
-        # run twice. tests/test_scan_blocking_db.py needs --deselect: the glob
-        # passes it by name, and --ignore does not apply to named files. The
+        # Eight deterministic partitions of the hermetic collection, two workers each.
+        # Policy, blocking-DB and serial container tests run in other required jobs.
+        # Use --deselect for excluded top-level files: the glob passes them by
+        # name, and --ignore does not apply to explicit file arguments. The
         # *_postgres.py and test_pg_session_store*.py files stay collected
         # here; they skip without ALLOW_REAL_PG=1 and run in the PostgreSQL
         # safety step.
@@ -104,8 +102,9 @@ jobs:
         run: |
           python scripts/ci/backend_shard_run.py -- \
             python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
-              tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
-              --deselect=tests/test_scan_blocking_db.py \
+              tests/performance tests/mcp tests/services tests/unit tests/test_*.py \
+              --ignore=tests/scripts --ignore=tests/core/test_docs_content.py \
+              --deselect=tests/test_buyer_docs.py --deselect=tests/test_scan_blocking_db.py \
               --ignore=tests/core/test_container_runtime.py \
               --ignore=tests/core/test_container_image_contract.py \
               -o addopts="" -q -p no:cacheprovider --timeout=120 -n 2 \
