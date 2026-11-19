@@ -77,6 +77,9 @@ async function expectMarked(sessions, title) {
 	const row = rowOf(sessions, title);
 	await row.waitFor();
 	const icon = row.locator('.worker');
+	const provider = row.getByRole('img', { name: 'Provider: Fake AI (dev)', exact: true });
+	await provider.waitFor();
+	expect(await provider.evaluate((el) => el.nextElementSibling?.classList.contains('worker')), `"${title}" shows its provider beside its worker`);
 	expect((await icon.count()) === 1, `"${title}" carries one worker icon`);
 	expect((await icon.getAttribute('title')) === `On ${OWNER}`, `"${title}" names its owner on hover`);
 	expect((await icon.getAttribute('aria-label')) === `On ${OWNER}`, `"${title}" names its owner to screen readers`);

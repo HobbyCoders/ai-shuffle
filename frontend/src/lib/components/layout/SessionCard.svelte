@@ -59,6 +59,9 @@
 		Unplug
 	} from 'lucide-svelte';
 	import type { Session } from '$lib/api/client';
+	import { decodeProviderModel, getClaudeDisplay, getProviderDisplay, getProviders, NATIVE_PROVIDER_KEY } from '$lib/constants/models';
+	import ProviderGlyph, { providerGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
+	import { classifyRow } from '$lib/components/settings/providers/providers-model';
 
 	/** Every status mark on a row is drawn at this one size and weight. */
 	const MARK_SIZE = 14;
@@ -180,6 +183,20 @@
 	});
 	const title = $derived(session.title?.trim() || 'Untitled');
 	const device = $derived(deviceLabel(session));
+	const providerBadge = $derived.by(() => {
+		const id = session.provider_id || decodeProviderModel(session.model)?.providerId;
+		if (id === NATIVE_PROVIDER_KEY || (!id && session.provider_id === null)) {
+			return { name: getClaudeDisplay().name, kind: providerGlyphKind(NATIVE_PROVIDER_KEY) };
+		}
+		// Older session rows may omit the binding entirely; that's not native Claude.
+		if (!id) return null;
+		const entry = getProviders().find((provider) => provider.id === id);
+		if (!entry) return { name: 'Unknown provider', kind: providerGlyphKind(undefined) };
+		// Legacy ChatGPT/Grok sign-ins can have provider_type 'custom'.
+		const rowClass = classifyRow({ provider_type: entry.provider_type, auth_mode: entry.auth_mode ?? null });
+		const type = rowClass === 'custom' ? entry.provider_type : rowClass;
+		return { name: getProviderDisplay({ ...entry, provider_type: type }).name, kind: providerGlyphKind(type) };
+	});
 	const branch = $derived(branchLabel(session));
 	const statusWord = $derived(runtimeStatusWord(status, compacting));
 	const attention = $derived(isAttentionStatus(status));
@@ -784,8 +801,15 @@
 						<span class="where" aria-hidden="true">{ageText}</span>
 					{/if}
 				</span>
-				{#if remote}
-					<span class="worker" role="img" aria-label={`On ${device}`} title={`On ${device}`}><Server size={12} strokeWidth={MARK_STROKE} aria-hidden="true" /></span>
+				{#if providerBadge || remote}
+					<span class="row-marks">
+						{#if providerBadge}
+							<span role="img" aria-label={`Provider: ${providerBadge.name}`} title={providerBadge.name}><ProviderGlyph kind={providerBadge.kind} size={12} /></span>
+						{/if}
+						{#if remote}
+							<span class="worker" role="img" aria-label={`On ${device}`} title={`On ${device}`}><Server size={12} strokeWidth={MARK_STROKE} aria-hidden="true" /></span>
+						{/if}
+					</span>
 				{/if}
 			</span>
 
@@ -1119,14 +1143,14 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* Sits under the time; the one mark that says the session is on another
-	   worker, on every such row whatever else it shows.
-	   Server, not Monitor: Monitor means this device (ExecutionModeBar). */
-	.worker {
+	/* Keep the provider and remote worker marks together under the timer. */
+	.row-marks {
 		display: inline-flex;
 		flex: none;
 		align-self: center;
+		gap: 4px;
 	}
+	.row-marks > span { display: inline-flex; }
 
 	/* Several PRs: each count keeps its state's tone; the chip opens the list.
 	   A button that reads as inline text: no box, no font or line-height of its
