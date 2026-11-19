@@ -376,6 +376,16 @@ async def seed_default() -> dict:
     from scripts.devloop.fake_agy import seed_usage
 
     await run_sync(seed_usage)
+    from app.core import claude_accounts, claude_api_models
+
+    # Seed an inactive test key only when the catalog resolves to the fake.
+    # Subscription stays active and the fake key cannot run a paid query.
+    try:
+        claude_api_models._catalog_url(claude_api_models.DEV_KEY)
+    except claude_api_models.CatalogError:
+        pass
+    else:
+        await run_sync(claude_accounts.add_api_key, claude_api_models.DEV_KEY, activate=False)
     return {
         "provider_id": provider_id, "model": model, "agent_id": DEV_AGENT_ID,
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,
