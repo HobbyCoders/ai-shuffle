@@ -16,7 +16,7 @@ import pytest
 
 from fluid.engine.native import NativeLoop, _is_ultrafast_rejection, _reported_speed
 from fluid.events import TurnComplete, UserTurn
-from fluid.events.model import ErrorEvent, FastModeOutcome, ProviderRetry
+from fluid.events.model import ErrorEvent, FastModeOutcome, ProviderRetry, Usage
 from fluid.permissions.engine import PermissionEngine
 from fluid.providers._retry import RetryPolicy
 from fluid.providers.openai_responses.client import OpenAIResponsesClient
@@ -63,10 +63,11 @@ def server():
         srv.close()
 
 
-async def _turn(server, tier: str | None, picks: dict | None = None,
-                **loop_kwargs) -> tuple[list, NativeLoop]:
+async def _turn(server, tier: str | None, picks: dict | None = None, *,
+                observe: bool = False, **loop_kwargs) -> tuple[list, NativeLoop]:
     """One turn starting at ``tier``; ``picks`` maps a call number (1-based)
-    to the tier the host picks just before that call, as a mid-turn pick."""
+    to the tier the host picks just before that call, as a mid-turn pick.
+    ``observe`` turns on the service-tier observation, as the host does."""
     loop = NativeLoop(
         provider=OpenAIResponsesClient(
             api_key="k", base_url=server.url + "/v1/responses",
@@ -74,6 +75,7 @@ async def _turn(server, tier: str | None, picks: dict | None = None,
         store=MemoryStore(), model="gpt-6.1-sol", registry=ToolRegistry(),
         permissions=PermissionEngine("never_ask"), **loop_kwargs,
     )
+    loop.observe_service_tier = observe
     if tier:
         loop.request_extra["service_tier"] = tier
     if picks:
@@ -204,6 +206,34 @@ async def test_the_response_tier_decides_how_an_ultrafast_call_counts(server, re
     assert (outcome.ultrafast_calls, outcome.fast_calls,
             outcome.standard_calls, outcome.unknown_calls) == counts
     assert outcome.disabled_reason is None
+
+
+_OBSERVED = ("service_tier_requested", "service_tier_reported")
+
+
+@pytest.mark.parametrize("asked, reported, observed", [
+    ("ultrafast", "ultrafast", ("ultrafast", "ultrafast")),
+    ("ultrafast", "default", ("ultrafast", "default")),
+    ("ultrafast", None, ("ultrafast", "absent")),
+    # Standard sends no tier; the response's own answer is kept verbatim.
+    (None, "default", ("none", "default")),
+    (None, "Auto", ("none", "auto")),
+    # Anything that is not a short tier token is not kept.
+    (None, "default; user=someone@example.com", ("none", "unrecognized_format")),
+])
+async def test_an_observed_turn_records_each_calls_tiers_on_its_usage(server, asked, reported, observed):
+    server.script(_reply("answered", reported))
+    events, _ = await _turn(server, asked, observe=True)
+    [usage] = [u for u in _of(events, Usage) if u.raw.get("model_call_index") is not None]
+    assert tuple(usage.raw.get(key) for key in _OBSERVED) == observed
+
+
+async def test_an_unobserved_turn_records_no_tiers(server):
+    server.script(_reply("answered", "default"))
+    events, loop = await _turn(server, "ultrafast")
+    assert loop.observe_service_tier is False
+    usages = _of(events, Usage)
+    assert usages and not any(key in u.raw for u in usages for key in _OBSERVED)
 
 
 def test_reported_tier_classifies_the_call():
