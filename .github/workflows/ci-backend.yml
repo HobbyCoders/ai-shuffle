@@ -64,7 +64,15 @@ jobs:
       # stdlib files. Match the image's trusted dependency permissions rather
       # than weakening the root-phase import provenance assertions.
       - name: Secure hosted Python dependency permissions
-        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+        run: |
+          # Blacksmith's tools are image-owned. Keep the original hardening,
+          # but use privilege only for the canonical setup-python directory.
+          prefix=$(readlink -e -- "$(python -c 'import sys; print(sys.base_prefix)')")
+          case "$prefix" in
+            /opt/hostedtoolcache/Python/3.12.*/x64) ;;
+            *) printf 'Unexpected hosted Python toolcache path: %s\n' "$prefix" >&2; exit 1 ;;
+          esac
+          sudo -n chmod -R go-w -- "$prefix"
 
       - name: Record runner capacity
         run: nproc
@@ -157,7 +165,15 @@ jobs:
       # stdlib files. Match the image's trusted dependency permissions rather
       # than weakening the root-phase import provenance assertions.
       - name: Secure hosted Python dependency permissions
-        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+        run: |
+          # Blacksmith's tools are image-owned. Keep the original hardening,
+          # but use privilege only for the canonical setup-python directory.
+          prefix=$(readlink -e -- "$(python -c 'import sys; print(sys.base_prefix)')")
+          case "$prefix" in
+            /opt/hostedtoolcache/Python/3.12.*/x64) ;;
+            *) printf 'Unexpected hosted Python toolcache path: %s\n' "$prefix" >&2; exit 1 ;;
+          esac
+          sudo -n chmod -R go-w -- "$prefix"
 
       - name: Record runner capacity
         run: nproc
@@ -304,7 +320,15 @@ jobs:
       # stdlib files. Match the image's trusted dependency permissions rather
       # than weakening the root-phase import provenance assertions.
       - name: Secure hosted Python dependency permissions
-        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+        run: |
+          # Blacksmith's tools are image-owned. Keep the original hardening,
+          # but use privilege only for the canonical setup-python directory.
+          prefix=$(readlink -e -- "$(python -c 'import sys; print(sys.base_prefix)')")
+          case "$prefix" in
+            /opt/hostedtoolcache/Python/3.12.*/x64) ;;
+            *) printf 'Unexpected hosted Python toolcache path: %s\n' "$prefix" >&2; exit 1 ;;
+          esac
+          sudo -n chmod -R go-w -- "$prefix"
 
       - name: Record runner capacity
         run: nproc
@@ -406,7 +430,15 @@ jobs:
       # stdlib files. Match the image's trusted dependency permissions rather
       # than weakening the root-phase import provenance assertions.
       - name: Secure hosted Python dependency permissions
-        run: chmod -R go-w "$(python -c 'import sys; print(sys.base_prefix)')"
+        run: |
+          # Blacksmith's tools are image-owned. Keep the original hardening,
+          # but use privilege only for the canonical setup-python directory.
+          prefix=$(readlink -e -- "$(python -c 'import sys; print(sys.base_prefix)')")
+          case "$prefix" in
+            /opt/hostedtoolcache/Python/3.12.*/x64) ;;
+            *) printf 'Unexpected hosted Python toolcache path: %s\n' "$prefix" >&2; exit 1 ;;
+          esac
+          sudo -n chmod -R go-w -- "$prefix"
 
       - name: Record runner capacity
         run: nproc
