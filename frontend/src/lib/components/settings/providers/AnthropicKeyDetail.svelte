@@ -13,11 +13,14 @@
 	import ProviderTile from './ProviderTile.svelte';
 	import CredentialControl from './CredentialControl.svelte';
 	import BuiltInModels from './tabs/BuiltInModels.svelte';
+	import ClaudeApiModels from './tabs/ClaudeApiModels.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import type { CredentialView, ProviderView } from './providers-model';
 	import { detailLine, safeKeyHint } from './credential-display';
 	import { changeClaudeMode, startSetup } from './provider-actions';
 
 	let { credential, provider }: { credential: CredentialView; provider: ProviderView } = $props();
+	const access = getSettingsAccess();
 	const account = $derived(credential.account);
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 	const masked = $derived(safeKeyHint(account?.masked_key) || safeKeyHint(providers.current.anthropicKeyMasked) || (account || providers.current.anthropicKeySet ? 'Saved' : 'No key selected'));
@@ -66,7 +69,8 @@
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
-			<BuiltInModels />
+			<!-- A key saved before the accounts list has no id to list by. -->
+			{#if account}<ClaudeApiModels accountId={account.id} active={account.active} readOnly={access.readOnly} />{:else}<BuiltInModels />{/if}
 		{:else}
 			<RowGroup title="Account">
 				{#if account}

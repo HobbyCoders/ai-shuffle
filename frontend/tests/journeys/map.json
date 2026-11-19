@@ -754,6 +754,18 @@
 			]
 		},
 		{
+			"why": "an Anthropic API key's models come from Anthropic's Models API for that key: each saved key's own list, refresh, and checking a version only on the selected key",
+			"journeys": ["claude-api-models"],
+			"globs": [
+				"frontend/tests/journeys/claude-api-models.journey.mjs",
+				"frontend/src/lib/components/settings/providers/tabs/ClaudeApiModels.svelte",
+				"frontend/src/lib/components/settings/providers/AnthropicKeyDetail.svelte",
+				"app/core/claude_api_models.py",
+				"app/api/model_registry.py",
+				"scripts/devloop/fake_wire.py"
+			]
+		},
+		{
 			"why": "Claude Code Fast mode: mid-turn toggle notices, reported turn speed, refusals and reload persistence",
 			"journeys": ["fast-midturn"],
 			"globs": [

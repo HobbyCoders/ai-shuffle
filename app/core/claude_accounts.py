@@ -177,6 +177,24 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
         )
 
 
+def saved_api_keys() -> list[tuple[str, str, bool]]:
+    """``(account id, decrypted key, selected)`` for every saved key."""
+    with _lock:
+        bundle = _keys()
+        return [(a["id"], a["key"], a["id"] == bundle["active_id"]) for a in bundle["accounts"]]
+
+
+def api_key_for(account_id: str) -> tuple[str, bool]:
+    """The decrypted key of one saved account and whether it is selected.
+
+    Raises ``KeyError`` for an unknown account; never logs or returns the key
+    to an API caller."""
+    for found, key, active in saved_api_keys():
+        if found == account_id:
+            return key, active
+    raise KeyError(account_id)
+
+
 def deactivate_api_key() -> None:
     """Clear the selected scalar key while retaining every saved account."""
     with _lock:

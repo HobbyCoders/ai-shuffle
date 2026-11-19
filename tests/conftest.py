@@ -256,6 +256,19 @@ def _no_claude_cli_model_list(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_claude_api_model_list(monkeypatch):
+    """No saved Anthropic key's Models API list leaks between tests, and adding
+    or selecting a key never asks Anthropic on a thread (tests of the list
+    install their own)."""
+    from app.core import claude_api_models
+
+    monkeypatch.setattr(claude_api_models, "_cache", {})
+    monkeypatch.setattr(claude_api_models, "_loaded", True)
+    monkeypatch.setattr(claude_api_models, "_active_memo", {})
+    monkeypatch.setattr(claude_api_models, "refresh_active_soon", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _agent_credentials_ready_by_default(request, monkeypatch):
     """Turn-start tests run on a worker that is set up to start agents.
 

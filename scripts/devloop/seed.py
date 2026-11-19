@@ -381,8 +381,41 @@ async def seed_default() -> dict:
         "projects": projects, "remotes": remote_urls, "worktree_path": created.worktree_path,
         "chats": chats, "long_chat_events": long_events,
         "claude_cli": await seed_claude_cli(),
+        "claude_api_keys": await run_sync(seed_claude_api_keys),
         "voice": await seed_voice(fake_url),
     }
+
+
+# ─── Saved Anthropic API keys (the fake Models API) ─────────────────────────
+
+
+#: (label, key). Not credentials: they only reach the fake AI's Models API
+#: (scripts/devloop/fake_wire.py, anthropic_models_reply), which lists a
+#: different catalog for "beta" and answers "slow" keys after 3 s.
+CLAUDE_API_KEYS = (
+    ("Dev key A", "devloop-fake-key-alpha"),
+    ("Dev key B (slow)", "devloop-fake-key-beta-slow"),
+)
+
+
+def seed_claude_api_keys() -> dict:
+    """Two saved Anthropic API keys, A selected, for Settings' API key > Models.
+
+    Only when listing a key's models resolves to the dev loop's fake
+    (``claude_api_models.fake_models_url``), so the keys never leave this
+    machine. The Claude mode stays the subscription (pinned when nothing chose
+    it yet, so a stored key cannot make the startup default pick API-key mode):
+    no chat runs on these keys unless a test switches the mode itself.
+    """
+    from app.core import claude_accounts, claude_api_models, claude_auth_mode
+
+    if claude_api_models.fake_models_url() is None:
+        return {"skipped": "the Models API does not resolve to the dev loop's fake"}
+    if claude_auth_mode.stored_mode() is None:
+        claude_auth_mode.set_mode(claude_auth_mode.MODE_SUBSCRIPTION)
+    ids = [claude_accounts.add_api_key(key, label, activate=index == 0)
+           for index, (label, key) in enumerate(CLAUDE_API_KEYS)]
+    return {"accounts": ids}
 
 
 # ─── voice calls (the dev loop's fake voice provider) ───────────────────────

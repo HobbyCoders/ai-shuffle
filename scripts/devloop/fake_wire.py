@@ -550,6 +550,55 @@ def gemini_models_reply(models: Sequence[str], context_window: int = 1_048_576) 
     return Reply(frames=[json.dumps({"models": rows})], content_type="application/json")
 
 
+# Anthropic's Models API for a saved API key (app/core/claude_api_models.py),
+# answered by key: a key containing "beta" lists BETA, "reject" is refused
+# (401), any other key lists ALPHA. A key containing "slow" waits 3 s first.
+ANTHROPIC_MODELS_ALPHA = (
+    ("claude-opus-5-5", "Claude Opus 5.5", 1_000_000),
+    ("claude-sonnet-5-5", "Claude Sonnet 5.5", 1_000_000),
+    ("claude-haiku-5-5", "Claude Haiku 5.5", 1_000_000),
+    ("claude-fable-5-2", "Claude Fable 5.2", 1_000_000),
+    ("claude-opus-4-6", "Claude Opus 4.6", 1_000_000),
+    ("claude-sonnet-4-6", "Claude Sonnet 4.6", 1_000_000),
+    ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000),
+)
+ANTHROPIC_MODELS_BETA = (
+    ("claude-opus-5-5", "Claude Opus 5.5", 1_000_000),
+    ("claude-sonnet-5", "Claude Sonnet 5", 1_000_000),
+    ("claude-opus-4-1", "Claude Opus 4.1", 200_000),
+)
+ANTHROPIC_MODELS_PAGE = 3  # Fewer than the app asks for, so it must page.
+
+
+def anthropic_models_reply(recorded: "Recorded") -> Reply:
+    """One page of ``GET /v1/models`` the way Anthropic answers it."""
+    from urllib.parse import parse_qs, urlsplit
+
+    headers = {k.lower(): v for k, v in recorded.headers.items()}
+    key = headers.get("x-api-key", "")
+    if not headers.get("anthropic-version"):
+        return error_reply(400, "anthropic-version header is required")
+    if not key or "reject" in key:
+        return error_reply(401, "invalid x-api-key")
+    rows = ANTHROPIC_MODELS_BETA if "beta" in key else ANTHROPIC_MODELS_ALPHA
+    query = parse_qs(urlsplit(recorded.path).query)
+    try:
+        limit = max(1, min(int((query.get("limit") or ["20"])[0]), 1000))
+    except ValueError:
+        return error_reply(400, "limit must be an integer")
+    ids = [row[0] for row in rows]
+    after = (query.get("after_id") or [None])[0]
+    start = ids.index(after) + 1 if after in ids else 0
+    page = rows[start:start + min(limit, ANTHROPIC_MODELS_PAGE)]
+    data = [{"type": "model", "id": value, "display_name": label,
+             "created_at": "2026-01-01T00:00:00Z", "max_input_tokens": window, "max_tokens": 64_000}
+            for value, label, window in page]
+    body = {"data": data, "has_more": start + len(page) < len(rows),
+            "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
+    return Reply(frames=[json.dumps(body)], content_type="application/json",
+                 delay=3.0 if "slow" in key else 0.0)
+
+
 class FakeProviderServer:
     """Loopback provider endpoint that plays scripted replies in order.
 
@@ -603,6 +652,8 @@ class FakeProviderServer:
     def _reply_for(self, recorded: Recorded) -> Reply:
         if recorded.method == "GET":
             path = recorded.path.split("?", 1)[0].rstrip("/")
+            if path == "/anthropic/v1/models":
+                return anthropic_models_reply(recorded)
             if path.endswith("/v1beta/models"):
                 return gemini_models_reply(self.models)
             if path.endswith("/models"):

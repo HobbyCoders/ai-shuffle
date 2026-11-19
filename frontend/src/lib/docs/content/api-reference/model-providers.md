@@ -782,13 +782,13 @@ curl http://localhost:8000/api/v1/models \
 - `default`: the default model, what a new chat runs when you pick none: the model you use most while its provider can run it, else the default model of the oldest provider that can run (adding another key never moves it), Claude's last. `inherit_value`: the value that means "inherit from the parent" (for subagents). `legacy_map`: full Claude model ids and the short id each maps to.
 - `providers`: enabled providers only, never with keys. `auth_kind` is `subscription` for ChatGPT and Grok subscription providers and `api` otherwise; `plan_type` names the subscription plan when known. `capability_generation` changes whenever the provider is edited. `effort_levels` lists the reasoning-effort levels a model accepts: `[]` means none, `null` means unknown (see [refresh-capabilities](#post-apiv1model-providersrefresh-capabilities)). A model has `"ultrafast": true` when chats on it can use OpenAI's Ultrafast tier: on a ChatGPT sign-in only when that account's catalog lists it for the model (Pro and some Enterprise and Edu plans). The tiers come only from the catalog the worker fetches for the signed-in account, and count only while that account is the provider's sign-in: tiers sent in a provider save are ignored, a model the fresh catalog no longer lists loses them, and after a sign-in to another account (on any worker) none count until that account's catalog is read. On an OpenAI API key it is offered for exactly GPT-6 Astra, GPT-6.1 Sol, GPT-6.2 Astra and GPT-6.2 Sol (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.2-astra`, `gpt-6.2-sol`). Other providers never offer it. A ChatGPT provider with a saved model whose tiers the current account has not fetched (saved before tiers were stored, added to the list since, or fetched by another account) has `"speed_tiers_stale": true` until its capabilities are refreshed.
 - `claude`: how this install signs in to Claude (`auth_kind` `api`, `subscription` or `null`, with `plan_type` when known). On a subscription sign-in it also has `cli_models` (`cli_version`, `captured_at`) once Claude Code has listed its models on this worker.
-- `versioned_models`: on a subscription sign-in, the versioned models this worker's Claude Code lists (for example `claude-opus-4-6`), each with `enabled`. Enabled ones are also in `models`. Empty in other modes.
+- `versioned_models`: on a subscription sign-in, the versioned models this worker's Claude Code lists (for example `claude-opus-4-6`), each with `enabled`. Enabled ones are also in `models`. Empty in other modes. In API-key mode, `models` also has the checked versions the selected key lists (see [Anthropic API key models](#anthropic-api-key-models)).
 
 ### Claude subscription models
 
 On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are always offered, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. The versioned models Claude Code lists are off until you check them in **Settings → Providers → Claude → Models**. A checked version runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are offered.
 
-Each worker keeps its own list, for the Claude account it came from. After you switch Claude accounts, AI Shuffle asks Claude Code again; until it answers, only the four short ids are offered. A model id goes unchanged to the Claude Code that runs the chat, including the subagent default and the model a chat hands to a chat it starts. A worker on an older AI Shuffle release runs the short id instead until it updates. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
+Each worker keeps its own list, for the Claude account it came from. After you switch Claude accounts, AI Shuffle asks Claude Code again; until it answers, only the four short ids are offered. A model id goes unchanged to the Claude Code that runs the chat, including the subagent default and the model a chat hands to a chat it starts. A worker on an older AI Shuffle release runs the short id instead until it updates. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. Cloud sign-ins keep the built-in list; API keys list theirs as described below.
 
 #### POST /api/v1/models/claude/refresh
 
@@ -812,3 +812,29 @@ curl -X PUT http://localhost:8000/api/v1/models/claude/enabled \
 ```
 
 **Response:** every model now turned on, for example `{ "models": ["claude-opus-4-6"] }`
+
+### Anthropic API key models
+
+With an Anthropic API key, **Settings → Providers → Claude → (the key) → Models** shows what Anthropic's Models API (`GET https://api.anthropic.com/v1/models`) lists for that key. Listing sends no prompt and costs nothing. Each saved key keeps its own list, fetched with that key: a key is listed when it is added or selected, when its Models page first opens, and on **Refresh**. A list belongs to the key it was fetched with, even if you switch keys during a refresh, and a deleted key's list is dropped.
+
+The four short ids are always offered. The versions a key lists are off until you check them on the selected key's Models page. In API-key mode the pickers offer the checked versions that the selected key lists; an unselected key's page shows its list read-only. One choice of checked versions is shared by every key. A version a chat already picked runs as that exact id even after you uncheck it, refresh, or switch keys; if the key cannot use it, the turn fails with Anthropic's error and never runs another model instead. Retired `[1m]` ids still map to their short id. Cloud sign-ins and the subscription's list are unaffected.
+
+#### GET /api/v1/models/claude/api-keys/{account_id}
+
+One saved key's Models page: `active` (whether it is the selected key), `aliases` (each short id with the model it runs, `runs`), `catalog` (`fetched_at` and `models`, each with `value`, `label` and `created_at`; `null` before its first listing) and `enabled` (the checked versions). Never includes the key.
+
+**Auth:** Owner only
+
+**Errors:** `404` for an unknown account.
+
+#### POST /api/v1/models/claude/api-keys/{account_id}/refresh
+
+Asks Anthropic's Models API which models this saved key can use, now, and returns the same body as the GET above.
+
+**Auth:** Owner only
+
+**Errors:** `404` for an unknown account. `409` with a plain reason when Anthropic rejects the key, rate-limits the request or cannot be reached; the reason never includes the key or Anthropic's reply.
+
+#### PUT /api/v1/models/claude/api-enabled
+
+Checks or unchecks one versioned Claude model for the API-key pickers. Body and response are the same as `PUT /api/v1/models/claude/enabled`. Other checked models stay as they are. `400` for a short id such as `opus` or a `[1m]` id.

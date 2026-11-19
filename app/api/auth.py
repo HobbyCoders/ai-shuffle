@@ -272,8 +272,12 @@ _PREVIEW_DEV_CHANGE = re.compile(
     r"|POST /api/v1/agents"
     r"|PUT /api/v1/agents/[^/]+"
     r"|PUT /api/v1/away-mode"
-    r"|PUT /api/v1/models/claude/enabled)"
+    r"|PUT /api/v1/models/claude/enabled"
+    r"|PUT /api/v1/models/claude/api-enabled"
+    r"|POST /api/v1/models/claude/api-keys/[^/]+/refresh)"
 )
+# Sends a saved key to the models endpoint: only while that is the dev fake.
+_PREVIEW_FAKE_CATALOG_CHANGE = re.compile(r"POST /api/v1/models/claude/api-keys/[^/]+/refresh")
 
 
 def _preview_may_change_dev_data(request: Request) -> bool:
@@ -289,15 +293,23 @@ def _preview_may_change_dev_data(request: Request) -> bool:
 
     Only these changes: add a project, set one up on a worker, cancel that
     setup, remove a worker's copy, create or update an agent, toggle global
-    Away, and turn a Claude Code model on or off in the pickers. Every other owner-only change (deleting or relinking a project;
-    deleting, importing or restoring an agent) stays refused even here.
+    Away, turn a Claude Code model on or off in the pickers (CLI or API key),
+    and list a saved API key's models while the endpoint is the dev loop's
+    fake catalog (never Anthropic). Every other owner-only change (deleting or
+    relinking a project; deleting, importing or restoring an agent; any key or
+    Claude mode change) stays refused even here.
     """
-    if not _PREVIEW_DEV_CHANGE.fullmatch(
-            f"{getattr(request, 'method', 'GET')} {request.url.path.rstrip('/')}"):
+    route = f"{getattr(request, 'method', 'GET')} {request.url.path.rstrip('/')}"
+    if not _PREVIEW_DEV_CHANGE.fullmatch(route):
         return False
     try:
         from app.preview_run import disposable_preview_data
 
+        if _PREVIEW_FAKE_CATALOG_CHANGE.fullmatch(route):
+            from app.core.claude_api_models import fake_models_url
+
+            if fake_models_url() is None:
+                return False
         return disposable_preview_data()
     except Exception:  # noqa: BLE001 - an unreadable marker is a real install
         return False

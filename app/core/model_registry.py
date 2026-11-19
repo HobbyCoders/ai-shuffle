@@ -182,21 +182,41 @@ def _cli_model(value: str) -> Optional[ModelOption]:
     return ModelOption(value, found.get("label") or value, family, window)
 
 
+def _api_model(value: str) -> Optional[ModelOption]:
+    """An entry of the selected Anthropic key's Models API list as a
+    ``ModelOption`` (API-key mode), or None."""
+    from app.core import claude_api_models
+
+    found = claude_api_models.entry(value)
+    if found is None:
+        return None
+    base = _BY_VALUE.get(value) or _BY_VALUE.get(re.sub(r"-\d{8}$", "", value))
+    family = _family_of(value, found.get("label")) or (base.family if base else None)
+    if family is None:
+        return None
+    window = found.get("context_window") or (
+        base.context_window if base else (200_000 if "haiku-4" in value else 1_000_000))
+    return ModelOption(value, found.get("label") or value, family, window)
+
+
 def keeps_own_id(value: Optional[str]) -> bool:
     """Whether a full Claude id is passed on as itself, never folded onto an alias.
 
-    On a subscription sign-in every ``claude-*`` id means itself wherever it
-    is stored, inherited, sent to another worker or handed to the CLI; a CLI
-    that does not know it fails the turn visibly. The saved CLI list decides
-    only what the pickers offer and how a model is described. API-key and
-    cloud modes fold as before.
+    On a subscription sign-in or an Anthropic API key every ``claude-*`` id
+    means itself wherever it is stored, inherited, sent to another worker or
+    handed to the CLI; a model the CLI or key cannot run fails the turn
+    visibly. The CLI's or key's list decides only what the pickers offer and
+    how a model is described. On an API key a retired ``[1m]`` form still
+    folds (``LEGACY_MODEL_MAP``); cloud mode folds as before.
     """
-    from app.core import claude_cli_models
+    from app.core import claude_api_models, claude_cli_models
 
     if not isinstance(value, str) or not value.lower().startswith("claude-"):
         return False
     try:
-        return claude_cli_models.subscription_mode()
+        if claude_cli_models.subscription_mode():
+            return True
+        return claude_api_models.api_key_mode() and not value.endswith(_LEGACY_1M_SUFFIX)
     except Exception:  # noqa: BLE001 - an unknown mode keeps today's folding
         return False
 
@@ -221,7 +241,7 @@ def get_model(value: Optional[str], *, delegated: bool = True) -> Optional[Model
     ``opus``), and an alias is labelled and sized as the model it resolves to.
     """
     if delegated and value:
-        listed = _cli_model(value)
+        listed = _cli_model(value) or _api_model(value)
         if listed is not None:
             return listed
     # The delegated CLI runs a kept legacy id as itself: describe that version.
@@ -785,13 +805,22 @@ def registry_payload() -> Dict[str, object]:
             continue
         versioned.append({**entry(item["value"], option), "description": item.get("description") or "",
                           "enabled": item["value"] in enabled})
+    # API-key mode: the checked versions the selected key's Models API lists.
+    from app.core import claude_api_models
+
+    api_versions = []
+    for item in claude_api_models.offered_entries():
+        option = get_model(item["value"])
+        if option is not None:
+            api_versions.append({**entry(item["value"], option), "description": "", "enabled": True})
     claude = _claude_payload()
     if snapshot:
         claude["cli_models"] = {"cli_version": snapshot.get("cli_version"),
                                 "captured_at": snapshot.get("captured_at")}
     return {
-        # The four aliases, then the CLI versions the owner turned on.
-        "models": [entry(m.value, m) for m in MODELS] + [v for v in versioned if v["enabled"]],
+        # The four aliases, then the CLI versions or the selected API key's
+        # versions the owner turned on.
+        "models": [entry(m.value, m) for m in MODELS] + [v for v in versioned if v["enabled"]] + api_versions,
         # Every version the subscription CLI lists (Settings > Claude > Models).
         "versioned_models": versioned,
         "default": _default_selection(),

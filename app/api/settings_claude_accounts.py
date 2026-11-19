@@ -78,7 +78,16 @@ async def add_key(request: KeyRequest, token: str = Depends(require_admin)) -> d
     await _call(accounts._require_storage)
     await validate_anthropic_key(request.api_key.strip())
     account_id = await _call(accounts.add_api_key, request.api_key, request.label, request.activate)
+    if request.activate:
+        _list_selected_key_models()
     return await _result(account_id)
+
+
+def _list_selected_key_models() -> None:
+    """The newly selected key's model list for the pickers (background, free)."""
+    from app.core import claude_api_models
+
+    claude_api_models.refresh_active_soon()
 
 
 @router.post("/subscription/save-current")
@@ -144,6 +153,8 @@ async def activate(
     await _call(
         accounts.change_account, kind, account_id, "activate", subscription=kind == "subscription"
     )
+    if kind == "api_key":
+        _list_selected_key_models()
     return await _result()
 
 

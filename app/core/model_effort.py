@@ -144,10 +144,11 @@ def effort_capabilities(model: str | None, provider: Mapping[str, Any] | None = 
                 aliases = delegated_model_aliases()
             cap = table.get(aliases.get(model, model)) or table.get(canonical_effort_model(model))
             if route == "delegated":
-                # A subscription CLI's own list says which levels it accepts.
-                from app.core import claude_cli_models
+                # A subscription CLI's own list, or the selected API key's
+                # Models API list, says which levels it accepts.
+                from app.core import claude_api_models, claude_cli_models
 
-                listed = claude_cli_models.entry(model)
+                listed = claude_cli_models.entry(model) or claude_api_models.entry(model)
                 if listed is not None and listed.get("effort_levels") is not None:
                     known = cap or table.get(_ALIASES.get(model, model)) or {}
                     cap = _capability(list(listed["effort_levels"]), known.get("default_effort"))
