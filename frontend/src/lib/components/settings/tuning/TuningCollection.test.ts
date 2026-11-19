@@ -82,7 +82,7 @@ const registry = {
 			auth_kind: 'api',
 			default_model: null,
 			models: [
-				{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effort_levels: FIVE, default_effort: 'medium', effort_metadata_version: 1 }
+				{ id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol', effort_levels: FIVE, default_effort: 'medium', effort_metadata_version: 1, ultrafast: true }
 			]
 		},
 		{
@@ -125,7 +125,7 @@ async function open(key?: string) {
 function clearPrefs() {
 	sync.adapters.get('composer.modelEfforts')?.apply(undefined);
 	for (const [key, adapter] of sync.adapters) {
-		if (/^composer\.model(Effort|Fast|ContextCap)\./.test(key)) adapter.apply(undefined);
+		if (/^composer\.model(Effort|Fast|Speed|ContextCap)\./.test(key)) adapter.apply(undefined);
 	}
 }
 
@@ -278,7 +278,34 @@ describe('effort', () => {
 	});
 });
 
-describe('fast mode and the Standard window', () => {
+describe('speed and the Standard window', () => {
+	it('saves the three tiers only on a supported model and clears the refinement on downgrade or reset', async () => {
+		await open('gpt-6.1-sol');
+		const speed = combo('Speed');
+		expect([...speed.options].map((o) => o.textContent)).toEqual(['Not picked', 'Standard', 'Fast', 'Ultrafast']);
+		expect(speed.value).toBe('');
+
+		await fireEvent.change(speed, { target: { value: 'ultrafast' } });
+		await flush();
+		expect(sync.save.mock.calls).toContainEqual(['composer.modelFast.gpt-6.1-sol', true]);
+		expect(lastSave()).toEqual(['composer.modelSpeed.gpt-6.1-sol', 'ultrafast']);
+		expect(screen.getByRole('button', { name: /^GPT-6.1 Sol.*Ultrafast/ })).toBeTruthy();
+		expect(composerPreferences.speedForModel('opus')).toBeNull();
+
+		await fireEvent.change(speed, { target: { value: 'fast' } });
+		expect(lastSave()).toEqual(['composer.modelSpeed.gpt-6.1-sol', null]);
+		expect(composerPreferences.speedForModel('prov:oai:gpt-6.1-sol')).toBe('fast');
+		await fireEvent.change(speed, { target: { value: 'standard' } });
+		expect(lastSave()).toEqual(['composer.modelFast.gpt-6.1-sol', false]);
+
+		await fireEvent.change(speed, { target: { value: 'ultrafast' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Reset Speed to default' }));
+		await flush();
+		expect(sync.save.mock.calls.slice(-2)).toEqual([
+			['composer.modelFast.gpt-6.1-sol', null], ['composer.modelSpeed.gpt-6.1-sol', null]
+		]);
+		expect(speed.value).toBe('');
+	});
 	it('saves Fast per model and clears it on reset', async () => {
 		await open('claude-opus-5');
 		const fast = screen.getByRole('switch', { name: 'Fast mode' });

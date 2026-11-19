@@ -456,8 +456,8 @@ export const composerPreferences = {
  },
  /** Remember a speed pick: Fast's on/off record, plus the Ultrafast record
   *  (written only when it changes, so plain Fast use adds no records). */
- rememberSpeed(model: string | null, speed: ComposerSpeed) {
-  composerPreferences.rememberFast(model, speed !== 'standard');
+ rememberSpeed(model: string | null, speed: ComposerSpeed | null) {
+  composerPreferences.rememberFast(model, speed === null ? null : speed !== 'standard');
   const key = effortModelKey(model);
   const ultrafast = speed === 'ultrafast';
   if (!!modelUltrafast[key] === ultrafast) return;

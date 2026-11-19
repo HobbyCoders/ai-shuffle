@@ -24,6 +24,8 @@
 	import ProviderTile from '../providers/ProviderTile.svelte';
 	import LocalTuning from '../providers/LocalTuning.svelte';
 	import { tuningRevision } from './revision.svelte';
+	import { SPEED_NAMES, SPEED_OPTIONS, type ComposerSpeed } from '$lib/components/chat/speed-tier';
+
 	import {
 		AUTO,
 		contextChoices,
@@ -41,6 +43,8 @@
 		type TuningRoute
 	} from './tuning-model';
 
+	const speedOptions = [{ value: '', label: 'Not picked' }, ...SPEED_OPTIONS];
+
 	interface Props {
 		model: TuningModel;
 		rows: readonly ModelProvider[];
@@ -52,6 +56,7 @@
 	const value = $derived(model.routes[0].value);
 	const effort = $derived(effortState(model));
 	const fastOn = $derived(fastRoutes(model));
+	const ultrafastOn = $derived(fastOn.filter((r) => r.ultrafast));
 	const context = $derived(contextControl(model));
 	const local = $derived(localRows(model, rows));
 	const multi = $derived(model.routes.length > 1);
@@ -63,6 +68,7 @@
 			effortSaved: effortSaved(model),
 			effort: selectedEffort(model),
 			fast: composerPreferences.fastForModel(value),
+			speed: composerPreferences.speedForModel(value),
 			cap: composerPreferences.contextCapForModel(value)
 		};
 	});
@@ -104,6 +110,10 @@
 		return `${auto}${measured}${startNote} Changing effort in a chat on this model saves the same choice.${fitted}`;
 	});
 
+	const speedHelp = $derived(
+		'Sets the speed for new chats on this model. Fast and Ultrafast can cost more than Standard. Not picked keeps the chat setting.' +
+			(ultrafastOn.length === model.routes.length ? '' : ` Ultrafast is offered only on ${ultrafastOn.map((r) => r.group).join(', ')}.`)
+	);
 	const fastHelp = $derived(
 		fastOn.length === model.routes.length
 			? "Starts new chats on this model in Fast mode: faster output at the provider's higher price. Switching it in a chat clears the prompt cache and saves the same choice here. Not picked, a new chat keeps the Fast setting it already had."
@@ -123,7 +133,9 @@
 	});
 	const facts = $derived([
 		{ label: 'Effort', value: effort.kind === 'adjustable' ? effortText(effort, saved.effort) : effort.kind === 'fixed' ? 'Fixed' : 'Unknown' },
-		{ label: 'Fast', value: fastOn.length ? (saved.fast ? 'On' : saved.fast === false ? 'Off' : 'Not picked') : 'Not offered' },
+		ultrafastOn.length
+			? { label: 'Speed', value: saved.speed ? SPEED_NAMES[saved.speed] : 'Not picked' }
+			: { label: 'Fast', value: fastOn.length ? (saved.fast ? 'On' : saved.fast === false ? 'Off' : 'Not picked') : 'Not offered' },
 		{ label: 'Standard window', value: context ? formatContextTokens(saved.cap ?? context.standardTokens) : 'Fixed' },
 		{ label: 'Runs on', value: runsOn }
 	]);
@@ -142,6 +154,10 @@
 		composerPreferences.rememberEffort(value, effort.initial);
 		done();
 	}
+	function pickSpeed(speed: ComposerSpeed | null) {
+		composerPreferences.rememberSpeed(value, speed);
+		done();
+	}
 	function pickFast(on: boolean | null) {
 		composerPreferences.rememberFast(value, on);
 		done();
@@ -158,7 +174,7 @@
 		if (!r.effort.known) parts.push('Effort unknown');
 		else if (!r.effort.options.length) parts.push('No effort setting');
 		else parts.push(`Effort ${effortLabel(level)}`);
-		if (r.fast) parts.push(saved.fast ? 'Fast on' : 'Fast off');
+		if (r.fast) parts.push(r.ultrafast && saved.speed === 'ultrafast' ? 'Ultrafast' : saved.fast ? 'Fast on' : 'Fast off');
 		return parts.join(' · ');
 	}
 	const routeHint = (r: TuningRoute) => (r.usable ? r.groupSubtext ?? undefined : 'Cannot run now');
@@ -198,7 +214,23 @@
 			</SettingRow>
 		{/if}
 
-		{#if fastOn.length}
+		{#if ultrafastOn.length}
+			<SettingRow
+				label="Speed"
+				hint={saved.speed === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
+				help={speedHelp}
+				value={saved.speed}
+				defaultValue={null}
+				onReset={() => pickSpeed(null)}
+			>
+				<SelectField
+					value={saved.speed ?? ''}
+					options={speedOptions}
+					width={200}
+					onchange={(next) => pickSpeed(SPEED_OPTIONS.find((option) => option.value === next)?.value ?? null)}
+				/>
+			</SettingRow>
+		{:else if fastOn.length}
 			<SettingRow
 				label="Fast mode"
 				hint={saved.fast === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
