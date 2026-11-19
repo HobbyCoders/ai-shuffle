@@ -182,6 +182,17 @@
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
 		},
 		{
+			"why": "provider settings show built-in brand artwork in the list and Antigravity detail",
+			"journeys": ["provider-artwork"],
+			"globs": [
+				"frontend/tests/journeys/provider-artwork.journey.mjs",
+				"frontend/src/lib/components/settings/ProviderGlyph.svelte",
+				"frontend/src/lib/components/settings/provider-artwork/**",
+				"frontend/src/lib/components/settings/providers/ProviderTile.svelte",
+				"frontend/src/lib/components/settings/providers/providers-model.ts"
+			]
+		},
+		{
 			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
 			"journeys": ["model-picker"],
 			"globs": [

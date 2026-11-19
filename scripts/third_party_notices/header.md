@@ -53,6 +53,14 @@ the DiffPanel component from pingdotgg/t3code
 {{T3CODE_LICENSE}}
 ```
 
+### LobeHub Lobe Icons (provider artwork)
+
+{{PROVIDER_ARTWORK_ATTRIBUTION}}
+
+```
+{{PROVIDER_ARTWORK_LICENSE}}
+```
+
 ### tweakcn (theme presets)
 
 The theme presets in `frontend/src/lib/themes/presets.json` are imported from
