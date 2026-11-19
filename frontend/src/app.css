@@ -1210,6 +1210,13 @@ html.desktop :is(.sb-head, .topbar, .rail-titlebar, .panel-header, .p-head, .vie
 	app-region: drag;
 	user-select: none;
 }
+/* Electron applies window regions in document order. The header comes after
+   the selection bar, so its drag region would steal every toolbar click even
+   though the selection bar stacks above it. */
+html.desktop .sidebar .col.selecting .p-head {
+	-webkit-app-region: no-drag;
+	app-region: no-drag;
+}
 /* All shared-shell controls, including nested More menus and the collapsed
    panel launcher, must remain clickable inside the native title-bar band. */
 html.desktop :is(.sidebar, .view-shell, .reopen-panel) :is(button, a, input, textarea, select, summary, [role='button'], [role='menu'], [role='menuitem']),

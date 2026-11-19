@@ -289,6 +289,80 @@ await runJourney({
 	recorder: { selectors: ['snoozed=[data-group="snoozed"] [data-session-card]'] },
 	cases: [
 		{
+			name: 'multi-select-actions',
+			async setup({ page, status, variant }) {
+				await gotoApp(page, status);
+				await waitChat(page, { surface: 'new' });
+				// Chromium exercises the real controls but has no frameless Electron
+				// window. Turn on its chrome styles and check the native drag source.
+				if (variant.viewport === 'desktop') {
+					await page.evaluate(() => document.documentElement.classList.add('desktop'));
+				}
+				page.__bulkChats = [];
+				for (let i = 0; i < 2; i++) {
+					const { session_id: id } = await api(page, 'POST', '/sessions', {});
+					page.__bulkChats.push(id);
+				}
+				for (const id of page.__bulkChats) await waitLane(page, id, 'active');
+			},
+			async act({ page, mark, variant }) {
+				const ids = page.__bulkChats;
+				const chats = await showSidebar(page);
+				const bar = chats.locator('.selbar');
+				const action = (name) => bar.getByRole('button', { name, exact: true });
+				const cancel = action('Cancel selection');
+				const desktop = variant.viewport === 'desktop';
+				const dragRegion = () => chats.locator('.p-head').evaluate(el => getComputedStyle(el).getPropertyValue('-webkit-app-region'));
+				async function selectBoth() {
+					const first = chats.locator(`${CARD(ids[0])} .scard`);
+					await first.scrollIntoViewIfNeeded();
+					const row = await first.boundingBox();
+					await page.mouse.move(row.x + 40, row.y + row.height / 2);
+					await page.mouse.down();
+					try {
+						await cancel.waitFor({ timeout: 5000 });
+					} finally {
+						await page.mouse.up();
+					}
+					await chats.locator(`${CARD(ids[1])} .scard`).click();
+					await bar.getByText('2 selected', { exact: true }).waitFor();
+				}
+
+				await mark('select two chats and cancel from the toolbar');
+				if (desktop) expect(await dragRegion() === 'drag', 'the regular desktop header is draggable');
+				await selectBoth();
+				if (desktop) {
+					// Electron applies app regions in DOM order, not visual stacking
+					// order. The covered header must not take the toolbar’s clicks.
+					const region = await dragRegion();
+					expect(region === 'no-drag', `the covered title bar steals clicks from the selection toolbar (app-region: ${region})`);
+				}
+				await cancel.click();
+				await cancel.waitFor({ state: 'hidden' });
+				if (desktop) expect(await dragRegion() === 'drag', 'cancel restores the desktop drag region');
+				for (const id of ids) await waitLane(page, id, 'active');
+
+				await mark('snooze both chats from the selection toolbar');
+				await selectBoth();
+				await action('Snooze').click();
+				await pickPreset(page, 0);
+				await cancel.waitFor({ state: 'hidden' });
+				for (const id of ids) {
+					await waitLane(page, id, 'snoozed');
+					await waitSaved(page, id, row => !row.is_active && !!row.snoozed_until, `bulk Snooze did not save ${id}`);
+				}
+
+				await mark('settle both chats from the selection toolbar');
+				await selectBoth();
+				await action('Settle').click();
+				await cancel.waitFor({ state: 'hidden' });
+				for (const id of ids) {
+					await waitLane(page, id, 'settled');
+					await waitSaved(page, id, row => !row.is_active && !row.snoozed_until, `bulk Settle did not save ${id}`);
+				}
+			}
+		},
+		{
 			name: 'snooze-then-unsnooze',
 			async setup({ page, status, log }) {
 				await gotoApp(page, status);
