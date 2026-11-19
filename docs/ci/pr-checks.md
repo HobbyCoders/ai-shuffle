@@ -29,7 +29,7 @@ push to a pull request starts one workflow run with one verdict. There are no
 draft skips. Which of them a run starts depends on the files the change touches
 ([What a run skips](#what-a-run-skips)):
 
-- `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
+- `ci-backend.yml`: eight backend shards, parallel real PostgreSQL/boot contracts,
   unconditional security checks and the stable fail-closed `Backend tests` gate.
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
   plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
@@ -94,8 +94,11 @@ In `ci.yml` the called workflows skip their own verdict jobs (`Backend tests`,
 of the workflow itself. `CI` is the only check the `main` ruleset requires.
 
 A pull request's run does not stop at the first failure: every area finishes,
-so one round shows every failure, and the areas that passed are recorded and do
-not run again on the next push unless their files change.
+so one round shows every failure, and the areas that passed are recorded for
+reuse on the same files. Backend and Windows reuse only records from a run
+that finished on its first attempt and checked its shard receipts. On reruns,
+GitHub can report an older receipt check as part of the new attempt, so those
+records are not reused.
 
 `ci.yml` groups concurrency by pull request (or ref): a newer push to a pull
 request cancels its running checks. Permissions are `contents: read`, with
@@ -436,7 +439,7 @@ three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
 | --- | --- |
-| backend | `backend` → CI Backend's four shards and security (scanner + scanner tests) |
+| backend | `backend` → CI Backend's eight shards and security (scanner + scanner tests) |
 | backend-linux | `backend` → contracts (real PostgreSQL boot/schema, serial container tests) and security (real-account isolation) |
 | fluid | `fluid` → complete isolated fluid unit suite |
 | frontend | `javascript` → four Vitest shards, production build, typechecks and contracts |
@@ -556,7 +559,8 @@ probes materialize lazy protected keys through application helpers before
 checking access denial. These repairs cover #389, #390 and #391; those jobs are
 required to pass, not temporary exceptions. Network migration and mobile contracts
 run in the parallel backend-contracts job for backend/shared changes. Pool safety
-and both Python dependency audits remain unconditional in backend-security.
+remains unconditional in `backend-postgres`; both Python dependency audits remain
+unconditional in `backend-security`.
 
 ### Unconditional backend shards and contracts
 
@@ -565,7 +569,7 @@ tools-only and workflow-only changes. Backend credential-path checks and contrac
 read those trees too, and `docs/content/` is served at runtime. There is no path
 classifier, skip approval, or reduced-coverage lane.
 
-Full coverage runs four `ubuntu-24.04` shards with two xdist workers apiece and
+Full coverage runs eight `ubuntu-24.04` shards with two xdist workers apiece and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
@@ -593,12 +597,16 @@ nothing else was reported. A skip, xfail, xpass, error or deselection in any pha
 of the rerun is not a pass. The gate refuses a receipt whose failed tests have no recorded passing
 rerun. The first run's JUnit file and
 `--durations` report keep its failures; the rerun's result is in the job log.
-`backend-security` and `backend-contracts` keep a single attempt.
+`backend-security`, `backend-postgres`, and `backend-contracts` keep a single attempt.
 
-`backend-security` always runs the blocking-DB guard,
-required root/real-account isolation, real PostgreSQL pool/transaction cases,
-Python public and voice-lock audits, pinned workflow syntax/action lint, and the
-full workflow/publication/security/docs policy regression suite. Required flags,
+`backend-security` always runs the blocking-DB guard, required root/real-account
+isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
+and the full workflow/publication/security/docs policy regression suite. The policy
+suite runs here once, not again in the hermetic shards.
+`backend-postgres` runs the real PostgreSQL pool and transaction checks.
+`backend-contracts` runs the large-fold contention tests on both databases in
+parallel with that job, using a separate disposable PostgreSQL database. All
+three jobs must pass for the backend verdict. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
 Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI
@@ -627,8 +635,8 @@ closed.
 The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
-contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
-succeed and all four successful shard receipts. Failed, cancelled, missing or
+contracts, security and PostgreSQL. `scripts/ci/backend_gate.py` requires every
+dependency to succeed and all eight successful shard receipts. Failed, cancelled, missing or
 skipped jobs, missing/duplicate receipts, inconsistent collection/partition
 digests, incomplete counts and failed tests without a recorded passing rerun all
 fail closed. No classifier output can approve
@@ -685,7 +693,7 @@ The suites the hook used to select locally run in full on every PR:
 
 | Former push-gate suite | PR CI job |
 | --- | --- |
-| backend | CI Backend's four shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
+| backend | CI Backend's eight shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
 | backend-linux | CI Backend contracts and security (real PostgreSQL, container contracts, real-account isolation) |
 | fluid | `ci-fluid.yml` |
 | frontend, mobile, tools, browser-mcp | `ci-frontend.yml` (Vitest shards, typechecks, mobile, tools, Browser MCP) |

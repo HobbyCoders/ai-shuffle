@@ -189,13 +189,31 @@ test('a split journey: its shared cases or any part selects all parts', () => {
 	const journeys = allJourneys();
 	for (const stem of ['chat-position-stability', 'stop-with-queued-messages', 'sidebar-truth', 'queue-while-busy']) {
 		const parts = [stem, `${stem}-2`];
-		if (stem === 'chat-position-stability') parts.push(`${stem}-3`);
+		if (stem === 'chat-position-stability' || stem === 'queue-while-busy') parts.push(`${stem}-3`);
 		for (const file of [`${stem}.cases.mjs`, ...parts.map((part) => `${part}.journey.mjs`)]) {
 			const picked = selectForCi([`frontend/tests/journeys/${file}`], map, journeys);
 			assert.equal(picked.all, false, file);
 			assert.deepEqual(picked.journeys.map((j) => j.name ?? j).sort(), parts, file);
 		}
 	}
+});
+
+test('the queue-while-busy files run every case and variant exactly once', () => {
+	const cwd = fileURLToPath(new URL('./', import.meta.url));
+	const list = (...args) => {
+		const result = spawnSync(process.execPath, args, { cwd, encoding: 'utf8', env: { ...process.env, JOURNEY_ONLY: '' } });
+		assert.equal(result.status, 0, result.stderr);
+		return result.stdout.trim().split('\n');
+	};
+	const expected = list('--input-type=module', '-e', `
+		import { journey } from './queue-while-busy.cases.mjs';
+		import { runJourney } from './runner.mjs';
+		process.argv[2] = '--list';
+		await runJourney(journey);
+	`);
+	const actual = ['', '-2', '-3'].flatMap((part) => list(`queue-while-busy${part}.journey.mjs`, '--list'));
+	assert.equal(new Set(actual).size, actual.length);
+	assert.deepEqual(actual.sort(), expected.sort());
 });
 
 test('the Agents page and Settings > Cloud select the journeys that check them', () => {

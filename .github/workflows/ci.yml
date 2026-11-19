@@ -308,7 +308,7 @@ jobs:
           BACKEND_NEEDS: ${{ steps.verdict.outputs.backend-needs }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          python scripts/ci/shard_evidence.py --prefix backend-shard --count 4 --source shard-attempts --destination shard-results
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count 8 --source shard-attempts --destination shard-results
           python scripts/ci/backend_gate.py --head "$HEAD_SHA"
       - name: Download Windows desktop shard receipts
         if: ${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}

@@ -61,7 +61,7 @@ def workflow(name):
 
 # --- What the gate expects ---------------------------------------------------
 
-def test_a_real_green_run_is_complete_and_passes():
+def test_a_green_run_with_all_required_jobs_passes():
     jobs = listing() + [SELF]
     assert gate.missing(PLAN, gate.judged(PLAN, jobs)) == []
     # Every listed job of the real run belongs to exactly one job definition.
@@ -70,7 +70,7 @@ def test_a_real_green_run_is_complete_and_passes():
     evidence = gate.verdict(PLAN, jobs, lookup())
     assert evidence["backend"] == evidence["windows"] == "true"
     assert json.loads(evidence["backend-needs"]) == {
-        name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security")}
+        name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
 
 
 def test_areas_match_the_aggregate_inventory_and_the_called_verdict_jobs():
@@ -412,6 +412,7 @@ def test_a_green_run_names_a_record_for_every_area_it_ran():
 @pytest.mark.parametrize(("name", "lost"), [
     ("backend / backend-shard 3", {"backend"}),
     ("backend / backend-security", {"backend"}),
+    ("backend / backend-postgres", {"backend"}),
     ("fluid / fluid unit tests", {"fluid"}),
     ("windows / Windows desktop shard (2/3)", {"windows"}),
     ("javascript / Frontend and mobile production build", {"javascript-checks"}),
@@ -530,7 +531,7 @@ def test_static_matrix_members_come_from_the_workflows():
 
 @pytest.mark.parametrize("name", ["javascript / Frontend tests (4/4)", "fluid / delegated tool-output contract (2.1.308)",
                                   "browser-workspace / Browser workspace (panel-demand)",
-                                  "windows / Windows desktop shard (2/3)", "backend / backend-shard 3"])
+                                  "windows / Windows desktop shard (2/3)", "backend / backend-shard 8"])
 def test_one_absent_member_of_a_static_matrix_is_waited_for(name):
     jobs = [job for job in listing() if job["name"] != name]
     assert gate.missing(PLAN, jobs) == [name]

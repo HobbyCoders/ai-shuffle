@@ -270,6 +270,11 @@ jobs:
       - name: Free hosted-runner disk before preparing the AVD
         run: |
           df -h
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          if bash ci/emulator-storage.sh has-headroom "$HOME" "$sdk" "$RUNNER_TEMP"; then
+            echo 'At least 24 GiB available on the emulator, SDK and temporary volumes; no cleanup needed.'
+            exit 0
+          fi
           # This job only installs prebuilt APKs; none of these toolchains or
           # container images is used. Keep SDK tools, platforms and system images.
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk

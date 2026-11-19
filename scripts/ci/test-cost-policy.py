@@ -309,11 +309,12 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
         self.assertEqual(javascript["on"]["workflow_dispatch"], "")
         shard = backend["jobs"]["backend-shard"]
-        self.assertEqual(shard["strategy"], {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}})
+        self.assertEqual(shard["strategy"], {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, 9)]}})
         self.assertEqual(backend["jobs"]["backend"]["name"], "Backend tests")
         self.assertEqual(backend["jobs"]["backend"]["if"], "always() && inputs.gated_by_caller != true")
         for config, key, timeout in [(backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
-                                     (backend, "backend-security", "35"), (javascript, "frontend", "20")]:
+                                     (backend, "backend-security", "35"), (backend, "backend-postgres", "35"),
+                                     (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertEqual(config["jobs"][key]["runs-on"], LINUX_RUNNER)
         command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")

@@ -108,13 +108,13 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     manifest = tmp_path / "durations.json"
     nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
     durations = {node: float(i + 1) for i, node in enumerate(nodes)}
-    expected = bs.partition(nodes, durations)
+    expected = bs.partition(nodes, durations, bs.SHARD_COUNT)
     manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": bs.hashed_durations(durations)}))
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
     # This test is run serially locally: no nested workers beyond the shared
     # machine-wide two-worker limit. Hosted policy tests also run it serially.
     collected = []
-    for index in range(1, 5):
+    for index in range(1, bs.SHARD_COUNT + 1):
         output = tmp_path / f"shard-{index}"
         result = subprocess.run([
             sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
@@ -144,7 +144,8 @@ def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tm
     manifest = tmp_path / "durations.json"
     nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
     manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": {}}))
-    shards = bs.partition(nodes, bs.manifest_weights(nodes, {"format": bs.MANIFEST_FORMAT, "durations": {}}))
+    weights = bs.manifest_weights(nodes, {"format": bs.MANIFEST_FORMAT, "durations": {}})
+    shards = bs.partition(nodes, weights, bs.SHARD_COUNT)
     index = next(i for i, shard in enumerate(shards, 1) if "test_fixture.py::test_value[3]" in shard)
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
 
@@ -186,20 +187,23 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     jobs = config["jobs"]
     assert jobs["backend"]["name"] == "Backend tests"
     assert jobs["backend"]["if"] == "always() && inputs.gated_by_caller != true"
-    assert set(jobs["backend"]["needs"]) == {"backend-shard", "backend-contracts", "backend-security"}
-    assert set(jobs) == {"backend", "backend-shard", "backend-contracts", "backend-security"}
+    required = {"backend-shard", "backend-contracts", "backend-security", "backend-postgres"}
+    assert set(jobs["backend"]["needs"]) == required
+    assert set(jobs) == required | {"backend"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
-    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
-    assert jobs["backend-security"]["if"] == "always()"
-    assert "needs" not in jobs["backend-security"]
+    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, bs.SHARD_COUNT + 1)]}}
+    for name in ("backend-security", "backend-postgres"):
+        assert jobs[name]["if"] == "always()"
+        assert "needs" not in jobs[name]
+        assert all("if" not in step for step in jobs[name]["steps"][:-1])
     for job in ("backend-shard", "backend-contracts"):
         assert "if" not in jobs[job]
         assert "needs" not in jobs[job]
         assert jobs[job]["timeout-minutes"] == "35"
     text = json.dumps(jobs["backend-shard"])
     for target in ("tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract", "tests/performance",
-                   "tests/mcp", "tests/services", "tests/unit", "tests/scripts", "tests/test_*.py"):
+                   "tests/mcp", "tests/services", "tests/unit", "tests/test_*.py"):
         assert target in text
     for exclusion in ("--deselect=tests/test_scan_blocking_db.py",
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
@@ -211,29 +215,46 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert command.lstrip().startswith("python scripts/ci/backend_shard_run.py -- \\\n")
     assert command.count("python -m pytest") == 1
     assert "LOCAL_CI_RETRY_FAILED" not in json.dumps(jobs), "the runner sets the retry switch itself"
-    for job in ("backend-contracts", "backend-security"):
+    for job in ("backend-contracts", "backend-security", "backend-postgres"):
         assert "backend_shard_run.py" not in json.dumps(jobs[job])
+
+
+def test_policy_suite_runs_once_in_the_required_security_job():
+    jobs = workflow()["jobs"]
+    shard = next(s["run"] for s in jobs["backend-shard"]["steps"] if s.get("name") == "Run fast test subset")
+    security = jobs["backend-security"]
+    policy = next(s for s in security["steps"] if s.get("name") == "Full workflow, publication, security and docs policy regressions")
+    assert "backend-security" in jobs["backend"]["needs"]
+    assert "if" not in policy and "continue-on-error" not in policy
+    for flag, path in (("--ignore", "tests/scripts"), ("--deselect", "tests/test_buyer_docs.py"),
+                       ("--ignore", "tests/core/test_docs_content.py")):
+        assert f"{flag}={path}" in shard.split()
+        assert path not in shard.split()
+        assert path in policy["run"].split()
 
 
 def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional():
     jobs = workflow()["jobs"]
     security = jobs["backend-security"]
-    text = json.dumps(security)
+    postgres = jobs["backend-postgres"]
+    policy_steps = json.dumps(security)
+    postgres_steps = json.dumps(postgres)
     for command in ("tests/test_scan_blocking_db.py", "scripts/scan_blocking_db.py",
                     "tests/core/test_agent_isolation_root.py",
-                    "tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
-                    "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py",
                     "python scripts/pip_audit_retry.py --skip-editable",
                     "python scripts/pip_audit_retry.py -r requirements-voice.lock",
                     "tests/scripts", "tests/test_buyer_docs.py", "tests/core/test_docs_content.py"):
-        assert command in text
-    for flag in ("AGENT_ISOLATION_ROOT_REQUIRED", "PG_SAFETY_TEST"):
-        assert any(step.get("env", {}).get(flag) == "1" for step in security["steps"])
-    assert 'chmod -R go-w' in text
+        assert command in policy_steps
+    for command in ("tests/integration/test_postgres_safety.py", "tests/db/test_usage_budget_postgres.py",
+                    "tests/core/test_pg_session_store.py", "tests/core/test_pg_session_store_rewind.py"):
+        assert command in postgres_steps
+    for job, flag in ((security, "AGENT_ISOLATION_ROOT_REQUIRED"), (postgres, "PG_SAFETY_TEST")):
+        assert any(step.get("env", {}).get(flag) == "1" for step in job["steps"])
+        assert 'chmod -R go-w' in json.dumps(job)
     contracts = json.dumps(jobs["backend-contracts"])
     for flag in ("BOOT_SMOKE_REQUIRED", "CONTAINER_RUNTIME_TEST_PG", "CONTAINER_RUNTIME_TEST_PRESSURE", "MOBILE_POSTGRES_TEST", "NETWORK_POSTGRES_TEST"):
         assert flag in contracts
-    for name in ("backend-security", "backend-contracts", "backend-shard"):
+    for name in ("backend-security", "backend-postgres", "backend-contracts", "backend-shard"):
         for step in jobs[name]["steps"]:
             run = step.get("run", "")
             if "python -m pytest" in run:
@@ -243,8 +264,17 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
 
 
 def test_large_fold_ratchets_repeat_everywhere_but_controls_run_once():
-    steps = workflow()["jobs"]["backend-security"]["steps"]
-    step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
+    jobs = workflow()["jobs"]
+    steps = jobs["backend-contracts"]["steps"]
+    label = "Measure large-fold contention on both databases"
+    step = next(s for s in steps if s.get("name") == label)
+    assert all(s.get("name") != label for s in jobs["backend-postgres"]["steps"])
+    assert "backend-contracts" in jobs["backend"]["needs"]
+    assert steps.index(step) > next(i for i, s in enumerate(steps) if s.get("name") == "Start the runner's PostgreSQL")
+    assert "openssl rand -hex 24" in step["run"]
+    assert "::add-mask::%s" in step["run"]
+    assert "createdb --owner shuffle_contention_test shuffle_contention_test" in step["run"]
+    assert "@127.0.0.1:5432/shuffle_contention_test" in step["run"]
     assert "if" not in step and "continue-on-error" not in step
     assert step["env"]["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] == "1"
     # The same on a pull request and on main: main may skip backend on a pull request's record.
@@ -292,7 +322,7 @@ def test_main_refresh_downloads_and_validates_complete_execution(
            "workflowName": "CI Backend", "headSha": "head", "url": "https://example.invalid/run"}
     monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
     nodes = [f"test_a.py::test_{i}" for i in range(8)]
-    shards = bs.partition(nodes, {})
+    shards = bs.partition(nodes, {}, bs.SHARD_COUNT)
     destination = tmp_path / "download"
     def download(command: list[str], check: bool) -> None:
         assert command[:4] == ["gh", "run", "download", "123"] and check is True

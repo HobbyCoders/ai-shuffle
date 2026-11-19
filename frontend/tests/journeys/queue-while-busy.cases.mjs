@@ -1116,8 +1116,8 @@ export const journey = {
 	allow: [...DEV_INSTANCE_NOISE]
 };
 
-// The cases queue-while-busy.journey.mjs runs: the seven its hosted measurement timed.
-// queue-while-busy-2.journey.mjs runs every other one, so a new case lands there.
+// Keep this measured group intact. Part 2 takes whatever parts 1 and 3 do not
+// name, so newly added cases still run without changing any selector.
 export const FIRST_HALF = [
 	'queue',
 	'queue-scrolled-up',
@@ -1126,4 +1126,11 @@ export const FIRST_HALF = [
 	'restored-words-survive-a-reload-after-the-answer',
 	'restore-finishing-with-no-composer-on-screen',
 	'reload-after-restoring-the-only-row'
+];
+
+// These three cases together took 331 seconds in merge-queue run 44434878489.
+export const THIRD_PART = [
+	'queued-error-row-leaves-no-blank',
+	'queued-banner-at-handoff',
+	'queued-banner-after-give-back'
 ];

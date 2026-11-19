@@ -109,15 +109,34 @@ def case_count(path: Path, *, strict: bool = False) -> int:
 
 
 def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
-    """Greedy longest-first split: every name in exactly one shard, deterministic."""
+    """Place each journey once, spreading numbered parts within the same time budget."""
     if shards < 1:
         raise ValueError("shards must be at least 1")
-    buckets: list[list[str]] = [[] for _ in range(shards)]
-    loads = [0.0] * shards
-    for name in sorted(weights, key=lambda n: (-weights[n], n)):
-        index = min(range(shards), key=lambda i: (loads[i], i))
-        buckets[index].append(name)
-        loads[index] += weights[name]
+    ordered = sorted(weights, key=lambda n: (-weights[n], n))
+
+    def allocate(limit: float | None = None) -> tuple[list[list[str]], float]:
+        buckets: list[list[str]] = [[] for _ in range(shards)]
+        loads = [0.0] * shards
+        families: list[set[str]] = [set() for _ in range(shards)]
+        for name in ordered:
+            # x.journey.mjs, x-2.journey.mjs, x-3.journey.mjs share a family
+            # even when a filtered run doesn't select the first part.
+            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", name.removesuffix(SUFFIX))
+            index = min(range(shards), key=lambda i: (
+                limit is not None and loads[i] + weights[name] > limit,
+                limit is not None and family in families[i],
+                loads[i], i,
+            ))
+            buckets[index].append(name)
+            loads[index] += weights[name]
+            families[index].add(family)
+        return buckets, max(loads)
+
+    buckets, limit = allocate()
+    spread, spread_max = allocate(limit)
+    # Preferring independent runners must not spend any retry/teardown reserve.
+    if spread_max <= limit:
+        buckets = spread
     union = [name for bucket in buckets for name in bucket]
     if sorted(union) != sorted(weights) or len(set(union)) != len(union):
         raise AssertionError("journey shards are not an exact partition")
