@@ -305,15 +305,33 @@ class ChatCapabilitiesSmokeTest {
         val size = 524_423_638L
         val served = java.security.MessageDigest.getInstance("SHA-256")
         val requested = CopyOnWriteArrayList<okhttp3.Request>()
+        // Only bits 0..7 of index * 31 and bits 13..20 of index affect the
+        // output byte. Reuse that exact 2 MiB period instead of doing a volatile
+        // read/write for each of the 524 million bytes on the emulator.
+        val pattern = ByteArray(1 shl 21) { ((it * 31) xor (it ushr 13)).toByte() }
+        val patternMask = pattern.size - 1
         val body = object : java.io.InputStream() {
             @Volatile var position = 0L
-            private fun at(index: Long) = ((index * 31) xor (index ushr 13)).toInt() and 0xFF
-            override fun read(): Int = if (position >= size) -1 else at(position++).also { served.update(it.toByte()) }
+            override fun read(): Int {
+                if (position >= size) return -1
+                val byte = pattern[position.toInt() and patternMask]
+                position++
+                served.update(byte)
+                return byte.toInt() and 0xFF
+            }
             override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
                 if (length == 0) return 0
                 if (position >= size) return -1
                 val count = minOf(length.toLong(), size - position).toInt()
-                for (i in 0 until count) buffer[offset + i] = at(position++).toByte()
+                var from = position.toInt() and patternMask
+                var copied = 0
+                while (copied < count) {
+                    val chunk = minOf(pattern.size - from, count - copied)
+                    pattern.copyInto(buffer, offset + copied, from, from + chunk)
+                    copied += chunk
+                    from = 0
+                }
+                position += count
                 served.update(buffer, offset, count)
                 return count
             }
