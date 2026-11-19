@@ -96,7 +96,14 @@ class ReducerBridge:
             finally:
                 await self._preparation.close()
 
-    async def _start(self) -> None:
+    async def warm_up(self, *, readiness_timeout: float) -> None:
+        """Start the child before a measured fold without changing request deadlines."""
+        if self._lock.locked():
+            raise ReducerUnavailable("node_busy")
+        async with self._lock:
+            await self._start(readiness_timeout=readiness_timeout)
+
+    async def _start(self, *, readiness_timeout: float | None = None) -> None:
         if self._process is not None:
             if self._process.returncode is None:
                 return
@@ -109,7 +116,8 @@ class ReducerBridge:
                 self.node, "--max-old-space-size=192", str(self.directory / "reducer.cjs"),
                 limit=MAX_PACKET_BYTES + 1, runtime="node")
             assert self._process.stdout is not None
-            line = await asyncio.wait_for(self._process.stdout.readline(), self.timeout)
+            deadline = self.timeout if readiness_timeout is None else readiness_timeout
+            line = await asyncio.wait_for(self._process.stdout.readline(), deadline)
             ready = json.loads(line)
             if (not isinstance(ready, dict) or not isinstance(ready.get("node"), str) or
                     ready.get("type") != "ready" or ready.get("version") != 1 or

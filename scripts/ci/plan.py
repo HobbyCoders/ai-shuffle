@@ -16,7 +16,9 @@ only when GitHub's own data agrees:
   for this area, hashed again here from GitHub's copy of that commit;
 - every job the area's workflow defines is listed for that run, finished, and
   none failed: the rule the ``CI`` job applied before it wrote the record
-  (``main_gate.passed``), applied again to the run as it is now.
+  (``main_gate.passed``), applied again to the run as it is now;
+- for the backend and Windows shards, the source run finished on its first
+  attempt and its ``CI`` job successfully checked the receipts.
 
 Every area's files include ``ci.yml``, this script, the gate and the area's
 own workflow, so a record can only stand for the same checks. Any doubt or
@@ -277,6 +279,28 @@ def area_passed(area: str, jobs) -> bool:
                     and (job.get("conclusion") in FINISHED_WELL or job.get("name") in advisory) for job in mine))
 
 
+RECEIPT_STEPS = {
+    "backend": "Fail closed on incomplete backend coverage",
+    "windows": "Prove the Windows desktop shard inventory union",
+}
+
+
+def receipts_passed(area, run, jobs) -> bool:
+    step_name = RECEIPT_STEPS.get(area)
+    if step_name is None:
+        return True
+    attempt = run.get("run_attempt")
+    # GitHub can copy a prior CI job and relabel it with the new attempt number.
+    # Use only first attempts, where there is no prior verdict to copy.
+    if run.get("status") != "completed" or type(attempt) is not int or attempt != 1:
+        return False
+    gates = [job for job in jobs if job.get("name") == "CI" and job.get("run_attempt") == attempt]
+    if len(gates) != 1 or gates[0].get("status") != "completed":
+        return False
+    return any(step.get("name") == step_name and step.get("status") == "completed"
+               and step.get("conclusion") == "success" for step in gates[0].get("steps") or ())
+
+
 def proven(area: str, key: str, lookup: Lookup) -> str | None:
     """The run that passed this area on these files, or None."""
     name = record_name(area, key)
@@ -295,7 +319,8 @@ def proven(area: str, key: str, lookup: Lookup) -> str | None:
         entries = lookup.entries(commit) if commit else None
         if entries is None or key_of(area, entries) != key:
             continue
-        if run_passed(area, lookup.jobs(origin["id"])):
+        jobs = lookup.jobs(origin["id"])
+        if jobs and receipts_passed(area, run, jobs) and run_passed(area, jobs):
             return str(run.get("html_url") or origin["id"])
     return None
 

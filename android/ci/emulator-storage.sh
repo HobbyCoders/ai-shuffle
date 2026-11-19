@@ -47,5 +47,17 @@ case "${1:-}" in
       exit 1
     fi
     ;;
-  *) echo 'Usage: emulator-storage.sh check' >&2; exit 2 ;;
+  has-headroom)
+    shift
+    (( $# > 0 )) || exit 1
+    # Before SDK installation, allow 24 GiB on each volume for downloads,
+    # expansion, and the AVD. The exact post-install check still gates boot.
+    headroom=$((24 * 1024 * 1024 * 1024))
+    for volume in "$@"; do
+      available=$(df -B1 --output=avail "$volume" | awk 'NR == 2 {print $1}') || exit 1
+      [[ "$available" =~ ^[0-9]+$ ]] || exit 1
+      (( available >= headroom )) || exit 1
+    done
+    ;;
+  *) echo 'Usage: emulator-storage.sh check | has-headroom PATH...' >&2; exit 2 ;;
 esac

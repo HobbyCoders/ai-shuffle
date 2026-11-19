@@ -27,6 +27,11 @@ from uuid import uuid4
 import pytest
 
 
+# Cold Node startup is not a measured stage. Allow slack for the initial
+# readiness handshake on shared runners; every fold keeps its deadline.
+WARM_UP_READINESS_SECONDS = 10
+
+
 def _held_prepare_frames(owner, entered, release, *args, **kwargs):
     """Hold the real CPU operation in its child until live ingestion finishes."""
     # Import the lightweight defining module, not the serving actor/config.
@@ -198,6 +203,7 @@ async def _exercise_projection_stages(monkeypatch, *, quanta=75):
             stop.set()
 
     try:
+        await bridge.warm_up(readiness_timeout=WARM_UP_READINESS_SECONDS)
         for _ in range(32):
             if not await actor.process(sid):
                 break
@@ -417,8 +423,10 @@ async def _exercise_commit_order(monkeypatch, stage):
                 return
         pytest.fail('projection never finished')
 
-    task = asyncio.create_task(project())
+    task = None
     try:
+        await bridge.warm_up(readiness_timeout=WARM_UP_READINESS_SECONDS)
+        task = asyncio.create_task(project())
         assert await asyncio.to_thread(started.wait, 10), f'{stage} commit never entered'
         deadline = time.perf_counter() + 10  # Broken-test guard, not a latency budget.
         while not finished.is_set():
@@ -445,7 +453,8 @@ async def _exercise_commit_order(monkeypatch, stage):
         try:
             if append_task is not None:
                 await asyncio.gather(append_task, return_exceptions=True)
-            await task
+            if task is not None:
+                await task
         finally:
             await bridge.close()
     assert (await database(store.load, sid)).ready
@@ -531,6 +540,7 @@ async def test_large_preparation_allows_ingest_before_release(monkeypatch, tmp_p
     try:
         # Warm both private runtimes through a real fold before either phase;
         # spawn/import startup is not the steady-state contention measurement.
+        await bridge.warm_up(readiness_timeout=WARM_UP_READINESS_SECONDS)
         await bridge.request('plan', carry=None, frames=[])
         for _ in range(20):
             if not await actor.process(large):

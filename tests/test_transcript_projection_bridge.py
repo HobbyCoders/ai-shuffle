@@ -32,13 +32,16 @@ def copy_bundle(tmp_path: Path) -> Path:
     return directory
 
 
-def hanging_bundle(tmp_path: Path) -> Path:
+def hanging_bundle(tmp_path: Path, *, ready_marker: Path | None = None) -> Path:
     directory = copy_bundle(tmp_path)
     manifest = json.loads((directory / "manifest.json").read_text())
-    # A private fixture sends the real handshake, answers once, then hangs.
+    # This fixture answers once, then hangs. The marker can withhold readiness
+    # entirely, independent of how the parent and child are scheduled.
+    ready = "true" if ready_marker is None else f"require('node:fs').existsSync({json.dumps(str(ready_marker))})"
     script = (
         "const r=require('node:readline').createInterface({input:process.stdin});"
-        "let n=0;console.log(JSON.stringify({type:'ready',version:1,fingerprint:"
+        f"let n=0;if({ready})"
+        "console.log(JSON.stringify({type:'ready',version:1,fingerprint:"
         + json.dumps(manifest["fingerprint"]) + ",node:process.versions.node}));"
         "r.on('line',line=>{const x=JSON.parse(line);if(++n===1)"
         "console.log(JSON.stringify({id:x.id,ok:true,result:[]}));});"
@@ -125,6 +128,44 @@ async def test_killed_process_is_restarted_without_reusing_responses():
         await previous.wait()
         assert await bridge.request("plan", carry=None, frames=[]) == []
         assert bridge._process.pid != previous.pid
+    finally:
+        await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_warm_up_slack_does_not_extend_request_deadline(tmp_path, monkeypatch):
+    marker = tmp_path / "send-ready"
+    bridge = ReducerBridge(directory=hanging_bundle(tmp_path, ready_marker=marker), timeout=0.05)
+    readiness_deadlines = []
+    wait_for = asyncio.wait_for
+
+    async def record_readiness_deadline(awaitable, timeout):
+        # Readiness passes readline directly; request and cleanup waits do not.
+        if getattr(awaitable, "cr_code", None) is asyncio.StreamReader.readline.__code__:
+            readiness_deadlines.append(timeout)
+        return await wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", record_readiness_deadline)
+    try:
+        # The first child never sends readiness, even if the parent stalls.
+        with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
+            await bridge.request("plan", carry=None, frames=[])
+        assert isinstance(error.value.__cause__, TimeoutError)
+        assert bridge._process is None
+        assert readiness_deadlines == [0.05]
+
+        marker.touch()
+        # A zero request timeout makes accidental use of that deadline in
+        # warm_up fail even when the ready line is already buffered.
+        bridge.timeout = 0
+        await bridge.warm_up(readiness_timeout=10)
+        assert readiness_deadlines == [0.05, 10]
+        child = bridge._process
+        assert child is not None and child.returncode is None
+        with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
+            await bridge.request("plan", carry=None, frames=[])
+        assert isinstance(error.value.__cause__, TimeoutError)
+        assert bridge._process is None and child.returncode is not None
     finally:
         await bridge.close()
 

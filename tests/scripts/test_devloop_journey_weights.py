@@ -32,6 +32,14 @@ def test_runtime_partition_is_deterministic_and_exact(shards):
     assert len(buckets) == shards
 
 
+def test_split_parts_get_parallel_runners_in_the_hosted_plan():
+    weights = ci.estimated_seconds()
+    parts = {"queue-while-busy.journey.mjs", "queue-while-busy-2.journey.mjs", "queue-while-busy-3.journey.mjs"}
+    assert parts <= weights.keys()
+    buckets = ci.partition(weights, ci.HOSTED_SHARDS)
+    assert sum(bool(parts.intersection(bucket)) for bucket in buckets) == len(parts)
+
+
 SPLIT_HALVES = (
     "chat-position-stability.journey.mjs", "chat-position-stability-2.journey.mjs",
     "stop-with-queued-messages.journey.mjs", "stop-with-queued-messages-2.journey.mjs",

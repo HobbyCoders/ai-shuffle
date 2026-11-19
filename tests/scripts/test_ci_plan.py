@@ -526,6 +526,49 @@ def found(**world):
     return plan.proven("android", KEY, plan.Lookup(REPO, "token", World(**world)))
 
 
+@pytest.mark.parametrize(("area", "receipt"), [
+    ("backend", "Fail closed on incomplete backend coverage"),
+    ("windows", "Prove the Windows desktop shard inventory union"),
+])
+@pytest.mark.parametrize(("run_attempt", "run_status", "job_attempt", "job_status", "step_result", "accepted"), [
+    (1, "completed", 1, "completed", "success", True),
+    (1, "completed", 1, "completed", "failure", False),
+    (1, "completed", 1, "completed", "skipped", False),
+    (1, "completed", 1, "completed", None, False),
+    # GitHub can copy a green CI job into a rerun and relabel it with the new attempt.
+    (2, "completed", 2, "completed", "success", False),
+    (2, "completed", 1, "completed", "success", False),
+    (None, "completed", 1, "completed", "success", False),
+    (1, "completed", None, "completed", "success", False),
+    (1, "in_progress", 1, "in_progress", "success", False),
+])
+def test_reuse_requires_a_first_attempt_receipt_verdict(area, receipt, run_attempt, run_status,
+                                                        job_attempt, job_status, step_result, accepted):
+    key = plan.key_of(area, [(item["mode"], item["sha"], item["path"]) for item in FILES if item["type"] != "tree"])
+    name = plan.record_name(area, key)
+    jobs = json.loads((ROOT / "tests/scripts/fixtures/main_suite_jobs.json").read_text())["jobs"]
+    check = {"name": "CI", "status": job_status, "run_attempt": job_attempt, "conclusion": "failure",
+             "steps": [] if step_result is None else [{"name": receipt, "status": "completed", "conclusion": step_result}]}
+    # The artifact is still listed after a rerun, even if no receipt check ran again.
+    world = World(run=the_run(run_attempt=run_attempt, status=run_status, conclusion="failure"),
+                  jobs=[j for j in jobs if j["name"] != "CI"] + [check])
+
+    def call(path, token):
+        if path.endswith(f"&name={name}"):
+            return {"artifacts": [{**artifact(), "name": name}]}
+        return world(path, token)
+
+    assert bool(plan.proven(area, key, plan.Lookup(REPO, "token", call))) is accepted
+
+
+def test_receipt_proof_names_match_the_steps_reported_by_github():
+    steps = workflow("ci.yml")["jobs"]["ci"]["steps"]
+    assert plan.RECEIPT_STEPS == {
+        area: next(step["name"] for step in steps if step.get("id") == f"{area}-receipts")
+        for area in ("backend", "windows")
+    }
+
+
 def test_a_record_of_this_repositorys_own_run_on_the_same_files_counts():
     assert found() == "https://example.invalid/run/7"
     # A push to main or the daily run leaves records too.

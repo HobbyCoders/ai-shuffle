@@ -39,7 +39,7 @@ def shard(tmp_path, monkeypatch):
     nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
     manifest = {"format": bs.MANIFEST_FORMAT, "durations": {}}
     (tmp_path / "durations.json").write_text(json.dumps(manifest))
-    shards = bs.partition(nodes, bs.manifest_weights(nodes, manifest))
+    shards = bs.partition(nodes, bs.manifest_weights(nodes, manifest), bs.SHARD_COUNT)
     index = next(i for i, nodes in enumerate(shards, 1) if FLAKY_NODE in nodes)
     results = tmp_path / "results"
 
@@ -76,11 +76,11 @@ def test_a_test_that_passes_its_rerun_passes_the_shard_as_flaky(shard, tmp_path,
 
 
 def gate(receipt):
-    """backend_gate.check_gate on this receipt plus three clean shards."""
-    needs = {name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security")}
-    others = [{**receipt, "shard": i, "failed": [], "rerun_passed": []} for i in range(1, 5) if i != receipt["shard"]]
+    """backend_gate.check_gate on this receipt plus the other clean shards."""
+    needs = {name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
+    others = [{**receipt, "shard": i, "failed": [], "rerun_passed": []} for i in range(1, bs.SHARD_COUNT + 1) if i != receipt["shard"]]
     for other in others:
-        other["count"] = (receipt["total"] - receipt["count"]) // 3
+        other["count"] = (receipt["total"] - receipt["count"]) // len(others)
     others[-1]["count"] += receipt["total"] - receipt["count"] - sum(o["count"] for o in others)
     check_gate(needs, [receipt, *others], "integration-head")
 

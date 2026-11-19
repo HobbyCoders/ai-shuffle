@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 VERSION = 1
 SHARED = "<shared>"
 
-# The backend fast subset. Keep in step with .github/workflows/ci-backend.yml and scripts/local_ci.py.
+# The local backend fast subset. Keep in step with scripts/local_ci.py.
 FAST_SUBSET_DIRS = (
     "tests/api", "tests/core", "tests/db", "tests/middleware", "tests/contract",
     "tests/performance", "tests/mcp", "tests/services", "tests/unit", "tests/scripts",

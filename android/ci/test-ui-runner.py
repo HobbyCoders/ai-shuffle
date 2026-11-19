@@ -34,6 +34,24 @@ def passing(name="fixture"):
             "OK (1 test)\nINSTRUMENTATION_CODE: -1\n")
 
 
+class StorageHeadroomTest(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "the storage preflight uses GNU df on hosted Linux")
+    def test_cleanup_is_skipped_only_when_every_volume_has_headroom(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "df"
+            fake.write_text('#!/usr/bin/env bash\nprintf "Avail\\n%s\\n" "${!3}"\n')
+            fake.chmod(0o755)
+            command = [BASH, str(CI / "emulator-storage.sh"), "has-headroom", "AVD", "SDK"]
+            env = {**os.environ, "PATH": f"{directory}{os.pathsep}{os.environ['PATH']}"}
+            high = str(24 * 1024**3)
+            low = str(24 * 1024**3 - 1)
+            for avd, sdk, expected in ((high, high, 0), (high, low, 1), (low, high, 1), (high, "unknown", 1)):
+                with self.subTest(avd=avd, sdk=sdk):
+                    result = subprocess.run(command, env={**env, "AVD": avd, "SDK": sdk}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+
+
 class UiRunnerTest(unittest.TestCase):
     def run_runner(self, mode="pass", phase="suite", runner="run-android-ui-tests.sh", api=34,
                    qemu=True, adb_state=None):
