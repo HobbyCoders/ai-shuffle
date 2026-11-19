@@ -57,7 +57,7 @@ function probe() {
 		let followedViewportEnd = 0, followedProseEnd = 0, followedFloorContext = null;
 		let presentedTailError = null, tailErrorOffsetPx = 0, tailQueueSlotPx = 0, handoffSlotPx = 0;
 		let handoffPainted = false, heldBlankPx = 0, handoffHold = 0;
-		let windowShifting = false, windowShiftVersion = 0;
+		let windowShifting = false, windowShiftVersion = 0, pendingReadingRestore = null;
 		let isMounted = true, shouldAutoScroll = true, programmaticScrollDepth = 0;
 		let currentTurnAnchorId = 'anchor', cleanup, showJumpToLatest = false;
 		const clearJumpRevealTimer = () => {};
@@ -114,6 +114,9 @@ function probe() {
 			},
 			shift() { windowShiftVersion++; ${beginShift} },
 			endShift() { windowShifting = false; },
+			setRestore(top) {
+				pendingReadingRestore = top === null ? null : { container: containerRef, version: windowShiftVersion, top };
+			},
 			floor: () => followedViewportEnd,
 			reserve: () => readingFloorReserve(),
 			free: px => freeFollowedFloor(px),
@@ -124,7 +127,7 @@ function probe() {
 			depth: () => programmaticScrollDepth
 		};
 	`);
-	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; floor(): number; reserve(): number; free(px: number): void; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
+	const state = create(env) as { dismiss(): void; start(fromQueue: boolean): void; run(): void; shift(): void; endShift(): void; setRestore(top: number | null): void; floor(): number; reserve(): number; free(px: number): void; queueSlot(): number; handoffSlot(): number; errorOffset(): number; presentedError(): string | null; depth(): number };
 	const settle = async () => { for (let i = 0; i < 4; i++) await Promise.resolve(); };
 	return {
 		env, ...state,
@@ -400,6 +403,27 @@ describe('MessageArea followed-floor coordinate ownership', () => {
 		const nested = source.slice(source.indexOf('.tail-controls :global(.pending-messages) {'));
 		expect(nested.slice(0, nested.indexOf('}'))).toContain('min-height: inherit;');
 		expect(nested.slice(0, nested.indexOf('}'))).toContain('justify-content: flex-end;');
+	});
+
+	it('holds a pending reading destination until scroll is applied or the window changes', () => {
+		const p = probe();
+		p.env.follows = false;
+		p.env.scrollTop = 0;
+		p.env.proseEnd = 560;
+		p.run();
+		expect(p.reserve()).toBe(40);
+
+		p.setRestore(86);
+		expect(p.reserve()).toBe(126);
+		p.env.scrollTop = 86;
+		p.setRestore(null);
+		expect(p.reserve()).toBe(126);
+
+		p.env.scrollTop = 0;
+		p.setRestore(86);
+		p.shift();
+		p.endShift();
+		expect(p.reserve()).toBe(40);
 	});
 
 	it('does not carry the outgoing long scroll offset into a short completed chat', () => {
