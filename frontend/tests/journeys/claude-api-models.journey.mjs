@@ -1,12 +1,15 @@
 // Real settings flow against the dev instance's paged Anthropic Models API.
 import { runJourney } from './runner.mjs';
-import { gotoApp, isPhone, showSidebar } from './lib/app.mjs';
+import { expect, gotoApp, isPhone, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 await runJourney({
 	name: 'claude-api-models',
 	throttles: ['fast'],
-	allow: DEV_INSTANCE_NOISE,
+	allow: [...DEV_INSTANCE_NOISE, {
+		kind: 'failed_requests', status: 502, url: /\/models\/claude\/api-key\/[^/]+$/,
+		reason: 'the journey injects one rejected-key response; it asserts the error and then retries against the real dev endpoint'
+	}],
 	cases: [{
 		name: 'saved-key-catalog',
 		async setup({ page, status, variant }) {
@@ -26,7 +29,22 @@ await runJourney({
 			const response = page.waitForResponse((res) => res.url().includes('/api/v1/models/claude/api-key/'));
 			await page.getByRole('button', { name: 'Refresh models', exact: true }).click();
 			if (!(await response).ok()) throw new Error('Refreshing the Anthropic model list failed');
-			await page.getByText('claude-haiku-dev-api', { exact: true }).waitFor({ timeout: 10_000 });
+			const refresh = page.getByRole('button', { name: 'Refresh models', exact: true });
+			const model = page.getByText('claude-haiku-dev-api', { exact: true });
+			await model.waitFor({ timeout: 10_000 });
+
+			const rejection = 'Anthropic did not accept this API key for listing models.';
+			await page.route('**/api/v1/models/claude/api-key/*', (route) => route.fulfill({
+				status: 502, json: { detail: rejection }
+			}), { times: 1 });
+			await mark('refresh after Anthropic rejects the key');
+			await refresh.click();
+			await page.getByRole('alert').filter({ hasText: rejection }).waitFor({ timeout: 10_000 });
+			expect(!(await model.isVisible()), 'a rejected refresh must not leave previously listed models visible');
+
+			await mark('retry after the rejected refresh');
+			await refresh.click();
+			await model.waitFor({ timeout: 10_000 });
 		}
 	}]
 });

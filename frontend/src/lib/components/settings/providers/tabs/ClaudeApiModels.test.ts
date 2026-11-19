@@ -24,6 +24,16 @@ it('reports a load error, then retries the same key and renders Anthropic’s li
 	expect(get.mock.calls.map(([path]) => path)).toEqual(Array(2).fill('/models/claude/api-key/account%2Fa'));
 });
 
+it('clears the previous catalog if refreshing the same key is rejected', async () => {
+	get.mockResolvedValueOnce({ models: [{ id: 'claude-test', label: 'Claude Test' }] })
+		.mockRejectedValueOnce(new Error('Anthropic did not accept this API key.'));
+	render(ClaudeApiModels, { props: { accountId: 'selected' } });
+	expect(await screen.findByText('Claude Test')).toBeTruthy();
+	await fireEvent.click(screen.getByRole('button', { name: 'Refresh models' }));
+	expect((await screen.findByRole('alert')).textContent).toBe('Anthropic did not accept this API key.');
+	expect(screen.queryByText('Claude Test')).toBeNull();
+});
+
 it('distinguishes an empty upstream list from loading', async () => {
 	get.mockResolvedValueOnce({ models: [] });
 	render(ClaudeApiModels, { props: { accountId: 'selected' } });

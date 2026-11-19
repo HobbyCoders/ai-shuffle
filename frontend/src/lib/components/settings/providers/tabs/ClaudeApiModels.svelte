@@ -22,7 +22,10 @@
 			);
 			if (!controller.signal.aborted) models = result.models;
 		} catch (err) {
-			if (!controller.signal.aborted) error = getErrorMessage(err, 'Could not load Anthropic models.');
+			if (!controller.signal.aborted) {
+				models = null;
+				error = getErrorMessage(err, 'Could not load Anthropic models.');
+			}
 		} finally {
 			if (!controller.signal.aborted) loading = false;
 		}
