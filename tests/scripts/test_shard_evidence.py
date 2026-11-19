@@ -5,17 +5,20 @@ from pathlib import Path
 import pytest
 import yaml
 
+from scripts.ci.backend_gate import SHARD_COUNT
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_workflows_namespace_attempts_and_select_before_validation() -> None:
     for filename, producer, gate, prefix, count in [
         ("windows-suite.yml", "desktop", "desktop-gate", "windows-desktop", 3),
-        ("ci-backend.yml", "backend-shard", "backend", "backend-shard", 4),
+        ("ci-backend.yml", "backend-shard", "backend", "backend-shard", SHARD_COUNT),
     ]:
         jobs = yaml.load(
             (ROOT / ".github/workflows" / filename).read_text(), Loader=yaml.BaseLoader,
         )["jobs"]
+        assert jobs[producer]["strategy"]["matrix"]["shard"] == [str(i) for i in range(1, count + 1)]
         upload = next(
             s for s in jobs[producer]["steps"] if s.get("uses") == "actions/upload-artifact@v4"
         )
@@ -28,6 +31,10 @@ def test_workflows_namespace_attempts_and_select_before_validation() -> None:
         assert f"--prefix {prefix} --count {count}" in select["run"]
         assert steps.index(download) < steps.index(select) < len(steps) - 1
         assert "continue-on-error" not in select
+        if producer == "backend-shard":
+            caller = yaml.load((ROOT / ".github/workflows/ci.yml").read_text(), Loader=yaml.BaseLoader)
+            receipts = next(s for s in caller["jobs"]["ci"]["steps"] if s.get("id") == "backend-receipts")
+            assert f"--prefix {prefix} --count {count}" in receipts["run"]
 
 
 def artifact(root: Path, name: str, content: str) -> Path:
@@ -37,7 +44,7 @@ def artifact(root: Path, name: str, content: str) -> Path:
     return directory
 
 
-@pytest.mark.parametrize("prefix,count", [("windows-desktop", 3), ("backend-shard", 4)])
+@pytest.mark.parametrize("prefix,count", [("windows-desktop", 3), ("backend-shard", SHARD_COUNT)])
 def test_partial_rerun_selects_numeric_latest_per_shard(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], prefix: str, count: int,
 ) -> None:
