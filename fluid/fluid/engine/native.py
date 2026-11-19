@@ -688,9 +688,11 @@ _PAYLOAD_IMAGE_MARKERS = ("image", "patches")
 #: The ``service_tier`` value of OpenAI's Ultrafast tier (gated by model, plan
 #: and API eligibility).
 ULTRAFAST_TIER = "ultrafast"
-#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast,
-#: anything else the response names is standard speed.
+#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast and
+#: ``default`` is standard processing. Any other value the response names is
+#: not evidence of a speed (see :func:`_reported_speed`).
 _REPORTED_TIERS = {"ultrafast": "ultrafast", "priority": "fast"}
+_REPORTED_STANDARD_TIERS = frozenset({"default"})
 
 
 def _is_ultrafast_rejection(payload: dict[str, Any]) -> bool:
@@ -724,13 +726,18 @@ def _is_ultrafast_rejection(payload: dict[str, Any]) -> bool:
 def _reported_speed(requested_tier: Any, reported_tier: Any) -> str:
     """``ultrafast``/``fast``/``standard``/``unknown`` for one finished call.
 
-    The response's own ``service_tier`` wins; a response that names none
-    leaves the call unknown rather than assuming the requested tier.
+    The response's own ``service_tier`` wins. A response that names none,
+    or names a value this module does not recognize (``auto``, an alias a
+    backend invents), leaves the call unknown rather than assuming either the
+    requested tier or Standard.
     """
     del requested_tier  # what was asked never decides what ran
-    if isinstance(reported_tier, str) and reported_tier:
-        return _REPORTED_TIERS.get(reported_tier.lower(), "standard")
-    return "unknown"
+    if not isinstance(reported_tier, str):
+        return "unknown"
+    tier = reported_tier.strip().lower()
+    if tier in _REPORTED_STANDARD_TIERS:
+        return "standard"
+    return _REPORTED_TIERS.get(tier, "unknown")
 
 
 def _is_payload_rejection(message: str, status: int | None = None) -> bool:

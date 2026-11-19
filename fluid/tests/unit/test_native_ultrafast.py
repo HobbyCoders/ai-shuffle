@@ -186,8 +186,33 @@ def test_the_refusal_rule_reads_only_structured_fields():
         {"error": {"param": "input", "code": "context_length_exceeded"}})})
 
 
+@pytest.mark.parametrize("reported, counts", [
+    # (ultrafast, fast, standard, unknown) calls for one answered request.
+    ("ultrafast", (1, 0, 0, 0)),
+    ("default", (0, 0, 1, 0)),
+    ("priority", (0, 1, 0, 0)),
+    (None, (0, 0, 0, 1)),
+    # A tier the module does not know is evidence of no speed at all.
+    ("auto", (0, 0, 0, 1)),
+    ("ultra_fast", (0, 0, 0, 1)),
+])
+async def test_the_response_tier_decides_how_an_ultrafast_call_counts(server, reported, counts):
+    server.script(_reply("answered", reported))
+    events, _ = await _turn(server, "ultrafast")
+    assert server.requests[0].body["service_tier"] == "ultrafast"
+    [outcome] = _of(events, FastModeOutcome)
+    assert (outcome.ultrafast_calls, outcome.fast_calls,
+            outcome.standard_calls, outcome.unknown_calls) == counts
+    assert outcome.disabled_reason is None
+
+
 def test_reported_tier_classifies_the_call():
     assert _reported_speed("ultrafast", "ultrafast") == "ultrafast"
+    assert _reported_speed("ultrafast", "Ultrafast") == "ultrafast"
     assert _reported_speed("ultrafast", "default") == "standard"
     assert _reported_speed("priority", "priority") == "fast"
     assert _reported_speed("ultrafast", None) == "unknown"
+    assert _reported_speed("ultrafast", "") == "unknown"
+    # Unrecognized values are never read as Standard, nor as the tier asked for.
+    for value in ("auto", "flex", "scale", "ultra_fast", "standard-ish"):
+        assert _reported_speed("ultrafast", value) == "unknown"
