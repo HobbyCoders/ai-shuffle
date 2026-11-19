@@ -12,6 +12,7 @@
 	 */
 	import type { ModelProvider } from '$lib/api/model-providers';
 	import { composerPreferences } from '$lib/stores/composer-preferences';
+	import { auth } from '$lib/stores/auth.svelte';
 	import { formatContextTokens } from '$lib/constants/model-context';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import DetailPane from '../shell/DetailPane.svelte';
@@ -51,6 +52,9 @@
 	}
 
 	let { model, rows }: Props = $props();
+	// Preview grants can read these choices, but the preference API rejects edits.
+	const preview = $derived(auth.current.status?.preview_access === true);
+	const previewHint = 'Read-only in preview';
 
 	/** Any route's picker value names the same records; the first is the list's. */
 	const value = $derived(model.routes[0].value);
@@ -87,6 +91,7 @@
 	);
 	const effortHint = $derived.by(() => {
 		if (effort.kind !== 'adjustable') return undefined;
+		if (preview) return previewHint;
 		if (saved.effortSaved) return 'Saved for new chats';
 		if (effort.initial) return `Starts at ${effortLabel(effort.initial)}, measured`;
 		return 'Not picked yet';
@@ -146,24 +151,27 @@
 	}
 
 	function pickEffort(next: string) {
+		if (preview) return;
 		composerPreferences.rememberEffort(value, next === AUTO ? null : next);
 		done();
 	}
 	function resetEffort() {
-		if (effort.kind !== 'adjustable') return;
+		if (preview || effort.kind !== 'adjustable') return;
 		composerPreferences.rememberEffort(value, effort.initial);
 		done();
 	}
 	function pickSpeed(speed: ComposerSpeed | null) {
+		if (preview) return;
 		composerPreferences.rememberSpeed(value, speed);
 		done();
 	}
 	function pickFast(on: boolean | null) {
+		if (preview) return;
 		composerPreferences.rememberFast(value, on);
 		done();
 	}
 	function pickCap(raw: string) {
-		if (!context) return;
+		if (preview || !context) return;
 		const tokens = Number(raw);
 		composerPreferences.rememberContextCap(value, tokens === context.standardTokens ? null : tokens);
 		done();
@@ -199,9 +207,9 @@
 				help={effortHelp}
 				value={saved.effort}
 				defaultValue={effort.initial}
-				onReset={resetEffort}
+				onReset={preview ? undefined : resetEffort}
 			>
-				<SelectField value={saved.effort ?? AUTO} options={effortOptions} width={200} onchange={pickEffort} />
+				<SelectField value={saved.effort ?? AUTO} options={effortOptions} width={200} disabled={preview} onchange={pickEffort} />
 			</SettingRow>
 		{:else}
 			<SettingRow
@@ -217,29 +225,30 @@
 		{#if ultrafastOn.length}
 			<SettingRow
 				label="Speed"
-				hint={saved.speed === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
+				hint={preview ? previewHint : saved.speed === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
 				help={speedHelp}
 				value={saved.speed}
 				defaultValue={null}
-				onReset={() => pickSpeed(null)}
+				onReset={preview ? undefined : () => pickSpeed(null)}
 			>
 				<SelectField
 					value={saved.speed ?? ''}
 					options={speedOptions}
 					width={200}
+					disabled={preview}
 					onchange={(next) => pickSpeed(SPEED_OPTIONS.find((option) => option.value === next)?.value ?? null)}
 				/>
 			</SettingRow>
 		{:else if fastOn.length}
 			<SettingRow
 				label="Fast mode"
-				hint={saved.fast === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
+				hint={preview ? previewHint : saved.fast === null ? 'Not picked: keeps chat setting' : 'Saved for new chats'}
 				help={fastHelp}
 				value={saved.fast}
 				defaultValue={null}
-				onReset={() => pickFast(null)}
+				onReset={preview ? undefined : () => pickFast(null)}
 			>
-				<Switch checked={saved.fast === true} onchange={(on) => pickFast(on)} />
+				<Switch checked={saved.fast === true} disabled={preview} onchange={(on) => pickFast(on)} />
 			</SettingRow>
 		{:else}
 			<SettingRow
@@ -255,16 +264,17 @@
 		{#if context}
 			<SettingRow
 				label="Standard window"
-				hint="Where Standard chats compact"
+				hint={preview ? previewHint : 'Where Standard chats compact'}
 				help={contextHelp}
 				value={saved.cap}
 				defaultValue={null}
-				onReset={() => pickCap(String(context.standardTokens))}
+				onReset={preview ? undefined : () => pickCap(String(context.standardTokens))}
 			>
 				<SelectField
 					value={String(saved.cap ?? context.standardTokens)}
 					options={contextChoices(context, saved.cap)}
 					width={160}
+					disabled={preview}
 					onchange={pickCap}
 				/>
 			</SettingRow>

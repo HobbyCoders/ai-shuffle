@@ -122,6 +122,10 @@ runJourney({ name: 'model-tuning-speed', cases: [{
       await modelList(page);
       await item(page, model).click();
       await save(page, changed, () => speed(page).selectOption(tier.toLowerCase()), values);
+      if (tier === 'Standard') {
+        await modelList(page);
+        await item(page, model).getByText(/\bStandard\b/).waitFor();
+      }
       await newChatSpeed(page, tier);
     }
     await openTuning(page);

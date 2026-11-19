@@ -229,8 +229,9 @@ export function tuningSummary(model: TuningModel, rows: readonly ModelProvider[]
 	if (effort.kind === 'adjustable') parts.push(`Effort ${effortText(effort, selectedEffort(model))}`);
 	else if (effort.kind === 'unknown') parts.push('Effort not known yet');
 	const speed = composerPreferences.speedForModel(model.routes[0].value);
-	if (speed && speed !== 'standard' && fastRoutes(model).length) {
-		parts.push(SPEED_NAMES[speed === 'ultrafast' && model.routes.some((r) => r.fast && r.ultrafast) ? speed : 'fast']);
+	if (speed && fastRoutes(model).length) {
+		const tier = speed === 'ultrafast' && !model.routes.some((r) => r.fast && r.ultrafast) ? 'fast' : speed;
+		parts.push(SPEED_NAMES[tier]);
 	}
 	const cap = composerPreferences.contextCapForModel(model.routes[0].value);
 	if (cap != null && contextControl(model)) parts.push(formatContextTokens(cap));

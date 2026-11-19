@@ -23,10 +23,13 @@ vi.mock('$lib/services/preferences', () => ({
 		hydrate: vi.fn(async () => {})
 	}
 }));
-const auth = vi.hoisted(() => ({ checkAuth: vi.fn() }));
+const auth = vi.hoisted(() => ({
+	checkAuth: vi.fn(),
+	current: { status: { preview_access: false } }
+}));
 vi.mock('$lib/stores/auth.svelte', async (importOriginal) => ({
 	...(await importOriginal<typeof import('$lib/stores/auth.svelte')>()),
-	auth: { checkAuth: auth.checkAuth }
+	auth
 }));
 
 import type { ModelProvider } from '$lib/api/model-providers';
@@ -135,6 +138,7 @@ const lastSave = () => sync.save.mock.calls.at(-1);
 beforeEach(() => {
 	vi.clearAllMocks();
 	auth.checkAuth.mockResolvedValue(undefined);
+	auth.current.status.preview_access = false;
 	rows = [gatewayRow({ models: [{ id: 'qwen3-coder', label: 'Qwen3 Coder', context_window: 131072 }] })];
 	worker = fakeWorker({ rows }, {
 		'GET /models': () => registry,
@@ -297,6 +301,7 @@ describe('speed and the Standard window', () => {
 		expect(composerPreferences.speedForModel('prov:oai:gpt-6.1-sol')).toBe('fast');
 		await fireEvent.change(speed, { target: { value: 'standard' } });
 		expect(lastSave()).toEqual(['composer.modelFast.gpt-6.1-sol', false]);
+		expect(screen.getByRole('button', { name: /^GPT-6.1 Sol.*Standard/ })).toBeTruthy();
 
 		await fireEvent.change(speed, { target: { value: 'ultrafast' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Reset Speed to default' }));
@@ -306,6 +311,44 @@ describe('speed and the Standard window', () => {
 		]);
 		expect(speed.value).toBe('');
 	});
+	it('preserves a known Ultrafast choice on passive fallback but clears it on explicit Fast-only edits', async () => {
+		composerPreferences.rememberSpeed('prov:oai:gpt-6.1-sol', 'ultrafast');
+		sync.save.mockClear();
+		// This time the model is offered by the Fast-only ChatGPT route.
+		worker = fakeWorker({ rows }, {
+			'GET /models': () => ({ ...registry, providers: registry.providers.filter((p) => p.id !== 'oai') }),
+			'POST /model-providers/refresh-capabilities': () => ({ refreshed: [], failed: [] })
+		});
+		vi.stubGlobal('fetch', worker.fetch);
+		await open('gpt-6.1-sol');
+		const fast = screen.getByRole('switch', { name: 'Fast mode' });
+		expect(fast.getAttribute('aria-checked')).toBe('true');
+		expect(sync.save).not.toHaveBeenCalled();
+		expect(composerPreferences.speedForModel('gpt-6.1-sol')).toBe('ultrafast');
+		await fireEvent.click(screen.getByRole('button', { name: 'Reset Fast mode to default' }));
+		await flush();
+		expect(lastSave()).toEqual(['composer.modelSpeed.gpt-6.1-sol', null]);
+		await fireEvent.click(fast);
+		await flush();
+		expect(composerPreferences.speedForModel('gpt-6.1-sol')).toBe('fast');
+	});
+
+	it('keeps model preferences read-only in an admin preview', async () => {
+		auth.current.status.preview_access = true;
+		composerPreferences.rememberSpeed('gpt-6.1-sol', 'ultrafast');
+		sync.save.mockClear();
+		await open('gpt-6.1-sol');
+		expect(combo('Speed').disabled).toBe(true);
+		expect(combo('Speed').value).toBe('ultrafast');
+		expect(combo('Effort').disabled).toBe(true);
+		expect(screen.queryByRole('button', { name: 'Reset Speed to default' })).toBeNull();
+		cleanup();
+		await open('claude-opus-5');
+		expect((screen.getByRole('switch', { name: 'Fast mode' }) as HTMLButtonElement).disabled).toBe(true);
+		expect(combo('Standard window').disabled).toBe(true);
+		expect(sync.save).not.toHaveBeenCalled();
+	});
+
 	it('saves Fast per model and clears it on reset', async () => {
 		await open('claude-opus-5');
 		const fast = screen.getByRole('switch', { name: 'Fast mode' });
