@@ -337,3 +337,28 @@ def test_an_ultrafast_outcome_carries_its_tier_to_the_app():
     assert message.data["ultrafast_calls"] == 2
     assert (message.data["speed"], message.data["speed_at_end"]) == ("ultrafast", "ultrafast")
     assert fast_outcome_note(message.data)["content"] == "Ran on Ultrafast."
+
+
+@pytest.mark.parametrize("counts, content, outcome", [
+    # Every response named no tier, or one fluid does not recognize.
+    ({"unknown_calls": 11}, "The provider didn't report a recognized speed for this turn.", "unknown"),
+    ({"standard_calls": 1, "unknown_calls": 2},
+     "Of 3 requests, 1 ran at standard speed and 2 didn't report a recognized speed.", "standard"),
+    ({"ultrafast_calls": 1, "unknown_calls": 1},
+     "Ran on Ultrafast for 1 of 2 requests; 1 didn't report a recognized speed.", "partial"),
+    # A response that did report standard processing still says so.
+    ({"standard_calls": 2}, "Ran at standard speed.", "standard"),
+])
+def test_an_unrecognized_ultrafast_tier_never_reads_as_standard(counts, content, outcome):
+    adapter = HarnessAdapter()
+    [message] = adapter._translate(FastModeOutcome(
+        session_id="s", turn_id="t", requested=True, requested_at_end=True,
+        speed="ultrafast", speed_at_end="ultrafast", **counts))
+    note = fast_outcome_note(message.data)
+    assert (note["content"], note["outcome"]) == (content, outcome)
+
+
+def test_a_refusal_still_reads_as_a_standard_fallback_beside_unknown_calls():
+    note = fast_outcome_note({"speed": "ultrafast", "speed_at_end": "ultrafast", "unknown_calls": 1,
+                              "disabled_reason": "ultrafast_unavailable"})
+    assert note["content"] == "Ultrafast isn't available for this account/model; ran on Standard."

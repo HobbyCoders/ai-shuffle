@@ -14,9 +14,12 @@ A turn that asked for Ultrafast (the OpenAI Responses lane: ``speed`` or
 
 ``ultrafast``  every request reported Ultrafast
 ``partial``    some requests reported Ultrafast, others did not
-``standard``   no request reported Ultrafast (for instance the provider
-               refused it: ``disabled_reason`` ``ultrafast_unavailable``)
-``unknown``    no request reported a speed
+``standard``   no request reported Ultrafast, and at least one reported Fast
+               or standard (for instance the provider refused it:
+               ``disabled_reason`` ``ultrafast_unavailable``)
+``unknown``    no request reported a recognized speed (fluid counts a
+               response naming no ``service_tier``, or an unrecognized one,
+               as unknown, never as standard)
 
 The reason wording follows what Claude Code itself says for each value of
 ``fast_mode_disabled_reason``. A value this app has never seen is shown verbatim.
@@ -86,17 +89,23 @@ def _speed(value: Any) -> Optional[str]:
 
 
 def _ran_ultrafast(ultrafast: int, fast: int, standard: int, unknown: int) -> str:
-    """What an Ultrafast turn's requests reported, Fast counted as its own tier."""
+    """What an Ultrafast turn's requests reported, Fast counted as its own tier.
+
+    An unknown request named no tier or one fluid does not recognize: it is
+    never described as Standard.
+    """
     total = ultrafast + fast + standard + unknown
     if ultrafast and ultrafast == total:
         return "Ran on Ultrafast."
+    if unknown and unknown == total:
+        return "The provider didn't report a recognized speed for this turn."
     rest = []
     if fast:
         rest.append(f"{fast} ran on Fast")
     if standard:
         rest.append(f"{standard} ran at standard speed")
     if unknown:
-        rest.append(f"{unknown} didn't report a speed")
+        rest.append(f"{unknown} didn't report a recognized speed")
     if ultrafast:
         return f"Ran on Ultrafast for {ultrafast} of {_requests(total)}; {' and '.join(rest)}."
     if fast and not standard and not unknown:

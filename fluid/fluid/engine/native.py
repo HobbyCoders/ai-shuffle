@@ -688,9 +688,11 @@ _PAYLOAD_IMAGE_MARKERS = ("image", "patches")
 #: The ``service_tier`` value of OpenAI's Ultrafast tier (gated by model, plan
 #: and API eligibility).
 ULTRAFAST_TIER = "ultrafast"
-#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast,
-#: anything else the response names is standard speed.
+#: How a Responses ``service_tier`` reports a call: ``priority`` is Fast and
+#: ``default`` is standard processing. Any other value the response names is
+#: not evidence of a speed (see :func:`_reported_speed`).
 _REPORTED_TIERS = {"ultrafast": "ultrafast", "priority": "fast"}
+_REPORTED_STANDARD_TIERS = frozenset({"default"})
 
 
 def _is_ultrafast_rejection(payload: dict[str, Any]) -> bool:
@@ -724,13 +726,36 @@ def _is_ultrafast_rejection(payload: dict[str, Any]) -> bool:
 def _reported_speed(requested_tier: Any, reported_tier: Any) -> str:
     """``ultrafast``/``fast``/``standard``/``unknown`` for one finished call.
 
-    The response's own ``service_tier`` wins; a response that names none
-    leaves the call unknown rather than assuming the requested tier.
+    The response's own ``service_tier`` wins. A response that names none,
+    or names a value this module does not recognize (``auto``, an alias a
+    backend invents), leaves the call unknown rather than assuming either the
+    requested tier or Standard.
     """
     del requested_tier  # what was asked never decides what ran
-    if isinstance(reported_tier, str) and reported_tier:
-        return _REPORTED_TIERS.get(reported_tier.lower(), "standard")
-    return "unknown"
+    if not isinstance(reported_tier, str):
+        return "unknown"
+    tier = reported_tier.strip().lower()
+    if tier in _REPORTED_STANDARD_TIERS:
+        return "standard"
+    return _REPORTED_TIERS.get(tier, "unknown")
+
+
+#: A tier name worth keeping verbatim in an observation: a short lowercase
+#: token. Anything else is replaced, so an observation never carries text.
+_OBSERVABLE_TIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,31}")
+
+
+def _observed_tier(value: Any, missing: str) -> str:
+    """One ``service_tier`` as a diagnostic observation records it.
+
+    ``missing`` when there is none (no string, or an empty one); the
+    lowercased token when it looks like a tier name; ``unrecognized_format``
+    for any other string, which is not kept.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return missing
+    tier = value.strip().lower()
+    return tier if _OBSERVABLE_TIER.fullmatch(tier) else "unrecognized_format"
 
 
 def _is_payload_rejection(message: str, status: int | None = None) -> bool:
@@ -1305,6 +1330,12 @@ class NativeLoop(BackgroundLifecycleMixin):
         # ``service_tier``, a provider-specific flag). The host owns the keys
         # and their validity; fluid neither inspects nor maps them.
         self.request_extra = dict(request_extra or {})
+        # Diagnostic, off by default: when the host turns it on, each finished
+        # main call's Usage ``raw`` also names the ``service_tier`` the request
+        # sent and the one the response reported (``service_tier_requested`` /
+        # ``service_tier_reported``), each a short token or a placeholder,
+        # never other request or response content. The host sets it per turn.
+        self.observe_service_tier = False
         self.registry = registry
         self.permissions = permissions
         self.hooks = hooks
@@ -5987,6 +6018,11 @@ class NativeLoop(BackgroundLifecycleMixin):
                 if payload.get("stop_reason"):
                     # A finished call; the Responses lane names the tier it ran on.
                     self._note_call_speed(request, payload.get("service_tier"))
+                    if self.observe_service_tier:
+                        usage_totals["service_tier_requested"] = _observed_tier(
+                            (request.extra or {}).get("service_tier"), "none")
+                        usage_totals["service_tier_reported"] = _observed_tier(
+                            payload.get("service_tier"), "absent")
             elif chunk.kind == "error":
                 if payload.get("transport_failure"):
                     usage_totals["transport_failure"] = payload["transport_failure"]

@@ -1849,6 +1849,10 @@ class HarnessAdapter(ProviderAdapter):
         """
         from app.core.session_plan import Backend, CURRENT_PLAN_RUN
 
+        if self._provider_kind == "openai_responses" and not self._is_delegated:
+            # Opt-in diagnostic, read per turn (see _observes_service_tier).
+            self._engine.observe_service_tier = await run_sync(
+                _observes_service_tier, self._resolve_app_session_id())
         ctx = getattr(self._engine, "ctx", None)
         previous = ctx.extra.get("session_plan") if ctx is not None else None
         proof = CURRENT_PLAN_RUN.get()
@@ -10176,6 +10180,37 @@ def _native_request_extra(kind: Optional[str], options: SessionOptions, model: O
     provider_id = (options.extra or {}).get("provider_id")
     row = _lookup_provider_row(provider_id) if provider_id else None
     return local_request_extra(row, model if model is not None else options.model)
+
+
+#: Owner preference naming the chats whose OpenAI Responses calls record the
+#: ``service_tier`` they sent and the one the response reported (a JSON list
+#: of app session ids). Absent or empty: nothing is recorded. A diagnostic
+#: for a test chat; see docs/content/api-reference/websocket.md.
+OBSERVE_SERVICE_TIER_PREFERENCE = "diagnostics.observe_service_tier"
+
+
+def _observes_service_tier(session_id: Optional[str]) -> bool:
+    """Whether the chat's owner listed ``session_id`` in the preference above.
+
+    Blocking (DB reads). Read per turn, so a change applies from the chat's
+    next turn without a restart. Never raises: any failure means off.
+    """
+    if not session_id:
+        return False
+    try:
+        from app.core.model_effort import _caller_preference_identity
+        from app.db import database
+
+        row = database.get_session(session_id)
+        if not row:
+            return False
+        pref = database.get_user_preference(
+            *_caller_preference_identity(row), OBSERVE_SERVICE_TIER_PREFERENCE)
+        listed = (pref or {}).get("value")
+        return isinstance(listed, list) and session_id in listed
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks a turn
+        logger.debug("[HarnessAdapter] service tier observation check failed", exc_info=True)
+        return False
 
 
 def _ultrafast_ok(options: SessionOptions, model: Optional[str] = None) -> bool:
