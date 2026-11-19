@@ -266,6 +266,8 @@
 	// row says the same words (#1341); one with an action (Fork here) stays.
 	const bannerError = $derived(visibleTurnError($activeSession));
 	let followedViewportEnd = 0;
+	// The prose end the floor was captured over (see readingFloorReserve).
+	let followedProseEnd = 0;
 	let followedFloorContext: { sessionId: string | null } | null = null;
 	let currentTurnAnchorId: string | null = null;
 	let tailReservePx = $state(MIN_TRANSCRIPT_TAIL_RESERVE);
@@ -927,7 +929,7 @@
 		windowShifting = true;
 		// A floor measured in the previous bounded slice is not a scroll target
 		// in this one. Retained-row anchoring owns coordinate compensation.
-		followedViewportEnd = 0;
+		followedViewportEnd = followedProseEnd = 0;
 		mountedRange = next;
 		leadingGap = 0;
 		if (windowSessionKey) {
@@ -1493,7 +1495,11 @@
 	 *
 	 * A followed reader is owed the viewport end the boundary effect captured:
 	 * dequeue and its delivered user row are separate commits, so the read viewport
-	 * stays available between them and later content consumes it.
+	 * stays available between them and later content consumes it. That floor holds
+	 * only the room that sat below the prose when it was captured: prose that
+	 * shrinks under a follower (a live work run folding into one label as new prose
+	 * starts) is not held. Holding it kept scrollTop on the old end and, once the
+	 * shrink outgrew the view, left a whole blank viewport above the stream.
 	 *
 	 * Rule: a reader who is not following is owed their own viewport end, so the
 	 * applied reserve drops by at most the room below their view and never clamps
@@ -1507,9 +1513,39 @@
 	function readingFloorReserve(): number {
 		if (!containerRef || !tailSpacerRef || windowShifting) return 0;
 		if (!shouldAutoScroll && !containerRef.clientHeight) return Math.max(tailReservePx, latestTurnTailPx);
-		const proseEnd = containerRef.scrollTop + tailSpacerRef.getBoundingClientRect().top - containerRef.getBoundingClientRect().top;
-		const owedEnd = shouldAutoScroll ? followedViewportEnd : containerRef.scrollTop + containerRef.clientHeight;
-		return Math.max(0, owedEnd - proseEnd);
+		const { proseEnd, reserveStart } = floorGeometry();
+		const owedEnd = shouldAutoScroll
+			? followedViewportEnd - Math.max(0, followedProseEnd - proseEnd)
+			: containerRef.scrollTop + containerRef.clientHeight;
+		return Math.max(0, owedEnd - reserveStart);
+	}
+
+	/**
+	 * Pre-render, while following: owe the painted viewport end over the painted
+	 * prose end, both read from this one layout (lastKnownScrollTop can still be
+	 * the end before a clamp). The floor already owed carries over less the prose
+	 * that collapsed under it since its capture: a later queue bubble's room is
+	 * owed in full, and a fold's collapsed prose is not held again.
+	 */
+	function captureFollowedFloor() {
+		if (!containerRef) return;
+		const { proseEnd } = floorGeometry();
+		const carried = followedViewportEnd - Math.max(0, followedProseEnd - proseEnd);
+		followedViewportEnd = Math.max(carried, containerRef.scrollTop + containerRef.clientHeight);
+		followedProseEnd = proseEnd;
+	}
+
+	/** The in-flow task row is a control, not prose: when Stop removes it, keep
+	 * its room just like a departing queued bubble. Only shrinkage above that
+	 * row (e.g. a folding tool list) should shorten the followed viewport. */
+	function floorGeometry() {
+		if (!containerRef || !tailSpacerRef) return { proseEnd: 0, reserveStart: 0 };
+		const origin = containerRef.scrollTop - containerRef.getBoundingClientRect().top;
+		const reserveStart = origin + tailSpacerRef.getBoundingClientRect().top;
+		const previous = tailSpacerRef.previousElementSibling;
+		const proseEnd = previous?.hasAttribute('data-transcript-task-row')
+			? origin + previous.getBoundingClientRect().top : reserveStart;
+		return { proseEnd, reserveStart };
 	}
 
 	async function maintainCurrentTurnAnchor(initial = false, beforeShrink?: number) {
@@ -1518,6 +1554,10 @@
 		const maintainedWindowVersion = windowShiftVersion;
 		const anchor = document.getElementById(turnAnchorId(maintainedTurnId));
 		if (!anchor || !containerRef.contains(anchor)) {
+			// A hidden page mounts no new rows (transcriptWindow.pauseWhenHidden):
+			// a queued prompt delivered while the device is closed has no row yet.
+			// It keeps its anchor until the window mounts it on visibility.
+			if (document.hidden) return;
 			cancelCurrentTurnAnchor();
 			return;
 		}
@@ -1654,7 +1694,7 @@
 
 	function startCurrentTurnAnchor(messageId: string, fromQueue = false) {
 		if (!fromQueue) {
-			followedViewportEnd = 0;
+			followedViewportEnd = followedProseEnd = 0;
 			presentedTailError = null;
 			tailErrorOffsetPx = 0;
 			tailQueueSlotPx = 0;
@@ -1914,7 +1954,7 @@
 					// The followed floor holds the live edge the reader just left. As for
 					// wheel/touch (disengageAutoScroll), they own their place now, and a
 					// later return to the bottom re-measures rather than restore it.
-					followedViewportEnd = 0;
+					followedViewportEnd = followedProseEnd = 0;
 					// #865: the capture queued by this scroll ran while still following
 					// the bottom; take the reading row now that the reader has left it.
 					scheduleReadingAnchorCapture();
@@ -1949,7 +1989,7 @@
 	 */
 	function disengageAutoScroll() {
 		queuedPrompts.releaseStopFollow();
-		followedViewportEnd = 0;
+		followedViewportEnd = followedProseEnd = 0;
 		cancelCurrentTurnAnchor();
 		if (!shouldAutoScroll && !pendingScrollToBottom) return;
 		// Stop any in-flight scroll settle so it can't keep fighting the user
@@ -2095,7 +2135,10 @@
 			// Use double RAF to ensure browser has finished any scroll restoration
 			requestAnimationFrame(() => {
 				requestAnimationFrame(() => {
-					scrollToBottom();
+					// An anchored prompt keeps its place, as on a resize: the bottom of
+					// its reserve is blank room owed to the reply, not more transcript.
+					if (currentTurnAnchorId) scheduleCurrentTurnAnchorMaintenance();
+					else scrollToBottom();
 				});
 			});
 		}
@@ -2446,7 +2489,7 @@
 		}
 		const resetFloor = s.sessionId !== followedFloorContext?.sessionId || (!s.messages.length && !s.isStreaming) || untrack(() => windowShifting);
 		if (resetFloor) {
-			followedViewportEnd = 0;
+			followedViewportEnd = followedProseEnd = 0;
 			followedFloorContext = { sessionId: s.sessionId };
 		}
 		const boundary = `${s.sessionId}:${s.messages.length}:${s.isStreaming}:${s.liveTurnId}:${bannerError}:${tailSendRevision}:${s.queuedMessages.map(m => `${m.id}:${m.status ?? ''}`).join(',')}`;
@@ -2455,7 +2498,7 @@
 		// lastKnownScrollTop still belongs to the outgoing/cleared slice here.
 		const follow = !unchanged && !resetFloor && untrack(() => isMounted && shouldAutoScroll) && !!containerRef;
 		const beforeTop = untrack(() => lastKnownScrollTop);
-		if (follow && containerRef) followedViewportEnd = Math.max(followedViewportEnd, beforeTop + containerRef.clientHeight);
+		if (follow && containerRef) captureFollowedFloor();
 		if (takeoverBlank) freeFollowedFloor(takeoverBlank);
 		if (!follow) return;
 		const sessionId = s.sessionId;

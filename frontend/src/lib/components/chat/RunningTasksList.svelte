@@ -1263,7 +1263,7 @@
 	<!-- One look on desktop and phone: a collapsible row under the last reply.
 	     The full list (search, filters, swipe to stop) opens from "Show all"
 	     here and, on a phone, from Chat controls > Running tasks. -->
-	<div class="inline" class:touch={mobileShell} data-open={inlineOpen}>
+	<div class="inline" class:touch={mobileShell} data-open={inlineOpen} data-transcript-task-row>
 		<div class="inline-head">
 			<button type="button" class="inline-toggle" onclick={toggleInline} aria-expanded={inlineOpen}
 				data-testid="tasks-toggle" title={inlineOpen ? 'Collapse task list' : 'Show running tasks'}>

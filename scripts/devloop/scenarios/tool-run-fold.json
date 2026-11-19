@@ -1,0 +1,22 @@
+{
+  "description": "A short opening line, then sixteen one-command tool rounds (a long flat work run), then new prose that streams slowly. The moment that prose starts, the live turn folds the run above it into one label, shrinking the transcript above a reader following the live edge by more than a phone viewport.",
+  "steps": [
+    { "text": "Checking the project step by step.", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 1" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 2" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 3" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 4" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 5" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 6" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 7" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 8" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 9" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 10" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 11" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 12" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 13" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 14" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 15" } }] },
+    { "text": "", "tool_calls": [{ "name": "Bash", "input": { "command": "echo step 16" } }] },
+    { "text": "All sixteen checks ran. The new paragraph starts here and streams slowly, so a reader following the live edge should keep seeing it arrive at the bottom of the screen while the finished commands above it fold into one line. It keeps going for a while longer to leave time to look at the screen during the stream. Done." }
+  ]
+}

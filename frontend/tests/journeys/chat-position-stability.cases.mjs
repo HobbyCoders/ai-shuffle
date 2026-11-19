@@ -4,7 +4,7 @@
 // produced by real UI sends through the devloop's fake providers; the long
 // error/Stop case specifically requires the seeded Claude Code CLI project.
 import { writeFileSync } from 'node:fs';
-import { ERROR_ROW_PROBE, SEEDED, api, composer, errorRow, expect, gotoApp, openFromSidebar, openPopup, pick, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated, waitTurnSettled } from './lib/app.mjs';
+import { ERROR_ROW_PROBE, PROJECT, SEEDED, api, chatIdByToken, composer, errorRow, expect, gotoApp, openFromSidebar, openNewChat, openPopup, pick, pickAccess, pickAgent, pickProject, scriptTag, seededChatId, sendButton, sidebarRow, typeAndSend, uniq, waitChat, waitChatOpen, waitSeated, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const mobile = process.argv.includes('--mobile-shell');
@@ -881,6 +881,466 @@ cases.push({
 	}
 });
 
+// A follower's live work run folds into one label when new prose starts, so the
+// prose above the reader shrinks by more than a phone viewport mid-stream. The
+// followed floor held that shrink as padding: scrollTop stayed on the old end and
+// the whole transcript sat above a blank view, Stop live and the scrollbar near
+// the bottom. Every painted frame must keep transcript content on screen.
+async function openFoldChat(ctx, path = prefix(ctx.variant)) {
+	const { page, status, variant } = ctx;
+	// Bash needs a project chat; Bypass is picked in the shared UI (the phone
+	// sheet's picker stays open), then the chat reopens in the real /mobile/.
+	await openNewChat(ctx, { project: PROJECT });
+	await pickAccess(page, 'Bypass');
+	const token = `fold-history-${uniq()}`;
+	await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 400 })}`);
+	await waitTurnSettled(page, { hold: 500, timeout: 120_000 });
+	const id = await chatIdByToken(page, token);
+	if (path !== '/') {
+		await gotoApp(page, status, `${path}?session=${encodeURIComponent(id)}`);
+		await waitChatOpen(page, { messagesAtLeast: 2, hold: 800 });
+	}
+	return id;
+}
+
+/** Per painted frame: blank-viewport runs while streaming, the largest prose-end
+ * drop (the fold), and once `track(key)` is called, that row's geometry for
+ * `foldClamp`. */
+async function watchFold(page) {
+	await page.evaluate(() => {
+		const watch = window.__foldFrames = { running: true, frames: 0, streaming: 0, blank: [], run: 0, longest: 0, proseDrop: 0, lastProseEnd: null,
+			track: null, tracked: 0, trace: [] };
+		const visible = (el, box) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+		const sample = () => {
+			if (!watch.running) return;
+			const log = document.querySelector('[role="log"][aria-label="Conversation messages"]');
+			const spacer = log?.querySelector('.transcript-tail-spacer');
+			const box = log?.getBoundingClientRect();
+			if (log && spacer && document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming === 'true') {
+				const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+				const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')];
+				watch.streaming++;
+				// The prose end in scroll coordinates: proves the fold really shrank it.
+				const proseEnd = log.scrollTop + spacer.getBoundingClientRect().top - box.top;
+				if (watch.lastProseEnd !== null) watch.proseDrop = Math.max(watch.proseDrop, watch.lastProseEnd - proseEnd);
+				watch.lastProseEnd = proseEnd;
+				if (rows.length && !rows.some(el => visible(el, box)) && !controls.some(el => visible(el, box))) {
+					watch.run++;
+					watch.longest = Math.max(watch.longest, watch.run);
+					if (watch.blank.length < 5) watch.blank.push({ scrollTop: Math.round(log.scrollTop), scrollHeight: log.scrollHeight, viewport: log.clientHeight,
+						padding: getComputedStyle(log.querySelector('.chat-column')).paddingBottom, lastRowBottom: Math.round(rows.at(-1).getBoundingClientRect().bottom - box.top) });
+				} else watch.run = 0;
+			}
+			const row = watch.track && log?.querySelector(`.chat-column > [data-transcript-key="${CSS.escape(watch.track)}"]`);
+			if (row) {
+				watch.tracked++;
+				// [rowTop, scrollTop, scrollHeight, proseEnd on screen, column padding, queued bubbles, user rows]
+				watch.trace.push([row.getBoundingClientRect().top - box.top, log.scrollTop, log.scrollHeight, spacer.getBoundingClientRect().top - box.top,
+					parseFloat(getComputedStyle(log.querySelector('.chat-column')).paddingBottom), log.querySelectorAll('.pending-messages .userrow').length,
+					log.querySelectorAll('[data-user-turn-id]').length]);
+			}
+			watch.frames++;
+			requestAnimationFrame(sample);
+		};
+		requestAnimationFrame(sample);
+	});
+	return {
+		track: key => page.evaluate(key => { window.__foldFrames.track = key; }, key),
+		stop: () => page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames; })
+	};
+}
+
+/** A follower at the live edge gives prose that collapsed above it back as
+ * scroll, keeping the edge still. Scroll lost beyond that shrink is a clamp: the
+ * reserve fell (a dequeued bubble's room released before its row landed) and
+ * the browser pulled the follower up into content it already passed. */
+function foldClamp(trace) {
+	let worst = { by: 0, at: -1 };
+	for (let i = 1; i < trace.length; i++) {
+		const [, top0, , edge0] = trace[i - 1], [, top1, , edge1] = trace[i];
+		const shrink = Math.max(0, (top0 + edge0) - (top1 + edge1));
+		const by = (top0 - top1) - shrink;
+		if (by > worst.by) worst = { by, at: i };
+	}
+	// The order under test: the bubble left before its transcript row landed.
+	const left = trace.findLastIndex(f => f[5] > 0), users = left < 0 ? 0 : trace[left][6];
+	const landed = left < 0 ? -1 : trace.findIndex((f, i) => i > left && f[6] > users);
+	const round = rows => rows.map(f => f.map(v => Math.round(v)));
+	return { by: worst.by, gapFrames: left < 0 || landed < 0 ? 0 : landed - left - 1,
+		around: worst.at < 0 ? [] : round(trace.slice(Math.max(0, worst.at - 3), worst.at + 4)),
+		handoff: left < 0 ? [] : round(trace.slice(Math.max(0, left - 2), left + 6)) };
+}
+
+async function checkFold(page, log, watch, label) {
+	const viewport = await page.locator(LOG).evaluate(el => el.clientHeight);
+	log(`${label} ${JSON.stringify({ frames: watch.frames, streaming: watch.streaming, proseDrop: Math.round(watch.proseDrop), viewport, blankFrames: watch.blank.length,
+		longest: watch.longest, blank: watch.blank, tracked: watch.tracked, clamp: foldClamp(watch.trace) })}`);
+	expect(watch.streaming > 20, `the stream was sampled while live (${watch.streaming} frames)`);
+	expect(watch.proseDrop > viewport, `the folding run shrank the prose by more than the viewport (${Math.round(watch.proseDrop)}px > ${viewport}px)`);
+	expect(watch.longest === 0, `no streaming frame left the follower on a blank viewport (longest blank run ${watch.longest} frames)`);
+	const settled = await page.locator(LOG).evaluate(el => {
+		const box = el.getBoundingClientRect();
+		const last = [...el.querySelectorAll('.chat-column > [data-transcript-key]')].at(-1).getBoundingClientRect();
+		return { rowTop: last.top - box.top, rowBottom: last.bottom - box.top, viewport: el.clientHeight };
+	});
+	expect(settled.rowBottom > 8 && settled.rowTop < settled.viewport - 8, `the settled reply stays on screen (${JSON.stringify(settled)})`);
+}
+
+cases.push({
+	name: 'live-run-fold-keeps-the-stream-on-screen', viewports: ['phone'], throttles: ['slow'],
+	setup: openFoldChat,
+	async act({ page, variant, mark, log }) {
+		const { stop } = await watchFold(page);
+		await mark('a long flat tool run folds above the follower as new prose streams');
+		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await waitTurnSettled(page, { hold: 800, timeout: 120_000 });
+		await checkFold(page, log, await stop(), 'live run fold');
+	}
+});
+
+// Round-1 review order: the fold first, then a fresh queued bubble docks under
+// the follower, then it leaves the queue. Native delivery retires the bubble in
+// the same commit its row lands (#1052); the fake Claude CLI's queue snapshot
+// (WebSocket) and delivered row (events feed) can arrive apart, so the bubble
+// leaves before its transcript row. The floor captured over the bubble must owe
+// its whole room (not only the room from before the fold), or the follower is
+// clamped up by the bubble and comes back when the row lands. Local phone runs
+// on both paths delivered atomically, so the split order is pinned by
+// MessageArea.follow-floor.test.ts and this case guards the combined flow.
+async function foldThenQueue({ page, variant, mark, log }, label) {
+	const { track, stop } = await watchFold(page);
+	await mark('fold a long tool run above the follower');
+	await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+	await waitChat(page, { streaming: 'true' });
+	const key = await page.waitForFunction(() => [...document.querySelectorAll('.chat-column > [data-transcript-key]')]
+		.findLast(row => row.querySelector('.prose')?.textContent.includes('All sixteen checks ran'))?.dataset.transcriptKey, null, { timeout: 120_000 })
+		.then(handle => handle.jsonValue());
+	await mark('queue a prompt after the fold, while the new prose streams');
+	await typeAndSend(page, `queued after fold ${uniq()} [script:default tps=300]`);
+	await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+	await track(key);
+	await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
+	await waitTurnSettled(page, { hold: 3000, timeout: 120_000 });
+	const watch = await stop();
+	await checkFold(page, log, watch, label);
+	expect(watch.tracked > 20, `the folded reply was tracked through the handoff (${watch.tracked} frames)`);
+	const clamp = foldClamp(watch.trace);
+	expect(clamp.by <= 2, `the follower is never clamped back over the dequeued bubble's room (${clamp.by.toFixed(1)}px beyond collapsed prose)`);
+}
+
+cases.push({
+	name: 'live-run-fold-then-queue-handoff', viewports: ['phone'], throttles: ['slow'],
+	setup: openFoldChat,
+	act: ctx => foldThenQueue(ctx, 'fold then queue handoff')
+});
+
+// Closing a foldable on a live chat (owner report, 2026-11-18): the SAME page
+// goes from the inner screen to the cover screen. ChatActivity handles the
+// size change itself (configChanges), so the document is kept; onStop pauses
+// the WebView, which holds frames (rAF, scroll, ResizeObserver) until onResume
+// while the reply keeps streaming. Emulated by holding those callbacks. This
+// order did not leave a blank viewport on main d2fe0a710 either: a guard for
+// the transition, not a reproduction of the owner's report.
+//
+// A stopped page also paints nothing, but headless Chromium keeps painting a
+// page that only reports itself hidden, and scores layout shifts in those
+// frames. The held ResizeObserver defers the follower's correction for the
+// reflow until the next DOM change, past the browser's 500ms excuse for the
+// resize, so a frame no closed device shows scored the docked queue scrolling
+// into view (#1824 CI). While paused the page is drawn invisible (layout,
+// scroll and hit-boxes unchanged); resume shows it in the same frame as the
+// held callbacks, as onResume does, and every frame from there is scored.
+function holdFramesWhilePaused() {
+	const r = (window.__render = { paused: false, rafQ: [], ros: new Set(), scrolls: new Set() });
+	const unseen = new CSSStyleSheet();
+	unseen.replaceSync('*, *::before, *::after { visibility: hidden !important; }');
+	const painted = on => { document.adoptedStyleSheets = on ? document.adoptedStyleSheets.filter(s => s !== unseen) : [...document.adoptedStyleSheets, unseen]; };
+	const raf = window.requestAnimationFrame.bind(window), caf = window.cancelAnimationFrame.bind(window);
+	window.requestAnimationFrame = cb => { if (!r.paused) return raf(cb); r.rafQ.push(cb); return -r.rafQ.length; };
+	window.cancelAnimationFrame = id => { if (id < 0) r.rafQ[-id - 1] = null; else caf(id); };
+	const RO = window.ResizeObserver;
+	window.ResizeObserver = class extends RO {
+		constructor(cb) {
+			let self = null;
+			super((entries, obs) => { if (r.paused) r.ros.add(self); else cb(entries, obs); });
+			self = this; this.cb = cb; this.targets = new Set();
+		}
+		observe(t, o) { this.targets.add(t); return super.observe(t, o); }
+		unobserve(t) { this.targets.delete(t); return super.unobserve(t); }
+		disconnect() { this.targets.clear(); r.ros.delete(this); return super.disconnect(); }
+	};
+	document.addEventListener('scroll', e => { if (r.paused) { e.stopImmediatePropagation(); r.scrolls.add(e.target); } }, true);
+	const visibility = hidden => {
+		Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => hidden ? 'hidden' : 'visible' });
+		Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+		document.dispatchEvent(new Event('visibilitychange'));
+	};
+	r.stop = () => { visibility(true); r.paused = true; painted(false); };
+	r.resume = () => {
+		painted(true);
+		visibility(false);
+		r.paused = false;
+		const queued = r.rafQ.splice(0);
+		raf(t => {
+			for (const target of r.scrolls) target.dispatchEvent(new Event('scroll'));
+			r.scrolls.clear();
+			for (const ro of [...r.ros]) ro.cb([...ro.targets].map(target => ({ target, contentRect: { width: target.clientWidth, height: target.clientHeight } })), ro);
+			r.ros.clear();
+			for (const cb of queued) cb?.(t);
+		});
+	};
+}
+
+/** A long two-turn chat on the inner screen, reopened in the shell that runs on the device. */
+async function openCloseChat(ctx) {
+	const { page, status, variant } = ctx;
+	await page.addInitScript(holdFramesWhilePaused);
+	await openNewChat(ctx);
+	const token = `foldclose-${uniq()}`;
+	await typeAndSend(page, `${token} ${scriptTag(variant, 'long', { tps: 4000 })}`);
+	await waitTurnSettled(page, { messagesAtLeast: 2, hold: 300, timeout: 120_000 });
+	await typeAndSend(page, `more ${uniq()} ${scriptTag(variant, 'long', { tps: 4000 })}`);
+	await waitTurnSettled(page, { messagesAtLeast: 4, hold: 300, timeout: 120_000 });
+	const id = await chatIdByToken(page, token);
+	await gotoApp(page, status, `${mobile ? '/mobile/' : '/'}?session=${encodeURIComponent(id)}`);
+	await waitChatOpen(page, { messagesAtLeast: 4, hold: 800 });
+}
+
+cases.push({
+	name: 'fold-close-resume-keeps-the-live-reply-on-screen', viewports: ['fold-inner'], throttles: ['slow'],
+	setup: openCloseChat,
+	async act({ page, variant, mark, log }) {
+		await mark('a plain reply streams on the inner screen, followed');
+		await typeAndSend(page, `live ${uniq()} ${scriptTag(variant, 'long', { tps: 25 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await page.waitForTimeout(2500);
+		await page.evaluate(LOG => {
+			const w = window.__foldFrames = { frames: [], running: true };
+			const tick = () => {
+				if (!w.running) return;
+				const log = document.querySelector(LOG);
+				const box = log.getBoundingClientRect();
+				const seen = el => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+				const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+				const last = rows.at(-1)?.getBoundingClientRect();
+				w.frames.push({ w: innerWidth, top: log.scrollTop, height: log.scrollHeight, viewport: log.clientHeight,
+					blank: rows.length > 0 && !rows.some(seen) && ![...log.querySelectorAll('.tail-controls, .turn-activity')].some(seen),
+					lastTop: last ? last.top - box.top : null, lastBottom: last ? last.bottom - box.top : null,
+					streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming });
+				requestAnimationFrame(tick);
+			};
+			requestAnimationFrame(tick);
+		}, LOG);
+		await mark('close the device: the page is hidden and paused, then sized to the cover screen');
+		await page.evaluate(() => window.__render.stop());
+		await page.waitForTimeout(300);
+		await page.setViewportSize({ width: 360, height: 882 });
+		await page.waitForTimeout(1500);
+		await mark('resume the same chat on the cover screen');
+		await page.evaluate(() => window.__render.resume());
+		await page.waitForTimeout(3000);
+		const frames = (await page.evaluate(() => { window.__foldFrames.running = false; return window.__foldFrames.frames; })).filter(f => f.w === 360);
+		let run = 0, longest = 0;
+		for (const f of frames) { run = f.blank ? run + 1 : 0; longest = Math.max(longest, run); }
+		const end = frames.at(-1);
+		log(`fold close ${JSON.stringify({ frames: frames.length, longest, first: frames[0], end })}`);
+		expect(frames.filter(f => f.streaming === 'true').length > 20, `the cover screen was sampled while the reply streamed (${frames.length} frames)`);
+		expect(longest === 0, `no cover-screen frame shows a blank transcript (longest blank run ${longest} frames)`);
+		expect(end.lastBottom > 8 && end.lastTop < end.viewport - 8, `the followed live reply is on screen after resume (${JSON.stringify(end)})`);
+	}
+});
+
+/** Per painted frame on the cover screen: scroll, the followed content end and
+ * blank runs, the row carrying `token`, the queue and, when `bubble` names the
+ * words of a queued prompt, whether that bubble is drawn in this frame. No
+ * frames run while paused. */
+function sampleCover({ LOG, token, bubble: words }) {
+	const w = window.__cover = { running: true, frames: [] };
+	// Inside the scroller, opaque, with nothing over it: three hit-tests down its
+	// left edge must land in this bubble, in the same frame its box is read.
+	const drawn = (el, log, box) => {
+		if (!el) return null;
+		const r = el.getBoundingClientRect();
+		let opacity = 1, shown = getComputedStyle(el).visibility === 'visible';
+		for (let at = el; at && at !== log; at = at.parentElement) opacity *= +getComputedStyle(at).opacity;
+		const x = r.left + Math.min(24, r.width / 2);
+		const hits = [r.top + 8, (r.top + r.bottom) / 2, r.bottom - 8].filter(y => el.contains(document.elementFromPoint(x, y))).length;
+		return { top: Math.round(r.top - box.top), bottom: Math.round(r.bottom - box.top), hits, opacity: Math.round(opacity * 100) / 100,
+			ok: r.height > 16 && r.top >= box.top && r.bottom <= box.bottom && shown && opacity > 0.99 && hits === 3,
+			text: words.every(s => el.textContent.includes(s)) };
+	};
+	const tick = () => {
+		const log = document.querySelector(LOG);
+		if (!w.running || !log) return;
+		const box = log.getBoundingClientRect();
+		const seen = el => { const r = el.getBoundingClientRect(); return r.height > 0 && r.bottom > box.top + 8 && r.top < box.bottom - 8; };
+		const rows = [...log.querySelectorAll('.chat-column > [data-transcript-key]')];
+		const controls = [...log.querySelectorAll('.tail-controls, .tail-error, .turn-activity')].filter(el => el.getBoundingClientRect().height > 0);
+		const prompt = rows.findLast(el => el.textContent.includes(token));
+		const queuedBubble = words && [...log.querySelectorAll('.pending-messages [data-queue-confirmed="true"]')].find(el => el.textContent.includes(words[0]));
+		w.frames.push({ w: innerWidth, at: Math.round(performance.now()), top: log.scrollTop, viewport: log.clientHeight,
+			// The followed edge: the last row or a docked control, in scroll coordinates.
+			end: log.scrollTop + Math.max(...[rows.at(-1), ...controls].filter(Boolean).map(el => el.getBoundingClientRect().bottom - box.top)),
+			blank: rows.length > 0 && !rows.some(seen) && !controls.some(seen),
+			promptTop: prompt ? Math.round(prompt.getBoundingClientRect().top - box.top) : null,
+			promptBottom: prompt ? Math.round(prompt.getBoundingClientRect().bottom - box.top) : null,
+			folded: !!log.querySelector('.chat-column [data-run-fold]'),
+			...(words ? { bubble: drawn(queuedBubble, log, box) } : {}),
+			users: log.querySelectorAll('[data-user-turn-id]').length, queued: log.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length,
+			streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming });
+		requestAnimationFrame(tick);
+	};
+	requestAnimationFrame(tick);
+}
+
+/** Resumed frames until the transcript or queue changes: a follower's scroll may
+ * only reveal content past the viewport (MIN_TRANSCRIPT_TAIL_RESERVE below it),
+ * never move into the blank reserve owed to the reply. */
+function coverResume(frames, from) {
+	let longest = 0, run = 0, worst = { by: 0, at: -1 }, i = from;
+	for (; i < frames.length; i++) {
+		const f = frames[i], prev = frames[i - 1];
+		run = f.blank ? run + 1 : 0;
+		longest = Math.max(longest, run);
+		if (i === from || f.users !== prev.users || f.queued !== prev.queued) { if (i > from) break; continue; }
+		const by = f.top - Math.max(prev.top, f.end - f.viewport + 24);
+		if (by > worst.by) worst = { by, at: i };
+	}
+	return { longest, frames: i - from, by: Math.round(worst.by), around: worst.at < 0 ? [] : frames.slice(Math.max(from, worst.at - 2), worst.at + 2) };
+}
+
+// Past the minimum tail, room for the reply's next row (its activity line) as
+// the catch-up lands; the regression parked the reader 245-261px into the reserve.
+const RESUME_SLACK = 48;
+const pauseClose = async (page) => { await page.evaluate(() => window.__render.stop()); await page.setViewportSize({ width: 360, height: 882 }); };
+const pausedUntil = (page, fn, arg) => page.waitForFunction(fn, arg, { polling: 50, timeout: 120_000 });
+
+// Round-2 review order: the device closes while a confirmed queued bubble is
+// docked under the follower, and the tool run above it folds. An ordinary
+// queued prompt is handed into the running turn at its next tool boundary
+// (steering), so its bubble leaves before the fold. A note reference needs turn
+// setup and is never steered (session_runtime._steer_refusal): this bubble stays
+// docked until the turn ends, then runs as its own turn (a missing note is sent
+// as typed). A hidden page paints no fold: the feed defers streamed text and the
+// transcript window mounts no new rows until visible. So the server finishes the
+// tools while the device is closed, and the collapse paints in the catch-up at
+// resume, on the cover screen, with the bubble still docked.
+const runFolded = () => !!document.querySelector('.chat-column [data-run-fold]');
+cases.push({
+	name: 'fold-close-across-a-tool-fold-keeps-reply-and-queue-on-screen', viewports: ['fold-inner'], throttles: ['slow'],
+	async setup(ctx) {
+		await ctx.page.addInitScript(holdFramesWhilePaused);
+		ctx.foldChatId = await openFoldChat(ctx, mobile ? '/mobile/' : '/');
+	},
+	async act({ page, variant, mark, log, foldChatId: session }) {
+		const queued = `queued-note-${uniq()}`;
+		expect(!!session, 'setup named the chat');
+		await mark('a long tool run streams on the inner screen, followed');
+		await typeAndSend(page, `fold ${uniq()} ${scriptTag(variant, 'tool-run-fold', { tps: 8 })}`);
+		await page.waitForFunction(() => [...document.querySelectorAll('.chat-column .prose')].some(e => e.textContent.includes('Checking the project')), null, { timeout: 60_000 });
+		await mark('queue a wrapping prompt the running turn cannot take: it names a note');
+		await typeAndSend(page, `${queued} runs as its own turn, it names @Notes/note-0f0f0f0f\nThis second line wraps on the cover display ${'word '.repeat(14)}[script:default tps=300]`);
+		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+		expect(!(await page.evaluate(runFolded)), 'the bubble was confirmed before the tool run folded');
+		await page.evaluate(sampleCover, { LOG, token: queued, bubble: [queued, '@Notes/note-0f0f0f0f'] });
+		await mark('close the device: hidden and paused, then sized to the cover screen');
+		await pauseClose(page);
+		// The server, not the hidden page, says when the run is done: all sixteen
+		// commands completed, so the final prose (and the fold) is under way.
+		// Polled from Node: the hidden page's own feed is what is under test.
+		const url = `${new URL(page.url()).origin}/api/v1/sessions/${encodeURIComponent(session)}`;
+		let ran = 0;
+		for (const until = Date.now() + 120_000; ran < 16 && Date.now() < until; await page.waitForTimeout(250)) {
+			const response = await page.request.get(url);
+			const { messages = [] } = response.ok() ? await response.json() : {};
+			ran = messages.filter(m => m.type === 'tool_use' && m.toolName === 'Bash' && m.toolStatus && m.toolStatus !== 'running').length;
+		}
+		expect(ran >= 16, `the server finished all sixteen commands while the device was closed (${ran})`);
+		await page.waitForTimeout(1200);
+		const paused = await page.evaluate(() => ({ folded: !!document.querySelector('.chat-column [data-run-fold]'), queued: document.querySelectorAll('.pending-messages [data-queue-confirmed="true"]').length }));
+		expect(!paused.folded && paused.queued === 1, `while closed, nothing folded on the page and the bubble is docked (${JSON.stringify(paused)})`);
+		await mark('resume the same chat on the cover screen: the run folds in the catch-up');
+		const from = await page.evaluate(() => { window.__render.resume(); return window.__cover.frames.length; });
+		await page.waitForFunction(runFolded, null, { polling: 'raf', timeout: 15_000 }).catch(() => {});
+		await page.waitForTimeout(1200);
+		// What the reader sees: hit-test the live prose and the bubble, not only their boxes.
+		const shown = await page.locator(LOG).evaluate((log, token) => {
+			const box = log.getBoundingClientRect();
+			const hit = el => {
+				if (!el) return { mounted: false };
+				const r = el.getBoundingClientRect(), top = Math.max(r.top, box.top), bottom = Math.min(r.bottom, box.bottom);
+				if (bottom - top < 8) return { mounted: true, painted: false, top: r.top - box.top, bottom: r.bottom - box.top };
+				const at = document.elementFromPoint(r.left + Math.min(24, r.width / 2), (top + bottom) / 2);
+				return { mounted: true, painted: !!at && el.contains(at), top: Math.round(r.top - box.top), bottom: Math.round(r.bottom - box.top) };
+			};
+			const prose = [...log.querySelectorAll('.chat-column .prose')].findLast(e => e.textContent.includes('All sixteen checks ran'));
+			const bubble = log.querySelector('.pending-messages [data-queue-confirmed="true"]');
+			return { viewport: log.clientHeight, prose: hit(prose), bubble: { ...hit(bubble), text: !!bubble?.textContent.includes(token) && bubble.textContent.includes('@Notes/note-0f0f0f0f') },
+				streaming: document.querySelector('[data-ui-state="chat"]')?.dataset.uiStreaming };
+		}, queued);
+		const resumed = await page.evaluate(() => window.__cover.frames.slice());
+		const check = coverResume(resumed, from);
+		const folded = await page.evaluate(runFolded);
+		// Resumed frames before the collapse painted, and the first frame it did.
+		const foldAt = resumed.findIndex((f, i) => i >= from && f.folded) - from;
+		const atFold = resumed[from + foldAt];
+		log(`fold close with queue ${JSON.stringify({ paused, folded, foldAt, atFold, shown, check, first: resumed[from] })}`);
+		expect(folded, 'the tool run folded once the page was visible again');
+		expect(foldAt >= 0 && foldAt < check.frames && atFold.queued === 1, `the run folded on the cover screen with the bubble still docked (frame ${foldAt} of ${check.frames})`);
+		// The collapse frame itself, sampled in one tick: this prompt's bubble is
+		// inside the scroller, opaque and on top, showing its own words. A bubble
+		// covered, clipped or pushed off screen there and only drawn later fails.
+		expect(atFold.bubble?.ok && atFold.bubble.text, `the queued prompt is drawn on screen with its own words in the frame the run folds (${JSON.stringify(atFold.bubble)})`);
+		expect(shown.streaming === 'true' && shown.bubble.mounted, `the reply still streams over the mounted bubble after resume (${JSON.stringify(shown)})`);
+		expect(check.frames > 20 && check.longest === 0, `no resumed cover frame is blank (${check.longest} of ${check.frames})`);
+		expect(check.by <= RESUME_SLACK, `the follower is not scrolled into the blank reserve on resume (${check.by}px past the content end: ${JSON.stringify(check.around)})`);
+		expect(shown.prose.painted, `the live prose is painted on screen after the fold (${JSON.stringify(shown.prose)})`);
+		expect(shown.bubble.painted && shown.bubble.text, `the queued prompt is still painted on screen with its own words (${JSON.stringify(shown.bubble)})`);
+		await mark('the turn ends: the queued prompt runs as its own turn');
+		await page.locator('.pending-messages').waitFor({ state: 'hidden', timeout: 120_000 });
+		await waitTurnSettled(page, { hold: 800, timeout: 120_000 });
+		const settled = await page.evaluate(() => { window.__cover.running = false; return window.__cover.frames.at(-1); });
+		expect(settled.promptTop !== null && settled.promptTop < settled.viewport - 8, `the delivered prompt is on screen or scrolled past by its reply (${JSON.stringify(settled)})`);
+	}
+});
+
+// Round-2 review order: the device closes on a live reply with a prompt queued;
+// the reply ends and the prompt is delivered while the page is paused, then it
+// resumes on the cover screen. The hidden page mounts no row for the delivered
+// prompt, so its anchor was dropped as missing; resume then pinned the follower
+// to the bottom of the reserve its reply had not filled yet: everything jumped
+// up, the prompt off the top, over a blank band (main d2fe0a710). The same flow
+// on a cover screen that is never hidden only reveals the reply as it grows.
+cases.push({
+	name: 'fold-close-dequeue-while-paused-keeps-the-prompt-in-place', viewports: ['fold-inner'], throttles: ['slow'],
+	setup: openCloseChat,
+	async act({ page, variant, mark, log }) {
+		const queued = `queued-close-${uniq()}`;
+		await mark('a plain reply streams on the inner screen; a wrapping prompt waits in the queue');
+		await typeAndSend(page, `live ${uniq()} ${scriptTag(variant, 'long', { tps: 300 })}`);
+		await waitChat(page, { streaming: 'true' });
+		await typeAndSend(page, `${queued} two lines to check the clearance\nThis line wraps on the cover display ${'word '.repeat(14)}[script:slow tps=6 latency_ms=0]`);
+		await page.locator('.pending-messages [data-queue-confirmed="true"]').waitFor();
+		await page.evaluate(sampleCover, { LOG, token: queued });
+		await mark('close the device; the reply ends and the prompt is delivered while paused');
+		await pauseClose(page);
+		// The hidden page mounts no new row, so the bubble leaving is the signal.
+		await pausedUntil(page, () => !document.querySelector('.pending-messages [data-queue-confirmed="true"]'));
+		await page.waitForTimeout(600);
+		await mark('resume the same chat on the cover screen');
+		const from = await page.evaluate(() => { window.__render.resume(); return window.__cover.frames.length; });
+		await page.waitForTimeout(1500);
+		const resumed = await page.evaluate(() => { window.__cover.running = false; return window.__cover.frames; });
+		const check = coverResume(resumed, from);
+		const end = resumed.at(-1);
+		log(`fold close dequeue ${JSON.stringify({ check, first: resumed[from], end })}`);
+		expect(check.frames > 20 && check.longest === 0, `no resumed cover frame is blank (${check.longest} of ${check.frames})`);
+		expect(check.by <= RESUME_SLACK, `the follower is not scrolled into the blank reserve on resume (${check.by}px past the content end: ${JSON.stringify(check.around)})`);
+		expect(end.promptTop !== null && end.promptBottom > 24 && end.promptTop < end.viewport - 8, `the delivered prompt stays on screen while its reply fits below it (${JSON.stringify(end)})`);
+	}
+});
+
 async function openSwitchTarget(ctx, title) {
 	const { page, variant } = ctx;
 	if (mobile && variant.viewport === 'phone') {
@@ -892,16 +1352,21 @@ async function openSwitchTarget(ctx, title) {
 	await waitChatOpen(page, { messagesAtLeast: 2, hold: 300 });
 }
 
-// Run in two halves (see lib/split.mjs): one file was a whole CI shard by itself.
+// Run in parts (see lib/split.mjs) so one file does not fill a CI shard.
 export const journey = { name: 'chat-position-stability', cases, allow: [...DEV_INSTANCE_NOISE] };
 
-// The cases chat-position-stability.journey.mjs runs; chat-position-stability-2.journey.mjs runs every other
-// one, so a new case lands there. Balanced on the per-case seconds of main run 42719765869.
-export const FIRST_HALF = [
+// The first two parts were balanced on the per-case seconds of main run 42719765869.
+export const FIRST_PART = [
 	'error-rebase-keeps-visible-prompt',
 	'long-history-short-send',
 	'fast-completion',
 	'long-to-short-navigation',
 	'short-send',
 	'fresh-queued-send-releases-error-slot'
+];
+
+// Part 2 takes every case not named by parts 1 and 3.
+export const THIRD_PART = [
+	'live-run-fold-keeps-the-stream-on-screen',
+	'live-run-fold-then-queue-handoff'
 ];
