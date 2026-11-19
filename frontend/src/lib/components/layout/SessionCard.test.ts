@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => {
 		},
 		watch: vi.fn(() => () => {}),
 		getSessionGit: vi.fn(() => null as Record<string, unknown> | null),
+		getProviders: vi.fn((): { id: string; provider_type: string; name: string; auth_mode?: string }[] => []),
 	};
 });
 
@@ -64,6 +65,11 @@ vi.mock('$lib/stores/active-session', () => ({
 		newChat: mocks.newChat,
 		setTitle: mocks.setTitle,
 	}),
+}));
+
+vi.mock('$lib/constants/models', async (importOriginal) => ({
+	...await importOriginal<typeof import('$lib/constants/models')>(),
+	getProviders: mocks.getProviders,
 }));
 
 vi.mock('$lib/api/client', () => ({
@@ -1473,10 +1479,46 @@ describe('SessionCard git state', () => {
 		expect(container.querySelector('.details')?.textContent).not.toContain('Worker B');
 	});
 
+	it.each([
+		['saved provider', { provider_id: 'p1', model: 'gpt-model' }],
+		['composite model', { provider_id: null, model: 'prov:p1:gpt-model' }],
+	])('puts the %s mark immediately before the remote worker icon', (_source, binding) => {
+		mocks.getProviders.mockReturnValueOnce([{ id: 'p1', provider_type: 'chatgpt', name: 'ChatGPT' }]);
+		const { container } = renderCard({ ...binding, is_remote: true, device_name: 'Worker B' });
+		const mark = screen.getByRole('img', { name: 'Provider: OpenAI' });
+		expect(mark.getAttribute('title')).toBe('OpenAI');
+		expect(mark.querySelector('[data-provider-logo]')?.getAttribute('data-provider-logo')).toBe('openai');
+		expect(mark.nextElementSibling).toBe(container.querySelector('.l2 .worker'));
+	});
+
+	it.each([
+		['chatgpt', 'OpenAI', 'openai'],
+		['grok', 'Grok', 'grok'],
+	])('recognizes an older %s sign-in recorded as a custom provider', (authMode, name, kind) => {
+		mocks.getProviders.mockReturnValueOnce([{ id: 'p1', provider_type: 'custom', name: 'Sign-in', auth_mode: authMode }]);
+		renderCard({ provider_id: 'p1' });
+		const mark = screen.getByRole('img', { name: `Provider: ${name}` });
+		expect(mark.querySelector('[data-provider-logo]')?.getAttribute('data-provider-logo')).toBe(kind);
+	});
+
+	it('keeps the worker mark when an older row omits its provider binding', () => {
+		renderCard({ is_remote: true, device_name: 'Worker B' });
+		expect(screen.getByRole('img', { name: 'On Worker B' })).toBeTruthy();
+		expect(screen.queryByRole('img', { name: /^Provider:/ })).toBeNull();
+	});
+
+	it('uses a generic mark for a bound provider missing from the registry', () => {
+		renderCard({ provider_id: 'unlisted' });
+		const mark = screen.getByRole('img', { name: 'Provider: Unknown provider' });
+		expect(mark.querySelector('[data-provider-logo]')?.getAttribute('data-provider-logo')).toBe('custom');
+	});
+
 	it('gives a row on this worker no worker icon and no worker name', () => {
-		const { container } = renderCard({ is_active: true, device_name: 'Worker A' }, { status: 'idle' });
+		const { container } = renderCard({ is_active: true, provider_id: null, device_name: 'Worker A' }, { status: 'idle' });
 		expect(container.querySelector('.l2 .worker')).toBeNull();
 		expect(container.querySelector('.l2')?.textContent).not.toContain('Worker A');
+		const mark = screen.getByRole('img', { name: 'Provider: Claude' });
+		expect(mark.querySelector('[data-provider-logo]')?.getAttribute('data-provider-logo')).toBe('claude');
 	});
 
 	it('marks a working row with the live pip and a parked row with the warning', () => {
