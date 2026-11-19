@@ -22,6 +22,7 @@ import {
 	gotoApp,
 	pick,
 	scriptTag,
+	showSidebar,
 	typeAndSend,
 	uniq,
 	waitChat,
@@ -152,8 +153,17 @@ const rowsLeave = (from, to) => [
 	}
 ];
 
+/** Read the first reply with the next prompt still in reach. */
+function showRetainedReply(page, retained) {
+	return page.getByText(`You said: “${retained}`).first().evaluate(async (el) => {
+		const log = el.closest('[role="log"]');
+		log.scrollTop += el.getBoundingClientRect().top - log.getBoundingClientRect().top - 96;
+		await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+	});
+}
+
 /** Rewind one user message (default the last) from its own row; answers once the server has. */
-async function rewindUserMessage(page, nth = -1) {
+async function rewindUserMessage(page, nth = -1, keepViewport = false) {
 	await page.route(
 		'**/rewind/execute/**',
 		async (route) => {
@@ -163,7 +173,18 @@ async function rewindUserMessage(page, nth = -1) {
 		{ times: 1 }
 	);
 	// Keyboard: the hover-only action row disappears as a pointer crosses the bubble.
-	await page.getByTitle('Rewind to before this message', { exact: true }).nth(nth).focus();
+	const trigger = page.getByTitle('Rewind to before this message', { exact: true }).nth(nth);
+	if (keepViewport) {
+		expect(await trigger.evaluate((el) => {
+			const box = el.getBoundingClientRect();
+			const view = el.closest('[role="log"]').getBoundingClientRect();
+			if (box.bottom <= view.top || box.top >= view.bottom) return false;
+			el.focus({ preventScroll: true });
+			return document.activeElement === el;
+		}), 'the rewind action is already reachable in the reader’s viewport');
+	} else {
+		await trigger.focus();
+	}
 	await page.keyboard.press('Enter');
 	const answered = page.waitForResponse(
 		(r) => r.url().includes('/rewind/execute/') && r.request().method() === 'POST'
@@ -387,20 +408,46 @@ await runJourney({
 				const later = `later-${uniq()}`;
 				await sendTurn(ctx.page, ctx.variant, later, 6, SHORT);
 				ctx.state.later = later;
+				// Read the first reply with the next prompt still in reach. Starting
+				// at the tail otherwise leaves the reply off screen, and merely
+				// revealing it after rewind does not exercise scroll preservation.
+				await showRetainedReply(ctx.page, ctx.state.retained);
 			},
 			async act({ page, variant, mark, state }) {
 				await trackRetainedGeometry(page, state.retained);
 				await mark(REWIND);
-				await rewindUserMessage(page, 1);
+				await rewindUserMessage(page, 1, true);
 				await expectRewound(page, variant, { ...state, messages: 2 });
 				state.geometry = await readRetainedGeometry(page);
+				expect(state.geometry[0].top > 0 && state.geometry[0].top < state.geometry[0].viewport,
+					'the retained reply was already visible before rewind');
 				expect((await countText(page, `You said: “${state.later}`)) === 0, 'the later reply left too');
 				await mark(NEXT);
-				await sendTurn(page, variant, `next-${uniq()}`, 4, SHORT);
+				state.next = `next-${uniq()}`;
+				await sendTurn(page, variant, state.next, 4, SHORT);
 			},
-			verify({ recording, state, log }) {
+			async verify({ page, variant, recording, state, log }) {
 				expectOneStepRewind(recording, { from: 6, to: 2, surfaces: ['active'] });
 				expectRetainedHolds(state.geometry, log);
+
+				// Repeat the cut after recording to test an intentional chat unmount
+				// without excusing an unmount during the original rewind.
+				await showRetainedReply(page, state.retained);
+				await rewindUserMessage(page, -1, true);
+				await expectRewound(page, variant, { ...state, removed: state.next, messages: 2 });
+				const reply = page.getByText(`You said: “${state.retained}`).first();
+				const top = () => reply.evaluate(el => el.getBoundingClientRect().top);
+				const before = await top();
+				await (await showSidebar(page)).getByRole('navigation', { name: 'Workspace', exact: true })
+					.getByRole('button', { name: 'Settings', exact: true }).click();
+				const settings = page.getByRole('button', { name: 'Back to chats', exact: true });
+				await settings.waitFor();
+				await reply.waitFor({ state: 'detached' });
+				await settings.click();
+				await expectRewound(page, variant, { ...state, removed: state.next, messages: 2 });
+				const after = await top();
+				expect(Math.abs(after - before) <= 1, `the retained reply moved after returning from Settings: ${before} → ${after}`);
+				log(`Retained reply returned at ${Math.round(after)}px after Settings.`);
 			}
 		},
 		{
