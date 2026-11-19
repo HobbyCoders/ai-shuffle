@@ -1,42 +1,28 @@
 name: CI Backend
-run-name: "${{ github.workflow }} (8 shards, 2 workers each)"
+run-name: Blacksmith 8 vCPU benchmark (pinned eight-shard backend)
 
-# Full backend coverage and security checks on every PR, including drafts.
-# Cross-tree contracts and credential-path checks make path-based skips unsafe.
+# Branch-only, manual benchmark. Never use as a required check or merge it.
+# The only change under test is runner hardware; check out the pinned workload.
 on:
-  workflow_call:
-    inputs:
-      gated_by_caller:
-        description: The caller judges these jobs itself (ci.yml), so the verdict job here does not queue for a runner
-        type: boolean
-        default: false
   workflow_dispatch:
-    inputs:
-      runner_cpus:
-        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-24.04'
-        type: choice
-        options: ['2', '4']
-        default: '2'
 
 permissions:
   contents: read
 
-# Cancel superseded runs (force-pushes / rapid successive commits) instead of
-# letting stale runs finish and fail/email after a newer commit already ran.
 concurrency:
-  # CI's daily run gets its own group so it never queues with a push run.
-  group: ci-backend-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-backend-blacksmith-benchmark-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   backend-shard:
     name: backend-shard ${{ matrix.shard }}
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/fix/ci-blacksmith-backend-benchmark'
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
-    timeout-minutes: 35
-    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -44,6 +30,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
+          persist-credentials: false
           # Keep history for tests that inspect public revisions. Schema lifecycle
           # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
@@ -102,6 +90,7 @@ jobs:
         # collection error or more than 20 failures fails it. The receipt
         # counts only with the rerun's pass recorded on it (backend_gate.py).
         run: |
+          export GITHUB_SHA=68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
           python scripts/ci/backend_shard_run.py -- \
             python -m pytest --durations=50 --junitxml=reports/hermetic-1.xml tests/api tests/core tests/db tests/middleware tests/contract \
               tests/performance tests/mcp tests/services tests/unit tests/scripts tests/test_*.py \
@@ -124,8 +113,9 @@ jobs:
 
   backend-contracts:
     name: backend-contracts
-    timeout-minutes: 35
-    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/fix/ci-blacksmith-backend-benchmark'
+    timeout-minutes: 12
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -133,6 +123,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
+          persist-credentials: false
           # Keep history for tests that inspect public revisions. Schema lifecycle
           # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
@@ -268,9 +260,9 @@ jobs:
 
   backend-security:
     name: backend-security
-    if: always()
-    timeout-minutes: 35
-    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/fix/ci-blacksmith-backend-benchmark'
+    timeout-minutes: 12
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -278,6 +270,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
+          persist-credentials: false
           # Keep history for tests that inspect public revisions. Schema lifecycle
           # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
@@ -368,9 +362,9 @@ jobs:
   # Run database safety and contention checks beside the policy suite.
   backend-postgres:
     name: backend-postgres
-    if: always()
-    timeout-minutes: 35
-    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/fix/ci-blacksmith-backend-benchmark'
+    timeout-minutes: 12
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     env:
       TESTING: "1"
       ALLOW_REAL_PG: "0"
@@ -378,6 +372,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
+          persist-credentials: false
           # Keep history for tests that inspect public revisions. Schema lifecycle
           # tests use checked-in SQL fixtures and need no private-era commits.
           fetch-depth: 0
@@ -505,12 +501,15 @@ jobs:
 
   backend:
     name: Backend tests
-    if: always() && inputs.gated_by_caller != true
+    if: always() && github.event_name == 'workflow_dispatch' && github.repository == 'HobbyCoders/ai-shuffle' && github.ref == 'refs/heads/fix/ci-blacksmith-backend-benchmark'
     needs: [backend-shard, backend-contracts, backend-security, backend-postgres]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -525,5 +524,5 @@ jobs:
         if: always()
         env:
           BACKEND_NEEDS: ${{ toJSON(needs) }}
-          HEAD_SHA: ${{ github.sha }}
+          HEAD_SHA: 68904c3555aa138dd9e5b78c9bd97fcfe4edef6d
         run: python scripts/ci/backend_gate.py --head "$HEAD_SHA"
