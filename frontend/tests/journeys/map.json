@@ -741,10 +741,11 @@
 			]
 		},
 		{
-			"why": "a saved Anthropic key lists its paged API catalog, clears stale rows on a failed refresh, and can retry",
+			"why": "a saved Anthropic key lists its paged API catalog in shared read-only rows, clears stale rows on a failed refresh, and can retry",
 			"journeys": ["claude-api-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-api-models.journey.mjs",
+				"frontend/src/lib/components/settings/providers/tabs/AvailableModelList.svelte",
 				"frontend/src/lib/components/settings/providers/tabs/ClaudeApiModels.svelte",
 				"frontend/src/lib/components/settings/providers/AnthropicKeyDetail.svelte",
 				"app/core/claude_api_models.py",
