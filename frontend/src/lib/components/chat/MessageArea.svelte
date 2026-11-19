@@ -911,7 +911,11 @@
 				})
 			: [];
 		const anchor = candidates.find(node => node.getBoundingClientRect().bottom > top) ?? candidates.at(-1);
-		const anchorTop = anchor?.getBoundingClientRect().top;
+		const anchorBox = anchor?.getBoundingClientRect();
+		const anchorTop = anchorBox?.top;
+		const holdVisibleTailCut = container && anchorBox && anchorBox.bottom > top &&
+			anchorBox.top < top + container.clientHeight && next.start === mountedStart &&
+			next.end < mountedEnd && next.end === displayItems.length;
 		// Browsers quantize scrollTop. Separate evictions must not accumulate
 		// three <0.5px errors into a >1px reading jump. Carry one subpixel debt
 		// only while the scroll position is untouched; user movement resets it.
@@ -972,11 +976,23 @@
 						if (version !== windowShiftVersion || container !== containerRef) return;
 						delta = -container.scrollTop - roundingError;
 					}
-					markProgrammaticScrollSettling();
-					const previousScrollTop = container.scrollTop;
 					const scrollDelta = delta + roundingError;
-					container.scrollTop += scrollDelta;
-					const error = scrollDelta - (container.scrollTop - previousScrollTop);
+					const targetTop = container.scrollTop + scrollDelta;
+					if (holdVisibleTailCut && anchor?.isConnected && scrollDelta > 0 && tailSpacerRef) {
+						// Rewind can cut the history below the visible anchor so short that
+						// its old position is no longer reachable. Publish enough room
+						// before restoring it; the reading floor takes over afterward.
+						const { reserveStart } = floorGeometry();
+						const reserve = Math.ceil(targetTop + container.clientHeight - reserveStart);
+						if (reserve > latestTurnTailPx) {
+							latestTurnTailPx = reserve;
+							await tick();
+							if (version !== windowShiftVersion || container !== containerRef) return;
+						}
+					}
+					markProgrammaticScrollSettling();
+					container.scrollTop = targetTop;
+					const error = targetTop - container.scrollTop;
 					// Never carry a real clamp/navigation boundary into a later shift.
 					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
 						? { scrollTop: container.scrollTop, error } : null;
