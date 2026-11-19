@@ -546,7 +546,7 @@
 		},
 		{
 			"why": "sending, streaming and rendering a reply",
-			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "reload-midstream"],
+			"journeys": ["chat-send-stream", "send-during-init", "stop-midstream", "queue-while-busy", "queue-while-busy-2", "queue-while-busy-3", "stop-holds-the-reader", "reload-midstream"],
 			"globs": [
 				"frontend/src/lib/components/chat/AssistantMessage*",
 				"frontend/src/lib/components/chat/UserMessage*",
@@ -618,7 +618,7 @@
 		},
 		{
 			"why": "queued (pending) messages",
-			"journeys": ["queue-while-busy", "queue-while-busy-2", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2", "queue-over-running-tasks"],
+			"journeys": ["queue-while-busy", "queue-while-busy-2", "queue-while-busy-3", "stop-holds-the-reader", "stop-with-queued-messages", "stop-with-queued-messages-2", "queue-over-running-tasks"],
 			"globs": ["frontend/src/lib/components/chat/Pending*", "frontend/src/lib/components/chat/pending-*", "frontend/src/lib/utils/not-sent-hold*"]
 		},
 		{
@@ -868,8 +868,8 @@
 			"globs": ["frontend/tests/journeys/queue-over-running-tasks.journey.mjs", "frontend/src/lib/components/chat/RunningTasksList*", "scripts/devloop/scenarios/tool-background-heavy.json"]
 		},
 		{
-			"why": "the queue-while-busy cases, which two journey files run in halves",
-			"journeys": ["queue-while-busy", "queue-while-busy-2"],
+			"why": "the queue-while-busy cases, split across three journey files",
+			"journeys": ["queue-while-busy", "queue-while-busy-2", "queue-while-busy-3"],
 			"globs": ["frontend/tests/journeys/queue-while-busy*"]
 		},
 		{
