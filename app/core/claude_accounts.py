@@ -93,6 +93,13 @@ def _keys():
     return bundle
 
 
+def saved_api_key(account_id: str) -> str | None:
+    """Read one saved key, never falling back to a different account."""
+    with _lock:
+        account = next((entry for entry in _keys()["accounts"] if entry["id"] == account_id), None)
+        return account["key"] if account else None
+
+
 def active_api_key() -> str | None:
     """Read the decrypted active key, including the legacy scalar setting."""
     return _read_setting(API_SETTING)

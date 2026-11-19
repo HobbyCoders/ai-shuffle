@@ -10,15 +10,32 @@ The underlying registry lives in ``app/core/model_registry.py``; this router
 is a thin read-only projection of it.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_admin, require_auth
-from app.core import claude_cli_models
+from app.core import claude_accounts, claude_api_models, claude_cli_models
 from app.core.model_registry import registry_payload
 from app.db.async_database import run_sync
 
 router = APIRouter(prefix="/api/v1/models", tags=["Models"])
+
+
+@router.get("/claude/api-key/{account_id}")
+async def list_claude_api_models(account_id: str, response: Response, token: str = Depends(require_admin)) -> dict:
+    """List the official Anthropic catalog for this saved key; do not send a prompt."""
+    try:
+        key = await run_sync(claude_accounts.saved_api_key, account_id)
+    except claude_accounts.AccountError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+    if not key:
+        raise HTTPException(status_code=404, detail="This Anthropic API key is no longer saved.")
+    try:
+        models = await claude_api_models.list_models(key)
+    except claude_api_models.CatalogError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from None
+    response.headers["Cache-Control"] = "no-store"
+    return {"models": models}
 
 
 @router.get("")

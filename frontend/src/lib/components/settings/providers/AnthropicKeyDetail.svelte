@@ -12,7 +12,7 @@
 	import TextField from '../rows/TextField.svelte';
 	import ProviderTile from './ProviderTile.svelte';
 	import CredentialControl from './CredentialControl.svelte';
-	import BuiltInModels from './tabs/BuiltInModels.svelte';
+	import ClaudeApiModels from './tabs/ClaudeApiModels.svelte';
 	import type { CredentialView, ProviderView } from './providers-model';
 	import { detailLine, safeKeyHint } from './credential-display';
 	import { changeClaudeMode, startSetup } from './provider-actions';
@@ -66,7 +66,11 @@
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
-			<BuiltInModels />
+			{#if account}
+				{#key account.id}<ClaudeApiModels accountId={account.id} />{/key}
+			{:else}
+				<RowGroup title="Models"><p class="pv-msg">{providers.current.anthropicKeySet ? 'Update this worker to list models for its saved API key.' : 'Save an Anthropic API key to list its models.'}</p></RowGroup>
+			{/if}
 		{:else}
 			<RowGroup title="Account">
 				{#if account}
