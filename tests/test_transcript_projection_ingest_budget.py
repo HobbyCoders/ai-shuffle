@@ -423,8 +423,10 @@ async def _exercise_commit_order(monkeypatch, stage):
                 return
         pytest.fail('projection never finished')
 
-    task = asyncio.create_task(project())
+    task = None
     try:
+        await bridge.warm_up(readiness_timeout=WARM_UP_READINESS_SECONDS)
+        task = asyncio.create_task(project())
         assert await asyncio.to_thread(started.wait, 10), f'{stage} commit never entered'
         deadline = time.perf_counter() + 10  # Broken-test guard, not a latency budget.
         while not finished.is_set():
@@ -451,7 +453,8 @@ async def _exercise_commit_order(monkeypatch, stage):
         try:
             if append_task is not None:
                 await asyncio.gather(append_task, return_exceptions=True)
-            await task
+            if task is not None:
+                await task
         finally:
             await bridge.close()
     assert (await database(store.load, sid)).ready

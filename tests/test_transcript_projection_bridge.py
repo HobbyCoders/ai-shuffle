@@ -32,15 +32,17 @@ def copy_bundle(tmp_path: Path) -> Path:
     return directory
 
 
-def hanging_bundle(tmp_path: Path, *, ready_delay_ms: int = 0) -> Path:
+def hanging_bundle(tmp_path: Path, *, ready_marker: Path | None = None) -> Path:
     directory = copy_bundle(tmp_path)
     manifest = json.loads((directory / "manifest.json").read_text())
-    # A private fixture sends the real handshake, answers once, then hangs.
+    # This fixture answers once, then hangs. The marker can withhold readiness
+    # entirely, independent of how the parent and child are scheduled.
+    ready = "true" if ready_marker is None else f"require('node:fs').existsSync({json.dumps(str(ready_marker))})"
     script = (
         "const r=require('node:readline').createInterface({input:process.stdin});"
-        "let n=0;setTimeout(()=>console.log(JSON.stringify({type:'ready',version:1,fingerprint:"
-        + json.dumps(manifest["fingerprint"]) + ",node:process.versions.node})),"
-        + str(ready_delay_ms) + ");"
+        f"let n=0;if({ready})"
+        "console.log(JSON.stringify({type:'ready',version:1,fingerprint:"
+        + json.dumps(manifest["fingerprint"]) + ",node:process.versions.node}));"
         "r.on('line',line=>{const x=JSON.parse(line);if(++n===1)"
         "console.log(JSON.stringify({id:x.id,ok:true,result:[]}));});"
     )
@@ -132,17 +134,26 @@ async def test_killed_process_is_restarted_without_reusing_responses():
 
 @pytest.mark.asyncio
 async def test_warm_up_slack_does_not_extend_request_deadline(tmp_path):
-    bridge = ReducerBridge(directory=hanging_bundle(tmp_path, ready_delay_ms=150), timeout=0.05)
+    marker = tmp_path / "send-ready"
+    bridge = ReducerBridge(directory=hanging_bundle(tmp_path, ready_marker=marker), timeout=0.05)
     try:
-        # An ordinary request still enforces the original startup deadline.
-        with pytest.raises(ReducerUnavailable, match="node_unavailable"):
+        # The first child never sends readiness, even if the parent stalls.
+        with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
             await bridge.request("plan", carry=None, frames=[])
+        assert isinstance(error.value.__cause__, TimeoutError)
         assert bridge._process is None
 
+        marker.touch()
+        # A zero request timeout makes accidental use of that deadline in
+        # warm_up fail even when the ready line is already buffered.
+        bridge.timeout = 0
         await bridge.warm_up(readiness_timeout=10)
         child = bridge._process
         assert child is not None and child.returncode is None
-        assert bridge.timeout == 0.05
+        with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
+            await bridge.request("plan", carry=None, frames=[])
+        assert isinstance(error.value.__cause__, TimeoutError)
+        assert bridge._process is None and child.returncode is not None
     finally:
         await bridge.close()
 
