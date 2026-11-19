@@ -133,21 +133,33 @@ async def test_killed_process_is_restarted_without_reusing_responses():
 
 
 @pytest.mark.asyncio
-async def test_warm_up_slack_does_not_extend_request_deadline(tmp_path):
+async def test_warm_up_slack_does_not_extend_request_deadline(tmp_path, monkeypatch):
     marker = tmp_path / "send-ready"
     bridge = ReducerBridge(directory=hanging_bundle(tmp_path, ready_marker=marker), timeout=0.05)
+    readiness_deadlines = []
+    wait_for = asyncio.wait_for
+
+    async def record_readiness_deadline(awaitable, timeout):
+        # Readiness passes readline directly; request and cleanup waits do not.
+        if getattr(awaitable, "cr_code", None) is asyncio.StreamReader.readline.__code__:
+            readiness_deadlines.append(timeout)
+        return await wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", record_readiness_deadline)
     try:
         # The first child never sends readiness, even if the parent stalls.
         with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
             await bridge.request("plan", carry=None, frames=[])
         assert isinstance(error.value.__cause__, TimeoutError)
         assert bridge._process is None
+        assert readiness_deadlines == [0.05]
 
         marker.touch()
         # A zero request timeout makes accidental use of that deadline in
         # warm_up fail even when the ready line is already buffered.
         bridge.timeout = 0
         await bridge.warm_up(readiness_timeout=10)
+        assert readiness_deadlines == [0.05, 10]
         child = bridge._process
         assert child is not None and child.returncode is None
         with pytest.raises(ReducerUnavailable, match="node_unavailable") as error:
