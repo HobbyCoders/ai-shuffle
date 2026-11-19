@@ -603,6 +603,23 @@ class FakeProviderServer:
     def _reply_for(self, recorded: Recorded) -> Reply:
         if recorded.method == "GET":
             path = recorded.path.split("?", 1)[0].rstrip("/")
+            if path == "/anthropic/v1/models":
+                from urllib.parse import parse_qs, urlsplit
+
+                headers = {name.lower(): value for name, value in recorded.headers.items()}
+                if (headers.get("x-api-key") != "dev-fake-anthropic-alpha"
+                        or headers.get("anthropic-version") != "2023-06-01"):
+                    return error_reply(401, "Missing fake Anthropic credentials")
+                cursor = parse_qs(urlsplit(recorded.path).query).get("after_id")
+                first_id = "claude-sonnet-dev-api"
+                if cursor not in (None, [first_id]):
+                    return error_reply(400, "Unexpected Anthropic model cursor")
+                more = cursor is None
+                model_id = first_id if more else "claude-haiku-dev-api"
+                label = "Claude Sonnet (dev API)" if more else "Claude Haiku (dev API)"
+                return Reply(frames=[json.dumps({"data": [{"id": model_id, "display_name": label}],
+                                                 "has_more": more, "last_id": model_id})],
+                             content_type="application/json")
             if path.endswith("/v1beta/models"):
                 return gemini_models_reply(self.models)
             if path.endswith("/models"):
