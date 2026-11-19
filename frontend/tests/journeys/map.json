@@ -741,6 +741,18 @@
 			]
 		},
 		{
+			"why": "a saved Anthropic key lists its paged API catalog, clears stale rows on a failed refresh, and can retry",
+			"journeys": ["claude-api-models"],
+			"globs": [
+				"frontend/tests/journeys/claude-api-models.journey.mjs",
+				"frontend/src/lib/components/settings/providers/tabs/ClaudeApiModels.svelte",
+				"frontend/src/lib/components/settings/providers/AnthropicKeyDetail.svelte",
+				"app/core/claude_api_models.py",
+				"app/core/claude_accounts.py",
+				"app/api/model_registry.py"
+			]
+		},
+		{
 			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
