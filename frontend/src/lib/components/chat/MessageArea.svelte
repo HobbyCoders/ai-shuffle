@@ -12,6 +12,11 @@
 	// scrolled up (false) when it was last on screen.
 	const autoScrollCache = new Map<string, boolean>();
 	const mountedRangeCache = new Map<string, { start: number; end: number; leadingGap?: number }>();
+	// Rewind can make a real reading offset depend on trailing room. Keep the
+	// layout identity, not a pixel height, so a remount computes its own reserve.
+	const rewindReadingCache = new Map<string, {
+		start: number; end: number; first: string; last: string; width: number; top: number;
+	}>();
 </script>
 
 <script lang="ts">
@@ -220,6 +225,7 @@
 	// scrollToBottomUntilStable) each increment on entry and decrement after double-RAF.
 	// handleScroll ignores events while any programmatic scroll is in-flight.
 	let programmaticScrollDepth = 0;
+	let pendingReadingRestore: { container: HTMLElement; version: number; top: number } | null = null;
 	let isMounted = $state(false);
 	let scrollRafPending = false; // Throttle scroll handler to one per frame
 	let lastKnownScrollTop = 0; // For scroll-direction detection
@@ -978,6 +984,7 @@
 					}
 					const scrollDelta = delta + roundingError;
 					const targetTop = container.scrollTop + scrollDelta;
+					let needsRewindRoom = false;
 					if (holdVisibleTailCut && anchor?.isConnected && scrollDelta > 0 && tailSpacerRef) {
 						// Rewind can cut the history below the visible anchor so short that
 						// its old position is no longer reachable. Publish enough room
@@ -985,6 +992,7 @@
 						const { reserveStart } = floorGeometry();
 						const reserve = Math.ceil(targetTop + container.clientHeight - reserveStart);
 						if (reserve > latestTurnTailPx) {
+							needsRewindRoom = true;
 							latestTurnTailPx = reserve;
 							await tick();
 							if (version !== windowShiftVersion || container !== containerRef) return;
@@ -993,6 +1001,18 @@
 					markProgrammaticScrollSettling();
 					container.scrollTop = targetTop;
 					const error = targetTop - container.scrollTop;
+					if (needsRewindRoom && shiftSessionKey && Math.abs(error) < 1) {
+						const first = displayItems[next.start];
+						const last = displayItems[next.end - 1];
+						if (first && last) {
+							rewindReadingCache.set(shiftSessionKey, {
+								start: next.start, end: next.end, first: displayItemKey(first), last: displayItemKey(last),
+								width: container.clientWidth, top: container.scrollTop
+							});
+							evictOldest(rewindReadingCache, SCROLL_CACHE_MAX);
+							scrollPositionCache.set(shiftSessionKey, container.scrollTop);
+						}
+					}
 					// Never carry a real clamp/navigation boundary into a later shift.
 					anchorRounding = anchor?.isConnected && Math.abs(error) < 1
 						? { scrollTop: container.scrollTop, error } : null;
@@ -1530,9 +1550,13 @@
 		if (!containerRef || !tailSpacerRef || windowShifting) return 0;
 		if (!shouldAutoScroll && !containerRef.clientHeight) return Math.max(tailReservePx, latestTurnTailPx);
 		const { proseEnd, reserveStart } = floorGeometry();
+		// A remount refresh can run after publishing the reserve but before
+		// applying the saved scrollTop. Honor the destination until it is set.
+		const restoring = pendingReadingRestore?.container === containerRef &&
+			pendingReadingRestore.version === windowShiftVersion ? pendingReadingRestore.top : 0;
 		const owedEnd = shouldAutoScroll
 			? followedViewportEnd - Math.max(0, followedProseEnd - proseEnd)
-			: containerRef.scrollTop + containerRef.clientHeight;
+			: Math.max(containerRef.scrollTop, restoring) + containerRef.clientHeight;
 		return Math.max(0, owedEnd - reserveStart);
 	}
 
@@ -2068,14 +2092,40 @@
 	 */
 	function restoreReadingPosition(position: number) {
 		shouldAutoScroll = false;
+		const sessionId = get(activeSession).sessionId;
+		const version = windowShiftVersion;
 		programmaticScrollDepth++;
-		void tick().then(() => {
-			if (!containerRef) {
+		void tick().then(async () => {
+			const container = containerRef;
+			const stillRestoring = () => container && container === containerRef &&
+				version === windowShiftVersion && sessionId === get(activeSession).sessionId;
+			if (!container || !stillRestoring()) {
 				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
 				return;
 			}
-			containerRef.scrollTop = position;
-			lastKnownScrollTop = containerRef.scrollTop;
+			const held = sessionId ? rewindReadingCache.get(sessionId) : undefined;
+			if (held && position <= held.top && container.clientWidth === held.width && tailSpacerRef &&
+				mountedStart === held.start && mountedEnd === held.end &&
+				visibleItems[0] && displayItemKey(visibleItems[0]) === held.first &&
+				visibleItems.at(-1) && displayItemKey(visibleItems[visibleItems.length - 1]) === held.last) {
+				// Set the reserve before the browser can clamp the saved offset of
+				// the short transcript to its new unpadded bottom.
+				const { reserveStart } = floorGeometry();
+				const reserve = Math.ceil(position + container.clientHeight - reserveStart);
+				if (reserve > latestTurnTailPx) {
+					const pending = { container, version, top: position };
+					pendingReadingRestore = pending;
+					latestTurnTailPx = reserve;
+					await tick();
+					if (pendingReadingRestore === pending) pendingReadingRestore = null;
+					if (!stillRestoring()) {
+						programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
+						return;
+					}
+				}
+			}
+			container.scrollTop = position;
+			lastKnownScrollTop = container.scrollTop;
 			lastScrollMetrics = readScrollMetrics();
 			requestAnimationFrame(() => {
 				programmaticScrollDepth = Math.max(0, programmaticScrollDepth - 1);
