@@ -29,7 +29,7 @@ push to a pull request starts one workflow run with one verdict. There are no
 draft skips. Which of them a run starts depends on the files the change touches
 ([What a run skips](#what-a-run-skips)):
 
-- `ci-backend.yml`: four backend shards, parallel real PostgreSQL/boot contracts,
+- `ci-backend.yml`: eight backend shards, parallel real PostgreSQL/boot contracts,
   unconditional security checks and the stable fail-closed `Backend tests` gate.
 - `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
   plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
@@ -436,7 +436,7 @@ three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
 | --- | --- |
-| backend | `backend` → CI Backend's four shards and security (scanner + scanner tests) |
+| backend | `backend` → CI Backend's eight shards and security (scanner + scanner tests) |
 | backend-linux | `backend` → contracts (real PostgreSQL boot/schema, serial container tests) and security (real-account isolation) |
 | fluid | `fluid` → complete isolated fluid unit suite |
 | frontend | `javascript` → four Vitest shards, production build, typechecks and contracts |
@@ -566,7 +566,7 @@ tools-only and workflow-only changes. Backend credential-path checks and contrac
 read those trees too, and `docs/content/` is served at runtime. There is no path
 classifier, skip approval, or reduced-coverage lane.
 
-Full coverage runs four `ubuntu-24.04` shards with two xdist workers apiece and
+Full coverage runs eight `ubuntu-24.04` shards with two xdist workers apiece and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
@@ -630,8 +630,8 @@ closed.
 The audit step (including tool installation and both audits) is capped at eight minutes.
 
 The stable `Backend tests` gate uses `if: always()` and depends on all shards,
-contracts and security. `scripts/ci/backend_gate.py` requires every dependency to
-succeed and all four successful shard receipts. Failed, cancelled, missing or
+contracts, security and PostgreSQL. `scripts/ci/backend_gate.py` requires every
+dependency to succeed and all eight successful shard receipts. Failed, cancelled, missing or
 skipped jobs, missing/duplicate receipts, inconsistent collection/partition
 digests, incomplete counts and failed tests without a recorded passing rerun all
 fail closed. No classifier output can approve
@@ -688,7 +688,7 @@ The suites the hook used to select locally run in full on every PR:
 
 | Former push-gate suite | PR CI job |
 | --- | --- |
-| backend | CI Backend's four shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
+| backend | CI Backend's eight shards (`tests/api` … `tests/scripts`, `tests/test_*.py`) |
 | backend-linux | CI Backend contracts and security (real PostgreSQL, container contracts, real-account isolation) |
 | fluid | `ci-fluid.yml` |
 | frontend, mobile, tools, browser-mcp | `ci-frontend.yml` (Vitest shards, typechecks, mobile, tools, Browser MCP) |

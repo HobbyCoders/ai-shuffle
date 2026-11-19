@@ -14,9 +14,16 @@ ROOT = Path(__file__).resolve().parents[2]
 def healthy_gate():
     needs = {name: {"result": "success"} for name in
              ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
-    receipts = [{"shard": i, "head": "head", "count": 2, "total": 8,
-                 "collection": "collection", "partition": "partition", "workers": 2} for i in range(1, 5)]
+    receipts = [{"shard": i, "head": "head", "count": 2, "total": 16,
+                 "collection": "collection", "partition": "partition", "workers": 2} for i in range(1, 9)]
     return needs, receipts
+
+
+def test_gate_rejects_a_self_consistent_four_shard_receipt_set():
+    needs, receipts = healthy_gate()
+    old_receipts = [{**receipt, "total": 8} for receipt in receipts[:4]]
+    with pytest.raises(ValueError, match="missing/duplicate shard receipt"):
+        check_gate(needs, old_receipts, "head")
 
 
 def test_gate_requires_complete_coverage():

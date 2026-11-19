@@ -5,13 +5,14 @@ import os
 from pathlib import Path
 
 
+SHARD_COUNT = 8
 REQUIRED_JOBS = frozenset({"backend-shard", "backend-contracts", "backend-security", "backend-postgres"})
 
 
 def check_gate(needs, receipts, head):
     if set(needs) != REQUIRED_JOBS or any(needs[job].get("result") != "success" for job in REQUIRED_JOBS):
         raise ValueError("required backend job failed, cancelled, missing or skipped")
-    if len(receipts) != 4 or {r["shard"] for r in receipts} != {1, 2, 3, 4}:
+    if len(receipts) != SHARD_COUNT or {r["shard"] for r in receipts} != set(range(1, SHARD_COUNT + 1)):
         raise ValueError("missing/duplicate shard receipt")
     if (any(r["head"] != head or r["count"] <= 0 or r["workers"] != 2 for r in receipts)
             or len({r["collection"] for r in receipts}) != 1

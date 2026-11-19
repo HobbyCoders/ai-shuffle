@@ -108,13 +108,13 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     manifest = tmp_path / "durations.json"
     nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
     durations = {node: float(i + 1) for i, node in enumerate(nodes)}
-    expected = bs.partition(nodes, durations)
+    expected = bs.partition(nodes, durations, bs.SHARD_COUNT)
     manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": bs.hashed_durations(durations)}))
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
     # This test is run serially locally: no nested workers beyond the shared
     # machine-wide two-worker limit. Hosted policy tests also run it serially.
     collected = []
-    for index in range(1, 5):
+    for index in range(1, bs.SHARD_COUNT + 1):
         output = tmp_path / f"shard-{index}"
         result = subprocess.run([
             sys.executable, "-m", "pytest", str(fixture), "--rootdir", str(tmp_path),
@@ -144,7 +144,8 @@ def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tm
     manifest = tmp_path / "durations.json"
     nodes = [f"test_fixture.py::test_value[{i}]" for i in range(12)]
     manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": {}}))
-    shards = bs.partition(nodes, bs.manifest_weights(nodes, {"format": bs.MANIFEST_FORMAT, "durations": {}}))
+    weights = bs.manifest_weights(nodes, {"format": bs.MANIFEST_FORMAT, "durations": {}})
+    shards = bs.partition(nodes, weights, bs.SHARD_COUNT)
     index = next(i for i, shard in enumerate(shards, 1) if "test_fixture.py::test_value[3]" in shard)
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
 
@@ -191,7 +192,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     assert set(jobs) == required | {"backend"}
     assert all(job["runs-on"] == "ubuntu-24.04" for job in jobs.values())
     assert all("continue-on-error" not in json.dumps(job) for job in jobs.values())
-    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": ["1", "2", "3", "4"]}}
+    assert jobs["backend-shard"]["strategy"] == {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, bs.SHARD_COUNT + 1)]}}
     for name in ("backend-security", "backend-postgres"):
         assert jobs[name]["if"] == "always()"
         assert "needs" not in jobs[name]
@@ -298,7 +299,7 @@ def test_main_refresh_downloads_and_validates_complete_execution(
            "workflowName": "CI Backend", "headSha": "head", "url": "https://example.invalid/run"}
     monkeypatch.setattr(bs.subprocess, "check_output", lambda *a, **k: json.dumps(run).encode())
     nodes = [f"test_a.py::test_{i}" for i in range(8)]
-    shards = bs.partition(nodes, {})
+    shards = bs.partition(nodes, {}, bs.SHARD_COUNT)
     destination = tmp_path / "download"
     def download(command: list[str], check: bool) -> None:
         assert command[:4] == ["gh", "run", "download", "123"] and check is True

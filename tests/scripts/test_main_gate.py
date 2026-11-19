@@ -531,7 +531,7 @@ def test_static_matrix_members_come_from_the_workflows():
 
 @pytest.mark.parametrize("name", ["javascript / Frontend tests (4/4)", "fluid / delegated tool-output contract (2.1.308)",
                                   "browser-workspace / Browser workspace (panel-demand)",
-                                  "windows / Windows desktop shard (2/3)", "backend / backend-shard 3"])
+                                  "windows / Windows desktop shard (2/3)", "backend / backend-shard 8"])
 def test_one_absent_member_of_a_static_matrix_is_waited_for(name):
     jobs = [job for job in listing() if job["name"] != name]
     assert gate.missing(PLAN, jobs) == [name]

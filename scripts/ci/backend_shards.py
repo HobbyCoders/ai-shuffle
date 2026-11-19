@@ -22,6 +22,8 @@ import subprocess
 
 import pytest
 
+from scripts.ci.backend_gate import REQUIRED_JOBS, SHARD_COUNT, check_gate
+
 MANIFEST = Path(__file__).resolve().parents[2] / "tests/backend-durations.json"
 MANIFEST_FORMAT = "sha256-nodeid-v1"
 
@@ -88,7 +90,7 @@ def digest(nodes):
 
 def pytest_addoption(parser):
     group = parser.getgroup("backend-shards")
-    group.addoption("--backend-shard", type=int, choices=range(1, 5))
+    group.addoption("--backend-shard", type=int, choices=range(1, SHARD_COUNT + 1))
     group.addoption("--backend-durations", default=str(MANIFEST))
     group.addoption("--backend-results", default="backend-results")
 
@@ -111,7 +113,7 @@ class ShardRun:
     def pytest_collection_modifyitems(self, session, config, items):
         nodes = [item.nodeid for item in items]
         manifest = json.loads(Path(config.getoption("backend_durations")).read_text())
-        shards = partition(nodes, manifest_weights(nodes, manifest))
+        shards = partition(nodes, manifest_weights(nodes, manifest), SHARD_COUNT)
         index = config.getoption("backend_shard") - 1
         selected = set(shards[index])
         self.evidence = {
@@ -187,7 +189,7 @@ def refresh(run_id, directory, output):
                     "--pattern", "backend-shard-*-a*", "--dir", str(directory)], check=True)
     from scripts.ci.shard_evidence import select_evidence
     selected = directory / "selected"
-    select_evidence(directory, selected, "backend-shard", 4)
+    select_evidence(directory, selected, "backend-shard", SHARD_COUNT)
     receipts, durations = [], {}
     for receipt in sorted(selected.glob("**/receipt.json")):
         receipts.append(json.loads(receipt.read_text()))
@@ -198,13 +200,12 @@ def refresh(run_id, directory, output):
         if durations.keys() & timings.keys():
             raise ValueError("duplicate timing nodes")
         durations.update(timings)
-    from scripts.ci.backend_gate import REQUIRED_JOBS, check_gate
     needs = {name: {"result": "success"} for name in REQUIRED_JOBS}
     check_gate(needs, receipts, run["headSha"])
     if (len(durations) != sum(r["count"] for r in receipts)
             or digest(sorted(durations)) != receipts[0]["collection"]):
         raise ValueError("timings do not cover collection")
-    partition(list(durations), durations)
+    partition(list(durations), durations, SHARD_COUNT)
     output.write_text(json.dumps({"format": MANIFEST_FORMAT, "source": run,
                                   "durations": hashed_durations(durations)}, sort_keys=True, indent=2) + "\n")
 
