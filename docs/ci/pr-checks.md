@@ -600,9 +600,10 @@ rerun. The first run's JUnit file and
 isolation, Python public and voice-lock audits, pinned workflow syntax/action lint,
 and the full workflow/publication/security/docs policy regression suite. The policy
 suite runs here once, not again in the hermetic shards.
-`backend-postgres` runs alongside it with the real PostgreSQL pool/transaction
-checks and the large-fold contention tests on both databases. Both jobs must
-pass for the backend verdict. Required flags,
+`backend-postgres` runs the real PostgreSQL pool and transaction checks.
+`backend-contracts` runs the large-fold contention tests on both databases in
+parallel with that job, using a separate disposable PostgreSQL database. All
+three jobs must pass for the backend verdict. Required flags,
 Python permission hardening and 35-minute heavy-job timeouts are retained. Every
 hosted pytest phase emits `--durations=50` and JUnit; artifacts expire in seven days.
 Both Python audits use `scripts/pip_audit_retry.py`: only a final PyPI

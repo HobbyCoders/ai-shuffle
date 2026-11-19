@@ -264,8 +264,17 @@ def test_all_security_commands_flags_and_timing_artifacts_remain_unconditional()
 
 
 def test_large_fold_ratchets_repeat_everywhere_but_controls_run_once():
-    steps = workflow()["jobs"]["backend-postgres"]["steps"]
-    step = next(s for s in steps if s.get("name") == "Measure large-fold contention on both databases")
+    jobs = workflow()["jobs"]
+    steps = jobs["backend-contracts"]["steps"]
+    label = "Measure large-fold contention on both databases"
+    step = next(s for s in steps if s.get("name") == label)
+    assert all(s.get("name") != label for s in jobs["backend-postgres"]["steps"])
+    assert "backend-contracts" in jobs["backend"]["needs"]
+    assert steps.index(step) > next(i for i, s in enumerate(steps) if s.get("name") == "Start the runner's PostgreSQL")
+    assert "openssl rand -hex 24" in step["run"]
+    assert "::add-mask::%s" in step["run"]
+    assert "createdb --owner shuffle_contention_test shuffle_contention_test" in step["run"]
+    assert "@127.0.0.1:5432/shuffle_contention_test" in step["run"]
     assert "if" not in step and "continue-on-error" not in step
     assert step["env"]["AI_SHUFFLE_TRANSCRIPT_PRODUCER"] == "1"
     # The same on a pull request and on main: main may skip backend on a pull request's record.
