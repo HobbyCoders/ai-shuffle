@@ -12,6 +12,17 @@ const quotas = [
 	['Gemini 4 Argon, weekly', '0% left']
 ];
 
+async function accessibleDescription(page, name) {
+	const cdp = await page.context().newCDPSession(page);
+	try {
+		const { nodes } = await cdp.send('Accessibility.getFullAXTree');
+		const button = nodes.find((n) => n.role?.value === 'button' && n.name?.value === name);
+		return button?.description?.value ?? '';
+	} finally {
+		await cdp.detach();
+	}
+}
+
 await runJourney({
 	name: 'antigravity-usage',
 	recorder: { selectors: ['usage=.usage-popover', 'meters=.popover-row', 'settingsQuota=#providers-antigravity-usage'] },
@@ -67,9 +78,37 @@ await runJourney({
 			const labels = (await panel.locator('.popover-row .row-label').allTextContents())
 				.filter((label) => quotas.some(([quota]) => label === quota));
 			expect(JSON.stringify(labels) === JSON.stringify(quotas.map(([label]) => label)), 'agent group order is preserved');
-			await mark('collapse Antigravity without quoting a percentage from another model group');
+			await mark('collapse Antigravity to its Gemini Models weekly percentage');
 			await provider.click();
-			expect(!(await provider.textContent()).includes('%'), 'the collapsed Antigravity heading has no percentage');
+			await provider.getByText('80% left', { exact: true }).waitFor();
+			expect((await provider.locator('.sec-summary').textContent())?.trim() === '80% left',
+				'the collapsed Antigravity heading shows Gemini Models weekly, not Argon or Claude/GPT');
+			const collapsedDesc = await provider.evaluate((el) => {
+				const id = el.getAttribute('aria-describedby');
+				const target = id ? document.getElementById(id) : null;
+				return {
+					id,
+					srOnly: target?.classList.contains('sr-only') ?? false,
+					text: target?.textContent?.trim() ?? null,
+				};
+			});
+			expect(Boolean(collapsedDesc.id) && collapsedDesc.srOnly && collapsedDesc.text === 'Gemini Models, weekly: 80% left',
+				'collapsed Antigravity button links aria-describedby to its .sr-only Gemini weekly summary');
+			const collapsedLabel = await provider.getAttribute('aria-label');
+			expect(await accessibleDescription(page, collapsedLabel) === 'Gemini Models, weekly: 80% left',
+				'collapsed Antigravity button exposes Gemini Models weekly as its accessible description');
+
+			await mark('re-expand Antigravity and clear its collapsed description');
+			await provider.click();
+			await first.waitFor();
+			expect((await provider.getAttribute('aria-expanded')) === 'true', 're-expanded Antigravity section');
+			expect((await provider.getAttribute('aria-describedby')) === null,
+				're-expanded Antigravity button clears aria-describedby');
+			expect(await page.evaluate((id) => document.getElementById(id) === null, collapsedDesc.id),
+				're-expanded Antigravity section removes the collapsed .sr-only summary span');
+			const expandedLabel = await provider.getAttribute('aria-label');
+			expect(await accessibleDescription(page, expandedLabel) === '',
+				're-expanded Antigravity button clears its accessible description');
 
 			await mark('open Settings Usage and verify the same reading');
 			if (isPhone(variant)) {

@@ -2521,3 +2521,193 @@ describe('ContextUsageBar — usage source details', () => {
 			.toBe('https://claude.ai/settings/usage');
 	});
 });
+
+describe('ContextUsageBar — collapsed Antigravity summary', () => {
+	const agySource = {
+		id: 'antigravity_usage', label: 'Antigravity CLI /usage', scope: 'subscription',
+		scope_label: 'Subscription allowance', measure: 'subscription_allowance' as const,
+		measure_label: 'Subscription allowance', collection: 'polled' as const,
+		support: 'undocumented' as const, support_label: 'Undocumented',
+		dashboard_url: 'https://antigravity.google/docs/faq', dashboard_label: 'Antigravity FAQ',
+	};
+
+	function applyAntigravity(
+		windows: { type: string; label?: string | null; utilization: number; resets_at: string | null }[],
+		overrides: Record<string, unknown> = {},
+	) {
+		rateLimit.applySnapshot({
+			available: false,
+			windows: [],
+			providers: [{
+				provider_id: 'agy-1',
+				provider_name: 'Sample Antigravity',
+				provider_type: 'antigravity',
+				status: 'fresh',
+				fetched_at: Date.now(),
+				source_info: agySource,
+				windows,
+				credits: null,
+				...overrides,
+			}],
+		});
+	}
+
+	function antigravitySummary(container: HTMLElement): HTMLElement | null {
+		const section = Array.from(container.querySelectorAll('.popover-section'))
+			.find((s) => s.querySelector('.section-device')?.textContent === 'Antigravity');
+		return section?.querySelector<HTMLElement>('.sec-summary') ?? null;
+	}
+
+	it('shows the Gemini Models weekly % left when collapsed, ignoring 5-hour, Claude/GPT and Argon buckets', async () => {
+		usageSections.set({ 'provider:agy-1': false });
+		applyAntigravity([
+			{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() },
+			{ type: 'antigravity_gemini-5h', label: 'Gemini Models, 5-hour', utilization: 65, resets_at: future() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 75, resets_at: future() },
+			{ type: 'antigravity_3p-5h', label: 'Claude and GPT models, 5-hour', utilization: 90, resets_at: future() },
+			{ type: 'antigravity_gemini-argon-wtu-weekly', label: 'Gemini 4 Argon, weekly', utilization: 100, resets_at: future() },
+		]);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const summary = antigravitySummary(container)!;
+		expect(summary.textContent).toBe('80% left');
+		expect(summary.classList.contains('row-pct')).toBe(true);
+		expect(summary.classList.contains('neutral')).toBe(true);
+		expect(summary.classList.contains('warning')).toBe(false);
+		expect(summary.classList.contains('danger')).toBe(false);
+	});
+
+	it.each([
+		['warning', 75, '25% left'],
+		['danger', 95, '5% left'],
+	] as const)('applies %s severity matching the expanded Gemini weekly row', async (severity, used, expected) => {
+		applyAntigravity([
+			{ type: 'antigravity_gemini-weekly', label: 'GEMINI MODELS, WEEKLY', utilization: used, resets_at: future() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 10, resets_at: future() },
+		]);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const expandedPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
+		expect(expandedPct.textContent).toBe(expected);
+		expect(expandedPct.classList.contains(severity)).toBe(true);
+		await fireEvent.click(container.querySelector('button[aria-label^="Antigravity"][aria-label$="— collapse"]')!);
+		const summary = antigravitySummary(container)!;
+		expect(summary.textContent).toBe(expected);
+		expect(summary.classList.contains(severity)).toBe(true);
+	});
+
+	it('picks the lowest remaining % when multiple split Gemini weekly windows exist', async () => {
+		usageSections.set({ 'provider:agy-1': false });
+		applyAntigravity([
+			{ type: 'antigravity_gemini-pro-weekly', label: 'Gemini Pro, weekly', utilization: 30, resets_at: future() },
+			{ type: 'antigravity_gemini-flash-weekly', label: 'Gemini Flash, weekly', utilization: 75, resets_at: future() },
+			{ type: 'antigravity_gemini-pro-5h', label: 'Gemini Pro, 5-hour', utilization: 95, resets_at: future() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 98, resets_at: future() },
+		]);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const summary = antigravitySummary(container)!;
+		expect(summary.textContent).toBe('25% left');
+		expect(summary.classList.contains('warning')).toBe(true);
+		const button = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		const descId = button.getAttribute('aria-describedby');
+		expect(descId).toBeTruthy();
+		expect(document.getElementById(descId!)?.textContent).toBe('Gemini Flash, weekly: 25% left');
+	});
+
+	it('announces the collapsed Gemini weekly summary via aria-describedby and omits it when expanded or unavailable', async () => {
+		applyAntigravity([
+			{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 75, resets_at: future() },
+		]);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+
+		// Expanded: no aria-describedby and no sr-only summary description.
+		const expandedBtn = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		expect(expandedBtn.getAttribute('aria-expanded')).toBe('true');
+		expect(expandedBtn.hasAttribute('aria-describedby')).toBe(false);
+		expect(container.querySelector('.popover-section .sr-only')).toBeNull();
+
+		// Collapsed: aria-describedby points to the hidden description naming the winning window and % left.
+		await fireEvent.click(expandedBtn);
+		const collapsedBtn = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		expect(collapsedBtn.getAttribute('aria-expanded')).toBe('false');
+		const descId = collapsedBtn.getAttribute('aria-describedby');
+		expect(descId).toBeTruthy();
+		const desc = document.getElementById(descId!);
+		expect(desc?.classList.contains('sr-only')).toBe(true);
+		expect(desc?.textContent).toBe('Gemini Models, weekly: 80% left');
+		expect(collapsedBtn.contains(desc!)).toBe(false);
+
+		// Multiple Antigravity rows with special-character IDs keep unique non-colliding description IDs.
+		usageSections.set({ 'provider:agy-1': false, 'provider:agy:1': false, 'provider:agy_1': false });
+		rateLimit.applySnapshot({
+			available: false,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'agy-1', provider_name: 'Row Dash', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() }],
+				},
+				{
+					provider_id: 'agy:1', provider_name: 'Row Colon', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 35, resets_at: future() }],
+				},
+				{
+					provider_id: 'agy_1', provider_name: 'Row Empty', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 40, resets_at: future() }],
+				},
+			],
+		});
+		await tick();
+		const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('button[aria-label^="Antigravity"]'));
+		expect(buttons).toHaveLength(3);
+		const byName = (part: string) => buttons.find((b) => b.getAttribute('aria-label')?.includes(part))!;
+		const dashId = byName('Row Dash').getAttribute('aria-describedby')!;
+		const colonId = byName('Row Colon').getAttribute('aria-describedby')!;
+		expect(dashId).toBeTruthy();
+		expect(colonId).toBeTruthy();
+		expect(dashId).not.toBe(colonId);
+		expect(document.getElementById(dashId)?.textContent).toBe('Gemini Models, weekly: 80% left');
+		expect(document.getElementById(colonId)?.textContent).toBe('Gemini Models, weekly: 65% left');
+		expect(byName('Row Empty').hasAttribute('aria-describedby')).toBe(false);
+	});
+
+	it('respects reset rollover so collapsed and expanded Gemini weekly rows both show 100% left', async () => {
+		applyAntigravity([
+			{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 95, resets_at: past() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 50, resets_at: future() },
+		]);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const expandedPct = container.querySelector('.popover-row .row-pct') as HTMLElement;
+		expect(expandedPct.textContent).toBe('100% left');
+		expect(expandedPct.classList.contains('neutral')).toBe(true);
+		await fireEvent.click(container.querySelector('button[aria-label^="Antigravity"][aria-label$="— collapse"]')!);
+		const summary = antigravitySummary(container)!;
+		expect(summary.textContent).toBe('100% left');
+		expect(summary.classList.contains('neutral')).toBe(true);
+	});
+
+	it.each([
+		['empty / unavailable bucket', [], { status: 'unavailable', fetched_at: null, last_error_kind: 'unavailable' }],
+		['only non-Gemini weekly windows', [
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 25, resets_at: future() },
+		], {}],
+		['only Gemini 5-hour window', [
+			{ type: 'antigravity_gemini-5h', label: 'Gemini Models, 5-hour', utilization: 40, resets_at: future() },
+		], {}],
+	])('falls back to "—" when no Gemini weekly window exists (%s)', async (_case, windows, overrides) => {
+		usageSections.set({ 'provider:agy-1': false });
+		applyAntigravity(windows, overrides);
+		const { container } = render(ContextUsageBar);
+		await openPopover(container);
+		const summary = antigravitySummary(container)!;
+		expect(summary.textContent).toBe('—');
+		expect(summary.classList.contains('sec-empty')).toBe(true);
+	});
+});

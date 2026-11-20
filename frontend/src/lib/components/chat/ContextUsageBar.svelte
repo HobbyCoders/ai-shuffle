@@ -165,6 +165,11 @@
 		bottomSheet = false
 	}: Props = $props();
 
+	const uid = $props.id();
+	function safeDomToken(value: string): string {
+		return value.replace(/[^A-Za-z0-9-]/g, (ch) => `_${ch.codePointAt(0)!.toString(16)}_`);
+	}
+
 	/** Where a model's context length is set, for the unknown-window hint. */
 	const UNKNOWN_WINDOW_HINT =
 		'This model has no advertised context length, so there is no percentage. Set one in Settings → Providers → the model entry.';
@@ -966,6 +971,43 @@
 		return kind === 'subscription';
 	}
 
+	interface AntigravitySummary extends PercentDisplay {
+		label: string;
+	}
+
+	/**
+	 * Antigravity reports separate model groups (e.g. Gemini Models, Claude and
+	 * GPT models, Gemini 4 Argon) across weekly and 5-hour windows. Its
+	 * collapsed summary shows the Gemini model weekly remaining percentage:
+	 * prefer the primary "Gemini Models, weekly" bucket when present so a
+	 * model-specific bucket (such as Gemini 4 Argon) does not override it,
+	 * otherwise pick the most constrained Gemini weekly window.
+	 */
+	function antigravitySummary(
+		windows: UsageWindow[],
+		nowMs: number,
+		showsRemaining: boolean
+	): AntigravitySummary | null {
+		const primary = windows.filter((w) =>
+			/^gemini(?:\s+models?)?\s*,\s*weekly$/i.test((w.label ?? '').trim())
+		);
+		const candidates = primary.length > 0
+			? primary
+			: windows.filter((w) => {
+				const match = /^(.+?),\s*weekly$/i.exec((w.label ?? '').trim());
+				return Boolean(match && /\bgemini\b/i.test(match[1]));
+			});
+		let best: AntigravitySummary | null = null;
+		for (const w of candidates) {
+			const display = providerWindowPercent(w, nowMs, showsRemaining);
+			const isMoreConstrained = !best || (showsRemaining ? display.pct < best.pct : display.pct > best.pct);
+			if (isMoreConstrained) {
+				best = { ...display, label: windowLabel(w.type, w.label) };
+			}
+		}
+		return best;
+	}
+
 	function providerWindowSummary(
 		windows: UsageWindow[],
 		nowMs: number,
@@ -1120,7 +1162,15 @@
 	</div>
 {/snippet}
 
-{#snippet sectionHeader(id: string, name: string, subtext: string | null, isOpen: boolean, ariaName: string, summary: Snippet)}
+{#snippet sectionHeader(
+	id: string,
+	name: string,
+	subtext: string | null,
+	isOpen: boolean,
+	ariaName: string,
+	summary: Snippet,
+	summaryDescription?: { id: string; text: string } | null
+)}
 	<div class="popover-section">
 		<div class="provider-header">
 			<button
@@ -1128,6 +1178,7 @@
 				class="sec-header"
 				aria-expanded={isOpen}
 				aria-label="{ariaName} — {isOpen ? 'collapse' : 'expand'}"
+				aria-describedby={!isOpen && summaryDescription ? summaryDescription.id : undefined}
 				onclick={() => toggleSection(id)}
 			>
 				<span class="sec-head-labels">
@@ -1149,6 +1200,9 @@
 			</button>
 			{@render hideProvider(id, name)}
 		</div>
+		{#if !isOpen && summaryDescription}
+			<span id={summaryDescription.id} class="sr-only">{summaryDescription.text}</span>
+		{/if}
 	</div>
 {/snippet}
 
@@ -1182,8 +1236,10 @@
 <!-- ═══ Provider usage (non-Claude) ═══
      ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
      their collapsed summary uses the 5-hour window when there is one, else the
-     least remaining window. xAI API-key, other API-key and credit windows keep
-     used-of-100 and summarize the highest-utilization window. -->
+     least remaining window. Antigravity summarizes its Gemini model weekly
+     remaining quota (or "—" when none is reported). xAI API-key, other API-key
+     and credit windows keep used-of-100 and summarize the highest-utilization
+     window. -->
 {#snippet providerSection(pb: ProviderUsageBucket)}
 	{@const sectionId = `provider:${pb.providerId}`}
 	{@const pbDisplay = providerDisplayFor(pb)}
@@ -1193,13 +1249,18 @@
 	{@const pbWindows = isAntigravity ? Object.values(pb.windows) : planDisplayWindows(pb.windows, pbNoFiveHour, now)}
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
+	{@const agSummary = isAntigravity ? antigravitySummary(pbWindows, now, pbShowsRemaining) : null}
+	{@const pbSummary = isAntigravity ? agSummary : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+	{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
+	{@const showsCreditHeadline = creditsNum(pb.credits, 'balance_remaining') != null && Boolean(pbCreditsShort)}
+	{@const summaryDescription = !pbOpen && agSummary && !showsCreditHeadline
+		? { id: `${uid}-ag-summary-${safeDomToken(pb.providerId)}`, text: `${agSummary.label}: ${agSummary.pct}%${suffix}` }
+		: null}
 	{#snippet providerSummary()}
-		{@const pbSummary = isAntigravity ? null : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
-		{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit
 		     would otherwise produce). -->
-		{#if creditsNum(pb.credits, 'balance_remaining') != null && pbCreditsShort}
+		{#if showsCreditHeadline}
 			<span class="sec-summary sec-credits" class:danger={creditsExhausted(pb)} title={creditsSummary(pb.credits, pb.providerType) ?? undefined}>{pbCreditsShort}</span>
 		{:else if pbSummary}
 			<span class="row-pct {pbSummary.severity} sec-summary">{pbSummary.pct}%{suffix}</span>
@@ -1212,7 +1273,7 @@
 			<span class="sec-summary sec-credits sec-empty">—</span>
 		{/if}
 	{/snippet}
-	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, providerAriaName(pb, pbDisplay), providerSummary)}
+	{@render sectionHeader(sectionId, pbDisplay.name, pbDisplay.subtext, pbOpen, providerAriaName(pb, pbDisplay), providerSummary, summaryDescription)}
 	{#if pbOpen}
 		{#each providerSlots(pb, pbWindows, pbShowsRemaining, pbNoFiveHour, now) as slot (slot.type)}
 			{@render windowRow(slot, suffix)}
@@ -1964,5 +2025,17 @@
 	.section-account {
 		font-size: 10.5px;
 		color: var(--muted-foreground);
+	}
+	.sr-only {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		padding: 0;
+		margin: -1px;
+		overflow: hidden;
+		clip: rect(0, 0, 0, 0);
+		clip-path: inset(50%);
+		white-space: nowrap;
+		border: 0;
 	}
 </style>
