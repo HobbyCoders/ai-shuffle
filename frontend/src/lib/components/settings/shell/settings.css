@@ -312,28 +312,30 @@
 
 /* Phone geometry belongs to the kit, not individual destination overrides.
    data-stacked also covers the native shell on a wide/foldable viewport. */
-.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink),
+.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
 .settings-shell[data-stacked] .st-seg button {
  min-height: 44px;
 }
-.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset) { min-width: 44px; }
+.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
 .settings-shell[data-stacked] :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
 .settings-shell[data-stacked] :is(.st-num input, textarea) { font-size: 16px; }
 @media (max-width: 600px), (pointer: coarse) {
- .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink),
+ .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
  .settings-shell .st-seg button { min-height: 44px; }
- .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset) { min-width: 44px; }
+ .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
  .settings-shell :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
 }
-/* The "?" beside a label keeps its 18px drawing and answers across 44px
+/* The "?" beside a row's label keeps its 18px drawing and answers across 44px
    through an invisible extension. Drawn 44px, it made a label with help twice
-   as tall as one without and pushed its helper text away from it. */
-.settings-shell[data-stacked] .st-help { position: relative; }
-.settings-shell[data-stacked] .st-help::after { content: ''; position: absolute; inset: -13px; }
+   as tall as one without and pushed its helper text away from it. A "?"
+   anywhere else stays a 44px box: its extension would cover the control next
+   to it. */
+.settings-shell[data-stacked] .st-rl > .st-help { position: relative; min-width: 0; min-height: 0; }
+.settings-shell[data-stacked] .st-rl > .st-help::after { content: ''; position: absolute; inset: -13px; }
 @media (max-width: 600px), (pointer: coarse) {
- .settings-shell .st-help { position: relative; }
- .settings-shell .st-help::after { content: ''; position: absolute; inset: -13px; }
+ .settings-shell .st-rl > .st-help { position: relative; min-width: 0; min-height: 0; }
+ .settings-shell .st-rl > .st-help::after { content: ''; position: absolute; inset: -13px; }
 }
 
 /* One phone select: the native select (SelectField) and the value button that
@@ -610,15 +612,19 @@
 .settings-shell[data-stacked] .st-row .st-txt {
 	flex: 1 1 100%;
 }
-/* A path keeps at least 260px: on a phone its Check button goes under it
-   rather than leaving room for half a folder name; an unfolded screen keeps
-   them on one line. (Both :has() are needed to outrank the no-wrap rule for
-   text fields above.) */
+/* A path keeps at least 260px: where the row is too narrow for that beside
+   its Check button (most phones), the button goes under the field, at the
+   right like any control that drops; a wider or unfolded screen keeps them on
+   one line. (Both :has() are needed to outrank the no-wrap rule for text
+   fields above.) */
 .settings-shell[data-stacked] .st-row:has(> .st-rc > .st-txt.st-mono + :is(.st-btn:not(.icon), .st-path-status)) > .st-rc:has(> .st-txt.st-mono) {
 	flex-wrap: wrap;
 }
 .settings-shell[data-stacked] .st-row > .st-rc > .st-txt.st-mono:has(+ :is(.st-btn:not(.icon), .st-path-status)) {
 	flex-basis: 260px;
+}
+.settings-shell[data-stacked] .st-row > .st-rc > .st-txt.st-mono + .st-btn:not(.icon) {
+	margin-left: auto;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
