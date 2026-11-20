@@ -30,6 +30,8 @@ reload. The first probe of the process publishes nothing.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import re
@@ -403,9 +405,31 @@ async def get_status_async(force: bool = False) -> ClaudeCliStatus:
     return await asyncio.to_thread(get_status, force)
 
 
+_UNPINNED = object()
+_peek_pin: contextvars.ContextVar[object] = contextvars.ContextVar("claude_cli_status_pin", default=_UNPINNED)
+
+
+@contextlib.contextmanager
+def pinned_peek():
+    """Answer :func:`peek` with one read for the whole block, so a projection
+    that checks the sign-in several times (the model registry payload: which
+    account's model list, which plan) describes one account even if a saved
+    sign-in switch lands midway."""
+    if _peek_pin.get() is not _UNPINNED:
+        yield
+        return
+    token = _peek_pin.set(peek())
+    try:
+        yield
+    finally:
+        _peek_pin.reset(token)
+
+
 def peek() -> Optional[ClaudeCliStatus]:
-    """The last result without probing (None before the first probe)."""
-    return _cached
+    """The last result without probing (None before the first probe); the
+    pinned one inside :func:`pinned_peek`."""
+    held = _peek_pin.get()
+    return _cached if held is _UNPINNED else held  # type: ignore[return-value]
 
 
 def is_signed_in_cached() -> bool:

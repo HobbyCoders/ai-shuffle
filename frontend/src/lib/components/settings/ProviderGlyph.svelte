@@ -14,6 +14,7 @@
 		| 'opencode'
 		| 'google'
 		| 'antigravity'
+		| 'fal'
 		| 'custom';
 
 	/**
@@ -45,7 +46,7 @@
 				return providerType;
 			case 'fal':
 			case 'fal-ai':
-				return 'custom';
+				return 'fal';
 			default:
 				return 'custom';
 		}
@@ -53,16 +54,29 @@
 </script>
 
 <script lang="ts">
+	import antigravityLogo from './provider-artwork/antigravity-color.svg';
+	import geminiLogo from './provider-artwork/gemini-color.svg';
+	import minimaxLogo from './provider-artwork/minimax-color.svg';
+
+	// Kept as separate images so SVG mask and gradient IDs are scoped per icon.
+	const colorLogos: Partial<Record<ProviderGlyphKind, string>> = {
+		antigravity: antigravityLogo,
+		google: geminiLogo,
+		minimax: minimaxLogo
+	};
+
 	interface Props {
 		kind: ProviderGlyphKind;
 		size?: number;
 		class?: string;
-		/** Drawn inside a tile that already has its fill: monograms drop their own box. */
-		tiled?: boolean;
 	}
-	let { kind, size = 16, class: className = '', tiled = false }: Props = $props();
+	let { kind, size = 16, class: className = '' }: Props = $props();
+	const logo = $derived(colorLogos[kind]);
 </script>
 
+{#if logo}
+	<img class="provider-glyph {className}" src={logo} width={size} height={size} alt="" aria-hidden="true" data-provider-logo={kind} />
+{:else}
 <svg
 	class="provider-glyph {className}"
 	width={size}
@@ -89,10 +103,16 @@
 	{:else if kind === 'openrouter'}
 		<!-- OpenRouter company mark -->
 		<path d="M16.778 1.844v1.919q-.569-.026-1.138-.032-.708-.008-1.415.037c-1.93.126-4.023.728-6.149 2.237-2.911 2.066-2.731 1.95-4.14 2.75-.396.223-1.342.574-2.185.798-.841.225-1.753.333-1.751.333v4.229s.768.108 1.61.333c.842.224 1.789.575 2.185.799 1.41.798 1.228.683 4.14 2.75 2.126 1.509 4.22 2.11 6.148 2.236.88.058 1.716.041 2.555.005v1.918l7.222-4.168-7.222-4.17v2.176c-.86.038-1.611.065-2.278.021-1.364-.09-2.417-.357-3.979-1.465-2.244-1.593-2.866-2.027-3.68-2.508.889-.518 1.449-.906 3.822-2.59 1.56-1.109 2.614-1.377 3.978-1.466.667-.044 1.418-.017 2.278.02v2.176L24 6.014Z" />
-	{:else if kind === 'kimi' || kind === 'minimax' || kind === 'opencode' || kind === 'google' || kind === 'antigravity'}
-		<!-- Neutral initials, not an invented vendor logo. -->
-		{#if !tiled}<rect width="24" height="24" rx="5" opacity="0.1" />{/if}
-		<text x="12" y="12" dy=".35em" text-anchor="middle" font-size="16" font-weight="600" font-family="inherit">{kind === 'kimi' ? 'K' : kind === 'minimax' ? 'M' : kind === 'google' ? 'G' : kind === 'antigravity' ? 'A' : 'O'}</text>
+	{:else if kind === 'kimi'}
+		<!-- Kimi lettermark; see provider-artwork/ATTRIBUTION.txt. -->
+		<path d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" />
+		<path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+	{:else if kind === 'opencode'}
+		<!-- OpenCode lettermark; see provider-artwork/ATTRIBUTION.txt. -->
+		<path d="M16 6H8v12h8V6zm4 16H4V2h16v20z" />
+	{:else if kind === 'fal'}
+		<!-- fal.ai brand mark; see provider-artwork/ATTRIBUTION.txt. -->
+		<path d="M15.477 0c.415 0 .749.338.788.752a7.775 7.775 0 006.985 6.984c.413.04.752.373.752.788v6.952c0 .415-.338.748-.752.788a7.775 7.775 0 00-6.985 6.984c-.04.414-.373.752-.788.752H8.525c-.416 0-.749-.338-.789-.752a7.775 7.775 0 00-6.984-6.984c-.414-.04-.752-.373-.752-.788V8.524c0-.415.338-.748.752-.788A7.775 7.775 0 007.736.752C7.776.338 8.11 0 8.526 0h6.95zM4.819 11.98a7.226 7.226 0 007.223 7.23 7.226 7.226 0 007.223-7.23c0-3.994-3.234-7.23-7.223-7.23a7.227 7.227 0 00-7.223 7.23z" />
 	{:else}
 		<!-- Generic endpoint cube -->
 		<g
@@ -107,6 +127,7 @@
 		</g>
 	{/if}
 </svg>
+{/if}
 
 <style>
 	.provider-glyph {

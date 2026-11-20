@@ -2279,6 +2279,9 @@ def build_options_from_profile(
     # stamped (not just for chat) so a pooled client comparing old/new options
     # sees a lane CHANGE rather than an absent field on one side.
     options.aih_session_mode = session_mode
+    # An explicit no-project folder may sit inside an unrelated checkout.
+    # Keep that session scope instead of inferring it from Git's ancestor search.
+    options.aih_no_project_cwd = working_dir_source in (OWNER_CHAT_SOURCE, "chat uploads")
     options.aih_owner_coordinator = owner_coordinator
     options.aih_working_record = working_record_context
 

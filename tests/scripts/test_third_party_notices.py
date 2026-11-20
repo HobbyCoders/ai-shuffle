@@ -8,6 +8,17 @@ from scripts import generate_third_party_notices as notices
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_provider_artwork_has_full_attribution_and_license():
+    artwork = ROOT / "frontend/src/lib/components/settings/provider-artwork"
+    attribution = (artwork / "ATTRIBUTION.txt").read_text().split("\n\n", 1)[1].strip()
+    license_text = (artwork / "LICENSE").read_text().strip()
+    published = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
+    for text in (published, notices.render()):
+        section = text.split("### LobeHub Lobe Icons (provider artwork)\n", 1)[1].split("\n### ", 1)[0]
+        assert attribution in section
+        assert f"```\n{license_text}\n```" in section
+
+
 def test_all_npm_lockfile_rows_are_noticed():
     text = (ROOT / "THIRD_PARTY_NOTICES.md").read_text()
     for project, include_dev in notices.NPM_PROJECTS:

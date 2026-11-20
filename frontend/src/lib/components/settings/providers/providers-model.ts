@@ -279,7 +279,7 @@ const BUILT_IN: { id: BuiltInProviderId; name: string; glyph: ProviderGlyphKind;
 	{ id: 'opencode', name: 'OpenCode', glyph: 'opencode', letter: 'O' },
 	{ id: 'google', name: 'Google Gemini', glyph: 'google', letter: 'G' },
 	{ id: 'antigravity', name: 'Google Antigravity', glyph: 'antigravity', letter: 'A' },
-	{ id: 'fal', name: 'fal.ai', glyph: 'custom', letter: 'f' }
+	{ id: 'fal', name: 'fal.ai', glyph: 'fal', letter: 'f' }
 ];
 
 /** Agent providers in the order Settings > Providers lists them (fal.ai is media only, so left out). */

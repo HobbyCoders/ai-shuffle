@@ -1,20 +1,26 @@
 """The subscription CLI's own model list (``app.core.claude_cli_models``).
 
 The list comes from the CLI's ``initialize`` reply. On a subscription sign-in
-it labels the four aliases, offers the versions it lists (off until the owner
-turns them on), and makes a listed id mean itself; in every other mode the
-static registry is unchanged.
+it labels the four aliases, offers every version it lists (Mythos included),
+and makes a listed id mean itself; in every other mode the static registry is
+unchanged.
 """
 
 import json
 
 import pytest
 
+from app.core import claude_auth_mode as _auth_mode
 from app.core import claude_cli_models as cm
+from app.core import claude_cli_status as _cli_status
 from app.core import model_registry as m
 from app.core.model_effort import effort_capabilities
 
 _ALL = ["low", "medium", "high", "xhigh", "max"]
+# The unpatched functions, for tests that need the real pin-aware path.
+_REAL_CURRENT_MODE = _auth_mode.current_mode
+_REAL_CLAUDE_PAYLOAD = m._claude_payload
+_REAL_PEEK = _cli_status.peek
 
 
 def _entry(value, label, resolved, levels=_ALL, supports=True):
@@ -33,6 +39,7 @@ REPLY = {
         _entry("sonnet", "Sonnet 5.5", "claude-sonnet-5-5"),
         _entry("haiku", "Haiku 5.5", "claude-haiku-5-5"),
         _entry("claude-fable-5-1", "Fable 5.1", "claude-fable-5-1"),
+        _entry("claude-mythos-5-1", "Mythos 5.1", "claude-mythos-5-1"),
         _entry("claude-opus-5", "Opus 5", "claude-opus-5"),
         _entry("claude-opus-4-6", "Opus 4.6", "claude-opus-4-6", ["low", "medium", "high", "max"]),
         _entry("claude-sonnet-4-6", "Sonnet 4.6", "claude-sonnet-4-6", ["low", "medium", "high", "max"]),
@@ -43,11 +50,11 @@ REPLY = {
 
 @pytest.fixture
 def cli(monkeypatch):
-    """A captured list, a subscription sign-in, nothing turned on."""
+    """A captured list and a subscription sign-in."""
     from app.core import claude_auth_mode, claude_cli_status
 
     # The active sign-in is the account REPLY was captured under.
-    state = {"mode": "subscription", "enabled": [],
+    state = {"mode": "subscription",
              "status": claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="a@example.invalid",
                                                          cli_version="2.1.325")}
     monkeypatch.setattr(cm, "_snapshot", cm.parse_initialize(REPLY))
@@ -55,7 +62,6 @@ def cli(monkeypatch):
     monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: state["mode"])
     monkeypatch.setattr(claude_cli_status, "peek", lambda: state["status"])
     monkeypatch.setattr(claude_cli_status, "get_status", lambda *a, **k: state["status"])
-    monkeypatch.setattr(cm, "enabled_models", lambda: list(state["enabled"]))
     monkeypatch.setattr(m, "_providers_payload", lambda: [])
     monkeypatch.setattr(m, "_claude_payload", lambda: {})
     return state
@@ -106,31 +112,98 @@ def test_effort_and_window_follow_the_picked_version(cli):
     assert effort_capabilities("opus", route="delegated")["effort_levels"] == _ALL
 
 
-def test_payload_offers_aliases_and_lists_versions_off_by_default(cli):
+def test_payload_offers_the_aliases_then_every_listed_version(cli):
     payload = m.registry_payload()
-    assert [e["value"] for e in payload["models"]] == ["haiku", "sonnet", "opus", "fable"]
-    assert {e["value"]: e["label"] for e in payload["models"]}["opus"] == "Opus 5.5"
-    versions = {e["value"]: e for e in payload["versioned_models"]}
-    assert set(versions) == {"claude-fable-5-1", "claude-opus-5", "claude-opus-4-6",
-                             "claude-sonnet-4-6", "claude-haiku-4-5-20251001"}
-    assert not any(e["enabled"] for e in versions.values())
-    assert versions["claude-opus-4-6"]["effort_levels"] == ["low", "medium", "high", "max"]
-    assert versions["claude-haiku-4-5-20251001"]["context_window"] == 200_000
+    assert "versioned_models" not in payload
+    assert [e["value"] for e in payload["models"]] == [
+        "haiku", "sonnet", "opus", "fable",
+        "claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5", "claude-opus-4-6",
+        "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+    by = {e["value"]: e for e in payload["models"]}
+    assert by["opus"]["label"] == "Opus 5.5"
+    assert by["claude-opus-4-6"]["effort_levels"] == ["low", "medium", "high", "max"]
+    assert by["claude-haiku-4-5-20251001"]["context_window"] == 200_000
     # On a subscription the picker folds no full id onto an alias.
     assert not [k for k in payload["legacy_map"] if k.startswith("claude-")]
 
 
-def test_turned_on_versions_join_the_picker(cli):
-    cli["enabled"] = ["claude-opus-4-6"]
-    payload = m.registry_payload()
-    assert [e["value"] for e in payload["models"]][-1] == "claude-opus-4-6"
-    assert payload["models"][-1]["label"] == "Opus 4.6"
+def test_mythos_is_its_own_family_and_ranks_no_alias(cli):
+    from app.core.credential_gate import _claude_alias
+
+    payload = {e["value"]: e for e in m.registry_payload()["models"]}
+    assert payload["claude-mythos-5-1"]["label"] == "Mythos 5.1"
+    assert payload["claude-mythos-5-1"]["family"] == "mythos"
+    assert payload["claude-mythos-5-1"]["context_window"] == 1_000_000
+    assert m.native_choice("claude-mythos-5-1") == "claude-mythos-5-1"
+    # Usage on a Mythos model never makes "mythos" a default alias.
+    assert _claude_alias("claude-mythos-5-1") is None
+    assert _claude_alias("claude-opus-4-6") == "opus"
+
+
+def test_an_unknown_family_is_still_listed_and_selectable(cli, monkeypatch):
+    """A family this release does not know yet keeps its row, with no family."""
+    reply = {**REPLY, "models": [*REPLY["models"], _entry("claude-nova-6", "Nova 6", "claude-nova-6")]}
+    monkeypatch.setattr(cm, "_snapshot", cm.parse_initialize(reply))
+    payload = {e["value"]: e for e in m.registry_payload()["models"]}
+    assert payload["claude-nova-6"]["label"] == "Nova 6"
+    assert payload["claude-nova-6"]["family"] is None
+    assert payload["claude-nova-6"]["context_window"] == 1_000_000
+    assert m.native_choice("claude-nova-6") == "claude-nova-6"
+    assert m.selectable_model_values()[-1] == "claude-nova-6"
+
+
+def test_subagent_model_enums_offer_every_listed_version(cli):
+    from app.mcp import config_subagents
+
+    values = m.selectable_model_values()
+    assert values[:4] == m.model_values()
+    assert "claude-mythos-5-1" in values and "claude-opus-4-6" in values
+    tools = {t.name: t for t in config_subagents._create_subagent_tools(True)}
+    for name in ("createSubagent", "updateSubagent"):
+        assert "claude-mythos-5-1" in tools[name].input_schema["properties"]["model"]["enum"]
+    cli["mode"] = "api"
+    assert m.selectable_model_values() == m.model_values()
+
+
+def test_a_refreshed_list_rebuilds_a_pooled_app_config_server(cli, monkeypatch):
+    """Review r2: an open chat must not keep advertising the old model enums."""
+    from app.core.provider.types import mcp_servers_equivalent
+    from app.mcp import config_subagents
+    from app.mcp.app_config_sdk import schema_signature
+
+    def server():
+        tools = config_subagents._create_subagent_tools(True)
+        return {"app-config": {"type": "sdk", "name": "app-config", "instance": object(),
+                               "schema_signature": schema_signature(tools)}}
+
+    before = server()
+    assert mcp_servers_equivalent(before, server())
+    reply = {**REPLY, "models": [*REPLY["models"], _entry("claude-mythos-6", "Mythos 6", "claude-mythos-6")]}
+    monkeypatch.setattr(cm, "_snapshot", cm.parse_initialize(reply))
+    assert not mcp_servers_equivalent(before, server())
+
+
+def test_an_inherited_full_id_reaches_a_paired_worker_as_itself(cli, monkeypatch):
+    """Review S2: a chat on Mythos starts a paired-worker chat on Mythos.
+    An explicit request keeps the alias-only rule."""
+    from app.core import model_override, session_orchestration as so
+
+    monkeypatch.setattr(model_override, "_provider_rows", lambda: [])
+    for runs_here in (False, True):
+        picked = so._inherited_choice("claude-mythos-5-1", runs_here=runs_here)
+        assert (picked.model, picked.provider_id) == ("claude-mythos-5-1", None)
+    assert so._inherited_choice("opus", runs_here=False).model == "opus"
+    with pytest.raises(ValueError):
+        model_override.resolve("claude-mythos-5-1", runs_here=False)
+    cli["mode"] = "api"
+    with pytest.raises(ValueError):
+        so._inherited_choice("claude-mythos-5-1", runs_here=False)
 
 
 def test_other_modes_keep_the_static_registry(cli):
     cli["mode"] = "api"
     payload = m.registry_payload()
-    assert payload["versioned_models"] == []
+    assert [e["value"] for e in payload["models"]] == ["haiku", "sonnet", "opus", "fable"]
     assert {e["value"]: e["label"] for e in payload["models"]}["opus"] == "Opus"
     assert payload["legacy_map"]["claude-opus-4-6"] == "opus"
     assert m.delegated_model_aliases()["opus"] == "claude-opus-5"
@@ -231,24 +304,6 @@ def test_store_writes_once_per_change(cli, monkeypatch, tmp_path):
     assert saved["cli_version"] == "2.1.325"
 
 
-def test_toggling_one_model_keeps_ids_this_worker_does_not_list(monkeypatch):
-    """Review S2: worker B toggling its model never drops worker A's."""
-    from app.core import claude_cli_status
-    from app.db import settings as db_settings
-
-    # Saved by worker A: a version only A's CLI lists.
-    saved = {cm.ENABLED_SETTING: json.dumps(["claude-only-on-a"])}
-    monkeypatch.setattr(db_settings, "get_system_setting", lambda k: saved.get(k))
-    monkeypatch.setattr(db_settings, "set_system_setting", lambda k, v: saved.update({k: v}))
-    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
-    assert cm.set_model_enabled("claude-opus-4-6", True) == ["claude-only-on-a", "claude-opus-4-6"]
-    assert cm.set_model_enabled("claude-opus-4-6", True) == ["claude-only-on-a", "claude-opus-4-6"]
-    assert cm.set_model_enabled("claude-opus-4-6", False) == ["claude-only-on-a"]
-    assert json.loads(saved[cm.ENABLED_SETTING]) == ["claude-only-on-a"]
-    with pytest.raises(ValueError):
-        cm.set_model_enabled("opus", True)
-
-
 @pytest.mark.parametrize("saved", ["listed", "no list", "list without it", "other account", "unknown account"])
 def test_a_full_id_is_never_folded_when_stored_inherited_or_sent(cli, monkeypatch, saved):
     """Review S1/S5: on a subscription a full id means itself on every path,
@@ -299,6 +354,89 @@ def test_a_full_id_is_never_folded_when_stored_inherited_or_sent(cli, monkeypatc
         assert _native_task_model("claude-opus-4-6") == "opus"
         assert model_override.app_id(None, "claude-opus-4-6") == "opus"
         assert m.native_choice("claude-opus-9") is None
+
+
+def test_a_sign_in_switch_mid_payload_never_mixes_two_lists(cli, monkeypatch):
+    """Review R7-S1: one payload describes one account's list."""
+    from app.core import claude_cli_status
+
+    account_b = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid",
+                                                  cli_version="2.1.325")
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        cli["status"] = account_b  # the owner switches accounts mid-projection
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    by = {e["value"]: e for e in m.registry_payload()["models"]}
+    # Still entirely account A's list: its alias labels and its versions.
+    assert by["opus"]["label"] == "Opus 5.5" and by["fable"]["label"] == "Fable 5.2"
+    assert "claude-mythos-5-1" in by and "claude-opus-4-6" in by
+    # The pin ends with the payload: the next read is B's (none captured yet).
+    assert cm.catalog() is None
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    by = {e["value"]: e for e in m.registry_payload()["models"]}
+    assert list(by) == ["haiku", "sonnet", "opus", "fable"]
+
+
+def test_a_mode_switch_mid_payload_never_mixes_subscription_rows_with_cloud(cli, monkeypatch):
+    """Review R8-S1: rows, auth metadata and the legacy map share one mode."""
+    from app.core import claude_auth_mode
+
+    # Keep the real projection pin and runtime choice, backed by a switchable setting.
+    monkeypatch.setattr(claude_auth_mode, "current_mode", _REAL_CURRENT_MODE)
+    monkeypatch.setattr(claude_auth_mode, "_stored_choice", lambda *, cached: (cli["mode"], {"mode": cli["mode"]}))
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        cli["mode"] = claude_auth_mode.MODE_CLOUD  # the owner turns on Cloud mid-projection
+        assert claude_auth_mode.runtime_choice()[0] == claude_auth_mode.MODE_CLOUD
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    payload = m.registry_payload()
+    by = {e["value"]: e for e in payload["models"]}
+    assert "claude-mythos-5-1" in by and "claude-opus-4-6" in by
+    assert payload["claude"]["auth_kind"] == "subscription"
+    assert "claude-opus-4-6" not in payload["legacy_map"]  # still means itself
+    # After the payload the switch shows: Cloud, no subscription rows.
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    payload = m.registry_payload()
+    assert not any(e["value"].startswith("claude-") for e in payload["models"])
+    assert payload["claude"]["auth_kind"] != "subscription"
+
+
+def test_an_account_switch_mid_payload_keeps_the_plan_and_list_together(cli, monkeypatch):
+    """Review R9-S1: the plan in the payload is the listed account's."""
+    from app.core import claude_cli_status
+
+    account_a = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="a@example.invalid",
+                                                  cli_version="2.1.325", plan="max")
+    account_b = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid",
+                                                  cli_version="2.1.325", plan="pro")
+    # The real pin-aware peek, over the module's cache.
+    monkeypatch.setattr(claude_cli_status, "peek", _REAL_PEEK)
+    monkeypatch.setattr(claude_cli_status, "_cached", account_a)
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        monkeypatch.setattr(claude_cli_status, "_cached", account_b)  # a saved-login switch lands
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    payload = m.registry_payload()
+    assert "claude-mythos-5-1" in {e["value"] for e in payload["models"]}
+    assert payload["claude"]["plan_type"] == "max"
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    payload = m.registry_payload()
+    assert "claude-mythos-5-1" not in {e["value"] for e in payload["models"]}
+    assert payload["claude"]["plan_type"] == "pro"
 
 
 def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch):
@@ -379,19 +517,15 @@ def test_a_capture_from_the_previous_account_never_replaces_the_active_one(cli, 
     assert cm.peek()["account"] == cm.account_key("b@example.invalid", None)
 
 
-def test_a_throwaway_preview_may_turn_models_on_and_off_and_a_real_install_may_not():
-    """The dev loop's journeys drive the Models tab through the preview cookie."""
+def test_a_preview_never_refreshes_the_cli_list():
+    """Refresh starts the CLI: owner only, even on a throwaway preview."""
     from unittest.mock import patch
 
     from starlette.requests import Request
 
     from app.api.auth import _preview_may_change_dev_data
-    from app.core.preview_access import mutation_allowed
 
-    request = Request({"type": "http", "method": "PUT", "path": "/api/v1/models/claude/enabled", "headers": []})
     refresh = Request({"type": "http", "method": "POST", "path": "/api/v1/models/claude/refresh", "headers": []})
-    assert mutation_allowed("/api/v1/models/claude/enabled", "PUT")
     for disposable in (True, False):
         with patch("app.preview_run.disposable_preview_data", return_value=disposable):
-            assert _preview_may_change_dev_data(request) == disposable
             assert _preview_may_change_dev_data(refresh) is False

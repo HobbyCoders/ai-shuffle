@@ -30,6 +30,8 @@ module never reads the CLI's own credential files; CLI sign-in state comes from
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -181,6 +183,24 @@ def _cli_signed_in_peek() -> Optional[bool]:
     return None if status is None else bool(status.signed_in)
 
 
+_mode_pin: contextvars.ContextVar[str | None] = contextvars.ContextVar("claude_auth_mode_pin", default=None)
+
+
+@contextlib.contextmanager
+def pinned_mode():
+    """Keep model registry reads on one mode without pinning turn credentials."""
+    held = _mode_pin.get()
+    if held is not None:
+        yield held
+        return
+    mode = current_mode()
+    token = _mode_pin.set(mode)
+    try:
+        yield mode
+    finally:
+        _mode_pin.reset(token)
+
+
 def runtime_choice() -> tuple[str, Optional[dict]]:
     """Resolve the mode and its shared account from one selection snapshot."""
     from app.core import claude_cloud_auth
@@ -198,7 +218,9 @@ def runtime_choice() -> tuple[str, Optional[dict]]:
 
 
 def current_mode() -> str:
-    return runtime_choice()[0]
+    """The active mode (the pinned one inside :func:`pinned_mode`)."""
+    held = _mode_pin.get()
+    return held if held is not None else runtime_choice()[0]
 
 
 def selected_api_key(choice: Optional[dict]) -> Optional[str]:

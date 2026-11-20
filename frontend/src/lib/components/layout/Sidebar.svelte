@@ -544,6 +544,7 @@
 	const SETTINGS_MEMBERS: ViewType[] = ['plugins', 'mcp', 'hooks'];
 	const currentType = $derived($activeView?.type ?? null);
 	const phone = $derived(platform.isMobile);
+	let panelPlane = $state<HTMLDivElement | null>(null);
 
 	// Admin gating stays HERE, above the preference layer: the rail and the
 	// Customize dialog only ever see the destinations this role may open, so a
@@ -958,7 +959,7 @@
 
 {#snippet globalControls(rail: boolean)}
 	<AwayAllChatsSwitch variant={rail ? 'rail' : 'drawer'} />
-	<DesktopUpdateButton {rail} bind:this={updater} bind:canCheck />
+	<DesktopUpdateButton {rail} panelBounds={rail && !layout.current.sidebarCollapsed ? panelPlane : null} bind:this={updater} bind:canCheck />
 	<NotificationCenter {rail} />
 {/snippet}
 
@@ -981,7 +982,7 @@
 	/>
 
 	<!-- The rail's overlays share the panel geometry, never Chats' hidden/inert scope. -->
-	<div class="panel-plane">
+	<div class="panel-plane" bind:this={panelPlane}>
 	{#if ownsPanel}
 		<div class="col page-panel">
 			{#if viewPanel.panel}

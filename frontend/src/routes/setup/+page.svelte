@@ -36,6 +36,7 @@
 	import AccountPanel from '$lib/components/deck/cards/settings/AccountPanel.svelte';
 	import JoinNetworkPanel from '$lib/components/deck/cards/settings/JoinNetworkPanel.svelte';
 	import WelcomeStep from '$lib/components/setup/WelcomeStep.svelte';
+	import SetupViewport from '$lib/components/setup/SetupViewport.svelte';
 	import LicenseStep from '$lib/components/setup/LicenseStep.svelte';
 	import ProviderStep from '$lib/components/setup/ProviderStep.svelte';
 	import WorkspaceStep from '$lib/components/setup/WorkspaceStep.svelte';
@@ -222,120 +223,109 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
 </svelte:head>
 
-<div class="setup-viewport ui-surface ui-onboarding">
-	<div class="ui-onboarding-card">
-		{#if loadingConfig}
-			<div class="text-center py-8">
-				<Loader2 size={24} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
-				<p class="text-muted-foreground">Loading...</p>
-			</div>
-		{:else}
-			<div class="text-center mb-6 sm:mb-8">
-				<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">Welcome to AI Shuffle</h1>
-				<p class="text-muted-foreground text-sm sm:text-base">{SUBTITLES[currentStep]}</p>
-			</div>
+<SetupViewport step={currentStep}>
+	{#if loadingConfig}
+		<div class="text-center py-8">
+			<Loader2 size={24} strokeWidth={1.5} class="mx-auto mb-4 animate-spin text-muted-foreground" />
+			<p class="text-muted-foreground">Loading...</p>
+		</div>
+	{:else}
+		<div class="text-center mb-6 sm:mb-8">
+			<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">Welcome to AI Shuffle</h1>
+			<p class="text-muted-foreground text-sm sm:text-base">{SUBTITLES[currentStep]}</p>
+		</div>
 
-			<SetupProgress {steps} current={currentStep} completed={completedSteps} />
+		<SetupProgress {steps} current={currentStep} completed={completedSteps} />
 
-			{#if setupError}<p role="alert" class="text-destructive text-sm mb-4">{setupError}</p>{/if}
+		{#if setupError}<p role="alert" class="text-destructive text-sm mb-4">{setupError}</p>{/if}
 
-			{#if currentStep === 'welcome'}
-				<WelcomeStep {desktop} onContinue={continueFromWelcome} />
+		{#if currentStep === 'welcome'}
+			<WelcomeStep {desktop} onContinue={continueFromWelcome} />
 
-			{:else if currentStep === 'license'}
-				<LicenseStep onContinue={() => complete('license')} onBack={() => back('license')} />
+		{:else if currentStep === 'license'}
+			<LicenseStep onContinue={() => complete('license')} onBack={() => back('license')} />
 
-			{:else if currentStep === 'provider'}
-				<ProviderStep isAdmin={$isAdmin} onConnected={(id) => (connectedProvider = id)}
-					onContinue={() => complete('provider')} onBack={() => back('provider')} />
+		{:else if currentStep === 'provider'}
+			<ProviderStep isAdmin={$isAdmin} onConnected={(id) => (connectedProvider = id)}
+				onContinue={() => complete('provider')} onBack={() => back('provider')} />
 
-			{:else if currentStep === 'workspace'}
-				<WorkspaceStep bind:path={workspacePath} container={workspaceConfig ? !workspaceConfig.is_local_mode : false}
-					hostPath={hostWorkspacePath} saving={savingWorkspace} error={workspaceError}
-					onSave={saveWorkspaceAndContinue} onBack={() => back('workspace')} />
+		{:else if currentStep === 'workspace'}
+			<WorkspaceStep bind:path={workspacePath} container={workspaceConfig ? !workspaceConfig.is_local_mode : false}
+				hostPath={hostWorkspacePath} saving={savingWorkspace} error={workspaceError}
+				onSave={saveWorkspaceAndContinue} onBack={() => back('workspace')} />
 
-			{:else if currentStep === 'first-run'}
-				<FirstRunStep preferredProvider={connectedProvider} onContinue={() => complete('first-run')} onBack={() => back('first-run')}
-					onFixProvider={() => { completedSteps.delete('provider'); goTo('provider'); }} />
+		{:else if currentStep === 'first-run'}
+			<FirstRunStep preferredProvider={connectedProvider} onContinue={() => complete('first-run')} onBack={() => back('first-run')}
+				onFixProvider={() => { completedSteps.delete('provider'); goTo('provider'); }} />
 
-			{:else if currentStep === 'extras'}
-				<div class="ui-surface space-y-4" data-testid="setup-extras">
-					<p class="text-sm text-muted-foreground">Each of these is optional. Open the ones you want, or finish now and set them up later in Settings.</p>
+		{:else if currentStep === 'extras'}
+			<div class="ui-surface space-y-4" data-testid="setup-extras">
+				<p class="text-sm text-muted-foreground">Each of these is optional. Open the ones you want, or finish now and set them up later in Settings.</p>
 
-					<div class="space-y-3">
-						{#if networkStepNeeded}
-							<ExtraSection id="account" title="HobbyCoders account" icon={UserRound} action={networkChoice === 'invite' ? 'Join' : 'Sign in'} bind:open={openExtras.account}
-								tone={accountState.tone} summary={accountState.text}>
-								<div class="space-y-3">
-									{#if syncing}
-										<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background.</div>
-									{:else if joinedOther}
-										<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
-											<Check size={16} strokeWidth={2} />
-											<span>This worker now syncs settings with {networkStatus?.network?.name || 'your other workers'}.</span>
+				<div class="space-y-3">
+					{#if networkStepNeeded}
+						<ExtraSection id="account" title="HobbyCoders account" icon={UserRound} action={networkChoice === 'invite' ? 'Join' : 'Sign in'} bind:open={openExtras.account}
+							tone={accountState.tone} summary={accountState.text}>
+							<div class="space-y-3">
+								{#if syncing}
+									<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Copying settings from your other worker. This continues in the background.</div>
+								{:else if joinedOther}
+									<div class="bg-success/10 border border-success/30 text-success px-3 py-2.5 rounded-lg text-sm flex items-center gap-2">
+										<Check size={16} strokeWidth={2} />
+										<span>This worker now syncs settings with {networkStatus?.network?.name || 'your other workers'}.</span>
+									</div>
+								{:else if networkChoice === 'account'}
+									{#if !linked}
+										<div>
+											<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
+											<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="ui-input text-sm" placeholder="My worker" />
 										</div>
-									{:else if networkChoice === 'account'}
-										{#if !linked}
-											<div>
-												<label for="workerName" class="block text-xs text-muted-foreground mb-1">Name for this worker</label>
-												<input type="text" id="workerName" bind:value={workerName} maxlength="80" class="ui-input text-sm" placeholder="My worker" />
-											</div>
-										{/if}
-										<AccountPanel {workerName} variant="setup" />
-										{#if waitingOnAccount}
-											<div class="space-y-1 bg-muted/30 border border-border rounded-lg p-3" role="status">
-												<div class="flex items-center gap-2 text-sm text-foreground font-medium">
-													<Loader2 size={14} strokeWidth={2} class="animate-spin" />
-													Joining your account's network
-												</div>
-												<p class="text-sm text-muted-foreground">
-													{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online.{:else}This worker joins as soon as another worker on your account is online.{/if}
-												</p>
-											</div>
-										{:else if linked}
-											<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
-										{/if}
-										{#if !linked}
-											<button type="button" onclick={() => chooseNetwork('invite')} class="ui-button w-full py-2.5 text-sm">Use a worker invite instead</button>
-										{/if}
-									{:else}
-										<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
-										{#if !(networkStatus?.enrollment)}
-											<button type="button" onclick={() => chooseNetwork('account')} class="ui-button w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
-										{/if}
 									{/if}
-								</div>
-							</ExtraSection>
-						{/if}
-
-						<ExtraSection id="github" title="GitHub" icon={Github} action="Connect" bind:open={openExtras.github}
-							tone={githubState.tone} summary={githubState.text}>
-							<GitHubConnection bare onstate={(s) => (github = s)} />
+									<AccountPanel {workerName} variant="setup" />
+									{#if waitingOnAccount}
+										<div class="space-y-1 bg-muted/30 border border-border rounded-lg p-3" role="status">
+											<div class="flex items-center gap-2 text-sm text-foreground font-medium">
+												<Loader2 size={14} strokeWidth={2} class="animate-spin" />
+												Joining your account's network
+											</div>
+											<p class="text-sm text-muted-foreground">
+												{#if accountWorkers.length}Your account already syncs settings between {accountWorkers.join(', ')}. This worker joins as soon as one of them is online.{:else}This worker joins as soon as another worker on your account is online.{/if}
+											</p>
+										</div>
+									{:else if linked}
+										<div role="status" class="text-sm text-muted-foreground flex items-start gap-2"><Loader2 size={16} class="animate-spin shrink-0" /> Connecting this worker to your account…</div>
+									{/if}
+									{#if !linked}
+										<button type="button" onclick={() => chooseNetwork('invite')} class="ui-button w-full py-2.5 text-sm">Use a worker invite instead</button>
+									{/if}
+								{:else}
+									<JoinNetworkPanel status={networkStatus} deviceName={workerName} onChanged={refreshNetwork} />
+									{#if !(networkStatus?.enrollment)}
+										<button type="button" onclick={() => chooseNetwork('account')} class="ui-button w-full py-2.5 text-sm"><ChevronLeft size={16} class="inline-block" /> Back to account sign-in</button>
+									{/if}
+								{/if}
+							</div>
 						</ExtraSection>
+					{/if}
 
-						<ExtraSection id="history" title="Earlier conversations" icon={History} action="Import" bind:open={openExtras.history}
-							hidden={!history.available} tone={historyState.tone} summary={historyState.text}>
-							<CliHistoryImport bare onstate={(s) => (history = s)} />
-						</ExtraSection>
-					</div>
+					<ExtraSection id="github" title="GitHub" icon={Github} action="Connect" bind:open={openExtras.github}
+						tone={githubState.tone} summary={githubState.text}>
+						<GitHubConnection bare onstate={(s) => (github = s)} />
+					</ExtraSection>
 
-					<div class="border-t border-border pt-4 flex gap-3">
-						<button type="button" onclick={() => back('extras')} class="ui-button flex-1 py-3" disabled={finishing}>Back</button>
-						<button type="button" onclick={finishSetup} class="ui-button primary flex-[2] py-3" disabled={finishing}>
-							{#if finishing}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Finish setup
-						</button>
-					</div>
+					<ExtraSection id="history" title="Earlier conversations" icon={History} action="Import" bind:open={openExtras.history}
+						hidden={!history.available} tone={historyState.tone} summary={historyState.text}>
+						<CliHistoryImport bare onstate={(s) => (history = s)} />
+					</ExtraSection>
 				</div>
-			{/if}
-		{/if}
-	</div>
-</div>
 
-<style>
-	/* The app disables document scrolling, so setup owns its scroll area.
-	   Auto margins center a short card and collapse when it needs to scroll. */
-	.setup-viewport {
-		height: 100vh;
-		height: var(--app-viewport-height, 100dvh);
-	}
-</style>
+				<div class="border-t border-border pt-4 flex gap-3">
+					<button type="button" onclick={() => back('extras')} class="ui-button flex-1 py-3" disabled={finishing}>Back</button>
+					<button type="button" onclick={finishSetup} class="ui-button primary flex-[2] py-3" disabled={finishing}>
+						{#if finishing}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Finish setup
+					</button>
+				</div>
+			</div>
+		{/if}
+	{/if}
+</SetupViewport>

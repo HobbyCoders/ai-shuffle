@@ -31,13 +31,14 @@ it matches the active sign-in and CLI version, so a handshake or chat process
 started under the previous account cannot overwrite the new one. A saved-login
 switch asks the CLI again (:func:`refresh_soon`).
 
-Which versioned entries the pickers offer is the owner's choice
-(``ENABLED_SETTING``, a JSON list in ``system_settings``); the four aliases are
-always offered and versioned entries are off until turned on.
+The pickers offer every entry the CLI lists: the four aliases first, then the
+versioned ids in the CLI's order.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -52,9 +53,6 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-ENABLED_SETTING = "claude_cli_enabled_models"
-"""System setting: JSON list of versioned CLI model ids the pickers offer."""
-
 _FILE_NAME = "claude-cli-models.json"
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
 # The CLI's "Default (recommended)" entry duplicates one of the aliases.
@@ -63,9 +61,36 @@ ALIASES = ("haiku", "sonnet", "opus", "fable")
 
 _lock = threading.Lock()
 _refresh_lock = threading.Lock()
-_enabled_lock = threading.Lock()
 _snapshot: Optional[Dict[str, Any]] = None
 _loaded = False
+
+_UNPINNED = object()
+# Set by :func:`pinned`: one served list for every read in a projection.
+_pin: contextvars.ContextVar[Any] = contextvars.ContextVar("claude_cli_models_pin", default=_UNPINNED)
+
+
+@contextlib.contextmanager
+def pinned():
+    """Serve one Claude auth mode, sign-in and :func:`catalog` read for the block.
+
+    A projection that reads them several times (the registry payload) would
+    otherwise mix two accounts' lists, or a subscription's list with Cloud's
+    metadata, if the owner switched midway. Yields the list (None when no
+    list is served)."""
+    from app.core import claude_auth_mode, claude_cli_status
+
+    current = _pin.get()
+    if current is not _UNPINNED:
+        yield current
+        return
+    # The sign-in too: the list's account check and the payload's plan.
+    with claude_auth_mode.pinned_mode(), claude_cli_status.pinned_peek():
+        snap = catalog()
+        token = _pin.set(snap)
+        try:
+            yield snap
+        finally:
+            _pin.reset(token)
 
 
 # ─── Parsing ────────────────────────────────────────────────────────────────
@@ -237,6 +262,9 @@ def catalog() -> Optional[Dict[str, Any]]:
 
     Only on a subscription sign-in, and only while the active sign-in is the
     account the list was captured under (unknown counts as different)."""
+    held = _pin.get()
+    if held is not _UNPINNED:
+        return held
     snap = peek()
     if not snap or not snap.get("account"):
         return None
@@ -273,48 +301,6 @@ def versioned_entries() -> List[Dict[str, Any]]:
     if not snap:
         return []
     return [m for m in snap["models"] if m.get("value") not in ALIASES]
-
-
-# ─── Owner's choice ─────────────────────────────────────────────────────────
-
-
-def enabled_models() -> List[str]:
-    """Versioned ids the owner turned on (default: none)."""
-    from app.db.settings import get_system_setting_cached
-
-    try:
-        raw = get_system_setting_cached(ENABLED_SETTING)
-        values = json.loads(raw) if raw else []
-    except Exception:  # noqa: BLE001 - unreadable means nothing extra is offered
-        logger.warning("Could not read the enabled Claude Code models", exc_info=True)
-        return []
-    return [v for v in values if isinstance(v, str)] if isinstance(values, list) else []
-
-
-def set_model_enabled(value: str, enabled: bool) -> List[str]:
-    """Turn one versioned id on or off; returns the saved list.
-
-    Only ``value`` changes: ids this worker's CLI does not list (another
-    worker's, or hidden by a CLI update) stay enabled. Read fresh, not from
-    the cache, so a recent change from another worker is kept."""
-    from app.db.settings import get_system_setting, set_system_setting
-
-    value = (value or "").strip()
-    if not value or value in ALIASES:
-        raise ValueError("Only a versioned model can be turned on or off.")
-    with _enabled_lock:
-        try:
-            current = json.loads(get_system_setting(ENABLED_SETTING) or "[]")
-        except ValueError:
-            current = []
-        clean = [v for v in current if isinstance(v, str) and v != value] if isinstance(current, list) else []
-        if enabled:
-            clean.append(value)
-        set_system_setting(ENABLED_SETTING, json.dumps(clean))
-    from app.core import claude_cli_status
-
-    claude_cli_status.announce_account_change()
-    return clean
 
 
 # ─── Capture ────────────────────────────────────────────────────────────────

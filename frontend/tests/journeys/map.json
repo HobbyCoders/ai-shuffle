@@ -71,6 +71,16 @@
 	],
 	"rules": [
 		{
+			"why": "first-run setup and the owner gate keep navigation reachable on short viewports",
+			"journeys": ["setup-scroll"],
+			"globs": [
+				"frontend/tests/journeys/setup-scroll.journey.mjs",
+				"frontend/src/routes/setup/**",
+				"frontend/src/lib/components/OwnerAccessGate.svelte",
+				"frontend/src/lib/components/setup/**"
+			]
+		},
+		{
 			"why": "Antigravity's grouped quota reply passes through the real parser and usage API to its ordered meters",
 			"journeys": ["antigravity-usage"],
 			"globs": [
@@ -182,6 +192,17 @@
 			"globs": ["frontend/tests/journeys/settings-detail-link.journey.mjs", "frontend/src/lib/components/settings/shell/SettingsShell.svelte", "frontend/src/lib/components/settings/shell/BackRow.svelte", "frontend/src/lib/components/settings/shell/CollectionPage.svelte"]
 		},
 		{
+			"why": "provider settings show built-in brand artwork in the list and Antigravity detail",
+			"journeys": ["provider-artwork"],
+			"globs": [
+				"frontend/tests/journeys/provider-artwork.journey.mjs",
+				"frontend/src/lib/components/settings/ProviderGlyph.svelte",
+				"frontend/src/lib/components/settings/provider-artwork/**",
+				"frontend/src/lib/components/settings/providers/ProviderTile.svelte",
+				"frontend/src/lib/components/settings/providers/providers-model.ts"
+			]
+		},
+		{
 			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
 			"journeys": ["model-picker"],
 			"globs": [
@@ -248,6 +269,11 @@
 				"frontend/src/lib/components/settings/shell/settings.css",
 				"frontend/src/lib/components/chat/ContextUsageBar.svelte"
 			]
+		},
+		{
+			"why": "update details stay inside the open sidebar and installer actions stay in the notification dock",
+			"journeys": ["desktop-update-popup"],
+			"globs": ["frontend/tests/journeys/desktop-update-popup.journey.mjs", "frontend/src/lib/components/layout/sidebar/DesktopUpdateButton.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
 		},
 		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
@@ -771,7 +797,7 @@
 			]
 		},
 		{
-			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",

@@ -603,12 +603,14 @@ def invalidate_most_used_cache() -> None:
 
 
 def _claude_alias(model: Optional[str]) -> Optional[str]:
-    """The registry alias a logged Claude model id maps to, or None."""
+    """The registry alias a logged Claude model id maps to, or None.
+
+    Mythos is a family with no alias, so its turns rank no alias."""
     from app.core.model_registry import get_model
 
     match = get_model(model)
     if match is not None:
-        return match.family
+        return match.family if match.family in _CLAUDE_FAMILIES else None
     lowered = (model or "").lower()
     if lowered.startswith("claude"):
         for family in _CLAUDE_FAMILIES:

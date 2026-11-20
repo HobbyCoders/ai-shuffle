@@ -1,5 +1,6 @@
 import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it } from 'vitest';
+import minimaxLogo from '../provider-artwork/minimax-color.svg';
 import ProviderTile from './ProviderTile.svelte';
 
 afterEach(() => cleanup());
@@ -11,10 +12,14 @@ describe('ProviderTile', () => {
 		expect(tile).toBeTruthy();
 		expect(tile?.querySelector('svg')?.getAttribute('width')).toBe('16');
 	});
-	it('draws a monogram as an uppercase letter without a second box inside the tile', () => {
+	it('puts the 16px MiniMax logo directly in one list tile without a second box or monogram', () => {
 		const { container } = render(ProviderTile, { provider: { glyph: 'minimax' } });
-		expect(container.querySelector('.pt rect')).toBeNull();
-		expect(container.querySelector('.pt text')?.textContent).toBe('M');
+		expect(container.querySelectorAll('.pt')).toHaveLength(1);
+		const logo = container.querySelector('.pt > img[data-provider-logo="minimax"]');
+		expect(logo?.getAttribute('src')).toBe(minimaxLogo);
+		expect(logo?.getAttribute('width')).toBe('16');
+		expect(logo?.getAttribute('height')).toBe('16');
+		expect(container.querySelector('.pt rect, .pt text')).toBeNull();
 	});
 	it('keeps the status dot on the tile corner', () => {
 		const { container } = render(ProviderTile, { provider: { glyph: 'openai' }, status: 'warn' });
