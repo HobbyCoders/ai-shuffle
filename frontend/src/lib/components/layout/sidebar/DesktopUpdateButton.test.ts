@@ -17,6 +17,23 @@ afterEach(cleanup);
 const announcedStatus = () => [...screen.queryAllByRole('alert'), ...screen.queryAllByRole('status')]
  .find(el => el.classList.contains('sr-only'))?.textContent ?? '';
 
+it('yields to a claimed Escape and claims the next Escape only while its tooltip is open', async () => {
+ render(DesktopUpdateButton);
+ const button = await screen.findByRole('button', { name: 'Download update' });
+ await fireEvent.focus(button);
+ const escape = () => new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+ button.addEventListener('keydown', event => event.preventDefault(), { once: true });
+ await fireEvent(button, escape());
+ expect(screen.getByRole('tooltip')).toBeTruthy();
+ const dismiss = escape();
+ await fireEvent(button, dismiss);
+ expect(dismiss.defaultPrevented).toBe(true);
+ expect(screen.queryByRole('tooltip')).toBeNull();
+ const bare = escape();
+ await fireEvent(button, bare);
+ expect(bare.defaultPrevented).toBe(false);
+});
+
 it('produces the ready bell action from the desktop bridge and executes canonical coordination', async () => {
  Object.defineProperty(window,'matchMedia',{configurable:true,value:()=>({matches:false,addEventListener(){},removeEventListener(){}})});
  const install=vi.fn();

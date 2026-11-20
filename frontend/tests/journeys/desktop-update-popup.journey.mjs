@@ -1,7 +1,8 @@
 // Exercise the real sidebar and dock with synthetic update status. No action
 // requests are allowed through, even if a click regresses into an install.
 import { runJourney } from './runner.mjs';
-import { expect, gotoApp, showSidebar } from './lib/app.mjs';
+import { composerControl, expect, gotoApp, seededChatId, showSidebar, waitChatOpen } from './lib/app.mjs';
+import { fakeTerminals } from './lib/fake-terminals.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const primaryStatus = 'This staged update needs an installer that can migrate the application files. Settings and chat history are kept.';
@@ -65,6 +66,19 @@ async function checkTip(page, label, { collapsed = false } = {}) {
 	expect(await update(page).getAttribute('aria-describedby') === await tip(page).getAttribute('id'), 'custom tooltip describes the trigger');
 }
 
+async function fakeUpdates(page, updateSnapshot = snapshot) {
+	// Show the control in the browser only; the server keeps preview restrictions.
+	await page.route('**/api/v1/auth/status', async route => {
+		const response = await route.fetch();
+		await route.fulfill({ response, json: { ...(await response.json()), preview_access: false } });
+	});
+	await page.route('**/api/v1/settings/application-updates**', route => {
+		const req = route.request();
+		return req.method() === 'GET' && new URL(req.url()).pathname.endsWith('/workers')
+			? route.fulfill({ json: updateSnapshot }) : route.abort();
+	});
+}
+
 await runJourney({
 	name: 'desktop-update-popup',
 	allow: DEV_INSTANCE_NOISE,
@@ -73,16 +87,7 @@ await runJourney({
 		name: 'worker-details',
 		async setup({ page, status, variant }) {
 			if (variant.viewport === 'phone') await page.emulateMedia({ colorScheme: 'dark' });
-			// Show the control in the browser only; the server keeps preview restrictions.
-			await page.route('**/api/v1/auth/status', async route => {
-				const response = await route.fetch();
-				await route.fulfill({ response, json: { ...(await response.json()), preview_access: false } });
-			});
-			await page.route('**/api/v1/settings/application-updates**', route => {
-				const req = route.request();
-				return req.method() === 'GET' && new URL(req.url()).pathname.endsWith('/workers')
-					? route.fulfill({ json: snapshot }) : route.abort();
-			});
+			await fakeUpdates(page);
 			await gotoApp(page, status);
 			await showSidebar(page);
 			if (await page.getByRole('separator', { name: 'Resize sidebar' }).isVisible()) await dragSidebar(page, 390);
@@ -131,6 +136,76 @@ await runJourney({
 				await page.keyboard.press('PageDown');
 				expect(await tip(page).evaluate(el => el.scrollTop > 0), 'long details scroll from the focused trigger');
 			}
+		}
+	}, {
+		name: 'escape-layering',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await fakeUpdates(page);
+			await page.addInitScript(fakeTerminals, {});
+			await gotoApp(page, status, `/?session=${encodeURIComponent(seededChatId(status, 'worktree'))}`);
+			await waitChatOpen(page, { messagesAtLeast: 2, hold: 1000 });
+			await showSidebar(page);
+		},
+		async act({ page, mark }) {
+			const terminal = page.getByRole('complementary', { name: 'Session side panel' }).getByRole('region', { name: 'Terminal' });
+			await mark('open the Terminal panel without starting a shell');
+			await (await composerControl(page, 'Toggle terminal')).click();
+			await terminal.waitFor();
+			await update(page).focus();
+			await tip(page).waitFor();
+			await mark('first Escape dismisses only the update tooltip');
+			await page.keyboard.press('Escape');
+			await tip(page).waitFor({ state: 'hidden' });
+			// Catch delayed dispatch in the panel's whenEscapeUnclaimed handler.
+			await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+			expect(await terminal.isVisible(), 'first Escape leaves the Terminal panel open');
+			await mark('next Escape dismisses the Terminal panel');
+			await page.keyboard.press('Escape');
+			await terminal.waitFor({ state: 'hidden' });
+		}
+	}, {
+		name: 'slow-pointer-handoff',
+		viewports: ['desktop'],
+		async setup({ page, status }) {
+			await page.setViewportSize({ width: 900, height: 560 });
+			await fakeUpdates(page, { ...snapshot, workers: [
+				...snapshot.workers,
+				...['Testing workstation', 'Rendering workstation', 'Release workstation'].map((device_name, i) => ({
+					...worker, device_id: `extra-${i}`, device_name, phase: 'ready', role: 'staged', label: peerStatus
+				}))
+			] });
+			await gotoApp(page, status);
+			await showSidebar(page);
+			await dragSidebar(page, 280);
+		},
+		async act({ page, mark }) {
+			const button = update(page);
+			await button.hover();
+			await tip(page).waitFor();
+			expect(await button.evaluate(el => el !== document.activeElement), 'pointer handoff does not rely on keyboard focus');
+			const trigger = await button.boundingBox();
+			const card = await tip(page).boundingBox();
+			const from = { x: trigger.x + trigger.width - 2, y: trigger.y + 4 };
+			const to = { x: card.x + card.width / 2, y: card.y + card.height - 4 };
+			await page.mouse.move(from.x, from.y);
+			await mark('move slowly from the trigger across the gap into the scrollable tooltip');
+			let openThroughout = true;
+			for (let step = 1; step <= 20; step++) {
+				const x = from.x + (to.x - from.x) * step / 20;
+				const y = from.y + (to.y - from.y) * step / 20;
+				await page.mouse.move(x, y);
+				if (step === 10) expect(await page.evaluate(({ x, y }) =>
+					!document.elementFromPoint(x, y)?.closest('.update-slot'), { x, y }), 'the gap is not an invisible hit target');
+				await page.waitForTimeout(40); // exercise a deliberately slow real pointer
+				openThroughout &&= await tip(page).isVisible();
+			}
+			expect(openThroughout, 'tooltip stays open across the whole slow crossing');
+			await page.mouse.wheel(0, 250);
+			await page.waitForFunction(() => document.querySelector('.update-tooltip')?.scrollTop > 0);
+			await mark('leaving the card away from the trigger dismisses it');
+			await page.mouse.move(500, 60);
+			await tip(page).waitFor({ state: 'hidden' });
 		}
 	}]
 });

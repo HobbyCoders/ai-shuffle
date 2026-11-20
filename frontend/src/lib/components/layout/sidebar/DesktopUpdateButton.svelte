@@ -82,7 +82,7 @@
 	let tipEl = $state<HTMLDivElement | null>(null);
 	let tipHovered = false;
 	let buttonHovered = false;
-	let tipCloseTimer: ReturnType<typeof setTimeout> | undefined;
+	let tipTransit: { from: HTMLElement; toward: HTMLElement } | null = null;
 	let panel = $state<Panel | null>(null);
 	let buttonEl = $state<HTMLButtonElement | null>(null);
 	const panelId = `${tooltipId}-panel`;
@@ -322,20 +322,48 @@
 		};
 	});
 	function showTip() {
-		clearTimeout(tipCloseTimer);
+		tipTransit = null;
 		if (!panel) tipOpen = true;
 	}
 	function closeTip() {
-		clearTimeout(tipCloseTimer);
+		tipTransit = null;
 		tipHovered = false;
 		tipOpen = false;
 	}
-	function leaveTip() {
-		clearTimeout(tipCloseTimer);
-		// Leave time to cross the gap from the trigger to the card.
-		tipCloseTimer = setTimeout(() => {
-			if (!buttonHovered && !tipHovered && document.activeElement !== buttonEl) closeTip();
-		}, 200);
+	function closeUnattendedTip() {
+		if (!buttonHovered && !tipHovered && !tipTransit && document.activeElement !== buttonEl) closeTip();
+	}
+	function leaveTip(event: MouseEvent, toward: HTMLElement | null) {
+		if (!tipOpen) return;
+		tipTransit = null;
+		if (toward && event.relatedTarget instanceof Node) {
+			if (toward.contains(event.relatedTarget)) return;
+			tipTransit = { from: event.currentTarget as HTMLElement, toward };
+			trackTipTransit(event);
+		} else closeUnattendedTip();
+	}
+	function trackTipTransit(event: MouseEvent) {
+		if (!tipTransit) return;
+		const from = tipTransit.from.getBoundingClientRect();
+		const toward = tipTransit.toward.getBoundingClientRect();
+		const { clientX, clientY } = event;
+		// Keep the tip open anywhere on a straight path between the two boxes.
+		// Interpolating their edges gives the corridor without creating a hit target.
+		let first = 0;
+		let last = 1;
+		const insideEdge = (point: number, start: number, end: number) => {
+			const change = end - start;
+			const distance = point - start + 1; // allow subpixel rounding
+			if (!change) return distance >= 0;
+			const at = distance / change;
+			if (change > 0) last = Math.min(last, at);
+			else first = Math.max(first, at);
+			return first <= last;
+		};
+		if (insideEdge(clientX, from.left, toward.left) && insideEdge(-clientX, -from.right, -toward.right)
+			&& insideEdge(clientY, from.top, toward.top) && insideEdge(-clientY, -from.bottom, -toward.bottom)) return;
+		tipTransit = null;
+		closeUnattendedTip();
 	}
 	function scrollTip(event: KeyboardEvent) {
 		if (!tipOpen || !tipEl || tipEl.scrollHeight <= tipEl.clientHeight) return;
@@ -351,8 +379,9 @@
 	function closePanel() { panel = null; }
 	function openInstallerPage() { window.open(INSTALLER_URL, '_blank', 'noopener,noreferrer'); }
 	function panelKey(event: KeyboardEvent) {
-		if (event.key !== 'Escape') return;
-		if (panel) { event.preventDefault(); closePanel(); buttonEl?.focus(); }
+		if (event.key !== 'Escape' || event.defaultPrevented || (!panel && !tipOpen)) return;
+		event.preventDefault();
+		if (panel) { closePanel(); buttonEl?.focus(); }
 		closeTip();
 	}
 	/** Plain text of what is running, for the bell: "Fix login (Run tests); Update docs". */
@@ -500,7 +529,7 @@
 		window.addEventListener('application-update-request', activateFromNotification);
 		document.addEventListener('visibilitychange', visibilityChanged);
 		return () => {
-			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer); clearTimeout(tipCloseTimer);
+			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer);
 			window.removeEventListener('application-update-policy', refresh);
 			window.removeEventListener('application-update-request', activateFromNotification);
 			document.removeEventListener('visibilitychange', visibilityChanged);
@@ -647,7 +676,7 @@
 	}
 </script>
 
-<svelte:window onkeydown={panelKey} />
+<svelte:window onkeydown={panelKey} onmousemove={trackTipTransit} />
 
 {#snippet blockerList(blockers: BlockerView[], stopOffered = true)}
 	<ul class="busy-list blockers">
@@ -669,8 +698,8 @@
 			aria-label={waiting || celebrating || deferred || restartLocked || outcomeOnly || (blocked && !error) ? headline : busy ? 'Downloading update' : installer.length ? 'Update needs the latest installer' : action}
 			aria-haspopup="dialog" aria-expanded={!!panel} aria-controls={panel ? panelId : undefined}
 			aria-describedby={tipOpen ? tooltipId : undefined}
-			onmouseenter={() => { buttonHovered = true; showTip(); }} onmouseleave={() => { buttonHovered = false; leaveTip(); }}
-			onfocus={showTip} onblur={leaveTip}
+			onmouseenter={() => { buttonHovered = true; showTip(); }} onmouseleave={(event) => { buttonHovered = false; leaveTip(event, tipEl); }}
+			onfocus={showTip} onblur={closeUnattendedTip}
 			onkeydown={scrollTip}>
 			{#if waiting || celebrating}
 				<svg class="completion-ring" width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={iconStroke} stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64" /></svg>
@@ -753,8 +782,8 @@
 		{/if}
 		{#if tipOpen}
 			<div class="update-tooltip" id={tooltipId} role="tooltip" tabindex="-1" bind:this={tipEl}
-				onmouseenter={() => { tipHovered = true; clearTimeout(tipCloseTimer); }}
-				onmouseleave={() => { tipHovered = false; leaveTip(); }}
+				onmouseenter={() => { tipHovered = true; tipTransit = null; }}
+				onmouseleave={(event) => { tipHovered = false; leaveTip(event, buttonEl); }}
 				style:left={`${tipPosition.left}px`} style:width={`${tipPosition.width}px`} style:max-height={`${tipPosition.height}px`}
 				style:top={tipPosition.above ? undefined : `${tipPosition.edge}px`}
 				style:bottom={tipPosition.above ? `${tipPosition.edge}px` : undefined}>
