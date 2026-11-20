@@ -11,6 +11,7 @@ import { QuitGuard } from './quit';
 import { showCloseDialog } from './close-dialog';
 import { existsSync, mkdirSync, promises as fsPromises, readFileSync } from 'node:fs';
 import { managedContext } from './managed-context';
+import { loginItemControl } from './login-item';
 import { installedContext } from './installed-entry';
 import { installedLaunchArgs, launcherVersion, LAUNCHER_VERSION_ENV } from './installed-host';
 import { replaceInstalledLauncher } from './launcher-swap';
@@ -85,7 +86,7 @@ async function main(): Promise<void> {
 	const managed = managedContext();
 	const installation = installedContext();
 	const applications = managed?.installersOnly || installation?.installersOnly ? null : managed?.updates ?? installation?.updates ?? null;
-	const installedExecutable = managed?.host?.executable ?? installedContext()?.executable;
+	const installedExecutable = managed?.host?.executable ?? installation?.executable;
 	const updateRoot = managed?.root ?? installation?.root;
 	const updatePolicyFile = updateRoot ? path.join(updateRoot, 'allow-updates.json') : undefined;
 	if (applications) updater.useApplications(applications, installedExecutable, installedLaunchArgs(process.argv.slice(1), app.commandLine.getSwitchValue('remote-debugging-port')).filter(arg => arg.startsWith('--')));
@@ -355,7 +356,13 @@ async function main(): Promise<void> {
 	// The voice call's always-on-top controls; the main window keeps the call.
 	const callPopout = new CallPopout(userData, window);
 	callPopout.register();
-	registerIpc({ window, updater, worker, callPopout });
+	const loginItem = loginItemControl(app, {
+		platform: process.platform, packaged: app.isPackaged, preview: identity.preview,
+		installedExecutable, localAppData: process.env.LOCALAPPDATA, appPath: app.getAppPath(),
+		systemVersion: process.platform === 'darwin' ? (process.getSystemVersion?.() ?? '') : '',
+		appId: identity.appId
+	});
+	registerIpc({ window, updater, worker, callPopout, loginItem });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
 
 	/** An older installed launcher than this release needs is replaced from this verified source (desktop/LAUNCHER.md). */

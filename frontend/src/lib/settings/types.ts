@@ -79,8 +79,8 @@ export interface SettingEntry {
 	/** Location inside a collection. */
 	item?: string;
 	tab?: string;
-	/** `desktop-app` rows are left out of search outside the desktop app. */
-	platform?: 'all' | 'desktop-app';
+	/** Limit search entries to the desktop app or a specific shell capability. */
+	platform?: 'all' | 'desktop-app' | 'desktop-login-item';
 	/** Value that counts as unmodified; drives the modified edge and reset. */
 	default?: unknown;
 }

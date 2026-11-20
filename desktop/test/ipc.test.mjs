@@ -8,7 +8,7 @@ const WORKER = 'http://127.0.0.1:8000';
 const PAGE = 'file:///opt/app/src/pages/worker.html';
 
 /** registerIpc from dist/main/ipc.js with fake Electron; returns a way to call each channel as a given frame. */
-function setup({ workerUrl = WORKER } = {}) {
+function setup({ workerUrl = WORKER, loginItem } = {}) {
 	const handlers = new Map();
 	const listeners = new Map();
 	const calls = [];
@@ -43,7 +43,7 @@ function setup({ workerUrl = WORKER } = {}) {
 		update: (state) => calls.push(['popout-update', state]),
 		close: () => calls.push('popout-close')
 	};
-	module.exports.registerIpc({ window, updater, worker, callPopout });
+	module.exports.registerIpc({ window, updater, worker, callPopout, loginItem });
 
 	const main = { url: '', processId: 3, routingId: 1 };
 	/** An event from the main window's main frame showing `url`, or from a subframe / another window. */
@@ -56,6 +56,35 @@ function setup({ workerUrl = WORKER } = {}) {
 	const info = (url, options) => { const e = event(url, options); listeners.get('desktop:info')(e); return e.returnValue; };
 	return { handlers, invoke, info, calls, window };
 }
+
+test('the startup setting accepts only a boolean from the installed shell’s worker main frame', async () => {
+	const writes = [];
+	const loginItem = { get: () => 'disabled', set: (enabled) => writes.push(enabled) };
+	const { invoke, info } = setup({ loginItem });
+	const get = 'desktop:login-item-get';
+	const set = 'desktop:login-item-set';
+	const url = `${WORKER}/settings`;
+	assert.equal(info(url).loginItem, true);
+	assert.equal(info(PAGE).loginItem, false);
+	assert.equal(await invoke(get, url), 'disabled');
+	for (const [foreign, options] of [
+		[PAGE], ['https://example.test/'], [url, { subframe: true }], [url, { sender: 8 }]
+	]) {
+		await assert.rejects(invoke(get, foreign, options), /not allowed/);
+		await assert.rejects(invoke(set, foreign, options, true), /not allowed/);
+	}
+	for (const args of [[], ['true'], [{ enabled: true, path: 'anything.exe' }], [true, 'anything.exe']]) {
+		await assert.rejects(invoke(set, url, undefined, ...args), /Invalid login item setting/);
+	}
+	assert.deepEqual(writes, []);
+	await invoke(set, url, undefined, true);
+	await invoke(set, url, undefined, false);
+	assert.deepEqual(writes, [true, false]);
+	const unsupported = setup();
+	assert.equal(unsupported.info(url).loginItem, false);
+	assert.equal(unsupported.handlers.has(get), false);
+	assert.equal(unsupported.handlers.has(set), false);
+});
 
 const WEB_UI_CHANNELS = ['desktop:window-state', 'desktop:update-state', 'desktop:update-check', 'desktop:update-install', 'desktop:worker-state'];
 const STATUS_PAGE_CHANNELS = ['desktop:worker-restart', 'desktop:worker-open-logs', 'desktop:worker-tail', 'desktop:worker-open-ui'];

@@ -161,6 +161,8 @@ test('Windows source restart shows the release window and a failed relaunch clos
   const updates = { options: { root: '/isolated/no-root' }, pendingVersion: revision, async requireRestorePoint() {}, async databaseStarting() {}, async healthy() {}, async finishRollback() {}, async failed() {} };
   const managed = { root: '/isolated/no-root', updates, application: { revision: 'a'.repeat(40), resources: '/isolated/resources', node: process.execPath, serverDir: '/isolated/server', desktopDir: '/isolated/desktop', python: '/isolated/python' }, host: { executable: 'C:/AI Shuffle.exe' } };
   const f = await launch({ platform: 'win32', managed });
+  assert.deepEqual(f.errors, [], 'a missing macOS-only host version API must not disrupt Windows bootstrap');
+  assert.equal(f.ipc.loginItem, undefined, 'this host does not have the Windows startup capability');
   f.updater.restarting();
   assert.equal(f.splashes.length, 1);
   assert.equal(f.splashes[0].options.release, '1.0.2');

@@ -23,6 +23,8 @@
 	import Switch from '../rows/Switch.svelte';
 	import { getEntry } from '$lib/settings/registry';
 	import ThemeStyleGrid from './editors/ThemeStyleGrid.svelte';
+	import DesktopStartup from './DesktopStartup.svelte';
+	import { desktop } from '$lib/services/desktop';
 
 	type ThemeChoice = 'light' | 'dark' | 'system';
 	const THEME_OPTIONS: { value: ThemeChoice; label: string }[] = [
@@ -147,6 +149,9 @@
 			<ExpandToggle value={presetLabel} bind:open={styleOpen} />
 		</SettingRow>
 	</RowGroup>
+	{#if desktop?.loginItem}
+		<DesktopStartup loginItem={desktop.loginItem} platform={desktop.platform} />
+	{/if}
 	<RowGroup title="Conversation">
 		{#each CONVERSATION as [id, key] (id)}
 			{@render chatRow(id, key)}
