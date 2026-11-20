@@ -30,6 +30,8 @@ tui = [
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
+    # ci-fluid.yml runs the unit suite on four workers (-n 4).
+    "pytest-xdist>=3.6",
     "mcp>=2.0",
 ]
 

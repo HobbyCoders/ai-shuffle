@@ -48,9 +48,11 @@ def workflow(name):
     ("android-minified", ".github/workflows/ci-android-minified.yml", True),
     ("android-minified", ".github/workflows/android.yml", False),
     # The server suites leave the UI's own source to the JavaScript checks.
-    ("fluid", "fluid/fluid/engine.py", True), ("fluid", "scripts/devloop/ci.py", True),
+    ("fluid", "fluid/fluid/engine.py", True), ("fluid", "scripts/devloop/fake_wire.py", True),
     ("fluid", "app/main.py", False), ("fluid", "frontend/src/lib/a.ts", False),
     ("fluid", "app/core/temp_scratch.py", True),
+    # Of scripts/ only what its tests and workflow load: a scripts-only change skips it.
+    ("fluid", "scripts/devloop/ci.py", False), ("fluid", "scripts/ci/proven.py", False),
     ("windows", "app/main.py", True), ("windows", "desktop/main.js", True), ("windows", "frontend/package.json", True),
     ("windows", "frontend/src/lib/a.ts", False), ("windows", "docs/x.md", False), ("windows", "ios/App.swift", False),
     ("windows", "README.md", False), ("windows", "android/app/src/main/AndroidManifest.xml", False),
@@ -238,11 +240,15 @@ ROOT_NAMES = ("ROOT", "REPO", "REPO_ROOT", "root")
 NOT_READ = {
     # android/ci/test-ci-webview.py opens two workflows by name; both are listed.
     ("android", ".github/workflows/x"),
+    # test_delegated_toolmix.py classifies a shell command naming it; nothing opens it.
+    ("fluid", "scripts/ci/test-cost-policy.py"),
 }
 
 
-def module_file(name):
-    for base in PACKAGE_ROOTS:
+def module_file(name, importer=None):
+    # Fluid's suite runs with fluid/ as its rootdir: its `tests` is fluid/tests.
+    inside_fluid = importer is not None and ROOT / "fluid" in importer.parents
+    for base in reversed(PACKAGE_ROOTS) if inside_fluid else PACKAGE_ROOTS:
         path = base / Path(*name.split("."))
         for found in (path.with_suffix(".py"), path / "__init__.py"):
             if found.is_file():
@@ -325,7 +331,7 @@ def imported_by(files):
             continue
         seen.add(path)
         for module in loaded_by(path)[0]:
-            found = module_file(module)
+            found = module_file(module, path)
             if found:
                 waiting.append(found)
                 waiting += [folder / "__init__.py" for folder in found.parents
@@ -344,6 +350,42 @@ def test_an_area_reads_every_path_its_scripts_spell_out(area):
     """The buyer-install check opens docs/install/compose; only its script says so."""
     named = {path for script in python_named(area) for path in loaded_by(script)[1]}
     assert sorted(path for path in named if not plan.reads(area, path) and (area, path) not in NOT_READ) == []
+
+
+def files_fluid_tests_load():
+    """Every module the fluid suite imports, and the scripts/ files it opens by path.
+
+    Its workflow names a folder of tests, which the scans above do not open, and
+    its fixtures load scripts by a path built from ``__file__``.
+    """
+    files = {ROOT / "conftest.py", ROOT / "fluid" / "conftest.py", *(ROOT / "fluid" / "tests").rglob("*.py")}
+    found = imported_by(files)
+    for path in files:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                text = node.value
+            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+                # Path(__file__).parents[3] / "scripts" / "devloop" / "fake_wire.py"
+                parts, current = [], node
+                while (isinstance(current, ast.BinOp) and isinstance(current.op, ast.Div)
+                       and isinstance(current.right, ast.Constant) and isinstance(current.right.value, str)):
+                    parts.append(current.right.value)
+                    current = current.left
+                text = "/".join(reversed(parts))
+            else:
+                continue
+            if text.startswith("scripts/") and ".." not in text and (ROOT / text).is_file():
+                found.add(text)
+    return found
+
+
+def test_the_fluid_area_reads_every_file_its_tests_load():
+    """The fluid area lists the scripts its tests use, not all of scripts/."""
+    loaded = files_fluid_tests_load()
+    assert {"scripts/ci/test_scratch.py", "scripts/devloop/fake_wire.py",
+            "scripts/ci/fetch_claude_fixture.py", "scripts/measure_learner_yield.py"} <= loaded
+    assert sorted(path for path in loaded
+                  if not plan.reads("fluid", path) and ("fluid", path) not in NOT_READ) == []
 
 
 def test_the_import_scan_follows_the_ways_a_test_loads_a_module():

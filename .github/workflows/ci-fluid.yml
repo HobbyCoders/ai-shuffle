@@ -18,7 +18,7 @@ jobs:
   unit:
     name: fluid unit tests
     timeout-minutes: 20
-    # A single-process pytest run needs no larger runner.
+    # Four pytest workers fill the standard runner's four vCPUs.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +51,10 @@ jobs:
       - name: Run the unit suite
         # fluid/pyproject.toml carries the pytest config (asyncio_mode=auto);
         # pytest picks it up as rootdir because the test path sits under it.
-        run: python -m pytest fluid/tests/unit -q -p no:cacheprovider
+        # Four workers, each test file on one of them (--dist loadfile): one
+        # process took about 6.5 minutes. loadfile measured faster than the
+        # default per-test spread and keeps a file's tests in one process.
+        run: python -m pytest fluid/tests/unit -q -p no:cacheprovider -n 4 --dist loadfile
 
   delegated-tool-output:
     name: delegated tool-output contract (${{ matrix.cli_version }})
