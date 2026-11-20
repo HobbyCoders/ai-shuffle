@@ -507,7 +507,12 @@ def default_provider_model(*, servable_only: bool = False) -> Optional[Tuple[str
         from app.core.provider_agent import curated_model_ids, default_model_for_provider
     except Exception:  # noqa: BLE001
         return None
-    rows = _default_candidate_rows(servable_only)
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+
+    # The Claude API key is billed per token and is Claude's own option: it is
+    # never the implicit default of another provider's setup (Claude's own
+    # default maps onto it in API-key mode, see default_run_selection).
+    rows = [r for r in _default_candidate_rows(servable_only) if r.get("id") != CLAUDE_API_PROVIDER_ID]
     brands: List[str] = []
     for row in rows:
         brand = provider_id_for_row(row)
@@ -758,6 +763,14 @@ def default_run_selection(
     provider_id, model = default_run_model(
         probe=probe, prefer_most_used=prefer_most_used, servable_only=servable_only,
     )
+    if not provider_id:
+        # In the API-key sign-in mode a Claude default runs on the Claude API row.
+        try:
+            from app.core.claude_api_provider import native_claude_rebind
+
+            provider_id, model = native_claude_rebind(model) or (None, model)
+        except Exception:  # noqa: BLE001 — the alias still runs (rebound at run time)
+            logger.warning("Could not map the default model to the Claude API", exc_info=True)
     # Same shape as query_options.PROVIDER_MODEL_PREFIX / decode_provider_model.
     return f"prov:{provider_id}:{model}" if provider_id else model
 

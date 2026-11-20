@@ -63,8 +63,15 @@ def test_native_claude_leg_is_billed_by_the_claude_auth_mode(mock_db, claude_mod
     assert usage_attribution(None) == {
         "provider_id": None, "provider_type": "claude", "billing": "subscription",
     }
-    claude_mode(claude_auth_mode.MODE_API_KEY)
+    claude_mode(claude_auth_mode.MODE_CLOUD)
     assert usage_attribution(None)["billing"] == "api"
+
+
+def test_claude_api_key_turns_book_on_their_own_provider(mock_db):
+    """The saved Anthropic key's turns never mix with the subscription leg."""
+    assert usage_attribution("claude-api") == {
+        "provider_id": "claude-api", "provider_type": "anthropic", "billing": "api",
+    }
 
 
 @pytest.mark.parametrize("ptype,auth_mode,billing", [

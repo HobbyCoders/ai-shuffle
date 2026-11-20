@@ -63,8 +63,10 @@ def claude_billing() -> Optional[str]:
     except Exception:  # noqa: BLE001 — attribution must never break booking
         logger.debug("usage attribution: Claude auth mode unreadable", exc_info=True)
         return None
-    # A cloud provider or gateway bills per token, like an API key.
-    if mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_CLOUD):
+    # A cloud provider or gateway bills per token. The Anthropic API key no
+    # longer runs on this leg: its turns book on the Claude API provider
+    # (``claude-api``), so they never mix with subscription usage here.
+    if mode == claude_auth_mode.MODE_CLOUD:
         return BILLING_API
     return BILLING_SUBSCRIPTION
 
@@ -83,6 +85,12 @@ def usage_attribution(provider_id: Optional[str]) -> UsageAttribution:
             "provider_type": CLAUDE_PROVIDER_TYPE,
             "billing": claude_billing(),
         }
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+
+    if provider_id == CLAUDE_API_PROVIDER_ID:
+        # The saved Anthropic key: billed per token, booked under its own id
+        # even if the key was switched off before the turn settled.
+        return {"provider_id": provider_id, "provider_type": "anthropic", "billing": BILLING_API}
     try:
         from app.db.model_providers import get_model_provider
 

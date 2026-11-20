@@ -510,8 +510,10 @@ export function getClaudeVersionedModels(): ClaudeVersionedModel[] {
 //   provider_type 'grok'     → "Grok"   · <plan>   (SuperGrok subscription)
 //   provider_type 'xai'      → "Grok"   · "API"    (xAI API key)
 //   any other row            → <row name> · "API"
+//   provider_type 'anthropic'→ "Claude" · "API"    (the saved Anthropic key,
+//                              the built-in "Claude API" row, run natively)
 //   native Claude            → "Claude" · <plan> for a subscription account,
-//                              "Claude" · "API" for Anthropic API-key auth
+//                              "Claude" · "API" for a cloud provider or gateway
 //
 // Configured OpenAI API rows and ChatGPT subscription rows keep separate
 // groups/sections when present; a subscription does not imply an API billing
@@ -530,6 +532,8 @@ const SUBSCRIPTION_SUBTEXT = 'Subscription';
 /** Brand overrides keyed by `provider_type` — rows whose stored name is not the
  *  brand we want to show (both OpenAI rows display as "OpenAI"). */
 const PROVIDER_BRANDS: Readonly<Record<string, string>> = {
+	// The built-in "Claude API" row (the saved Anthropic key, run natively).
+	anthropic: 'Claude',
 	chatgpt: 'OpenAI',
 	openai: 'OpenAI',
 	grok: 'Grok',

@@ -296,9 +296,12 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 		expect(
 			getProviderDisplay({ name: 'My Gateway', provider_type: 'custom', auth_kind: 'api' })
 		).toEqual({ name: 'My Gateway', subtext: 'API' });
+	});
+
+	it('shows the saved Anthropic key as Claude + API', () => {
 		expect(
-			getProviderDisplay({ name: 'Anthropic', provider_type: 'anthropic', auth_kind: 'api' })
-		).toEqual({ name: 'Anthropic', subtext: 'API' });
+			getProviderDisplay({ name: 'Claude API', provider_type: 'anthropic', auth_kind: 'api' })
+		).toEqual({ name: 'Claude', subtext: 'API' });
 	});
 
 	it('honours auth_kind over provider_type for a custom row on Codex auth', () => {

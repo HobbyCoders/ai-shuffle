@@ -232,10 +232,35 @@ def resolve_model_provider(provider_id: str, include_token: bool = False) -> Opt
     return row
 
 
+def _claude_api_row(include_token: bool = False) -> Optional[ModelProviderRow]:
+    """The built-in Claude API row (the active saved Anthropic key), or None.
+
+    Not stored here: :mod:`app.core.claude_api_provider` builds it from the
+    Settings > Claude key. Run-time readers include it; the management list
+    (:func:`get_all_model_providers`) and every writer do not.
+    """
+    from app.core import claude_api_provider
+
+    return claude_api_provider.virtual_row(include_token=include_token)  # type: ignore[return-value]
+
+
+def _with_claude_api(rows: List[ModelProviderRow], include_token: bool = False) -> List[ModelProviderRow]:
+    try:
+        row = _claude_api_row(include_token)
+    except Exception:  # noqa: BLE001 — the stored rows still list
+        logger.warning("Could not build the Claude API provider row", exc_info=True)
+        return rows
+    return rows + [row] if row else rows
+
+
 def get_model_provider(
     provider_id: str, include_token: bool = False
 ) -> Optional[ModelProviderRow]:
     """Get one provider by id. Token blob included only when requested."""
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+
+    if provider_id == CLAUDE_API_PROVIDER_ID:
+        return _claude_api_row(include_token)
     cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", " + _TOKEN_COLUMNS
     with get_db() as conn:
         cursor = conn.cursor()
@@ -272,7 +297,8 @@ def get_enabled_model_providers(include_token: bool = False) -> List[ModelProvid
             "ORDER BY created_at DESC"
         )
         rows = rows_to_list(cursor.fetchall())
-        return [_parse_json_columns(r) for r in rows]  # type: ignore[return-value]
+        parsed = [_parse_json_columns(r) for r in rows]
+    return _with_claude_api(parsed, include_token)  # type: ignore[arg-type]
 
 
 def count_configured_model_providers() -> int:
@@ -418,7 +444,9 @@ def list_usable_model_providers() -> List[ModelProviderRow]:
             """
         )
         rows = rows_to_list(cursor.fetchall())
-        return [_parse_json_columns(r) for r in rows]  # type: ignore[return-value]
+        parsed = [_parse_json_columns(r) for r in rows]
+    # The saved Claude API key counts as soon as it is the active key.
+    return _with_claude_api(parsed)  # type: ignore[arg-type]
 
 
 def _normalize_model_capabilities(models):

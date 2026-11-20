@@ -337,6 +337,12 @@ def build_generation_options(
         provider_id = config.get("provider")
     else:
         provider_id = session_provider_id
+    if not provider_id:
+        # API-key sign-in mode: a Claude model runs on the native Claude API
+        # provider; the CLI never receives the key (app.core.claude_api_provider).
+        from app.core.claude_api_provider import native_claude_rebind
+
+        provider_id, model = native_claude_rebind(model) or (provider_id, model)
 
     # Permission mode: profile value or bypassPermissions
     permission_mode = config.get("permission_mode") or "bypassPermissions"

@@ -1525,6 +1525,19 @@ def build_options_from_profile(
                         session_id,
                     )
 
+    # A Claude pick with no provider on a worker in the API-key sign-in mode
+    # runs natively on the Claude API provider: the Claude Code CLI never gets
+    # the key (app/core/claude_api_provider.py). Not persisted: switching the
+    # worker back to the subscription puts the same chat back on the CLI.
+    if not provider_id and not overrides.get("provider"):
+        from app.core.claude_api_provider import native_claude_rebind
+
+        _claude_api = native_claude_rebind(model_to_use)
+        if _claude_api is not None:
+            provider_id, model_to_use = _claude_api
+            if provider_pin_id is None:
+                provider_pin_id = provider_id
+
     # Subagent models are not resolved here: the Task tool resolves the target
     # agent's own binding at dispatch time.
 

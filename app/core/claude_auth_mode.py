@@ -7,8 +7,13 @@ and the user picks it:
 - ``subscription``: the CLI uses its own sign-in, which the user completed in
   Anthropic's flow (``claude auth login``). Nothing is injected; any Anthropic
   key in the host or profile environment is kept away from the CLI.
-- ``api_key``: the Anthropic API key the user stored in Settings is passed to
-  the CLI as ``ANTHROPIC_API_KEY``, and nothing else credential-like is.
+- ``api_key``: Claude runs on the Anthropic API key the user stored in
+  Settings, through fluid's native Anthropic client (the "Claude API"
+  provider, :mod:`app.core.claude_api_provider`), not the CLI. The CLI never
+  receives the key: a Claude model picked without a provider is moved onto the
+  Claude API provider for the turn, and every Anthropic credential is kept
+  away from any CLI child. Installs that used to hand the key to the CLI keep
+  working without reconfiguration through that move.
 - ``cloud``: "Cloud provider or gateway". The CLI runs on the one method the
   owner set up in Settings (Amazon Bedrock, Google Vertex AI, Microsoft Foundry
   or an LLM gateway), with only that method's allowlisted values
@@ -64,7 +69,9 @@ API_KEY_SETTING = "anthropic_api_key"
 # Environment names the CLI reads as an Anthropic credential. In each mode the
 # ones that do not belong to it are removed from what the CLI child inherits.
 SUBSCRIPTION_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-API_KEY_UNSET = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+# The API key runs natively, never through the CLI: nothing credential-like
+# reaches a CLI child in this mode.
+API_KEY_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 OFF_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 

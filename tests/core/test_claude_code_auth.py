@@ -2,9 +2,9 @@
 Tests for the Claude Code credential injection under the explicit auth mode.
 
 The user chooses ``subscription`` or ``api_key`` (``app.core.claude_auth_mode``).
-In ``api_key`` mode the stored ``anthropic_api_key`` is injected as
-``ANTHROPIC_API_KEY`` and other Anthropic credential variables are kept from the
-CLI. In ``subscription`` mode nothing is injected and any Anthropic key from the
+In ``api_key`` mode the stored ``anthropic_api_key`` runs on the native Claude
+API provider, so nothing is injected and every Anthropic credential variable is
+kept from the CLI. In ``subscription`` mode nothing is injected and any Anthropic key from the
 profile env or the host environment is kept from the CLI. The key's mere
 presence never picks the mode.
 
@@ -31,36 +31,36 @@ def _unset(env):
 
 
 class TestApiKeyMode:
-    def test_key_set_injects_anthropic_api_key(self):
-        with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-decrypted"):
-            env = inject_claude_code_auth({})
-        assert env["ANTHROPIC_API_KEY"] == "sk-ant-decrypted"
-        assert _unset(env) == {"ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+    """The stored key runs on the native Claude API provider; the CLI never gets it."""
 
-    def test_other_credentials_in_profile_env_are_dropped(self):
-        base = {"ANTHROPIC_AUTH_TOKEN": "tok", "CLAUDE_CODE_OAUTH_TOKEN": "oauth", "FOO": "bar"}
+    def test_stored_key_is_never_injected(self):
+        with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-decrypted") as m:
+            env = inject_claude_code_auth({})
+        assert "ANTHROPIC_API_KEY" not in env
+        m.assert_not_called()
+        assert _unset(env) == {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"}
+
+    def test_every_credential_in_profile_env_is_dropped(self):
+        base = {"ANTHROPIC_API_KEY": "from-profile", "ANTHROPIC_AUTH_TOKEN": "tok",
+                "CLAUDE_CODE_OAUTH_TOKEN": "oauth", "FOO": "bar"}
         with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-x"):
             env = inject_claude_code_auth(base)
-        assert "ANTHROPIC_AUTH_TOKEN" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
+        for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+            assert name not in env
         assert env["FOO"] == "bar"
 
-    def test_no_stored_key_injects_nothing_and_blocks_inherited_key(self):
-        with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value=None):
-            env = inject_claude_code_auth({"ANTHROPIC_API_KEY": "from-profile"})
-        assert "ANTHROPIC_API_KEY" not in env
-        assert "ANTHROPIC_API_KEY" in _unset(env)
-
-    def test_reads_anthropic_api_key_setting_name(self):
-        with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-x") as m:
-            inject_claude_code_auth({})
-        m.assert_called_once_with("anthropic_api_key")
+    def test_host_key_never_reaches_the_cli_child(self):
+        with _mode("api_key"):
+            env = inject_claude_code_auth({})
+        child = child_env_with_overlay(env, {"ANTHROPIC_API_KEY": "sk-host", "PATH": "/bin"})
+        assert "ANTHROPIC_API_KEY" not in child
 
     def test_mutates_and_returns_same_dict(self):
-        original = {}
-        with _mode("api_key"), patch.object(env_mod, "_get_decrypted_api_key", return_value="sk-ant-x"):
+        original = {"ANTHROPIC_API_KEY": "x"}
+        with _mode("api_key"):
             returned = inject_claude_code_auth(original)
         assert returned is original
-        assert original["ANTHROPIC_API_KEY"] == "sk-ant-x"
+        assert "ANTHROPIC_API_KEY" not in original
 
 
 class TestSubscriptionMode:

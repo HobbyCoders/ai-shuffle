@@ -680,15 +680,30 @@ class TestRegistryPayloadClaude:
         assert "claude" in payload
         assert set(payload["claude"]) == {"auth_kind", "plan_type", "enabled"}
 
-    def test_api_key_mode_reports_api_auth_and_no_plan(self, mock_db, monkeypatch):
-        """API-key mode with a stored key → API auth, no plan, even while the
-        CLI is signed in (the explicit mode decides)."""
+    def test_api_key_mode_lists_the_key_as_the_claude_api_provider(self, mock_db, monkeypatch):
+        """API-key mode: the native Claude group has no auth kind (the CLI has no
+        credential), and the key appears as its own "Claude API" provider row,
+        even while the CLI is signed in (the explicit mode decides)."""
         from app.core import claude_auth_mode
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
         claude_auth_mode.set_mode("api_key")
-        assert m.registry_payload()["claude"] == {"auth_kind": "api", "plan_type": None, "enabled": True}
+        payload = m.registry_payload()
+        assert payload["claude"] == {"auth_kind": None, "plan_type": None, "enabled": True}
+        row = next(p for p in payload["providers"] if p["id"] == "claude-api")
+        assert row["provider_type"] == "anthropic" and row["auth_kind"] == "api"
+
+    def test_subscription_and_claude_api_are_listed_together(self, mock_db, monkeypatch):
+        """Both configured: the subscription group and the Claude API row coexist."""
+        from app.core import claude_auth_mode
+        from app.core import claude_cli_status as cs
+        monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
+        claude_auth_mode.set_mode("subscription")
+        payload = m.registry_payload()
+        assert payload["claude"]["auth_kind"] == "subscription"
+        assert any(p["id"] == "claude-api" for p in payload["providers"])
 
     def test_off_mode_disables_claude_with_no_auth_kind(self, mock_db, monkeypatch):
         """Off hides Claude from the pickers whatever credentials exist."""

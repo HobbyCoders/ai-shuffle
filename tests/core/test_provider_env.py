@@ -633,12 +633,13 @@ class TestInjectClaudeCodeAuth:
         env = inject_claude_code_auth({}, provider_id="op")
         assert API_KEY not in env
 
-    def test_native_injects_anthropic_key(self, mock_db):
+    def test_native_never_injects_anthropic_key(self, mock_db):
+        """The saved key runs on the native Claude API provider, never the CLI."""
         from app.db import database as db
         encryption.set_encryption_key("pw", db)
         db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-test"))
         env = inject_claude_code_auth({}, provider_id=None)
-        assert env[API_KEY] == "sk-test"
+        assert API_KEY not in env
 
     def test_native_no_key_injects_nothing(self, mock_db):
         from app.db import database as db

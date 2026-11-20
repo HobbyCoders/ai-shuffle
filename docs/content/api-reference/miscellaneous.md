@@ -668,7 +668,7 @@ Remove the fal.ai API key.
 
 ### POST /api/v1/settings/integrations/anthropic
 
-Save the Anthropic API key used by Claude Code. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
+Save an Anthropic API key. The active key is the **Claude API** provider (`prov:claude-api:<model>` in `GET /api/v1/models`), which runs on AI Shuffle's own Anthropic client; Claude Code never receives the key. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
 
 The key is checked with a one-token request to Anthropic first. A key Anthropic rejects returns `400` and is not saved; a rate-limited check returns `429`. If Anthropic cannot be reached, the key is saved anyway. Returns `{"success": true, "masked_key": "sk-ant-...wxyz"}`.
 
@@ -1132,6 +1132,8 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
 
+In `api_key` mode Claude Code gets no credential. A Claude model chosen without a provider runs on the Claude API provider with the active key, so installs already on this mode keep working with no changes. Switching back to `subscription` moves those chats back to the CLI. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
+
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 
 ```json
@@ -1197,8 +1199,8 @@ the change at the next turn, and idle Claude sessions still on the previous
 sign-in are closed when a subscription switch happens.
 
 Both key settings sync encrypted under the existing system-settings policy.
-The active key remains a scalar in `anthropic_api_key`, preserving every
-existing injection path and older-worker compatibility. The shared saved list
+The active key remains a scalar in `anthropic_api_key`, preserving
+older-worker compatibility. The shared saved list
 is `claude_saved_api_keys`; active flags are derived from the real active scalar,
 not a separately replicated pointer. If the scalar arrives before the list, a
 masked legacy entry is shown until the list arrives, never another key's active

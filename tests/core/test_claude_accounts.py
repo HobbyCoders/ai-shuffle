@@ -34,7 +34,7 @@ def test_keys_save_activate_rename_delete_and_legacy_migration(isolated):
     assert all(encryption.is_encrypted(value) for value in isolated.values())
 
 
-def test_key_list_follows_scalar_sync_and_injection_uses_active(isolated):
+def test_key_list_follows_scalar_sync_and_the_active_key_is_used(isolated):
     from app.api.settings_crypto import get_decrypted_api_key
     from app.core.environment import _get_decrypted_api_key, inject_claude_code_auth
     first = accounts.add_api_key("example-anthropic-secret-key-1111")
@@ -42,7 +42,9 @@ def test_key_list_follows_scalar_sync_and_injection_uses_active(isolated):
     isolated[claude_auth_mode.setting_key()] = "api_key"
     assert get_decrypted_api_key(accounts.API_SETTING).endswith("2222")
     assert _get_decrypted_api_key(accounts.API_SETTING).endswith("2222")
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"].endswith("2222")
+    assert claude_auth_mode.stored_api_key().endswith("2222")
+    # The active key runs natively; the Claude Code CLI never receives it.
+    assert "ANTHROPIC_API_KEY" not in inject_claude_code_auth({})
     replica = isolated[accounts.API_SETTING]
     accounts.change_account("api_key", first, "activate")
     isolated[accounts.API_SETTING] = replica

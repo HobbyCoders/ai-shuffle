@@ -371,10 +371,9 @@ def inject_claude_code_auth(
     The owner chooses the mode (``app.core.claude_auth_mode``) in Settings or
     through an explicit built-in cloud/gateway worker-environment configuration:
 
-    - ``api_key``: the Anthropic API key stored in Settings goes in as
-      ``ANTHROPIC_API_KEY``. Other Anthropic credential variables from the host
-      or the profile env are kept away from the CLI, so it sees that key and
-      nothing else credential-like.
+    - ``api_key``: nothing is injected and every Anthropic credential variable
+      is kept away. The stored key runs on the native Claude API provider
+      (:mod:`app.core.claude_api_provider`); the CLI never receives it.
     - ``subscription``: no credential is injected, and any
       ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` from the host or the
       profile env is kept away, so the CLI runs on the sign-in the user
@@ -419,15 +418,11 @@ def inject_claude_code_auth(
     if mode != claude_auth_mode.MODE_OFF:
         claude_subscriptions.apply_cli_home(env)
     if mode == claude_auth_mode.MODE_API_KEY:
+        # The key runs on the native Claude API provider; the CLI never gets
+        # it, nor any other Anthropic credential from the host or profile.
         unset = claude_auth_mode.API_KEY_UNSET
-        api_key = _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING)
-        if api_key:
-            env["ANTHROPIC_API_KEY"] = api_key
-        else:
-            # No stored key: the credential gate refuses the turn; never let a
-            # key from somewhere else stand in for the user's.
-            unset = unset + ("ANTHROPIC_API_KEY",)
-            env.pop("ANTHROPIC_API_KEY", None)
+        for name in unset:
+            env.pop(name, None)
     elif mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
     elif mode == claude_auth_mode.MODE_CLOUD:

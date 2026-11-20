@@ -10,6 +10,8 @@ The underlying registry lives in ``app/core/model_registry.py``; this router
 is a thin read-only projection of it.
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
@@ -18,6 +20,7 @@ from app.core import claude_accounts, claude_api_models, claude_cli_models
 from app.core.model_registry import registry_payload
 from app.db.async_database import run_sync
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/models", tags=["Models"])
 
 
@@ -34,6 +37,13 @@ async def list_claude_api_models(account_id: str, response: Response, token: str
         models = await claude_api_models.list_models(key)
     except claude_api_models.CatalogError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from None
+    try:
+        # The active key's list becomes the Claude API provider's models.
+        from app.core.claude_api_provider import remember_models
+
+        await run_sync(remember_models, key, models)
+    except Exception:  # noqa: BLE001 — the list is still returned
+        logger.warning("Could not keep the Claude API model list", exc_info=True)
     response.headers["Cache-Control"] = "no-store"
     return {"models": models}
 
