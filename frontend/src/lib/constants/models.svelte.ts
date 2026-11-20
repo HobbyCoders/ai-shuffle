@@ -302,6 +302,8 @@ export interface ClaudeAuthInfo {
 
 interface RegistryState {
 	models: ModelOption[];
+	/** Native Claude models hidden from pickers, kept with live metadata for existing chats. */
+	hiddenModels: ModelOption[];
 	default: string;
 	legacyMap: Record<string, string>;
 	effortModelAliases: Record<string, string>;
@@ -320,6 +322,7 @@ interface RegistryState {
 
 const _registry = $state<RegistryState>({
 	models: [...STATIC_MODELS],
+	hiddenModels: [],
 	default: STATIC_DEFAULT,
 	serverDefaultSet: false,
 	legacyMap: { ...STATIC_LEGACY_MAP },
@@ -351,7 +354,8 @@ export function getModels(): readonly ModelOption[] {
 export function supportsAutoPermission(value: string | null | undefined): boolean {
 	const composite = decodeProviderModel(value);
 	if (composite) return _registry.providers.find(p => p.id === composite.providerId)?.auto_permission_supported === true;
-	return _registry.models.find(m => m.value === normalizeModel(value || getDefaultModel()))?.auto_permission_supported === true;
+	const target = value || getDefaultModel();
+	return target ? getNativeModel(target)?.auto_permission_supported === true : false;
 }
 
 /**
@@ -637,6 +641,7 @@ export function getNativeModel(value: string | null | undefined): ModelOption | 
 	const base = normalizeModel(value);
 	const version = base.startsWith('claude-') ? base.replace(/-\d{8}$/, '') : base;
 	return _registry.models.find((m) => m.value === base)
+		?? _registry.hiddenModels.find((m) => m.value === base)
 		?? STATIC_MODELS.find((m) => m.value === base)
 		?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
 }
@@ -878,7 +883,8 @@ interface RegistryClaudePayload {
 
 interface RegistryPayload {
 	models: RegistryModelPayload[];
-	default: string;
+	hidden_models?: RegistryModelPayload[];
+	default?: string;
 	inherit_value?: string;
 	legacy_map: Record<string, string>;
 	effort_model_aliases?: Record<string, string>;
@@ -1067,13 +1073,18 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 			return false;
 		}
 		const models = payload.models.map(mapPayloadModel);
+		const hiddenModels = Array.isArray(payload.hidden_models)
+			? payload.hidden_models.map(mapPayloadModel)
+			: [];
 		// Drift-checked against the static Claude bundle only — providers are
 		// entirely db-sourced (no static baseline to drift from). Versions a
 		// subscription CLI offers are not part of the bundle.
 		warnOnDrift(models.filter((m) => !m.value.startsWith('claude-')), STATIC_MODELS);
+		const hasExplicitDefault = typeof payload.default === 'string';
 		_registry.models = models;
-		_registry.default = payload.default || STATIC_DEFAULT;
-		_registry.serverDefaultSet = !!payload.default;
+		_registry.hiddenModels = hiddenModels;
+		_registry.default = hasExplicitDefault ? payload.default! : STATIC_DEFAULT;
+		_registry.serverDefaultSet = hasExplicitDefault;
 		_registry.legacyMap = payload.legacy_map ?? { ...STATIC_LEGACY_MAP };
 		_registry.effortModelAliases = payload.effort_model_aliases ?? { ...STATIC_EFFORT_MODEL_ALIASES };
 		_registry.providers = Array.isArray(payload.providers)

@@ -54,7 +54,9 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _FILE_NAME = "claude-cli-models.json"
-DISABLED_MODELS_SETTING = "claude_subscription_disabled_models"
+# Per-model opt-out keys: ``claude_subscription_model_disabled:<model_id>`` = "1"
+# (disabled) or "0" (enabled, keeping a newer revision for LWW sync).
+DISABLED_MODEL_PREFIX = "claude_subscription_model_disabled:"
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
 # The CLI's "Default (recommended)" entry duplicates one of the aliases.
 _SKIPPED_VALUES = frozenset({"default"})
@@ -309,48 +311,50 @@ def versioned_entries() -> List[Dict[str, Any]]:
 
 
 def disabled_models() -> List[str]:
-    """Claude subscription model ids hidden from pickers (default: none)."""
+    """Claude subscription model ids hidden from pickers (default: none).
+
+    Stored as one ``system_settings`` row per model id
+    (``claude_subscription_model_disabled:<model_id>`` = ``"1"`` or ``"0"``)
+    so independent edits on paired workers never overwrite each other.
+    """
     try:
         from app.db import database
 
-        raw = database.get_system_setting(DISABLED_MODELS_SETTING)
-        parsed = json.loads(raw) if raw else None
+        rows = database.get_system_settings_by_prefix(DISABLED_MODEL_PREFIX)
     except Exception:  # noqa: BLE001 — early boot or unreadable DB offers all models
         return []
-    if not isinstance(parsed, list):
-        return []
     out: List[str] = []
-    seen: set[str] = set()
-    for item in parsed:
-        if isinstance(item, str):
-            value = item.strip()
-            if value and len(value) <= 300 and value not in seen:
-                seen.add(value)
-                out.append(value)
+    for key in sorted(rows):
+        if rows[key] != "1":
+            continue
+        value = key.removeprefix(DISABLED_MODEL_PREFIX).strip()
+        if value and len(value) <= 300:
+            out.append(value)
     return out
 
 
 def set_model_enabled(model_id: str, enabled: bool) -> List[str]:
     """Enable or disable a single Claude subscription model for pickers.
 
-    Suppresses DB writes when the model is already in the requested state.
-    Returns the updated list of disabled model ids.
+    Writes ``"1"`` (disabled) or ``"0"`` (enabled — keeping a revision so
+    re-enabling beats an older ``"1"`` across LWW sync). Suppresses DB writes
+    when the model is already in the requested state.
     """
     value = model_id.strip() if isinstance(model_id, str) else ""
     if not value or len(value) > 300:
         raise ValueError("Model id must be a non-empty string of at most 300 characters.")
     from app.db import database
 
+    setting_key = f"{DISABLED_MODEL_PREFIX}{value}"
+    target = "0" if enabled else "1"
     with _disabled_lock:
-        current = disabled_models()
-        if enabled:
-            updated = [m for m in current if m != value]
-        else:
-            updated = current if value in current else [*current, value]
-        if updated == current:
-            return current
-        database.set_system_setting(DISABLED_MODELS_SETTING, json.dumps(updated))
-        return updated
+        current = database.get_system_setting(setting_key)
+        if enabled and current in (None, "0"):
+            return disabled_models()
+        if not enabled and current == "1":
+            return disabled_models()
+        database.set_system_setting(setting_key, target)
+        return disabled_models()
 
 
 def subscription_catalog_rows() -> Dict[str, Any]:

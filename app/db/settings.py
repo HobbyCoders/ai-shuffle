@@ -463,6 +463,19 @@ def get_all_system_settings() -> Dict[str, str]:
         return {row["key"]: row["value"] for row in rows}
 
 
+def get_system_settings_by_prefix(prefix: str) -> Dict[str, str]:
+    """Return all system settings whose key starts with ``prefix``."""
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT key, value FROM system_settings WHERE key LIKE %s ESCAPE '\\'",
+            (f"{escaped}%",),
+        )
+        rows = cursor.fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+
 # Register at the implementation so direct setters and facade/API callers share
 # the same committed-write/no-op detection. Nested per-model clears emit once.
 from app.core.resource_sync import install_database_mutations as _install_resource_sync, replicated_wakes_enabled

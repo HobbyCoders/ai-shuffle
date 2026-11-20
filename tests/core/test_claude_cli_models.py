@@ -531,42 +531,66 @@ def test_a_preview_never_refreshes_the_cli_list():
             assert _preview_may_change_dev_data(refresh) is False
 
 
-def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(cli, mock_db, monkeypatch):
-    """Disabled subscription models leave pickers/enums/defaults, while metadata helpers still resolve them."""
+def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(cli, mock_db, monkeypatch, tmp_path):
+    """S1 + S2 + S3: independent per-model keys, hidden_models metadata, and no-enabled-default refusal."""
+    import asyncio
+    from unittest.mock import patch
+
     from fastapi import Response
     from starlette.requests import Request
 
+    from app.api import command_context, query as query_api
     from app.api.auth import _preview_may_change_dev_data
     from app.api.model_registry import (
         ToggleClaudeSubscriptionModelRequest,
         list_claude_subscription_models,
         toggle_claude_subscription_model,
     )
-    from app.core import credential_gate
+    from app.core import automation_service, credential_gate, generation_options, query_options
     from app.db import database
     from app.mcp import config_subagents
+    from app.network.policy import is_shared_setting_key
 
     # Default: all models enabled.
     full = cm.subscription_catalog_rows()
     assert full["captured"] is True
     assert all(row["enabled"] is True for row in full["models"])
 
-    # Disable sonnet (default alias) and claude-mythos-5-1 (versioned).
+    # S3: disable sonnet and claude-mythos-5-1 -> two independent shared system_settings rows.
     writes = []
     real_set = database.set_system_setting
-    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append((k, v)), real_set(k, v))[1])
     assert cm.set_model_enabled("sonnet", False) == ["sonnet"]
     assert cm.set_model_enabled("sonnet", False) == ["sonnet"]  # no-op suppressed
-    assert len(writes) == 1
-    assert cm.set_model_enabled("claude-mythos-5-1", False) == ["sonnet", "claude-mythos-5-1"]
-    assert len(writes) == 2
+    assert cm.set_model_enabled("claude-mythos-5-1", False) == ["claude-mythos-5-1", "sonnet"]
+    assert writes == [
+        (f"{cm.DISABLED_MODEL_PREFIX}sonnet", "1"),
+        (f"{cm.DISABLED_MODEL_PREFIX}claude-mythos-5-1", "1"),
+    ]
+    assert is_shared_setting_key(f"{cm.DISABLED_MODEL_PREFIX}sonnet") is True
+    assert is_shared_setting_key(f"{cm.DISABLED_MODEL_PREFIX}claude-mythos-5-1") is True
 
-    # Pickers & selectable enums hide disabled models.
+    # Re-enabling writes "0" (preserving LWW revision) and no-op repeat writes nothing.
+    assert cm.set_model_enabled("sonnet", True) == ["claude-mythos-5-1"]
+    assert cm.set_model_enabled("sonnet", True) == ["claude-mythos-5-1"]
+    assert writes[-1] == (f"{cm.DISABLED_MODEL_PREFIX}sonnet", "0")
+    assert len(writes) == 3
+    # Re-disable sonnet for the remaining assertions.
+    assert cm.set_model_enabled("sonnet", False) == ["claude-mythos-5-1", "sonnet"]
+
+    # Pickers & selectable enums hide disabled models; S2 hidden_models retains full live metadata.
     payload = m.registry_payload()
     offered = [item["value"] for item in payload["models"]]
     assert "sonnet" not in offered
     assert "claude-mythos-5-1" not in offered
     assert "haiku" in offered and "opus" in offered and "claude-opus-4-6" in offered
+    hidden_by_value = {item["value"]: item for item in payload["hidden_models"]}
+    assert set(hidden_by_value) == {"sonnet", "claude-mythos-5-1"}
+    assert hidden_by_value["sonnet"]["label"] == "Sonnet 5.5"
+    assert hidden_by_value["claude-mythos-5-1"]["label"] == "Mythos 5.1"
+    assert hidden_by_value["claude-mythos-5-1"]["family"] == "mythos"
+    assert hidden_by_value["claude-mythos-5-1"]["context_window"] == 1_000_000
+    assert hidden_by_value["claude-mythos-5-1"]["effort_levels"] == _ALL
     selectable = m.selectable_model_values()
     assert "sonnet" not in selectable and "claude-mythos-5-1" not in selectable
 
@@ -583,25 +607,49 @@ def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(c
 
     # Default model falls back to the first enabled model when sonnet is disabled.
     monkeypatch.setattr(credential_gate, "_claude_ready_for_default", lambda probe: True)
+    monkeypatch.setattr(credential_gate, "_default_candidate_rows", lambda servable_only=False: [])
     assert credential_gate._claude_default("sonnet", probe=False) == (None, "haiku")
+    assert credential_gate.default_run_selection(probe=False) == "haiku"
 
     # Unfiltered Settings endpoint still lists every model with its enabled flag.
-    import asyncio
-
     sub_list = asyncio.run(list_claude_subscription_models(Response(), "admin"))
     by_id = {row["id"]: row for row in sub_list["models"]}
     assert by_id["sonnet"]["enabled"] is False
     assert by_id["claude-mythos-5-1"]["enabled"] is False
     assert by_id["haiku"]["enabled"] is True
 
-    # Disable EVERY subscription model -> subagent tool schema omits empty enum & _claude_default returns None.
+    # S1: disable EVERY subscription model on a Claude-only worker -> no fabricated "sonnet" default!
     for row in sub_list["models"]:
         asyncio.run(toggle_claude_subscription_model(
             ToggleClaudeSubscriptionModelRequest(model=row["id"], enabled=False), "admin"
         ))
     assert m.selectable_model_values() == []
-    assert m.registry_payload()["models"] == []
+    all_disabled_payload = m.registry_payload()
+    assert all_disabled_payload["models"] == []
+    assert len(all_disabled_payload["hidden_models"]) == len(sub_list["models"])
+    assert all_disabled_payload["default"] == ""
     assert credential_gate._claude_default("sonnet", probe=False) is None
+    assert credential_gate.default_run_model(probe=False) == (None, None)
+    assert credential_gate.default_run_selection(probe=False) == ""
+
+    # S1: implicit new-run paths refuse cleanly while explicit model selections still pass through.
+    implicit_profile = {"id": "p1", "config": {"cwd": str(tmp_path), "tools_preset": "claude_code"}}
+    with patch.object(query_options, "get_security_instructions", return_value=""):
+        with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+            query_options.build_options_from_profile(profile=implicit_profile)
+        explicit_profile = {"id": "p2", "config": {"model": "claude-mythos-5-1", "cwd": str(tmp_path), "tools_preset": "claude_code"}}
+        opts, _ = query_options.build_options_from_profile(profile=explicit_profile)
+        assert opts.model == "claude-mythos-5-1"
+    with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+        generation_options.text_generation_config()
+    monkeypatch.setattr(database, "get_profile", lambda pid: {"id": pid, "config": {}})
+    with pytest.raises(credential_gate.AgentSetupRequired, match="No models are enabled"):
+        query_api._request_binding("default", {}, None)
+    assert query_api._request_binding("default", {"model": "sonnet"}, None) == (None, "sonnet")
+    assert command_context.command_provider_kind(None, None, None, None, None) == "unavailable"
+    auto_model = automation_service.resolve_automation_model({"id": "a1", "profile_id": "default"})
+    assert auto_model["model"] is None and "No models are enabled" in (auto_model["error"] or "")
+
     tools = {t.name: t for t in config_subagents._create_subagent_tools(True)}
     for name in ("createSubagent", "updateSubagent"):
         assert "enum" not in tools[name].input_schema["properties"]["model"]
@@ -611,8 +659,6 @@ def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(c
     assert [item["value"] for item in m.registry_payload()["models"]] == ["haiku", "sonnet", "opus", "fable"]
 
     # Disposable preview allows curation PUTs (never on real installs).
-    from unittest.mock import patch
-
     for path in ("/api/v1/models/claude/subscription/models", "/api/v1/models/claude/api-key/acct-1/models"):
         req = Request({"type": "http", "method": "PUT", "path": path, "headers": []})
         with patch("app.preview_run.disposable_preview_data", return_value=True):

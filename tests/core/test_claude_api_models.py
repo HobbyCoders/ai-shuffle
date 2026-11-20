@@ -80,12 +80,14 @@ async def test_route_uses_only_the_named_account(mock_db, monkeypatch):
 
     monkeypatch.setattr(claude_api_models, "list_models", list_models)
     response = Response()
-    assert await list_claude_api_models("inactive", response, "admin") == {
-        "models": [],
-        "curated": None,
-        "fetched_at": None,
-    }
+    first = await list_claude_api_models("inactive", response, "admin")
+    assert first["models"] == []
+    assert first["curated"] is None
+    assert isinstance(first["fetched_at"], str) and first["fetched_at"]
     assert response.headers["Cache-Control"] == "no-store"
+    # Second call serves the cached empty catalog without re-contacting Anthropic.
+    second = await list_claude_api_models("inactive", Response(), "admin")
+    assert second == first
     with pytest.raises(HTTPException) as exc:
         await list_claude_api_models("deleted", Response(), "admin")
     assert exc.value.status_code == 404

@@ -935,20 +935,25 @@ def _default_provider_model_without_claude(
     ``credential_gate.default_run_model``: with ``prefer_most_used`` (an
     interactive run) the owner's most used model when its provider is still
     usable; then Claude's default while Claude has its credential, else a
-    usable provider's own default model, else the registry default. None when
-    that is just the registry default. Never raises: a failed check keeps the
-    registry default.
+    usable provider's own default model, else ``(None, None)`` when ready
+    provider(s) have every model disabled (raises ``AgentSetupRequired``), else
+    the registry default. None when that is just the registry default.
     """
+    from app.core import credential_gate
+
     try:
-        from app.core import credential_gate
         from app.core.model_registry import DEFAULT_MODEL
 
         provider_id, model = credential_gate.default_run_model(
             prefer_most_used=prefer_most_used,
         )
-        if provider_id or (model and model != DEFAULT_MODEL):
+        if not model:
+            raise credential_gate.AgentSetupRequired(credential_gate.NO_ENABLED_MODELS_MESSAGE)
+        if provider_id or model != DEFAULT_MODEL:
             return provider_id, model
         return None
+    except credential_gate.AgentSetupRequired:
+        raise
     except Exception:  # noqa: BLE001
         logger.warning("Could not pick a default provider model", exc_info=True)
         return None

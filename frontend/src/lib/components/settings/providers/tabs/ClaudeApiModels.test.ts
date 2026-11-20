@@ -155,3 +155,16 @@ it('distinguishes an empty upstream list from loading and permits refresh after 
 	await waitFor(() => expect(screen.queryByTestId('curation-fetching')).toBeNull());
 	expect(refresh.disabled).toBe(false);
 });
+
+it('disables checkboxes and refresh button when readOnly is true', async () => {
+	mocks.get.mockResolvedValueOnce({
+		models: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }],
+		curated: null,
+		fetched_at: '2026-11-20T00:00:00Z'
+	});
+	render(ClaudeApiModels, { props: { accountId: 'acct-1', readOnly: true } });
+	const checkbox = (await screen.findByRole('checkbox')) as HTMLInputElement;
+	const refresh = screen.getByRole<HTMLButtonElement>('button', { name: 'Refresh model list' });
+	expect(checkbox.disabled).toBe(true);
+	expect(refresh.disabled).toBe(true);
+});

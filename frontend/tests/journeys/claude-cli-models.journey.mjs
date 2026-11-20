@@ -8,8 +8,10 @@
 //                       Mythos, unknown family), filterable, and unchecking a
 //                       model removes it from /api/v1/models while keeping it
 //                       checkable in Settings
-//   pick-and-run        pick Mythos 5.1 in a chat, run a turn: the fake CLI
-//                       was started with exactly that model, not an alias
+//   pick-and-run        pick Mythos 5.1 in a chat, run a turn (CLI started with
+//                       claude-mythos-5-1), then uncheck Mythos in Settings:
+//                       the picker hides Mythos while the existing Mythos chat
+//                       still displays "Mythos 5.1"
 import { readFileSync } from 'node:fs';
 import { runJourney } from './runner.mjs';
 import {
@@ -53,6 +55,18 @@ async function openClaudeModels(page, variant) {
 	await page.getByRole('button', { name: /^Open Claude .*subscription$/ }).first().click();
 	await page.getByRole('tab', { name: 'Models', exact: true }).click();
 	await page.getByTestId('claude-cli-models').waitFor({ timeout: 30_000 });
+}
+
+async function backToChatsFromSettings(page, variant) {
+	if (isPhone(variant)) {
+		const backToChats = page.getByRole('button', { name: 'Back to chats', exact: true });
+		for (let i = 0; i < 4 && !(await backToChats.isVisible()); i++) {
+			const backBtn = page.getByRole('button', { name: /^Back to / }).first();
+			if (await backBtn.isVisible()) await backBtn.click();
+			else break;
+		}
+	}
+	await page.getByRole('button', { name: 'Back to chats', exact: true }).click();
 }
 
 /** Fresh Claude Code chat in the Dev sandbox, Bypass. */
@@ -126,6 +140,8 @@ await runJourney({
 				const afterDisable = await api(page, 'GET', '/models');
 				expect(!afterDisable.models.some((m) => m.value === VERSION),
 					'disabled subscription model is removed from /api/v1/models');
+				expect(afterDisable.hidden_models?.some((m) => m.value === VERSION && m.label === VERSION_LABEL),
+					'disabled subscription model keeps its live metadata in hidden_models');
 
 				const saveEnable = page.waitForResponse((res) =>
 					res.request().method() === 'PUT' && res.url().endsWith('/api/v1/models/claude/subscription/models'));
@@ -173,6 +189,38 @@ await runJourney({
 				log(`fake CLI started with --model ${ran.join(', ')}`);
 				expect(ran.length > 0 && ran.every((value) => value === MYTHOS), `the CLI ran ${MYTHOS} (got ${ran})`);
 				await page.getByRole('button', { name: new RegExp(`^Model: .*${label.source}`) }).first().waitFor();
+
+				// S2 end-to-end: unchecking Mythos hides it from the picker while this
+				// existing Mythos chat continues to display "Mythos 5.1" (never raw id).
+				await mark('hide Mythos and verify existing chat keeps Mythos 5.1 label');
+				try {
+					await openClaudeModels(page, variant);
+					const panel = page.getByRole('tabpanel', { name: 'Models' });
+					const filter = panel.getByRole('searchbox', { name: 'Filter models', exact: true });
+					await filter.fill(MYTHOS);
+					const mythosBox = panel.getByTestId('claude-cli-models').getByRole('checkbox').first();
+					const hideSave = page.waitForResponse((res) =>
+						res.request().method() === 'PUT' && res.url().endsWith('/api/v1/models/claude/subscription/models'));
+					await mythosBox.click();
+					expect((await hideSave).ok(), 'unchecking Mythos must succeed');
+
+					await mark('return to existing Mythos chat and verify label + picker');
+					await backToChatsFromSettings(page, variant);
+					await waitChat(page, { surface: 'active' }, { timeout: 30_000 });
+					await page.getByRole('button', { name: new RegExp(`^Model: .*${label.source}`) }).first().waitFor({ timeout: 10_000 });
+
+					const picker = page.getByRole('dialog', { name: 'Choose model' });
+					await openPopup(page.getByRole('button', { name: /^Model:/ }).first(), picker);
+					await picker.getByRole('textbox', { name: 'Search models' }).fill(MYTHOS_LABEL);
+					expect(await picker.getByRole('option', { name: new RegExp(`^${label.source}`) }).count() === 0,
+						'hidden Mythos 5.1 must not appear in the model picker');
+					await page.keyboard.press('Escape');
+					if (await picker.isVisible()) await page.keyboard.press('Escape');
+					await picker.waitFor({ state: 'hidden', timeout: 5000 });
+				} finally {
+					// Restore Mythos 5.1 so the dev instance stays clean for subsequent variants/runs.
+					await api(page, 'PUT', '/models/claude/subscription/models', { model: MYTHOS, enabled: true }).catch(() => {});
+				}
 			}
 		}
 	],

@@ -776,16 +776,15 @@ def _claude_payload() -> Dict[str, object]:
 def _default_selection() -> str:
     """The model a new chat with no pick runs on, as a picker value.
 
-    A native alias, or a ``prov:<providerId>:<modelId>`` composite for a
-    provider row (``credential_gate.default_run_selection``: the owner's most
-    used model while its provider is usable, else a usable provider's default
-    model). Reads the cached Claude probe only and degrades to
-    ``DEFAULT_MODEL`` on any failure.
+    A native alias, a ``prov:<providerId>:<modelId>`` composite for a provider
+    row, or ``""`` when ready provider(s) exist with every model disabled.
+    Reads the cached Claude probe only and degrades to ``DEFAULT_MODEL`` on
+    unexpected failures.
     """
     try:
         from app.core import credential_gate
 
-        return credential_gate.default_run_selection(probe=False) or DEFAULT_MODEL
+        return credential_gate.default_run_selection(probe=False)
     except Exception as e:  # noqa: BLE001 — the registry payload never fails
         logger.warning("Could not resolve the default model for registry: %s", e)
         return DEFAULT_MODEL
@@ -841,10 +840,14 @@ def _registry_payload() -> Dict[str, object]:
     all_models = [entry(m.value, m) for m in MODELS] + versioned
     disabled = _disabled_subscription_models(claude)
     models = [item for item in all_models if item["value"] not in disabled] if disabled else all_models
+    hidden_models = [item for item in all_models if item["value"] in disabled] if disabled else []
     return {
         # The four aliases, then every other version the subscription CLI lists,
         # filtered by the owner's subscription model curation.
         "models": models,
+        # Disabled native models with full live metadata so existing chats and
+        # profiles keep their labels, badges, windows, and effort controls.
+        "hidden_models": hidden_models,
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": legacy_map,

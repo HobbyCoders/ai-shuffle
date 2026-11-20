@@ -168,7 +168,7 @@
 			aria-label="Refresh model list"
 			aria-busy={loading}
 			title={loading ? 'Fetching the model list' : 'Refresh model list'}
-			disabled={loading || saving}
+			disabled={loading || saving || readOnly}
 			onclick={() => load(true)}
 		>
 			<RefreshCw />

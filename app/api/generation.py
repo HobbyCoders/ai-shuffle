@@ -261,7 +261,8 @@ async def generate_with_claude(
     # Run them off the event loop: this function sits in front of interactive
     # flows (branch naming, commit messages) and a slow DB round-trip here used
     # to stall every other request in the process.
-    generation_config = await run_sync(text_generation_config)
+    from app.core import credential_gate
+
     if model:
         # A UI selection is a complete run binding, not a bare model on the
         # Settings provider. Native aliases explicitly clear that provider.
@@ -271,6 +272,15 @@ async def generate_with_claude(
         provider_id, selected_model = decoded if decoded else (None, model)
         generation_config = {"model": selected_model, "provider": provider_id, "effort": None}
         model = selected_model
+    else:
+        try:
+            generation_config = await run_sync(text_generation_config)
+        except credential_gate.AgentSetupRequired as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=str(exc),
+                headers={"X-Error-Code": credential_gate.SETUP_CODE},
+            ) from None
     effective_model = generation_config.get("model") or DEFAULT_MODEL
 
     # Single-shot turn: max_turns=1 since we only send one prompt.
