@@ -6,7 +6,13 @@ const win = {
 	platform: 'win32', packaged: false, preview: false,
 	installedExecutable: 'C:\\Program Files\\AI Shuffle\\AI Shuffle.exe',
 	appPath: 'C:\\Users\\example\\AI Shuffle\\updates\\versions\\revision\\desktop',
+	appData: 'C:\\Users\\example\\AppData\\Roaming',
 	appId: 'com.hobbycoders.aishuffle.desktop'
+};
+const readWinStamp = (stampPath, encoding) => {
+	assert.equal(stampPath, 'C:\\Program Files\\AI Shuffle\\resources\\login-item-uninstall-v1');
+	assert.equal(encoding, 'utf16le');
+	return `\uFEFF${win.appData.toUpperCase()}`;
 };
 const mac = {
 	platform: 'darwin', packaged: true, preview: false, appId: win.appId,
@@ -33,7 +39,7 @@ test('Windows bundled and managed runtimes register the same installed executabl
 				approved = given.openAtLogin;
 			}
 		};
-		const control = loginItemControl(app, { ...win, packaged });
+		const control = loginItemControl(app, { ...win, packaged }, readWinStamp);
 		assert.equal(control.get(), 'disabled', 'reading initially does not register the item');
 		assert.deepEqual(control.set(true), { state: 'enabled', failed: false });
 		approved = false; // Startup Apps disabled this item; ignore unrelated enabled entries.
@@ -87,6 +93,8 @@ test('only supported installed apps get the native capability; none writes at st
 		{ ...mac, appPath: '/private/var/AppTranslocation/some-id/d/AI Shuffle.app/Contents/Resources/app.asar' }
 	]) assert.equal(loginItemControl(app, host), undefined);
 	assert.equal(loginItemControl({}, win), undefined);
-	assert.ok(loginItemControl(app, win));
+	assert.equal(loginItemControl(app, win, () => { throw Error('old installer has no stamp'); }), undefined);
+	assert.equal(loginItemControl(app, win, () => 'C:\\Users\\another-user\\AppData\\Roaming'), undefined);
+	assert.ok(loginItemControl(app, win, readWinStamp));
 	assert.ok(loginItemControl(app, mac));
 });

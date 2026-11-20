@@ -11,6 +11,8 @@
 	const access = getSettingsAccess();
 	let status = $state<DesktopLoginItemState | null>(null);
 	let busy = $state(false);
+	let refreshQueued = false;
+	let mounted = false;
 	let error = $state<string>();
 	const osSettings = $derived(platform === 'darwin'
 		? 'System Settings → General → Login Items & Extensions'
@@ -20,17 +22,29 @@
 		: status === 'unavailable' ? 'Startup is unavailable for this installation.'
 		: status === null ? 'Checking startup settings…' : undefined));
 
-	async function refresh() {
-		if (busy) return;
+	function finish() {
+		busy = false;
+		if (!mounted || !refreshQueued) return;
+		refreshQueued = false;
+		void refresh(true);
+	}
+
+	async function refresh(keepError = false) {
+		if (!mounted) return;
+		if (busy) {
+			refreshQueued = true;
+			return;
+		}
 		busy = true;
 		try {
-			status = await loginItem.get();
-			error = undefined;
+			const current = await loginItem.get();
+			if (!keepError || current !== status) error = undefined;
+			status = current;
 		} catch {
 			status = null;
 			error = 'Could not read the startup setting.';
 		} finally {
-			busy = false;
+			finish();
 		}
 	}
 
@@ -48,14 +62,18 @@
 			status = null;
 			error = 'Could not confirm the startup setting. Try reading it again.';
 		} finally {
-			busy = false;
+			finish();
 		}
 	}
 
-	onMount(() => void refresh());
+	onMount(() => {
+		mounted = true;
+		void refresh();
+		return () => { mounted = false; };
+	});
 </script>
 
-<svelte:window onfocus={refresh} />
+<svelte:window onfocus={() => refresh()} />
 
 <RowGroup title="Desktop app">
 	<SettingRow id="general.startAtSignIn" {hint} wrapHint>
@@ -63,7 +81,7 @@
 		{#if status === 'blocked'}
 			<ActionButton disabled={busy || access.readOnly} onclick={() => change(false)}>Remove startup item</ActionButton>
 		{:else if status === null && error}
-			<ActionButton disabled={busy} onclick={refresh}>Try again</ActionButton>
+			<ActionButton disabled={busy} onclick={() => refresh()}>Try again</ActionButton>
 		{/if}
 		<Switch controlled checked={status === 'enabled'} disabled={busy || status === null || status === 'unavailable'} onchange={change} />
 	</SettingRow>

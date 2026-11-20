@@ -112,6 +112,34 @@ describe('General page', () => {
 		expect(saveStatus.visible).toBe(false);
 	});
 
+	it.each(['read', 'write'])('coalesces a focus refresh during a native %s', async (operation) => {
+		native.bridge = { platform: 'win32', loginItem: native };
+		let finish!: () => void;
+		if (operation === 'read') {
+			native.get.mockImplementationOnce(() => new Promise((resolve) => {
+				finish = () => resolve('enabled');
+			}));
+		}
+		render(GeneralPage);
+		const control = switchFor('Start AI Shuffle at sign-in');
+		if (operation === 'write') {
+			await waitFor(() => expect(control.disabled).toBe(false));
+			native.set.mockImplementationOnce(() => new Promise((resolve) => {
+				finish = () => resolve({ state: 'enabled', failed: false });
+			}));
+			await fireEvent.click(control);
+		}
+		await waitFor(() => expect(finish).toBeTypeOf('function'));
+		native.get.mockResolvedValueOnce('blocked');
+		await fireEvent.focus(window);
+		await fireEvent.focus(window);
+		expect(native.get).toHaveBeenCalledTimes(1);
+		finish();
+		await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Startup is off.'));
+		expect(control.getAttribute('aria-checked')).toBe('false');
+		expect(native.get).toHaveBeenCalledTimes(2);
+	});
+
 	it('shows external denial on focus and lets the user remove a blocked item', async () => {
 		native.bridge = { platform: 'darwin', loginItem: native };
 		native.get.mockResolvedValueOnce('enabled');

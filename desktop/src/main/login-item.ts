@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { posix, win32 } from 'node:path';
 import type { App, LoginItemSettingsOptions, Settings } from 'electron';
 
@@ -12,6 +13,7 @@ interface Host {
 	packaged: boolean;
 	preview: boolean;
 	installedExecutable?: string;
+	appData?: string;
 	appPath: string;
 	systemVersion: string;
 	appId: string;
@@ -20,7 +22,7 @@ interface Host {
 type LoginItemApi = Pick<App, 'getLoginItemSettings' | 'setLoginItemSettings'>;
 
 /** Only user-initiated writes. The OS, not a saved preference, is the source of truth. */
-export function loginItemControl(app: LoginItemApi, host: Host): LoginItemControl | undefined {
+export function loginItemControl(app: LoginItemApi, host: Host, readStamp: (path: string, encoding: 'utf16le') => string = readFileSync): LoginItemControl | undefined {
 	if (host.preview || typeof app.getLoginItemSettings !== 'function' || typeof app.setLoginItemSettings !== 'function') return;
 
 	let options: LoginItemSettingsOptions;
@@ -31,6 +33,14 @@ export function loginItemControl(app: LoginItemApi, host: Host): LoginItemContro
 		// to process.execPath: in the updated app it is the versioned npm Electron.
 		const executable = host.installedExecutable;
 		if (!executable || !win32.isAbsolute(executable) || !/\.exe$/i.test(executable) || /["\0]/.test(executable)) return;
+		// Without a per-user installer stamp the uninstaller cannot promise to
+		// clean up this Run entry. An in-app update alone must not enable it.
+		if (!host.appData) return;
+		try {
+			const stamp = win32.join(win32.dirname(executable), 'resources', 'login-item-uninstall-v1');
+			const installedFor = readStamp(stamp, 'utf16le').replace(/^\uFEFF/, '');
+			if (installedFor.toLowerCase() !== host.appData.toLowerCase()) return;
+		} catch { return; }
 		// Electron parses the lookup path as a Windows command line (and strips
 		// quotes before writing). The product name and install directory can have spaces.
 		options = { path: `"${executable}"`, args: [] };

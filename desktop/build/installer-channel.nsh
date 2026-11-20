@@ -16,6 +16,8 @@
 # Silent installs: /CHANNEL=nightly. Without it a silent install, including
 # the installer update the app runs itself, writes nothing.
 
+!define SHUFFLE_LOGIN_ITEM_STAMP "$INSTDIR\resources\login-item-uninstall-v1"
+
 !ifndef BUILD_UNINSTALLER
   !include LogicLib.nsh
   !include nsDialogs.nsh
@@ -121,6 +123,30 @@
       ${endif}
       !insertmacro shuffleRestoreContext
       Pop $0
+    ${endif}
+
+    # A source update does not replace the uninstaller. Stamp only copies
+    # installed for this user, whose HKCU entries this uninstaller can clean.
+    ${if} $installMode == "CurrentUser"
+      Push $0
+      ClearErrors
+      FileOpen $0 "${SHUFFLE_LOGIN_ITEM_STAMP}" w
+      ${ifNot} ${Errors}
+        FileWriteUTF16LE $0 "$APPDATA"
+        FileClose $0
+      ${endif}
+      Pop $0
+    ${endif}
+  !macroend
+!else
+  !macro customUnInstall
+    # electron-builder also runs the old uninstaller with --updated during
+    # an in-place installer upgrade. Keep both registration and OS approval.
+    ${ifNot} ${isUpdated}
+    ${andIf} $installMode == "CurrentUser"
+    ${andIf} ${FileExists} "${SHUFFLE_LOGIN_ITEM_STAMP}"
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "com.hobbycoders.aishuffle.desktop"
+      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "com.hobbycoders.aishuffle.desktop"
     ${endif}
   !macroend
 !endif

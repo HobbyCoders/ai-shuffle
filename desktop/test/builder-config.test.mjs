@@ -103,14 +103,15 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   const install = macro('customInstall');
   const lines = install.split('\n').map(line => line.trim()).filter(Boolean);
   assert.equal(lines[0], '${if} $shuffleChannel == "nightly"');
-  assert.equal(matchingEndif(lines, 0), lines.length - 1, 'the whole write is inside the nightly branch');
+  const channelEnd = matchingEndif(lines, 0);
+  assert.ok(channelEnd < lines.indexOf('FileOpen $0 "${SHUFFLE_LOGIN_ITEM_STAMP}" w'), 'the installer stamp is independent of channel');
   const guard = lines.indexOf('${ifNot} ${FileExists} "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard > 0, 'the write is guarded by the file being absent');
   const open = lines.indexOf('FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w');
   const rename = lines.indexOf('Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard < open && open < rename, 'guard, then temporary file, then rename');
   assert.ok(matchingEndif(lines, guard) > rename, 'the rename is inside the file-absent guard, not after it');
-  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*$/gm)].map(m => m[0].trim()), [
+  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*SHUFFLE_CHANNEL_.*$/gm)].map(m => m[0].trim()), [
     'FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w',
     'Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"',
     'Delete "${SHUFFLE_CHANNEL_FILE}.tmp"'
@@ -118,4 +119,22 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   // userData is per user even for an all-users install.
   assert.ok(lines.indexOf('!insertmacro shuffleUserContext') > 0 && lines.indexOf('!insertmacro shuffleUserContext') < guard);
   assert.ok(lines.indexOf('!insertmacro shuffleRestoreContext') > rename);
+});
+
+test('per-user installers stamp uninstall support and remove only their startup entries, never on upgrade', () => {
+  assert.match(channelCode, /!define SHUFFLE_LOGIN_ITEM_STAMP "\$INSTDIR\\resources\\login-item-uninstall-v1"/);
+  const install = macro('customInstall').split('\n').map(line => line.trim()).filter(Boolean);
+  const currentUser = install.indexOf('${if} $installMode == "CurrentUser"');
+  const stamp = install.indexOf('FileOpen $0 "${SHUFFLE_LOGIN_ITEM_STAMP}" w');
+  const write = install.indexOf('FileWriteUTF16LE $0 "$APPDATA"');
+  assert.ok(currentUser > 0 && currentUser < stamp && stamp < write && write < matchingEndif(install, currentUser));
+  assert.match(channelCode, /!else\s+!macro customUnInstall/);
+  assert.deepEqual(macro('customUnInstall').split('\n').map(line => line.trim()).filter(Boolean), [
+    '${ifNot} ${isUpdated}',
+    '${andIf} $installMode == "CurrentUser"',
+    '${andIf} ${FileExists} "${SHUFFLE_LOGIN_ITEM_STAMP}"',
+    'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Run" "com.hobbycoders.aishuffle.desktop"',
+    'DeleteRegValue HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run" "com.hobbycoders.aishuffle.desktop"',
+    '${endif}'
+  ]);
 });

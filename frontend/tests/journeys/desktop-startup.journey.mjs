@@ -20,6 +20,7 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 		async setup({ page, status, variant }) {
 			await page.addInitScript(() => {
 				let state = 'disabled';
+				window.addEventListener('test:startup-blocked', () => { state = 'blocked'; });
 				const noSubscription = () => () => {};
 				window.shuffleDesktop = {
 					platform: 'win32', version: 'test',
@@ -46,6 +47,21 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 			await control.and(page.locator('[aria-checked="true"]:enabled')).waitFor();
 			await mark('Turn off startup');
 			await control.click();
+			await control.and(page.locator('[aria-checked="false"]:enabled')).waitFor();
+			await mark('Return from Windows Settings after startup was blocked');
+			await page.evaluate(() => {
+				window.dispatchEvent(new Event('test:startup-blocked'));
+				window.dispatchEvent(new Event('focus'));
+			});
+			const row = page.locator('[data-setting-anchor="general.startAtSignIn"]');
+			const hint = row.locator('.st-rh').getByText('Startup is off. To allow it, check Windows Settings → Apps → Startup.');
+			await hint.waitFor({ state: 'visible' });
+			await control.and(page.locator('[aria-checked="false"]:enabled')).waitFor();
+			await mark('Remove the blocked startup item');
+			const remove = row.getByRole('button', { name: 'Remove startup item' });
+			await remove.click();
+			await remove.waitFor({ state: 'hidden' });
+			await hint.waitFor({ state: 'hidden' });
 			await control.and(page.locator('[aria-checked="false"]:enabled')).waitFor();
 		}
 	},
