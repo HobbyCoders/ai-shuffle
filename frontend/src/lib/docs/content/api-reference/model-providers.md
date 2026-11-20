@@ -785,9 +785,25 @@ curl http://localhost:8000/api/v1/models \
 
 ### Claude subscription models
 
-On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are always offered, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. Every versioned model Claude Code lists, such as `claude-opus-4-6` or a Mythos model, is offered after them, and **Settings → Providers → Claude → Models** shows the whole list. A versioned model runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are offered.
+On a Claude subscription, the model list comes from the worker's Claude Code CLI. Claude Code sends it when a chat starts, and AI Shuffle also asks for it at startup and on refresh, without sending a prompt. The four short ids (`haiku`, `sonnet`, `opus`, `fable`) are listed first, labelled with the version Claude Code currently runs for them, such as "Opus 5.5". Their effort levels follow what Claude Code reports. Every versioned model Claude Code lists, such as `claude-opus-4-6` or a Mythos model, appears after them. By default every model is offered in pickers; in **Settings → Providers → Claude → Models** you can check or uncheck individual models (aliases or versions) to choose which ones appear in model pickers, while keeping existing chats and profiles working. A versioned model runs exactly that model, with its own effort levels and context window. Before Claude Code has listed its models, only the four short ids are listed.
 
 Each worker keeps its own list, for the Claude account it came from. After you switch Claude accounts, AI Shuffle asks Claude Code again; until it answers, only the four short ids are offered. A model id goes unchanged to the Claude Code that runs the chat, including the subagent default and the model a chat hands to a chat it starts. A worker signed in with an API key or a cloud account, or on an older AI Shuffle release, runs the short id for a versioned subagent default; a model with no short id, such as Mythos, counts there as no default, so that worker asks for one. Until it updates, an older worker also refuses to start a chat handed to it on a full id; nothing starts there. If that worker's Claude Code does not know the id, the turn fails with Claude Code's error; it never runs another model in its place. API-key and cloud sign-ins keep the built-in list.
+
+#### GET /api/v1/models/claude/subscription
+
+Returns the full (unfiltered) list of Claude subscription models for **Settings → Providers → Claude → Models**, each with its `id`, `label`, and `enabled` flag (`true` by default unless disabled in pickers), along with `captured`, `cli_version`, and `captured_at`.
+
+**Auth:** Owner only
+
+#### PUT /api/v1/models/claude/subscription/models
+
+Enables or disables a single Claude subscription model in pickers.
+
+**Auth:** Owner only
+
+**Body:** `{"model": "<id>", "enabled": true|false}`
+
+**Response:** `{"disabled_models": [...], "model": "<id>", "enabled": true|false}`
 
 #### POST /api/v1/models/claude/refresh
 
@@ -796,3 +812,23 @@ Asks this worker's Claude Code for its model list again, then returns the same b
 **Auth:** Owner only
 
 **Errors:** `409` when this install is not signed in with a Claude subscription, or Claude Code did not answer.
+
+### Claude API key models
+
+#### GET /api/v1/models/claude/api-key/{account_id}
+
+Returns the Anthropic model catalog and curation state for a saved Anthropic API key: `{"models": [...], "curated": [...] | null, "fetched_at": "<iso>" | null}`. Pass `?refresh=true` to force a fresh read from Anthropic; otherwise a cached catalog for that key is returned without contacting Anthropic. `curated` is `null` until the owner explicitly saves a selection (meaning all listed models are offered in pickers).
+
+**Auth:** Owner only
+
+**Errors:** `404` when the saved key does not exist; `502` when Anthropic rejects the key or cannot be reached.
+
+#### PUT /api/v1/models/claude/api-key/{account_id}/models
+
+Saves the curated list of models offered in pickers for a saved Anthropic API key (an empty list hides all models for that key).
+
+**Auth:** Owner only
+
+**Body:** `{"models": [{"id": "...", "label": "..."}]}`
+
+**Response:** `{"models": [...]}`

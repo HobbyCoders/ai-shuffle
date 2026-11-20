@@ -3,10 +3,11 @@
 // Claude Code 2.1.325 does (scripts/devloop/fake_claude/cli.py, FAKE_CLI_MODELS).
 //
 // Cases:
-//   listed-in-settings  Settings > Providers > Claude > Models: one list of every
-//                       model Claude Code offers (aliases, versions, Mythos, and
-//                       a family the app does not know), no checkboxes, and the
-//                       pickers offer all of them
+//   listed-in-settings  Settings > Providers > Claude > Models: curated checklist
+//                       of every model Claude Code offers (aliases, versions,
+//                       Mythos, unknown family), filterable, and unchecking a
+//                       model removes it from /api/v1/models while keeping it
+//                       checkable in Settings
 //   pick-and-run        pick Mythos 5.1 in a chat, run a turn: the fake CLI
 //                       was started with exactly that model, not an alias
 import { readFileSync } from 'node:fs';
@@ -87,24 +88,57 @@ await runJourney({
 			},
 			async act({ page, mark, log }) {
 				await mark('read the Models tab');
-				const list = page.getByTestId('claude-cli-models');
+				const panel = page.getByRole('tabpanel', { name: 'Models' });
+				const list = panel.getByTestId('claude-cli-models');
 				const text = (await list.innerText()).replace(/\s+/g, ' ');
 				log(`models: ${text}`);
 				for (const wanted of ['Opus 5.5', VERSION_LABEL, VERSION, MYTHOS_LABEL, MYTHOS, UNKNOWN_LABEL, UNKNOWN]) {
 					expect(text.includes(wanted), `the Models tab lists ${wanted}: ${text}`);
 				}
 				const rows = list.locator('.pv-mrow');
-				expect(await rows.filter({ has: page.locator('[data-provider-logo="claude"]:visible') }).count() === await rows.count(),
-					'every model in the read-only roster shows the Claude mark');
-				expect((await page.getByRole('checkbox').count()) === 0, 'no opt-in checkboxes');
+				const total = await rows.count();
+				expect(await rows.filter({ has: page.locator('[data-provider-logo="claude"]:visible') }).count() === total,
+					'every model in the checklist shows the Claude mark');
+				const checkboxes = list.getByRole('checkbox');
+				expect(await checkboxes.count() === total, 'every subscription model has a checkbox');
 				expect((await page.getByText(/Listed by Claude Code/).count()) === 0, 'no "Listed by Claude Code" section');
+
 				const registry = await api(page, 'GET', '/models');
 				const values = registry.models.map((m) => m.value);
 				expect(values.includes(VERSION) && values.includes(MYTHOS), `the pickers offer every version: ${values}`);
 				expect(registry.models.find((m) => m.value === MYTHOS)?.family === 'mythos', 'Mythos is its own family');
-				// A family the app does not know yet is still offered, with no family.
 				const unknown = registry.models.find((m) => m.value === UNKNOWN);
 				expect(unknown && unknown.family === null, `an unknown family stays selectable: ${JSON.stringify(unknown)}`);
+
+				await mark('filter models and uncheck then re-check one version');
+				const filterInput = panel.getByRole('searchbox', { name: 'Filter models', exact: true });
+				await filterInput.fill(VERSION);
+				expect(await rows.count() === 1, 'filter isolates the matching model');
+				const rowCheckbox = list.getByRole('checkbox').first();
+				expect(await rowCheckbox.isChecked(), 'model starts checked');
+
+				const saveDisable = page.waitForResponse((res) =>
+					res.request().method() === 'PUT' && res.url().endsWith('/api/v1/models/claude/subscription/models'));
+				await rowCheckbox.click();
+				expect((await saveDisable).ok(), 'disabling a Claude subscription model must succeed');
+				expect(!(await rowCheckbox.isChecked()), 'disabled model stays visible and unchecked');
+
+				const afterDisable = await api(page, 'GET', '/models');
+				expect(!afterDisable.models.some((m) => m.value === VERSION),
+					'disabled subscription model is removed from /api/v1/models');
+
+				const saveEnable = page.waitForResponse((res) =>
+					res.request().method() === 'PUT' && res.url().endsWith('/api/v1/models/claude/subscription/models'));
+				await rowCheckbox.click();
+				expect((await saveEnable).ok(), 're-enabling a Claude subscription model must succeed');
+				expect(await rowCheckbox.isChecked(), 're-enabled model is checked again');
+
+				const afterEnable = await api(page, 'GET', '/models');
+				expect(afterEnable.models.some((m) => m.value === VERSION),
+					're-enabled subscription model returns to /api/v1/models');
+
+				await filterInput.fill('');
+				expect(await rows.count() === total, 'clearing filter shows all models again');
 			}
 		},
 		{

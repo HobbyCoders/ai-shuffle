@@ -637,6 +637,7 @@ export function getNativeModel(value: string | null | undefined): ModelOption | 
 	const base = normalizeModel(value);
 	const version = base.startsWith('claude-') ? base.replace(/-\d{8}$/, '') : base;
 	return _registry.models.find((m) => m.value === base)
+		?? STATIC_MODELS.find((m) => m.value === base)
 		?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
 }
 
@@ -947,9 +948,9 @@ function warnOnDrift(hydrated: ModelOption[], baseline: readonly ModelOption[]):
 	const H = new Set(hydrated.map((m) => m.value));
 	const B = new Set(baseline.map((m) => m.value));
 	const added = [...H].filter((v) => !B.has(v));
-	const removed = [...B].filter((v) => !H.has(v));
-	if (added.length || removed.length) {
-		console.warn('[model-registry] static bundle drift vs. backend', { added, removed });
+	// Missing baseline aliases can be curated off in Settings > Providers > Claude > Models.
+	if (added.length) {
+		console.warn('[model-registry] static bundle drift vs. backend', { added });
 	}
 }
 

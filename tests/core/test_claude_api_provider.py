@@ -376,3 +376,75 @@ def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkey
     cap.remember_models(KEY, [{"id": "claude-a-only", "label": "A"}])  # A's late write
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
     assert cap.virtual_row()["models_json"] == [{"id": "claude-b-only", "label": "B"}]
+
+
+def test_remember_models_suppresses_noop_writes_and_reads_legacy_format(key, monkeypatch):
+    """Unchanged model lists must not rewrite system_settings (prevents settings broadcast loop)."""
+    import json
+
+    claude_auth_mode.set_mode("subscription")
+    writes = []
+    real_set = database.set_system_setting
+
+    def spy_set(k, v):
+        writes.append((k, v))
+        return real_set(k, v)
+
+    monkeypatch.setattr(database, "set_system_setting", spy_set)
+    first_ts = cap.remember_models(KEY, [{"id": "claude-live-1", "label": "Live One"}])
+    assert first_ts is not None
+    assert len(writes) == 1
+    second_ts = cap.remember_models(KEY, [{"id": "claude-live-1", "label": "Live One"}])
+    assert second_ts == first_ts
+    assert len(writes) == 1  # No-op suppressed!
+    # Legacy list-only format still parses cleanly.
+    digest = cap._key_hash(KEY)
+    real_set(cap.MODELS_CACHE_SETTING, json.dumps({"by_key": {digest: [{"id": "claude-legacy", "label": "Legacy"}]}}))
+    cached = cap.cached_catalog(KEY)
+    assert cached == {"models": [{"id": "claude-legacy", "label": "Legacy"}], "fetched_at": None}
+
+
+def test_curated_models_override_catalog_including_empty_list(key, monkeypatch):
+    """Explicit per-key curation controls virtual_row(), default_model, _claude_api_default, and refresh_models_once()."""
+    from app.core import claude_api_models, credential_gate
+
+    _api_key_mode()
+    cap.remember_models(KEY, [
+        {"id": "claude-sonnet-5", "label": "Sonnet 5"},
+        {"id": "claude-haiku-5-5", "label": "Haiku 5.5"},
+    ])
+    assert cap.curated_models(KEY) is None
+    assert [m["id"] for m in cap.virtual_row()["models_json"]] == ["claude-sonnet-5", "claude-haiku-5-5"]
+
+    # Curate down to one model; no-op save does not rewrite DB.
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
+    saved = cap.save_curated_models(KEY, [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}])
+    assert saved == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    assert len(writes) == 1
+    cap.save_curated_models(KEY, [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}])
+    assert len(writes) == 1  # No-op suppressed!
+    row = cap.virtual_row()
+    assert row["models_json"] == [{"id": "claude-haiku-5-5", "label": "Haiku 5.5"}]
+    assert row["default_model"] == "claude-haiku-5-5"
+    assert credential_gate._claude_api_default() == (cap.CLAUDE_API_PROVIDER_ID, "claude-haiku-5-5")
+
+    # Explicit curation must not be bypassed by refresh_models_once().
+    reads = []
+
+    async def fail_if_called(k, *, client=None):
+        reads.append(k)
+        return []
+
+    monkeypatch.setattr(claude_api_models, "list_models", fail_if_called)
+    assert cap.refresh_models_once() is False
+    assert reads == []
+
+    # Unchecking every model ([]) yields empty models_json and default_model=None.
+    assert cap.save_curated_models(KEY, []) == []
+    assert cap.curated_models(KEY) == []
+    empty_row = cap.virtual_row()
+    assert empty_row["models_json"] == []
+    assert empty_row["default_model"] is None
+    assert credential_gate._claude_api_default() is None
