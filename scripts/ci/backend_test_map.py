@@ -478,6 +478,9 @@ class Selector:
         self.tests_by_index = test_map["tests"]
         self.selected: set[str] = set()
         self.reasons: list[str] = []
+        # Code (not tests) found reading a changed non-Python file, whether or
+        # not the map holds tests for it.
+        self.code_readers = 0
         self.refs = References(files)
 
     # lookups ---------------------------------------------------------------
@@ -603,6 +606,7 @@ class Selector:
                 if not self._covered(source, qualname):
                     self.file_level(source, f"{qualname} reads changed {path} but the map does not know it")
             self.name_changes(source, module_name(source), names)
+        self.code_readers += readers
         if not tests and not narrow and not readers:
             # Nothing names it in code: whatever reads it (code loading its
             # folder, a path built at run time) is unknown.
@@ -647,6 +651,9 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
     see through is left to main's full run instead of running everything. Its
     tests are added after the share of the suite ``changed`` reaches is judged;
     if the two together reach that share, everything runs as the cheaper choice.
+    When ``changed`` holds no Python file and no code at the merge reads any of
+    it (tests that name it or list its folder are chosen as usual), main's
+    changes cannot give a test a new path to it, and they are skipped.
     """
     try:
         if test_map is None:
@@ -662,6 +669,11 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
             raise FullSuite(f"{len(chosen)} of {len(tests)} test files are affected")
     except FullSuite as reason:
         return "all", [str(reason)]
+    if main_changed and not selector.code_readers and not any(PurePosixPath(p).suffix == ".py" for p in changed):
+        # The merged tree was searched for readers above; with none, a test
+        # reaches the change only by reading it itself, and those are chosen.
+        selector.reasons.append("No code reads what the pull request changed; main's changes since the map cannot reach it")
+        return chosen, selector.reasons
     # Main's own changes since the map: a block main changed can be the only new
     # path from an existing test into the pull request's code.
     for path in sorted(set(main_changed) - set(changed)):
@@ -797,7 +809,8 @@ def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
     since the map adds the tests the map gives it (main may have made a mapped
     function call the pull request's code) and the test files main added or
     changed, but never runs everything: what of it the map cannot see through is
-    left to main's full run after the merge.
+    left to main's full run after the merge. A pull request changing no Python
+    file that no code reads skips main's changes: they cannot reach it.
     """
     event = environ.get("GITHUB_EVENT_NAME", "")
     if event != "pull_request":

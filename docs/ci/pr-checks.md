@@ -211,7 +211,10 @@ PostgreSQL safety always run in full.
   changes the map cannot see through (an unmapped module, a manifest, a
   conftest) is logged as left to main's full run after the merge. Everything
   runs only when the pull request's tests and main's together reach 60% of
-  the suite, because then one full run is cheaper.
+  the suite, because then one full run is cheaper. A pull request that
+  changes no Python file, and whose files no code at the merge reads (a
+  frontend-only change, say), skips this: main's changes cannot give a test a
+  new path to it, so only the tests that read its files themselves run.
 - A file that is not Python chooses the tests that name it or list a folder of
   it, and the tests of the code that reads it. Tests that list the whole
   checkout or a top-level folder (`frontend`) run with them, but alone they

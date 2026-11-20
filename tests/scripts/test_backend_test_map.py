@@ -511,17 +511,26 @@ def test_main_and_a_pull_request_changing_separate_module_statements_run_the_fil
 UNMAPPED_MODULE = "app/core/new_provider.py", "REGISTRY = {}\nREGISTRY['x'] = 1\n"
 
 
-def test_a_frontend_only_pull_request_ignores_an_unmapped_module_main_added(pull_request):
+JOURNEY = "frontend/tests/journeys/settings.journey.mjs"
+
+
+def test_a_frontend_only_pull_request_skips_what_main_changed(pull_request):
     # PR #1870 (run 44695146908) ran every shard for app/core/claude_api_provider.py,
     # which main had added after the map's commit.
     _, map_path, commit, merge = pull_request
     commit("main", *UNMAPPED_MODULE)
+    commit("main", "app/a.py", CHANGED_F)
+    commit("main", "tests/core/test_new_on_main.py", "def test_new():\n    pass\n")
+    # A policy test outside the shards names the journey (as tests/scripts/ do).
+    commit("main", "tests/scripts/test_journey_list.py", f"def test_list():\n    assert '{JOURNEY}'\n")
     commit("pr", "frontend/src/app.css", "body { color: red; }\n")
+    commit("pr", JOURNEY, "export default {};\n")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
-    # Only a policy test outside the shards names the file.
+    # Only policy tests outside the shards name the files; no code reads them.
     assert found == {"selection": "none", "shards": [], "tests": []}, reasons
-    assert any(r.startswith("Left to main's full run: app/core/new_provider.py") for r in reasons), reasons
+    assert any(r.startswith("No code reads what the pull request changed") for r in reasons), reasons
+    assert not any("new_provider" in r for r in reasons), reasons
 
 
 def test_a_test_file_main_added_or_changed_since_the_map_runs(pull_request):
@@ -530,11 +539,28 @@ def test_a_test_file_main_added_or_changed_since_the_map_runs(pull_request):
     commit("main", B_TESTS[0], "def test_changed():\n    pass\n")
     # Not of the fast subset: main's helper changes decide nothing.
     commit("main", "tests/core/helpers_main.py", "VALUE = 1\n")
-    commit("pr", "frontend/src/app.css", "body { color: red; }\n")
+    commit("main", *UNMAPPED_MODULE)
+    commit("pr", "app/a.py", CHANGED_F)
     merge()
     found, reasons = tm.ci_select(map_path, PR)
-    assert found["tests"] == sorted(["tests/core/test_new_on_main.py", B_TESTS[0]]), reasons
+    assert found["tests"] == sorted(A_TESTS + ["tests/core/test_new_on_main.py", B_TESTS[0]]), reasons
     assert any("2 more test files reach what main changed" in reason for reason in reasons)
+    assert any(r.startswith("Left to main's full run: app/core/new_provider.py") for r in reasons), reasons
+
+
+def test_main_giving_a_mapped_function_a_reader_of_a_pull_requests_file_runs_its_tests(pull_request):
+    # The asset form of S4: the map knows read_rules but no test ran it, so the
+    # pull request's own pass finds a reader yet chooses nothing.
+    repo, map_path, commit, merge = pull_request
+    commit("main", "app/rules_reader.py", "def read_rules():\n    return open('app/prompts/rules.md').read()\n")
+    commit("main", "app/prompts/rules.md", "be kind\n")
+    remap(repo, map_path, **{"app/rules_reader.py": ["read_rules"]})
+    commit("main", "app/b.py", "from app.a import LIMIT\nfrom app.rules_reader import read_rules\n\n"
+                               "def uses_limit():\n    return LIMIT + len(read_rules())\n")
+    commit("pr", "app/prompts/rules.md", "be very kind\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(B_TESTS), reasons
 
 
 @pytest.mark.parametrize("path, text, reason", [
