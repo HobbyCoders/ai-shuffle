@@ -2,27 +2,26 @@ import { cleanup, render } from '@testing-library/svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import ProviderGlyph, { providerGlyphKind, type ProviderGlyphKind } from './ProviderGlyph.svelte';
-import antigravityLogo from './provider-artwork/antigravity-color.svg';
-import geminiLogo from './provider-artwork/gemini-color.svg';
-import minimaxLogo from './provider-artwork/minimax-color.svg';
 
 afterEach(() => cleanup());
 
-describe('ProviderGlyph', () => {
-	it.each([
-		['antigravity', antigravityLogo],
-		['google', geminiLogo],
-		['minimax', minimaxLogo]
-	] as const)('renders the bundled %s image without a text initial', (kind, asset) => {
-		const { container } = render(ProviderGlyph, { kind, size: 19 });
-		const logo = container.querySelector(`img[data-provider-logo="${kind}"]`);
-		expect(logo?.getAttribute('src')).toBe(asset);
-		expect(logo?.getAttribute('width')).toBe('19');
-		expect(logo?.getAttribute('height')).toBe('19');
-		expect(logo?.getAttribute('alt')).toBe('');
-		expect(container.querySelector('text')).toBeNull();
-	});
+const BRAND_GLYPHS = [
+	'claude',
+	'anthropic',
+	'openai',
+	'grok',
+	'openrouter',
+	'kimi',
+	'minimax',
+	'opencode',
+	'google',
+	'antigravity',
+	'fal'
+] as const satisfies readonly Exclude<ProviderGlyphKind, 'custom'>[];
 
+const ALL_GLYPHS = [...BRAND_GLYPHS, 'custom'] as const satisfies readonly ProviderGlyphKind[];
+
+describe('ProviderGlyph', () => {
 	it.each([
 		['__native__', 'claude'],
 		['__claude__', 'claude'],
@@ -49,13 +48,21 @@ describe('ProviderGlyph', () => {
 		expect(providerGlyphKind(type)).toBe(mark);
 	});
 
-	it.each(['claude', 'anthropic', 'openai', 'grok', 'openrouter', 'kimi', 'opencode', 'fal'] as const)(
-		'renders the %s vector mark in the current theme colour',
+	it.each(BRAND_GLYPHS)(
+		'renders the %s vector mark as monochrome currentColor SVG without img fallback',
 		(kind) => {
-			const { container } = render(ProviderGlyph, { kind });
+			const { container } = render(ProviderGlyph, { kind, size: 19 });
+			expect(container.querySelector('img')).toBeNull();
 			const logo = container.querySelector(`svg[data-provider-logo="${kind}"]`);
+			expect(logo).toBeTruthy();
+			expect(logo?.getAttribute('viewBox')).toBe('0 0 24 24');
+			expect(logo?.getAttribute('width')).toBe('19');
+			expect(logo?.getAttribute('height')).toBe('19');
 			expect(logo?.getAttribute('fill')).toBe('currentColor');
+			expect(logo?.getAttribute('fill-rule')).toBe('evenodd');
+			expect(logo?.getAttribute('clip-rule')).toBe('evenodd');
 			expect(logo?.querySelector('rect, text')).toBeNull();
+			expect(logo?.querySelector('[fill^="#"], [stroke^="#"], linearGradient, filter')).toBeNull();
 			const paths = [...(logo?.querySelectorAll('path[d]') ?? [])];
 			expect(paths.length).toBeGreaterThan(0);
 
@@ -70,6 +77,19 @@ describe('ProviderGlyph', () => {
 			}
 		}
 	);
+
+	it.each(ALL_GLYPHS)('never renders an img element for %s at any app icon size', (kind) => {
+		for (const size of [12, 15, 16, 18, 19, 20]) {
+			const { container, unmount } = render(ProviderGlyph, { kind, size });
+			const logo = container.querySelector(`svg[data-provider-logo="${kind}"]`);
+			expect(logo).toBeTruthy();
+			expect(logo?.getAttribute('width')).toBe(String(size));
+			expect(logo?.getAttribute('height')).toBe(String(size));
+			expect(logo?.getAttribute('fill')).toBe('currentColor');
+			expect(container.querySelector('img')).toBeNull();
+			unmount();
+		}
+	});
 
 	it.each(['gateway', 'custom'])('keeps a generic endpoint cube for %s providers', (providerType) => {
 		const { container } = render(ProviderGlyph, { kind: providerGlyphKind(providerType) });
