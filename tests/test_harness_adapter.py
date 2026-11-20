@@ -2309,24 +2309,50 @@ def test_delegated_tool_use_block_needs_code_lane_bash_and_file_tools(cli_ships_
 
 
 @pytest.mark.asyncio
-async def test_delegated_append_with_the_tool_use_block_is_byte_identical(cli_ships_search):
-    from app.core.provider.harness_adapter import (
-        DELEGATED_TOOL_USE_BLOCK,
-        _delegated_append_text,
+async def test_claude_system_prompt_with_the_tool_use_block_is_byte_identical(tmp_path, cli_ships_search):
+    from app.core.provider import harness_adapter as ha
+
+    options = SessionOptions(
+        model="opus", cwd=str(tmp_path), setting_sources=[],
+        extra={"fluid_inproc_servers": [_FakeInprocServer()], "app_session_id": "bound"},
     )
+    adapter = HarnessAdapter()
+    registry = await adapter._build_registry(options, native=False)
+    try:
+        def render():
+            # The Claude CLI replaces its system prompt; it does not use the ACP append.
+            return adapter._compile_prompt(
+                "PROFILE", "APPEND", options, registry=registry, external_servers={},
+            )
 
-    import app.core.provider.harness_adapter as ha
+        first, second = render(), render()
+        assert first.encode() == second.encode()
+        assert first.count("PROFILE") == first.count("APPEND") == 1
+        assert first.count(ha.DELEGATED_TOOL_USE_BLOCK + "\n" + ha.DELEGATED_BATCHING_RULE) == 1
+    finally:
+        await registry.aclose()
 
-    options = SessionOptions(model="opus")
-    # The append is the Antigravity leg's: its registry carries the bundled
-    # Glob and Grep on every OS (agy has no search tools of those names).
+
+@pytest.mark.asyncio
+async def test_antigravity_append_with_bridged_search_guidance_is_byte_identical(tmp_path, cli_ships_search):
+    from app.core.provider import harness_adapter as ha
+
+    options = SessionOptions(model="gemini-4-hydrogen-high", cwd=str(tmp_path), setting_sources=[])
+    # ACP registers its own bundled search even when Claude ships Glob and Grep.
     adapter = HarnessAdapter()
     adapter._provider_kind = ha._ANTIGRAVITY_KIND
     registry = await adapter._build_registry(options, native=False)
-    first = _delegated_append_text("APPEND", options, registry)
-    second = _delegated_append_text("APPEND", options, registry)
-    assert first == second
-    assert first.count(DELEGATED_TOOL_USE_BLOCK) == 1
+    try:
+        first = ha._delegated_append_text("APPEND", options, registry)
+        second = ha._delegated_append_text("APPEND", options, registry)
+        assert first.encode() == second.encode()
+        assert first.count("APPEND") == 1
+        assert first.count("# App tools on this session") == 1
+        assert first.count("For file searches, use mcp__fluid_bundled__Glob and "
+                           "mcp__fluid_bundled__Grep where applicable.") == 1
+        assert FILE_RULE_OPENING not in first
+    finally:
+        await registry.aclose()
 
 
 def test_delegated_append_routes_to_swarm_only_when_the_bridge_serves_it():
