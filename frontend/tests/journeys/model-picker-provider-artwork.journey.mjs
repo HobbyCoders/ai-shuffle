@@ -196,6 +196,17 @@ const imageChoice = {
 	options: {}, verified: true, price: { currency: 'USD', unit: 'item', amount: '0.02', total: '0.02', status: 'estimated' },
 	schema: null, available: true, reason: null
 };
+// Phone moves the pane actions into the sticky header's overflow menu.
+async function automationAction(page, name) {
+	const overflow = page.locator('.detail-more:visible');
+	if (await overflow.isVisible()) {
+		await overflow.locator('summary').click();
+		await overflow.getByRole('button', { name, exact: true }).click();
+	} else {
+		await page.getByRole('button', { name, exact: true }).click();
+	}
+}
+
 const automationForm = {
 	name: 'automation-form-selection', throttles: ['fast'],
 	async setup(ctx) {
@@ -232,9 +243,7 @@ const automationForm = {
 		await load(ctx);
 		await showAutomations(page);
 		await page.getByText(job.name, { exact: true }).first().click();
-		const phoneActions = page.locator('.detail-more summary');
-		if (await phoneActions.isVisible()) await phoneActions.click();
-		await page.getByRole('button', { name: 'Edit', exact: true }).click();
+		await automationAction(page, 'Edit');
 		await page.locator('#automation-model').waitFor();
 	},
 	async act({ page, mark, log }) {
@@ -261,9 +270,11 @@ const automationForm = {
 		expect(await trigger.evaluate((el) => el === document.activeElement), 'keyboard selection returns focus');
 		await mark('stage and capture the job payloads');
 		await page.getByRole('button', { name: 'Pin to this job' }).click();
+		await page.locator('.ajc-row[data-kind="image"]').getByRole('button', { name: 'Undo', exact: true }).waitFor();
 		await Promise.all([
+			page.waitForResponse((r) => r.url().endsWith(`/automations/${jobId}`) && r.request().method() === 'PATCH'),
 			page.waitForResponse((r) => r.url().endsWith(`/generation/jobs/${jobId}/choices/image`) && r.request().method() === 'PUT'),
-			page.getByRole('button', { name: 'Save', exact: true }).click()
+			automationAction(page, 'Save')
 		]);
 		const { automation, image } = automationWrites.get(page);
 		expect(automation.model === 'prov:artwork-ag:claude-opus', 'the model payload retains the chosen Opus provider');
