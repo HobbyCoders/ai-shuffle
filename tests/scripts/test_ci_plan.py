@@ -390,7 +390,43 @@ def test_the_advisory_job_is_the_one_its_workflow_lets_fail():
     names = [android["name"].replace("${{ matrix.api }}", leg["api"])
              for leg in android["strategy"]["matrix"]["include"] if leg["advisory"] == "true"]
     assert plan.AREAS["android"]["advisory"] == tuple("android / " + name for name in names)
-    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["android"]
+    # The backend test map: a lost map only makes pull requests run every test.
+    backend = workflow("ci-backend.yml")["jobs"]
+    tolerant = [key for key, job in backend.items() if str(job.get("continue-on-error")).lower() == "true"]
+    assert tolerant == ["backend-map"]
+    assert plan.AREAS["backend"]["advisory"] == ("backend / " + backend["backend-map"]["name"],)
+    # No verdict waits on it.
+    assert not any("backend-map" in (job.get("needs") or ()) for job in backend.values())
+    assert [area for area, rule in plan.AREAS.items() if rule.get("advisory")] == ["backend", "android"]
+
+
+def test_the_container_area_reads_the_setup_wizard_its_smoke_script_walks():
+    smoke = (ROOT / "tests/integration/container_ui_smoke.mjs").read_text(encoding="utf-8")
+    assert "setup-provider-missing" in smoke and "setup-license" in smoke
+    for path in ("frontend/src/routes/setup/+page.svelte", "frontend/src/lib/components/setup/ProviderStep.svelte",
+                 "frontend/src/lib/components/setup/LicenseStep.svelte",
+                 "frontend/src/lib/components/OwnerAccessGate.svelte"):
+        assert (ROOT / path).is_file(), path
+        assert plan.reads("container", path), path
+    for prefix in plan.SETUP_UI:
+        assert (ROOT / prefix).exists(), prefix
+    # The rest of the UI stays the JavaScript checks' alone.
+    assert not plan.reads("container", "frontend/src/lib/components/chat/ChatInput.svelte")
+    # Every API client, store and service the wizard's screens import directly.
+    import re
+    screens = [ROOT / "frontend/src/routes/setup/+page.svelte", ROOT / "frontend/src/routes/+layout.svelte",
+               ROOT / "frontend/src/lib/components/OwnerAccessGate.svelte",
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.svelte")),
+               *sorted((ROOT / "frontend/src/lib/components/setup").glob("*.ts"))]
+    for screen in screens:
+        for module in re.findall(r"from '\$lib/((?:api|stores|services|constants)/[^']+)'", screen.read_text("utf-8")):
+            found = [ROOT / "frontend/src/lib" / (module + ext) for ext in (".ts", ".svelte.ts", "")]
+            path = next(f for f in found if f.is_file()).relative_to(ROOT).as_posix()
+            assert plan.reads("container", path), (screen.name, path)
+    # The owner password the script creates goes through api/owner.ts: a change to it is a new container key.
+    entries = [("100644", "a" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, "frontend/src/lib/api/owner.ts"), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
 
 
 # --- Did the area pass in a run ----------------------------------------------------
@@ -764,6 +800,100 @@ def test_the_plan_step_writes_one_answer_per_area_and_the_record_names(checkout,
     assert all("\n" not in value for value in answers.values())
     text = summary.read_text()
     assert "| `android` | skipped | its files are unchanged since it passed in https://example.invalid/run/7 |" in text
+    assert "| `backend` | runs | no pass is recorded for these files |" in text
+
+
+def merged(checkout, *paths):
+    """Make HEAD GitHub's merge of a branch that changes ``paths`` into a main that moved on."""
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    for path in paths:
+        (checkout / path).parent.mkdir(parents=True, exist_ok=True)
+        (checkout / path).write_text("changed\n")
+    git("add", "-A")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    # main moved on after the branch started: its own change is not the pull request's.
+    (checkout / "app.py").write_text("main moved\n")
+    git("commit", "-qam", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    return checkout
+
+
+def test_a_pull_request_changing_only_the_api_base_runs_the_container_job(checkout):
+    # runtime.ts holds apiBase(), which every call of the container smoke script goes through.
+    path = "frontend/src/lib/api/runtime.ts"
+    assert plan.reads("container", path)
+    merged(checkout, path)
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not found["container"]["proven"]
+    entries = [("100644", "a" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
+
+
+def test_a_pull_request_skips_the_areas_it_changes_no_file_of(checkout):
+    merged(checkout, "android/a.kt")
+    lookups = []
+
+    def call(path, token):
+        lookups.append(path)
+        return {"artifacts": []}
+
+    found = plan.plan(checkout, environment(), call)
+    running = [area for area, state in found.items() if not state["proven"]]
+    # backend reads every file; desktop and the rest read nothing of android/.
+    assert running == ["backend", "android", "android-minified"]
+    assert all(found[area]["by"] == plan.UNTOUCHED for area in plan.AREAS if area not in running)
+    # Only the areas that run are looked up; the others are skipped already.
+    assert sorted({re.search(r"name=pass-(.+)-[0-9a-f]{40}$", path).group(1) for path in lookups}) == sorted(running)
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_only_a_pull_request_skips_an_untouched_area(checkout, event):
+    merged(checkout, "android/a.kt")
+    found = plan.plan(checkout, environment(GITHUB_EVENT_NAME=event), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+
+
+def test_a_pull_request_whose_changes_cannot_be_read_skips_nothing_untouched(checkout, capsys):
+    # HEAD is not a merge commit (a shallow checkout lists no parents): nothing is skipped this way.
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not any(state["proven"] for state in found.values())
+    assert plan.changed_files(checkout) is None
+    assert plan.changed_files(checkout / "missing") is None
+    assert "could not read the pull request's changed files" in capsys.readouterr().err
+
+
+def test_a_pull_request_names_both_sides_of_a_rename_and_a_deletion(checkout):
+    def git(*args):
+        subprocess.run(["git", *args], cwd=checkout, check=True, capture_output=True)
+
+    git("checkout", "-qb", "branch")
+    git("mv", "android/a.kt", "android/b.kt")
+    git("rm", "-q", "app.py")
+    git("commit", "-qm", "branch")
+    git("checkout", "-q", "-")
+    (checkout / "other.txt").write_text("main moved\n")
+    git("add", "-A")
+    git("commit", "-qm", "main")
+    git("merge", "-q", "--no-ff", "-m", "merge", "branch")
+    assert sorted(plan.changed_files(checkout)) == ["android/a.kt", "android/b.kt", "app.py"]
+
+
+def test_the_plan_step_says_why_an_untouched_area_is_skipped(checkout, monkeypatch, capsys, tmp_path):
+    merged(checkout, "docs/guide.md")
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    real = plan.plan
+    monkeypatch.setattr(plan, "plan", lambda: real(checkout, environment(), lambda path, token: {"artifacts": []}))
+    assert plan.main(["plan"]) == 0
+    answers = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    assert answers["container"] == "true" and answers["backend"] == "false"
+    text = summary.read_text()
+    assert "| `container` | skipped | this pull request changes none of its files |" in text
     assert "| `backend` | runs | no pass is recorded for these files |" in text
 
 

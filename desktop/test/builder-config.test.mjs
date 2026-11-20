@@ -103,14 +103,17 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   const install = macro('customInstall');
   const lines = install.split('\n').map(line => line.trim()).filter(Boolean);
   assert.equal(lines[0], '${if} $shuffleChannel == "nightly"');
-  assert.equal(matchingEndif(lines, 0), lines.length - 1, 'the whole write is inside the nightly branch');
+  const channelEnd = matchingEndif(lines, 0);
+  assert.ok(channelEnd < lines.indexOf('FileOpen $3 "$INSTDIR\\${NSIS_STARTUP_STAMP}" w'), 'the installer stamp is independent of channel');
   const guard = lines.indexOf('${ifNot} ${FileExists} "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard > 0, 'the write is guarded by the file being absent');
   const open = lines.indexOf('FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w');
   const rename = lines.indexOf('Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard < open && open < rename, 'guard, then temporary file, then rename');
   assert.ok(matchingEndif(lines, guard) > rename, 'the rename is inside the file-absent guard, not after it');
-  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*$/gm)].map(m => m[0].trim()), [
+  const channelDefinePrefix = 'SHUFFLE_CHANNEL_FILE'.replace(/FILE$/, '');
+  const channelWrites = new RegExp(`^\\s*(?:FileOpen|Rename|Delete|CopyFiles)\\b.*${channelDefinePrefix}.*$`, 'gm');
+  assert.deepEqual([...channelCode.matchAll(channelWrites)].map(m => m[0].trim()), [
     'FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w',
     'Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"',
     'Delete "${SHUFFLE_CHANNEL_FILE}.tmp"'
@@ -118,4 +121,18 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   // userData is per user even for an all-users install.
   assert.ok(lines.indexOf('!insertmacro shuffleUserContext') > 0 && lines.indexOf('!insertmacro shuffleUserContext') < guard);
   assert.ok(lines.indexOf('!insertmacro shuffleRestoreContext') > rename);
+});
+
+test('pinned NSIS selects the replacement before either ExecWait; old removal fences after the close check', () => {
+  const template = file => readFileSync(path.join(require.resolve('app-builder-lib/package.json'), '..', 'templates/nsis', file), 'utf8');
+  const section = template('installSection.nsh');
+  assert.match(template('installer.nsi'), /!include "common.nsh"[\s\S]+!insertmacro customHeader[\s\S]+Section "install"[\s\S]+!include "installSection.nsh"/);
+  assert.match(template('common.nsh'), /!define APP_EXECUTABLE_FILENAME /);
+  assert.match(channelCode, /!macro customHeader\s+Function un\.onUninstSuccess\b/);
+  assert.match(section, /CHECK_APP_RUNNING[\s\S]+!insertmacro uninstallOldVersion SHELL_CONTEXT[\s\S]+!insertmacro uninstallOldVersion HKEY_CURRENT_USER[\s\S]+!insertmacro installApplicationFiles/);
+  assert.match(template('include/installUtil.nsh'), /StrCpy \$0 "\$0 --updated"[\s\S]+ExecWait .*\$uninstallerFileNameTemp[\s\S]+ExecWait .*\$uninstallerFileName/);
+  const uninstaller = template('uninstaller.nsh');
+  assert.match(uninstaller, /\$\{If\} \$\{Silent\}\s+call un\.checkAppRunning/);
+  assert.match(uninstaller, /Section "un\.[\s\S]+call un\.checkAppRunning[\s\S]+!insertmacro customUnInstall[\s\S]+Call un\.atomicRMDir[\s\S]+Call un\.restoreFiles\s+Pop \$R0\s+Abort/);
+  assert.doesNotMatch(uninstaller, /Function un\.onUninstSuccess/, 'builder must not already define our post-success hook');
 });

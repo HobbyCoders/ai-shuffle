@@ -12,7 +12,8 @@ import shutil
 def select_evidence(source: Path, destination: Path, prefix: str, count: int) -> None:
     pattern = re.compile(re.escape(prefix) + r"-([1-9][0-9]*)-a([1-9][0-9]*)")
     selected = {}
-    for path in source.iterdir():
+    # A run that chose no shards downloads nothing: no directory at all is no evidence.
+    for path in (source.iterdir() if count or source.exists() else ()):
         match = pattern.fullmatch(path.name)
         if not match or not path.is_dir():
             continue
@@ -39,8 +40,8 @@ def main() -> None:
     parser.add_argument("--prefix", required=True)
     parser.add_argument("--count", type=int, required=True)
     args = parser.parse_args()
-    if args.count < 1:
-        parser.error("--count must be positive")
+    if args.count < 0:
+        parser.error("--count must not be negative")
     select_evidence(args.source, args.destination, args.prefix, args.count)
 
 

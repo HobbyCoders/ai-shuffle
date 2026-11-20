@@ -89,11 +89,19 @@ export type DesktopCallCommand = 'toggle-mic' | 'toggle-agent' | 'hangup' | 'ret
  * The part of the preload bridge (desktop/src/preload/index.ts) the web UI
  * uses. The preload has a few more members for the desktop CI scripts.
  */
+export type DesktopLoginItemState = 'enabled' | 'disabled' | 'blocked' | 'unavailable';
+export interface DesktopLoginItem {
+	get(): Promise<DesktopLoginItemState>;
+	set(enabled: boolean): Promise<{ state: DesktopLoginItemState; failed: boolean }>;
+}
+
 export interface ShuffleDesktopBridge {
 	version: string;
 	platform: DesktopPlatform;
 	/** Older shells lack it. */
 	agentAccess?: DesktopAgentAccess | null;
+	/** Only exposed by a supported installed shell. */
+	loginItem?: DesktopLoginItem;
 	window: {
 		getState(): Promise<DesktopWindowState>;
 		onStateChange(listener: (state: DesktopWindowState) => void): () => void;

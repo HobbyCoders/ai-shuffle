@@ -151,7 +151,7 @@ def _restore_to_catalog(cursor, project: Dict[str, Any]) -> None:
 
     project_v2_id = _catalog_project_v2_id(cursor, _catalog_origin(project))
     if project_v2_id:
-        restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project))
+        restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project), project["path"])
 
 
 def _seed_catalog(cursor, project: Dict[str, Any]) -> str:
@@ -292,6 +292,115 @@ def update_project(
                 )
 
     return get_project(project_id)
+
+
+class FolderConflict(Exception):
+    """An unsafe or stale edit to a worker's base registration."""
+
+
+def _retarget_base(cursor, legacy_id, identity, runner, old_path, new_path, stored_path, *, original=False):
+    from app.db import checkouts
+
+    # The move is scoped to one legacy registration. A same-origin clone is
+    # not proof that its runner-local base can be edited or retired.
+    registrations = checkouts.live_base_registrations(cursor, identity, runner)
+    if [row['id'] for row in registrations] != [legacy_id]:
+        if original:
+            return False
+        raise FolderConflict('This worker does not have a single matching base folder to change.')
+    cursor.execute(
+        'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
+        "AND (branch IS NULL OR branch = '') ORDER BY id FOR UPDATE", (identity, runner),
+    )
+    bases = cursor.fetchall()
+    old_key = checkouts.base_folder_key(old_path)
+    matching = [r for r in bases if (original or checkouts.is_active(r))
+                and r['path'] and checkouts.base_folder_key(r['path']) == old_key]
+    if not matching:
+        # A relink can make the first-link alias current again without moving
+        # its historical base along with the current registration.
+        if original:
+            return False
+        raise FolderConflict('This worker does not have a single matching base folder to change.')
+    # Old setup sometimes activated retained folders. Only the verified live
+    # path is writable; take stale active bases out of selection.
+    for row in bases:
+        if not original and row not in matching and checkouts.is_active(row):
+            cursor.execute('UPDATE checkouts SET status = %s, updated_at = NOW() WHERE id = %s',
+                           (checkouts.REMOVED_STATUS, row['id']))
+    # Setup can leave a legacy relative row beside its canonical absolute twin.
+    base = next((r for r in matching if checkouts.is_absolute_checkout_path(r['path'])), matching[0])
+    for duplicate in matching:
+        if duplicate['id'] != base['id']:
+            cursor.execute('DELETE FROM checkouts WHERE id = %s', (duplicate['id'],))
+    cursor.execute(
+        'SELECT 1 FROM checkouts WHERE project_id = %s AND runner_id = %s AND path IN (%s, %s) '
+        'AND id <> %s', (identity, runner, new_path, stored_path, base['id']),
+    )
+    if cursor.fetchone():
+        raise FolderConflict('That folder is already registered as a checkout.')
+    cursor.execute(
+        'UPDATE checkouts SET path = %s, status = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
+        'WHERE id = %s', (new_path, checkouts.REMOVED_STATUS if original else base['status'], base['id']),
+    )
+    return True
+
+
+def retarget_folder(
+    snapshot: dict, *, old_path: str, new_path: str, stored_path: str, same_folder: bool,
+    name: Optional[str] = None, description: Optional[str] = None,
+    settings_dict: Optional[Dict[str, Any]] = None,
+) -> ProjectRow:
+    """Move the worker's live base and any proven first-link base in one transaction."""
+    project_id = snapshot['id']
+    runner = settings.effective_instance_id
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM projects WHERE id = %s FOR UPDATE', (project_id,))
+        current = _parse_project_row(row_to_dict(cursor.fetchone()))
+        if not current or current != snapshot or current.get('instance_id') != runner:
+            raise FolderConflict('The project folder changed. Close this editor and reopen it.')
+        if not same_folder:
+            from app.core.worktree_manager import preserve_worktree_owners
+
+            from app.db import project_catalog_aliases
+
+            pv2_id = _catalog_project_v2_id(cursor, _catalog_origin(current))
+            original_id = project_catalog_aliases.original_for_legacy(cursor, project_id, pv2_id)
+            _retarget_base(cursor, project_id, pv2_id, runner, old_path, new_path, stored_path)
+            if original_id and not _retarget_base(
+                cursor, project_id, original_id, runner, old_path, new_path, stored_path, original=True
+            ):
+                original_id = None
+            # Turn admission locks the same rows. Include shared-only chats on
+            # either identity, not explicit bindings to past, unrelated links.
+            scope = (
+                "(instance_id = %s OR instance_id IS NULL) AND "
+                "((project_v2_id IS NULL AND project_id = %s) OR project_v2_id IN (%s, %s))"
+            )
+            params = (runner, project_id, pv2_id, original_id)
+            cursor.execute(f'SELECT id FROM sessions WHERE {scope} ORDER BY id FOR UPDATE', params)
+            if cursor.fetchall():
+                cursor.execute(
+                    'SELECT 1 FROM turns WHERE session_id IN '
+                    f'(SELECT id FROM sessions WHERE {scope}) '
+                    "AND state IN ('queued','running','interrupting','draining') LIMIT 1",
+                    params,
+                )
+                if cursor.fetchone():
+                    raise FolderConflict('Wait for queued and running chats on this worker to finish first.')
+            preserve_worktree_owners(cursor, current, old_path)
+        if same_folder and name is None and description is None and settings_dict is None:
+            return current
+        cursor.execute(
+            'UPDATE projects SET path = %s, name = COALESCE(%s, name), '
+            'description = COALESCE(%s, description), settings = COALESCE(%s::jsonb, settings), '
+            'updated_at = %s WHERE id = %s RETURNING *',
+            (current['path'] if same_folder else stored_path, name, description,
+             json.dumps(settings_dict) if settings_dict is not None else None,
+             datetime.now(timezone.utc).isoformat(), project_id),
+        )
+        return _parse_project_row(row_to_dict(cursor.fetchone()))
 
 
 def set_project_link_group(project_id: str, link_group_id: Optional[str]) -> Optional[ProjectRow]:

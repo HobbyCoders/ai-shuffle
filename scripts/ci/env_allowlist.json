@@ -2407,6 +2407,36 @@
     "reason": "Hostnames accepted by local-owner access policy",
     "base_settings": true
   },
+  "SHUFFLE_LOGIN_ENABLE": {
+    "kind": "internal",
+    "reason": "Electron passes the validated startup toggle value (1 or 0) to its one-shot Windows PowerShell writer; not an environment setting",
+    "base_settings": false
+  },
+  "SHUFFLE_LOGIN_EXE": {
+    "kind": "internal",
+    "reason": "Electron passes the stable installed executable path to its Windows startup writer for the existence check and exact Run command",
+    "base_settings": false
+  },
+  "SHUFFLE_LOGIN_GENERATION": {
+    "kind": "internal",
+    "reason": "Electron passes the installer generation GUID to its Windows startup writer to select the mutex shared with NSIS",
+    "base_settings": false
+  },
+  "SHUFFLE_LOGIN_NAME": {
+    "kind": "internal",
+    "reason": "Electron passes the desktop app ID to its Windows startup writer as the HKCU Run and StartupApproved value name",
+    "base_settings": false
+  },
+  "SHUFFLE_LOGIN_RECEIPT": {
+    "kind": "internal",
+    "reason": "Electron passes the captured installer receipt to its Windows startup writer to compare against disk while holding the mutex",
+    "base_settings": false
+  },
+  "SHUFFLE_LOGIN_STAMP": {
+    "kind": "internal",
+    "reason": "Electron passes the installer stamp path to its Windows startup writer to recheck the current install before writing HKCU",
+    "base_settings": false
+  },
   "SHUFFLE_MOVE_FROM": {
     "kind": "internal",
     "reason": "Private PowerShell helper input: move from",

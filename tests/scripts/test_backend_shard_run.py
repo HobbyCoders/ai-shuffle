@@ -17,7 +17,7 @@ import backend_shard_run  # noqa: E402  pyright: ignore[reportMissingImports]
 import local_ci  # noqa: E402  pyright: ignore[reportMissingImports]
 import windows_parts  # noqa: E402  pyright: ignore[reportMissingImports]
 from scripts.ci import backend_shards as bs  # noqa: E402
-from scripts.ci.backend_gate import check_gate  # noqa: E402
+from scripts.ci.backend_gate import REQUIRED_JOBS, check_gate  # noqa: E402
 
 FLAKY_NODE = "test_fixture.py::test_value[3]"
 FAILS_ONCE = ("    if value == 3 and not MARKER.exists():\n"
@@ -77,7 +77,7 @@ def test_a_test_that_passes_its_rerun_passes_the_shard_as_flaky(shard, tmp_path,
 
 def gate(receipt):
     """backend_gate.check_gate on this receipt plus the other clean shards."""
-    needs = {name: {"result": "success"} for name in ("backend-shard", "backend-contracts", "backend-security", "backend-postgres")}
+    needs = {name: {"result": "success"} for name in REQUIRED_JOBS}
     others = [{**receipt, "shard": i, "failed": [], "rerun_passed": []} for i in range(1, bs.SHARD_COUNT + 1) if i != receipt["shard"]]
     for other in others:
         other["count"] = (receipt["total"] - receipt["count"]) // len(others)

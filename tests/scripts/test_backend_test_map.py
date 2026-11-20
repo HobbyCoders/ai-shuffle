@@ -25,7 +25,10 @@ BASE = {
     "app/prompts/system.md": "hello\n",
     "app/prompt_loader.py": "def load():\n    return open('system.md').read()\n",
     "tests/conftest.py": "def helper():\n    return 1\n",
+    # Reads every file of notes/2026/ without naming one.
+    "tests/core/test_notes_walk.py": "def test_notes():\n    assert list((ROOT / \"notes/2026\").rglob(\"*.md\"))\n",
 }
+NOTES_WALKER = "tests/core/test_notes_walk.py"
 
 
 def head_files(**changes):
@@ -87,6 +90,8 @@ def test_a_non_python_file_selects_the_tests_of_code_that_reads_it():
 
 
 GUIDE = "docs/guide.md"
+GUIDE_TEST = "tests/core/test_guide.py"
+GUIDE_TEXT = f"def test_guide():\n    assert (ROOT / '{GUIDE}').read_text()\n"
 
 
 @pytest.mark.parametrize("addition", [
@@ -95,11 +100,13 @@ GUIDE = "docs/guide.md"
     '\nprint(note="Read docs/guide.md before changing LIMIT.")\n',
     '\nclass Note:\n    text = "see docs/guide.md for the rules"\n',
 ], ids=["docstring", "comment", "import-time-prose", "class-prose"])
-def test_a_file_named_only_in_prose_selects_nothing(addition):
+def test_a_file_named_only_in_prose_selects_no_tests_of_that_code(addition):
     # app.a runs in every mapped test: reading it file-wide would be the suite.
-    chosen, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})
-    assert chosen == []
-    assert any("0 of them in code" in reason for reason in reasons)
+    chosen, reasons = select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition, GUIDE_TEST: GUIDE_TEXT})
+    assert chosen == [GUIDE_TEST]
+    assert any("0 of 1 naming sources read it in code" in reason for reason in reasons)
+    # With no test naming it, prose is no reader either: nothing says what reads it.
+    assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + addition})[0] == "all"
 
 
 def test_a_file_read_in_a_function_selects_only_that_functions_tests():
@@ -130,6 +137,66 @@ def test_a_file_read_at_import_runs_every_test_of_the_reader(addition):
 
 def test_a_reader_that_does_not_parse_is_read_file_wide():
     assert select([GUIDE], **{"app/a.py": BASE["app/a.py"] + f"\nx = '{GUIDE}'\ndef broken(:\n"})[0] == "all"
+
+
+@pytest.mark.parametrize("changed", ["conftest.py", "fluid/conftest.py", "tests/core/network/conftest.py"])
+def test_any_conftest_runs_everything(changed):
+    # The root conftest is outside the source folders; it reaches every test all the same.
+    result, reasons = select([changed], **{changed: "import os\n"})
+    assert result == "all" and "conftest" in reasons[0]
+
+
+def test_a_file_nothing_names_runs_everything():
+    # Not named by any code or test, nor is any folder of it: nothing says it is safe.
+    result, reasons = select(["ops/cron.d/backup"])
+    assert result == "all" and "no code reads it by name" in reasons[0]
+
+
+def test_a_file_a_test_lists_by_its_own_folder_selects_that_test():
+    assert select(["notes/2026/today.md"])[0] == [NOTES_WALKER]
+
+
+LISTER = "tests/core/test_tracked.py"
+LISTER_TEXT = "import subprocess\n\ndef test_x():\n    subprocess.run(['git', 'ls-files'])\n"
+
+
+def test_a_test_listing_the_whole_checkout_runs_but_never_narrows():
+    # It reads every file, so it runs whenever a named or folder-listing test narrows the choice.
+    assert select(["notes/2026/a.md"], **{LISTER: LISTER_TEXT})[0] == sorted([LISTER, NOTES_WALKER])
+    # Alone it says nothing about this file: everything runs.
+    assert select(["ops/cron.d/backup"], **{LISTER: LISTER_TEXT})[0] == "all"
+
+
+def test_a_test_listing_a_top_level_folder_never_narrows():
+    # A file outside notes/2026/ is not one NOTES_WALKER lists.
+    result, reasons = select(["notes/a.md"])
+    assert result == "all" and "no code reads it by name" in reasons[0]
+    top = {"tests/core/test_frontend_walk.py": "def test_x():\n    list((ROOT / 'frontend').rglob('*'))\n"}
+    assert select(["frontend/src/a.svelte"], **top)[0] == "all"
+
+
+@pytest.mark.parametrize("path", ["frontend/package-lock.json", "frontend/package.json",
+                                  "browser-mcp/npm-shrinkwrap.json", "fluid/pyproject.toml",
+                                  "requirements-dev.txt", "docker/requirements-extra.txt", "tools/uv.lock"])
+def test_a_package_manifest_or_lockfile_anywhere_runs_everything(path):
+    # test_version_source builds the path to frontend/package-lock.json at run time.
+    named = {"tests/core/test_version_source.py":
+             "def test_x():\n    (ROOT / 'frontend' / ('package' + '-lock.json')).read_text()\n"}
+    result, reasons = select([path], **named)
+    assert result == "all" and ("manifest or lockfile" in reasons[0] or "dependencies" in reasons[0])
+
+
+@pytest.mark.parametrize("path", ["tests/db/fixtures/schema_v88.sql", "tests/fixtures/x.json",
+                                  "tests/core/__snapshots__/a.snap"])
+def test_test_data_runs_everything(path):
+    # A loader builds the name at run time (schema_v{n}.sql): no map follows it.
+    named = {"tests/db/test_schema_lifecycle.py": "def test_x():\n    load('schema_v88.sql')\n"}
+    result, reasons = select([path], **named)
+    assert result == "all" and "test data" in reasons[0]
+
+
+def test_a_name_that_is_not_utf8_runs_everything():
+    assert select(["tests/core/test_\ufffd.py"])[0] == "all"
 
 
 @pytest.mark.parametrize("changed, files, reason", [
@@ -193,6 +260,13 @@ def test_fast_subset_dirs_match_the_workflow():
         assert f"{directory}/" in workflow or f"{directory} " in workflow
     for excluded in tm.FAST_SUBSET_EXCLUDED:
         assert excluded in workflow
+    # A pull request's chosen files are passed by name, so --ignore cannot drop them:
+    # the files the shards never run must never be chosen.
+    for excluded in tm.SHARD_EXCLUDED:
+        assert f"--ignore={excluded}" in workflow or f"--deselect={excluded}" in workflow
+        assert not tm.in_shards(excluded)
+    for directory in tm.SHARD_EXCLUDED_DIRS:
+        assert f"--ignore={directory.rstrip('/')} " in workflow
 
 
 def test_merge_combines_worker_records(tmp_path, monkeypatch):
@@ -246,13 +320,196 @@ def test_recorder_attributes_calls_to_the_running_test_file(tmp_path):
 
 
 
-def test_a_source_dir_file_no_code_names_selects_the_code_beside_it():
-    # Code beside a file may load it by folder; a comment naming it is no read.
+def test_a_source_dir_file_no_code_names_runs_everything():
+    # Code beside it may load it by folder, and so may code anywhere else: unknown.
     sibling = "def load():\n    # app/prompts/other.md is read with the rest of the folder\n    return 1\n"
     test_map = fake_map()
     test_map["covered"]["app/prompts/sibling.py"] = {"load": [test_map["tests"].index(B_TESTS[0])]}
     test_map["known"]["app/prompts/sibling.py"] = ["load"]
     chosen, reasons = tm.select(["app/prompts/other.md"], test_map,
                                 head_files(**{"app/prompts/sibling.py": sibling}), BASE.get)
-    assert chosen == B_TESTS
-    assert any("beside" in reason for reason in reasons)
+    assert chosen == "all"
+    assert "no code reads it by name" in reasons[0]
+
+
+# ---------------------------------------------------------------------------
+# CI Backend: a pull request's shards (ci-select)
+# ---------------------------------------------------------------------------
+
+def test_a_full_run_uses_every_shard_and_names_no_files():
+    assert tm.shard_plan("all", None) == {"selection": "all", "shards": list(range(1, 9)), "tests": []}
+
+
+def test_tests_run_outside_the_shards_choose_no_shard():
+    found = tm.shard_plan(["tests/scripts/test_ci_plan.py", "tests/core/test_docs_content.py"], fake_map())
+    assert found == {"selection": "none", "shards": [], "tests": []}
+
+
+def test_the_shards_are_sized_by_the_chosen_files_recorded_seconds():
+    chosen = [f"tests/core/test_{n}.py" for n in range(10)]
+    timed = {**fake_map(), "seconds": {path: 100.0 for path in chosen}}
+    found = tm.shard_plan(chosen, timed)
+    assert found["shards"] == [1, 2, 3, 4] and found["tests"] == chosen
+    assert found["selection"].startswith("files-")
+    # Unknown files count a fixed time each; never more shards than files or than a full run.
+    assert tm.shard_plan(chosen[:2], fake_map())["shards"] == [1]
+    assert tm.shard_plan(chosen, {**timed, "seconds": {p: 9999.0 for p in chosen}})["shards"] == list(range(1, 9))
+    assert tm.shard_plan(chosen[:3], {**timed, "seconds": {p: 9999.0 for p in chosen}})["shards"] == [1, 2, 3]
+
+
+def test_the_selection_names_exactly_the_chosen_files():
+    one = tm.shard_plan(["tests/core/test_a.py"], fake_map())["selection"]
+    assert one == tm.shard_plan(["tests/core/test_a.py", "tests/scripts/test_x.py"], fake_map())["selection"]
+    assert one != tm.shard_plan(["tests/core/test_b.py"], fake_map())["selection"]
+
+
+def run_git(repo, *args):
+    import subprocess
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def pull_request(tmp_path, monkeypatch):
+    """A repository on main whose map was recorded at main's first commit."""
+    repo = tmp_path / "repo"
+    for path, text in head_files().items():
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+    run_git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    run_git(repo, "config", "user.email", "t@example.com")
+    run_git(repo, "config", "user.name", "t")
+    run_git(repo, "add", "-A")
+    run_git(repo, "commit", "-q", "-m", "base")
+    recorded = run_git(repo, "rev-parse", "HEAD")
+    map_path = tmp_path / "map.json.gz"
+    map_path.write_bytes(gzip.compress(json.dumps({**fake_map(), "commit": recorded}).encode()))
+    monkeypatch.setattr(tm, "ROOT", repo)
+    monkeypatch.chdir(repo)
+
+    run_git(repo, "branch", "pr")
+
+    def commit(branch, path, text):
+        run_git(repo, "checkout", "-q", branch)
+        (repo / path).parent.mkdir(parents=True, exist_ok=True)
+        (repo / path).write_text(text, encoding="utf-8")
+        run_git(repo, "add", "-A")
+        run_git(repo, "commit", "-q", "-m", path)
+
+    def merge():
+        run_git(repo, "checkout", "-q", "main")
+        run_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "pr")
+
+    return repo, map_path, commit, merge
+
+
+PR = {"GITHUB_EVENT_NAME": "pull_request"}
+CHANGED_F = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
+
+
+def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", "notes/2026/main.md", "main moved on\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    expected = sorted(A_TESTS + [NOTES_WALKER])
+    assert found["tests"] == expected and found["shards"] == [1]
+    assert found["selection"] == tm.shard_plan(expected, None)["selection"]
+    assert reasons[0].startswith("Test map from ")
+
+
+def test_a_pull_request_also_runs_the_tests_of_what_main_changed_since_the_map(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    commit("main", "app/b.py", BASE["app/b.py"].replace("return LIMIT", "return LIMIT + 1"))
+    merge()
+    found, _ = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(A_TESTS + B_TESTS)
+
+
+def test_a_pull_request_no_shard_test_reaches_runs_no_shard(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", BASE["app/a.py"] + "\ndef new():\n    return 4\n")
+    merge()
+    found, _ = tm.ci_select(map_path, PR)
+    assert found == {"selection": "none", "shards": [], "tests": []}
+
+
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch", ""])
+def test_every_run_but_a_pull_request_runs_everything(pull_request, event):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    merge()
+    assert tm.ci_select(map_path, {"GITHUB_EVENT_NAME": event})[0]["selection"] == "all"
+
+
+def test_doubt_runs_everything(pull_request, tmp_path):
+    repo, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    # Not a merge commit.
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+    merge()
+    assert tm.ci_select(tmp_path / "absent.json.gz", PR)[0]["selection"] == "all"
+    broken = tmp_path / "broken.json.gz"
+    broken.write_bytes(b"not gzip")
+    assert tm.ci_select(broken, PR)[0]["selection"] == "all"
+    # A map recorded on a commit main does not have (here: the pull request's own).
+    foreign = tmp_path / "foreign.json.gz"
+    foreign.write_bytes(gzip.compress(json.dumps({**fake_map(), "commit": run_git(repo, "rev-parse", "pr")}).encode()))
+    found, reasons = tm.ci_select(foreign, PR)
+    assert found["selection"] == "all" and "not on main" in reasons[0]
+    unknown = tmp_path / "unknown.json.gz"
+    unknown.write_bytes(gzip.compress(json.dumps({**fake_map(), "commit": "f" * 40}).encode()))
+    assert tm.ci_select(unknown, PR)[0]["selection"] == "all"
+
+
+def test_a_file_name_with_a_line_break_runs_everything(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/odd\nname.md", "x\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and "line break" in reasons[0]
+
+
+def test_a_non_ascii_test_file_name_is_read_and_chosen(pull_request):
+    # git quotes such a name in its plain output; it would then match no file.
+    _, map_path, commit, merge = pull_request
+    commit("pr", "tests/unit/test_caf\u00e9.py", "def test_x():\n    pass\n")
+    merge()
+    found, _ = tm.ci_select(map_path, PR)
+    assert found["tests"] == ["tests/unit/test_caf\u00e9.py"] and found["shards"] == [1]
+
+
+def test_a_change_to_how_the_shards_run_runs_everything(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("pr", "scripts/ci/backend_shards.py", "SHARD_COUNT = 8\n")
+    merge()
+    assert tm.ci_select(map_path, PR)[0]["selection"] == "all"
+
+
+def test_ci_select_writes_the_three_outputs(pull_request, tmp_path, capsys):
+    import io
+    _, map_path, commit, merge = pull_request
+    commit("pr", "app/a.py", CHANGED_F)
+    merge()
+    out, summary = io.StringIO(), tmp_path / "summary.md"
+    found = tm.write_ci_select(map_path, {**PR, "GITHUB_STEP_SUMMARY": str(summary)}, out)
+    assert out.getvalue().splitlines() == [
+        f"selection={found['selection']}", "shards=[1]", "count=1", f"tests={json.dumps(sorted(A_TESTS))}"]
+    assert "main runs every test after the merge" in summary.read_text(encoding="utf-8")
+
+
+def test_merge_reads_each_shards_records_and_times(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    monkeypatch.setattr(tm, "ROOT", repo)
+    for shard, test in ((1, "tests/core/test_a.py"), (2, "tests/core/test_b.py")):
+        (tmp_path / "hits" / f"backend-map-hits-{shard}").mkdir(parents=True)
+        (tmp_path / "hits" / f"backend-map-hits-{shard}" / "hits-gw0-1.json").write_text(
+            json.dumps({"worker": "gw0", "hits": {test: [["app/a.py", "f"]]}}), encoding="utf-8")
+        (tmp_path / "shards" / f"backend-shard-{shard}").mkdir(parents=True)
+        (tmp_path / "shards" / f"backend-shard-{shard}" / "durations.json").write_text(json.dumps(
+            {f"{test}::test_one": 1.5, f"{test}::test_two[x]": 2.0, f"{test}::bad": "n/a"}), encoding="utf-8")
+    result = tm.merge(tmp_path / "hits", tmp_path / "map.json.gz", "abc", tmp_path / "shards")
+    assert result["tests"] == ["tests/core/test_a.py", "tests/core/test_b.py"]
+    assert result["seconds"] == {"tests/core/test_a.py": 3.5, "tests/core/test_b.py": 3.5}

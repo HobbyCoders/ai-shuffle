@@ -9,6 +9,15 @@ import type { SettingEntry } from '../types';
 
 export const entries: SettingEntry[] = [
 	{
+		id: 'general.startAtSignIn',
+		category: 'general',
+		section: 'Desktop app',
+		label: 'Start AI Shuffle at sign-in',
+		hint: 'Open the desktop app when you sign in on this device',
+		keywords: ['startup', 'launch', 'login', 'sign in', 'autostart', 'boot'],
+		platform: 'desktop-login-item'
+	},
+	{
 		id: 'general.theme',
 		category: 'general',
 		section: 'Appearance',

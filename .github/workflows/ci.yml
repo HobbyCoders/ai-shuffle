@@ -6,9 +6,10 @@ name: CI
 # Each area (backend, JavaScript, Android, ...) lists the files its checks read
 # (scripts/ci/plan.py). The "plan" job skips an area whose files are unchanged
 # since that area last passed, on any pull request or on main, so a change runs
-# only the areas it touches: Android runs when Android's files changed. The
-# daily and the manual run skip nothing. The "CI" job gives the one verdict and
-# records each area that passed.
+# only the areas it touches: Android runs when Android's files changed. A pull
+# request also skips every area it changes no file of; main then runs what its
+# records do not prove. The daily and the manual run skip nothing. The "CI" job
+# gives the one verdict and records each area that passed.
 #
 # A manual run on any ref but main fails closed: its jobs do not run.
 on:
@@ -75,6 +76,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # A pull request's merge commit and main, its first parent: the files it changes.
+          fetch-depth: 2
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -289,7 +292,7 @@ jobs:
       # The receipts are checked whenever the area's jobs all succeeded, also
       # when another area failed, so the area's pass can still be recorded.
       - name: Download successful backend shard receipts
-        if: ${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}
+        if: ${{ !cancelled() && steps.verdict.outputs.backend == 'true' && steps.verdict.outputs.backend-shards != '[]' }}
         uses: actions/download-artifact@v4
         with:
           pattern: backend-shard-*-a*
@@ -299,9 +302,13 @@ jobs:
         if: ${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}
         env:
           BACKEND_NEEDS: ${{ steps.verdict.outputs.backend-needs }}
+          # The shards the run's backend-select job chose: all 8, or on a pull request the ones its change needs.
+          BACKEND_SHARDS: ${{ steps.verdict.outputs.backend-shards }}
+          BACKEND_SELECTION: ${{ steps.verdict.outputs.backend-selection }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          python scripts/ci/shard_evidence.py --prefix backend-shard --count 8 --source shard-attempts --destination shard-results
+          count=$(python -c 'import json, os; print(len(json.loads(os.environ["BACKEND_SHARDS"])))')
+          python scripts/ci/shard_evidence.py --prefix backend-shard --count "$count" --source shard-attempts --destination shard-results
           python scripts/ci/backend_gate.py --head "$HEAD_SHA"
       - name: Download Windows desktop shard receipts
         if: ${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}

@@ -91,12 +91,19 @@ def digest(nodes):
 def pytest_addoption(parser):
     group = parser.getgroup("backend-shards")
     group.addoption("--backend-shard", type=int, choices=range(1, SHARD_COUNT + 1))
+    # A pull request's selected run (scripts/ci/backend_test_map.py ci-select)
+    # splits the chosen files into fewer shards; a full run uses all of them.
+    group.addoption("--backend-shard-count", type=int, choices=range(1, SHARD_COUNT + 1), default=SHARD_COUNT)
+    group.addoption("--backend-selection", default="all")
     group.addoption("--backend-durations", default=str(MANIFEST))
     group.addoption("--backend-results", default="backend-results")
 
 
 def pytest_configure(config):
-    if config.getoption("backend_shard"):
+    shard = config.getoption("backend_shard")
+    if shard:
+        if shard > config.getoption("backend_shard_count"):
+            raise pytest.UsageError("--backend-shard is beyond --backend-shard-count")
         config.pluginmanager.register(ShardRun(config), "backend-shard-run")
 
 
@@ -113,7 +120,8 @@ class ShardRun:
     def pytest_collection_modifyitems(self, session, config, items):
         nodes = [item.nodeid for item in items]
         manifest = json.loads(Path(config.getoption("backend_durations")).read_text())
-        shards = partition(nodes, manifest_weights(nodes, manifest), SHARD_COUNT)
+        count = config.getoption("backend_shard_count")
+        shards = partition(nodes, manifest_weights(nodes, manifest), count)
         index = config.getoption("backend_shard") - 1
         selected = set(shards[index])
         self.evidence = {
@@ -121,6 +129,7 @@ class ShardRun:
             "partition": digest(shards), "selected": digest(sorted(selected)),
             "count": len(selected), "total": len(nodes),
             "head": os.environ.get("GITHUB_SHA", "local"),
+            "shards": count, "selection": config.getoption("backend_selection"),
         }
         kept, removed = [], []
         for item in items:

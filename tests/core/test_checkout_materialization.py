@@ -724,6 +724,33 @@ def test_seed_happy_path_clones_renames_and_upserts(seedable, workspace_root, mo
     assert len(calls) == 1
 
 
+def test_seed_from_real_peer_registration(mock_db, workspace_root, monkeypatch):
+    from app.core.project_links import auto_link_group_id
+    from app.core.project_setup import register_local_project
+    from app.db import database
+
+    peer_repo = _make_base_repo(workspace_root / "peer")
+    remote = peer_repo.as_uri()
+    _git(peer_repo, "remote", "add", "origin", remote)
+    origin = auto_link_group_id(remote)
+    proj = projects_v2.upsert_project(origin, name="Peer repo")
+    monkeypatch.setattr(type(checkout_manager.settings), "effective_instance_id", property(lambda _: "peer"))
+    legacy_id = register_local_project(proj["id"], origin=origin, name="Peer repo",
+                                       folder=str(peer_repo), path=peer_repo, kind="git")
+    assert database.get_project(legacy_id)["instance_id"] == "peer"
+    peer_checkout = checkouts_db.get_checkout(proj["id"], "peer")
+    assert peer_checkout is not None
+    assert checkouts_db.get_checkout(proj["id"], RUNNER) is None
+
+    monkeypatch.setattr(type(checkout_manager.settings), "effective_instance_id", property(lambda _: RUNNER))
+    path = checkout_manager.ensure_checkout(proj, runner_id=RUNNER)
+    assert path is not None and Path(path) != peer_repo
+    assert (Path(path) / "README.md").read_text(encoding="utf-8") == "hello\n"
+    assert checkouts_db.get_checkout(proj["id"], RUNNER)["path"] == path
+    assert checkout_manager.ensure_checkout(proj, runner_id=RUNNER) == path
+    assert checkouts_db.get_checkout(proj["id"], "peer") == peer_checkout
+
+
 def test_seed_flag_off_no_clone(seedable, workspace_root, monkeypatch):
     proj, _ = seedable
     monkeypatch.setattr(checkout_manager.settings, "self_seed_checkouts", False)

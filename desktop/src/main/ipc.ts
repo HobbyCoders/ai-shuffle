@@ -18,6 +18,7 @@ import type { MainWindow, TitleBarTheme } from './window';
 import type { WorkerState } from './worker';
 import { AGENT_ACCESS } from './disclosure';
 import type { CallPopout } from './call-popout';
+import type { LoginItemControl } from './login-item';
 
 /** The database behind the worker, as the status page shows it. */
 export interface PostgresStatus {
@@ -48,11 +49,12 @@ interface Deps {
 	worker: WorkerControl;
 	/** The voice call pop-out; it validates the state it is given. */
 	callPopout?: Pick<CallPopout, 'open' | 'update' | 'close'>;
+	loginItem?: LoginItemControl;
 }
 
 type Handler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
 
-export function registerIpc({ window, updater, worker, callPopout }: Deps): void {
+export function registerIpc({ window, updater, worker, callPopout, loginItem }: Deps): void {
 	const senderPage = (event: IpcMainInvokeEvent | IpcMainEvent): TrustedPage | null => {
 		if (!window.isOwnSender(event.sender.id)) return null;
 		const frame = event.senderFrame;
@@ -81,7 +83,8 @@ export function registerIpc({ window, updater, worker, callPopout }: Deps): void
 		event.returnValue = {
 			platform: process.platform,
 			version: managedContext() ? `main@${managedContext()!.application.revision.slice(0, 12)}` : app.getVersion(),
-			agentAccess: AGENT_ACCESS
+			agentAccess: AGENT_ACCESS,
+			loginItem: !!loginItem && fromWorkerPage(event)
 		};
 	});
 
@@ -95,6 +98,16 @@ export function registerIpc({ window, updater, worker, callPopout }: Deps): void
 		if (!isTitleBarTheme(theme)) return;
 		window.setTitleBarTheme(theme);
 	});
+
+	// Only the worker UI offers this setting. Neither executable nor arguments
+	// can come from the renderer, including from an otherwise trusted sender.
+	if (loginItem) {
+		handle('desktop:login-item-get', fromWorkerPage, () => loginItem.get());
+		handle('desktop:login-item-set', fromWorkerPage, (_event, ...args) => {
+			if (args.length !== 1 || typeof args[0] !== 'boolean') throw new Error('Invalid login item setting');
+			return loginItem.set(args[0]);
+		});
+	}
 
 	// Worker state (both trusted pages read it; it includes the local log path).
 	handle('desktop:worker-state', fromTrustedPage, () => worker.state());

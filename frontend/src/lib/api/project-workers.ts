@@ -19,6 +19,7 @@
  */
 
 import { api } from './client';
+import type { BrowseResponse } from './filesystem';
 
 /** One worker's relation to a project. */
 export type WorkerProjectState =
@@ -82,6 +83,8 @@ export interface ProjectsOverviewResponse {
 export interface ProjectWorkerDetail extends ProjectWorker {
 	/** Owner/admin only; null for API users. */
 	folder: string | null;
+	/** Opaque, target-issued revision; absent when retarget is unavailable. */
+	folder_revision?: string | null;
 	/** Where a setup would put it on that worker. */
 	suggested_folder: string | null;
 	branch: string | null;
@@ -150,6 +153,19 @@ export async function getProjectsOverview(): Promise<ProjectOverviewRow[] | null
 
 export function getProjectWorkers(ref: ProjectRef, options?: { signal?: AbortSignal }): Promise<ProjectWorkersResponse> {
 	return api.get<ProjectWorkersResponse>(`/projects/workers?${refQuery(ref)}`, options);
+}
+
+function folderUrl(installId: string, ref: ProjectRef, suffix = ''): string {
+	return `/projects/workers/${encodeURIComponent(installId)}/folder${suffix}?${refQuery(ref)}`;
+}
+
+export function browseWorkerFolder(installId: string, ref: ProjectRef, path?: string): Promise<BrowseResponse> {
+	const query = path ? `&path=${encodeURIComponent(path)}` : '';
+	return api.get<BrowseResponse>(folderUrl(installId, ref, '/browse') + query);
+}
+
+export function changeWorkerFolder(installId: string, ref: ProjectRef, folder: string, expected_revision: string) {
+	return api.put<{ folder: string; folder_revision: string }>(folderUrl(installId, ref), { folder, expected_revision });
 }
 
 export function startProjectSetup(ref: ProjectRef, request: SetupRequest): Promise<SetupResponse> {

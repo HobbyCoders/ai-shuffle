@@ -297,7 +297,10 @@ def test_the_gate_alone_may_cancel_the_run_and_checks_the_receipts_the_skipped_v
     for step in steps:
         if step.get("uses", "").startswith("actions/download-artifact") or "shard_evidence" in step.get("run", ""):
             # Also after another area failed, so this area's pass can still be recorded.
+            # A pull request whose backend change no shard test reaches has no receipts to download.
             assert step["if"] in ("${{ !cancelled() && steps.verdict.outputs.backend == 'true' }}",
+                                  "${{ !cancelled() && steps.verdict.outputs.backend == 'true'"
+                                  " && steps.verdict.outputs.backend-shards != '[]' }}",
                                   "${{ !cancelled() && steps.verdict.outputs.windows == 'true' }}")
 
 
