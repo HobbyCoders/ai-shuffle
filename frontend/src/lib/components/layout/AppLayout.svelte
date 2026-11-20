@@ -136,7 +136,7 @@
 	<ClaudeReloginBanner />
 	<PeerTerminalRequestBanner />
 
-	<div class="app-body" role="region" aria-label="Workspace" tabindex="-1" bind:this={workspace}>
+	<div class="app-body" role="region" aria-label="Workspace" bind:this={workspace}>
 		{#if sidebarFloating}
 			<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>

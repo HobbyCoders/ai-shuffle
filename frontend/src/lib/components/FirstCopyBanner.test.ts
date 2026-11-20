@@ -134,7 +134,6 @@ it('keeps polling while minimized, restores the latest details, and clears on co
 it.each(['chip', 'details', 'Minimize', 'Reload', 'composer', 'modal'] as const)(
 	'handles completion while %s owns focus', async (owner) => {
 		const workspace = document.createElement('section');
-		workspace.tabIndex = -1;
 		const composer = workspace.appendChild(document.createElement('textarea'));
 		const modal = document.createElement('div');
 		modal.setAttribute('role', 'dialog');
@@ -165,7 +164,13 @@ it.each(['chip', 'details', 'Minimize', 'Reload', 'composer', 'modal'] as const)
 			expect(document.activeElement).toBe(focused);
 			await vi.advanceTimersByTimeAsync(10_000);
 			expect(screen.getByRole('status').textContent).toContain('Your data is copied');
-			expect(document.activeElement).toBe(owner === 'composer' || owner === 'modal' ? focused : workspace);
+			const handedOff = owner !== 'composer' && owner !== 'modal';
+			expect(document.activeElement).toBe(handedOff ? workspace : focused);
+			if (handedOff) {
+				expect(workspace.getAttribute('tabindex')).toBe('-1');
+				composer.focus();
+			}
+			expect(workspace.hasAttribute('tabindex')).toBe(false);
 		} finally {
 			workspace.remove();
 			modal.remove();
