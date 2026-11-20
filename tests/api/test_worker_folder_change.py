@@ -150,10 +150,13 @@ def test_remove_setup_different_folder_and_edit(registered, pre_upgrade, resolve
 
 @pytest.fixture
 def synced_worktree(registered, request):
+    from app.core.checkout_manager import _link_directory
     from app.core.project_links import auto_link_group_id
+    from app.core.project_utils import get_worktree_working_dir
     from app.core.worktree_manager import WorktreeManager
 
     row, _, old, new = registered
+    kind = getattr(request, 'param', 'external')
     def git(path, *args):
         return subprocess.run(['git', '-C', str(path), *args], check=True,
                               capture_output=True, text=True).stdout.strip()
@@ -167,15 +170,19 @@ def synced_worktree(registered, request):
         clone = dest.with_name(dest.name + '-clone')
         git(origin, 'clone', str(origin), str(clone))
         (clone / '.git').rename(dest / '.git')
+    if kind == 'managed-linked-root':
+        physical = old.rename(old.with_name('old-physical'))
+        _link_directory(physical, old)
     database.create_session('before-link', 'default', project_v2_id=projects_v2.get_project_v2_by_origin('local:moving')['id'])
     row = database.set_project_link_group(row['id'], auto_link_group_id(str(origin)))
     repo = database.create_git_repository('repo', row['id'], str(origin))
     manager = WorktreeManager()
-    if getattr(request, 'param', 'external') == 'managed':
+    if kind in ('managed', 'managed-linked-root'):
         topic = old / '.fluid' / 'worktrees' / 'topic'
         seed = database.create_worktree('managed-topic', repo['id'], 'topic', str(topic),
                                         status='completed')
         worktree = manager.recreate_worktree(seed['id'])
+        assert Path(get_worktree_working_dir(worktree)) == topic
     else:
         topic = old.parent / 'external-topic'
         git(old, 'worktree', 'add', '-b', 'topic', str(topic))
@@ -312,7 +319,7 @@ def test_retarget_back_to_first_link_leaves_stale_alias_base_alone(synced_worktr
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('synced_worktree', ['managed', 'external'], indirect=True)
+@pytest.mark.parametrize('synced_worktree', ['managed', 'managed-linked-root', 'external'], indirect=True)
 @pytest.mark.parametrize('keep_first', [True, False])
 @pytest.mark.parametrize('explicit', [True, False])
 async def test_kept_worktree_after_retarget(synced_worktree, keep_first, explicit):

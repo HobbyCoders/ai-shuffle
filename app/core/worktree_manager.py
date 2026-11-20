@@ -1425,7 +1425,9 @@ class WorktreeManager:
             owner = _verified_owner(project, worktree)
             root, target = owner["root"], get_worktree_working_dir(worktree)
             branch = worktree["branch_name"]
-            if Path(target) != self._managed_worktree_path(root, branch):
+            managed_path = self._managed_worktree_path(root, branch)
+            self._require_inside_checkout(root, Path(target))
+            if checkouts_db.folder_key(target) != checkouts_db.folder_key(str(managed_path)):
                 raise WorktreeError("the registered path is not the app-managed worktree path")
             listing, _ = _inspect_worktree_owner(root, target, owner["common"])
             tip = _local_branch_tip(root, branch)
