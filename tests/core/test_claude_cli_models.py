@@ -159,6 +159,24 @@ def test_subagent_model_enums_offer_every_listed_version(cli):
     assert m.selectable_model_values() == m.model_values()
 
 
+def test_a_refreshed_list_rebuilds_a_pooled_app_config_server(cli, monkeypatch):
+    """Review r2: an open chat must not keep advertising the old model enums."""
+    from app.core.provider.types import mcp_servers_equivalent
+    from app.mcp import config_subagents
+    from app.mcp.app_config_sdk import schema_signature
+
+    def server():
+        tools = config_subagents._create_subagent_tools(True)
+        return {"app-config": {"type": "sdk", "name": "app-config", "instance": object(),
+                               "schema_signature": schema_signature(tools)}}
+
+    before = server()
+    assert mcp_servers_equivalent(before, server())
+    reply = {**REPLY, "models": [*REPLY["models"], _entry("claude-mythos-6", "Mythos 6", "claude-mythos-6")]}
+    monkeypatch.setattr(cm, "_snapshot", cm.parse_initialize(reply))
+    assert not mcp_servers_equivalent(before, server())
+
+
 def test_an_inherited_full_id_reaches_a_paired_worker_as_itself(cli, monkeypatch):
     """Review S2: a chat on Mythos starts a paired-worker chat on Mythos.
     An explicit request keeps the alias-only rule."""

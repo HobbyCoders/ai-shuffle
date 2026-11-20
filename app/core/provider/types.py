@@ -287,9 +287,10 @@ def mcp_servers_equivalent(old: Optional[Dict[str, Any]], new: Optional[Dict[str
     This helper compares:
     - External servers (stdio/sse/http): full dict equality (all values are
       serializable primitives).
-    - SDK servers: by (type, name) since the instance is functionally
-      equivalent when those match.  Tool definitions come from the same code
-      path each time, so name equality is sufficient.
+    - SDK servers: by (type, name, schema_signature) since the instance is
+      functionally equivalent when those match.  Tool definitions come from
+      the same code path each time; ``schema_signature`` is set only by a
+      server whose schemas follow live state.
     """
     old = old or {}
     new = new or {}
@@ -306,6 +307,10 @@ def mcp_servers_equivalent(old: Optional[Dict[str, Any]], new: Optional[Dict[str
             if not isinstance(new_cfg, dict) or new_cfg.get("type") != "sdk":
                 return False
             if old_cfg.get("name") != new_cfg.get("name"):
+                return False
+            # A server whose schemas follow live state (app-config's model
+            # enums) carries a signature; a changed one needs a fresh server.
+            if old_cfg.get("schema_signature") != new_cfg.get("schema_signature"):
                 return False
             continue
 

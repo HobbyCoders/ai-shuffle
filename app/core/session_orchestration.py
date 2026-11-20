@@ -716,8 +716,10 @@ def _inherited_choice(model, *, runs_here):
     from app.core import model_override
     from app.core.model_registry import keeps_own_id
 
-    if isinstance(model, str) and keeps_own_id(model.strip()):
-        return model_override.Choice(model.strip(), None, model.strip())
+    text = model.strip() if isinstance(model, str) else ""
+    # The resolver's own shape rules: at most 300 characters, a plain id.
+    if keeps_own_id(text) and len(text) <= 300 and re.fullmatch(r"claude-[a-z0-9][a-z0-9.\-]*", text):
+        return model_override.Choice(text, None, text)
     return model_override.resolve(model, runs_here=runs_here)
 
 
@@ -1166,6 +1168,10 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         # HERE, never quietly on something else, and the inherited settings are
         # mapped against this worker's provider rows.
         from app.core import model_override
+        if inherited and (choice.get("model") != model or choice.get("provider_id") != provider_id):
+            # The sender writes the same binding in both places (see the
+            # inherited branch of the remote-start body).
+            raise ValueError("The inherited model binding does not match the request. Nothing was started.")
         try:
             picked = (_inherited_choice(choice.get("model"), runs_here=True) if inherited
                       else model_override.resolve(choice.get("model"), runs_here=True))

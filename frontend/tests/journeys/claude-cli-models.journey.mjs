@@ -4,8 +4,9 @@
 //
 // Cases:
 //   listed-in-settings  Settings > Providers > Claude > Models: one list of every
-//                       model Claude Code offers (aliases, versions, Mythos), no
-//                       checkboxes, and the pickers offer all of them
+//                       model Claude Code offers (aliases, versions, Mythos, and
+//                       a family the app does not know), no checkboxes, and the
+//                       pickers offer all of them
 //   pick-and-run        pick Mythos 5.1 in a chat, run a turn: the fake CLI
 //                       was started with exactly that model, not an alias
 import { readFileSync } from 'node:fs';
@@ -35,6 +36,9 @@ const VERSION = 'claude-opus-4-6';
 const VERSION_LABEL = 'Opus 4.6';
 const MYTHOS = 'claude-mythos-5-1';
 const MYTHOS_LABEL = 'Mythos 5.1';
+/** The fake CLI's entry from a family this release does not know. */
+const UNKNOWN = 'claude-zephyr-1';
+const UNKNOWN_LABEL = 'Zephyr 1';
 
 /** The fake CLI's log: one JSON line per event, `start` lines carry argv. */
 const cliLog = (status) => readFileSync(status.claude_cli.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
@@ -86,7 +90,7 @@ await runJourney({
 				const list = page.getByTestId('claude-cli-models');
 				const text = (await list.innerText()).replace(/\s+/g, ' ');
 				log(`models: ${text}`);
-				for (const wanted of ['Opus 5.5', VERSION_LABEL, VERSION, MYTHOS_LABEL, MYTHOS]) {
+				for (const wanted of ['Opus 5.5', VERSION_LABEL, VERSION, MYTHOS_LABEL, MYTHOS, UNKNOWN_LABEL, UNKNOWN]) {
 					expect(text.includes(wanted), `the Models tab lists ${wanted}: ${text}`);
 				}
 				expect((await page.getByRole('checkbox').count()) === 0, 'no opt-in checkboxes');
@@ -95,6 +99,9 @@ await runJourney({
 				const values = registry.models.map((m) => m.value);
 				expect(values.includes(VERSION) && values.includes(MYTHOS), `the pickers offer every version: ${values}`);
 				expect(registry.models.find((m) => m.value === MYTHOS)?.family === 'mythos', 'Mythos is its own family');
+				// A family the app does not know yet is still offered, with no family.
+				const unknown = registry.models.find((m) => m.value === UNKNOWN);
+				expect(unknown && unknown.family === null, `an unknown family stays selectable: ${JSON.stringify(unknown)}`);
 			}
 		},
 		{

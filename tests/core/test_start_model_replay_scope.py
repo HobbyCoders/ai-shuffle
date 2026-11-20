@@ -507,6 +507,52 @@ async def test_legacy_readback_receiver_rechecks_identity(chats, remote_wire, mo
                              from_device="caller-worker" if invalid == "fingerprint" else "unpaired-worker")
 
 
+@pytest.mark.parametrize("tamper", ["overlong", "mismatch", "provider"])
+async def test_remote_inherited_subscription_version_runs_as_itself(chats, remote_wire, monkeypatch, tamper):
+    """A chat on a full Claude id (Mythos) starts its paired-worker chat on it,
+    through the sender, a replay and the receiver; a malformed binding is refused."""
+    import copy
+    from types import SimpleNamespace
+
+    from app.core import claude_cli_models
+    from app.db import sessions
+    from app.network import control, engine, membership
+
+    monkeypatch.setattr(claude_cli_models, "subscription_mode", lambda: True)
+    _turn("caller", "user", "do the work", profile="agent")
+    with get_db() as conn:
+        conn.cursor().execute("UPDATE sessions SET model='claude-mythos-5-1' WHERE id='caller'")
+    args = {**ARGS, "worker": "Other"}
+    assert (await _start(args)).is_error
+    sent = remote_wire["calls"][0][1]
+    assert sent["model"] == "claude-mythos-5-1" and sent["model_inherited"] is True
+    assert sent["model_choice"] == {"model": "claude-mythos-5-1", "provider_id": None}
+
+    # The receiver refuses a binding the sender could not have written.
+    bad = copy.deepcopy(sent)
+    if tamper == "overlong":
+        bad["model"] = bad["model_choice"]["model"] = "claude-" + "a" * 300
+    elif tamper == "mismatch":
+        bad["model_choice"]["model"] = "claude-opus-4-6"
+    else:
+        bad["model_choice"]["provider_id"] = "lane"
+    member = SimpleNamespace(kind=membership.KIND_WORKER, status=membership.STATUS_ACTIVE, name="Caller worker")
+    context = SimpleNamespace(device_id="other-worker",
+                              member=lambda device: member if device == "caller-worker" else None)
+    with monkeypatch.context() as receiver:
+        receiver.setattr(engine, "context", lambda: context)
+        with pytest.raises(ValueError):
+            await control.handle(orch.REMOTE_ACTION, bad, from_device="caller-worker")
+
+    remote_wire["offline"] = False
+    retry = await _start(args)
+    assert not retry.is_error, retry.text
+    child = sessions.get_session(json.loads(retry.text)["session_id"])
+    assert child["provider_id"] is None and child["model"] == "claude-mythos-5-1"
+    # The replay reused the saved body rather than re-deriving it.
+    assert remote_wire["calls"][-1][1]["model_choice"] == sent["model_choice"]
+
+
 async def test_unbound_remote_inheritance_requires_an_explicit_choice(chats, remote_wire):
     _turn("caller", "user", "do the work", profile="agent")
     with get_db() as conn:
