@@ -128,13 +128,24 @@ export function saveCurrentClaudeSubscription(label = ''): Promise<ClaudeAccount
 	return api.post('/settings/claude-auth/accounts/subscription/save-current', { label });
 }
 
+export function selectDefaultClaudeSubscription(): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/subscription/use-default');
+}
+
+export function repairClaudeSubscription(id: string, terminal: boolean): Promise<{
+	login?: ClaudeSubscriptionLogin;
+	terminal_run?: import('./claude-cli').ClaudeCliLoginState;
+}> {
+	return api.post(`/settings/claude-auth/accounts/subscription/${id}/sign-in?terminal=${terminal}`);
+}
+
 export function addAnotherClaudeSubscription(): Promise<ClaudeAccountsResponse> {
 	return api.post('/settings/claude-auth/accounts/subscription/add-another');
 }
 
 /**
  * Stop a pending add-another sign-in. When the CLI had already finished
- * signing in, the worker keeps it (active) and returns its `account_id`.
+ * signing in, the worker keeps it without selecting it and returns its `account_id`.
  */
 export function cancelClaudeSubscriptionLogin(): Promise<ClaudeAccountsResponse> {
 	return api.post('/settings/claude-auth/accounts/subscription/cancel-login');

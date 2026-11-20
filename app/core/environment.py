@@ -415,18 +415,22 @@ def inject_claude_code_auth(
 
     from app.core import claude_auth_mode, claude_cloud_auth, claude_subscriptions, credential_gate
 
-    mode = claude_auth_mode.current_mode()
-    shared = claude_auth_mode.shared_selection(cached=True) is not None
-    pinned = mode == claude_auth_mode.MODE_SUBSCRIPTION and claude_subscriptions.shared_target() is not None
-    enforced = shared or pinned
+    mode, choice = claude_auth_mode.runtime_choice()
+    target = (claude_subscriptions.shared_target(choice, read_choice=False)
+              if mode == claude_auth_mode.MODE_SUBSCRIPTION else None)
+    enforced = choice is not None or target is not None
     if enforced and mode == claude_auth_mode.MODE_OFF:
         raise ProviderTurnRefused(credential_gate.OFF_MESSAGE)
     if mode == claude_auth_mode.MODE_SUBSCRIPTION:
         try:
             # Do not let a profile override the folder we verified.
-            if pinned:
-                env.pop("CLAUDE_CONFIG_DIR", None)
-            env.update(claude_subscriptions.active_home_env(force=pinned))
+            if target is not None:
+                for name in tuple(env):
+                    if name.upper() == "CLAUDE_CONFIG_DIR":
+                        env.pop(name)
+                env.update(claude_subscriptions.verified_home_env(target))
+            else:
+                env.update(claude_subscriptions.legacy_home_env())
         except claude_subscriptions.SubscriptionError as exc:
             raise ProviderTurnRefused(str(exc)) from None
     unset = claude_auth_mode.SUBSCRIPTION_UNSET
@@ -438,7 +442,8 @@ def inject_claude_code_auth(
             env.pop(name, None)
     if mode == claude_auth_mode.MODE_API_KEY:
         unset = tuple(n for n in unset if n != "ANTHROPIC_API_KEY") if enforced else claude_auth_mode.API_KEY_UNSET
-        api_key = _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING)
+        api_key = (claude_auth_mode.selected_api_key(choice) if choice is not None
+                   else _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING))
         if enforced and not api_key:
             raise ProviderTurnRefused(credential_gate.NO_KEY_MESSAGE)
         if api_key:
@@ -451,8 +456,6 @@ def inject_claude_code_auth(
     elif mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
     elif mode == claude_auth_mode.MODE_CLOUD:
-        if not claude_auth_mode.cloud_selection_is_local():
-            raise ProviderTurnRefused(credential_gate.CLOUD_OTHER_WORKER_MESSAGE)
         # Every method's variables and every other Claude credential go,
         # whether they came from the host or the profile; then only the
         # chosen method's allowlisted owner configuration is put back.

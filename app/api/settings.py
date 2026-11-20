@@ -429,7 +429,7 @@ async def set_anthropic_api_key(
     # above is a real network await.
     from app.core import claude_accounts
     try:
-        await run_sync(claude_accounts.add_api_key, api_key)
+        await run_sync(claude_accounts.add_api_key, api_key, for_claude_code=request.use_for_claude_code)
     except claude_accounts.AccountError as exc:
         raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
                             detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None
@@ -437,10 +437,6 @@ async def set_anthropic_api_key(
         if encryption.is_encryption_ready():
             raise
         raise HTTPException(status_code=409, detail=encryption.credential_storage_error()) from None
-    if request.use_for_claude_code:
-        from app.core import claude_auth_mode
-        await run_sync(claude_auth_mode.set_mode, claude_auth_mode.MODE_API_KEY)
-
     return AnthropicKeyResponse(
         success=True,
         masked_key=mask_api_key(api_key)
@@ -497,18 +493,17 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
     """The mode, the CLI account from the probe, the key's last four, and the
     credential gate (whether new agent runs can start on any provider, and
     ``claude_credential_ready`` for Claude itself)."""
-    from app.core import claude_auth_mode, claude_cli_status, credential_gate
+    from app.core import claude_accounts, claude_auth_mode, claude_cli_status, credential_gate
 
-    status = await claude_cli_status.get_status_async(refresh)
-    cli = status.to_dict()
+    accounts = await run_sync(claude_accounts.accounts_payload)
+    cli = (await claude_cli_status.get_status_async(refresh)).to_dict()
 
     def _load() -> dict:
         try:
             claude_reason = credential_gate.claude_credential_ready(cli)[1]
         except Exception:  # noqa: BLE001 — display text only
             claude_reason = credential_gate.CHECK_FAILED_MESSAGE
-        from app.core import claude_accounts
-        return {**claude_auth_mode.summary(cli), "accounts": claude_accounts.accounts_payload(),
+        return {**claude_auth_mode.summary(cli), "accounts": accounts,
                 "gate": credential_gate.status_payload(cli),
                 # Why Claude itself cannot run (None when it can). ``gate.reason``
                 # is about the worker as a whole.
@@ -516,7 +511,6 @@ async def claude_auth_payload(refresh: bool = False) -> dict:
 
     payload = await run_sync(_load)
     from app.core import claude_subscriptions
-    # Listing accounts can finish a pending sign-in that switched the active one.
     await claude_subscriptions.reap_idle_pooled_clis()
     return payload
 
@@ -584,7 +578,7 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
 async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
     """Choose the mode (admin only). Takes effect for the next agent run.
 
-    ``off`` turns Claude off on the owner's synced workers: Claude models leave the pickers
+    ``off`` turns Claude off on this worker: Claude models leave the pickers
     and Claude runs are refused with the gate's off message (``gate.reason``).
     """
     from app.core import claude_auth_mode, claude_cloud_auth

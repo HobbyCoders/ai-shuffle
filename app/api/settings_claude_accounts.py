@@ -52,8 +52,6 @@ async def _call(function, *args, subscription=False):
 
 async def _result(account_id=None):
     result = {"accounts": await run_sync(accounts.accounts_payload)}
-    # Listing can finish a pending sign-in, which switches the active one.
-    await accounts.subscriptions.reap_idle_pooled_clis()
     if account_id:
         result["account_id"] = account_id
     return result
@@ -92,7 +90,7 @@ async def save_current(
 
 @router.post("/subscription/add-another")
 async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
-    """Start `claude auth login` into a fresh folder; it becomes active once signed in."""
+    """Start `claude auth login` into a fresh folder; save it once signed in."""
     try:
         login = await accounts.start_login(external=True)
     except accounts.AccountError as exc:
@@ -100,19 +98,25 @@ async def add_another(token: str = Depends(require_admin)) -> dict[str, Any]:
     return {**await _result(), "login": login}
 
 
+@router.post("/subscription/use-default")
+async def use_default(token: str = Depends(require_admin)) -> dict[str, Any]:
+    """Verify and explicitly choose this worker's default CLI sign-in."""
+    await _call(accounts.select_default_login, subscription=True)
+    return await _result()
+
+
 @router.post("/subscription/{account_id}/sign-in")
-async def saved_sign_in(account_id: str, token: str = Depends(require_admin)) -> dict[str, Any]:
-    """Return folder-scoped CLI login commands; do not activate this saved account."""
-    login = await _call(accounts.saved_sign_in_commands, account_id)
-    return {"login": login}
+async def saved_sign_in(account_id: str, terminal: bool = False, token: str = Depends(require_admin)) -> dict[str, Any]:
+    """Start or return commands for folder-scoped login; never select the account."""
+    return await _call(accounts.saved_sign_in_commands, account_id, terminal)
 
 
 @router.post("/subscription/cancel-login")
 async def cancel(token: str = Depends(require_admin)) -> dict[str, Any]:
     """Stop a pending add-another sign-in and remove its unfinished folder.
 
-    If the CLI had already finished signing in, the sign-in is kept and made
-    active instead, and its id comes back as ``account_id``.
+    If the CLI had already finished signing in, the sign-in is kept without
+    selecting it, and its id comes back as ``account_id``.
     """
     try:
         account_id = await accounts.cancel_login()

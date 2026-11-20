@@ -107,7 +107,12 @@ def _probe_env(home_env: Optional[dict] = None) -> dict:
     (:mod:`app.core.claude_subscriptions`)."""
     from fluid.tools.child_env import claude_program_env
 
-    env = {k: v for k, v in claude_program_env().items() if k not in _STRIPPED_ENV}
+    from app.core.claude_cloud_auth import is_cloud_unset_name
+
+    env = {k: v for k, v in claude_program_env().items()
+           if k not in _STRIPPED_ENV and (home_env is None or (
+               k.upper() != "CLAUDE_CONFIG_DIR" and not is_cloud_unset_name(k)
+           ))}
     env.setdefault("NO_COLOR", "1")
     if home_env is None:
         from app.core import claude_subscriptions

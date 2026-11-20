@@ -1180,11 +1180,12 @@ Which credential Claude Code agents run on: your Claude subscription (the signed
 | `POST /api_key/{id}/activate` | none | Activate this entry and deactivate its sibling. |
 | `DELETE /api_key/{id}` | none | Delete the entry; deleting the active entry leaves no key active. |
 | `POST /subscription/save-current` | `{"label":"Personal"}` | Save the sign-in in Claude Code's own folder as a `default` entry (one at most; saving again relabels it). Needs that folder signed in: `409 not_signed_in` otherwise. Returns `account_id`. |
-| `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved and made active once the CLI reports it. |
-| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept and made active instead, and its id comes back as `account_id`. |
+| `POST /subscription/add-another` | none | Start `claude auth login` into a fresh folder. Returns `login` (below). The sign-in is saved but not selected once the CLI reports it. |
+| `POST /subscription/cancel-login` | none | Stop a pending add-another sign-in and delete its unfinished folder. If the CLI had already finished signing in there, the sign-in is kept without selecting it, and its id comes back as `account_id`. |
 | `PATCH /subscription/{id}` | `{"label":"Work"}` | Rename; at most 120 characters. |
 | `POST /subscription/{id}/activate` | none | Make this sign-in the one Claude Code uses; the other subscription turns off. |
-| `POST /subscription/{id}/sign-in` | none | Return `{"login": {...}}` with folder-scoped external terminal commands for a `saved` entry, even when inactive. Does not activate it or start an in-app login; run the returned command on this worker. |
+| `POST /subscription/use-default` | none | Verify and select the default CLI sign-in on this worker, including on macOS. |
+| `POST /subscription/{id}/sign-in` | none | Repair a `saved` entry without selecting it. Returns folder-scoped commands in `login`, or `terminal_run` with `?terminal=true` on an in-app terminal worker. |
 | `DELETE /subscription/{id}` | none | Forget the entry. A `saved` entry is signed out with `claude auth logout` in its folder and its folder is deleted; a `default` entry is only forgotten (Claude Code's own folder and sign-in stay). |
 
 Mutations return `{"accounts":{…}}`; add-key and save-current also return
@@ -1197,12 +1198,11 @@ the change at the next turn, and idle Claude sessions still on the previous
 sign-in are closed when a subscription switch happens.
 
 Both key settings sync encrypted under the existing system-settings policy.
-The active key remains a scalar in `anthropic_api_key`, preserving every
-existing injection path and older-worker compatibility. The shared saved list
-is `claude_saved_api_keys`; active flags are derived from the real active scalar,
-not a separately replicated pointer. If the scalar arrives before the list, a
-masked legacy entry is shown until the list arrives, never another key's active
-label. Concurrent edits use normal settings sync conflict handling.
+Worker-local legacy choices can still use the `anthropic_api_key` scalar. An
+explicit synced choice pins the exact saved key ID in the same row as its mode.
+A worker refuses to run in API key mode if that ID is absent from its encrypted
+`claude_saved_api_keys` list. The scalar cannot substitute for a missing key.
+Concurrent decisions use the existing settings sync conflict rules.
 
 #### Saved subscription sign-ins
 
@@ -1293,10 +1293,11 @@ forget a saved key permanently.
 
 ### PUT /api/v1/settings/claude-auth
 
-Choose the mode for the owner's synced workers. It takes effect on new turns
-as each worker receives the choice. Missing credentials never select another
-mode. In cloud mode only the worker that selected its local cloud configuration
-can run Claude. Existing worker-local defaults apply until the first shared choice.
+Subscription and API key choices sync to the owner's workers and take effect
+on new turns as each worker receives the choice. Missing credentials never
+select another account or mode. Cloud and Off are worker-local overrides.
+Update all workers before relying on an owner-wide switch: older workers may
+still use their previous account.
 
 **Auth:** Owner only
 
@@ -1307,7 +1308,7 @@ curl -X PUT http://localhost:8000/api/v1/settings/claude-auth \
   -d '{"mode": "api_key"}'
 ```
 
-`mode` is `subscription`, `api_key` or `cloud` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
+`mode` is `subscription`, `api_key`, `cloud` or `off` (other values return `400`). Store the key with `POST /api/v1/settings/integrations/anthropic`. `cloud` also needs `"acknowledge_warning": true` and a method saved with `PUT /api/v1/settings/claude-auth/cloud`. Returns the same body as `GET`, which in every mode includes `cloud`: `{"method", "method_label", "configured", "ready", "missing", "storage_locked"}`, with no values.
 
 ### GET /api/v1/settings/claude-auth/cloud
 

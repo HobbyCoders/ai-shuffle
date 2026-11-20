@@ -103,12 +103,6 @@ startup_state: Optional[str] = None
 startup_reason: Optional[str] = None
 
 
-CLOUD_OTHER_WORKER_MESSAGE = (
-    "The selected Claude cloud provider is configured on a different worker. "
-    "Configure it on this worker or choose a different Claude account in Settings > Providers."
-)
-
-
 def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
     """Whether the active Claude Code mode has its credential, and why not.
 
@@ -117,16 +111,14 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
     """
     from app.core import claude_auth_mode
 
-    mode = claude_auth_mode.current_mode()
+    mode, choice = claude_auth_mode.runtime_choice()
     if mode == claude_auth_mode.MODE_OFF:
         return False, OFF_MESSAGE
     if mode == claude_auth_mode.MODE_API_KEY:
-        if claude_auth_mode.has_stored_api_key():
+        if claude_auth_mode.selected_api_key(choice):
             return True, None
         return False, NO_KEY_MESSAGE
     if mode == claude_auth_mode.MODE_CLOUD:
-        if not claude_auth_mode.cloud_selection_is_local():
-            return False, CLOUD_OTHER_WORKER_MESSAGE
         # A presence check of the owner's stored values; no network call.
         # The subscription sign-in and the Anthropic key never stand in.
         from app.core import claude_cloud_auth

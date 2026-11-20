@@ -1250,8 +1250,18 @@ def auth_status() -> dict:
     # only the text form names the tier.
     plan = fake_plan()
     subscription = ("max" if plan == "ultra" else plan) or "fake"
+    # A journey can give a private CLI folder a fake identity, or set it to
+    # signed-out with an empty file. No OAuth or credential file is involved.
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "devloop-account.txt"
+    try:
+        name = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        name = ""
+    else:
+        if not name:
+            return {"loggedIn": False}
     return {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-            "email": FAKE_EMAIL, "orgName": FAKE_ORG, "orgId": "devloop-fake-org",
+            "email": f"{name}@devloop.invalid" if name else FAKE_EMAIL, "orgName": FAKE_ORG, "orgId": "devloop-fake-org",
             "subscriptionType": subscription, "configDirectory": None}
 
 

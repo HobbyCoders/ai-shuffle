@@ -405,10 +405,14 @@ def refresh() -> Dict[str, Any]:
     if not subscription_mode():
         raise RuntimeError("The Claude Code model list is used only with a Claude subscription sign-in.")
     with _refresh_lock:
-        claude_cli_status.get_status()  # the active sign-in, before asking
+        from app.core import claude_subscriptions
+
+        claude_cli_status.get_status()  # prime the identity checked by store()
         binary = claude_cli_status._default_resolver()
         try:
-            payload = _handshake(binary, claude_cli_status._probe_env())
+            target = claude_subscriptions.shared_target()
+            home_env = claude_subscriptions.verified_home_env(target) if target is not None else None
+            payload = _handshake(binary, claude_cli_status._probe_env(home_env))
         except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
             raise RuntimeError(f"Could not ask Claude Code for its models: {exc}") from exc
         snapshot = parse_initialize(payload)

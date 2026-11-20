@@ -1,4 +1,5 @@
 """GET/PUT /settings/claude-auth: the explicit Claude Code auth mode."""
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -61,6 +62,51 @@ def test_owner_mode_selection_is_shared_and_does_not_fall_back(authenticated_cli
         inject_claude_code_auth({"ANTHROPIC_API_KEY": "not-the-owner-key"})
 
 
+def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(authenticated_client):
+    from app.core import claude_accounts
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
+
+    alpha, beta, gamma = "fixture-alpha-1111", "fixture-beta-2222", "fixture-gamma-3333"
+    claude_accounts.add_api_key(alpha)
+    old_keys = db.get_system_setting(claude_accounts.API_LIST_SETTING)
+    with patch("app.api.settings.validate_anthropic_key", new_callable=AsyncMock):
+        response = authenticated_client.post("/api/v1/settings/integrations/anthropic", json={
+            "api_key": beta, "use_for_claude_code": True,
+        })
+    assert response.status_code == 200, response.text
+    choice = db.get_system_setting(claude_auth_mode.SELECTION_SETTING)
+    beta_id = json.loads(choice)["key_id"]
+    assert all(key not in choice for key in (alpha, beta, gamma))
+    new_keys = db.get_system_setting(claude_accounts.API_LIST_SETTING)
+    # An offline peer's scalar wins independently; then the decision arrives
+    # before the encrypted list. Neither intermediate state may launch Alpha.
+    db.set_system_setting(claude_accounts.API_SETTING, encryption.encrypt_value(alpha))
+    db.set_system_setting(claude_accounts.API_LIST_SETTING, old_keys)
+    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
+        inject_claude_code_auth({"ANTHROPIC_API_KEY": alpha})
+    db.set_system_setting(claude_accounts.API_LIST_SETTING, new_keys)
+    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == beta
+    gamma_id = claude_accounts.add_api_key(gamma)
+    assert gamma_id != beta_id
+    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == gamma
+    claude_accounts.change_account("api_key", gamma_id, "delete")
+    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
+        inject_claude_code_auth({})
+
+
+def test_off_and_cloud_do_not_write_owner_selection(authenticated_client, monkeypatch):
+    claude_auth_mode.set_mode("subscription")
+    before = db.get_system_setting(claude_auth_mode.SELECTION_SETTING)
+    for mode in ("cloud", "off"):
+        with monkeypatch.context() as m:
+            # A second worker's explicit overrides must not affect the first.
+            m.setattr(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-peer")
+            assert claude_auth_mode.set_mode(mode) == mode
+            assert claude_auth_mode.current_mode() == mode
+        assert claude_auth_mode.current_mode() == "subscription"
+        assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) == before
+
+
 def test_put_rejects_unknown_mode(authenticated_client):
     with _probe(False):
         assert authenticated_client.put(ENDPOINT, json={"mode": "auto"}).status_code == 400
@@ -96,7 +142,8 @@ def test_payload_carries_the_credential_gate(authenticated_client):
     assert body["gate"]["ready"] is False
     assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
     assert body["claude_reason"] == credential_gate.NO_KEY_MESSAGE
-    db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
+    from app.core import claude_accounts
+    claude_accounts.add_api_key("fixture-api-key-ABCD")
     with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is True and body["gate"]["reason"] is None

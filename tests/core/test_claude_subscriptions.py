@@ -4,6 +4,7 @@ No real CLI, credentials or database: ``claude auth status`` is faked per
 folder, the worker-local setting lives in a dict, and every folder is under
 ``tmp_path``. Nothing here opens a CLI credential file.
 """
+import json
 import os
 import subprocess
 import sys
@@ -66,7 +67,6 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(cs, "run_home", run_home)
     monkeypatch.setattr(cs, "announce_account_change", lambda: None)
     monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: False)
-    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_SUBSCRIPTION)
     return SimpleNamespace(base=base, root=root, values=values, signed=signed, probed=probed, ran=ran)
 
 
@@ -83,6 +83,7 @@ def _add(world, email):
     account_id = _finish_pending(world, email)
     assert login["id"] == account_id
     subs.payload()
+    subs.change(account_id, "activate")
     return account_id
 
 
@@ -90,7 +91,7 @@ def test_synced_selection_resolves_to_a_different_local_folder(world):
     from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
 
     origin_id = _add(world, "paid@example.com")
-    selection = world.values[subs.SELECTION_SETTING]
+    selection = world.values[claude_auth_mode.SELECTION_SETTING]
     assert is_shared_setting_key(subs.SELECTION_SETTING)
     assert origin_id not in selection and "paid@" not in selection
 
@@ -123,6 +124,70 @@ def test_subscription_mode_arriving_before_its_selection_refuses_default(world):
 
 
 # ─── Folder layout ───────────────────────────────────────────────────────────
+
+def test_delayed_login_does_not_override_same_account_reselect(world):
+    alpha = _add(world, "alpha@example.com")
+    subs.start_login()
+    beta = json.loads(world.values[subs.setting_key()])["pending"]["id"]
+    world.signed[str(world.root / beta)] = "beta@example.com"
+    subs.change(alpha, "activate")
+    subs._last_pending_probe = 0.0
+    rows = subs.payload()["subscription"]
+    assert [(row["id"], row["active"]) for row in rows] == [(alpha, True), (beta, False)]
+
+
+def test_verified_default_recovers_first_sign_in_even_without_saved_folder_support(world, monkeypatch):
+    world.signed.clear()
+    claude_auth_mode.set_mode("api_key")
+    claude_auth_mode.set_mode("subscription")
+    assert subs.shared_target() == subs.UNRESOLVED
+    monkeypatch.setattr(home, "platform_support", lambda: (False, "macOS"))
+    world.signed[""] = "owner@example.com"
+    cs.invalidate()
+    assert not cs.probe().signed_in  # an arbitrary peer default cannot claim it
+    claude_auth_mode.set_mode("subscription")
+    assert subs.shared_target() == subs.UNRESOLVED
+    subs.select_default()
+    assert cs.probe().email == "owner@example.com"
+    row = world.values[claude_auth_mode.SELECTION_SETTING]
+    assert "owner@example.com" not in row and "fixture-org" not in row
+    subs.invalidate_identity()
+    assert cs.probe().email == "owner@example.com"  # persisted binding, cold cache
+
+
+def test_refresh_rechecks_cached_negative_candidates(world):
+    target = subs._binding(cs.probe_home({}))
+    world.signed.pop("")
+    with pytest.raises(subs.SubscriptionError):
+        subs.shared_home(target)
+    world.signed[""] = "default@example.com"
+    assert subs.shared_home(target, force=True)[0] is None
+
+
+def test_model_handshake_uses_the_verified_folder_without_host_oauth(world, monkeypatch):
+    from app.core import claude_cli_models
+    from app.core.environment import inject_claude_code_auth
+
+    account_id = _add(world, "alpha@example.com")
+    folder = str(world.root / account_id)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-host-oauth")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fixture.invalid")
+    monkeypatch.setattr(cs, "_default_resolver", lambda: "fake-claude")
+    monkeypatch.setattr(claude_cli_models, "store", lambda snapshot: True)
+    snapshot = {"models": ["fixture-model"]}
+    monkeypatch.setattr(claude_cli_models, "parse_initialize", lambda payload: snapshot)
+
+    def handshake(binary, env):
+        assert binary == "fake-claude"
+        launch = inject_claude_code_auth({"claude_config_dir": "wrong-windows-folder"})
+        assert env["CLAUDE_CONFIG_DIR"] == launch["CLAUDE_CONFIG_DIR"] == folder
+        assert "claude_config_dir" not in launch
+        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_BASE_URL" not in env
+        return {}
+
+    monkeypatch.setattr(claude_cli_models, "_handshake", handshake)
+    assert claude_cli_models.refresh() is snapshot
+
 
 def test_folder_links_shared_state_back_to_the_default_folder(world):
     account_id = "0123456789abcdef"
@@ -209,7 +274,7 @@ def test_remove_refuses_a_linked_root_and_a_linked_folder_is_only_unlinked(world
 
 # ─── Saving, switching, deleting ─────────────────────────────────────────────
 
-def test_add_another_signs_in_to_a_fresh_folder_and_becomes_active(world):
+def test_add_another_saves_to_a_fresh_folder_without_switching(world):
     login = subs.start_login()
     folder = str(world.root / login["id"])
     assert login["terminal"] is False and login["env"] == {"CLAUDE_CONFIG_DIR": folder}
@@ -223,13 +288,15 @@ def test_add_another_signs_in_to_a_fresh_folder_and_becomes_active(world):
     done = subs.payload()
     assert done["login_pending"] is False and done["login"] is None
     [row] = done["subscription"]
-    assert row["kind"] == "saved" and row["active"] and row["email"] == "second@example.com"
+    assert row["kind"] == "saved" and not row["active"] and row["email"] == "second@example.com"
     assert row["plan"] == "max" and row["label"] == "second@example.com"
-    assert done["default_in_use"] is False and done["recovery_required"] is False
+    assert done["default_in_use"] is True and done["recovery_required"] is False
+    assert subs.active_home_env() == {}
+    assert subs._reap_due is False
+    assert set(world.probed) == {folder}
+    subs.change(login["id"], "activate")
     assert subs.active_home_env() == {"CLAUDE_CONFIG_DIR": folder}
     assert subs._reap_due is True
-    # Identity only ever came from `claude auth status` against the folders.
-    assert set(world.probed) <= {folder}
 
 
 def test_every_claude_spawn_gets_the_active_folder(world, monkeypatch):
@@ -443,7 +510,7 @@ def test_inactive_saved_login_commands_never_switch_accounts(world):
     first = _add(world, "first@example.com")
     second = _add(world, "second@example.com")
     before = subs._load()
-    login = subs.sign_in_commands(first)
+    login = subs.sign_in_commands(first)["login"]
     assert login["terminal"] is False
     assert login["env"] == {"CLAUDE_CONFIG_DIR": str(world.root / first)}
     assert "claude auth login" in login["commands"]["posix"]
@@ -571,8 +638,8 @@ def test_in_app_terminal_login_targets_the_new_folder(world, monkeypatch):
     assert subs.payload()["login_pending"] is True  # still running: not probed yet
     run.update(running=False, succeeded=True)
     done = subs.payload()
-    assert done["login_pending"] is False and done["subscription"][0]["active"]
-    assert subs.active_home_env() == {"CLAUDE_CONFIG_DIR": folder}
+    assert done["login_pending"] is False and not done["subscription"][0]["active"]
+    assert subs.active_home_env() == {}
 
     # A failed run is reported and can be cancelled, which cleans up.
     run.update(running=False, succeeded=False)
@@ -624,9 +691,9 @@ def test_cancel_keeps_a_sign_in_that_already_finished(world):
     listing = subs.payload()
     assert listing["login_pending"] is False
     [row] = listing["subscription"]
-    assert row["id"] == login["id"] and row["active"] and row["email"] == "late@example.com"
-    assert subs.active_home_env() == {"CLAUDE_CONFIG_DIR": str(folder)}
-    assert subs._reap_due is True
+    assert row["id"] == login["id"] and not row["active"] and row["email"] == "late@example.com"
+    assert subs.active_home_env() == {}
+    assert subs._reap_due is False
     # With nothing pending, cancel is a no-op.
     assert subs.cancel_login() is None
 
@@ -678,7 +745,7 @@ def test_claude_off_mode_does_not_point_spawns_at_a_saved_folder(world, monkeypa
     from app.core.environment import inject_claude_code_auth
     _add(world, "second@example.com")
     assert "CLAUDE_CONFIG_DIR" in inject_claude_code_auth({})
-    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_OFF)
+    world.values[claude_auth_mode.setting_key()] = claude_auth_mode.MODE_OFF
     assert "CLAUDE_CONFIG_DIR" not in inject_claude_code_auth({})
 
 
@@ -704,7 +771,7 @@ def test_list_is_worker_local_and_never_synced(world):
     assert not is_shared_setting_key("claude_cli_logins:any-worker")
     assert not is_shared_setting_key("claude_cli_logins")
     _add(world, "second@example.com")
-    assert set(world.values) == {"claude_cli_logins:test-worker", subs.SELECTION_SETTING}
+    assert set(world.values) == {"claude_cli_logins:test-worker", claude_auth_mode.SELECTION_SETTING}
     stored = world.values["claude_cli_logins:test-worker"]
     assert "CLAUDE_CONFIG_DIR" not in stored and "token" not in stored.lower()
 
