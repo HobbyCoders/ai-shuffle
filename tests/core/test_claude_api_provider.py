@@ -114,6 +114,100 @@ def test_a_bound_model_missing_after_a_key_switch_reads_the_catalog_once(key, mo
     assert reads == ["sk-ant-new-key"]  # the list now belongs to this key: no second read
 
 
+def test_concurrent_callers_share_one_catalog_read(key, monkeypatch):
+    """A second caller during the read waits for it, then finds the model,
+    instead of hitting the cooldown and refusing."""
+    import threading
+
+    from app.core import claude_api_models
+
+    claude_auth_mode.set_mode("api_key")
+    monkeypatch.setattr(cap, "_refresh_tried", {})
+    started, release, reads = threading.Event(), threading.Event(), []
+
+    async def list_models(key, *, client=None):
+        reads.append(key)
+        started.set()
+        release.wait(5)
+        return [{"id": "claude-live", "label": "Live"}]
+
+    monkeypatch.setattr(claude_api_models, "list_models", list_models)
+    results = []
+    first = threading.Thread(target=lambda: results.append(cap.refresh_models_once()))
+    first.start()
+    assert started.wait(5)
+    second = threading.Thread(target=lambda: results.append(cap.refresh_models_once()))
+    second.start()
+    release.set()
+    first.join(5), second.join(5)
+    assert results == [True, True] and reads == [KEY]
+
+
+def test_a_failed_read_refuses_without_retrying_and_keeps_the_key_out_of_logs(key, monkeypatch, caplog):
+    from app.core import claude_api_models
+
+    claude_auth_mode.set_mode("api_key")
+    monkeypatch.setattr(cap, "_refresh_tried", {})
+    reads = []
+
+    async def list_models(key, *, client=None):
+        reads.append(key)
+        raise claude_api_models.CatalogError("Could not read the model list from Anthropic. Try again.")
+
+    monkeypatch.setattr(claude_api_models, "list_models", list_models)
+    assert cap.refresh_models_once() is False
+    assert cap.refresh_models_once() is False and reads == [KEY]  # cooldown
+    assert KEY not in caplog.text
+
+
+def test_a_bare_claude_pick_clears_a_key_binding(key, mock_db):
+    """An id both catalogs list is still the subscription when picked bare."""
+    claude_auth_mode.set_mode("subscription")
+    shared = API_MODEL_IDS["opus"]
+    row = database.resolve_model_provider(cap.CLAUDE_API_PROVIDER_ID)
+    assert shared in [m["id"] for m in row["models_json"]]
+
+    database.create_session(session_id="api-chat", profile_id="default", project_id=None,
+                            title="API", model=f"prov:{cap.CLAUDE_API_PROVIDER_ID}:{shared}")
+    assert database.get_session("api-chat")["provider_id"] == cap.CLAUDE_API_PROVIDER_ID
+    database.set_session_run_binding("api-chat", model=shared)
+    assert database.get_session("api-chat")["provider_id"] is None
+    # The explicit composite still binds the key.
+    database.set_session_run_binding("api-chat", model=f"prov:{cap.CLAUDE_API_PROVIDER_ID}:{shared}")
+    assert database.get_session("api-chat")["provider_id"] == cap.CLAUDE_API_PROVIDER_ID
+
+
+def test_task_and_start_session_names_never_bind_the_key(key):
+    from app.core import model_override
+
+    claude_auth_mode.set_mode("subscription")
+    composite = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:{API_MODEL_IDS['opus']}"
+    # A bare id both catalogs list is not the key: refused here (the
+    # subscription takes family names), with the explicit option named.
+    with pytest.raises(ValueError, match=composite):
+        model_override.resolve(API_MODEL_IDS["opus"], runs_here=False)
+    assert model_override.resolve("opus", runs_here=False).provider_id is None
+    assert model_override.resolve(composite, runs_here=False).provider_id == cap.CLAUDE_API_PROVIDER_ID
+
+
+def test_a_claude_api_worker_row_keeps_the_explicit_binding():
+    """A Task worker on the key stores the composite, so a later turn that
+    resends the row's model (a limit resume) stays on the key."""
+    from app.core.provider_agent import worker_session_fields
+
+    fields = worker_session_fields(worker_session_id="w", profile_id="p", title="t",
+                                   parent_session_id=None, provider_id=cap.CLAUDE_API_PROVIDER_ID,
+                                   model_id=API_MODEL_IDS["opus"], effort=None)
+    assert fields["model"] == f"prov:{cap.CLAUDE_API_PROVIDER_ID}:{API_MODEL_IDS['opus']}"
+
+
+def test_automation_list_lookups_resolve_the_key_row(key):
+    from app.core.automation_service import ModelLookups
+
+    claude_auth_mode.set_mode("subscription")
+    assert ModelLookups().prefetch().provider(cap.CLAUDE_API_PROVIDER_ID)["id"] == cap.CLAUDE_API_PROVIDER_ID
+
+
 def test_bound_turns_take_the_native_anthropic_leg(key):
     from app.core.provider.harness_adapter import provider_kind_for_sdk_options
 

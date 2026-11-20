@@ -698,9 +698,9 @@ def _inherited_model(sender, overrides, runtime_model=None):
     if provider_id and is_native_claude_model(value):
         # A native Claude pick on a provider chat runs natively unless that
         # provider itself serves the id (query_options' rebind rule).
-        from app.core.provider_agent import curated_model_ids
+        from app.core.provider_agent import keeps_bare_pick
         from app.db.model_providers import resolve_model_provider
-        if value not in curated_model_ids(resolve_model_provider(provider_id)):
+        if not keeps_bare_pick(resolve_model_provider(provider_id), value):
             provider_id = None
     return model_override.app_id(provider_id, value)
 

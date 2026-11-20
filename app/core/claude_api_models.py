@@ -18,18 +18,26 @@ class CatalogError(Exception):
     """An error safe for display. Never forward an upstream body or headers."""
 
 
+def dev_base_url() -> str | None:
+    """The dev loop's fake Anthropic base URL, only on disposable preview data."""
+    from app.preview_run import disposable_preview_data
+
+    origin = urlsplit(os.environ.get("SHUFFLE_DEV_FAKE_AI_URL", ""))
+    if (origin.scheme == "http" and origin.hostname == "127.0.0.1"
+            and origin.port and not origin.username and not origin.password
+            and origin.path in ("", "/") and not origin.query and not origin.fragment
+            and disposable_preview_data()):
+        return f"http://127.0.0.1:{origin.port}/anthropic"
+    return None
+
+
 def _catalog_url(key: str) -> str:
     # A real credential always goes to Anthropic, even on a preview. The only
     # exception is the dev loop's literal fixture key on disposable data.
     if key == DEV_KEY:
-        from app.preview_run import disposable_preview_data
-
-        origin = urlsplit(os.environ.get("SHUFFLE_DEV_FAKE_AI_URL", ""))
-        if (origin.scheme == "http" and origin.hostname == "127.0.0.1"
-                and origin.port and not origin.username and not origin.password
-                and origin.path in ("", "/") and not origin.query and not origin.fragment
-                and disposable_preview_data()):
-            return f"http://127.0.0.1:{origin.port}/anthropic/v1/models"
+        base = dev_base_url()
+        if base:
+            return f"{base}/v1/models"
         raise CatalogError("The dev loop’s fake Anthropic model service is unavailable.")
     return ANTHROPIC_MODELS_URL
 

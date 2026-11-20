@@ -198,6 +198,7 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
         raise ValueError("model must be a non-empty model id of at most 300 characters.")
     from app.core.query_options import decode_provider_model, is_native_claude_model
     from app.core import subagent_default
+    from app.core.claude_api_provider import is_claude_api_id
     from app.core.task_dispatch import _credential_gap
 
     text = value.strip()
@@ -236,6 +237,10 @@ def resolve(value: Any, leg: Optional[str] = None, *, runs_here: bool = True) ->
         for model, names in catalog.items():
             decoded = decode_provider_model(model)
             if explicit and (not decoded or decoded[0] != explicit[0]):
+                continue
+            if not explicit and decoded and is_claude_api_id(decoded[0]):
+                # Its names are also the Claude subscription's: a bare name is
+                # the subscription; only prov:claude-api:<model> names the key.
                 continue
             if fingerprint and any(fingerprint == "".join(_tokens(name)) for name in names):
                 candidate, error = checked(model)

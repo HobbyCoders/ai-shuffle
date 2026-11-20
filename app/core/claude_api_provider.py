@@ -30,10 +30,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import threading
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +48,11 @@ _CREATED_AT = "1970-01-01T00:00:00+00:00"
 # refresh_models_once: last try per key hash, so a missing model is not a
 # catalog read on every turn.
 _REFRESH_INTERVAL = 300.0
+# How long a concurrent caller waits for the read already in flight (the read
+# itself gives up after 12 s, claude_api_models.list_models).
+_REFRESH_WAIT = 15.0
 _refresh_tried: Dict[str, float] = {}
+_refresh_inflight: Dict[str, threading.Event] = {}
 _refresh_lock = threading.Lock()
 
 
@@ -76,19 +78,9 @@ def _claude_off() -> bool:
 
 def _base_url(key: str) -> Optional[str]:
     """Anthropic for a real key; the dev loop's fake server for its fixture key."""
-    from app.core.claude_api_models import DEV_KEY
+    from app.core.claude_api_models import DEV_KEY, dev_base_url
 
-    if key != DEV_KEY:
-        return ANTHROPIC_API_BASE_URL
-    from app.preview_run import disposable_preview_data
-
-    origin = urlsplit(os.environ.get("SHUFFLE_DEV_FAKE_AI_URL", ""))
-    if (origin.scheme == "http" and origin.hostname == "127.0.0.1" and origin.port
-            and not origin.username and not origin.password
-            and origin.path in ("", "/") and not origin.query and not origin.fragment
-            and disposable_preview_data()):
-        return f"http://127.0.0.1:{origin.port}/anthropic"
-    return None
+    return ANTHROPIC_API_BASE_URL if key != DEV_KEY else dev_base_url()
 
 
 def _default_models() -> List[Dict[str, str]]:
@@ -189,7 +181,9 @@ def refresh_models_once() -> bool:
     For a bound model the row does not list, right after a switch of key: the
     row then shows the built-in list until someone opens the key's Models tab.
     One read per key per few minutes, and never on an event loop (it blocks).
-    True when a fresh list was saved, so the caller checks the model again.
+    Single-flight: a caller that arrives while the read runs waits for it
+    (bounded) instead of finding the cooldown and refusing. True when the
+    active key now has a saved list, so the caller checks the model again.
     """
     import asyncio
     import time
@@ -204,29 +198,41 @@ def refresh_models_once() -> bool:
         key = _active_key()
     except Exception:  # noqa: BLE001 — an unreadable key is no refresh
         return False
-    if not key or _cached_models(key) is not None:
+    if not key:
         return False
+    if _cached_models(key) is not None:
+        return True  # another caller already saved it: check again
     try:
         asyncio.get_running_loop()
         return False
     except RuntimeError:
         pass
     digest = _key_hash(key)
-    now = time.monotonic()
     with _refresh_lock:
-        last = _refresh_tried.get(digest)
-        if last is not None and now - last < _REFRESH_INTERVAL:
-            return False
-        _refresh_tried[digest] = now
+        flight = _refresh_inflight.get(digest)
+        owner = flight is None
+        if owner:
+            last = _refresh_tried.get(digest)
+            if last is not None and time.monotonic() - last < _REFRESH_INTERVAL:
+                return False
+            _refresh_tried[digest] = time.monotonic()
+            flight = _refresh_inflight[digest] = threading.Event()
+    if not owner:
+        flight.wait(_REFRESH_WAIT)
+        return _cached_models(key) is not None
 
     async def read() -> List[Dict[str, str]]:
         async with httpx.AsyncClient() as client:
             return await claude_api_models.list_models(key, client=client)
 
     try:
-        models = asyncio.run(read())
-        remember_models(key, models)
-    except Exception:  # noqa: BLE001 — the caller rejects the model as before
-        logger.warning("Could not refresh the Claude API model list", exc_info=True)
-        return False
-    return bool(models)
+        # Saved only while this key is still the active one (remember_models).
+        remember_models(key, asyncio.run(read()))
+    except Exception as exc:  # noqa: BLE001 — the caller rejects the model as before
+        # CatalogError text is display-safe; never log the request (it has the key).
+        logger.warning("Could not refresh the Claude API model list: %s", exc)
+    finally:
+        with _refresh_lock:
+            _refresh_inflight.pop(digest, None)
+        flight.set()
+    return _cached_models(key) is not None
