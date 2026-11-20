@@ -89,7 +89,7 @@ async def source(wire, monkeypatch, tmp_path):
     session_runtime.register_broadcaster(None)
 
 
-async def _settle(user, *, model=MODEL, leg="native"):
+async def _settle(user, *, model=MODEL, leg="native", reply="I only checked its status."):
     row = turns.enqueue_turn(SID, "user", prompt=user, person_entered=True)
 
     async def pump(*_args, **_kwargs):
@@ -121,7 +121,7 @@ async def _settle(user, *, model=MODEL, leg="native"):
                 finally:
                     await loop.aclose()
                     await http.aclose()
-        yield {"type": "stream_delta", "delta_type": "text", "content": "I only checked its status."}
+        yield {"type": "stream_delta", "delta_type": "text", "content": reply}
         yield {"type": "done", "metadata": {"stop_reason": "end_turn"}}
 
     real_recorder = session_runtime.TurnRecorder.create_for_run
@@ -160,6 +160,40 @@ async def test_review_only_uses_a_matching_recent_native_window(source, wire, mo
         assert PRIVATE in source.call_args_list[0].args[0]
     else:
         source.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["expired", "account", "unattested"])
+async def test_review_keeps_only_the_fresh_matching_suffix(source, wire, monkeypatch, boundary):
+    row, _, _ = wire
+    account_a = row["codex_account_id"]
+    account_b = "test-account-b" if boundary == "account" else account_a
+    row["codex_account_id"] = account_b
+    await _settle("Earlier matching owner text.", reply="Earlier matching reply.")
+    row["codex_account_id"] = account_a
+    barrier = await _settle("Old owner text.", reply="Old reply text.",
+                            leg="unattested" if boundary == "unattested" else "native")
+    if boundary == "expired":
+        now = provenance.monotonic() + provenance.MAX_AGE_SECONDS + 1
+        monkeypatch.setattr(provenance, "monotonic", lambda: now)
+    expected = provenance.Binding(PROVIDER, account_a, MODEL) if boundary == "account" else None
+    assert provenance.settled_binding(SID, barrier) == expected
+    row["codex_account_id"] = account_b
+    source.reset_mock()
+
+    await _settle("First fresh owner text.", reply="First fresh reply.")
+    source.assert_not_awaited()  # One fresh turn is not an exchange.
+    await _settle(PRIVATE, reply="Second fresh reply.")
+
+    source.assert_awaited_once()
+    (prompt,) = source.await_args.args
+    assert prompt.index("First fresh reply.") < prompt.index(PRIVATE)
+    assert "Old owner text." not in prompt and "Old reply text." not in prompt
+    assert "Earlier matching" not in prompt
+
+    newest = await _settle("Unattested newest owner text.", leg="unattested")
+    assert not learning._transcript(SID, newest, learning.Scope("", MODEL, PROVIDER, account_b))
+    source.assert_awaited_once()
 
 
 @pytest.mark.asyncio

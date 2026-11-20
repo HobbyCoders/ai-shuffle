@@ -17,8 +17,8 @@ from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
 DAILY_CALLS = 6  # Rolling installation-wide ceiling on proposal + verification calls.
-BURST_PROPOSALS = 3
-DEFER_CANDIDATES = 3
+BURST_CALLS = DAILY_CALLS - 2  # Leave room for a proposal and verification after a burst.
+BURST_WINDOW_SECONDS = 8 * 3600
 BUDGET_WINDOW_SECONDS = 86_400
 RECEIPT_LIMIT = 64
 DEBOUNCE_SECONDS = 1.0
@@ -121,7 +121,7 @@ def _transcript(session_id: str, turn_id: str, scope: Scope) -> tuple[review.Exc
         cur.execute("""
             SELECT e.turn_id, e.event_type, e.payload, e.seq, t.source, t.state, t.error,
                    t.payload AS turn_payload
-            FROM session_events e JOIN turns t ON t.id=e.turn_id AND t.session_id=e.session_id
+            FROM session_events e LEFT JOIN turns t ON t.id=e.turn_id AND t.session_id=e.session_id
             WHERE e.session_id=%s AND e.event_type IN ('turn.completed','turn.aborted','turn.parked')
             ORDER BY e.seq DESC LIMIT %s
         """, (session_id, review.MAX_EXCHANGES + 1))
@@ -130,10 +130,15 @@ def _transcript(session_id: str, turn_id: str, scope: Scope) -> tuple[review.Exc
             return ()
         eligible = []
         seen = set()
+        binding = provenance.Binding(scope.provider_id, scope.account, scope.model)
         for row in terminals:
             if (row["turn_id"] in seen or row["event_type"] != "turn.completed"
                     or not _owner_turn({**row, "payload": row["turn_payload"]})
                     or not _successful(parse_jsonb(row["payload"]) or {})):
+                break
+            # An unknown or different native route ends the window. Keep only
+            # the newer matching turns and don't read text from the boundary.
+            if provenance.settled_binding(session_id, row["turn_id"]) != binding:
                 break
             seen.add(row["turn_id"])
             cur.execute("""
@@ -169,12 +174,6 @@ def _transcript(session_id: str, turn_id: str, scope: Scope) -> tuple[review.Exc
             owner = review.excerpt(user["text"])
             if not owner or not reply or owner != user["text"].strip() or review.screen_findings(owner):
                 break
-            # Both ends of every exchange must be from this exact native
-            # provider/account/model. A session route is not past execution proof.
-            if provenance.settled_binding(session_id, row["turn_id"]) != provenance.Binding(
-                scope.provider_id, scope.account, scope.model
-            ):
-                return ()
             eligible.append((owner, reply))
     eligible.reverse()
     return tuple(review.Exchange(previous_reply=previous[1], owner=current[0])
@@ -183,27 +182,30 @@ def _transcript(session_id: str, turn_id: str, scope: Scope) -> tuple[review.Exc
 
 def _claim(session_id: str, turn_id: str, prompt: str, *, verify: bool = False) -> bool:
     """Charge each model call durably. Space later proposals without classifying text."""
-    now = int(time.time())
-    updated_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
     turn_key = sha256(f"{session_id}:{turn_id}".encode()).hexdigest()
     prompt_key = sha256(prompt.encode()).hexdigest()
     with get_db() as conn:
         cur = conn.cursor()
-        cur.execute("""INSERT INTO system_settings(key,value,updated_at,revision)
-                       VALUES (%s,%s,%s,%s) ON CONFLICT(key) DO NOTHING""",
-                    (_STATE_KEY, "{}", updated_at, str(uuid4())))
+        cur.execute("""INSERT INTO system_settings(key,value,revision)
+                       VALUES (%s,%s,%s) ON CONFLICT(key) DO NOTHING""",
+                    (_STATE_KEY, "{}", str(uuid4())))
         cur.execute("SELECT value FROM system_settings WHERE key=%s FOR UPDATE", (_STATE_KEY,))
         state = json.loads(cur.fetchone()["value"])
+        now = time.time()
+        updated_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
         claims = state.get("claims", [])
         cutoff = now - BUDGET_WINDOW_SECONDS
         active = [entry for entry in claims if entry[0] > cutoff]
-        # Receipts store proposal time and, if charged, verification time.
-        # Old three-field receipts already represent one call.
-        used = len(active) + sum(len(entry) == 4 and entry[3] > cutoff for entry in claims)
+        # Count each charge by its own timestamp in both windows, even when
+        # its proposal has already expired. Keep the existing durable receipts.
+        call_times = [ts for proposal, _, _, *verification in claims for ts in (proposal, *verification)]
+        used = sum(ts > cutoff for ts in call_times)
+        burst_used = sum(ts > now - BURST_WINDOW_SECONDS for ts in call_times)
         admitted = True
         if verify:
             receipt = next((entry for entry in active if entry[1:3] == [turn_key, prompt_key]), None)
-            if receipt is None or len(receipt) != 3 or used >= DAILY_CALLS:
+            if (receipt is None or len(receipt) != 3
+                    or used >= DAILY_CALLS or burst_used >= BURST_CALLS):
                 return False
             receipt.append(now)
         else:
@@ -213,14 +215,11 @@ def _claim(session_id: str, turn_id: str, prompt: str, *, verify: bool = False) 
             deferred = state.get("deferred", [])
             if any(turn == turn_key or text == prompt_key for _, turn, text, *_ in (*claims, *deferred)):
                 return False
-            remaining = state.get("defer_remaining", 0) if len(active) >= BURST_PROPOSALS else 0
-            if remaining:
+            if burst_used + 2 > BURST_CALLS:
                 admitted = False
                 state["deferred"] = (deferred + [[now, turn_key, prompt_key]])[-RECEIPT_LIMIT:]
-                state["defer_remaining"] = remaining - 1
             else:
                 state["claims"] = (claims + [[now, turn_key, prompt_key]])[-RECEIPT_LIMIT:]
-                state["defer_remaining"] = DEFER_CANDIDATES if len(active) + 1 >= BURST_PROPOSALS else 0
         cur.execute("UPDATE system_settings SET value=%s, updated_at=%s, revision=%s WHERE key=%s",
                     (json.dumps(state), updated_at, str(uuid4()), _STATE_KEY))
     return admitted

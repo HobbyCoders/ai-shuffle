@@ -32,7 +32,7 @@ For eligible owner chats in Code mode, AI Shuffle can learn how you want it to r
 
 To enable this for a ChatGPT chat, choose a Text Generation model in **Settings → Models → Text tasks** using the same ChatGPT provider and account as the chat. With no matching setup, the learner skips that chat. Automatic learning also requires Fluid's continual learning to be on.
 
-The worker uses at most six review calls in a rolling 24 hours, including the separate verification calls. When three initial proposals have been reviewed in that window, the worker skips the next three distinct eligible candidates, reviews the fourth if there is room for verification, and repeats. Skipped candidates aren't queued for later. This leaves room after a run of routine replies but can still miss a correction. It does not look for particular words or signs of frustration.
+The worker uses at most six review calls in a rolling 24 hours and at most four in a rolling eight hours. Both limits count proposals and verifications. A proposal starts only when both limits have room for two calls. Eight hours after a burst, there's room for a fresh proposal and verification if the 24-hour budget still has room for both calls. Skipped candidates aren't queued, so pacing can still miss a correction. The worker doesn't look for particular words or signs of frustration when deciding when to review.
 
 Choose **Save guidance** to keep an edit, or **Delete guidance** and confirm to remove a block. Automatic learning can’t overwrite your edit or restore a deleted block. These changes affect future prompts, not past chats.
 

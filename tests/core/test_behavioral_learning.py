@@ -1,6 +1,7 @@
 """Actual runtime/recorder settlement into semantic review and prompt assembly."""
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -127,8 +128,10 @@ async def test_status_stop_anger_one_off_and_no_op(env, reply):
 
 
 @pytest.mark.asyncio
-async def test_independent_recurrence_and_non_pr_correction(env):
+async def test_independent_recurrence_and_non_pr_correction(env, monkeypatch):
     fake, _ = env
+    now = 100_000
+    monkeypatch.setattr(learning, "time", SimpleNamespace(time=lambda: now))
     session()
     await turn("Can you run the first check?", "It failed. I stopped here.")
     fake.return_value = decision([(1, INFERENCE_1), (1, INFERENCE_1)])
@@ -137,10 +140,13 @@ async def test_independent_recurrence_and_non_pr_correction(env):
     fake.side_effect = [decision([(1, INFERENCE_1), (2, INFERENCE_2)]), '{"replace":null}']
     await turn(INFERENCE_2, "I can fix that locally.")
     assert "routine check blocks a PR" in saved().content
-    fake.side_effect = [decision(FORMAT, exchange=3, condition="handing off test results",
+    now += 8 * 3600
+    session("handoff")
+    await turn("Hand off the test results.", "The check failed.", sid="handoff")
+    fake.side_effect = [decision(FORMAT, condition="handing off test results",
                                  preference="leading with the failed check and exact local rerun command"),
                         '{"replace":null}']
-    await turn(FORMAT, "Noted.")
+    await turn(FORMAT, "Noted.", sid="handoff")
     assert "leading with the failed check" in later_prompt()
     assert saved().content.count("- When ") == 2
 
@@ -190,8 +196,10 @@ async def test_other_account_route_never_sends(env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_manual_edit_wins_during_review_then_delete_stays_deleted(env):
+async def test_manual_edit_wins_during_review_then_delete_stays_deleted(env, monkeypatch):
     fake, _ = env
+    now = 100_000
+    monkeypatch.setattr(learning, "time", SimpleNamespace(time=lambda: now))
     session()
     await turn("Check the PR", "The check failed. Should I investigate?")
     fake.side_effect = [decision(BLOCKER), '{"replace":null}']
@@ -216,7 +224,11 @@ async def test_manual_edit_wins_during_review_then_delete_stays_deleted(env):
     assert "Report the failing item first." in later_prompt()
     assert "leading with the failed check" not in saved().content
     guidance_storage.delete_saved_guidance(owner.id, owner.revision)
-    await turn("For future handoffs, report the shortest rerun command.", "Understood.")
+    # Check the tombstone with budget available, not while pacing blocks review.
+    now += 8 * 3600
+    session("post-delete-source")
+    await turn("Gather the test results.", "The check failed.", sid="post-delete-source")
+    await turn("For future handoffs, report the shortest rerun command.", "Understood.", sid="post-delete-source")
     assert fake.await_count == 4
     assert saved() is None and review.HEADER not in later_prompt("after-delete")
 
@@ -285,13 +297,48 @@ async def test_same_session_pending_notifications_coalesce(env, monkeypatch):
 
 def test_rolling_budget_and_prompt_byte_caps(mock_db, monkeypatch):
     assert review.review_prompt((review.Exchange("界" * 480, "界" * 480),) * 3, ()) is None
-    monkeypatch.setattr(learning.time, "time", lambda: 100_000)
-    for i in range(learning.DAILY_CALLS // 2):
-        assert learning._claim("s", str(i), f"prompt-{i}")
-        assert learning._claim("s", str(i), f"prompt-{i}", verify=True)
-        assert not learning._claim("s", str(i), f"prompt-{i}", verify=True)
-    assert not learning._claim("s", "overflow", "new prompt")
-    monkeypatch.setattr(learning.time, "time", lambda: 186_401)
+    start = now = 100_000
+    monkeypatch.setattr(learning, "time", SimpleNamespace(time=lambda: now))
+    assert learning._claim("s", "0", "prompt-0")
+    now += 1
+    assert learning._claim("s", "0", "prompt-0", verify=True)
+    assert not learning._claim("s", "0", "prompt-0", verify=True)
+    assert learning._claim("s", "1", "prompt-1")
+    assert learning._claim("s", "1", "prompt-1", verify=True)
+
+    now = start + 8 * 3600
+    assert not learning._claim("s", "paced", "paced prompt")  # Only the first proposal aged out.
+    now += 1
+    assert learning._claim("s", "2", "prompt-2")
+    assert learning._claim("s", "2", "prompt-2", verify=True)
+    assert not learning._claim("other session", "overflow", "new prompt")
+
+    now = start + 86_400
+    assert not learning._claim("other session", "overflow", "new prompt")  # Five calls still count.
+    now += 1
     assert not learning._claim("s", "0", "other prompt")
     assert not learning._claim("s", "other turn", "prompt-1")
-    assert learning._claim("s", "overflow", "new prompt")
+    assert not learning._claim("s", "paced", "paced prompt")  # A skipped candidate isn't replayed.
+    assert learning._claim("other session", "overflow", "new prompt")
+
+
+@pytest.mark.parametrize("ceiling", ["burst", "rolling"])
+def test_competing_verifications_share_durable_call_headroom(mock_db, monkeypatch, ceiling):
+    now = 100_000
+    monkeypatch.setattr(learning, "time", SimpleNamespace(time=lambda: now))
+    sessions = ("a", "b", "c")
+    if ceiling == "rolling":
+        assert learning._claim("s", "old", "old prompt")
+        assert learning._claim("s", "old", "old prompt", verify=True)
+        assert learning._claim("s", "null", "null prompt")
+        now += 8 * 3600
+        sessions = ("a", "b")
+
+    # Interleave proposals across sessions; only one verifier can claim the
+    # final slot, under the eight-hour ceiling or the 24-hour ceiling alone.
+    for sid in sessions:
+        assert learning._claim(sid, "turn", f"prompt from {sid}")
+    assert learning._claim("a", "turn", "prompt from a", verify=True)
+    for sid in sessions:
+        assert not learning._claim(sid, "turn", f"prompt from {sid}", verify=True)
+    assert not learning._claim("s", "overflow", "new prompt")

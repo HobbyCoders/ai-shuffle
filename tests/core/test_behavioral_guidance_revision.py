@@ -1,5 +1,6 @@
 """Regression coverage for automatic behavioral review decisions and their budget."""
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -117,13 +118,25 @@ async def test_disagreement_about_a_conflicting_rule_cannot_stack_it(env):
 
 
 @pytest.mark.asyncio
-async def test_routine_nulls_do_not_starve_seventh_candidate(env):
+async def test_morning_nulls_leave_room_for_a_later_verified_correction(env, monkeypatch):
     fake, _ = env
+    now = 100_000
+    monkeypatch.setattr(learning, "time", SimpleNamespace(time=lambda: now))
     session()
     await turn("Check the PR.", "The check failed. Should I investigate?")
-    for topic in ("logs", "tests", "first check", "second check", "report", "handoff"):
-        await turn(f"What is the status of the {topic}?", "The PR check failed. I have not investigated.")
-    fake.side_effect = [decision(BLOCKER, exchange=3), '{"replace":null}']
-    await turn(BLOCKER, "I will inspect the failing check locally.")
-    assert saved() and "fixing the issue locally" in saved().content
-    assert fake.await_count == 5  # Three samples, then proposal and verification for #7.
+    for i in range(1, 12):
+        await turn(f"What is the status of check {i}?", "The check failed. I have not investigated.")
+    morning_calls = fake.await_count
+    assert saved() is None
+
+    now += 8 * 3600
+    session("afternoon")  # Same installation and scope, fresh transcript.
+    await turn("Run the PR check again.", "The check still failed. Should I investigate?", sid="afternoon")
+    fake.side_effect = [decision(BLOCKER), '{"replace":null}']
+    await turn(BLOCKER, "I will inspect the failing check locally.", sid="afternoon")
+
+    assert saved() and "fixing the issue locally" in saved().content, (
+        f"morning calls: {morning_calls}; later calls: {fake.await_count - morning_calls}"
+    )
+    assert morning_calls == 3
+    assert fake.await_count == morning_calls + 2
