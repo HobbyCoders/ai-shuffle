@@ -607,14 +607,16 @@ def claude_api_is_default() -> bool:
 
 
 def _claude_default(
-    model: str, probe: bool, *, servable_only: bool = False,
+    model: str, probe: bool, *, servable_only: bool = False, allow_fallback: bool = True,
 ) -> Optional[Tuple[Optional[str], str]]:
     """Claude's place in the default order, or None when Claude cannot run.
 
     A worker whose owner chose API key mode takes the saved key as its Claude
     default, bound explicitly to the Claude API provider so the picker shows
     it. Otherwise (or once that key is gone) the unbound alias, which always
-    means the Claude subscription on the CLI.
+    means the Claude subscription on the CLI. When the preferred subscription
+    model is disabled for pickers, pick the first enabled one (when
+    ``allow_fallback`` is True) or None so another usable provider can win.
     """
     from app.core import claude_auth_mode
 
@@ -623,7 +625,17 @@ def _claude_default(
         if picked:
             return picked
     if _claude_ready_for_default(probe):
-        return None, model
+        from app.core.model_registry import _disabled_subscription_models, selectable_model_values
+
+        disabled = _disabled_subscription_models()
+        if not disabled or model not in disabled:
+            return None, model
+        if not allow_fallback:
+            return None
+        enabled = selectable_model_values()
+        if enabled:
+            return None, enabled[0]
+        return None
     return None
 
 
@@ -744,7 +756,7 @@ def most_used_model(
             if turns < MOST_USED_MIN_TURNS:
                 break
             if provider_id is None:
-                picked = _claude_default(model, probe, servable_only=servable_only)
+                picked = _claude_default(model, probe, servable_only=servable_only, allow_fallback=False)
                 if picked:
                     return picked
                 continue

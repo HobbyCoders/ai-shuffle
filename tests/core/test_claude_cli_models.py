@@ -529,3 +529,93 @@ def test_a_preview_never_refreshes_the_cli_list():
     for disposable in (True, False):
         with patch("app.preview_run.disposable_preview_data", return_value=disposable):
             assert _preview_may_change_dev_data(refresh) is False
+
+
+def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(cli, mock_db, monkeypatch):
+    """Disabled subscription models leave pickers/enums/defaults, while metadata helpers still resolve them."""
+    from fastapi import Response
+    from starlette.requests import Request
+
+    from app.api.auth import _preview_may_change_dev_data
+    from app.api.model_registry import (
+        ToggleClaudeSubscriptionModelRequest,
+        list_claude_subscription_models,
+        toggle_claude_subscription_model,
+    )
+    from app.core import credential_gate
+    from app.db import database
+    from app.mcp import config_subagents
+
+    # Default: all models enabled.
+    full = cm.subscription_catalog_rows()
+    assert full["captured"] is True
+    assert all(row["enabled"] is True for row in full["models"])
+
+    # Disable sonnet (default alias) and claude-mythos-5-1 (versioned).
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
+    assert cm.set_model_enabled("sonnet", False) == ["sonnet"]
+    assert cm.set_model_enabled("sonnet", False) == ["sonnet"]  # no-op suppressed
+    assert len(writes) == 1
+    assert cm.set_model_enabled("claude-mythos-5-1", False) == ["sonnet", "claude-mythos-5-1"]
+    assert len(writes) == 2
+
+    # Pickers & selectable enums hide disabled models.
+    payload = m.registry_payload()
+    offered = [item["value"] for item in payload["models"]]
+    assert "sonnet" not in offered
+    assert "claude-mythos-5-1" not in offered
+    assert "haiku" in offered and "opus" in offered and "claude-opus-4-6" in offered
+    selectable = m.selectable_model_values()
+    assert "sonnet" not in selectable and "claude-mythos-5-1" not in selectable
+
+    # Metadata/resolution helpers still work on disabled models for existing chats.
+    assert m.get_model("sonnet").label == "Sonnet 5.5"
+    assert m.get_model("claude-mythos-5-1").label == "Mythos 5.1"
+    assert m.get_model_family("claude-mythos-5-1") == "mythos"
+    assert m.get_context_window("claude-mythos-5-1") == 1_000_000
+    assert effort_capabilities("claude-mythos-5-1", route="delegated")["effort_levels"] == _ALL
+    assert m.normalize_model("claude-sonnet-4-6") == "sonnet"
+    assert m.keeps_own_id("claude-mythos-5-1") is True
+    assert m.native_choice("claude-mythos-5-1") == "claude-mythos-5-1"
+    assert m.delegated_model_aliases()["sonnet"] == "claude-sonnet-5-5"
+
+    # Default model falls back to the first enabled model when sonnet is disabled.
+    monkeypatch.setattr(credential_gate, "_claude_ready_for_default", lambda probe: True)
+    assert credential_gate._claude_default("sonnet", probe=False) == (None, "haiku")
+
+    # Unfiltered Settings endpoint still lists every model with its enabled flag.
+    import asyncio
+
+    sub_list = asyncio.run(list_claude_subscription_models(Response(), "admin"))
+    by_id = {row["id"]: row for row in sub_list["models"]}
+    assert by_id["sonnet"]["enabled"] is False
+    assert by_id["claude-mythos-5-1"]["enabled"] is False
+    assert by_id["haiku"]["enabled"] is True
+
+    # Disable EVERY subscription model -> subagent tool schema omits empty enum & _claude_default returns None.
+    for row in sub_list["models"]:
+        asyncio.run(toggle_claude_subscription_model(
+            ToggleClaudeSubscriptionModelRequest(model=row["id"], enabled=False), "admin"
+        ))
+    assert m.selectable_model_values() == []
+    assert m.registry_payload()["models"] == []
+    assert credential_gate._claude_default("sonnet", probe=False) is None
+    tools = {t.name: t for t in config_subagents._create_subagent_tools(True)}
+    for name in ("createSubagent", "updateSubagent"):
+        assert "enum" not in tools[name].input_schema["properties"]["model"]
+
+    # Cloud mode is unaffected by subscription disabled models.
+    cli["mode"] = "cloud"
+    assert [item["value"] for item in m.registry_payload()["models"]] == ["haiku", "sonnet", "opus", "fable"]
+
+    # Disposable preview allows curation PUTs (never on real installs).
+    from unittest.mock import patch
+
+    for path in ("/api/v1/models/claude/subscription/models", "/api/v1/models/claude/api-key/acct-1/models"):
+        req = Request({"type": "http", "method": "PUT", "path": path, "headers": []})
+        with patch("app.preview_run.disposable_preview_data", return_value=True):
+            assert _preview_may_change_dev_data(req) is True
+        with patch("app.preview_run.disposable_preview_data", return_value=False):
+            assert _preview_may_change_dev_data(req) is False

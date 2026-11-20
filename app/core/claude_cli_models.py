@@ -54,6 +54,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _FILE_NAME = "claude-cli-models.json"
+DISABLED_MODELS_SETTING = "claude_subscription_disabled_models"
 _HANDSHAKE_TIMEOUT_SECONDS = 30.0
 # The CLI's "Default (recommended)" entry duplicates one of the aliases.
 _SKIPPED_VALUES = frozenset({"default"})
@@ -61,6 +62,7 @@ ALIASES = ("haiku", "sonnet", "opus", "fable")
 
 _lock = threading.Lock()
 _refresh_lock = threading.Lock()
+_disabled_lock = threading.Lock()
 _snapshot: Optional[Dict[str, Any]] = None
 _loaded = False
 
@@ -301,6 +303,87 @@ def versioned_entries() -> List[Dict[str, Any]]:
     if not snap:
         return []
     return [m for m in snap["models"] if m.get("value") not in ALIASES]
+
+
+# ─── Disabled-model curation (opt-out) ──────────────────────────────────────
+
+
+def disabled_models() -> List[str]:
+    """Claude subscription model ids hidden from pickers (default: none)."""
+    try:
+        from app.db import database
+
+        raw = database.get_system_setting(DISABLED_MODELS_SETTING)
+        parsed = json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — early boot or unreadable DB offers all models
+        return []
+    if not isinstance(parsed, list):
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in parsed:
+        if isinstance(item, str):
+            value = item.strip()
+            if value and len(value) <= 300 and value not in seen:
+                seen.add(value)
+                out.append(value)
+    return out
+
+
+def set_model_enabled(model_id: str, enabled: bool) -> List[str]:
+    """Enable or disable a single Claude subscription model for pickers.
+
+    Suppresses DB writes when the model is already in the requested state.
+    Returns the updated list of disabled model ids.
+    """
+    value = model_id.strip() if isinstance(model_id, str) else ""
+    if not value or len(value) > 300:
+        raise ValueError("Model id must be a non-empty string of at most 300 characters.")
+    from app.db import database
+
+    with _disabled_lock:
+        current = disabled_models()
+        if enabled:
+            updated = [m for m in current if m != value]
+        else:
+            updated = current if value in current else [*current, value]
+        if updated == current:
+            return current
+        database.set_system_setting(DISABLED_MODELS_SETTING, json.dumps(updated))
+        return updated
+
+
+def subscription_catalog_rows() -> Dict[str, Any]:
+    """Full (unfiltered) subscription model list for Settings > Claude > Models."""
+    from app.core.model_registry import MODELS, get_model
+
+    with pinned():
+        snapshot = catalog()
+        listed = {m["value"] for m in snapshot["models"]} if snapshot else set()
+        disabled = set(disabled_models())
+        rows: List[Dict[str, Any]] = []
+        for m in MODELS:
+            option = (get_model(m.value) if m.value in listed else None) or m
+            rows.append({
+                "id": m.value,
+                "label": option.label,
+                "enabled": m.value not in disabled,
+            })
+        for item in versioned_entries():
+            option = get_model(item["value"])
+            if option is None:
+                continue
+            rows.append({
+                "id": item["value"],
+                "label": option.label,
+                "enabled": item["value"] not in disabled,
+            })
+        return {
+            "models": rows,
+            "captured": snapshot is not None,
+            "cli_version": snapshot.get("cli_version") if snapshot else None,
+            "captured_at": snapshot.get("captured_at") if snapshot else None,
+        }
 
 
 # ─── Capture ────────────────────────────────────────────────────────────────
