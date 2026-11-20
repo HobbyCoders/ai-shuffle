@@ -1,7 +1,58 @@
 """Guards for the actual-image acceptance harness (Docker runs separately in CI)."""
 import json
+import sys
 
+import pytest
+import yaml
+
+from scripts import verify_container_postgres
 from scripts.verify_container_postgres import Check
+
+GROUPS = ["fresh_persistence_and_restore", "updater_lifecycle", "identity_and_failure_safety",
+          "removed_environment_regression"]
+
+
+def _phases_run(monkeypatch, tmp_path, *argv):
+    ran = []
+    for name in GROUPS:
+        monkeypatch.setattr(Check, name, lambda self, name=name: ran.append(name))
+    monkeypatch.setattr(Check, "docker", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(Check, "cleanup", lambda self: None)
+    monkeypatch.setattr(sys, "argv", ["verify", "--image", "candidate", "--artifacts", str(tmp_path), *argv])
+    verify_container_postgres.main()
+    return ran
+
+
+@pytest.mark.parametrize("argv,expected", [
+    ((), GROUPS),  # the release workflows: every group, in the original order
+    (("--phases", "all"), GROUPS),
+    (("--phases", "lifecycle"), [GROUPS[0], GROUPS[2], GROUPS[3]]),
+    (("--phases", "updater"), [GROUPS[1]]),
+])
+def test_phases_select_whole_groups(monkeypatch, tmp_path, argv, expected):
+    assert _phases_run(monkeypatch, tmp_path, *argv) == expected
+
+
+def test_pull_request_lanes_together_run_every_container_check():
+    from scripts.verify_container_postgres import ROOT
+
+    job = yaml.safe_load((ROOT / ".github/workflows/container-postgres.yml").read_text())["jobs"]["container-postgres"]
+    lanes = job["strategy"]["matrix"]["lane"]
+    assert lanes == ["lifecycle", "updater", "install"]
+    commands = {"verify_container_postgres.py": None, "verify_agent_isolation.py": None,
+                "verify_buyer_compose.py": None, "docker compose config --quiet": None}
+    for step in job["steps"]:
+        for command in commands:
+            if command in step.get("run", ""):
+                commands[command] = step
+    verify = commands.pop("verify_container_postgres.py")
+    # lifecycle and updater pass their own name to --phases; together they are "all".
+    assert verify["if"] == "matrix.lane != 'install'"
+    assert '--phases "$LANE"' in verify["run"] and verify["env"] == {"LANE": "${{ matrix.lane }}"}
+    for step in commands.values():
+        assert step["if"] == "matrix.lane == 'install'"
+    # The fail-fast default would cancel the other groups' evidence on one failure.
+    assert job["strategy"]["fail-fast"] is False
 
 
 def test_backup_helper_uses_a_real_isolated_compose_service(monkeypatch, tmp_path):

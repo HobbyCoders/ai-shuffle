@@ -69,7 +69,15 @@ draft skips. Which of them a run starts depends on the files the change touches
   `Real browser workspace` aggregate requires smoke and all three cases.
 - `container-postgres.yml`: candidate image lifecycle, isolation and install checks,
   without publishing or signing. This is broader than a small policy check but
-  covers the production container path without requiring secrets.
+  covers the production container path without requiring secrets. Three groups
+  run at once, each on its own build of the image from the shared BuildKit
+  cache: `Container checks (lifecycle)` (boot, UI, restart, backup and restore,
+  PostgreSQL failure, identity and inherited environment), `Container checks
+  (updater)` (the synthetic signed source update and its controlled restart)
+  and `Container checks (install)` (Compose configuration, agent isolation and
+  the buyer compose file). The gate requires all three. Pull requests read
+  main's cache and do not write it; main and the daily run write it. The
+  release workflows still run every group in one job.
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
   and disposable signing are test-only; release keep rules are unchanged.
