@@ -147,7 +147,8 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		mkdirSync(resources);
 		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
 		const powershell = script => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-		const openExclusive = `[IO.File]::Open('${guard.replaceAll("'", "''")}', [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)`;
+		const psPath = file => `'${file.replaceAll("'", "''")}'`;
+		const openExclusive = `[IO.File]::Open(${psPath(guard)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)`;
 		let reads = 0;
 		let writes = 0;
 		const control = loginItemControl({
@@ -165,11 +166,17 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		assert.deepEqual(control.set(false), { state: 'disabled', failed: false });
 		assert.deepEqual([writes, reads], [1, 1]);
 
-		// Keep the native handle open until the actual JS caller has tested it.
-		// The same controller/host exercises both directions on the same file.
-		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::Error.WriteLine('exe=' + (Get-Process -Id $PID).Path + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' stdinRedirected=' + [Console]::IsInputRedirected); [Console]::WriteLine('held'); $reply = [Console]::ReadLine(); [Console]::Error.WriteLine('consoleEof=' + ($null -eq $reply)) } finally { $lock.Dispose() }`), {
-			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000
-		});
+		// Redirected PowerShell stdin can reach EOF in the Windows test shard.
+		// Acknowledge the lock on stdout and wait for an explicit release file.
+		const release = path.join(dir, 'release');
+		const holder = spawn('powershell.exe', powershell(`
+			$ErrorActionPreference = 'Stop'
+			$lock = ${openExclusive}
+			try {
+				[Console]::WriteLine('held')
+				while (-not [IO.File]::Exists(${psPath(release)})) { Start-Sleep -Milliseconds 25 }
+			} finally { $lock.Dispose() }
+		`), { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 });
 		const closed = new Promise(resolve => {
 			holder.once('error', error => resolve({ error }));
 			holder.once('close', (status, signal) => resolve({ status, signal }));
@@ -185,9 +192,8 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
 		} finally {
 			lines.close();
-			holder.stdin.end();
+			writeFileSync(release, '');
 			const { error, status, signal } = await closed;
-			console.log(`startup guard diagnostics: Node ${process.version} ${process.arch}, NODE_OPTIONS present=${Boolean(process.env.NODE_OPTIONS)}, NODE_TEST_CONTEXT=${process.env.NODE_TEST_CONTEXT}, holder exit=${status}/${signal}, ${stderr.trim()}`);
 			assert.ifError(error);
 			assert.equal(status, 0, stderr || signal);
 		}
