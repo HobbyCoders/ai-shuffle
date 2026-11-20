@@ -32,7 +32,7 @@ it('bounds rendered siblings, reaches the final page, and keeps it on a same-sou
 	expect(onSelect).toHaveBeenCalledWith('/root/500');
 	await fireEvent.click(screen.getByRole('button', { name: 'Show previous folders' }));
 	await screen.findByText('folder 200');
-});
+}, 15_000); // 501 jsdom rows and three page clicks: 3-4 s locally, past vitest's 5 s default on CI runners (#1868).
 
 it('uses bounded pages at the root and still surfaces browse failures', async () => {
 	const roots = Array.from({ length: 250 }, (_, i) => entry(`drive ${i}`, `/drive-${i}`));
