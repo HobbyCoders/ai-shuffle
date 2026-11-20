@@ -240,7 +240,8 @@ ROOT_NAMES = ("ROOT", "REPO", "REPO_ROOT", "root")
 NOT_READ = {
     # android/ci/test-ci-webview.py opens two workflows by name; both are listed.
     ("android", ".github/workflows/x"),
-    # test_delegated_toolmix.py classifies a shell command naming it; nothing opens it.
+    # test_delegated_toolmix.py classifies a shell command naming it; nothing opens
+    # it, so the fluid scan does not follow it into the scripts it names in turn.
     ("fluid", "scripts/ci/test-cost-policy.py"),
 }
 
@@ -266,9 +267,24 @@ def package_of(path, level):
     return None
 
 
-def loaded_by(path):
-    """(modules a Python file imports, repository paths it spells out)."""
+def is_main_block(node):
+    """``if __name__ == "__main__":``, which an import or runpy.run_path never runs."""
+    test = node.test if isinstance(node, ast.If) else None
+    return (isinstance(test, ast.Compare) and getattr(test.left, "id", "") == "__name__"
+            and any(getattr(item, "value", None) == "__main__" for item in test.comparators))
+
+
+def parsed(path, main=True):
+    """A Python file's syntax tree; without its ``__main__`` block when ``main`` is False."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    if not main:
+        tree.body = [node for node in tree.body if not is_main_block(node)]
+    return tree
+
+
+def loaded_by(path, main=True):
+    """(modules a Python file imports, repository paths it spells out)."""
+    tree = parsed(path, main)
     modules, paths, inner = set(), set(), set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -323,14 +339,14 @@ def python_named(area):
     return files
 
 
-def imported_by(files):
+def imported_by(files, main=True):
     seen, waiting = set(), list(files)
     while waiting:
         path = waiting.pop()
         if path in seen:
             continue
         seen.add(path)
-        for module in loaded_by(path)[0]:
+        for module in loaded_by(path, main)[0]:
             found = module_file(module, path)
             if found:
                 waiting.append(found)
@@ -352,31 +368,70 @@ def test_an_area_reads_every_path_its_scripts_spell_out(area):
     assert sorted(path for path in named if not plan.reads(area, path) and (area, path) not in NOT_READ) == []
 
 
+def scripts_named_by(path):
+    """The scripts/ files a Python file names by a literal path, outside its ``__main__`` block."""
+    found = set()
+    for node in ast.walk(parsed(path, main=False)):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            # Path(__file__).parents[3] / "scripts" / "devloop" / "fake_wire.py"
+            parts, current = [], node
+            while (isinstance(current, ast.BinOp) and isinstance(current.op, ast.Div)
+                   and isinstance(current.right, ast.Constant) and isinstance(current.right.value, str)):
+                parts.append(current.right.value)
+                current = current.left
+            text = "/".join(reversed(parts))
+        else:
+            continue
+        if text.startswith("scripts/") and ".." not in text and (ROOT / text).is_file():
+            found.add(text)
+    return found
+
+
 def files_fluid_tests_load():
     """Every module the fluid suite imports, and the scripts/ files it opens by path.
 
     Its workflow names a folder of tests, which the scans above do not open, and
-    its fixtures load scripts by a path built from ``__file__``.
+    its fixtures load scripts by a path built from ``__file__``. A script found by
+    its path is followed in turn, into its imports and the scripts it names, until
+    nothing new turns up. The suite loads such scripts with runpy.run_path or
+    exec_module, which never run an ``if __name__ == "__main__":`` block, so the
+    imports there are left out (a test that ran a script as a subprocess would
+    need them).
     """
-    files = {ROOT / "conftest.py", ROOT / "fluid" / "conftest.py", *(ROOT / "fluid" / "tests").rglob("*.py")}
-    found = imported_by(files)
-    for path in files:
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                text = node.value
-            elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-                # Path(__file__).parents[3] / "scripts" / "devloop" / "fake_wire.py"
-                parts, current = [], node
-                while (isinstance(current, ast.BinOp) and isinstance(current.op, ast.Div)
-                       and isinstance(current.right, ast.Constant) and isinstance(current.right.value, str)):
-                    parts.append(current.right.value)
-                    current = current.left
-                text = "/".join(reversed(parts))
-            else:
-                continue
-            if text.startswith("scripts/") and ".." not in text and (ROOT / text).is_file():
-                found.add(text)
+    starts = {ROOT / "conftest.py", ROOT / "fluid" / "conftest.py", *(ROOT / "fluid" / "tests").rglob("*.py")}
+    found, named_from, waiting = set(), set(), {path for path in starts if path.is_file()}
+    while waiting:
+        found |= imported_by(waiting, main=False)
+        scripts = {ROOT / name for name in found if name.startswith("scripts/") and name.endswith(".py")}
+        unread = (waiting | scripts) - named_from
+        named_from |= unread
+        named = {name for name in set().union(*map(scripts_named_by, unread))
+                 if ("fluid", name) not in NOT_READ} - found
+        found |= named
+        waiting = {ROOT / name for name in named if name.endswith(".py")}
     return found
+
+
+def test_the_fluid_scan_follows_what_a_script_loaded_by_path_loads(tmp_path, monkeypatch):
+    for name, text in {
+        "fluid/tests/unit/test_x.py": 'import runpy\nrunpy.run_path(str(ROOT / "scripts/a.py"))\n',
+        "scripts/__init__.py": "",
+        # A module-level import runs under run_path; the __main__ block does not.
+        "scripts/a.py": ('from scripts import b\nNAMED = "scripts/c.sh"\n'
+                         'if __name__ == "__main__":\n    from scripts import main_only\n'),
+        "scripts/b.py": 'import importlib\nimportlib.import_module("x")\nNEXT = "scripts/d.py"\n',
+        "scripts/c.sh": "", "scripts/d.py": "from scripts import e\n", "scripts/e.py": "",
+        "scripts/main_only.py": "", "scripts/unused.py": "",
+    }.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    monkeypatch.setitem(globals(), "ROOT", tmp_path)
+    monkeypatch.setitem(globals(), "PACKAGE_ROOTS", (tmp_path, tmp_path / "fluid"))
+    found = {name for name in files_fluid_tests_load() if name.startswith("scripts/")}
+    assert found == {"scripts/__init__.py", "scripts/a.py", "scripts/b.py", "scripts/c.sh",
+                     "scripts/d.py", "scripts/e.py"}
 
 
 def test_the_fluid_area_reads_every_file_its_tests_load():
@@ -384,8 +439,7 @@ def test_the_fluid_area_reads_every_file_its_tests_load():
     loaded = files_fluid_tests_load()
     assert {"scripts/ci/test_scratch.py", "scripts/devloop/fake_wire.py",
             "scripts/ci/fetch_claude_fixture.py", "scripts/measure_learner_yield.py"} <= loaded
-    assert sorted(path for path in loaded
-                  if not plan.reads("fluid", path) and ("fluid", path) not in NOT_READ) == []
+    assert sorted(path for path in loaded if not plan.reads("fluid", path)) == []
 
 
 def test_the_import_scan_follows_the_ways_a_test_loads_a_module():

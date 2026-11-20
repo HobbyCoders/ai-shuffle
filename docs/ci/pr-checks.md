@@ -239,7 +239,8 @@ The file lists are what makes a skip safe, and they have limits:
   deep, test helpers and pytest plugins included), or that such a script
   spells out itself. For `fluid`, whose workflow names a folder of tests, it
   also scans every file under `fluid/tests/` for the scripts they import or
-  open by a literal path. It cannot see a path a program builds at run time or a
+  open by a literal path, and follows those scripts in turn (leaving out their
+  `__main__` blocks, which loading a script by path never runs). It cannot see a path a program builds at run time or a
   file read by JavaScript or a shell script; the daily run checks everything
   on main within a day. When a test starts reading another part of the
   repository, add that part to its area in `scripts/ci/plan.py`.
