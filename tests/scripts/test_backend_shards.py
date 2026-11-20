@@ -13,6 +13,11 @@ import yaml
 from scripts.ci import backend_shards as bs
 
 ROOT = Path(__file__).resolve().parents[2]
+# Tests that start nested two-worker pytest runs. The policy step runs
+# tests/scripts with four workers and --timeout=120; with nested workers on the
+# same four CPUs, eight runs took 100s on a passing run and over 120s on a
+# failing one. Each nested run keeps its own 60s hang guard.
+NESTED_XDIST_TIMEOUT = 300
 
 
 def test_hashed_manifest_keeps_exact_weights_and_unknown_nodes():
@@ -100,6 +105,7 @@ def test_partition_rejects_empty_or_duplicate_collection(nodes):
         bs.partition(nodes, {})
 
 
+@pytest.mark.timeout(NESTED_XDIST_TIMEOUT)
 def test_actual_xdist_collection_producing_path(tmp_path):
     # A real two-worker invocation, outside the repository test tree. The
     # generated tests never recurse into this test file or touch app state.
@@ -111,8 +117,9 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     expected = bs.partition(nodes, durations, bs.SHARD_COUNT)
     manifest.write_text(json.dumps({"format": bs.MANIFEST_FORMAT, "durations": bs.hashed_durations(durations)}))
     env = {**os.environ, "PYTHONPATH": str(ROOT), "GITHUB_SHA": "integration-head"}
-    # This test is run serially locally: no nested workers beyond the shared
-    # machine-wide two-worker limit. Hosted policy tests also run it serially.
+    # The nested runs go one at a time, each with two workers (the shared
+    # machine-wide limit). The hosted policy step runs this file beside three
+    # other workers (-n 4 --dist loadfile), hence NESTED_XDIST_TIMEOUT.
     collected = []
     for index in range(1, bs.SHARD_COUNT + 1):
         output = tmp_path / f"shard-{index}"
@@ -135,6 +142,7 @@ def test_actual_xdist_collection_producing_path(tmp_path):
     assert len(collected) == len(set(collected)) == 12
 
 
+@pytest.mark.timeout(NESTED_XDIST_TIMEOUT)
 def test_failed_tests_leave_a_receipt_naming_them_and_other_faults_leave_none(tmp_path):
     # A complete run whose only fault is failed tests keeps its evidence, for
     # scripts/ci/backend_shard_run.py's one rerun; a collection error does not.

@@ -462,7 +462,14 @@ class CostPolicyTests(unittest.TestCase):
                 build = next(s for s in steps if s.get("uses") == "docker/build-push-action@v6")
                 options = build["with"]
                 self.assertEqual(options["cache-from"], "type=gha,scope=Dockerfile")
-                self.assertEqual(options["cache-to"], "type=gha,mode=max,scope=Dockerfile")
+                if name == "container-postgres.yml":
+                    # Pull requests read main's cache; one group writes it elsewhere.
+                    self.assertEqual(options["cache-to"],
+                                     "${{ github.event_name != 'pull_request' && matrix.lane == 'install' "
+                                     "&& 'type=gha,mode=max,scope=Dockerfile' || '' }}")
+                    self.assertIn("install", job["strategy"]["matrix"]["lane"])
+                else:
+                    self.assertEqual(options["cache-to"], "type=gha,mode=max,scope=Dockerfile")
                 self.assertEqual(options["load"], "true")
                 self.assertEqual(options["push"], "false")
                 self.assertEqual(options["platforms"], "linux/amd64")
