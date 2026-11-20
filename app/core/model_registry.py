@@ -285,9 +285,30 @@ def model_values() -> List[str]:
     return [m.value for m in MODELS]
 
 
+def _disabled_subscription_models(claude: Optional[Dict[str, object]] = None) -> set[str]:
+    """Claude subscription model ids the owner unchecked for pickers.
+
+    Applies when serving subscription models (subscription mode, or api_key mode
+    where native Claude is the subscription CLI). Cloud and off modes keep the
+    built-in list untouched.
+    """
+    from app.core import claude_auth_mode, claude_cli_models
+
+    if claude is not None and claude.get("auth_kind") == "api":
+        return set()
+    try:
+        mode = claude_auth_mode.current_mode()
+    except Exception:  # noqa: BLE001
+        return set()
+    if mode in (claude_auth_mode.MODE_CLOUD, claude_auth_mode.MODE_OFF):
+        return set()
+    return set(claude_cli_models.disabled_models())
+
+
 def selectable_model_values() -> List[str]:
     """Every native model a picker offers: the aliases, then on a subscription
-    each other version the Claude Code CLI lists (``claude-mythos-5-1``).
+    each other version the Claude Code CLI lists (``claude-mythos-5-1``),
+    excluding any the owner disabled for pickers.
 
     For enums of what someone may pick. Routing's alias-only checks keep
     :func:`model_values`."""
@@ -299,7 +320,9 @@ def selectable_model_values() -> List[str]:
     except Exception:  # noqa: BLE001 - an unreadable list offers the aliases
         logger.warning("Could not read the Claude Code model list", exc_info=True)
         listed = []
-    return aliases + [v for v in dict.fromkeys(listed) if isinstance(v, str) and v not in aliases]
+    all_values = aliases + [v for v in dict.fromkeys(listed) if isinstance(v, str) and v not in aliases]
+    disabled = _disabled_subscription_models()
+    return [v for v in all_values if v not in disabled] if disabled else all_values
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -815,9 +838,13 @@ def _registry_payload() -> Dict[str, object]:
     if snapshot:
         claude["cli_models"] = {"cli_version": snapshot.get("cli_version"),
                                 "captured_at": snapshot.get("captured_at")}
+    all_models = [entry(m.value, m) for m in MODELS] + versioned
+    disabled = _disabled_subscription_models(claude)
+    models = [item for item in all_models if item["value"] not in disabled] if disabled else all_models
     return {
-        # The four aliases, then every other version the subscription CLI lists.
-        "models": [entry(m.value, m) for m in MODELS] + versioned,
+        # The four aliases, then every other version the subscription CLI lists,
+        # filtered by the owner's subscription model curation.
+        "models": models,
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": legacy_map,
