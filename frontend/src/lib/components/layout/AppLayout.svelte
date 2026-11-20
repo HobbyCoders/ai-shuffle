@@ -138,7 +138,7 @@
 
 	<!-- Start Tab at Workspace after transcript completion, without making empty space clickable. -->
 	<div class="sr-only pointer-events-none" role="group" aria-label="Start of workspace" tabindex="-1" bind:this={workspaceStart}></div>
-	<div class="app-body" role="region" aria-label="Workspace">
+	<div class="app-body">
 		{#if sidebarFloating}
 			<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>

@@ -23,7 +23,7 @@ function networkStatus(phase) {
 const button = (page, name) => page.getByRole('button', { name, exact: true });
 const chip = (page) => page.getByRole('button', { name: /Restore details/ });
 const success = (page) => page.getByText('Your data is copied', { exact: true });
-const workspace = (page) => page.getByRole('region', { name: 'Workspace', exact: true });
+const workspace = (page) => page.locator('.app-body');
 const workspaceStart = (page) => page.getByRole('group', { name: 'Start of workspace', exact: true });
 async function focused(page, locator, description, timeout = 2000) {
 	// assert the actual active element, not a class or a document position
@@ -46,6 +46,8 @@ async function openAtPhase(ctx, initialPhase) {
 		await route.fulfill({ json: networkStatus(phase) });
 	});
 	await openNewChat(ctx);
+	// Settings uses the same top bar; keep its implicit banner landmark exposed.
+	await page.getByRole('banner').and(page.locator('header.topbar')).waitFor({ timeout: 5000 });
 }
 
 function makeCase(owner, viewports, throttle) {
@@ -181,15 +183,12 @@ const historyAtCompletion = {
 			assert.equal(await workspace(page).getAttribute('tabindex'), null, 'Workspace itself is not focusable');
 			assert.equal(await panel.isVisible(), true);
 
-			const spot = await workspace(page).evaluate((region) => {
+			const spot = await workspace(page).evaluate((body) => {
 				const nonempty = '.notif-center, [data-ui-mount="ChatInput"], button, a, input, textarea, select, [contenteditable], [role="button"], [tabindex]';
 				for (let y = 8; y < innerHeight - 8; y += 16) {
 					for (let x = 12; x < innerWidth - 8; x += 24) {
 						const el = document.elementFromPoint(x, y);
-						if (!el || !region.contains(el) || !el.closest('[data-ui-state="chat"]')) continue;
-						// Ignore the region itself when testing whether a descendant is a control.
-						const control = el.closest(nonempty);
-						if (control && control !== region) continue;
+						if (!el || !body.contains(el) || !el.closest('[data-ui-state="chat"]') || el.closest(nonempty)) continue;
 						// Stay clear of nearby controls that the browser might choose for a touch.
 						const around = [-16, 0, 16];
 						if (!around.every((dx) => around.every((dy) => document.elementFromPoint(x + dx, y + dy) === el))) continue;
