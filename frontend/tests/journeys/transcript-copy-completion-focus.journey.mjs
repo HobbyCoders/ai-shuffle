@@ -117,6 +117,7 @@ function makeCase(owner, viewports, throttle) {
 			if (owner === 'composer') assert.equal(await keptFocus.innerText(), 'Keep this draft through completion.');
 			await mark(`focus verified: ${keptFocus ? owner : 'Start of workspace'}`);
 			if (standalone) {
+				assert.equal(await page.locator('.app-body').getAttribute('tabindex'), null, 'Workspace itself is not focusable');
 				await mark('Tab from Start of workspace to the first chat control');
 				await page.keyboard.press('Tab');
 				// The phone sidebar toggle's name includes the unread count when nonzero.
