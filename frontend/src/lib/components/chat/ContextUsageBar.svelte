@@ -966,6 +966,33 @@
 		return kind === 'subscription';
 	}
 
+	/**
+	 * Antigravity reports separate model groups (e.g. Gemini Models, Claude and
+	 * GPT models, Gemini 4 Argon) across weekly and 5-hour windows. Its
+	 * collapsed summary shows the Gemini model weekly remaining percentage:
+	 * prefer the primary "Gemini Models, weekly" bucket when present so a
+	 * model-specific bucket (such as Gemini 4 Argon) does not override it,
+	 * otherwise summarize across all Gemini weekly windows (most constrained).
+	 */
+	function antigravitySummaryWindows(windows: UsageWindow[]): UsageWindow[] {
+		const primary = windows.filter((w) => {
+			const label = (w.label ?? '').trim();
+			if (label) return /^gemini(?:\s+models?)?\s*,\s*weekly$/i.test(label);
+			return /^antigravity_gemini(?:[-_.]models?)?[-_.]weekly$/i.test(w.type);
+		});
+		if (primary.length > 0) return primary;
+
+		return windows.filter((w) => {
+			const label = (w.label ?? '').trim();
+			if (label) {
+				const match = /^(.+?),\s*weekly$/i.exec(label);
+				return Boolean(match && /\bgemini\b/i.test(match[1]));
+			}
+			const body = w.type.replace(/^antigravity_/i, '');
+			return /(?:^|[_.-])gemini(?:$|[_.-])/i.test(body) && /(?:^|[_.-])weekly(?:$|[_.-])/i.test(body);
+		});
+	}
+
 	function providerWindowSummary(
 		windows: UsageWindow[],
 		nowMs: number,
@@ -1182,8 +1209,10 @@
 <!-- ═══ Provider usage (non-Claude) ═══
      ChatGPT/Codex and SuperGrok subscription windows show quota remaining;
      their collapsed summary uses the 5-hour window when there is one, else the
-     least remaining window. xAI API-key, other API-key and credit windows keep
-     used-of-100 and summarize the highest-utilization window. -->
+     least remaining window. Antigravity summarizes its Gemini model weekly
+     remaining quota (or "—" when none is reported). xAI API-key, other API-key
+     and credit windows keep used-of-100 and summarize the highest-utilization
+     window. -->
 {#snippet providerSection(pb: ProviderUsageBucket)}
 	{@const sectionId = `provider:${pb.providerId}`}
 	{@const pbDisplay = providerDisplayFor(pb)}
@@ -1194,7 +1223,7 @@
 	{@const pbShowsRemaining = providerShowsRemaining(pb)}
 	{@const suffix = pbShowsRemaining ? ' left' : ''}
 	{#snippet providerSummary()}
-		{@const pbSummary = isAntigravity ? null : providerWindowSummary(pbWindows, now, pbShowsRemaining)}
+		{@const pbSummary = providerWindowSummary(isAntigravity ? antigravitySummaryWindows(pbWindows) : pbWindows, now, pbShowsRemaining)}
 		{@const pbCreditsShort = creditsShort(providerCredits(pb), pb.providerType)}
 		<!-- An account credit balance is the headline the user cares about, so
 		     it outranks the window pct (which an OpenRouter key-spend limit

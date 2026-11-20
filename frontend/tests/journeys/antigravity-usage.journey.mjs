@@ -67,9 +67,11 @@ await runJourney({
 			const labels = (await panel.locator('.popover-row .row-label').allTextContents())
 				.filter((label) => quotas.some(([quota]) => label === quota));
 			expect(JSON.stringify(labels) === JSON.stringify(quotas.map(([label]) => label)), 'agent group order is preserved');
-			await mark('collapse Antigravity without quoting a percentage from another model group');
+			await mark('collapse Antigravity to its Gemini Models weekly percentage');
 			await provider.click();
-			expect(!(await provider.textContent()).includes('%'), 'the collapsed Antigravity heading has no percentage');
+			await provider.getByText('80% left', { exact: true }).waitFor();
+			expect((await provider.locator('.sec-summary').textContent())?.trim() === '80% left',
+				'the collapsed Antigravity heading shows Gemini Models weekly, not Argon or Claude/GPT');
 
 			await mark('open Settings Usage and verify the same reading');
 			if (isPhone(variant)) {
