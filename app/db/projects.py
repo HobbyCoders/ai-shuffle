@@ -151,7 +151,7 @@ def _restore_to_catalog(cursor, project: Dict[str, Any]) -> None:
 
     project_v2_id = _catalog_project_v2_id(cursor, _catalog_origin(project))
     if project_v2_id:
-        restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project))
+        restore_removed_base_checkouts(cursor, project_v2_id, _catalog_runners(project), project["path"])
 
 
 def _seed_catalog(cursor, project: Dict[str, Any]) -> str:
@@ -304,7 +304,7 @@ def retarget_folder(
     settings_dict: Optional[Dict[str, Any]] = None,
 ) -> ProjectRow:
     """Update exactly one worker's live base checkout and legacy row together."""
-    from app.core.project_utils import get_project_working_dir, is_absolute_project_path
+    from app.db import checkouts
 
     project_id = snapshot['id']
     runner = settings.effective_instance_id
@@ -315,6 +315,8 @@ def retarget_folder(
         if not current or current != snapshot or current.get('instance_id') != runner:
             raise FolderConflict('The project folder changed. Close this editor and reopen it.')
         if not same_folder:
+            from app.core.worktree_manager import preserve_worktree_owners
+
             pv2_id = _catalog_project_v2_id(cursor, _catalog_origin(current))
             # Lock chats before inspecting live/queued turns: turn admission
             # takes the same session row lock. A running chat may still hold
@@ -338,18 +340,20 @@ def retarget_folder(
                 'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
                 "AND (branch IS NULL OR branch = '') FOR UPDATE", (pv2_id, runner),
             )
-            bases = cursor.fetchall()
-            # The cwd resolver can also use a retained base if it exists.
-            # Don't guess which row to replace on an ambiguous registration.
-            if not bases or any(
-                (base['status'] or 'active') != 'active'
-                or get_project_working_dir(base['path']) != old_path for base in bases
-            ):
+            bases = [row for row in cursor.fetchall() if checkouts.is_active(row)]
+            old_key = checkouts.base_folder_key(old_path)
+            matching = [row for row in bases if row['path'] and checkouts.base_folder_key(row['path']) == old_key]
+            stale = [row for row in bases if row not in matching]
+            if not matching or (stale and checkouts.registered_base_key(cursor, pv2_id, runner) != old_key):
                 raise FolderConflict('This worker does not have a single matching base folder to change.')
-            # Setup can leave a legacy relative row beside its canonical absolute
-            # twin. They name one registration, as in the startup repair.
-            base = next((row for row in bases if is_absolute_project_path(row['path'])), bases[0])
-            for duplicate in bases:
+            # Older setup reactivated retained bases too. Keep their rows and
+            # files, but take them out of active selection when fixing the edit.
+            for row in stale:
+                cursor.execute("UPDATE checkouts SET status = %s, updated_at = NOW() WHERE id = %s",
+                               (checkouts.REMOVED_STATUS, row['id']))
+            # Setup can leave a legacy relative row beside its canonical absolute twin.
+            base = next((row for row in matching if checkouts.is_absolute_checkout_path(row['path'])), matching[0])
+            for duplicate in matching:
                 if duplicate['id'] != base['id']:
                     cursor.execute('DELETE FROM checkouts WHERE id = %s', (duplicate['id'],))
             cursor.execute(
@@ -358,6 +362,7 @@ def retarget_folder(
             )
             if cursor.fetchone():
                 raise FolderConflict('That folder is already registered as a checkout.')
+            preserve_worktree_owners(cursor, current, old_path)
             cursor.execute(
                 'UPDATE checkouts SET path = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
                 'WHERE id = %s', (new_path, base['id']),

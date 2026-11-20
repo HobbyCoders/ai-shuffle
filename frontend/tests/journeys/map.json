@@ -77,7 +77,8 @@
 				"frontend/tests/journeys/setup-scroll.journey.mjs",
 				"frontend/src/routes/setup/**",
 				"frontend/src/lib/components/OwnerAccessGate.svelte",
-				"frontend/src/lib/components/setup/**"
+				"frontend/src/lib/components/setup/**",
+				"frontend/src/lib/components/DirectoryBrowser.svelte"
 			]
 		},
 		{
@@ -534,9 +535,21 @@
 		},
 		{
 			"why": "cross-worker project sync: worker chips, the Workers tab, New project's worker picker and Set up & send",
-			"journeys": ["project-workers"],
+			"journeys": ["project-workers", "worker-folder-change"],
 			"globs": [
 				"frontend/tests/journeys/project-workers.journey.mjs",
+				"frontend/tests/journeys/worker-folder-change.journey.mjs",
+				"frontend/src/lib/components/DirectoryBrowser*",
+				"frontend/src/lib/components/deck/cards/ProjectGeneralTab.svelte",
+				"app/api/project_workers.py",
+				"app/api/projects.py",
+				"app/api/system.py",
+				"app/core/project_folders.py",
+				"app/core/project_setup.py",
+				"app/core/worktree_manager.py",
+				"app/db/checkouts.py",
+				"app/db/projects.py",
+				"app/db/git.py",
 				"frontend/src/lib/api/project-workers.ts",
 				"frontend/src/lib/stores/projects-overview.ts",
 				"frontend/src/lib/stores/project-setup*",

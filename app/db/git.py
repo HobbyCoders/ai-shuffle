@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
@@ -30,6 +31,7 @@ class WorktreeRow(TypedDict):
     session_id: Optional[str]
     branch_name: str
     worktree_path: str
+    cleanup_owner: Optional[Dict[str, Any]]
     base_branch: Optional[str]
     status: str
     created_at: str
@@ -348,7 +350,8 @@ def create_worktree(
     worktree_path: str,
     session_id: Optional[str] = None,
     base_branch: Optional[str] = None,
-    status: str = "active"
+    status: str = "active",
+    *, cleanup_owner: Optional[Dict[str, Any]] = None,
 ) -> Optional[WorktreeRow]:
     """Create a worktree record, or return the existing one for this path.
 
@@ -370,9 +373,11 @@ def create_worktree(
         if existing:
             return existing
         cursor.execute(
-            """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
-            (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
+            """INSERT INTO worktrees
+               (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at, cleanup_owner)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
+            (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now,
+             json.dumps(cleanup_owner) if cleanup_owner is not None else None)
         )
     return get_worktree(worktree_id)
 

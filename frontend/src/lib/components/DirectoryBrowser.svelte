@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import Banner from '$lib/components/Banner.svelte';
 	/**
 	 * DirectoryBrowser - Tree browser for picking directories
@@ -19,35 +20,37 @@
 
 	let { onSelect, selectedPath = '', browse = browseFilesystem }: Props = $props();
 
+	const PAGE_SIZE = 200;
+
 	interface TreeNode {
 		entry: DirectoryEntry;
+		pageStart: number;
 		children: TreeNode[] | null; // null = not loaded, [] = empty
 		expanded: boolean;
 		loading: boolean;
 	}
 
 	let roots = $state<TreeNode[]>([]);
+	let rootPageStart = $state(0);
 	let rootLoading = $state(true);
 	let error = $state<string | null>(null);
 
-	// Load root entries on mount
-	$effect(() => {
-		loadRoots();
-	});
+	// The picker lives for one browse source. A parent can recreate its callback
+	// during a row refresh without replacing the already expanded tree.
+	onMount(() => { void loadRoots(); });
+
+	function directoryNodes(entries: DirectoryEntry[]): TreeNode[] {
+		return entries.filter(entry => entry.is_dir).map(entry => ({
+			entry, children: null, expanded: false, loading: false, pageStart: 0
+		}));
+	}
 
 	async function loadRoots() {
 		rootLoading = true;
 		error = null;
 		try {
 			const response = await browse();
-			roots = response.entries
-				.filter(e => e.is_dir)
-				.map(entry => ({
-					entry,
-					children: null,
-					expanded: false,
-					loading: false
-				}));
+			roots = directoryNodes(response.entries);
 		} catch (e: unknown) {
 			const err = e as { detail?: string; message?: string };
 			error = err.detail || err.message || 'Failed to browse filesystem';
@@ -64,17 +67,11 @@
 
 		// Load children if not loaded
 		if (node.children === null) {
+			if (node.loading) return;
 			node.loading = true;
 			try {
 				const response = await browse(node.entry.path);
-				node.children = response.entries
-					.filter(e => e.is_dir)
-					.map(entry => ({
-						entry,
-						children: null,
-						expanded: false,
-						loading: false
-					}));
+				node.children = directoryNodes(response.entries);
 			} catch {
 				node.children = [];
 			} finally {
@@ -100,9 +97,7 @@
 		<Banner message={error} />
 	{:else}
 		<div class="tree">
-			{#each roots as node (node.entry.path)}
-				{@render treeItem(node, 0)}
-			{/each}
+			{@render pageOf(roots, 0, rootPageStart, (start) => (rootPageStart = start))}
 		</div>
 	{/if}
 </div>
@@ -140,10 +135,23 @@
 		</button>
 	</div>
 	{#if node.expanded && node.children}
-		{#each node.children as child (child.entry.path)}
-			{@render treeItem(child, depth + 1)}
-		{/each}
+		{@render pageOf(node.children, depth + 1, node.pageStart, (start) => (node.pageStart = start))}
 	{/if}
+{/snippet}
+
+{#snippet pageOf(nodes: TreeNode[], depth: number, start: number, setStart: (start: number) => void)}
+	{#if nodes.length > PAGE_SIZE}
+		<div class="tree-page" style="--depth: {depth}">
+			<button type="button" class="st-btn" aria-label="Show previous folders" disabled={start === 0}
+				onclick={() => setStart(start - PAGE_SIZE)}>Previous</button>
+			<span aria-live="polite">{start + 1}–{Math.min(start + PAGE_SIZE, nodes.length)} of {nodes.length}</span>
+			<button type="button" class="st-btn" aria-label="Show next folders" disabled={start + PAGE_SIZE >= nodes.length}
+				onclick={() => setStart(start + PAGE_SIZE)}>Next</button>
+		</div>
+	{/if}
+	{#each nodes.slice(start, start + PAGE_SIZE) as node (node.entry.path)}
+		{@render treeItem(node, depth)}
+	{/each}
 {/snippet}
 
 <style>
@@ -172,6 +180,16 @@
 
 	.tree-item {
 		padding-left: calc(var(--depth) * 16px);
+	}
+
+	.tree-page {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 4px;
+		padding: 4px 8px 4px min(calc(8px + var(--depth) * 16px), 20%);
+		font-size: 0.8125rem;
+		color: var(--muted-foreground);
 	}
 
 	.tree-row {

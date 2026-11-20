@@ -25,6 +25,7 @@ import posixpath
 import re
 from typing import Any, Dict, List, Optional
 
+from app.core.config import settings
 from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
@@ -57,17 +58,21 @@ def retire_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -
     return cursor.rowcount or 0
 
 
-def restore_removed_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str]) -> int:
-    """Re-activate base checkouts :func:`retire_base_checkouts` removed."""
-    if not runner_ids:
+def restore_removed_base_checkouts(cursor: Any, project_id: str, runner_ids: List[str], path: str) -> int:
+    """Restore only the folder being registered, not other retained copies."""
+    if not runner_ids or not path:
         return 0
     placeholders = ", ".join(["%s"] * len(runner_ids))
     cursor.execute(
-        f"UPDATE checkouts SET status = 'active', updated_at = NOW() "
-        f"WHERE project_id = %s AND runner_id IN ({placeholders}) AND {_BASE} AND status = %s",
+        f"SELECT id, path FROM checkouts WHERE project_id = %s "
+        f"AND runner_id IN ({placeholders}) AND {_BASE} AND status = %s FOR UPDATE",
         (project_id, *runner_ids, REMOVED_STATUS),
     )
-    return cursor.rowcount or 0
+    key = base_folder_key(path)
+    ids = [r["id"] for r in cursor.fetchall() if r["path"] and base_folder_key(r["path"]) == key]
+    for checkout_id in ids:
+        cursor.execute("UPDATE checkouts SET status = 'active', updated_at = NOW() WHERE id = %s", (checkout_id,))
+    return len(ids)
 
 
 def checkout_id_for(project_id: str, runner_id: str, path: str) -> str:
@@ -379,6 +384,14 @@ def list_checkouts_with_legacy_fallback(
         rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
         if not rows and runner_id != "":
             rows = _checkouts_for_branch(cursor, project_id, "", branch)
+        if not branch and len(rows) > 1:
+            # Old re-setup could reactivate ALL retained bases. In that case,
+            # the sole live registration tells us which active folder to use.
+            preferred = registered_base_key(cursor, project_id, runner_id)
+            rows.sort(key=lambda r: (
+                not is_active(r),
+                not (preferred and r.get("path") and base_folder_key(r["path"]) == preferred),
+            ))
     return rows
 
 
@@ -618,8 +631,34 @@ def seed_legacy_base_checkout(cursor: Any, legacy_id: str, project_id: str,
     return bool(cursor.rowcount and cursor.rowcount > 0)
 
 
-def _folder_key(path: str) -> str:
+def folder_key(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
+
+
+def base_folder_key(path: str) -> str:
+    """Compare workspace-relative and absolute registrations as startup repair does."""
+    if not os.path.isabs(path) and is_absolute_checkout_path(path):
+        # A foreign Windows path is not relative to a POSIX worker's workspace.
+        return ntpath.normcase(ntpath.normpath(path))
+    if not is_absolute_checkout_path(path):
+        path = os.path.normpath(os.path.join(settings.effective_workspace_dir, path))
+    return folder_key(path)
+
+
+def is_active(row: Dict[str, Any]) -> bool:
+    return (row.get("status") or "active") == "active"
+
+
+def registered_base_key(cursor: Any, project_id: str, runner_id: str) -> Optional[str]:
+    """One unambiguous live registration for this identity on this runner."""
+    cursor.execute(
+        "SELECT p.path FROM projects p JOIN projects_v2 v "
+        "ON v.origin = COALESCE(NULLIF(p.link_group_id, ''), 'local:' || p.id) "
+        "WHERE v.id = %s AND (p.instance_id = %s OR p.instance_id IS NULL OR p.instance_id = '')",
+        (project_id, runner_id),
+    )
+    keys = {base_folder_key(r["path"]) for r in cursor.fetchall() if r["path"]}
+    return next(iter(keys)) if len(keys) == 1 else None
 
 
 def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[str, int]:
@@ -650,9 +689,9 @@ def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[s
             if not path or is_absolute_checkout_path(path):
                 continue
             target = os.path.normpath(os.path.join(workspace, path))
-            key = _folder_key(target)
+            key = folder_key(target)
             twins = [a for a in absolute
-                     if a["project_id"] == row["project_id"] and _folder_key(a["path"]) == key]
+                     if a["project_id"] == row["project_id"] and folder_key(a["path"]) == key]
             same_role = [a for a in twins
                          if _is_base(a) == _is_base(row)
                          and (_is_base(row) or a.get("branch") == row.get("branch"))]
