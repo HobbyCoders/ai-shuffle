@@ -10,6 +10,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { Search } from 'lucide-svelte';
 	import { getErrorMessage } from '$lib/api/client';
+	import ProviderGlyph, { providerGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
 	import { workerInstalls } from '$lib/stores/worker-presence';
 	import {
@@ -271,9 +272,10 @@
 							title={row.available ? (unpriced && view.detail) || row.description || row.model : row.reason || 'Unavailable'}
 							onclick={() => ready && onpick(row, listedOperation ?? operation)}
 						>
+							<span class="gmb-row-logo"><ProviderGlyph kind={providerGlyphKind(row.source || current.source)} /></span>
 							<span class="gmb-row-main">
 								<span class="gmb-row-title">{title}</span>
-								<span class="gmb-row-id">{row.available ? row.model : row.reason || 'Unavailable'}</span>
+								<span class="gmb-row-id">{sourceLabel(row.source || current.source)} · {row.available ? row.model : row.reason || 'Unavailable'}</span>
 							</span>
 							<span class="gmb-row-price" class:unknown={!view.priced}>
 								{#if view.priced}
@@ -435,6 +437,7 @@
 		cursor: not-allowed;
 		opacity: 0.6;
 	}
+	.gmb-row-logo { display: flex; flex: none; }
 	.gmb-row-main {
 		display: grid;
 		flex: 1;

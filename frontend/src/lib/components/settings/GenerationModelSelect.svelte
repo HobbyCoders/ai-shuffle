@@ -1,6 +1,5 @@
 <script lang="ts">
-	import SelectField from './rows/SelectField.svelte';
-	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+	import ModelPicker from './ModelPicker.svelte';
 
 	interface Props {
 		value?: string;
@@ -8,21 +7,14 @@
 	}
 
 	let { value = $bindable(''), disabled = false }: Props = $props();
-	const catalog = $derived(buildModelPickerCatalog());
 </script>
 
-<label class="generation-model">
+<div class="generation-model">
 	<span>Generation model</span>
-	<SelectField bind:value {disabled} label="Generation model" width={640}
-		groups={[
-			{ label: '', options: [{ value: '', label: 'Use Settings default' }] },
-			...catalog.groups.map((group) => ({
-				label: group.subtext ? `${group.name} · ${group.subtext}` : group.name,
-				options: catalog.options.filter((option) => option.groupKey === group.key)
-			}))
-		]} />
+	<ModelPicker {value} {disabled} label="Generation model" formSelect allowEmpty allowCustom={false}
+		emptyLabel="Use Settings default" onSelect={(selected) => (value = selected)} />
 	<small>Used only to generate this content. Does not change Settings or the models assigned to agents.</small>
-</label>
+</div>
 
 <style>
 	.generation-model { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1rem; min-width: 0; }

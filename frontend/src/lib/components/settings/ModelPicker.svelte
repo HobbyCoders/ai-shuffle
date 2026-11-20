@@ -19,10 +19,12 @@
 	import { tick } from 'svelte';
 	import { ChevronDown } from 'lucide-svelte';
 	import { decodeProviderModel, CUSTOM_VALUE } from '$lib/constants/models';
-	import { buildModelPickerCatalog } from '$lib/constants/model-picker';
+	import { buildModelPickerCatalog, type PickerCatalog } from '$lib/constants/model-picker';
 	import ModelPickerPanel from './ModelPickerPanel.svelte';
 	import { focusLeftRoots, pickerHoldsFocus } from './model-picker-focus';
 	import ProviderGlyph from './ProviderGlyph.svelte';
+	import { getSettingsAccess } from '$lib/settings/access.svelte';
+	import { controlAria, getRowContext } from './rows/row-context';
 
 	interface Props {
 		/** Current composite selection value (see module comment). */
@@ -31,6 +33,11 @@
 		onSelect: (value: string) => void;
 		/** Optional id for the trigger button (a11y labelling). */
 		id?: string;
+		/** A form select uses this picker instead of a native select (whose rows cannot render images). */
+		formSelect?: boolean;
+		catalogOverride?: PickerCatalog;
+		disabled?: boolean;
+		label?: string;
 		/**
 		 * When true, list only provider-curated models — suppress the native
 		 * Claude group and the `Custom…` entry. Additive, default false.
@@ -57,6 +64,10 @@
 		value,
 		onSelect,
 		id,
+		formSelect = false,
+		catalogOverride,
+		disabled = false,
+		label,
 		providerModelsOnly = false,
 		providerScope,
 		allowEmpty = false,
@@ -66,7 +77,12 @@
 		apiKeyOnly = false
 	}: Props = $props();
 
-	const catalog = $derived(buildModelPickerCatalog({ providerModelsOnly, providerScope, apiKeyOnly }));
+	const catalog = $derived(catalogOverride ?? buildModelPickerCatalog({ providerModelsOnly, providerScope, apiKeyOnly }));
+	const access = getSettingsAccess();
+	const row = getRowContext();
+	const blocked = $derived(disabled || (formSelect && access.readOnly));
+	const pickerId = $props.id();
+	const selectionId = `${pickerId}-selection`;
 
 	const leadingRows = $derived(allowEmpty ? [{ value: '', label: emptyLabel }] : []);
 	const trailingRows = $derived(
@@ -177,8 +193,13 @@
 	});
 
 	function selectOption(optionValue: string) {
-		// Keep the panel open so the user can still tweak options like context
-		// window size; outside click / Escape still dismiss via onRequestClose.
+		if (blocked) return;
+		if (formSelect) {
+			close(true);
+			// Like a native select, picking the current value is not a change.
+			if (optionValue === value) return;
+		}
+		// Chat pickers still notify on every pick and stay open for context controls.
 		onSelect(optionValue);
 	}
 
@@ -219,7 +240,7 @@
 	}
 
 	$effect(() => {
-		if (!open) return;
+		if (!open || blocked) return;
 		document.addEventListener('mousedown', onDocClick);
 		document.addEventListener('keydown', onKeydown);
 		// A resize or a phone rotation moves the pane edges: place it again.
@@ -255,17 +276,20 @@
 		class="mpk-trigger"
 		class:open
 		aria-haspopup="listbox"
-		aria-expanded={open}
+		aria-expanded={open && !blocked}
+		disabled={blocked}
+		{...(formSelect ? controlAria(row, label) : {})}
+		aria-describedby={formSelect ? [selectionId, row?.hintId].filter(Boolean).join(' ') : undefined}
 		onclick={toggleOpen}
 	>
 		{#if currentGroup}
 			<span class="mpk-glyph"><ProviderGlyph kind={currentGroup.glyph} size={15} /></span>
 		{/if}
-		<span class="mpk-current">{currentLabel}</span>
+		<span class="mpk-current" id={formSelect ? selectionId : undefined}>{currentLabel}</span>
 		<ChevronDown size={15} class="mpk-chev" />
 	</button>
 
-	{#if open}
+	{#if open && !blocked}
 		<div
 			class="mpk-panel"
 			class:mpk-panel-up={openUpward}
@@ -276,6 +300,8 @@
 				groups={catalog.groups}
 				options={catalog.options}
 				{value}
+				ariaLabel={label || (formSelect ? row?.label : undefined)}
+				showFavorites={!formSelect}
 				onSelect={selectOption}
 				{leadingRows}
 				{trailingRows}
@@ -312,7 +338,8 @@
 		cursor: pointer;
 		text-align: left;
 	}
-	.mpk-trigger:hover {
+	.mpk-trigger:disabled { cursor: not-allowed; opacity: 0.65; }
+	.mpk-trigger:hover:not(:disabled) {
 		background: var(--muted);
 	}
 	.mpk-trigger.open {

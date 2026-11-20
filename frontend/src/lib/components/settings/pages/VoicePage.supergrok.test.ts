@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const transport = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), post: vi.fn(), delete: vi.fn(), patch: vi.fn() }));
@@ -97,22 +97,29 @@ async function mountPage() {
 	return view;
 }
 
-const engine = () => screen.getByRole('combobox', { name: 'Voice engine' }) as HTMLSelectElement;
+const engine = () => screen.getByRole('button', { name: 'Voice engine' });
+const engineOptions = () => within(screen.getByRole('listbox', { name: 'Voice engine' })).getAllByRole('option');
+async function selectEngine(id: string) {
+	if (engine().getAttribute('aria-expanded') !== 'true') await fireEvent.click(engine());
+	await fireEvent.click(engineOptions().find((option) => option.dataset.value === id)!);
+}
 const rowOf = (el: HTMLElement) => el.closest('[data-setting-anchor]') as HTMLElement;
 
 describe('Grok voice (SuperGrok subscription)', () => {
 	it('is offered with a neutral label but is never the default', async () => {
 		await mountPage();
-		expect(engine().value).toBe('gpt-live-1');
-		const option = Array.from(engine().options).find((o) => o.value === SUPERGROK);
-		expect(option?.textContent).toBe(LABEL);
+		expect(engine().textContent?.trim()).toBe('GPT Live 1');
+		await fireEvent.click(engine());
+		const option = engineOptions().find((o) => o.dataset.value === SUPERGROK);
+		expect(option?.getAttribute('aria-label')).toBe(LABEL);
+		expect(option?.querySelector('[data-provider-logo="grok"]')).toBeTruthy();
 		expect(transport.put).not.toHaveBeenCalled();
 	});
 
 	it('selecting it is the opt-in: saves the engine with the old API pin cleared and offers Grok voices', async () => {
 		server.voice_provider_id = 'xai-key';
 		await mountPage();
-		await fireEvent.change(engine(), { target: { value: SUPERGROK } });
+		await selectEngine(SUPERGROK);
 		await waitFor(() => expect(transport.put).toHaveBeenCalledExactlyOnceWith('/settings/voice', { voice_model: SUPERGROK, voice_provider_id: null }));
 		await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('eve'));
 		expect(screen.getByRole('option', { name: 'Ara' })).toBeTruthy();

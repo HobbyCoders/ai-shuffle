@@ -266,8 +266,11 @@ describe('ModelsCollection', () => {
 
 	it('saves the dictation model through the voice settings', async () => {
 		await open('Dictation');
-		const select = await screen.findByRole('combobox', { name: 'Model' });
-		await fireEvent.change(select, { target: { value: 'fal-ai/whisper' } });
+		const select = await screen.findByRole('button', { name: 'Model' });
+		await fireEvent.click(select);
+		const whisper = screen.getByRole('option', { name: /whisper/i });
+		expect(whisper.querySelector('[data-provider-logo="fal"]')).toBeTruthy();
+		await fireEvent.click(whisper);
 		expect(mocks.saveVoice).toHaveBeenCalledWith({ voice_input_model: 'fal-ai/whisper' });
 	});
 
