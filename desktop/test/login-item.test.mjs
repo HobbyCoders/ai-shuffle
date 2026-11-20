@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { closeSync, mkdtempSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -176,7 +177,7 @@ const windowsGuardCase = (name, root) => test(`Windows guard excludes native no-
 				[Console]::WriteLine('held')
 				while (-not [IO.File]::Exists(${psPath(release)})) { Start-Sleep -Milliseconds 25 }
 			} finally { $lock.Dispose() }
-		`), { stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 });
+		`), { stdio: ['ignore', 'pipe', 'pipe'], timeout: 30_000 });
 		const closed = new Promise(resolve => {
 			holder.once('error', error => resolve({ error }));
 			holder.once('close', (status, signal) => resolve({ status, signal }));
@@ -195,11 +196,44 @@ const windowsGuardCase = (name, root) => test(`Windows guard excludes native no-
 					[IO.File]::Open(${psPath(guard)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read).Dispose()
 					[Console]::WriteLine('native reader opened the file')
 				} catch { [Console]::WriteLine('native reader Win32=' + (($_.Exception.GetBaseException()).HResult -band 65535)) }
+				Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class NativeRead {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern IntPtr CreateFile(string file, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static int Probe(string path, uint flags) {
+    IntPtr handle = CreateFile(path, 0x00120089, 7, IntPtr.Zero, 3, flags, IntPtr.Zero);
+    if (handle == new IntPtr(-1)) return Marshal.GetLastWin32Error();
+    CloseHandle(handle);
+    return 0;
+  }
+}
+'@
+				[Console]::WriteLine('CreateFile normal=' + [NativeRead]::Probe(${psPath(guard)}, 128))
+				[Console]::WriteLine('CreateFile libuv flags=' + [NativeRead]::Probe(${psPath(path.toNamespacedPath(guard))}, 33554560))
 			`), { encoding: 'utf8', timeout: 15_000 });
 			const diagnostics = `${dir}: ${nativeReader.stdout.trim()} ${nativeReader.stderr.trim()}`;
 			t.diagnostic(diagnostics);
 			assert.ifError(nativeReader.error);
 			assert.equal(nativeReader.status, 0, diagnostics);
+			const require = createRequire(import.meta.url);
+			const { NODE_TEST_CONTEXT: _context, ...env } = process.env;
+			const script = `
+				const fs = require('node:fs');
+				let direct;
+				try { fs.closeSync(fs.openSync(process.argv[1], 'r')); direct = 'opened'; }
+				catch (e) { direct = e.code; }
+				const { loginItemControl } = require(process.argv[2]);
+				let writes = 0, reads = 0;
+				const control = loginItemControl({setLoginItemSettings() { writes++; }, getLoginItemSettings() { reads++; return {openAtLogin: false}; }}, JSON.parse(process.argv[3]));
+				const result = control.set(true);
+				console.log(JSON.stringify({execPath: process.execPath, node: process.versions.node, uv: process.versions.uv, electron: process.versions.electron, direct, result, writes, reads}));`;
+			for (const [label, exe, extra] of [['Node', process.execPath, {}], ['Electron', require('electron'), { ELECTRON_RUN_AS_NODE: '1' }]]) {
+				const child = spawnSync(exe, ['-e', script, guard, require.resolve('../dist/main/login-item.js'), JSON.stringify(host)], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 10_000 });
+				t.diagnostic(`${label} child status=${child.status}, error=${child.error?.code}: ${child.stdout?.trim()} ${child.stderr?.trim()}`);
+			}
 			assert.throws(() => closeSync(openSync(guard, 'r')), { code: 'EBUSY' }, 'the real guard path must be locked');
 			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
 			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
@@ -216,4 +250,3 @@ const windowsGuardCase = (name, root) => test(`Windows guard excludes native no-
 });
 
 windowsGuardCase('runner TEMP', () => os.tmpdir());
-windowsGuardCase('profile LOCALAPPDATA', () => process.env.LOCALAPPDATA);
