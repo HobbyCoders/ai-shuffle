@@ -2609,20 +2609,72 @@ describe('ContextUsageBar — collapsed Antigravity summary', () => {
 		const summary = antigravitySummary(container)!;
 		expect(summary.textContent).toBe('25% left');
 		expect(summary.classList.contains('warning')).toBe(true);
+		const button = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		const descId = button.getAttribute('aria-describedby');
+		expect(descId).toBeTruthy();
+		expect(document.getElementById(descId!)?.textContent).toBe('Gemini Flash, weekly: 25% left');
 	});
 
-	it('matches Gemini weekly windows by type when label is absent', async () => {
-		usageSections.set({ 'provider:agy-1': false });
+	it('announces the collapsed Gemini weekly summary via aria-describedby and omits it when expanded or unavailable', async () => {
 		applyAntigravity([
-			{ type: 'antigravity_gemini_pro_weekly', label: null, utilization: 40, resets_at: future() },
-			{ type: 'antigravity_gemini_flash_weekly', label: null, utilization: 55, resets_at: future() },
-			{ type: 'antigravity_3p-weekly', label: null, utilization: 95, resets_at: future() },
+			{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() },
+			{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 75, resets_at: future() },
 		]);
 		const { container } = render(ContextUsageBar);
 		await openPopover(container);
-		const summary = antigravitySummary(container)!;
-		expect(summary.textContent).toBe('45% left');
-		expect(summary.classList.contains('neutral')).toBe(true);
+
+		// Expanded: no aria-describedby and no sr-only summary description.
+		const expandedBtn = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		expect(expandedBtn.getAttribute('aria-expanded')).toBe('true');
+		expect(expandedBtn.hasAttribute('aria-describedby')).toBe(false);
+		expect(container.querySelector('.popover-section .sr-only')).toBeNull();
+
+		// Collapsed: aria-describedby points to the hidden description naming the winning window and % left.
+		await fireEvent.click(expandedBtn);
+		const collapsedBtn = container.querySelector('button[aria-label^="Antigravity"]') as HTMLButtonElement;
+		expect(collapsedBtn.getAttribute('aria-expanded')).toBe('false');
+		const descId = collapsedBtn.getAttribute('aria-describedby');
+		expect(descId).toBeTruthy();
+		const desc = document.getElementById(descId!);
+		expect(desc?.classList.contains('sr-only')).toBe(true);
+		expect(desc?.textContent).toBe('Gemini Models, weekly: 80% left');
+		expect(collapsedBtn.contains(desc!)).toBe(false);
+
+		// Multiple Antigravity rows with special-character IDs keep unique non-colliding description IDs.
+		usageSections.set({ 'provider:agy-1': false, 'provider:agy:1': false, 'provider:agy_1': false });
+		rateLimit.applySnapshot({
+			available: false,
+			windows: [],
+			providers: [
+				{
+					provider_id: 'agy-1', provider_name: 'Row Dash', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 20, resets_at: future() }],
+				},
+				{
+					provider_id: 'agy:1', provider_name: 'Row Colon', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_gemini-weekly', label: 'Gemini Models, weekly', utilization: 35, resets_at: future() }],
+				},
+				{
+					provider_id: 'agy_1', provider_name: 'Row Empty', provider_type: 'antigravity',
+					status: 'fresh', fetched_at: Date.now(), source_info: agySource, credits: null,
+					windows: [{ type: 'antigravity_3p-weekly', label: 'Claude and GPT models, weekly', utilization: 40, resets_at: future() }],
+				},
+			],
+		});
+		await tick();
+		const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('button[aria-label^="Antigravity"]'));
+		expect(buttons).toHaveLength(3);
+		const byName = (part: string) => buttons.find((b) => b.getAttribute('aria-label')?.includes(part))!;
+		const dashId = byName('Row Dash').getAttribute('aria-describedby')!;
+		const colonId = byName('Row Colon').getAttribute('aria-describedby')!;
+		expect(dashId).toBeTruthy();
+		expect(colonId).toBeTruthy();
+		expect(dashId).not.toBe(colonId);
+		expect(document.getElementById(dashId)?.textContent).toBe('Gemini Models, weekly: 80% left');
+		expect(document.getElementById(colonId)?.textContent).toBe('Gemini Models, weekly: 65% left');
+		expect(byName('Row Empty').hasAttribute('aria-describedby')).toBe(false);
 	});
 
 	it('respects reset rollover so collapsed and expanded Gemini weekly rows both show 100% left', async () => {
