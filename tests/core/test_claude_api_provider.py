@@ -60,7 +60,8 @@ def test_fallback_list_and_default_are_the_5_5_generation(key):
     assert [m["id"] for m in row["models_json"]] == [
         "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2",
         "claude-sonnet-5", "claude-opus-5", "claude-fable-5"]
-    assert row["models_json"][5] == {"id": "claude-opus-5", "label": "Opus 5"}
+    assert [m["label"] for m in row["models_json"]] == [
+        "Haiku 5.5", "Sonnet 5.5", "Opus 5.5", "Fable 5.2", "Sonnet 5", "Opus 5", "Fable 5"]
     assert row["default_model"] == "claude-sonnet-5-5"
     from app.core.provider_agent import validate_provider_model
 

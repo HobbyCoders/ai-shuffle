@@ -98,12 +98,10 @@ def _default_models() -> List[Dict[str, str]]:
     defaults, so a pin made from the old list still validates."""
     from app.core.model_registry import _BY_VALUE, API_MODEL_IDS, FROZEN_MODEL_IDS, MODELS
 
-    models = [{"id": API_MODEL_IDS[m.value], "label": m.label} for m in MODELS if m.value in API_MODEL_IDS]
-    for old in FROZEN_MODEL_IDS.values():
-        if all(m["id"] != old for m in models):
-            option = _BY_VALUE.get(old)
-            models.append({"id": old, "label": option.label if option else old})
-    return models
+    ids = [API_MODEL_IDS[m.value] for m in MODELS if m.value in API_MODEL_IDS]
+    ids += [old for old in FROZEN_MODEL_IDS.values() if old not in ids]
+    # Version labels ("Sonnet 5.5", "Sonnet 5"), so the two generations differ.
+    return [{"id": i, "label": _BY_VALUE[i].label if i in _BY_VALUE else i} for i in ids]
 
 
 def _catalogs() -> Dict[str, Any]:
