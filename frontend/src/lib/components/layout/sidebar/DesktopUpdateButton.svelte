@@ -40,7 +40,9 @@
 	/** `canCheck` tells the host whether a manual "Check for updates" entry
 	 *  makes sense right now: updates are allowed and this is not an agent
 	 *  preview. The button itself only appears once there is something to show. */
-	let { canCheck = $bindable(false), rail = false }: { canCheck?: boolean; rail?: boolean } = $props();
+	let { canCheck = $bindable(false), rail = false, panelBounds = null }: {
+		canCheck?: boolean; rail?: boolean; panelBounds?: HTMLElement | null
+	} = $props();
 	const iconSize = $derived(rail ? 18 : 16);
 	const iconStroke = $derived(rail ? 1.75 : 1.85);
 	const tooltipId = $props.id();
@@ -76,7 +78,11 @@
 	// Reasons workers gave for refusing the last request, by device id.
 	let refusals = $state<Record<string, string>>({});
 	let tipOpen = $state(false);
-	let tipPosition = $state({ top: 0, left: 0, bottom: 0 });
+	let tipPosition = $state({ left: 0, width: 0, edge: 0, height: 0, above: true });
+	let tipEl = $state<HTMLDivElement | null>(null);
+	let tipHovered = false;
+	let buttonHovered = false;
+	let tipCloseTimer: ReturnType<typeof setTimeout> | undefined;
 	let panel = $state<Panel | null>(null);
 	let buttonEl = $state<HTMLButtonElement | null>(null);
 	const panelId = `${tooltipId}-panel`;
@@ -272,28 +278,82 @@
 		}
 	}
 
-	function anchor(rect: DOMRect) {
-		const edge = buttonEl?.closest('aside')?.getBoundingClientRect().right ?? rect.right;
-		return {
-			top: rect.bottom + 12,
-			left: Math.max(8, Math.min(rail ? edge + 8 : rect.left - 170, window.innerWidth - 288)),
-			bottom: Math.max(8, window.innerHeight - rect.bottom)
+	// A narrow expanded panel can extend past the rail's aside. Use its actual
+	// bounds when open, and the space beside the rail when collapsed.
+	$effect(() => {
+		if (!tipOpen) return;
+		if (!visible || !buttonEl) {
+			buttonHovered = false;
+			closeTip();
+			return;
+		}
+		const button = buttonEl;
+		const sidebar = button.closest('aside');
+		const host = rail ? panelBounds : sidebar;
+		const railEdge = rail && !host ? button.closest('nav') : null;
+		const place = () => {
+			const rect = button.getBoundingClientRect();
+			const bounds = host?.getBoundingClientRect();
+			const sidebarRect = sidebar?.getBoundingClientRect();
+			const leftBound = Math.max(0, bounds?.left ?? railEdge?.getBoundingClientRect().right ?? sidebarRect?.right ?? rect.right);
+			const rightBound = Math.min(window.innerWidth, bounds?.right ?? window.innerWidth);
+			const width = Math.max(0, Math.min(280, rightBound - leftBound - 16));
+			const left = rail ? leftBound + 8 : Math.max(leftBound + 8, Math.min(rect.right - width, rightBound - width - 8));
+			const top = Math.max(0, sidebarRect?.top ?? 0) + 8;
+			const bottom = Math.min(window.innerHeight, sidebarRect?.bottom ?? window.innerHeight) - 8;
+			const aboveEdge = Math.min(bottom, rect.top - 8);
+			const belowEdge = Math.max(top, rect.bottom + 8);
+			const above = aboveEdge - top >= bottom - belowEdge;
+			const edge = above ? window.innerHeight - aboveEdge : belowEdge;
+			const height = Math.max(0, above ? aboveEdge - top : bottom - belowEdge);
+			tipPosition = { left, width, edge, height, above };
 		};
+		place();
+		const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(place) : null;
+		for (const node of new Set([button, sidebar, host])) if (node) observer?.observe(node);
+		window.addEventListener('resize', place);
+		// Keyboard focus can scroll the trigger into view in a short window.
+		const onScroll = (event: Event) => { if (event.target !== tipEl) place(); };
+		window.addEventListener('scroll', onScroll, true);
+		return () => {
+			observer?.disconnect();
+			window.removeEventListener('resize', place);
+			window.removeEventListener('scroll', onScroll, true);
+		};
+	});
+	function showTip() {
+		clearTimeout(tipCloseTimer);
+		if (!panel) tipOpen = true;
 	}
-	function showTip(event: MouseEvent | FocusEvent) {
-		if (panel) return;
-		tipPosition = anchor((event.currentTarget as HTMLButtonElement).getBoundingClientRect());
-		tipOpen = true;
+	function closeTip() {
+		clearTimeout(tipCloseTimer);
+		tipHovered = false;
+		tipOpen = false;
+	}
+	function leaveTip() {
+		clearTimeout(tipCloseTimer);
+		// Leave time to cross the gap from the trigger to the card.
+		tipCloseTimer = setTimeout(() => {
+			if (!buttonHovered && !tipHovered && document.activeElement !== buttonEl) closeTip();
+		}, 200);
+	}
+	function scrollTip(event: KeyboardEvent) {
+		if (!tipOpen || !tipEl || tipEl.scrollHeight <= tipEl.clientHeight) return;
+		if (event.key !== 'PageDown' && event.key !== 'PageUp') return;
+		event.preventDefault();
+		tipEl.scrollTop += (event.key === 'PageDown' ? 1 : -1) * tipEl.clientHeight;
 	}
 	/** The restart notice draws in the shared notification dock (#1823), not under this button. */
 	function openPanel(next: Panel) {
-		tipOpen = false;
+		closeTip();
 		panel = next;
 	}
 	function closePanel() { panel = null; }
 	function openInstallerPage() { window.open(INSTALLER_URL, '_blank', 'noopener,noreferrer'); }
 	function panelKey(event: KeyboardEvent) {
-		if (panel && event.key === 'Escape') { event.preventDefault(); closePanel(); buttonEl?.focus(); }
+		if (event.key !== 'Escape') return;
+		if (panel) { event.preventDefault(); closePanel(); buttonEl?.focus(); }
+		closeTip();
 	}
 	/** Plain text of what is running, for the bell: "Fix login (Run tests); Update docs". */
 	function busyText(workers: BusyGroup[]): string {
@@ -399,7 +459,7 @@
 		clearTimeout(finishTimer); clearTimeout(hideTimer);
 		celebration = 'complete';
 		finishTimer = setTimeout(() => { celebration = 'leaving'; }, 1850);
-		hideTimer = setTimeout(() => { celebration = 'none'; tipOpen = false; }, 2150);
+		hideTimer = setTimeout(() => { celebration = 'none'; closeTip(); }, 2150);
 	}
 	function schedule() {
 		clearTimeout(pollTimer); pollTimer = undefined;
@@ -440,7 +500,7 @@
 		window.addEventListener('application-update-request', activateFromNotification);
 		document.addEventListener('visibilitychange', visibilityChanged);
 		return () => {
-			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer);
+			active = false; clearTimeout(pollTimer); clearTimeout(finishTimer); clearTimeout(hideTimer); clearTimeout(tipCloseTimer);
 			window.removeEventListener('application-update-policy', refresh);
 			window.removeEventListener('application-update-request', activateFromNotification);
 			document.removeEventListener('visibilitychange', visibilityChanged);
@@ -608,9 +668,10 @@
 			type="button" onclick={clicked} aria-disabled={busy && !opensPanel} aria-busy={busy && !celebrating} bind:this={buttonEl}
 			aria-label={waiting || celebrating || deferred || restartLocked || outcomeOnly || (blocked && !error) ? headline : busy ? 'Downloading update' : installer.length ? 'Update needs the latest installer' : action}
 			aria-haspopup="dialog" aria-expanded={!!panel} aria-controls={panel ? panelId : undefined}
-			title={panel ? undefined : status} aria-describedby={tipOpen ? tooltipId : undefined}
-			onmouseenter={showTip} onmouseleave={() => tipOpen = false} onfocus={showTip} onblur={() => tipOpen = false}
-			onkeydown={(event) => { if (event.key === 'Escape') tipOpen = false; }}>
+			aria-describedby={tipOpen ? tooltipId : undefined}
+			onmouseenter={() => { buttonHovered = true; showTip(); }} onmouseleave={() => { buttonHovered = false; leaveTip(); }}
+			onfocus={showTip} onblur={leaveTip}
+			onkeydown={scrollTip}>
 			{#if waiting || celebrating}
 				<svg class="completion-ring" width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={iconStroke} stroke-linecap="round" aria-hidden="true"><path d="M12 3a9 9 0 1 1-6.36 2.64" /></svg>
 				<svg class="completion-check" width={iconSize} height={iconSize} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width={iconStroke} stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7" /></svg>
@@ -691,7 +752,12 @@
 			</NotificationSlot>
 		{/if}
 		{#if tipOpen}
-			<div class="update-tooltip" id={tooltipId} role="tooltip" style:top={rail ? undefined : `${tipPosition.top}px`} style:bottom={rail ? `${tipPosition.bottom}px` : undefined} style:left={`${tipPosition.left}px`}>
+			<div class="update-tooltip" id={tooltipId} role="tooltip" tabindex="-1" bind:this={tipEl}
+				onmouseenter={() => { tipHovered = true; clearTimeout(tipCloseTimer); }}
+				onmouseleave={() => { tipHovered = false; leaveTip(); }}
+				style:left={`${tipPosition.left}px`} style:width={`${tipPosition.width}px`} style:max-height={`${tipPosition.height}px`}
+				style:top={tipPosition.above ? undefined : `${tipPosition.edge}px`}
+				style:bottom={tipPosition.above ? `${tipPosition.edge}px` : undefined}>
 				<strong>{headline}</strong>
 				{#if operation && showOperation}
 					{#if operationError || partialNote}<span class="tip-lead">{operationError || partialNote}</span>{/if}
@@ -759,9 +825,9 @@
 	.complete .halo { animation: update-halo .6s .12s ease-out both; }
 	.leaving { animation: close-gap .3s ease-in forwards; }
 	.leaving .update-button { animation: update-leave .3s ease-in forwards; }
-	.update-tooltip { position: fixed; z-index: 250; width: 280px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 8px 24px #0004; font-size: 11px; line-height: 1.5; pointer-events: none; overflow-wrap: break-word; }
+	.update-tooltip { position: fixed; z-index: 250; box-sizing: border-box; overflow-y: auto; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--popover); color: var(--popover-foreground); box-shadow: 0 8px 24px #0004; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
 	.update-tooltip strong { display: block; font-size: 12px; margin-bottom: 8px; }
-	.worker-row { display: flex; justify-content: space-between; gap: 12px; margin-top: 6px; }
+	.worker-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; margin-top: 6px; }
 	.worker-row span:last-child { text-align: right; color: var(--muted-foreground); }
 	.worker-row .verified { color: var(--primary) !important; }
 	.release-notes { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }

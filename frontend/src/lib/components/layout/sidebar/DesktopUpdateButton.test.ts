@@ -13,6 +13,10 @@ const state = { allow_updates:true, update_all_workers:false, workers:[worker] }
 beforeEach(() => { localStorage.clear(); updateAuth.current.status.preview_access = false; vi.resetAllMocks(); api.get.mockResolvedValue(state); api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'}]}); });
 afterEach(cleanup);
 
+// The condensed summary is announced, not rendered as a second native tooltip.
+const announcedStatus = () => [...screen.queryAllByRole('alert'), ...screen.queryAllByRole('status')]
+ .find(el => el.classList.contains('sr-only'))?.textContent ?? '';
+
 it('produces the ready bell action from the desktop bridge and executes canonical coordination', async () => {
  Object.defineProperty(window,'matchMedia',{configurable:true,value:()=>({matches:false,addEventListener(){},removeEventListener(){}})});
  const install=vi.fn();
@@ -96,7 +100,7 @@ it.each(['idle','unsupported','error'])('hides %s without a known update', async
 it('uses the same button for Docker or desktop and only restarts on a ready click', async () => {
  render(DesktopUpdateButton);
  const download = await screen.findByRole('button',{name:'Download update'});
- expect(download.title).toContain('Current worker');
+ expect(announcedStatus()).toContain('Current worker');
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}]});
  await fireEvent.click(download);
  expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'download'});
@@ -109,9 +113,9 @@ it('uses all-worker scope without adding a second action button and reports part
  api.post.mockResolvedValue({results:[{device_name:'Current worker',accepted:true,reason:'Request queued'},{device_name:'Peer',accepted:false,reason:'Offline; not queued'}]});
  render(DesktopUpdateButton);
  const button = await screen.findByRole('button',{name:'Download update'});
- expect(button.title).toContain('All online workers'); expect(screen.getAllByRole('button')).toHaveLength(1);
+ expect(announcedStatus()).toContain('All online workers'); expect(screen.getAllByRole('button')).toHaveLength(1);
  await fireEvent.click(button);
- await waitFor(()=>expect(button.title).toContain('Peer: Offline; not queued'));
+ await waitFor(()=>expect(announcedStatus()).toContain('Peer: Offline; not queued'));
 });
 it('blocks duplicate clicks and preserves transport failures for retry',async()=>{
  let reject!: (error:Error)=>void;
@@ -126,7 +130,7 @@ it('blocks duplicate clicks and preserves transport failures for retry',async()=
 it('refreshes the saved scope immediately after the settings event', async()=>{
  render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Download update'});
  api.get.mockResolvedValue({...state,update_all_workers:true});window.dispatchEvent(new Event('application-update-policy'));
- await waitFor(()=>expect(button.title).toContain('All online workers'));
+ await waitFor(()=>expect(announcedStatus()).toContain('All online workers'));
 });
 it('pauses all actions when allow updates is disabled',async()=>{
  api.get.mockResolvedValue({...state,allow_updates:false});render(DesktopUpdateButton);
@@ -145,9 +149,10 @@ it('restores waiting after reload instead of offering a stale ready update', asy
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}],operation});
  const view=render(DesktopUpdateButton);
  let button=await screen.findByRole('button',{name:'Waiting on all workers to finish startup'});
- expect(button.title).toContain('Worker 2: Waiting for startup');
+ expect(announcedStatus()).toContain('Worker 2: Waiting for startup');
+ expect(button.hasAttribute('title')).toBe(false);
  // A first start after an update can take minutes: say so rather than look hung.
- expect(button.title).toContain('Starting the new version can take a few minutes.');
+ expect(announcedStatus()).toContain('Starting the new version can take a few minutes.');
  await fireEvent.click(button);expect(api.post).not.toHaveBeenCalled();
  await fireEvent.focus(button);
  expect(screen.getByRole('tooltip').textContent).toContain('Worker 2');
@@ -189,7 +194,7 @@ it('keeps waiting through transport loss without enabling another install', asyn
 it('shows startup failures for retry without a success animation', async()=>{
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}],operation:{...operation,phase:'error'}});
  render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Update and restart'});
- expect(button.title).toContain('startup could not be confirmed');
+ expect(announcedStatus()).toContain('startup could not be confirmed');
  expect(document.querySelector('.complete')).toBeNull();
  await fireEvent.click(button);expect(api.post).toHaveBeenCalledWith('/settings/application-updates',{action:'install'});
 });
@@ -201,7 +206,7 @@ it('offers a newly staged update plainly once the worker settled an old failed i
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready',version:'24b1105c7276'}],operation:replaced});
  render(DesktopUpdateButton);const button=await screen.findByRole('button',{name:'Update and restart'});
  expect(button.classList.contains('failed')).toBe(false);expect(button.classList.contains('ready')).toBe(true);
- expect(button.title).not.toContain('startup could not be confirmed');expect(button.title).toContain('Update ready');
+ expect(announcedStatus()).not.toContain('startup could not be confirmed');expect(announcedStatus()).toContain('Update ready');
  expect(document.querySelector('.complete')).toBeNull();
 });
 
@@ -285,19 +290,19 @@ it('waits for every included worker before offering restart and labels each phas
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Downloading update'});
  expect(button.getAttribute('aria-disabled')).toBe('true');
- expect(button.title).toContain('1 of 2 staged');
- expect(button.title).toContain('Current worker: Staged, awaiting restart');
- expect(button.title).toContain('ServerWorker: Building frontend…');
+ expect(announcedStatus()).toContain('1 of 2 staged');
+ expect(announcedStatus()).toContain('Current worker: Staged, awaiting restart');
+ expect(announcedStatus()).toContain('ServerWorker: Building frontend…');
  await fireEvent.click(button);expect(api.post).not.toHaveBeenCalled();
  api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'checking'}]});
  window.dispatchEvent(new Event('application-update-policy'));
- await waitFor(()=>expect(button.title).toContain('ServerWorker: Checking for updates…'));
+ await waitFor(()=>expect(announcedStatus()).toContain('ServerWorker: Checking for updates…'));
  expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
  api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'ready',message:'Update ready. Choose Update and restart.'}]});
  window.dispatchEvent(new Event('application-update-policy'));
  const restart=await screen.findByRole('button',{name:'Update and restart'});
- expect(restart.title).toContain('ServerWorker: Staged, awaiting restart');
- expect(restart.title).not.toContain('running');
+ expect(announcedStatus()).toContain('ServerWorker: Staged, awaiting restart');
+ expect(announcedStatus()).not.toContain('running');
  await fireEvent.focus(restart);
  const rows=[...screen.getByRole('tooltip').querySelectorAll('.worker-row')].map(row=>row.textContent);
  expect(rows).toEqual(['Current workerStaged, awaiting restart','ServerWorkerStaged, awaiting restart']);
@@ -316,8 +321,8 @@ it('lists excluded workers with a reason without counting them ready or letting 
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Update and restart'});
  for (const text of ['Laptop: Offline; not queued','Desk: Already up to date','Old: No application updater; not included',
-  'Locked: Updates disabled on this worker; not included','Idle: No update offered','Docker: Needs a new Docker image; not included']) expect(button.title).toContain(text);
- expect(button.title).not.toContain('Docker: Already up to date');
+  'Locked: Updates disabled on this worker; not included','Idle: No update offered','Docker: Needs a new Docker image; not included']) expect(announcedStatus()).toContain(text);
+ expect(announcedStatus()).not.toContain('Docker: Already up to date');
 });
 it.each([
  ['an unreadable status',{phase:'unknown',supported:false,reason:'Worker unavailable or does not support application updates'},'ServerWorker (Status unavailable)'],
@@ -326,7 +331,7 @@ it.each([
  api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,...change}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Check for updates'});
- expect(button.title).toContain(text);
+ expect(announcedStatus()).toContain(text);
  expect(screen.getByRole('alert').textContent).toContain(text);
  await fireEvent.click(button);
  expect(api.post).toHaveBeenCalledWith('/settings/application-updates',{action:'check'});
@@ -337,8 +342,8 @@ it('does not keep showing accepted requests once workers report their phase', as
  api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}]});
  await fireEvent.click(button);
  const restart=await screen.findByRole('button',{name:'Update and restart'});
- expect(restart.title).not.toContain('Request queued');
- expect(restart.title).toContain('Current worker: Staged, awaiting restart');
+ expect(announcedStatus()).not.toContain('Request queued');
+ expect(announcedStatus()).toContain('Current worker: Staged, awaiting restart');
 });
 
 // #1623: a reload while staged must not replay a historical completion.
@@ -380,14 +385,14 @@ it('does not let a peer outside a current-worker update hold or join the restart
  api.get.mockResolvedValue({...state,workers:[{...worker,is_self:true,phase:'ready'},{...peer,is_self:false,phase:'unknown',supported:false}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Update and restart'});
- expect(button.title).not.toContain('Restart waits');
- expect(button.title).toContain('ServerWorker: Not in scope; current worker only');
+ expect(announcedStatus()).not.toContain('Restart waits');
+ expect(announcedStatus()).toContain('ServerWorker: Not in scope; current worker only');
 });
 it('never celebrates a recent completion while an update is staged but held for an unknown worker', async()=>{
  api.get.mockResolvedValue({...justSettled,update_all_workers:true,workers:[{...worker,phase:'ready',version:'cccccccccccc',running_version:'b'.repeat(40)},{...peer,phase:'unknown',supported:false}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Check for updates'});
- expect(button.title).toContain('Restart waits for ServerWorker');
+ expect(announcedStatus()).toContain('Restart waits for ServerWorker');
  expect(document.querySelector('.complete')).toBeNull();
  expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
 });
@@ -405,7 +410,7 @@ it('names a worker that refused the last request and holds restart for it', asyn
  await fireEvent.click(download);
  const button=await screen.findByRole('button',{name:'Check for updates'});
  expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
- expect(button.title).toContain('Restart waits for ServerWorker (Refused: No application update available');
+ expect(announcedStatus()).toContain('Restart waits for ServerWorker (Refused: No application update available');
  expect(screen.getByRole('alert').textContent).toContain('Refused: No application update available');
  await fireEvent.focus(button);
  const rows=[...screen.getByRole('tooltip').querySelectorAll('.worker-row')].map(row=>row.textContent);
@@ -417,14 +422,14 @@ it('names a worker that refused the last request and holds restart for it', asyn
  await fireEvent.click(button);
  expect(api.post).toHaveBeenLastCalledWith('/settings/application-updates',{action:'check'});
  const next=await screen.findByRole('button',{name:'Download update'});
- expect(next.title).not.toContain('Refused');
+ expect(announcedStatus()).not.toContain('Refused');
 });
 it('counts a worker with a queued request it has not taken yet as preparing', async()=>{
  api.get.mockResolvedValue({...state,update_all_workers:true,workers:[{...worker,phase:'ready'},{...peer,phase:'idle',version:null,request_pending:true}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Downloading update'});
  expect(button.getAttribute('aria-disabled')).toBe('true');
- expect(button.title).toContain('ServerWorker: Request queued; waiting for the updater');
+ expect(announcedStatus()).toContain('ServerWorker: Request queued; waiting for the updater');
  expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
 });
 it('ignores an idle message that claims an update is in progress', async()=>{
@@ -433,9 +438,9 @@ it('ignores an idle message that claims an update is in progress', async()=>{
   {...peer,device_id:'desk',device_name:'Desk',phase:'idle',version:null,message:'Updated version is running.'}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Update and restart'});
- expect(button.title).toContain('ServerWorker: No update offered');
- expect(button.title).not.toContain('Application update is running');
- expect(button.title).toContain('Desk: Updated version is running.');
+ expect(announcedStatus()).toContain('ServerWorker: No update offered');
+ expect(announcedStatus()).not.toContain('Application update is running');
+ expect(announcedStatus()).toContain('Desk: Updated version is running.');
 });
 
 // #1623: a staged desktop offered restart while a peer that had not checked yet sat idle.
@@ -459,7 +464,7 @@ it('uses the worker’s own role and label when the snapshot carries them', asyn
  ] });
  render(DesktopUpdateButton);
  const button = await screen.findByRole('button', { name: 'Download update' });
- expect(button.getAttribute('title')).toContain('ServerWorker: Not checked yet; will check and download');
+ expect(announcedStatus()).toContain('ServerWorker: Not checked yet; will check and download');
  await fireEvent.click(button);
  await waitFor(() => expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates', { action:'download' }));
 });
@@ -515,7 +520,7 @@ describe('manual check from the host', () => {
    api.get.mockResolvedValue({ ...state, update_all_workers:true, workers:[worker, { ...peer, phase:'available', version:'abc123' }] });
    await vi.advanceTimersByTimeAsync(4000);
    await waitFor(() => expect(notice.info).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ title:'Update found' })));
-   expect(screen.getByRole('button', { name:'Download update' }).title).toContain('ServerWorker: Update available; not downloaded');
+   expect(announcedStatus()).toContain('ServerWorker: Update available; not downloaded');
   } finally { vi.useRealTimers(); }
  });
  it('checks while a worker is downloading; only that worker declines', async () => {
@@ -662,10 +667,10 @@ it('tells a Docker worker ahead of time that a coming update needs a newer image
  ]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Update and restart'});
- expect(button.title).toContain('Docker: Staged, awaiting restart; a coming update needs a newer Docker image');
+ expect(announcedStatus()).toContain('Docker: Staged, awaiting restart; a coming update needs a newer Docker image');
  // A worker that needs it now says so once, not twice.
- expect(button.title).toContain('Old: Needs a new Docker image; not included');
- expect(button.title).not.toContain('Old: Needs a new Docker image; not included; a coming');
+ expect(announcedStatus()).toContain('Old: Needs a new Docker image; not included');
+ expect(announcedStatus()).not.toContain('Old: Needs a new Docker image; not included; a coming');
 });
 
 // A failed desktop update that only the latest installer can finish says so,
@@ -700,7 +705,7 @@ it('offers a retry, not the installer, when the installer would reinstall the sa
  api.get.mockResolvedValue({...state, workers:[{...worker,phase:'error',version:null,error:FAILED_START,role:'unknown',label:FAILED_START,remedy:null,data_kept:false}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Check for updates'});
- expect(button.title).toContain(FAILED_START);
+ expect(announcedStatus()).toContain(FAILED_START);
  expect(screen.queryByRole('button',{name:'Update needs the latest installer'})).toBeNull();
  await fireEvent.click(button);
  await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
@@ -712,7 +717,7 @@ it('shows why a failed first start is offered again', async () => {
  api.get.mockResolvedValue({...state, workers:[{...worker,phase:'available',message:why,role:'available',label:why}]});
  render(DesktopUpdateButton);
  const button=await screen.findByRole('button',{name:'Download update'});
- expect(button.title).toContain(why);
+ expect(announcedStatus()).toContain(why);
 });
 it('puts the installer action on a manual check that finds the installer state', async () => {
  vi.useFakeTimers({shouldAdvanceTime:true});
@@ -738,7 +743,7 @@ describe('restart waiting state', () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Ready; waiting for running work'});
-  expect(button.title).toContain('Service npm run preview -- --port 5173 still running for Fix login on port 5173');
+  expect(announcedStatus()).toContain('Service npm run preview -- --port 5173 still running for Fix login on port 5173');
   await fireEvent.click(button);
   const panel = await screen.findByRole('dialog',{name:'Work is still running'});
   expect(panel.textContent).toContain('Downloaded and ready.');
@@ -767,7 +772,7 @@ describe('restart waiting state', () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'queued',wait_reason:'updater_acknowledgement',blocked_by:[]}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Restart requested'});
-  expect(button.title).toContain('Restart requested; waiting for the updater…');
+  expect(announcedStatus()).toContain('Restart requested; waiting for the updater…');
   await fireEvent.click(button);
   expect(api.post).not.toHaveBeenCalled();
  });
@@ -787,9 +792,9 @@ describe('restart waiting state', () => {
    stop_result:{request_id:'r',accepted:false,reason:'Busy with running work: Fix login',completed_at:1_790_000_000}}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Ready; waiting for running work'});
-  expect(button.title).toContain('The stop attempt finished, but work is still running. Restart was not queued. Service npm run preview -- --port 5173 still running');
+  expect(announcedStatus()).toContain('The stop attempt finished, but work is still running. Restart was not queued. Service npm run preview -- --port 5173 still running');
   // Named once, by the blocker line; the busy refusal does not repeat it.
-  expect(button.title.match(/npm run preview/g)).toHaveLength(1);
+  expect(announcedStatus().match(/npm run preview/g)).toHaveLength(1);
  });
  it('reports a not-sent request with the worker named once', async () => {
   api.get.mockResolvedValue({...state,workers:[{...ready,install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]}]});
@@ -799,8 +804,8 @@ describe('restart waiting state', () => {
   await fireEvent.click(await screen.findByRole('button',{name:'Ready; waiting for running work'}));
   await fireEvent.click(await screen.findByRole('button',{name:'Restart when work finishes'}));
   await waitFor(()=>expect(notice.warning).toHaveBeenCalledWith('Not sent to Current worker: Waiting on workers to finish the previous update.',expect.objectContaining({title:'Restart was not sent'})));
-  await waitFor(()=>expect(screen.getByRole('button').title).toContain('Last request: Not sent to Current worker: Waiting on workers to finish the previous update.'));
-  expect(screen.getByRole('button').title).not.toContain('Refused');
+  await waitFor(()=>expect(announcedStatus()).toContain('Last request: Not sent to Current worker: Waiting on workers to finish the previous update.'));
+  expect(announcedStatus()).not.toContain('Refused');
  });
  it('names a retained download behind a newer offer without the offer’s release name', async () => {
   api.get.mockResolvedValue({...state,workers:[{...worker,phase:'available',version:'b'.repeat(40),staged_version:'a'.repeat(40),
@@ -849,7 +854,7 @@ describe('review fixes (#355)', () => {
   api.get.mockResolvedValue({...blockedSnap,workers:[{...blockedSnap.workers[0],wait_reason:'still_busy_after_stop',stop_result:{accepted:false,reason:'Busy with running work'}}]});
   window.dispatchEvent(new Event('application-update-policy'));
   const again = await screen.findByRole('button',{name:'Ready; waiting for running work'});
-  expect(again.title).toContain('The stop attempt finished, but work is still running.');
+  expect(announcedStatus()).toContain('The stop attempt finished, but work is still running.');
  });
  it('the bell action cannot send a second stop before the next snapshot', async () => {
   api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}]});
@@ -874,8 +879,8 @@ describe('review fixes (#355)', () => {
   api.get.mockResolvedValue({...state,workers:[{...idleRetained,role:'available',label:'Check for updates before restarting'}]});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Check for updates'});
-  expect(button.title).toContain('Current worker: Check for updates before restarting');
-  expect(button.title.match(/the updater is idle/g)).toHaveLength(1);
+  expect(announcedStatus()).toContain('Current worker: Check for updates before restarting');
+  expect(announcedStatus().match(/the updater is idle/g)).toHaveLength(1);
   await fireEvent.click(button);
   await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
   expect(notice.info).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({title:'Checking for updates'}));
@@ -913,7 +918,7 @@ describe('review fixes (#355)', () => {
    render(DesktopUpdateButton);
    const button = await screen.findByRole('button',{name:'Restarts when work finishes'});
    const local = new Date(Date.now() + 60_000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-   expect(button.title).toContain(`Waits until ${local} at most`);
+   expect(announcedStatus()).toContain(`Waits until ${local} at most`);
   } finally { vi.useRealTimers(); }
  });
 });
@@ -930,8 +935,8 @@ describe('check-first fleet (#361)', () => {
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Check for updates'});
   expect(screen.queryByRole('button',{name:'Update and restart'})).toBeNull();
-  expect(button.title).toContain('All online workers: Restart waits for an update check on Desktop. Click to check for updates.');
-  expect(button.title).toContain('Desktop: Check for updates before restarting');
+  expect(announcedStatus()).toContain('All online workers: Restart waits for an update check on Desktop. Click to check for updates.');
+  expect(announcedStatus()).toContain('Desktop: Check for updates before restarting');
   await fireEvent.click(button);
   await waitFor(()=>expect(api.post).toHaveBeenCalledExactlyOnceWith('/settings/application-updates',{action:'check'}));
   expect(notice.info).toHaveBeenCalledWith(expect.any(String),expect.objectContaining({title:'Checking for updates'}));
@@ -954,7 +959,7 @@ describe('check-first fleet (#361)', () => {
    expect.objectContaining({title:'Restart held'})));
   // Nothing restarts: never "waiting on startup".
   expect(screen.queryByRole('button',{name:'Waiting on all workers to finish startup'})).toBeNull();
-  await waitFor(()=>expect(screen.getByRole('button').title).toContain('Last request: Check for updates needed on Desktop; nothing was installed'));
+  await waitFor(()=>expect(announcedStatus()).toContain('Last request: Check for updates needed on Desktop; nothing was installed'));
  });
  it('a restart waiting on running work offers the check, not stop or restart, while a worker must check first', async () => {
   api.get.mockResolvedValue({...mixed,workers:[{...staged,install_state:'blocked',wait_reason:'running_work',blocked_by:[svc]},idle],plan});
@@ -993,12 +998,12 @@ describe('check-first fleet (#361)', () => {
   // The read after the click: the held worker checks first.
   api.get.mockResolvedValue({...mixed,plan,workers:[staged,idle]});
   window.dispatchEvent(new Event('application-update-policy'));
-  await waitFor(()=>expect(screen.getByRole('button',{name:'Check for updates'}).title).toContain('Last request: Check for updates needed on Desktop'));
+  await waitFor(()=>expect(announcedStatus()).toContain('Last request: Check for updates needed on Desktop'));
   // It checked and staged: the held text is history.
   api.get.mockResolvedValue({...mixed,workers:[staged,{...staged,device_id:'desk',device_name:'Desktop',is_self:false}]});
   window.dispatchEvent(new Event('application-update-policy'));
   const ready = await screen.findByRole('button',{name:'Update and restart'});
-  expect(ready.title).not.toContain('Last request');
+  expect(announcedStatus()).not.toContain('Last request');
  });
  it('checks with feedback even beside a worker error', async () => {
   api.get.mockResolvedValue({...mixed,plan,workers:[staged,{...idle,error:'Feed unreachable'}]});
@@ -1016,15 +1021,15 @@ describe('aggregate outcome', () => {
    refused_workers:[{device_id:'local',device_name:'Current worker',reason:'Busy with running work: Fix login'}],workers:[skipped]}});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Update and restart'});
-  expect(button.title).toContain('Restart was not started: Current worker: Busy with running work: Fix login.');
-  expect(button.title).not.toContain('startup could not be confirmed');
+  expect(announcedStatus()).toContain('Restart was not started: Current worker: Busy with running work: Fix login.');
+  expect(announcedStatus()).not.toContain('startup could not be confirmed');
   expect(screen.getByRole('alert').textContent).toContain('Restart was not started');
  });
  it('a legacy all-skipped error reads as a refusal too', async () => {
   api.get.mockResolvedValue({...state,workers:[{...worker,phase:'ready'}],operation:{id:'op',phase:'error',workers:[skipped]}});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Update and restart'});
-  expect(button.title).toContain('Restart was not started: Current worker: Busy with running work: Fix login.');
+  expect(announcedStatus()).toContain('Restart was not started: Current worker: Busy with running work: Fix login.');
  });
  it('partial: names who was left behind and never celebrates', async () => {
   vi.useFakeTimers();
@@ -1037,7 +1042,7 @@ describe('aggregate outcome', () => {
    expect(document.querySelector('.complete')).toBeNull();
    expect(notice.warning).toHaveBeenCalledWith('Update finished on some workers. Not restarted: Current worker: Busy with running work: Fix login.',expect.objectContaining({title:'Update finished on some workers'}));
    const button = screen.getByRole('button',{name:'Update finished on some workers'});
-   expect(button.title).toContain('Update finished on some workers. Not restarted: Current worker');
+   expect(announcedStatus()).toContain('Update finished on some workers. Not restarted: Current worker');
    await vi.advanceTimersByTimeAsync(2500);
    expect(screen.queryByRole('button',{name:'Update complete'})).toBeNull();
    await fireEvent.click(button);
@@ -1053,7 +1058,7 @@ describe('aggregate outcome', () => {
    workers:[{device_id:'local',device_name:'Current worker',status:'error',message:'Startup not confirmed. Check this worker before retrying.'}]}});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Update and restart'});
-  expect(button.title).toContain('Current worker: Startup not confirmed. Check this worker before retrying.');
+  expect(announcedStatus()).toContain('Current worker: Startup not confirmed. Check this worker before retrying.');
  });
  it('waiting: keeps refused workers named while the rest start', async () => {
   api.get.mockResolvedValue({...state,update_all_workers:true,operation:{id:'op',phase:'waiting',outcome:'waiting',
@@ -1061,6 +1066,6 @@ describe('aggregate outcome', () => {
    workers:[{device_id:'peer',device_name:'Peer',status:'waiting',message:'Verifying updated version…'},{...skipped,message:'Offline; not queued'}]}});
   render(DesktopUpdateButton);
   const button = await screen.findByRole('button',{name:'Waiting on all workers to finish startup'});
-  expect(button.title).toContain('Not restarted: Current worker: Offline; not queued.');
+  expect(announcedStatus()).toContain('Not restarted: Current worker: Offline; not queued.');
  });
 });

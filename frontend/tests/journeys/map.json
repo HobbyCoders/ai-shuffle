@@ -271,6 +271,11 @@
 			]
 		},
 		{
+			"why": "update details stay inside the open sidebar and installer actions stay in the notification dock",
+			"journeys": ["desktop-update-popup"],
+			"globs": ["frontend/tests/journeys/desktop-update-popup.journey.mjs", "frontend/src/lib/components/layout/sidebar/DesktopUpdateButton.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [
