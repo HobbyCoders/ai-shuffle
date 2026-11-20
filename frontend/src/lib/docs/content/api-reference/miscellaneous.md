@@ -668,7 +668,7 @@ Remove the fal.ai API key.
 
 ### POST /api/v1/settings/integrations/anthropic
 
-Save the Anthropic API key used by Claude Code. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
+Save an Anthropic API key. The active key is the **Claude API** provider (`prov:claude-api:<model>` in `GET /api/v1/models`), which runs on AI Shuffle's own Anthropic client; Claude Code never receives the key. Body: `api_key` and optional `use_for_claude_code` (default `false`); `true` also switches Claude Code to API-key mode (see [claude-auth](#get-apiv1settingsclaude-auth)). Saving a key never changes the mode otherwise.
 
 The key is checked with a one-token request to Anthropic first. A key Anthropic rejects returns `400` and is not saved; a rate-limited check returns `429`. If Anthropic cannot be reached, the key is saved anyway. Returns `{"success": true, "masked_key": "sk-ant-...wxyz"}`.
 
@@ -1132,6 +1132,8 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
 
+Claude Code never receives the key. Only a model bound to the Claude API provider (`prov:claude-api:<model>`) runs on it; a Claude model chosen without a provider always runs on the subscription through the CLI, in every mode, and fails with a message naming the "Claude · API" models when the CLI is not signed in. In `api_key` mode the default model for new chats is the Claude API provider's, shown in the picker; existing chats keep their model. In other modes the key is never a default: not when the subscription is signed out, and not because Claude API models were used in other chats. An agent cannot start a chat or subagent on a Claude API model, or save one on an automation or agent, unless the owner approves it at a prompt or chose it there. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
+
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 
 ```json
@@ -1200,8 +1202,9 @@ sign-in are closed when a subscription switch happens.
 Both key settings sync encrypted under the existing system-settings policy.
 Worker-local legacy choices can still use the `anthropic_api_key` scalar. An
 explicit synced choice pins the exact saved key ID in the same row as its mode.
-A worker refuses to run in API key mode if that ID is absent from its encrypted
-`claude_saved_api_keys` list. The scalar cannot substitute for a missing key.
+If that ID is absent from a worker's encrypted `claude_saved_api_keys` list,
+the Claude API provider has no key there and its models cannot run. The scalar
+cannot substitute for a missing key.
 Concurrent decisions use the existing settings sync conflict rules.
 
 #### Saved subscription sign-ins

@@ -364,9 +364,13 @@ class ModelLookups:
         self._complete = False
 
     def prefetch(self) -> "ModelLookups":
+        from app.db.model_providers import _with_claude_api
+
         self._profiles = {p["id"]: p for p in database.get_all_profiles()}
+        # A run-time read: the built-in Claude API row runs automations too,
+        # so it is resolved here as resolve_model_provider() would.
         self._providers = {
-            p["id"]: p for p in database.get_all_model_providers(include_token=False)
+            p["id"]: p for p in _with_claude_api(database.get_all_model_providers(include_token=False))
         }
         self._complete = True
         return self

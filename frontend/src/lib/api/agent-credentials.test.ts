@@ -86,6 +86,21 @@ describe('agent credentials', () => {
 		expect(claudeOk.reason).toBeNull();
 	});
 
+	it('reads API key mode as ready from the Claude API provider, not the CLI sign-in', () => {
+		const gate = { ready: true, reason: null, mode: 'subscription' as const, claude_credential_ready: false, startup_state: 'ready' as const };
+		// The key runs natively while this worker's CLI is signed in elsewhere.
+		expect(credentialsFromSummary(summary({
+			mode: 'api_key', gate: { ...gate, ready_providers: ['gw:claude-api'] },
+		})).credentialReady).toBe(true);
+		expect(credentialsFromSummary(summary({
+			mode: 'api_key', gate: { ...gate, claude_credential_ready: true, ready_providers: ['claude'] },
+		})).credentialReady).toBe(false);
+		// Subscription mode still follows the CLI.
+		expect(credentialsFromSummary(summary({
+			gate: { ...gate, ready_providers: ['gw:claude-api'] },
+		})).credentialReady).toBe(false);
+	});
+
 	it('falls back to the gate reason on an older worker only while Claude is not ready', () => {
 		expect(credentialsFromSummary(summary()).reason).toBe(NOT_SIGNED_IN);
 		expect(credentialsFromSummary(summary({

@@ -42,17 +42,11 @@ NO_CLI_MESSAGE = (
     "Install it in Settings > Providers > Claude. You can also pick a model from another provider."
 )
 NOT_SIGNED_IN_MESSAGE = (
-    "Claude cannot run on this worker: Claude is set to subscription mode and the "
-    "Claude Code CLI is not signed in. Sign in with your Claude account in "
-    "Settings > Providers > Claude (it runs `claude auth login`), or add an "
-    "Anthropic API key and switch Claude to API key mode. You can also pick a "
+    "Claude cannot run on this worker: this model uses your Claude subscription "
+    "and the Claude Code CLI is not signed in. Sign in with your Claude account in "
+    "Settings > Providers > Claude (it runs `claude auth login`), or pick a "
+    "\"Claude · API\" model to use your Anthropic API key. You can also pick a "
     "model from another provider."
-)
-NO_KEY_MESSAGE = (
-    "Claude cannot run on this worker: Claude is set to API key mode and no "
-    "Anthropic API key is stored here. Add your key in Settings > Providers > "
-    "Claude, or switch Claude to subscription mode and sign in to the Claude Code "
-    "CLI. You can also pick a model from another provider."
 )
 UNKNOWN_CLI_MESSAGE = (
     "Claude cannot run on this worker: AI Shuffle could not read the Claude Code "
@@ -111,13 +105,10 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
     """
     from app.core import claude_auth_mode
 
-    mode, choice = claude_auth_mode.runtime_choice()
+    mode = claude_auth_mode.current_mode()
     if mode == claude_auth_mode.MODE_OFF:
         return False, OFF_MESSAGE
-    if mode == claude_auth_mode.MODE_API_KEY:
-        if claude_auth_mode.selected_api_key(choice):
-            return True, None
-        return False, NO_KEY_MESSAGE
+    # API key mode reads as subscription here: the key never reaches the CLI.
     if mode == claude_auth_mode.MODE_CLOUD:
         # A presence check of the owner's stored values; no network call.
         # The subscription sign-in and the Anthropic key never stand in.
@@ -240,8 +231,9 @@ def provider_row_is_subscription(provider_type: Optional[str], auth_mode: Option
 def claude_cli_uses_subscription() -> bool:
     """Whether a Claude run on the CLI leg uses the owner's Claude plan.
 
-    True in subscription mode. API key and cloud modes use a key; off refuses
-    every Claude run anyway. Unreadable reads as a subscription: this answer
+    True in subscription mode, which is also the CLI's mode when the owner
+    chose API key mode (the key runs only on the Claude API provider). Cloud
+    mode uses a key; off refuses every Claude run anyway. Unreadable reads as a subscription: this answer
     only ever narrows what other people may run.
     """
     try:
@@ -512,7 +504,12 @@ def default_provider_model(*, servable_only: bool = False) -> Optional[Tuple[str
         from app.core.provider_agent import curated_model_ids, default_model_for_provider
     except Exception:  # noqa: BLE001
         return None
-    rows = _default_candidate_rows(servable_only)
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+
+    # The Claude API key is billed per token and is Claude's own option: it
+    # takes Claude's place in the order (``_claude_default``), never a
+    # provider's.
+    rows = [r for r in _default_candidate_rows(servable_only) if r.get("id") != CLAUDE_API_PROVIDER_ID]
     brands: List[str] = []
     for row in rows:
         brand = provider_id_for_row(row)
@@ -578,6 +575,56 @@ def _claude_ready_for_default(probe: bool) -> bool:
             return True
         return bool(claude_credential_ready(cached)[0])
     return bool(claude_credential_ready({})[0])
+
+
+def _claude_api_default(
+    model: Optional[str] = None, *, servable_only: bool = False,
+) -> Optional[Tuple[str, str]]:
+    """``("claude-api", API model id)`` on the active saved Anthropic key, or
+    None without one. ``model`` (an alias or API id) is kept when the key
+    lists it, else the key's own default model."""
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID, api_model_id
+    from app.core.provider_agent import curated_model_ids
+
+    row = next((r for r in _default_candidate_rows(servable_only)
+                if r.get("id") == CLAUDE_API_PROVIDER_ID), None)
+    if row is None:
+        return None
+    ids = curated_model_ids(row)
+    wanted = api_model_id(model) if model else None
+    if wanted in ids:
+        return CLAUDE_API_PROVIDER_ID, wanted  # type: ignore[return-value]
+    fallback = row.get("default_model") or (ids[0] if ids else None)
+    return (CLAUDE_API_PROVIDER_ID, fallback) if fallback else None
+
+
+def claude_api_is_default() -> bool:
+    """Whether a run that names no model takes the saved key: the owner chose
+    API key mode and the key is usable (see :func:`_claude_default`)."""
+    from app.core import claude_auth_mode
+
+    return claude_auth_mode.prefers_claude_api() and _claude_api_default() is not None
+
+
+def _claude_default(
+    model: str, probe: bool, *, servable_only: bool = False,
+) -> Optional[Tuple[Optional[str], str]]:
+    """Claude's place in the default order, or None when Claude cannot run.
+
+    A worker whose owner chose API key mode takes the saved key as its Claude
+    default, bound explicitly to the Claude API provider so the picker shows
+    it. Otherwise (or once that key is gone) the unbound alias, which always
+    means the Claude subscription on the CLI.
+    """
+    from app.core import claude_auth_mode
+
+    if claude_auth_mode.prefers_claude_api():
+        picked = _claude_api_default(model, servable_only=servable_only)
+        if picked:
+            return picked
+    if _claude_ready_for_default(probe):
+        return None, model
+    return None
 
 
 # The owner's most used model, the first choice for a run that names none.
@@ -688,18 +735,22 @@ def most_used_model(
         ranking = _most_used_ranking()
         if not ranking:
             return None
+        from app.core import claude_auth_mode
+        from app.core.claude_api_provider import is_claude_api_id
         from app.core.provider_agent import curated_model_ids
 
         rows: Optional[dict] = None
-        claude_ok: Optional[bool] = None
         for provider_id, model, turns, _last in ranking:
             if turns < MOST_USED_MIN_TURNS:
                 break
             if provider_id is None:
-                if claude_ok is None:
-                    claude_ok = _claude_ready_for_default(probe)
-                if claude_ok:
-                    return None, model
+                picked = _claude_default(model, probe, servable_only=servable_only)
+                if picked:
+                    return picked
+                continue
+            # Picking the key in some chats is not choosing it for runs that
+            # name no model; only API key mode makes it a default.
+            if is_claude_api_id(provider_id) and not claude_auth_mode.prefers_claude_api():
                 continue
             if rows is None:
                 rows = {r.get("id"): r for r in _default_candidate_rows(servable_only)}
@@ -726,6 +777,15 @@ def default_run_model(
     3. the registry default, so a worker with nothing set up still gets the
        Claude setup message.
 
+    The saved Anthropic API key (the Claude API provider) is billed per
+    token, so it is a default only on a worker whose owner chose API key
+    mode: never as a last resort, and never from usage history otherwise.
+
+    Claude's place in this order is the unbound alias (the subscription),
+    or on a worker whose owner chose API key mode, the same model bound to
+    the Claude API provider (:func:`_claude_default`). The answer is always an
+    explicit pick the picker shows; nothing is moved to the API at run time.
+
     ``prefer_most_used=False`` is for internal text generation (titles,
     suggestions, commit text), where the chat model the owner uses most may
     be an expensive one: it skips step 1 and keeps the earlier order, the
@@ -747,11 +807,19 @@ def default_run_model(
             picked = most_used_model(probe=probe, servable_only=servable_only)
             if picked:
                 return picked[0], picked[1]
-        elif _claude_ready_for_default(probe):
-            return None, DEFAULT_MODEL
+        else:
+            picked = _claude_default(DEFAULT_MODEL, probe, servable_only=servable_only)
+            if picked:
+                return picked[0], picked[1]
         picked = default_provider_model(servable_only=servable_only)
         if picked:
             return picked[0], picked[1]
+        if prefer_most_used:
+            picked = _claude_default(DEFAULT_MODEL, probe, servable_only=servable_only)
+            if picked:
+                return picked[0], picked[1]
+        # Never the saved key as a last resort: saving a key is not choosing
+        # it. Only API key mode (``_claude_default``) makes it the default.
     except Exception:  # noqa: BLE001 — a failed check keeps the registry default
         logger.warning("Could not pick a default model", exc_info=True)
     return None, DEFAULT_MODEL
@@ -809,7 +877,7 @@ def status_payload(cli=None) -> dict:
     return {
         "ready": any_ok,
         "reason": reason,
-        "mode": claude_auth_mode.current_mode(),
+        "mode": claude_auth_mode.selected_mode(),
         "claude_credential_ready": claude_ok,
         "license_allows_runs": True,
         "startup_state": startup_state,

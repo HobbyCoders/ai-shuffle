@@ -6,8 +6,9 @@
    and the worker process never opens or stats the CLI's own credential file
    (``$CLAUDE_CONFIG_DIR/.credentials.json``); no Anthropic API key or token
    reaches the CLI, even when a key is stored in Settings or set on the host.
-3. An API-key (BYOK) run hands the CLI exactly the user's stored key and no
-   other Anthropic credential.
+3. In API-key mode the stored key never reaches the CLI: a Claude model chosen
+   without a provider is the subscription, run by the CLI on its own sign-in.
+   The key runs only on the native Claude API provider.
 4. An explicit worker gateway token selects the CLI's built-in gateway auth
    even when subscription/API-key mode was previously saved (#1862); these
    credentials never reach app-owned child environments.
@@ -339,34 +340,35 @@ async def test_subscription_host_oauth_token_reaches_only_the_cli(
 
 
 # ---------------------------------------------------------------------------
-# 3. API key mode: the user's key and nothing else
+# 3. API key mode: the key never reaches the CLI
 # ---------------------------------------------------------------------------
 
-async def test_byok_run_uses_only_the_users_key(mock_db, tmp_path, fake_cli, file_audit, monkeypatch):
-    from cryptography.fernet import Fernet
-
-    from app.core import claude_accounts, encryption
-
-    monkeypatch.setattr(encryption, "_encryption_key", Fernet.generate_key())
-    claude_accounts.add_api_key(USER_KEY, for_claude_code=True)
-    database.set_system_setting("anthropic_api_key", HOST_KEY)  # stale peer scalar must not win
-    # OAuth cannot ride along. An explicit worker auth token instead selects
-    # gateway mode (#1862), covered separately below.
+async def test_api_key_mode_runs_a_subscription_pick_on_the_cli_without_the_key(
+    mock_db, tmp_path, fake_cli, file_audit, monkeypatch,
+):
+    """A Claude pick without a provider (as a subscription chat stores it) on a
+    worker still in the old API key mode: the CLI on the subscription sign-in,
+    never the saved key and never an API call."""
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local choice
+    database.set_system_setting("anthropic_api_key", USER_KEY)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", HOST_OAUTH)
-    _seed(tmp_path, "c14-byok")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    database.create_profile("c14-profile", "C14", None, {"cwd": str(workspace), "model": "sonnet"})
+    database.create_session(session_id="c14-api-key-mode", profile_id="c14-profile", title="c14")
 
-    frames = await _run_turn("c14-byok", audit=file_audit)
+    frames = await _run_turn("c14-api-key-mode", audit=file_audit)
 
     assert [f for f in frames if f.get("type") == "error"] == []
     assert any(f.get("type") == "done" for f in frames), frames
     runs = _turn_calls(fake_cli["calls"]())
-    assert len(runs) == 1
+    assert len(runs) == 1, "the subscription pick must run through the claude CLI"
     child = runs[0]["env"]
-    assert child.get("ANTHROPIC_API_KEY") == USER_KEY
-    credential_like = sorted(n for n in child if CREDENTIAL_NAME.search(n) or n in ANTHROPIC_CREDENTIALS)
-    assert credential_like == ["ANTHROPIC_API_KEY"]
-    assert not {HOST_TOKEN, HOST_OAUTH} & set(child.values())
+    assert "ANTHROPIC_API_KEY" not in child and USER_KEY not in child.values()
+    assert child.get("CLAUDE_CODE_OAUTH_TOKEN") == HOST_OAUTH
     assert file_audit.touched(fake_cli["credentials"]) == []
 
 

@@ -384,13 +384,36 @@ describe('claudeGateNotice', () => {
 	});
 
 	it('warns about Claude even while another provider keeps the gate ready', () => {
-		const summary = claudeSummary({ mode: 'subscription', gate: { ...gate, ready: true, claude_credential_ready: false } });
+		const summary = claudeSummary({
+			mode: 'subscription', api_key: { set: false, last4: null },
+			gate: { ...gate, ready: true, claude_credential_ready: false }
+		});
 		expect(claudeGateNotice(summary)).toBe('Claude cannot run: the Claude Code CLI is not signed in on this worker.');
 	});
 
 	it('names the missing key in API key mode', () => {
+		const summary = claudeSummary({
+			mode: 'api_key', api_key: { set: false, last4: null },
+			gate: { ...gate, mode: 'api_key', claude_credential_ready: false }
+		});
+		expect(claudeGateNotice(summary)).toBe('Claude API cannot run: no Anthropic API key is stored on this worker.');
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'warn', text: 'Not ready' });
+	});
+
+	it('reports a saved key and the CLI sign-in separately', () => {
+		// The gate's credential is the CLI's; the key runs Claude API without it.
 		const summary = claudeSummary({ mode: 'api_key', gate: { ...gate, mode: 'api_key', claude_credential_ready: false } });
-		expect(claudeGateNotice(summary)).toBe('Claude cannot run: no Anthropic API key is stored on this worker.');
+		expect(claudeHeaderStatus(summary)).toEqual({ status: 'ok', text: 'Runs on API key' });
+		expect(claudeGateNotice(summary)).toBe(
+			'Claude subscription cannot run: the Claude Code CLI is not signed in on this worker. Claude API models run on the saved key.'
+		);
+	});
+
+	it('names only Claude Cloud when cloud mode is incomplete and a key is saved', () => {
+		const summary = claudeSummary({ mode: 'cloud', gate: { ...gate, mode: 'cloud', claude_credential_ready: false } });
+		expect(claudeGateNotice(summary)).toBe(
+			'Claude Cloud cannot run: no cloud provider or gateway is saved on this worker. Claude API models run on the saved key.'
+		);
 	});
 
 });

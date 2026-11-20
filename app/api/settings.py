@@ -75,7 +75,8 @@ class IntegrationSettingsResponse(BaseModel):
     anthropic_api_key_masked: str = ""
     # Which credential Claude Code runs on, from the explicit auth mode
     # (``claude_auth_mode``; see GET /settings/claude-auth):
-    #   "api_key"  — api_key mode: the stored key is injected
+    #   "api_key"  — api_key mode: new chats default to the Claude API
+    #                provider (the key); the CLI never receives it
     #   "account"  — subscription mode: the CLI's own sign-in is used
     #   "off"      — Claude is turned off on this worker
     # Kept for older clients; ``claude_auth_mode`` carries the mode itself
@@ -234,9 +235,11 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         fal_key = get_decrypted_api_key("fal_api_key")
         from app.core import fal_credential
         fal_enabled = fal_credential.is_enabled()
-        anthropic_key = get_decrypted_api_key("anthropic_api_key")
         from app.core import claude_auth_mode
-        auth_mode = claude_auth_mode.current_mode()
+        # The key the native Claude API provider uses: the owner's pinned key
+        # (none while it has not synced here), never a stale scalar.
+        anthropic_key = claude_auth_mode.selected_api_key(claude_auth_mode.key_pin())
+        auth_mode = claude_auth_mode.selected_mode()
         image_model = database.get_system_setting("image_model")
         image_edit_model = database.get_system_setting("image_edit_model")
         video_model = database.get_system_setting("video_model")
@@ -414,10 +417,10 @@ async def set_anthropic_api_key(
     """
     Set the Anthropic API key (admin only).
 
-    The key is a Claude Code credential used only in ``api_key`` auth mode,
-    where it is injected as ANTHROPIC_API_KEY into the CLI processes this
-    worker starts. Saving it does not change the mode unless
-    ``use_for_claude_code`` is true. It is stored encrypted on this worker
+    The active key is the Claude API provider (``claude-api``), run on the
+    native Anthropic client; the Claude Code CLI never receives it. Saving it
+    does not change the mode unless ``use_for_claude_code`` is true, which
+    makes the key the default for new chats (``api_key`` mode). It is stored encrypted on this worker
     and synced encrypted with saved API-key accounts. Validated here before storage.
 
     Get your API key from: https://console.anthropic.com/settings/keys
@@ -448,9 +451,9 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
     """
     Deactivate the Anthropic API key (admin only); saved keys remain available.
 
-    The auth mode is left as it is: in ``api_key`` mode new agent runs then
-    wait for a key (or for the user to choose subscription mode) instead of
-    falling back to the CLI's sign-in.
+    The auth mode is left as it is. Chats bound to the Claude API provider
+    then fail plainly until a key is active again; nothing moves them to the
+    CLI's sign-in.
     """
     from app.core import claude_accounts
     await run_sync(claude_accounts.deactivate_api_key)

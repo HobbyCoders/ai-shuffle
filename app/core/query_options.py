@@ -1471,9 +1471,9 @@ def build_options_from_profile(
             provider_id, include_token=False
         )
         if is_native_claude_model(_override_model):
-            from app.core.provider_agent import curated_model_ids
+            from app.core.provider_agent import keeps_bare_pick
 
-            if _override_model not in curated_model_ids(_bound_provider_row):
+            if not keeps_bare_pick(_bound_provider_row, _override_model):
                 logger.info(
                     "[Provider] Model override %r clears the session's provider "
                     "binding %r for this turn (native Claude pick).",

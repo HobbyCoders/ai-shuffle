@@ -371,11 +371,10 @@ def inject_claude_code_auth(
     The owner chooses the mode (``app.core.claude_auth_mode``) in Settings or
     through an explicit built-in cloud/gateway worker-environment configuration:
 
-    - ``api_key``: the Anthropic API key stored in Settings goes in as
-      ``ANTHROPIC_API_KEY``. Other Anthropic credential variables from the host
-      or the profile env are kept away from the CLI, so it sees that key and
-      nothing else credential-like.
-    - ``subscription``: no credential is injected, and any
+    - ``subscription`` (also the CLI's mode when the owner chose API key
+      mode: the stored key runs on the native Claude API provider,
+      :mod:`app.core.claude_api_provider`, and never reaches the CLI): no
+      credential is injected, and any
       ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` from the host or the
       profile env is kept away, so the CLI runs on the sign-in the user
       completed with ``claude auth login``. With a saved sign-in active, only
@@ -415,7 +414,12 @@ def inject_claude_code_auth(
 
     from app.core import claude_auth_mode, claude_cli_home, claude_cloud_auth, claude_subscriptions, credential_gate
 
-    mode, choice = claude_auth_mode.runtime_choice()
+    selected, choice = claude_auth_mode.runtime_choice()
+    # API key mode runs the CLI on the subscription: the saved key is the
+    # separate "Claude API" provider (app.core.claude_api_provider) and never
+    # reaches the CLI.
+    mode = (claude_auth_mode.MODE_SUBSCRIPTION if selected == claude_auth_mode.MODE_API_KEY
+            else selected)
     target = (claude_subscriptions.shared_target(choice, read_choice=False)
               if mode == claude_auth_mode.MODE_SUBSCRIPTION else None)
     enforced = choice is not None or target is not None
@@ -433,26 +437,13 @@ def inject_claude_code_auth(
         except claude_subscriptions.SubscriptionError as exc:
             raise ProviderTurnRefused(str(exc)) from None
     unset = claude_auth_mode.SUBSCRIPTION_UNSET
-    if enforced and mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_SUBSCRIPTION):
+    if enforced and mode == claude_auth_mode.MODE_SUBSCRIPTION:
         # Host or profile OAuth, gateway URLs and cloud selectors cannot win.
         unset = (*claude_auth_mode.OFF_UNSET, *claude_cloud_auth.host_names_to_unset(),
                  *(n for n in env if claude_cloud_auth.is_cloud_unset_name(n)))
         for name in unset:
             env.pop(name, None)
-    if mode == claude_auth_mode.MODE_API_KEY:
-        unset = tuple(n for n in unset if n != "ANTHROPIC_API_KEY") if enforced else claude_auth_mode.API_KEY_UNSET
-        api_key = (claude_auth_mode.selected_api_key(choice) if choice is not None
-                   else _get_decrypted_api_key(claude_auth_mode.API_KEY_SETTING))
-        if enforced and not api_key:
-            raise ProviderTurnRefused(credential_gate.NO_KEY_MESSAGE)
-        if api_key:
-            env["ANTHROPIC_API_KEY"] = api_key
-        else:
-            # No stored key: the credential gate refuses the turn; never let a
-            # key from somewhere else stand in for the user's.
-            unset = unset + ("ANTHROPIC_API_KEY",)
-            env.pop("ANTHROPIC_API_KEY", None)
-    elif mode == claude_auth_mode.MODE_OFF:
+    if mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
     elif mode == claude_auth_mode.MODE_CLOUD:
         # Every method's variables and every other Claude credential go,

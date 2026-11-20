@@ -199,7 +199,7 @@ describe('getClaudeAuth — native-Claude auth block hydration', () => {
 		).toEqual({ name: 'Claude', subtext: 'MAX' });
 	});
 
-	it('carries an API-key block through hydration', async () => {
+	it('carries a cloud block through hydration', async () => {
 		mocks.get.mockResolvedValueOnce(payload({ auth_kind: 'api', plan_type: null }));
 
 		await hydrateModelRegistry();
@@ -210,7 +210,7 @@ describe('getClaudeAuth — native-Claude auth block hydration', () => {
 				planType: getClaudeAuth().plan_type,
 				authKind: getClaudeAuth().auth_kind
 			})
-		).toEqual({ name: 'Claude', subtext: 'API' });
+		).toEqual({ name: 'Claude', subtext: 'Cloud' });
 	});
 
 	it('normalises to nulls when an older payload omits the block', async () => {
@@ -296,9 +296,12 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 		expect(
 			getProviderDisplay({ name: 'My Gateway', provider_type: 'custom', auth_kind: 'api' })
 		).toEqual({ name: 'My Gateway', subtext: 'API' });
+	});
+
+	it('shows the saved Anthropic key as Claude + API', () => {
 		expect(
-			getProviderDisplay({ name: 'Anthropic', provider_type: 'anthropic', auth_kind: 'api' })
-		).toEqual({ name: 'Anthropic', subtext: 'API' });
+			getProviderDisplay({ name: 'Claude API', provider_type: 'anthropic', auth_kind: 'api' })
+		).toEqual({ name: 'Claude', subtext: 'API' });
 	});
 
 	it('honours auth_kind over provider_type for a custom row on Codex auth', () => {
@@ -350,9 +353,12 @@ describe('getProviderDisplay / getClaudeDisplay — brand + auth-kind subtext', 
 		expect(getProviderDisplay({}).name).toBe('Provider');
 	});
 
-	it('names the native Claude group by plan, by API-key auth, or bare', () => {
+	it('names the native Claude group by plan, by cloud auth, or bare', () => {
 		expect(getClaudeDisplay({ planType: 'max' })).toEqual({ name: 'Claude', subtext: 'MAX' });
-		expect(getClaudeDisplay({ authKind: 'api' })).toEqual({ name: 'Claude', subtext: 'API' });
+		// Cloud mode is not the saved key's "Claude · API" row: distinct labels.
+		expect(getClaudeDisplay({ authKind: 'api' })).toEqual({ name: 'Claude', subtext: 'Cloud' });
+		expect(getProviderDisplay({ name: 'Claude API', provider_type: 'anthropic', auth_kind: 'api' }))
+			.toEqual({ name: 'Claude', subtext: 'API' });
 		expect(getClaudeDisplay()).toEqual({ name: 'Claude', subtext: null });
 		expect(getClaudeDisplay({ planType: '  ' })).toEqual({ name: 'Claude', subtext: null });
 	});

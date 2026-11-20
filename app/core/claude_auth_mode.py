@@ -7,8 +7,15 @@ and the user picks it:
 - ``subscription``: the CLI uses its own sign-in, which the user completed in
   Anthropic's flow (``claude auth login``). Nothing is injected; any Anthropic
   key in the host or profile environment is kept away from the CLI.
-- ``api_key``: the Anthropic API key the user stored in Settings is passed to
-  the CLI as ``ANTHROPIC_API_KEY``, and nothing else credential-like is.
+- ``api_key``: the worker's Claude default is the Anthropic API key the user
+  stored in Settings, which runs on fluid's native Anthropic client as the
+  "Claude API" provider (:mod:`app.core.claude_api_provider`), never through
+  the CLI. Only a run that names no model takes that default
+  (``credential_gate.default_run_model``), and it is bound to the Claude API
+  provider explicitly, so the picker shows it. A Claude model picked without a
+  provider still means the Claude subscription: for the CLI this mode is
+  subscription mode (:func:`current_mode`), and with no CLI sign-in the turn
+  is refused with a message pointing at the "Claude · API" models.
 - ``cloud``: "Cloud provider or gateway". The CLI runs on the one method the
   owner set up in Settings (Amazon Bedrock, Google Vertex AI, Microsoft Foundry
   or an LLM gateway), with only that method's allowlisted values
@@ -65,7 +72,6 @@ API_KEY_SETTING = "anthropic_api_key"
 # Environment names the CLI reads as an Anthropic credential. In each mode the
 # ones that do not belong to it are removed from what the CLI child inherits.
 SUBSCRIPTION_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-API_KEY_UNSET = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 OFF_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
@@ -170,9 +176,15 @@ def stored_mode(*, cached: bool = False) -> Optional[str]:
 
 
 def default_mode(key_stored: bool, cli_signed_in: Optional[bool]) -> str:
-    """The mode an install without an explicit choice starts in (never ``off``)."""
-    if key_stored and not cli_signed_in:
-        return MODE_API_KEY
+    """The mode an install without an explicit choice starts in: subscription.
+
+    Never API key mode, even with only a key saved and the CLI signed out:
+    that mode makes the per-token key Claude's default, which only the owner
+    chooses (a restored or synced key is not that choice). The key still runs
+    any "Claude · API" model picked explicitly. The arguments are kept for
+    callers.
+    """
+    del key_stored, cli_signed_in
     return MODE_SUBSCRIPTION
 
 
@@ -188,17 +200,24 @@ _mode_pin: contextvars.ContextVar[str | None] = contextvars.ContextVar("claude_a
 
 @contextlib.contextmanager
 def pinned_mode():
-    """Keep model registry reads on one mode without pinning turn credentials."""
+    """Answer :func:`selected_mode` (and so :func:`current_mode` and
+    :func:`prefers_claude_api`) with one read for the whole block, so a
+    projection that asks several times (the model registry payload) describes
+    one mode even if the owner switches midway. Yields the CLI's mode. Turn
+    credentials are not pinned (:func:`runtime_choice` reads them)."""
     held = _mode_pin.get()
     if held is not None:
-        yield held
+        yield _cli_mode(held)
         return
-    mode = current_mode()
-    token = _mode_pin.set(mode)
+    token = _mode_pin.set(selected_mode())
     try:
-        yield mode
+        yield _cli_mode(_mode_pin.get())
     finally:
         _mode_pin.reset(token)
+
+
+def _cli_mode(selected: str) -> str:
+    return MODE_SUBSCRIPTION if selected == MODE_API_KEY else selected
 
 
 def runtime_choice() -> tuple[str, Optional[dict]]:
@@ -218,7 +237,27 @@ def runtime_choice() -> tuple[str, Optional[dict]]:
 
 
 def current_mode() -> str:
-    """The active mode (the pinned one inside :func:`pinned_mode`)."""
+    """The mode the Claude Code CLI runs in.
+
+    The API-key choice is not a CLI mode: the key never reaches the CLI, so a
+    Claude run on the CLI there is a subscription run (its sign-in, its
+    guards, its billing). Settings shows :func:`selected_mode`.
+    """
+    return _cli_mode(selected_mode())
+
+
+def prefers_claude_api() -> bool:
+    """Whether this worker's Claude default is the saved API key (the owner
+    chose API key mode). Never raises."""
+    try:
+        return selected_mode() == MODE_API_KEY
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the Claude sign-in mode", exc_info=True)
+        return False
+
+
+def selected_mode() -> str:
+    """The mode the owner chose (the pinned one inside :func:`pinned_mode`)."""
     held = _mode_pin.get()
     return held if held is not None else runtime_choice()[0]
 
@@ -235,13 +274,36 @@ def selected_api_key(choice: Optional[dict]) -> Optional[str]:
         return None
 
 
+def key_pin() -> Optional[dict]:
+    """The owner's synced choice when it pins an exact saved API key, else None.
+
+    Read from the shared row itself, not this worker's CLI mode: a worker-local
+    Cloud or Off override changes how the CLI runs here, never which key the
+    native Claude API provider bills (``claude_api_provider``) or which key
+    Settings marks active (``claude_accounts._keys``). With a pin, the key is
+    that exact saved key or none; the scalar never substitutes for it.
+    """
+    return _pin_of(shared_selection(cached=True))
+
+
+def _pin_of(choice: Optional[dict]) -> Optional[dict]:
+    if choice is None or choice.get("invalid"):
+        return None
+    if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
+        return choice
+    return None
+
+
 def spawn_fingerprint() -> str:
     """Non-secret pooled-session identity, without materializing CLI credentials."""
     from app.core import claude_cloud_auth
 
     from app.core import claude_subscriptions
 
-    mode, choice = runtime_choice()
+    selected, choice = runtime_choice()
+    # The CLI's mode: API key mode runs the CLI on the subscription (the key
+    # never reaches it), so the key is not part of this identity.
+    mode = _cli_mode(selected)
     # Which sign-in folder the CLI runs in (a saved subscription switch must
     # reconnect pooled sessions), as an opaque id, never an email.
     identity = [mode]
@@ -254,10 +316,11 @@ def spawn_fingerprint() -> str:
             identity.extend(database.get_system_setting(key) or "" for key in (
                 claude_cloud_auth.CONFIG_SETTING, claude_cloud_auth.SECRETS_SETTING,
             ))
-    elif mode == MODE_API_KEY:
-        identity.append(selected_api_key(choice) or "")
     if choice is not None:
-        identity.append(choice)
+        # The key pin and the api_key/subscription distinction are the native
+        # provider's, not the CLI's: changing the active key must not
+        # reconnect a subscription chat.
+        identity.append({k: v for k, v in choice.items() if k not in ("key_id", "mode")})
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
@@ -322,7 +385,7 @@ def publish_subscription(target: str, *, local_subscription: tuple[str, str] | N
     choice = choice or {}
     mode = choice.get("mode")
     if mode not in (MODE_SUBSCRIPTION, MODE_API_KEY):
-        if current_mode() == MODE_API_KEY:
+        if selected_mode() == MODE_API_KEY:
             # Publishing a shared API choice would require pinning its key.
             # Leave the legacy route intact until the owner confirms it.
             raise claude_accounts.AccountError(
@@ -500,6 +563,13 @@ def summary(cli: Optional[dict] = None) -> dict:
                 key = selected_api_key(choice)
             elif key:
                 confirmation = _confirmation_revision(rows)
+        else:
+            # The native Claude API provider bills the owner's pinned key in
+            # every mode (key_pin), so Settings shows that key, never a stale scalar.
+            shared = rows.get(SELECTION_SETTING)
+            pin = _pin_of(_decode_selection(shared.value if shared else None))
+            if pin is not None:
+                key = selected_api_key(pin)
     except DatabaseError:
         mode, choice, key, explicit = MODE_OFF, {"invalid": True}, None, False
     signed_in = bool(cli.get("signed_in"))

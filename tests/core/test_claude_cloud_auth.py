@@ -78,7 +78,7 @@ def _unset(env):
 def test_cloud_is_never_the_default_mode(store):
     assert claude_auth_mode.ensure_mode_recorded(cli_signed_in=False) == "subscription"
     assert claude_auth_mode.default_mode(key_stored=False, cli_signed_in=None) == "subscription"
-    assert claude_auth_mode.default_mode(key_stored=True, cli_signed_in=False) == "api_key"
+    assert claude_auth_mode.default_mode(key_stored=True, cli_signed_in=False) == "subscription"
 
 
 def test_default_install_cli_env_is_unchanged(store):
@@ -95,13 +95,14 @@ def test_default_install_cli_env_is_unchanged(store):
     assert FAKE["gateway_token"] not in json.dumps(env)
 
 
-def test_api_key_mode_env_is_unchanged(store):
+def test_api_key_mode_gives_the_cli_neither_the_key_nor_cloud_settings(store):
+    # The saved key runs only on the native Claude API provider; the CLI stays
+    # on the subscription sign-in, and cloud settings stay unused outside cloud mode.
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-fake-ABCD")
     cloud.save("bedrock", {"region": "us-east-1", "bearer_token": FAKE["bedrock_key"]})
     database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local row
     overlay = inject_claude_code_auth({})
-    assert overlay == {"ANTHROPIC_API_KEY": "sk-ant-api03-fake-ABCD",
-                       UNSET_ENV: "ANTHROPIC_AUTH_TOKEN,CLAUDE_CODE_OAUTH_TOKEN"}
+    assert overlay == {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN"}
 
 
 # ─── one method at a time, stored values only ─────────────────────────────

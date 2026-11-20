@@ -4,10 +4,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.core import claude_auth_mode, claude_cli_status, encryption
+from app.core import claude_auth_mode, claude_cli_status, claude_subscriptions, encryption
 from app.db import database as db
 
 ENDPOINT = "/api/v1/settings/claude-auth"
+
+
+def _native_key():
+    """The key the native Claude API provider runs on. The CLI never gets one."""
+    from app.core import claude_api_provider
+
+    return claude_api_provider._active_key()
 
 
 def _cli(signed_in: bool) -> claude_cli_status.ClaudeCliStatus:
@@ -47,7 +54,6 @@ def test_put_switches_mode_and_integrations_follow(authenticated_client):
 
 
 def test_owner_mode_selection_is_shared_and_does_not_fall_back(authenticated_client, monkeypatch):
-    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
     from app.network.policy import is_shared_setting_key
 
     assert is_shared_setting_key(claude_auth_mode.SELECTION_SETTING)
@@ -57,14 +63,12 @@ def test_owner_mode_selection_is_shared_and_does_not_fall_back(authenticated_cli
     with _probe(True):
         assert authenticated_client.put(ENDPOINT, json={"mode": "api_key"}).status_code == 200
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fixture.invalid")
-    assert claude_auth_mode.current_mode() == "api_key"
-    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
-        inject_claude_code_auth({"ANTHROPIC_API_KEY": "not-the-owner-key"})
+    assert claude_auth_mode.selected_mode() == "api_key"
+    assert _native_key() is None
 
 
 def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(authenticated_client):
     from app.core import claude_accounts
-    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
 
     alpha, beta, gamma = "fixture-alpha-1111", "fixture-beta-2222", "fixture-gamma-3333"
     alpha_id = claude_accounts.add_api_key(alpha)
@@ -82,22 +86,27 @@ def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(
     # before the encrypted list. Neither intermediate state may launch Alpha.
     db.set_system_setting(claude_accounts.API_SETTING, encryption.encrypt_value(alpha))
     db.set_system_setting(claude_accounts.API_LIST_SETTING, old_keys)
-    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
-        inject_claude_code_auth({"ANTHROPIC_API_KEY": alpha})
+    assert _native_key() is None
+    # Settings' key detail agrees: no key to show (or remove) until Beta syncs.
+    integrations = authenticated_client.get("/api/v1/settings/integrations").json()
+    assert integrations["anthropic_api_key_set"] is False
     db.set_system_setting(claude_accounts.API_LIST_SETTING, new_keys)
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == beta
+    assert _native_key() == beta
+    integrations = authenticated_client.get("/api/v1/settings/integrations").json()
+    assert integrations["anthropic_api_key_set"] is True
     with patch.object(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-off-peer"):
         claude_auth_mode.set_mode("off")
         claude_accounts.change_account("api_key", alpha_id, "delete")
-        assert db.get_system_setting(claude_accounts.API_SETTING) is None
+        # The owner's pin still says Beta on this Off worker, so the stale
+        # Alpha scalar is replaced by Beta, never left holding a deleted key.
+        assert claude_accounts.active_api_key() == beta
         assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) == choice
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == beta
+    assert _native_key() == beta
     gamma_id = claude_accounts.add_api_key(gamma)
     assert gamma_id != beta_id
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == gamma
+    assert _native_key() == gamma
     claude_accounts.change_account("api_key", gamma_id, "delete")
-    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
-        inject_claude_code_auth({})
+    assert _native_key() is None
 
 
 def test_off_and_cloud_do_not_write_owner_selection(authenticated_client, monkeypatch):
@@ -116,7 +125,6 @@ def test_off_and_cloud_do_not_write_owner_selection(authenticated_client, monkey
 @pytest.mark.parametrize("encrypted", [False, True])
 def test_upgrade_pins_legacy_key_after_unlock(authenticated_client, monkeypatch, encrypted):
     from app.core import claude_accounts
-    from app.core.environment import inject_claude_code_auth
 
     legacy_key = "fixture-legacy-secret-ABCD"
     value = encryption.encrypt_value(legacy_key) if encrypted else legacy_key
@@ -140,7 +148,7 @@ def test_upgrade_pins_legacy_key_after_unlock(authenticated_client, monkeypatch,
     response = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
     assert response.status_code == 200, response.text
     assert response.json()["api_key"] == {"set": True, "last4": "ABCD"}
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == legacy_key
+    assert _native_key() == legacy_key
     assert encryption.is_encrypted(db.get_system_setting(claude_accounts.API_LIST_SETTING))
 
 
@@ -168,7 +176,6 @@ def _save_with_shipped_writer(first, second):
 @pytest.mark.parametrize("old_pin", [False, True])
 def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, old_pin):
     from app.core import claude_accounts as accounts
-    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
     from app.db.settings import get_system_setting_snapshots
 
     first, second = "fixture-upgrade-first-ABCD", "fixture-upgrade-second-WXYZ"
@@ -179,7 +186,7 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
     old_choice = {"mode": "api_key", "subscription": None, "key_id": second_old}
     if old_pin:
         db.set_system_setting(shared, json.dumps(old_choice))
-        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == second
+        assert _native_key() == second
     before = get_system_setting_snapshots(shared, local, saved, scalar)
 
     def safe(response):
@@ -206,7 +213,7 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
         assert encryption.is_encrypted(choice)
         assert second_old not in choice
         assert accounts.pinned_api_key(second_old) == second  # A peer can still carry the old pin.
-        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == second
+        assert _native_key() == second
         assert db.get_system_setting_snapshot(scalar) == before[scalar]
 
         path = f"{ACCOUNTS}/api_key/{first_id}"
@@ -218,7 +225,7 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
         choice = db.get_system_setting(shared)
         assert encryption.is_encrypted(choice)
         assert all(value not in choice for value in (first, second, first_old, second_old))
-        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == first
+        assert _native_key() == first
         safe(authenticated_client.delete(path))
         assert accounts.pinned_api_key(first_old) is None
         accounts.add_api_key(first, activate=False)
@@ -227,13 +234,11 @@ def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, o
         # Even if the older, encrypted selection wins independently of the list,
         # re-adding the same credential must not make that deleted pin valid.
         db.set_system_setting(shared, choice)
-        with pytest.raises(ProviderTurnRefused, match="no Anthropic API key"):
-            inject_claude_code_auth({})
+        assert _native_key() is None
 
 
 def test_offline_rename_preserves_legacy_pin_without_reselection(authenticated_client):
     from app.core import claude_accounts as accounts
-    from app.core.environment import inject_claude_code_auth
 
     active, inactive = "fixture-original-A123", "fixture-inactive-B456"
     old_active, _ = _save_with_shipped_writer(active, inactive)
@@ -261,7 +266,7 @@ def test_offline_rename_preserves_legacy_pin_without_reselection(authenticated_c
 
         rows = authenticated_client.get(ACCOUNTS).json()["accounts"]["api_key"]
         assert {row["last4"] for row in rows} == {"A123", "B456"}
-        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == active
+        assert _native_key() == active
 
 
 @pytest.fixture
@@ -297,7 +302,6 @@ def test_subscription_writer_does_not_pin_scalar_before_it_syncs(
     authenticated_client, monkeypatch, saved_subscription, writer,
 ):
     from app.core import claude_accounts as accounts
-    from app.core.environment import inject_claude_code_auth
 
     choice_key = claude_auth_mode.SELECTION_SETTING
     old_scalar = encryption.encrypt_value("fixture-stale-1111")
@@ -326,7 +330,7 @@ def test_subscription_writer_does_not_pin_scalar_before_it_syncs(
     db.set_system_setting(accounts.API_SETTING, new_scalar)
     response = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
     assert response.status_code == 200, response.text
-    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == "fixture-newer-2222"
+    assert _native_key() == "fixture-newer-2222"
 
     # A subscription-only change must also preserve an existing explicit pin.
     pin = claude_auth_mode.shared_selection()["key_id"]
@@ -357,7 +361,7 @@ def test_failed_legacy_api_activation_does_not_steer_later_choice(
         assert response.status_code == 503, response.text
     assert db.get_system_setting(subs.setting_key()) == before
     assert claude_auth_mode.shared_selection() is None
-    assert claude_auth_mode.current_mode() == "api_key"
+    assert claude_auth_mode.selected_mode() == "api_key"
     target = subs.legacy_binding()
     confirmation = authenticated_client.put(ENDPOINT, json={
         "mode": "api_key", "api_key_confirmation": rendered["api_key_confirmation"],
@@ -499,17 +503,24 @@ def test_payload_carries_the_credential_gate(authenticated_client):
     from app.core import credential_gate
 
     claude_auth_mode.set_mode("api_key")
-    with _probe(True):
+    with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
+    assert body["mode"] == "api_key"
     assert body["gate"]["ready"] is False
     assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
-    assert body["claude_reason"] == credential_gate.NO_KEY_MESSAGE
+    # The key is its own provider; the CLI still needs the subscription sign-in.
+    assert body["claude_reason"] == claude_subscriptions.SELECTION_UNAVAILABLE
     from app.core import claude_accounts
     claude_accounts.add_api_key("fixture-api-key-ABCD")
     with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is True and body["gate"]["reason"] is None
-    assert body["gate"]["ready_providers"] == ["claude"] and body["claude_reason"] is None
+    assert body["gate"]["ready_providers"] == ["gw:claude-api"]
+    assert body["claude_reason"] == claude_subscriptions.SELECTION_UNAVAILABLE
+    with _probe(True):
+        body = authenticated_client.get(ENDPOINT).json()
+    assert body["gate"]["ready_providers"] == ["claude", "gw:claude-api"]
+    assert body["claude_reason"] is None
 
 
 @pytest.mark.real_agent_gate

@@ -53,14 +53,15 @@ def test_subscription_mode_ignores_a_stored_key(mock_db):
     assert not ready and reason == SELECTION_UNAVAILABLE
 
 
-def test_api_key_mode_needs_a_stored_key_not_a_cli_login(mock_db):
-    claude_auth_mode.set_mode("api_key")
-    assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (
-        False, credential_gate.NO_KEY_MESSAGE)
+def test_api_key_mode_leaves_the_claude_leg_on_the_subscription(mock_db):
+    """The key never makes the CLI ready: an unbound Claude model still needs
+    the subscription sign-in, and the refusal names the Claude · API models."""
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local choice
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
-    # A later scalar must not silently switch an owner-wide selection.
     assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (
-        False, credential_gate.NO_KEY_MESSAGE)
+        False, credential_gate.NOT_SIGNED_IN_MESSAGE)
+    assert '"Claude · API"' in credential_gate.NOT_SIGNED_IN_MESSAGE
+    assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (True, None)
 
 
 def test_off_mode_refuses_claude_whatever_credentials_exist(mock_db):
@@ -131,9 +132,11 @@ def test_ready_providers_lists_each_usable_provider_once(mock_db):
     _provider_row("sg", "grok", auth_mode="grok", codex_access_token="enc:tok")
     _provider_row("or", "openrouter", auth_token="enc:key", checked=True)
     _provider_row("gw1", "custom")  # a keyless gateway still counts
-    providers = credential_gate.status_payload(_cli(signed_in=False))["ready_providers"]
+    # The subscription and the key are listed apart, side by side.
+    providers = credential_gate.status_payload(_cli(signed_in=True))["ready_providers"]
     assert providers[0] == "claude"
-    assert sorted(providers[1:]) == sorted(["openai", "grok", "openrouter", "gw:gw1"])
+    assert sorted(providers[1:]) == sorted(
+        ["openai", "grok", "openrouter", "gw:gw1", "gw:claude-api"])
 
     _provider_row("off", "xai", auth_token="enc:key", enabled=False)
     _provider_row("nokey", "openrouter")
@@ -143,8 +146,7 @@ def test_ready_providers_lists_each_usable_provider_once(mock_db):
     assert all(database.get_model_provider(pid)["enabled"] for pid in ("nokey", "stale", "half"))
     assert all(not database.get_model_provider(pid)["enabled"] for pid in ("or", "sg", "codex"))
     providers = credential_gate.status_payload(_cli(signed_in=False))["ready_providers"]
-    assert providers[0] == "claude"
-    assert sorted(providers[1:]) == sorted(["openai", "gw:gw1"])
+    assert sorted(providers) == sorted(["openai", "gw:gw1", "gw:claude-api"])
 
 
 def test_a_provider_row_read_failure_never_breaks_the_payload(mock_db, monkeypatch):
@@ -219,7 +221,7 @@ def _build_turn(tmp_path, session_id, source="user", **session_fields):
 
 
 def test_no_model_named_follows_the_most_used_model_with_claude_set_up(mock_db, tmp_path):
-    _claude_api_key_ready()
+    _claude_signed_in()
     _openai_with_default()
     # No usage history: Claude is just another candidate, the row's default leads.
     assert _build_turn(tmp_path, "c1").model == "gpt-5"
@@ -245,7 +247,7 @@ def test_a_provider_default_is_bound_to_the_session_like_an_explicit_pick(
     # The runtime records the bare id the turn ran on; the most used ranking
     # then moves to Claude. Neither may reroute the session.
     database.update_session("b1", launched_model=model)
-    _claude_api_key_ready()
+    _claude_signed_in()
     _book(_chat("other"), "opus", turns=5)
     credential_gate.invalidate_most_used_cache()
     for source in ("auto_continue", "failover", "wakeup", "user"):
@@ -410,7 +412,7 @@ def test_an_interactive_default_always_runs_on_a_ready_provider(mock_db, tmp_pat
     claude_cli_status.get_status()  # the CLI is missing
     for row in rows:  # created oldest first
         if row == "claude":
-            _claude_api_key_ready()
+            _claude_signed_in()
         elif row == "oa":
             _openai_with_default()
         else:
@@ -467,7 +469,7 @@ def test_startup_with_no_provider_warns_with_the_neutral_reason(mock_db, caplog)
 
 
 def test_an_unlinked_worker_can_run_every_configured_provider(mock_db, monkeypatch):
-    _claude_api_key_ready()
+    _claude_signed_in()
     monkeypatch.setattr(license_mod, "status", lambda: (_ for _ in ()).throw(AssertionError("Cloud state must not gate runs")))
     assert credential_gate.agent_credentials_ready() == (True, None)
     # A provider-row turn needs no Claude credential or Cloud plan.
@@ -642,10 +644,81 @@ async def test_fresh_install_refuses_the_rest_query_paths(mock_db, tmp_path):
 # default_run_model(): the one default for a run that names no model
 # ---------------------------------------------------------------------------
 
-def _claude_api_key_ready():
+def _claude_signed_in():
+    """Claude set up: the CLI signed in to the subscription (the last probe)."""
+    import time
+
+    claude_auth_mode.set_mode("subscription")
+    claude_cli_status._cached = _cli(signed_in=True)
+    claude_cli_status._cached_at = time.monotonic()
+
+
+def _claude_api_key_saved(mode="api_key"):
     # Setup for routing tests: a pre-existing legacy install, not a new pin.
-    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")
+    database.set_system_setting(claude_auth_mode.setting_key(), mode)
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+
+
+def test_api_key_mode_defaults_to_the_claude_api_binding_not_an_unbound_alias(
+    mock_db, _api_unit_credentials,
+):
+    """The old API key mode, migrated: Claude's place in the default order is
+    the key bound to Claude API, visible in the picker. Never an unbound alias,
+    which would run on the subscription."""
+    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL, registry_payload
+
+    _claude_api_key_saved()
+    api_default = ("claude-api", API_MODEL_IDS[DEFAULT_MODEL])
+    assert credential_gate.default_run_model(prefer_most_used=False) == api_default
+    assert credential_gate.default_run_model() == api_default
+    assert registry_payload()["default"] == f"prov:claude-api:{API_MODEL_IDS[DEFAULT_MODEL]}"
+    # Most used Claude turns keep their family on the key.
+    _book(_chat("s1"), "opus", turns=4)
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model() == ("claude-api", API_MODEL_IDS["opus"])
+    # Key removed: back to the unbound alias, which the CLI gate then judges.
+    database.set_system_setting("anthropic_api_key", "")
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
+
+
+def test_subscription_mode_never_defaults_to_the_key_while_claude_can_run(
+    mock_db, _api_unit_credentials,
+):
+    from app.core.model_registry import DEFAULT_MODEL
+
+    _claude_api_key_saved("subscription")
+    _claude_signed_in()
+    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+
+
+def test_saving_a_key_never_makes_it_the_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+    """S14: subscription signed out and no other provider: still not the key.
+    Saving it is not choosing it; the run gets Claude's setup message."""
+    from app.core.model_registry import DEFAULT_MODEL
+
+    _claude_api_key_saved("subscription")
+    claude_cli_status.get_status()  # the CLI is missing
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
+    _openai_with_default()  # another provider can run: it keeps the default
+    assert credential_gate.default_run_model() == ("oa", "gpt-5")
+
+
+def test_claude_api_usage_history_is_not_a_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+    """S14: Claude API picked in some chats is not consent for runs that name
+    no model; API key mode, the owner's own choice, still is."""
+    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
+
+    _claude_api_key_saved("subscription")
+    _claude_signed_in()
+    _book(_chat("s1"), API_MODEL_IDS["opus"], "claude-api", turns=5)
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+    claude_auth_mode.set_mode("api_key")
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model()[0] == "claude-api"
 
 
 def test_default_run_model_follows_the_ready_providers(mock_db):
@@ -657,7 +730,7 @@ def test_default_run_model_follows_the_ready_providers(mock_db):
     assert credential_gate.default_run_selection() == "prov:oa:gpt-5"
     # Claude is just another candidate: with no usage history the usable
     # provider's own default still wins over the registry default.
-    _claude_api_key_ready()
+    _claude_signed_in()
     assert credential_gate.default_run_model() == ("oa", "gpt-5")
     # Only the text-generation order puts Claude's registry default first.
     assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
@@ -694,7 +767,7 @@ def test_models_registry_default_is_a_ready_providers_model(mock_db):
     _openai_with_default()
     claude_cli_status.get_status()  # startup's probe: the CLI is missing
     assert registry_payload()["default"] == "prov:oa:gpt-5"
-    _claude_api_key_ready()
+    _claude_signed_in()
     assert registry_payload()["default"] == "prov:oa:gpt-5"  # no usage history
     database.delete_model_provider("oa")
     assert registry_payload()["default"] == DEFAULT_MODEL
@@ -734,7 +807,7 @@ def test_automation_with_no_model_reports_the_model_it_runs_on(mock_db):
     assert reported["model_source"] == MODEL_SOURCE_DEFAULT
     explicit = with_model_resolution({"id": "a2", "model": "sonnet"})
     assert (explicit["effective_model"], explicit["effective_provider_id"]) == ("sonnet", None)
-    _claude_api_key_ready()
+    _claude_signed_in()
     database.delete_model_provider("oa")
     reported = with_model_resolution({"id": "a1"})
     assert (reported["effective_model"], reported["effective_provider_id"]) == (DEFAULT_MODEL, None)
@@ -752,7 +825,7 @@ def test_text_generation_with_no_setting_uses_a_ready_provider(mock_db):
     config = text_generation_config()
     assert (config["model"], config["provider"]) == ("sonnet", None)
     database.set_system_setting(TEXT_GENERATION_MODEL_KEY, "")
-    _claude_api_key_ready()
+    _claude_signed_in()
     config = text_generation_config()
     assert (config["model"], config["provider"]) == (DEFAULT_MODEL, None)
 
@@ -783,7 +856,7 @@ def _book(session_id, model, provider_id=None, *, turns=1, source="user", **attr
 
 
 def _claude_and_openai():
-    _claude_api_key_ready()
+    _claude_signed_in()
     _provider_row("oa", "openai", auth_token="enc:key",
                   models=[{"id": "gpt-5", "label": "GPT-5"}, {"id": "gpt-5-mini", "label": "Mini"}],
                   default_model="gpt-5")
@@ -1064,6 +1137,8 @@ def _row(provider_type, model, **fields):
 
 SUBSCRIPTION_KINDS = {
     "claude_cli_subscription": _claude("subscription"),
+    # The key never reaches the CLI: an unbound Claude model is the subscription.
+    "claude_cli_in_api_key_mode": _claude("api_key"),
     "chatgpt_row": _row("chatgpt", "gpt-5"),
     "openai_row_chatgpt_sign_in": _row("openai", "gpt-5", auth_mode="chatgpt"),
     "grok_row": _row("grok", "grok-4"),
@@ -1071,7 +1146,6 @@ SUBSCRIPTION_KINDS = {
     "anthropic_row_plan_login": _row("anthropic", "claude-sonnet-4-5", auth_mode="oauth"),
 }
 API_KEY_KINDS = {
-    "claude_cli_api_key": _claude("api_key"),
     "claude_cli_cloud": _claude("cloud"),
     "anthropic_api_key_row": _row("anthropic", "claude-sonnet-4-5"),
     "openai_api_key_row": _row("openai", "gpt-5"),
@@ -1207,7 +1281,9 @@ def test_subscription_warning_for_a_saved_setup(mock_db):
     assert api_user_scope.subscription_warning({"model": "prov:p:gpt-5"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
     assert api_user_scope.subscription_warning({"model": "sonnet"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
     assert api_user_scope.subscription_warning({"model": "prov:oa:gpt-5"}) is None
-    claude_auth_mode.set_mode("api_key")
+    claude_auth_mode.set_mode("api_key")  # the CLI stays on the subscription
+    assert api_user_scope.subscription_warning({"model": "sonnet"}) == api_user_scope.SUBSCRIPTION_MODEL_WARNING
+    claude_auth_mode.set_mode("cloud")
     assert api_user_scope.subscription_warning({"model": "sonnet"}) is None
     # Agent default: each assigned agent's saved model decides.
     database.create_profile("sub-agent", "Codex helper", None, {"model": "prov:p:gpt-5"})
@@ -1396,3 +1472,7 @@ def test_connector_warning_and_save_check_follow_the_owner_account(authenticated
     _owner_connector(connector_type="msteams", api_user_id=API_USER, connector_id="c-teams")
     assert client.get(f"/api/v1/api-users/{API_USER}").json()["subscription_warning"] == (
         api_user_scope.SUBSCRIPTION_MODEL_WARNING)
+
+
+def _claude_api_key_ready():
+    _claude_api_key_saved()

@@ -18,6 +18,7 @@
 	 */
 	import { onDestroy, onMount } from 'svelte';
 	import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-svelte';
+	import { CLAUDE_API_READY_ID } from '$lib/api/agent-credentials';
 	import type { AgentGateStatus } from '$lib/api/client';
 	import { auth } from '$lib/stores/auth.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -60,7 +61,9 @@
 	const readiness = $derived(setupReadiness(gate, views, s.providers));
 	const choices = $derived(setupProviders());
 
-	const NAMES: Record<string, string> = { claude: 'Claude', openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter' };
+	const NAMES: Record<string, string> = {
+		claude: 'Claude', [CLAUDE_API_READY_ID]: 'Claude API', openai: 'OpenAI', grok: 'xAI Grok', openrouter: 'OpenRouter'
+	};
 	function nameOf(id: string): string {
 		return NAMES[id] ?? views.find((v) => v.id === id)?.name ?? 'Your gateway';
 	}
@@ -138,7 +141,7 @@
 				{#if open === p.id}
 					<div class="panel" id="setup-provider-{p.id}">
 						{#if p.id === 'claude'}
-							<ClaudeConnect {isAdmin} onReady={() => void connected('claude')} />
+							<ClaudeConnect {isAdmin} onReady={(way) => void connected(way === 'api_key' ? CLAUDE_API_READY_ID : 'claude')} />
 						{:else}
 							<ProviderConnect provider={p.id}
 								existing={p.id === 'gateway' ? [] : (views.find((v) => v.id === p.id)?.credentials ?? [])}

@@ -8,6 +8,7 @@
  * counts when one of its credentials is on (Claude: the active credential is
  * ready). fal.ai is media only and never counts.
  */
+import { CLAUDE_API_READY_ID } from '$lib/api/agent-credentials';
 import type { AgentGateStatus } from '$lib/api/client';
 import { hasModelRefresh, isNativeProvider, type NativeProviderId, type ModelProvider } from '$lib/api/model-providers';
 import { nativeOptions } from '$lib/components/settings/providers/native-options.svelte';
@@ -76,6 +77,8 @@ export function providerReadiness(
 
 /** The step's choice a ready provider id belongs to. */
 export function choiceOf(id: string): SetupProviderChoice | null {
+	// The saved Anthropic key's native provider is connected from the Claude choice.
+	if (id === CLAUDE_API_READY_ID) return 'claude';
 	if (id.startsWith('gw:')) return 'gateway';
 	return AGENT_PROVIDER_ORDER.find((c) => c === id) ?? null;
 }
@@ -98,7 +101,9 @@ export interface SetupReadiness extends ProviderReadiness {
 }
 
 export function hasPickedModel(id: string, rows: readonly ModelProvider[]): boolean {
-	if (id === 'claude') return true;
+	// Claude's models are built in, on the subscription and on the Claude API
+	// key alike (the key's row is virtual, never in `rows`).
+	if (id === 'claude' || id === CLAUDE_API_READY_ID) return true;
 	return rows.some((r) => r.enabled && providerOfRow(r) === id && (r.models?.length ?? 0) > 0);
 }
 

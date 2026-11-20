@@ -758,6 +758,11 @@ def _provider_display_name(key: str, name: Optional[str]) -> str:
         return "Claude"
     if key == UNATTRIBUTED_PROVIDER_KEY:
         return "Unattributed"
+    from app.core.claude_api_provider import CLAUDE_API_NAME, CLAUDE_API_PROVIDER_ID
+
+    if key == CLAUDE_API_PROVIDER_ID:
+        # The saved Anthropic key is not a stored provider row.
+        return CLAUDE_API_NAME
     return name or "Deleted provider"
 
 

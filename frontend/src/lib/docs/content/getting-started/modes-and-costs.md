@@ -12,7 +12,7 @@ AI Shuffle includes no AI usage. You pay HobbyCoders for the app, and you pay yo
 
 Connect one or several. Each uses your own account and bills you under its own terms.
 
-- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, an Anthropic API key, or your own cloud provider or gateway.
+- **Claude:** a Claude subscription (Pro or Max) through the Claude Code CLI, an Anthropic API key, or your own cloud provider or gateway through the CLI. AI Shuffle runs an Anthropic API key itself, without the CLI, and lists it as **Claude · API** in the model picker, next to the subscription's models.
 - **OpenAI:** a ChatGPT subscription sign-in, or an OpenAI API key.
 - **OpenRouter:** one API key for many models.
 - **xAI Grok:** a SuperGrok subscription sign-in, or an xAI API key.

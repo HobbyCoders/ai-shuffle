@@ -715,11 +715,12 @@ def _claude_payload() -> Dict[str, object]:
     Anthropic side, which has no ``model_providers`` row to carry them:
 
       * the explicit auth mode decides (``app.core.claude_auth_mode``):
-        ``api_key`` mode with a stored key, or ``cloud`` mode with its
-        method's values stored → ``auth_kind = "api"``, no plan;
-      * ``subscription`` mode, when the Claude Code CLI reports a login
-        (``claude auth status``) → ``auth_kind = "subscription"`` with the plan
-        the CLI printed, if any;
+        ``cloud`` mode with its method's values stored → ``auth_kind =
+        "api"``, no plan;
+      * ``subscription`` mode (also ``api_key`` mode, whose key is the
+        separate "Claude API" provider row, ``app.core.claude_api_provider``),
+        when the Claude Code CLI reports a login (``claude auth status``) →
+        ``auth_kind = "subscription"`` with the plan the CLI printed, if any;
       * ``off`` mode → no auth kind and ``enabled = False``, so the pickers
         (which hide Claude when ``auth_kind`` is null) drop Claude models.
 
@@ -733,10 +734,6 @@ def _claude_payload() -> Dict[str, object]:
         mode = claude_auth_mode.current_mode()
         if mode == claude_auth_mode.MODE_OFF:
             return {"auth_kind": None, "plan_type": None, "enabled": False}
-        if mode == claude_auth_mode.MODE_API_KEY:
-            if claude_auth_mode.has_stored_api_key():
-                return {"auth_kind": "api", "plan_type": None, "enabled": True}
-            return {"auth_kind": None, "plan_type": None, "enabled": True}
         if mode == claude_auth_mode.MODE_CLOUD:
             if claude_auth_mode.cloud_status().get("ready"):
                 return {"auth_kind": "api", "plan_type": None, "enabled": True}
