@@ -1742,13 +1742,13 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		await openPopover(container);
 
 		// The Claude header always renders (self, empty windows → just "Claude").
-		// Both are subscriptions, so the Settings order applies: OpenAI first.
+		// Both are subscriptions, so they sort alphabetically: Claude first.
 		expect(container.querySelectorAll('.popover-section').length).toBe(2);
 		// A ChatGPT-subscription row displays under the OpenAI brand.
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		expect(deviceLabels).toEqual(['OpenAI', 'Claude']);
+		expect(deviceLabels).toEqual(['Claude', 'OpenAI']);
 		// The only .section-account belongs to the provider header (Claude self is unlabeled).
 		expect(container.querySelector('.section-account')?.textContent).toBe('PROLITE');
 
@@ -1848,8 +1848,8 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		// Both are subscriptions: Grok comes before Claude in the Settings order.
-		expect(deviceLabels).toEqual(['Grok', 'Claude']);
+		// Both are subscriptions, sorted alphabetically: Claude before Grok.
+		expect(deviceLabels).toEqual(['Claude', 'Grok']);
 		expect(container.querySelector('.section-account')?.textContent).toBe('SuperGrok');
 
 		// SuperGrok billing reports used-%, converted to "% left" for display.
@@ -1944,8 +1944,8 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const deviceLabels = Array.from(container.querySelectorAll('.section-device')).map(
 			(e) => e.textContent
 		);
-		// Subscriptions (ChatGPT, then the Claude plan) above the API key.
-		expect(deviceLabels).toEqual(['OpenAI', 'Claude']);
+		// Both subscriptions (the Claude plan, then ChatGPT) sort alphabetically.
+		expect(deviceLabels).toEqual(['Claude', 'OpenAI']);
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
@@ -1971,7 +1971,7 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
         expect(container.textContent).not.toContain('$3.00 used');
     });
 
-	it('sorts subscriptions above API accounts, each in the Settings > Providers order, Claude included (#1845)', async () => {
+	it('sorts subscriptions above API accounts, each alphabetically, Claude included (#1845)', async () => {
 		rateLimit.applySnapshot({
 			available: true,
 			windows: [],
@@ -2024,11 +2024,11 @@ describe('ContextUsageBar — provider usage (non-Claude)', () => {
 		const accounts = Array.from(container.querySelectorAll('.section-account:not(.provider-status)')).map(
 			(e) => e.textContent
 		);
-		// Subscriptions in the Settings order (OpenAI, Grok, Claude), then API
-		// accounts in the same order (OpenRouter, then fal.ai). Claude is
-		// ordered by the rule like any other provider, not pinned first.
-		expect(labels).toEqual(['OpenAI', 'Grok', 'Claude', 'OpenRouter', 'fal.ai']);
-		expect(accounts).toEqual(['PROLITE', 'SuperGrok', 'API', 'API']);
+		// Subscriptions A–Z (Claude, Grok, OpenAI), then API accounts A–Z,
+		// ignoring case (fal.ai before OpenRouter). Claude is ordered by the
+		// rule like any other provider, not pinned first.
+		expect(labels).toEqual(['Claude', 'Grok', 'OpenAI', 'fal.ai', 'OpenRouter']);
+		expect(accounts).toEqual(['SuperGrok', 'PROLITE', 'API', 'API']);
 	});
 
 	it('does not show Codex extra-credit $0 on the ChatGPT subscription row', async () => {
