@@ -41,6 +41,7 @@ def world(tmp_path, monkeypatch):
     for name in ("get_system_setting", "get_system_setting_cached"):
         monkeypatch.setattr(subs.database, name, lambda key, *a, **k: values.get(key))
     monkeypatch.setattr(subs.database, "set_system_setting", values.__setitem__)
+    monkeypatch.setattr(subs.database, "set_system_settings", values.update)
     monkeypatch.setattr(subs.database, "get_or_create_system_setting", lambda key, factory: values.setdefault(key, factory()))
     monkeypatch.setattr(subs, "setting_key", lambda: "claude_cli_logins:test-worker")
     monkeypatch.setattr(subs, "_verified", {})

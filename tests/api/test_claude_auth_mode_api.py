@@ -144,6 +144,144 @@ def test_upgrade_pins_legacy_key_after_unlock(authenticated_client, monkeypatch,
     assert encryption.is_encrypted(db.get_system_setting(claude_accounts.API_LIST_SETTING))
 
 
+ACCOUNTS = ENDPOINT + "/accounts"
+
+
+@pytest.fixture
+def saved_subscription(authenticated_client, monkeypatch, tmp_path):
+    from app.core import claude_cli_home as home, claude_cli_login, claude_subscriptions as subs
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "default"))
+    monkeypatch.setattr(home, "root", lambda: tmp_path / "logins")
+    monkeypatch.setattr(home, "platform_support", lambda: (True, None))
+    monkeypatch.setattr(claude_cli_login, "terminal_supported", lambda: False)
+    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: None)
+    monkeypatch.setattr(subs, "_identity_cache", {})
+    monkeypatch.setattr(subs, "_verified", {})
+
+    def probe(home_env, resolver=None):
+        return claude_cli_status.ClaudeCliStatus(
+            installed=True, signed_in=True, auth_method="claude.ai", org_id="fixture-org",
+            email="saved@example.com" if home_env else "default@example.com",
+        )
+
+    monkeypatch.setattr(claude_cli_status, "probe_home", probe)
+    response = authenticated_client.post(ACCOUNTS + "/subscription/add-another")
+    assert response.status_code == 200, response.text
+    account_id = response.json()["login"]["id"]
+    monkeypatch.setattr(subs, "_last_pending_probe", 0.0)
+    rows = authenticated_client.get(ACCOUNTS).json()["accounts"]["subscription"]
+    assert [(row["id"], row["active"]) for row in rows] == [(account_id, False)]
+    return account_id
+
+
+@pytest.mark.parametrize("writer", ["mode", "saved", "default"])
+def test_subscription_writer_does_not_pin_scalar_before_it_syncs(
+    authenticated_client, monkeypatch, saved_subscription, writer,
+):
+    from app.core import claude_accounts as accounts
+    from app.core.environment import inject_claude_code_auth
+
+    choice_key = claude_auth_mode.SELECTION_SETTING
+    old_scalar = encryption.encrypt_value("fixture-stale-1111")
+    new_scalar = encryption.encrypt_value("fixture-newer-2222")
+    db.set_system_setting(accounts.API_SETTING, new_scalar)
+    with monkeypatch.context() as locked:
+        locked.setattr(encryption, "is_encryption_ready", lambda: False)
+        response = authenticated_client.put(ENDPOINT, json={"mode": "subscription"})
+        assert response.status_code == 200, response.text
+    from_a = db.get_system_setting(choice_key)
+    assert "key_id" not in json.loads(from_a)
+
+    # B's independent worker row and lagging scalar when A's selection arrives.
+    monkeypatch.setattr(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-peer")
+    db.set_system_setting(accounts.API_SETTING, old_scalar)
+    assert db.get_system_setting(choice_key) == from_a
+    if writer == "mode":
+        response = authenticated_client.put(ENDPOINT, json={"mode": "subscription"})
+    else:
+        path = f"{saved_subscription}/activate" if writer == "saved" else "use-default"
+        response = authenticated_client.post(ACCOUNTS + f"/subscription/{path}")
+    assert response.status_code == 200, response.text
+    assert "key_id" not in claude_auth_mode.shared_selection()
+    assert db.get_system_setting(accounts.API_LIST_SETTING) is None
+
+    db.set_system_setting(accounts.API_SETTING, new_scalar)
+    response = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
+    assert response.status_code == 200, response.text
+    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == "fixture-newer-2222"
+
+    # A subscription-only change must also preserve an existing explicit pin.
+    pin = claude_auth_mode.shared_selection()["key_id"]
+    db.set_system_setting(accounts.API_SETTING, old_scalar)
+    if writer == "mode":
+        response = authenticated_client.put(ENDPOINT, json={"mode": "subscription"})
+    else:
+        response = authenticated_client.post(ACCOUNTS + f"/subscription/{path}")
+    assert response.status_code == 200, response.text
+    assert claude_auth_mode.shared_selection()["key_id"] == pin
+
+
+def test_failed_legacy_api_activation_does_not_steer_later_choice(
+    authenticated_client, monkeypatch, saved_subscription,
+):
+    from app.core import claude_accounts as accounts, claude_subscriptions as subs
+
+    db.set_system_setting(claude_auth_mode.setting_key(), "api_key")
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("fixture-api-3333"))
+    before = db.get_system_setting(subs.setting_key())
+    activate = ACCOUNTS + f"/subscription/{saved_subscription}/activate"
+    with monkeypatch.context() as locked:
+        locked.setattr(encryption, "is_encryption_ready", lambda: False)
+        response = authenticated_client.post(activate)
+        assert response.status_code == 503, response.text
+    assert db.get_system_setting(subs.setting_key()) == before
+    assert claude_auth_mode.shared_selection() is None
+    assert claude_auth_mode.current_mode() == "api_key"
+    target = subs.legacy_binding()
+    assert authenticated_client.put(ENDPOINT, json={"mode": "api_key"}).status_code == 200
+    assert claude_auth_mode.shared_selection()["subscription"] == target
+    assert authenticated_client.post(activate).status_code == 200
+    assert claude_auth_mode.shared_selection()["subscription"] != target
+    assert subs._load()["active_id"] == saved_subscription
+
+
+@pytest.mark.parametrize("failed_row", ["local", "shared"])
+def test_activation_storage_failure_rolls_back_both_choices_and_retries(
+    authenticated_client, monkeypatch, saved_subscription, failed_row,
+):
+    from psycopg2 import OperationalError
+
+    from app.core import claude_subscriptions as subs
+    from app.db import settings as db_settings
+
+    activate = ACCOUNTS + f"/subscription/{saved_subscription}/activate"
+    default = ACCOUNTS + "/subscription/use-default"
+    assert authenticated_client.post(default).status_code == 200
+    local_key, shared_key = subs.setting_key(), claude_auth_mode.SELECTION_SETTING
+    before = (db.get_system_setting(local_key), db.get_system_setting(shared_key))
+    write = db_settings._write_system_setting
+
+    def fail_write(conn, key, value):
+        # Fail after the SQL statement so even the last row needs rollback.
+        write(conn, key, value)
+        if key == (local_key if failed_row == "local" else shared_key):
+            raise OperationalError("fixture write failure")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(db_settings, "_write_system_setting", fail_write)
+        response = authenticated_client.post(activate)
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["code"] == "storage_unavailable"
+    assert (db.get_system_setting(local_key), db.get_system_setting(shared_key)) == before
+
+    response = authenticated_client.post(activate)
+    assert response.status_code == 200, response.text
+    assert subs._load()["active_id"] == saved_subscription
+    assert db.get_system_setting(shared_key) != before[1]
+    assert response.json()["accounts"]["subscription"][0]["active"] is True
+
+
 def test_put_rejects_unknown_mode(authenticated_client):
     with _probe(False):
         assert authenticated_client.put(ENDPOINT, json={"mode": "auto"}).status_code == 400

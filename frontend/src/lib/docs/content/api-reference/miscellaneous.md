@@ -1282,9 +1282,13 @@ label, `404 not_found`, `409 not_signed_in` (save-current),
 `409 login_busy` (another Claude sign-in is running), `409 cli_missing`,
 `409 folder_unavailable` (a sign-in folder could not be prepared),
 `501 unsupported` (macOS), and `503 storage_locked`,
-`storage_unreadable` or `storage_unavailable`. Key validation keeps the legacy
-error strings: `400` authentication/API error, `429` rate limit; a transient
-network error still saves the key. Invalid request shapes return `422`.
+`storage_unreadable`, `storage_unavailable` or `key_selection_required`. If
+Claude uses a legacy API key that has not been explicitly selected, confirm
+API key mode before choosing a subscription sign-in without changing modes.
+A failed subscription activation leaves the previous choice in place.
+Key validation keeps the legacy error strings: `400` authentication/API error,
+`429` rate limit; a transient network error still saves the key. Invalid request
+shapes return `422`.
 
 The legacy `POST /settings/integrations/anthropic` saves and activates a key in
 the same list (mode changes only with `use_for_claude_code:true`). Its `DELETE`

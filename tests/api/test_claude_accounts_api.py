@@ -81,6 +81,7 @@ def sign_ins(client, tmp_path, monkeypatch):
     for name in ("get_system_setting", "get_system_setting_cached"):
         monkeypatch.setattr(claude_subscriptions.database, name, lambda key, *a, **k: values.get(key))
     monkeypatch.setattr(claude_subscriptions.database, "set_system_setting", values.__setitem__)
+    monkeypatch.setattr(claude_subscriptions.database, "set_system_settings", values.update)
     monkeypatch.setattr(claude_subscriptions, "setting_key", lambda: "claude_cli_logins:test")
     monkeypatch.setattr(claude_subscriptions, "_last_pending_probe", 0.0)
     monkeypatch.setattr(claude_subscriptions, "_identity_cache", {})
@@ -240,8 +241,11 @@ def test_refresh_write_failure_keeps_rows_and_keys_then_retries(client, sign_ins
 @pytest.fixture
 def pending_sign_in(client, sign_ins, tmp_path, monkeypatch):
     """Produce a saved active login and a second pending login through the API."""
-    from app.core import claude_subscriptions as subs
+    from app.core import claude_auth_mode, claude_subscriptions as subs
 
+    # This is a subscription install with a staged API key, not a legacy
+    # API-mode install that would require explicit confirmation of its key.
+    subs.database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     clock = [100.0]
     monkeypatch.setattr(subs.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(subs, "_verified", {})

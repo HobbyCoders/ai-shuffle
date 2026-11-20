@@ -282,32 +282,42 @@ def get_system_setting_revision(key: str) -> Optional[str]:
         return row["revision"] if row else None
 
 
+def _write_system_setting(conn, key: str, value: str) -> None:
+    cursor = conn.cursor()
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        """INSERT INTO system_settings (key, value, updated_at, revision)
+           VALUES (%s, %s, %s, %s)
+           ON CONFLICT(key) DO UPDATE SET
+               value = excluded.value,
+               updated_at = excluded.updated_at,
+               revision = excluded.revision""",
+        (key, value, now, str(uuid4()))
+    )
+    if key == "fal_api_key":
+        # Same transaction and lock order as conditional billing writes.
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
+    if key.startswith("openrouter_billing_key:"):
+        cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
+                       ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
+    if key == "fal_api_key" or key.startswith("openrouter_billing_key:"):
+        from app.db.provider_usage_snapshots import delete_shared_observations
+        delete_shared_observations(conn, "fal-ai" if key == "fal_api_key" else key.removeprefix("openrouter_billing_key:"),
+                                   source_id="fal_billing" if key == "fal_api_key" else "openrouter_credits")
+
+
 def set_system_setting(key: str, value: str) -> None:
-    """Set a system setting (upsert)"""
+    """Set a system setting (upsert)."""
+    set_system_settings({key: value})
+
+
+def set_system_settings(values: dict[str, str]) -> None:
+    """Commit related settings together and invalidate their memos on success."""
     with get_db() as conn:
-        cursor = conn.cursor()
-        now = datetime.now(timezone.utc).isoformat()
-        cursor.execute(
-            """INSERT INTO system_settings (key, value, updated_at, revision)
-               VALUES (%s, %s, %s, %s)
-               ON CONFLICT(key) DO UPDATE SET
-                   value = excluded.value,
-                   updated_at = excluded.updated_at,
-                   revision = excluded.revision""",
-            (key, value, now, str(uuid4()))
-        )
-        if key == "fal_api_key":
-            # Same transaction and lock order as conditional billing writes.
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s", ("fal-ai",))
-        if key.startswith("openrouter_billing_key:"):
-            cursor.execute("DELETE FROM provider_usage_snapshots WHERE provider_id = %s",
-                           ("openrouter-account:" + key.removeprefix("openrouter_billing_key:"),))
-        if key == "fal_api_key" or key.startswith("openrouter_billing_key:"):
-            from app.db.provider_usage_snapshots import delete_shared_observations
-            delete_shared_observations(conn, "fal-ai" if key == "fal_api_key" else key.removeprefix("openrouter_billing_key:"),
-                                       source_id="fal_billing" if key == "fal_api_key" else "openrouter_credits")
-    # Explicit invalidation: the memo must never outlive a write we made.
-    invalidate_system_setting_memo(key)
+        for key, value in values.items():
+            _write_system_setting(conn, key, value)
+    for key in values:
+        invalidate_system_setting_memo(key)
 
 
 def delete_system_setting(key: str) -> bool:

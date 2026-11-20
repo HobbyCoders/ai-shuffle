@@ -35,6 +35,8 @@ import json
 import logging
 from typing import Optional
 
+from psycopg2 import Error as DatabaseError
+
 from app.core.config import settings
 from app.db import database
 
@@ -219,39 +221,58 @@ def is_explicit() -> bool:
         return False
 
 
-def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str], defer_key_pin: bool = False) -> None:
+def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str], defer_key_pin: bool = False,
+             local_subscription: tuple[str, str] | None = None) -> None:
     # One replicated decision. The encrypted key list may lag behind it; a
     # reader must either find this exact ID there or refuse, never use a scalar.
     selection = {"mode": mode, "subscription": subscription}
     if not defer_key_pin:
         selection["key_id"] = key_id
-    database.set_system_setting(SELECTION_SETTING, json.dumps(selection, separators=(",", ":")))
+    value = json.dumps(selection, separators=(",", ":"))
+    if local_subscription is None:
+        database.set_system_setting(SELECTION_SETTING, value)
+    else:
+        local_key, local_value = local_subscription
+        database.set_system_settings({local_key: local_value, SELECTION_SETTING: value})
 
 
-def _key_pin(mode: str, choice: dict) -> tuple[str | None, bool]:
-    """Keep any explicit pin (including no key); otherwise migrate legacy storage."""
+def _key_pin(choice: dict, *, choose_api_key: bool) -> tuple[str | None, bool]:
+    """Preserve explicit pins; only an API-key action can resolve a deferred pin."""
     from app.core import claude_accounts
 
     if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
         return choice.get("key_id"), False
-    try:
+    if choose_api_key:
         return claude_accounts.pin_legacy_key(), False
-    except claude_accounts.AccountError:
-        if mode == MODE_API_KEY:
-            raise
-        # A subscription switch does not read a key at run time. Leave the
-        # pin unset so an explicit later API-mode switch can migrate after unlock.
-        return None, True
+    # The scalar can be missing, unreadable, or stale on this worker. None
+    # would be an explicit empty pin, so omit the field until an API action.
+    return None, True
 
 
-def publish_subscription(target: str) -> None:
+def publish_subscription(target: str, *, local_subscription: tuple[str, str] | None = None) -> None:
     """Explicitly select a verified subscription without changing the auth mode."""
+    from app.core import claude_accounts
+
     choice = shared_selection() or {}
     mode = choice.get("mode")
     if mode not in (MODE_SUBSCRIPTION, MODE_API_KEY):
-        mode = MODE_API_KEY if current_mode() == MODE_API_KEY else MODE_SUBSCRIPTION
-    key_id, deferred = _key_pin(mode, choice)
-    _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred)
+        if current_mode() == MODE_API_KEY:
+            # Publishing a shared API choice would require pinning its key.
+            # Leave the legacy route intact until the owner confirms it.
+            raise claude_accounts.AccountError(
+                "key_selection_required",
+                "Select Anthropic API key mode to confirm its key before choosing a subscription.",
+                503,
+            )
+        mode = MODE_SUBSCRIPTION
+    key_id, deferred = _key_pin(choice, choose_api_key=False)
+    try:
+        _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred,
+                 local_subscription=local_subscription)
+    except DatabaseError:
+        raise claude_accounts.AccountError(
+            "storage_unavailable", "Claude account storage is unavailable. Retry choosing this sign-in.", 503,
+        ) from None
 
 
 def update_shared_key(account_id: Optional[str]) -> None:
@@ -305,7 +326,7 @@ def set_mode(mode: str, *, key_id: Optional[str] = None) -> str:
             target = claude_subscriptions.legacy_binding()
         deferred = False
         if key_id is None:
-            key_id, deferred = _key_pin(mode, shared_selection() or {})
+            key_id, deferred = _key_pin(shared_selection() or {}, choose_api_key=mode == MODE_API_KEY)
         _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred)
         database.set_system_setting(setting_key(), mode)
         from app.core import claude_cli_status

@@ -517,10 +517,13 @@ def change(account_id: str, action: str, label: str = "") -> None:
                 raise SubscriptionError("unverified_subscription", SELECTION_UNAVAILABLE)
             _record_identity(account, status)
             state["active_id"] = account["id"]
-            _save(state)
             from app.core import claude_auth_mode
 
-            claude_auth_mode.publish_subscription(target)
+            # The legacy folder preference and shared billing identity must
+            # commit together. A rejected activation cannot steer a later mode switch.
+            claude_auth_mode.publish_subscription(
+                target, local_subscription=(setting_key(), json.dumps(state, separators=(",", ":"))),
+            )
             _switched()
             return
         if action == "delete":

@@ -4242,6 +4242,7 @@ from app.db.settings import (  # noqa: F401
     get_system_setting_cached,
     invalidate_system_setting_memo,
     set_system_setting,
+    set_system_settings,
     delete_system_setting,
     get_or_create_system_setting,
     get_all_system_settings,
