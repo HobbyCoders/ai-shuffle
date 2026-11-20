@@ -205,6 +205,8 @@ export interface ClaudeAuthSummary {
 	api_key: { set: boolean; last4: string | null };
 	/** Legacy API mode uses a saved key that the owner has not yet pinned. */
 	api_key_confirmation_required?: boolean;
+	/** Opaque revision for the exact legacy selection shown above. */
+	api_key_confirmation?: string | null;
 	/** The cloud provider or gateway method. Absent on older workers. */
 	cloud?: ClaudeCloudStatus;
 	/** Whether new Claude agent runs can start on this worker, and why not. */
@@ -223,6 +225,10 @@ export function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {
  */
 export function setClaudeAuthMode(mode: ClaudeAuthMode, acknowledgeWarning = false): Promise<ClaudeAuthSummary> {
 	return api.put('/settings/claude-auth', acknowledgeWarning ? { mode, acknowledge_warning: true } : { mode });
+}
+
+export function confirmClaudeApiKey(revision: string): Promise<ClaudeAuthSummary> {
+	return api.put('/settings/claude-auth', { mode: 'api_key', api_key_confirmation: revision });
 }
 
 // ============================================================================

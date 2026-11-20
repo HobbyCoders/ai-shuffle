@@ -231,7 +231,8 @@ def test_failed_legacy_api_activation_does_not_steer_later_choice(
     db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("fixture-api-3333"))
     before = db.get_system_setting(subs.setting_key())
     activate = ACCOUNTS + f"/subscription/{saved_subscription}/activate"
-    assert authenticated_client.get(ENDPOINT).json()["api_key_confirmation_required"] is True
+    rendered = authenticated_client.get(ENDPOINT).json()
+    assert rendered["api_key_confirmation_required"] is True
     assert claude_auth_mode.shared_selection() is None
     with monkeypatch.context() as locked:
         locked.setattr(encryption, "is_encryption_ready", lambda: False)
@@ -241,7 +242,9 @@ def test_failed_legacy_api_activation_does_not_steer_later_choice(
     assert claude_auth_mode.shared_selection() is None
     assert claude_auth_mode.current_mode() == "api_key"
     target = subs.legacy_binding()
-    confirmation = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
+    confirmation = authenticated_client.put(ENDPOINT, json={
+        "mode": "api_key", "api_key_confirmation": rendered["api_key_confirmation"],
+    })
     assert confirmation.status_code == 200
     assert confirmation.json()["api_key_confirmation_required"] is False
     assert accounts.pinned_api_key(claude_auth_mode.shared_selection()["key_id"]) == "fixture-api-3333"
@@ -314,6 +317,57 @@ def test_saving_a_key_does_not_switch_mode_unless_asked(authenticated_client):
                                       json={"api_key": "sk-ant-api03-second-2222", "use_for_claude_code": True})
         assert r.status_code == 200, r.text
     assert claude_auth_mode.stored_mode() == "api_key"
+
+
+@pytest.mark.parametrize("change", ["activate", "same_suffix", "missing", "local_off", "local_cloud", "shared"])
+def test_legacy_confirmation_rejects_stale_key_or_mode_without_writes(authenticated_client, change):
+    from app.core import claude_accounts as accounts
+
+    first, second = "fixture-first-1111", "fixture-second-1111" if change == "same_suffix" else "fixture-second-2222"
+    local, shared = claude_auth_mode.setting_key(), claude_auth_mode.SELECTION_SETTING
+    db.set_system_setting(local, "api_key")
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value(first))
+    # Seed a pre-list legacy key alongside a distinct saved account.
+    saved_id = "fixture-saved-id"
+    db.set_system_setting(accounts.API_LIST_SETTING, encryption.encrypt_value(json.dumps({
+        "accounts": [{"id": saved_id, "label": "Other key", "key": second}],
+    })))
+
+    rendered = authenticated_client.get(ENDPOINT).json()
+    assert rendered["api_key"]["last4"] == "1111"
+    revision = rendered["api_key_confirmation"]
+    assert revision and first not in json.dumps(rendered) and second not in json.dumps(rendered)
+    assert authenticated_client.put(ENDPOINT, json={"mode": "api_key"}).status_code == 409
+
+    if change in ("activate", "same_suffix"):
+        assert authenticated_client.post(f"{ACCOUNTS}/api_key/{saved_id}/activate").status_code == 200
+        assert db.get_system_setting(shared) is None
+    elif change == "missing":
+        assert authenticated_client.delete("/api/v1/settings/integrations/anthropic").status_code == 200
+    elif change.startswith("local_"):
+        db.set_system_setting(local, change.removeprefix("local_"))
+    else:
+        claude_auth_mode.set_mode("subscription")
+
+    def state():
+        return [db.get_system_setting_snapshot(k) for k in (local, shared, accounts.API_SETTING, accounts.API_LIST_SETTING)]
+
+    before = state()
+    response = authenticated_client.put(ENDPOINT, json={"mode": "api_key", "api_key_confirmation": revision})
+    assert response.status_code == 409, response.text
+    assert first not in response.text and second not in response.text
+    assert state() == before
+    fresh = authenticated_client.get(ENDPOINT).json()
+    assert fresh["api_key_confirmation"] != revision
+    if change in ("activate", "same_suffix"):
+        retry = authenticated_client.put(ENDPOINT, json={
+            "mode": "api_key", "api_key_confirmation": fresh["api_key_confirmation"],
+        })
+        assert retry.status_code == 200, retry.text
+        assert claude_auth_mode.shared_selection()["key_id"] == saved_id
+        assert accounts.pinned_api_key(saved_id) == second
+    else:
+        assert fresh["api_key_confirmation"] is None
 
 
 def test_removing_the_key_keeps_api_key_mode(authenticated_client):

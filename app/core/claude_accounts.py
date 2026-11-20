@@ -9,7 +9,6 @@ This module is the facade the accounts API calls.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import threading
 from typing import Any, Callable, Optional
@@ -35,13 +34,21 @@ def _error(code: str, detail: str, status: int = 409):
     raise AccountError(code, detail, status)
 
 
+def key_write_lock():
+    """Keep confirmation out of the middle of a same-worker account write."""
+    return _lock
+
+
 def _require_storage():
     if not encryption.is_encryption_ready():
         _error("storage_locked", "Unlock credential storage before managing Claude accounts.", 503)
 
 
 def _read_setting(key: str):
-    value = database.get_system_setting(key)
+    return _decode_setting(database.get_system_setting(key))
+
+
+def _decode_setting(value):
     if not value:
         return None
     if encryption.is_encrypted(value):
@@ -66,8 +73,8 @@ def _write_setting(key: str, value: dict):
     database.set_system_setting(key, _encrypt(json.dumps(value)))
 
 
-def _keys(*, legacy: bool = False):
-    raw = _read_setting(API_LIST_SETTING)
+def _decode_key_bundle(stored):
+    raw = _decode_setting(stored)
     bundle = {"accounts": [], "active_id": None}
     if raw:
         try:
@@ -77,20 +84,26 @@ def _keys(*, legacy: bool = False):
             bundle["accounts"] = value["accounts"]
         except (ValueError, KeyError, TypeError):
             _error("storage_unreadable", "Saved Anthropic API keys could not be read.", 503)
+    return bundle
+
+
+def _keys(*, legacy: bool = False):
+    bundle = _decode_key_bundle(database.get_system_setting(API_LIST_SETTING))
     from app.core import claude_auth_mode
 
     mode, choice = claude_auth_mode.runtime_choice()
     if not legacy and choice is not None and ("key_id" in choice or mode == claude_auth_mode.MODE_API_KEY):
         bundle["active_id"] = choice.get("key_id")
         return bundle
-    active = active_api_key()
+    scalar = database.get_system_setting_snapshot(API_SETTING)
+    active = _decode_setting(scalar.value) if scalar else None
     if active:
         account = next((a for a in bundle["accounts"] if a["key"] == active), None)
         if account is None:
             # A legacy save or peer scalar may arrive before its list. Display
             # the credential actually used by the CLI, not a stale pointer.
             account = {
-                "id": "legacy-" + hashlib.sha256(active.encode()).hexdigest()[:24],
+                "id": "legacy-" + (scalar.revision or "unversioned"),
                 "label": "Anthropic API key",
                 "key": active,
             }
@@ -119,6 +132,21 @@ def pin_legacy_key() -> str | None:
             account_id = account["id"] = str(uuid4())
             _save_keys(bundle)
         return account_id
+
+
+def prepare_legacy_key_pin(key: str, stored_list: str | None) -> tuple[str, str | None]:
+    """Resolve this exact key without writing; return an encrypted list only for migration."""
+    _require_storage()
+    bundle = _decode_key_bundle(stored_list)
+    account = next((entry for entry in bundle["accounts"] if entry["key"] == key), None)
+    if account is not None and not account["id"].startswith("legacy-"):
+        return account["id"], None
+    account_id = str(uuid4())
+    if account is None:
+        bundle["accounts"].append({"id": account_id, "label": "Anthropic API key", "key": key})
+    else:
+        account["id"] = account_id
+    return account_id, _encrypt(json.dumps({"accounts": bundle["accounts"]}))
 
 
 def saved_api_key(account_id: str) -> str | None:

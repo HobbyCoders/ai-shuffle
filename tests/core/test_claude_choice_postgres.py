@@ -93,6 +93,57 @@ def test_subscription_activation_conflict_rolls_back_and_retry_keeps_latest_pin(
     assert auth.shared_selection() == {"mode": "subscription", "subscription": "new", "key_id": "K2"}
 
 
+@pytest.mark.parametrize("changed", ["scalar", "local", "shared"])
+def test_legacy_confirmation_cas_rolls_back_a_prepared_migration(choice_cluster, changed, monkeypatch):
+    def connect():
+        conn = pg_connect(choice_cluster)
+        conn.cursor().execute("SET statement_timeout = '5s'")
+        conn.autocommit = False
+        return conn
+
+    monkeypatch.setattr(base, "get_connection", connect)
+    monkeypatch.setattr(base, "_close_connection", lambda conn: conn.close())
+    monkeypatch.setattr(claude_accounts, "_encrypt", lambda value: value)
+    monkeypatch.setattr(claude_accounts, "_require_storage", lambda: None)
+    local, shared = auth.setting_key(), auth.SELECTION_SETTING
+    scalar, saved = auth.API_KEY_SETTING, claude_accounts.API_LIST_SETTING
+    db.delete_system_setting(shared)
+    db.delete_system_setting(saved)
+    db.set_system_setting(local, auth.MODE_API_KEY)
+    db.set_system_setting(scalar, "fixture-first-1111")
+    revision = auth.summary()["api_key_confirmation"]
+    assert revision
+    update = {
+        "scalar": (scalar, "fixture-different-1111"),
+        "local": (local, auth.MODE_OFF),
+        "shared": (shared, json.dumps({"mode": auth.MODE_SUBSCRIPTION})),
+    }[changed]
+    before = db_settings.get_system_setting_snapshots(scalar, local, shared, saved)
+    original_write = db_settings._write_system_setting_if_unchanged
+    original_commit = db_settings.write_system_settings_if_unchanged
+
+    def commit(writes, *, guards):
+        assert saved in writes and scalar in guards  # Migration prepared, but not committed.
+        if changed == "scalar":
+            db.set_system_setting(*update)  # After matching the rendered revision, before taking the scalar lock.
+        return original_commit(writes, guards=guards)
+
+    def write(conn, key, value, expected):
+        if key == update[0] and changed != "scalar":
+            assert db.get_system_setting(saved) is None  # Migration not visible yet.
+            db.set_system_setting(*update)  # On a different connection, before the local/shared CAS.
+        return original_write(conn, key, value, expected)
+
+    monkeypatch.setattr(db_settings, "_write_system_setting_if_unchanged", write)
+    monkeypatch.setattr(db_settings, "write_system_settings_if_unchanged", commit)
+    with pytest.raises(claude_accounts.AccountError, match="API key or mode changed") as error:
+        auth.confirm_legacy_api_key(revision)
+    assert error.value.status == 409
+    before[update[0]] = db.get_system_setting_snapshot(update[0])
+    assert before[update[0]].value == update[1]
+    assert db_settings.get_system_setting_snapshots(scalar, local, shared, saved) == before
+
+
 def test_signed_peer_choice_lands_inside_activation_transaction(pg_workers, monkeypatch):
     receiver, producer = pg_workers("receiver"), pg_workers("producer")
     shared, local = auth.SELECTION_SETTING, "claude_cli_logins:receiver-fixture"

@@ -1286,7 +1286,11 @@ label, `404 not_found`, `409 not_signed_in` (save-current),
 `storage_unreadable`, `storage_unavailable` or `key_selection_required`. If
 Claude Code uses an unconfirmed legacy key, open Settings → Providers →
 Claude and select **Confirm API key**. That keeps Claude Code in API key
-mode. Then choose the subscription sign-in again.
+mode. Then choose the subscription sign-in again. The confirmation PUT sends
+`{ "mode": "api_key", "api_key_confirmation": "…" }` with the opaque revision
+from the same GET as the displayed key. If the key or mode changed, the
+server returns `409` without pinning or migrating a key. Review the refreshed
+selection and confirm it explicitly.
 A rejected subscription activation leaves both choices untouched by the
 request. For `selection_changed`, review the latest choice and retry.
 Key validation keeps the legacy error strings: `400` authentication/API error,

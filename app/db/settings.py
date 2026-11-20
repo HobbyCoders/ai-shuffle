@@ -287,6 +287,15 @@ def get_system_setting_snapshot(key: str) -> Optional[SystemSettingSnapshot]:
         return SystemSettingSnapshot(row["value"], row["revision"]) if row else None
 
 
+def get_system_setting_snapshots(*keys: str) -> dict[str, SystemSettingSnapshot]:
+    """Read related settings from the same statement snapshot."""
+    placeholders = ", ".join(["%s"] * len(keys))
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT key, value, revision FROM system_settings WHERE key IN ({placeholders})", keys)
+        return {row["key"]: SystemSettingSnapshot(row["value"], row["revision"]) for row in cursor.fetchall()}
+
+
 def get_system_setting_revision(key: str) -> Optional[str]:
     """Opaque write generation, without disclosing the setting's value."""
     with get_db() as conn:
@@ -371,6 +380,33 @@ def set_system_setting_if_unchanged(
     return True
 
 
+def write_system_settings_if_unchanged(
+    writes: dict[str, tuple[str, SystemSettingSnapshot | None]],
+    *, guards: dict[str, SystemSettingSnapshot],
+) -> bool:
+    """Commit plain settings together only if all write and read snapshots match.
+
+    Guards must exist: lock them through commit. For possibly absent rows,
+    the conditional writes detect competing inserts via the unique key.
+    """
+    try:
+        with get_db() as conn:
+            cursor = conn.cursor()
+            for key, expected in guards.items():
+                cursor.execute("SELECT value, revision FROM system_settings WHERE key = %s FOR UPDATE", (key,))
+                row = cursor.fetchone()
+                if row is None or SystemSettingSnapshot(row["value"], row["revision"]) != expected:
+                    raise _SystemSettingConflict
+            for key, (value, expected) in writes.items():
+                if not _write_system_setting_if_unchanged(conn, key, value, expected):
+                    raise _SystemSettingConflict
+    except _SystemSettingConflict:
+        return False
+    for key in writes:
+        invalidate_system_setting_memo(key)
+    return True
+
+
 def delete_system_setting(key: str) -> bool:
     """Delete a system setting"""
     with get_db() as conn:
@@ -433,7 +469,8 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), "settings",
-    "set_system_setting set_system_setting_if_unchanged delete_system_setting get_or_create_system_setting",
+    "set_system_setting set_system_setting_if_unchanged write_system_settings_if_unchanged "
+    "delete_system_setting get_or_create_system_setting",
 )
 if replicated_wakes_enabled():
     _install_resource_sync(globals(), "preferences", "set_user_preference delete_user_preference")

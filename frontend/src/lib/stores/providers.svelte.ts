@@ -50,6 +50,7 @@ import {
 	getClaudeAuth,
 	saveClaudeCloud as apiSaveClaudeCloud,
 	setClaudeAuthMode,
+	confirmClaudeApiKey as apiConfirmClaudeApiKey,
 	type ClaudeAuthMode,
 	type ClaudeAuthSummary,
 	type ClaudeCloudConfig,
@@ -411,6 +412,7 @@ export const providers = {
 		try {
 			const claude = await boundedProviderRead(getClaudeAuth(refresh), 'Claude account status');
 			_update((s) => ({ ...s, claude, claudeError: null, claudeForbidden: false }));
+			return true;
 		} catch (e) {
 			const forbidden = (e as { status?: unknown } | null)?.status === 403;
 			_update((s) => ({
@@ -418,6 +420,7 @@ export const providers = {
 				claudeForbidden: forbidden,
 				claudeError: forbidden ? null : getErrorMessage(e, 'Could not read the Claude Code mode')
 			}));
+			return false;
 		}
 	},
 
@@ -488,6 +491,13 @@ export const providers = {
 	 */
 	async setClaudeMode(mode: ClaudeAuthMode, acknowledgeWarning = false) {
 		const claude = await setClaudeAuthMode(mode, acknowledgeWarning);
+		_update((s) => ({ ...s, claude }));
+		auth.checkAuth().catch(() => {});
+		await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);
+	},
+
+	async confirmClaudeApiKey(revision: string) {
+		const claude = await apiConfirmClaudeApiKey(revision);
 		_update((s) => ({ ...s, claude }));
 		auth.checkAuth().catch(() => {});
 		await Promise.all([hydrateModelRegistry(), providers.loadIntegrations()]);

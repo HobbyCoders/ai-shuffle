@@ -7,7 +7,7 @@
 	 * the control stays on the current mode until that finishes.
 	 */
 	import type { ClaudeAuthMode } from '$lib/api/claude-auth';
-	import { getErrorMessage } from '$lib/api/client';
+	import { getErrorMessage, isApiError } from '$lib/api/client';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { providers } from '$lib/stores/providers.svelte';
@@ -24,18 +24,25 @@
 	const mode = $derived<ClaudeAuthMode>(claude?.mode ?? 'subscription');
 	let confirming = $state(false);
 	let confirmationError = $state('');
+	let rejectedRevision = $state<string | null>(null);
 
-	async function confirmApiKey() {
-		if (access.readOnly || !claude?.api_key_confirmation_required || confirming) return;
+	async function refreshSelection() {
+		if (await providers.loadClaude()) rejectedRevision = null;
+	}
+
+	async function confirmApiKey(revision: string) {
+		if (access.readOnly || confirming || revision === rejectedRevision) return;
 		confirming = true;
 		confirmationError = '';
 		try {
-			// Explicitly save the current mode to pin the legacy key. A same-mode
-			// click on the segmented control intentionally does not save anything.
-			await providers.setClaudeMode('api_key');
+			await providers.confirmClaudeApiKey(revision);
 			flashSaved();
 		} catch (e) {
 			confirmationError = getErrorMessage(e, 'Could not confirm the API key');
+			if (isApiError(e) && e.status === 409) {
+				rejectedRevision = revision;
+				await refreshSelection();
+			}
 		} finally {
 			confirming = false;
 		}
@@ -52,10 +59,21 @@
 			hint={`Confirm ${claude.api_key.last4 ? `the key ending in ${claude.api_key.last4}` : 'the saved key'} before choosing a subscription sign-in. Claude Code stays in API key mode.`}
 			wrapHint
 		>
-			<button type="button" class="st-btn" disabled={confirming} onclick={confirmApiKey}>
-				{confirming ? 'Confirming…' : 'Confirm API key'}
-			</button>
+			{@const revision = claude.api_key_confirmation}
+			{#if revision && revision !== rejectedRevision}
+				{#key revision}
+					<button type="button" class="st-btn" disabled={confirming} onclick={() => confirmApiKey(revision)}>
+						{confirming ? 'Confirming…' : 'Confirm API key'}
+					</button>
+				{/key}
+			{:else if revision}
+				<button type="button" class="st-btn" disabled={confirming} onclick={refreshSelection}>
+					Refresh selection
+				</button>
+			{:else}
+				<span>Update this worker to confirm the saved key.</span>
+			{/if}
 		</SettingRow>
-		{#if confirmationError}<p class="pv-msg err" role="alert">{confirmationError}</p>{/if}
 	{/if}
+	{#if confirmationError}<p class="pv-msg err" role="alert">{confirmationError}</p>{/if}
 </RowGroup>

@@ -463,6 +463,7 @@ async def remove_anthropic_api_key(token: str = Depends(require_admin)):
 
 class ClaudeAuthModeRequest(BaseModel):
     mode: str = Field(..., description="'subscription', 'api_key', 'cloud' or 'off'")
+    api_key_confirmation: str | None = None
     # Required for 'cloud': the owner saw the warning (see claude_cloud_auth).
     acknowledge_warning: StrictBool = False
 
@@ -591,7 +592,12 @@ async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(r
             raise HTTPException(status_code=400,
                                 detail="Save a cloud provider or gateway first.")
     try:
-        await run_sync(claude_auth_mode.set_mode, request.mode)
+        if request.api_key_confirmation is not None:
+            if request.mode != claude_auth_mode.MODE_API_KEY:
+                raise HTTPException(status_code=400, detail="An API key confirmation requires API key mode.")
+            await run_sync(claude_auth_mode.confirm_legacy_api_key, request.api_key_confirmation)
+        else:
+            await run_sync(claude_auth_mode.set_mode, request.mode, require_legacy_confirmation=True)
     except claude_accounts.AccountError as exc:
         raise HTTPException(status_code=409 if exc.code == "storage_locked" else exc.status,
                             detail=encryption.credential_storage_error() if exc.code == "storage_locked" else str(exc)) from None
