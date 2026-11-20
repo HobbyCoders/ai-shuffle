@@ -117,6 +117,9 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	/* Phone: the account line wraps instead of cutting an email short. */
+	:global(.settings-shell[data-stacked]) .sm { display: block; white-space: normal; overflow-wrap: anywhere; }
+	:global(.settings-shell[data-stacked]) .sm-rest { overflow: visible; }
 	.cred :global(.chev) {
 		flex: none;
 		color: var(--st-subtle);

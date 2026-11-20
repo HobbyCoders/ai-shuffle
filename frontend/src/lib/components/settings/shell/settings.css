@@ -312,19 +312,28 @@
 
 /* Phone geometry belongs to the kit, not individual destination overrides.
    data-stacked also covers the native shell on a wide/foldable viewport. */
-.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+.settings-shell[data-stacked] :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink),
 .settings-shell[data-stacked] .st-seg button {
  min-height: 44px;
 }
-.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+.settings-shell[data-stacked] :is(.st-btn.icon, .st-vbtn, .st-reset) { min-width: 44px; }
 .settings-shell[data-stacked] :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
 .settings-shell[data-stacked] :is(.st-num input, textarea) { font-size: 16px; }
 @media (max-width: 600px), (pointer: coarse) {
- .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink, .st-help),
+ .settings-shell :is(.st-btn, .st-back, .st-vbtn, .st-hotkey, .st-reset, .st-vlink),
  .settings-shell .st-seg button { min-height: 44px; }
- .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset, .st-help) { min-width: 44px; }
+ .settings-shell :is(.st-btn.icon, .st-vbtn, .st-reset) { min-width: 44px; }
  .settings-shell :is(input.st-txt, select.st-sel, .st-num) { min-height: 44px; font-size: 16px; }
  .settings-shell :is(.st-num input, textarea) { font-size: 16px; }
+}
+/* The "?" beside a label keeps its 18px drawing and answers across 44px
+   through an invisible extension. Drawn 44px, it made a label with help twice
+   as tall as one without and pushed its helper text away from it. */
+.settings-shell[data-stacked] .st-help { position: relative; }
+.settings-shell[data-stacked] .st-help::after { content: ''; position: absolute; inset: -13px; }
+@media (max-width: 600px), (pointer: coarse) {
+ .settings-shell .st-help { position: relative; }
+ .settings-shell .st-help::after { content: ''; position: absolute; inset: -13px; }
 }
 
 /* One phone select: the native select (SelectField) and the value button that
@@ -551,6 +560,10 @@
 /*
  * SettingRow on the phone: label and control share a line while they fit and
  * the control drops under the label (still right-aligned) when it does not.
+ * Beside a text button, "fit" leaves the helper at least 180px: an action's
+ * helper is a sentence, and a wide button ("Use this sign-in") squeezed it
+ * into three words a line on a 360px phone. A short button still fits there;
+ * a wide one goes below. Switches, values and links keep the 128px minimum.
  * Text fields and meters always take the full width. The reset stays left
  * of the control, as on desktop.
  */
@@ -563,6 +576,9 @@
 }
 .settings-shell[data-stacked] .st-row > .st-rt {
 	flex: 1 1 128px;
+}
+.settings-shell[data-stacked] .st-row:has(> .st-rc > .st-btn:not(.icon)) > .st-rt:has(> .st-rh) {
+	flex-basis: min(100%, 180px);
 }
 .settings-shell[data-stacked] .st-row > .st-rt .st-rh {
 	white-space: normal;
@@ -593,6 +609,12 @@
 }
 .settings-shell[data-stacked] .st-row .st-txt {
 	flex: 1 1 100%;
+}
+/* A path keeps the whole row width; its Check button goes under it rather
+   than leaving room for half a folder name. (Both :has() are needed to
+   outrank the no-wrap rule for text fields above.) */
+.settings-shell[data-stacked] .st-row:has(> .st-rc > .st-txt.st-mono + :is(.st-btn:not(.icon), .st-path-status)) > .st-rc:has(> .st-txt.st-mono) {
+	flex-wrap: wrap;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
@@ -792,6 +814,29 @@
 /* Native phone shells stay stacked even in an unfolded viewport. */
 .settings-shell[data-stacked] :is(.st-rl, .st-it .nm, .st-lg) { font-size: 15px; }
 .settings-shell[data-stacked] :is(.st-gt, .st-lg) { padding-inline: 0; }
+/* Phone lists read their second line instead of cutting it after a few words:
+   13px and up to two lines for a row's summary and a value row's value, three
+   for a log line, which stays in its small monospace. A list drawn in a card
+   keeps the card rows' 16px inset, so its marks and times clear the border. */
+.settings-shell[data-stacked] .st-it :is(.tx > .sm, .vt),
+.settings-shell[data-stacked] .st-it.log .nm {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
+	line-clamp: 2;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}
+.settings-shell[data-stacked] .st-it .tx > .sm { font-size: 13px; line-height: 1.35; }
+.settings-shell[data-stacked] .st-it .vt { text-align: right; }
+/* A value row's name takes the width it needs (up to 60%), not a fixed 40%
+   that cut "Audio and sound" short beside a two-word value. */
+.settings-shell[data-stacked] .st-it.value { grid-template-columns: fit-content(60%) minmax(0, 1fr) 16px; }
+.settings-shell[data-stacked] .st-it.log .nm { font-size: 12.5px; line-height: 1.4; -webkit-line-clamp: 3; line-clamp: 3; }
+.settings-shell[data-stacked] .st-it.log { padding-block: 8px; }
+@media (max-width: 600px) {
+	.settings-shell .st-card > .st-it:not(.navigation):not(.card):not(.value) { padding-inline: 16px; }
+}
 /* Only non-transcript disclosures: native triangles are replaced by the same line chevron. */
 .settings-shell details:not(.detail-more) > summary { list-style: none; display: flex; align-items: center; gap: 8px; }
 .settings-shell details:not(.detail-more) > summary::-webkit-details-marker { display: none; }

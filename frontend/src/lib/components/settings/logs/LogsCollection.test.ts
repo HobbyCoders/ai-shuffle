@@ -22,7 +22,7 @@ vi.mock('$lib/stores/auth.svelte', async () => {
 import { api, fetchAndDownload } from '$lib/api/client';
 import { activeView } from '$lib/stores/layout.svelte';
 import LogsCollection from './LogsCollection.svelte';
-import { LogsModel, withIds, levelTone, sortLevels } from './logs-model.svelte';
+import { LogsModel, withIds, levelTone, logText, sortLevels } from './logs-model.svelte';
 import { settingsNav } from '$lib/settings/navigation.svelte';
 import { assertCategoryCoverage } from '$lib/settings/testing/coverage';
 
@@ -167,6 +167,32 @@ describe('entries', () => {
 		expect(within(facts).getByText('ERROR')).toBeTruthy();
 		expect(within(facts).getByText('app.providers.grok')).toBeTruthy();
 		expect(screen.getByRole('heading', { level: 2, name: 'Error' })).toBeTruthy();
+	});
+
+	it('shows a row its own text, not the time, logger and level the row already carries', async () => {
+		// The shape GET /logs really sends: the ring buffer formats every record.
+		const sent = {
+			timestamp: '2026-10-01T14:42:03.340Z',
+			level: 'WARNING',
+			logger_name: 'app.api.sessions',
+			message: '2026-10-01 14:42:03,340 - app.api.sessions - WARNING - Slow request: GET /sessions'
+		};
+		vi.mocked(api.get).mockResolvedValue({ lines: [sent], total: 1, returned: 1, levels: ['WARNING'] });
+		await mount();
+		const row = document.querySelector('[data-settings-item]') as HTMLElement;
+		expect(row.querySelector('.nm')?.textContent).toBe('Slow request: GET /sessions');
+		// The open entry still shows the line as the worker wrote it.
+		await fireEvent.click(row);
+		expect(screen.getByRole('region', { name: 'Details' }).textContent).toContain(sent.message);
+	});
+
+	it('leaves a message in any other shape as it is', () => {
+		const line = { timestamp: '', level: 'INFO', logger_name: 'app.x', message: 'POST /turns 202' };
+		expect(logText(line)).toBe('POST /turns 202');
+		// Another logger's prefix quoted inside the text is not this line's prefix.
+		expect(logText({ ...line, message: 'saw "a - app.x - INFO - b" in the output' })).toBe('saw "a - app.x - INFO - b" in the output');
+		// Nothing after the prefix: keep the line rather than show an empty row.
+		expect(logText({ ...line, message: '2026-10-01 14:42:03,340 - app.x - INFO - ' })).toBe('2026-10-01 14:42:03,340 - app.x - INFO - ');
 	});
 
 	it('narrows to the same logger and clears it', async () => {
