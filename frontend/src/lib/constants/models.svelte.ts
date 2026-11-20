@@ -334,6 +334,14 @@ const _registry = $state<RegistryState>({
 // Public accessors — prefer these over touching `_registry` directly.
 // ---------------------------------------------------------------------------
 
+/**
+ * The four short ids with plain family labels ("Opus"), describing no
+ * particular sign-in: for a Claude credential that is not the one running.
+ */
+export function getBuiltInAliases(): readonly ModelOption[] {
+	return STATIC_MODELS;
+}
+
 /** Ordered list of selectable models. Reactive in Svelte component contexts. */
 export function getModels(): readonly ModelOption[] {
 	return _registry.models;

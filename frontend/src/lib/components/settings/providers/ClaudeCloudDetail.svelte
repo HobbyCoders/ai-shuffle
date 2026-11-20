@@ -112,7 +112,7 @@
 	{/snippet}
 	{#snippet children(tab: string | null)}
 		{#if tab === 'Models'}
-			<BuiltInModels />
+			<BuiltInModels active={mode === 'cloud'} />
 		{:else if config}
 			<ClaudeCloudForm {config} {mode} showWarning={false} onSaved={saved} />
 		{:else if loadError}
