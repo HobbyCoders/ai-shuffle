@@ -385,13 +385,15 @@ async def _load_usage_links(
 
     Read-only: no request and no snapshot row. A row that already has a
     ``providers`` entry keeps that section instead. Best-effort like the
-    provider rows: a read failure yields ``None``.
+    provider rows: a read failure yields ``None``. The enabled-rows reader
+    includes the built-in Claude API row (the saved Anthropic key), so the key
+    gets its own section beside the Claude subscription's.
     """
     try:
         from app.db import database as db
         from app.db.async_database import run_sync
 
-        rows = await run_sync(db.get_all_model_providers)
+        rows = await run_sync(db.get_enabled_model_providers)
         shown = {entry.provider_id for entry in providers or ()}
         links: list[ProviderUsageLink] = []
         for row in rows:

@@ -1063,6 +1063,18 @@
 		return entries.sort(compareSections);
 	});
 	const hiddenRows = $derived(sections.filter((s) => $hiddenUsageProviders[s.id]));
+	// The hide and restore buttons name a section by brand, plus its subtext
+	// when another section shares the brand with a different one (a Claude
+	// plan and the saved key, "Claude · API"), so the two stay apart.
+	const sectionLabels = $derived(
+		new Map(
+			sections.map((s) => {
+				const clash = s.subtext != null &&
+					sections.some((o) => o !== s && o.name === s.name && o.subtext !== s.subtext);
+				return [s.id, clash ? `${s.name} · ${s.subtext}` : s.name];
+			})
+		)
+	);
 	const hasUsageSections = $derived(sections.length > 0);
 
 	function setProviderHidden(id: string, hidden: boolean) {
@@ -1114,8 +1126,8 @@
 	<button
 		type="button"
 		class="provider-hide"
-		title="Hide {name} usage"
-		aria-label="Hide {name} usage"
+		title="Hide {sectionLabels.get(id) ?? name} usage"
+		aria-label="Hide {sectionLabels.get(id) ?? name} usage"
 		onclick={() => setProviderHidden(id, true)}
 	>
 		<EyeOff size={13} aria-hidden="true" />
@@ -1445,9 +1457,10 @@
 					<summary>Hidden providers ({hiddenRows.length})</summary>
 					{#each hiddenRows as row (row.id)}
 						<button type="button" class="provider-restore" onclick={() => setProviderHidden(row.id, false)}
-							aria-label="Show {row.name} usage" title="Show {row.name} usage">
+							aria-label="Show {sectionLabels.get(row.id) ?? row.name} usage"
+							title="Show {sectionLabels.get(row.id) ?? row.name} usage">
 							<Eye size={13} aria-hidden="true" />
-							<span>{row.name}</span>
+							<span>{sectionLabels.get(row.id) ?? row.name}</span>
 						</button>
 					{/each}
 				</details>

@@ -104,7 +104,10 @@ vendor's own page: Kimi Code on
 [My Quota](https://www.kimi.com/membership/subscription?tab=quota), the
 MiniMax API on [Balance](https://platform.minimax.io/user-center/payment/balance),
 and OpenCode Console and OpenCode Go on the
-[OpenCode console](https://opencode.ai/console).
+[OpenCode console](https://opencode.ai/console). The built-in Claude API row
+(the saved Anthropic key) gets the same kind of section, kind `claude_api`:
+"Credit balance is shown only in the Claude Console", linking to Console
+[Billing](https://platform.claude.com/settings/billing).
 
 | Provider type / display | Plan label / slot | API label / slot |
 | --- | --- | --- |
