@@ -18,7 +18,8 @@ B_TESTS = ["tests/core/test_b.py"]
 SHARED_TESTS = ["tests/core/test_shared.py"]
 
 BASE = {
-    "app/a.py": "LIMIT = 1\n\ndef f():\n    return 1\n\ndef g():\n    return 2\n\nclass Box:\n    size = 1\n    def open(self):\n        return self.size\n",
+    "app/a.py": "LIMIT = 1\n\ndef f():\n    return 1\n\ndef g():\n    return 2\n\nclass Box:\n    size = 1\n    def open(self):\n        return self.size\n"
+                "\ndef idle():\n    return 0\n",  # known to the map, run by no test
     "app/b.py": "from app.a import LIMIT\n\ndef uses_limit():\n    return LIMIT\n",
     "app/shared.py": "def setup():\n    return 1\n",
     "app/unmapped.py": "def lonely():\n    return 1\n",
@@ -51,7 +52,7 @@ def fake_map():
     return {
         "version": tm.VERSION, "commit": "c" * 40, "tests": tests, "covered": covered,
         "shared": {"app/shared.py": ["setup"]},
-        "known": {"app/a.py": ["Box", "Box.open", "f", "g"], "app/b.py": ["uses_limit"],
+        "known": {"app/a.py": ["Box", "Box.open", "f", "g", "idle"], "app/b.py": ["uses_limit"],
                   "app/shared.py": ["setup"], "app/prompt_loader.py": ["load"]},
     }
 
@@ -290,7 +291,7 @@ def test_merge_combines_worker_records(tmp_path, monkeypatch):
     assert result["tests"] == ["tests/core/test_a.py", "tests/core/test_b.py"]
     assert result["covered"]["app/a.py"] == {"f": [0, 1], "Box.open": [1]}
     assert result["shared"] == {"app/a.py": ["g"]}
-    assert result["known"]["app/a.py"] == ["Box", "Box.open", "f", "g"]
+    assert result["known"]["app/a.py"] == ["Box", "Box.open", "f", "g", "idle"]
 
 
 def _recorded_helper():
@@ -408,11 +409,22 @@ PR = {"GITHUB_EVENT_NAME": "pull_request"}
 CHANGED_F = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
 
 
+HELPERS = "app/helpers.py"
+HELPER = "def helper():\n    return 1\n"
+
+
+def remap(repo, map_path, **known):
+    """Record the map again, at main's current commit."""
+    test_map = fake_map()
+    test_map["known"].update(known)
+    run_git(repo, "checkout", "-q", "main")
+    map_path.write_bytes(gzip.compress(json.dumps({**test_map, "commit": run_git(repo, "rev-parse", "HEAD")}).encode()))
+    run_git(repo, "branch", "-f", "pr", "main")
+
+
 def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
-    # Main's own change since the map is left to main's full run: NOTES_WALKER does not run.
-    commit("main", "notes/2026/main.md", "main moved on\n")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
     expected = sorted(A_TESTS)
@@ -421,13 +433,77 @@ def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
     assert reasons[0].startswith("Test map from ") and "1 files the pull request changed" in reasons[0]
 
 
-def test_what_only_main_changed_since_the_map_is_left_to_main(pull_request):
+def test_what_main_changed_since_the_map_adds_its_tests(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
     commit("main", "app/b.py", BASE["app/b.py"].replace("return LIMIT", "return LIMIT + 1"))
+    commit("main", "notes/2026/main.md", "main moved on\n")
     merge()
-    found, _ = tm.ci_select(map_path, PR)
-    assert found["tests"] == sorted(A_TESTS)
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(A_TESTS + B_TESTS + [NOTES_WALKER]), reasons
+    assert "2 main changed since" in reasons[0]
+
+
+def test_main_giving_a_mapped_function_a_new_callee_runs_its_tests(pull_request):
+    # Sol r2 S4: the map knows idle but no test ran it; main makes uses_limit call it.
+    _, map_path, commit, merge = pull_request
+    commit("main", "app/b.py", "from app.a import LIMIT, idle\n\ndef uses_limit():\n    return LIMIT + idle()\n")
+    commit("pr", "app/a.py", BASE["app/a.py"].replace("def idle():\n    return 0", "def idle():\n    return 9"))
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(B_TESTS), reasons
+
+
+@pytest.mark.parametrize("pr_text", [
+    "def helper():\n    return 2\n", None, HELPER + "\ndef extra():\n    return 3\n",
+], ids=["changes-it", "deletes-it", "only-adds-to-its-file"])
+def test_a_pull_request_changing_code_main_added_since_the_map_runs_its_callers_tests(pull_request, pr_text):
+    # Sol r1 S2: after the map, main adds a helper and makes a mapped function call it.
+    repo, map_path, commit, merge = pull_request
+    commit("main", HELPERS, HELPER)
+    commit("main", "app/b.py", "from app.a import LIMIT\nfrom app.helpers import helper\n\n"
+                               "def uses_limit():\n    return LIMIT + helper()\n")
+    run_git(repo, "branch", "-f", "pr", "main")
+    if pr_text is None:
+        run_git(repo, "checkout", "-q", "pr")
+        run_git(repo, "rm", "-q", HELPERS)
+        run_git(repo, "commit", "-q", "-m", "delete")
+    else:
+        commit("pr", HELPERS, pr_text)
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    # Compared with the map's commit alone, the helper is new code and nothing would run.
+    assert found["tests"] == sorted(B_TESTS), reasons
+
+
+GUARDED = "try:\n    import json\nexcept {}:\n    json = None\n\n" + BASE["app/b.py"]
+
+
+def test_a_changed_module_level_except_header_runs_the_files_tests(pull_request):
+    # Sol r2 S2: the handler's type was not compared, so nothing ran.
+    repo, map_path, commit, merge = pull_request
+    commit("main", "app/b.py", GUARDED.format("ImportError"))
+    remap(repo, map_path)
+    commit("main", "app/b.py", GUARDED.format("(ImportError, OSError)"))
+    run_git(repo, "branch", "-f", "pr", "main")
+    commit("pr", "app/b.py", GUARDED.format("(ImportError, RuntimeError)"))
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(B_TESTS), reasons
+    assert any("module-level statement changed" in reason for reason in reasons)
+
+
+def test_main_and_a_pull_request_changing_separate_module_statements_run_the_files_tests(pull_request):
+    # Sol r2 S5: main edits the docstring, the pull request a separate top-level call.
+    repo, map_path, commit, merge = pull_request
+    registered = '"""Limits."""\n' + BASE["app/b.py"] + '\nregister("legacy")\n'
+    commit("main", "app/b.py", registered)
+    remap(repo, map_path)
+    commit("main", "app/b.py", registered.replace("Limits.", "Limits, documented."))
+    commit("pr", "app/b.py", registered.replace('"legacy"', '"old"'))
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(B_TESTS), reasons
 
 
 # Unmapped and run at import (#1861's app/core/claude_api_provider.py): changed
@@ -445,7 +521,7 @@ def test_a_frontend_only_pull_request_ignores_an_unmapped_module_main_added(pull
     found, reasons = tm.ci_select(map_path, PR)
     # Only a policy test outside the shards names the file.
     assert found == {"selection": "none", "shards": [], "tests": []}, reasons
-    assert not any("new_provider" in reason for reason in reasons)
+    assert any(r.startswith("Left to main's full run: app/core/new_provider.py") for r in reasons), reasons
 
 
 def test_a_test_file_main_added_or_changed_since_the_map_runs(pull_request):
@@ -458,7 +534,7 @@ def test_a_test_file_main_added_or_changed_since_the_map_runs(pull_request):
     merge()
     found, reasons = tm.ci_select(map_path, PR)
     assert found["tests"] == sorted(["tests/core/test_new_on_main.py", B_TESTS[0]]), reasons
-    assert any("main added or changed" in reason for reason in reasons)
+    assert any("2 more test files reach what main changed" in reason for reason in reasons)
 
 
 @pytest.mark.parametrize("path, text, reason", [
@@ -505,37 +581,7 @@ def test_an_edit_counts_where_it_lands_in_the_merge(pull_request):
     assert found["selection"] == "all" and "assets/current/rules.toml" in reasons[-1], reasons
 
 
-HELPERS = "app/helpers.py"
-HELPER = "def helper():\n    return 1\n"
-
-
-@pytest.mark.parametrize("pr_text, expected", [
-    ("def helper():\n    return 2\n", "all"),
-    (None, "all"),
-    (HELPER + "\ndef extra():\n    return 3\n", "none"),
-], ids=["changes-it", "deletes-it", "only-adds-to-its-file"])
-def test_a_pull_request_changing_code_main_added_since_the_map_runs_everything(pull_request, pr_text, expected):
-    repo, map_path, commit, merge = pull_request
-    # After the map, main adds a helper and makes a mapped function call it.
-    commit("main", HELPERS, HELPER)
-    commit("main", "app/b.py", "from app.a import LIMIT\nfrom app.helpers import helper\n\n"
-                               "def uses_limit():\n    return LIMIT + helper()\n")
-    run_git(repo, "branch", "-f", "pr", "main")
-    if pr_text is None:
-        run_git(repo, "checkout", "-q", "pr")
-        run_git(repo, "rm", "-q", HELPERS)
-        run_git(repo, "commit", "-q", "-m", "delete")
-    else:
-        commit("pr", HELPERS, pr_text)
-    merge()
-    found, reasons = tm.ci_select(map_path, PR)
-    # Compared with the map's commit alone, the helper is new code and nothing would run.
-    assert found["selection"] == expected, reasons
-    if expected == "all":
-        assert f"{HELPERS}::helper is changed by the pull request and was added on main" in reasons[-1]
-
-
-def test_renaming_a_file_main_changed_since_the_map_runs_everything(pull_request):
+def test_renaming_a_file_main_changed_since_the_map_runs_the_tests_of_both(pull_request):
     repo, map_path, commit, merge = pull_request
     commit("main", "app/a.py", BASE["app/a.py"].replace("def g():\n    return 2", "def g():\n    return 5"))
     run_git(repo, "checkout", "-q", "pr")
@@ -543,7 +589,8 @@ def test_renaming_a_file_main_changed_since_the_map_runs_everything(pull_request
     run_git(repo, "commit", "-q", "-m", "rename")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
-    assert found["selection"] == "all" and "app/a.py::g" in reasons[-1], reasons
+    # g is compared with the map's version: its tests run as well as f's.
+    assert set(A_TESTS + B_TESTS) <= set(found["tests"]), reasons
 
 
 def test_a_brand_new_module_still_chooses_nothing(pull_request):
@@ -554,11 +601,17 @@ def test_a_brand_new_module_still_chooses_nothing(pull_request):
     assert tm.ci_select(map_path, PR)[0] == {"selection": "none", "shards": [], "tests": []}
 
 
-def test_tests_main_changed_do_not_count_toward_running_everything():
-    chosen, reasons = tm.select(["app/a.py"], fake_map(), head_files(**{"app/a.py": CHANGED_F}), BASE.get,
-                                also=FILLER + ["tests/core/gone.py", "tests/core/helper.py"])
-    assert chosen == sorted(A_TESTS + FILLER)
-    assert any("120 test files main added or changed" in reason for reason in reasons)
+def test_main_changes_judge_the_share_only_with_the_pull_requests():
+    files = head_files(**{"app/a.py": CHANGED_F})
+    # Main's test files alone never run everything for doubt ...
+    chosen, reasons = tm.select(["app/a.py"], fake_map(), files, BASE.get,
+                                main_changed=FILLER[:60] + ["tests/core/gone.py", "tests/core/helper.py", "frontend/package.json"])
+    assert chosen == sorted(A_TESTS + FILLER[:60]), reasons
+    assert any(r.startswith("Left to main's full run: frontend/package.json") for r in reasons)
+    assert any("60 more test files reach what main changed" in r for r in reasons)
+    # ... but with the pull request's they may reach the share where a full run is cheaper.
+    chosen, reasons = tm.select(["app/a.py"], fake_map(), files, BASE.get, main_changed=FILLER)
+    assert chosen == "all" and "running everything is cheaper" in reasons[-1]
 
 
 def test_a_pull_request_no_shard_test_reaches_runs_no_shard(pull_request):

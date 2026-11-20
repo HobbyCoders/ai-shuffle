@@ -196,21 +196,23 @@ PostgreSQL safety always run in full.
   requests run every test, so nothing about saving it can fail a run:
   `backend-map` and the shards' upload of their records may fail
   (`continue-on-error`); the test receipts may not.
-- Only the pull request's files choose tests and decide whether everything
-  runs: its own (the diff from main to the pull request's head, the two parents
-  of its merge commit) and where its change lands in the merge (the diff from
-  main to the merge commit, so an edit to a file main moved counts at the new
-  path too). Each changed Python file is compared with its version at the
-  commit the map was recorded on, the code the map saw run (so a change main
-  also made to that file since is compared too). A function, class or
-  module-level statement the pull request changes or deletes that main added or
-  changed since the map runs every test, because the map cannot know its
-  callers. Otherwise the selection picks the test files that ran a changed
-  function (the rules are in the script's docstring). Files only main changed since the map choose nothing and never
-  make a pull request run everything: they are left to main's full run after
-  the merge. The one exception is test files main added or changed since the
-  map, which run too, because the map does not know what a new test needs.
-  A file that is not Python chooses the tests that name it or list a folder of
+- Only the pull request's files decide whether everything runs: its own (the
+  diff from main to the pull request's head, the two parents of its merge
+  commit) and where its change lands in the merge (the diff from main to the
+  merge commit, so an edit to a file main moved counts at the new path too).
+  Each changed Python file is compared with its version at the commit the map
+  was recorded on, the code the map saw run (so a change main also made to that
+  file since is compared too), and the selection picks the test files that ran
+  a changed function (the rules are in the script's docstring).
+- The files only main changed since the map add their tests too, compared the
+  same way, because main may have given the pull request's code a new caller
+  the map has not seen. Test files main added or changed run as well. They
+  never make a pull request run everything for doubt: whatever of main's own
+  changes the map cannot see through (an unmapped module, a manifest, a
+  conftest) is logged as left to main's full run after the merge. Everything
+  runs only when the pull request's tests and main's together reach 60% of
+  the suite, because then one full run is cheaper.
+- A file that is not Python chooses the tests that name it or list a folder of
   it, and the tests of the code that reads it. Tests that list the whole
   checkout or a top-level folder (`frontend`) run with them, but alone they
   say nothing about the file, so everything runs.

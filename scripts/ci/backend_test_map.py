@@ -185,6 +185,10 @@ class Blocks:
                 self.loose.append(type(node).__name__ + repr({field: dump(value) for field, value in shell.items()}))
                 for field in STATEMENT_LISTS:
                     for child in getattr(node, field, None) or []:
+                        if isinstance(child, (ast.excepthandler, ast.match_case)):
+                            # Its own parts: ``except X as e`` / ``case P if g``.
+                            self.loose.append(type(child).__name__ + repr(
+                                {f: dump(v) for f, v in ast.iter_fields(child) if f != "body"}))
                         self._visit(getattr(child, "body", None) if isinstance(child, (ast.excepthandler, ast.match_case)) else [child],
                                     prefix, module_level=True)
             else:
@@ -467,11 +471,10 @@ def resolve_relative(path: str, level: int, module: str | None) -> str:
 
 
 class Selector:
-    def __init__(self, test_map: dict, files: dict[str, str], base_source, main_source=None):
+    def __init__(self, test_map: dict, files: dict[str, str], base_source):
         self.map = test_map
         self.files = files
         self.base_source = base_source
-        self.main_source = main_source
         self.tests_by_index = test_map["tests"]
         self.selected: set[str] = set()
         self.reasons: list[str] = []
@@ -511,13 +514,22 @@ class Selector:
 
     # change handling ---------------------------------------------------------
 
+    def change(self, path: str) -> None:
+        tracked = PurePosixPath(path).suffix == ".py" and (path in ROOT_SCRIPTS or any(path.startswith(d + "/") for d in SOURCE_DIRS))
+        if fast_subset(path):
+            if path in self.files:
+                self.selected.add(path)
+        elif tracked:
+            self.python_change(path)
+            self.subprocess_users(path)
+        else:
+            self.other_change(path)
+
     def python_change(self, path: str) -> None:
         base = Blocks(self.base_source(path))
         head = Blocks(self.files.get(path))
         if not base.valid or not head.valid:
             raise FullSuite(f"{path} does not parse")
-        if self.main_source is not None:
-            self.since_map(path, base, head)
         module = module_name(path)
         for qualname in sorted(differing(base.functions, head.functions)):
             if qualname not in base.functions:
@@ -539,27 +551,6 @@ class Selector:
         if changed_names and PurePosixPath(path).name == "conftest.py":
             raise FullSuite(f"{path}: module-level names changed in a conftest")
         self.name_changes(path, module, changed_names)
-
-    def since_map(self, path: str, base: Blocks, head: Blocks) -> None:
-        """A pull request's change to code main added or changed after the map runs everything.
-
-        The map holds no tests for a block main added since, and may miss the
-        callers main gave a block it changed, so comparing with the map's
-        version alone could choose nothing. Compared at three points: the map's
-        commit (``base``), main, and the merge (``head``). Blocks the pull
-        request adds itself (absent on main) are left to the usual rules.
-        """
-        main = Blocks(self.main_source(path))
-        if not main.valid:
-            raise FullSuite(f"{path} does not parse on main")
-        for kind in ("functions", "classes", "names"):
-            at_map, on_main, merged = getattr(base, kind), getattr(main, kind), getattr(head, kind)
-            for key in sorted(differing(on_main, merged)):
-                if key in on_main and at_map.get(key) != on_main[key]:
-                    since = "added" if key not in at_map else "changed"
-                    raise FullSuite(f"{path}::{key} is changed by the pull request and was {since} on main since the map")
-        if main.loose != head.loose and base.loose != main.loose:
-            raise FullSuite(f"{path}: module-level statements changed by the pull request and on main since the map")
 
     def name_changes(self, path: str, module: str | None, names: set[str]) -> None:
         pending = [(path, module, name, 0) for name in sorted(names)]
@@ -629,56 +620,63 @@ class Selector:
                 self.selected.add(test)
 
 
+def check_path(path: str) -> None:
+    """Raise FullSuite for a changed path no map can see through."""
+    if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
+        raise FullSuite(f"{path} changes the test setup or dependencies")
+    if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
+        raise FullSuite(f"{path} is a package manifest or lockfile")
+    # Any conftest, the root one too: pytest loads it for every test beneath it.
+    if PurePosixPath(path).name == "conftest.py":
+        raise FullSuite(f"{path} is a conftest")
+    if "\ufffd" in path:
+        raise FullSuite(f"{path!r} is not a UTF-8 file name")
+    # Fixtures, data and snapshots under tests/ are read by paths tests
+    # build at run time; only test modules and helpers are mapped.
+    if path.startswith("tests/") and PurePosixPath(path).suffix != ".py":
+        raise FullSuite(f"{path} is test data, read by paths no map can follow")
+
+
 def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source,
-           also: list[str] = (), main_source=None) -> tuple[str | list[str], list[str]]:
+           main_changed: list[str] = ()) -> tuple[str | list[str], list[str]]:
     """``("all" | [tests], reasons)``.
 
     ``changed`` drives the choice and every rule that runs everything.
-    ``also`` names test files to run as well that decide nothing: on a pull
-    request, the tests main added or changed since the map. They are added after
-    the share of the suite is judged, and only those of the fast subset that
-    still exist are run. ``main_source`` (a pull request's) gives main's version
-    of a file, for ``Selector.since_map``.
+    ``main_changed`` (a pull request's: what main changed since the map) only
+    adds tests: each such file is compared the same way, and one the map cannot
+    see through is left to main's full run instead of running everything. Its
+    tests are added after the share of the suite ``changed`` reaches is judged;
+    if the two together reach that share, everything runs as the cheaper choice.
     """
     try:
         if test_map is None:
             raise FullSuite("no test map from a full run on main")
         for path in changed:
-            if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
-                raise FullSuite(f"{path} changes the test setup or dependencies")
-            if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
-                raise FullSuite(f"{path} is a package manifest or lockfile")
-            # Any conftest, the root one too: pytest loads it for every test beneath it.
-            if PurePosixPath(path).name == "conftest.py":
-                raise FullSuite(f"{path} is a conftest")
-            if "\ufffd" in path:
-                raise FullSuite(f"{path!r} is not a UTF-8 file name")
-            # Fixtures, data and snapshots under tests/ are read by paths tests
-            # build at run time; only test modules and helpers are mapped.
-            if path.startswith("tests/") and PurePosixPath(path).suffix != ".py":
-                raise FullSuite(f"{path} is test data, read by paths no map can follow")
-        selector = Selector(test_map, files, base_source, main_source)
+            check_path(path)
+        selector = Selector(test_map, files, base_source)
         for path in changed:
-            p = PurePosixPath(path)
-            tracked = p.suffix == ".py" and (path in ROOT_SCRIPTS or any(path.startswith(d + "/") for d in SOURCE_DIRS))
-            if fast_subset(path):
-                if path in files:
-                    selector.selected.add(path)
-            elif tracked:
-                selector.python_change(path)
-                selector.subprocess_users(path)
-            else:
-                selector.other_change(path)
+            selector.change(path)
         tests = [t for t in files if fast_subset(t)]
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):
             raise FullSuite(f"{len(chosen)} of {len(tests)} test files are affected")
-        added = sorted({t for t in also if t in files and fast_subset(t)} - set(chosen))
-        if added:
-            selector.reasons.append(f"{len(added)} test files main added or changed since the map run too")
-        return sorted(set(chosen) | set(added)), selector.reasons
     except FullSuite as reason:
         return "all", [str(reason)]
+    # Main's own changes since the map: a block main changed can be the only new
+    # path from an existing test into the pull request's code.
+    for path in sorted(set(main_changed) - set(changed)):
+        try:
+            check_path(path)
+            selector.change(path)
+        except FullSuite as reason:
+            selector.reasons.append(f"Left to main's full run: {reason}")
+    combined = sorted(t for t in selector.selected if t in files and fast_subset(t))
+    if len(combined) >= FULL_SUITE_SHARE * len(tests):
+        return "all", selector.reasons + [
+            f"{len(combined)} of {len(tests)} test files with main's changes since the map; running everything is cheaper"]
+    if len(combined) > len(chosen):
+        selector.reasons.append(f"{len(combined) - len(chosen)} more test files reach what main changed since the map")
+    return combined, selector.reasons
 
 
 # ---------------------------------------------------------------------------
@@ -713,11 +711,11 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD",
     merged (``main...head``; a file main moved takes the edit at its new
     path). A changed Python file is still compared with its version at
     ``base_rev``, the map's commit, since that is the code the map saw run
-    (whatever main changed in that file since is compared too); a block the
-    pull request changes that main added or changed since the map runs
-    everything (``Selector.since_map``). Files only main changed since
-    ``base_rev`` choose nothing and run nothing in full, except the test files
-    main added or changed, which run as well.
+    (whatever main changed in that file since is compared too). The files
+    only main changed since ``base_rev`` are compared the same way and add
+    their tests, since a block main changed can be the only path from an
+    existing test into the pull request's code; one the map cannot see through
+    is left to main's full run rather than running everything.
 
     Returns the selection, the reasons and the map it was made from.
     """
@@ -727,9 +725,9 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD",
             main = git("rev-parse", pull_request[0]).strip()
             # merge-base(main, head) is main: three dots read as two here.
             changed = sorted(set(changed_names(main, pull_request[1])) | set(changed_names(main, head)))
-            main_tests = [name for name in changed_names(base, main) if fast_subset(name)]
+            main_changed = changed_names(base, main)
         else:
-            changed, main_tests = changed_names(base, head), []
+            changed, main_changed = changed_names(base, head), []
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None
@@ -742,11 +740,11 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD",
             return shown.stdout if shown.returncode == 0 else None
         return source
 
-    result, reasons = select(changed, test_map, load_sources(ROOT), source_at(base), main_tests,
-                             main_source=source_at(main) if pull_request else None)
+    result, reasons = select(changed, test_map, load_sources(ROOT), source_at(base), main_changed)
     if test_map is not None:
         whose = "files the pull request changed" if pull_request else "changed files"
-        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} {whose}.")
+        since = f", {len(main_changed)} main changed since" if pull_request else ""
+        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} {whose}{since}.")
     return result, reasons, test_map
 
 
@@ -795,11 +793,11 @@ def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
     runs: its own (main...its head, the merge commit's two parents) and where
     its change lands in the merge (main...the merge). Each is compared with its
     version at the commit the map was recorded on (a full run on main), so the
-    functions compared are the ones the map saw run; a block it changes that
-    main added or changed since the map runs everything. What main alone
-    changed since the map is left to main's full run after the merge, except
-    the test files main added or changed, which run too: the map does not know
-    what they need.
+    functions compared are the ones the map saw run. What main alone changed
+    since the map adds the tests the map gives it (main may have made a mapped
+    function call the pull request's code) and the test files main added or
+    changed, but never runs everything: what of it the map cannot see through is
+    left to main's full run after the merge.
     """
     event = environ.get("GITHUB_EVENT_NAME", "")
     if event != "pull_request":
