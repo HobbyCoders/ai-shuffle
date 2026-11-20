@@ -17,8 +17,19 @@ def _git(cwd, *args):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("placement", ["standalone", "nested", "windows-no-gh", "windows-nested", "linked"])
-async def test_repository_scope_at_the_acp_producer(client, monkeypatch, tmp_path, placement):  # noqa: F811
+@pytest.mark.parametrize(("placement", "allowlist"), [
+    pytest.param("standalone", None, id="standalone"),
+    pytest.param("nested", None, id="nested"),
+    pytest.param("windows-no-gh", None, id="windows-no-gh"),
+    pytest.param("windows-nested", None, id="windows-nested"),
+    pytest.param("linked", None, id="linked"),
+    pytest.param("windows-no-gh", ["Monitor"], id="windows-monitor-only"),
+    pytest.param("standalone", ["Monitor"], id="linux-monitor-only"),
+    pytest.param("windows-no-gh", ["Read"], id="windows-read-only"),
+])
+async def test_repository_scope_at_the_acp_producer(
+    client, monkeypatch, tmp_path, placement, allowlist,  # noqa: F811
+):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     workspace = tmp_path / "workspace"
     if placement in {"nested", "windows-nested", "linked"}:
@@ -45,9 +56,10 @@ async def test_repository_scope_at_the_acp_producer(client, monkeypatch, tmp_pat
     model = "gemini-4-hydrogen-high"
     database.update_model_provider(row["id"], models_json=[{"id": model, "name": model}])
     role = "You are the Overseer. Coordinate engineering work and report results."
-    database.create_profile("agent", "Overseer", None, {
-        "model": model, "system_prompt": {"type": "custom", "content": role},
-    })
+    agent_config = {"model": model, "system_prompt": {"type": "custom", "content": role}}
+    if allowlist is not None:
+        agent_config.update(tool_selection_mode="allow", allowed_tools=allowlist)
+    database.create_profile("agent", "Overseer", None, agent_config)
     if placement == "linked":
         session, _ = chat("owner-acp", mode="code", project_id="repo")
         overrides = {"cwd": str(checkout)}
@@ -96,9 +108,16 @@ async def test_repository_scope_at_the_acp_producer(client, monkeypatch, tmp_pat
             assert guidance.count(ha.GITHUB_BLOCK) == 1
             assert "# Repository work" not in guidance
         else:
-            assert guidance.count("# Repository work") == int(github_connected)
+            if allowlist is not None:
+                permits = ha._delegated_tool_predicate(adapter._options)
+                assert permits is not None and not permits("Bash") and not permits("PowerShell")
+                monitor = ha._bundled_registry_name("Monitor")
+                served = adapter._engine.bridged_tools() + adapter._engine.deferred_tools()
+                assert (monitor in served) is ("Monitor" in allowlist)
+            assert guidance.count("# Repository work") == int(github_connected and allowlist is None)
             assert "git worktree list" not in guidance
-            assert guidance.count(ha.WORKTREE_REMOVAL_RULE) == int(windows)
+            can_shell = allowlist is None or "Monitor" in allowlist
+            assert guidance.count(ha.WORKTREE_REMOVAL_RULE) == int(windows and can_shell)
             assert len(guidance.encode()) <= 8_500
     finally:
         if adapter._engine is not None:

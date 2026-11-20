@@ -8670,7 +8670,9 @@ def _antigravity_guidance_blocks(
             )
     # A Windows shell can remove a provisioned worktree from any cwd, and
     # without gh. Keep the warning even when the repository playbook is absent.
-    if not github_playbook and _windows_worktree_junctions() and (permits("Bash") or permits("PowerShell")):
+    if not github_playbook and _windows_worktree_junctions() and (
+        permits("Bash") or permits("PowerShell") or offered("Monitor")
+    ):
         blocks.append("# Worktree safety\n" + WORKTREE_REMOVAL_RULE)
     if _session_mode(options) == "code" and (permits("Edit") or permits("Write")):
         blocks.append(_delegated_verification(options, "antigravity", registry, host_servers))
