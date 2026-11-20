@@ -224,6 +224,13 @@ def guidance_revision(stem: str, *, scoped: bool = False) -> str | None:
     return block.revision if block else None
 
 
+def automatic_guidance_blocked(stem: str, *, scoped: bool = False) -> bool:
+    """Cheap preflight for the learner; apply still rechecks under the write lock."""
+    if not _STEM.fullmatch(stem):
+        raise GuidanceValidationError("Invalid guidance target")
+    return bool(_marker_bytes(guidance_directory(), stem, scoped))
+
+
 def apply_automatic_guidance(
     stem: str, content: str, *, expected_revision: str | None,
     model: str | None = None, provider: str | None = None,

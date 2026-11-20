@@ -105,6 +105,7 @@ def test_exact_scope_uses_same_managed_row_and_cas(client):
                                        model=initial.model, provider=initial.provider)
     assert client.delete(url, headers=OWNER, params={"expected_revision": edited["revision"]}).status_code == 204
     assert store.read_saved_guidance(initial.stem, scoped=True) is None
+    assert store.automatic_guidance_blocked(initial.stem, scoped=True)
     with pytest.raises(store.GuidanceConflict):
         store.apply_automatic_guidance(initial.stem, "Automatic resurrection", expected_revision=None,
                                        model=initial.model, provider=initial.provider)
