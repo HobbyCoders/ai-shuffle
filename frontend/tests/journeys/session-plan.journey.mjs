@@ -1,11 +1,12 @@
 // Real native/delegated Plan handlers write canonical state. No display-field seeding.
 import { fakeAiTag, runJourney } from './runner.mjs';
-import { PROJECT, expect, openNewChat, pick, pickAccess, settleServiceWorker, typeAndSend, waitChat, waitTurnSettled } from './lib/app.mjs';
+import { PROJECT, api, expect, openNewChat, openPopup, pick, pickAccess, settleServiceWorker, typeAndSend, waitChat, waitTurnSettled } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
 const plans = page => page.getByRole('region', { name: 'Session plan' });
 const revision = (page, n) => page.locator(`[aria-label="Session plan"][data-plan-revision="${n}"]`);
 const legacyNote = 'Legacy scratch remains a thought, not a completed step';
+const planModel = (status, delegated) => delegated ? 'sonnet' : `prov:${status.seed.provider_id}:${status.seed.model}`;
 
 async function setupChat(ctx, delegated = false) {
  await openNewChat(ctx, { project: PROJECT });
@@ -18,6 +19,15 @@ async function setupChat(ctx, delegated = false) {
    hero.getByRole('button', { name: 'Agent: Dev (Claude Code)' }));
  }
  await pickAccess(ctx.page, 'Bypass');
+ // Agent selection doesn't change the model binding. A previous journey can
+ // leave a saved composer model on this worker, even in a fresh browser context.
+ const { page, status } = ctx;
+ const model = planModel(status, delegated);
+ const picker = page.getByRole('dialog', { name: 'Choose model' });
+ await openPopup(page.getByRole('button', { name: /^Model: / }).filter({ visible: true }), picker);
+ await picker.getByRole('option').and(picker.locator(`[data-value="${model}"]`)).click();
+ if (await picker.isVisible()) await page.keyboard.press('Escape');
+ await picker.waitFor({ state: 'hidden' });
 }
 
 async function produce(page, variant, script) {
@@ -71,28 +81,26 @@ async function readPlan(page, id) {
 
 async function diagnosticEvents(page, id) {
  return page.evaluate(async id => {
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), 3000);
+  const feed = new EventSource(`/api/v1/sessions/${id}/events?from_seq=0`);
   const out = [];
+  let timer;
   try {
-   const response = await fetch(`/api/v1/sessions/${id}/events?from_seq=0`, { signal: abort.signal });
-   const reader = response.body.getReader();
-   let text = '';
-   while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    text += new TextDecoder().decode(value);
-    const lines = text.split('\n'); text = lines.pop();
-    for (const line of lines) {
-     if (!line.startsWith('data:')) continue;
-     const data = JSON.parse(line.slice(5));
-     if (data.type === 'caught_up') return out;
-     if (['tool.use', 'tool.result', 'plan.updated', 'turn.aborted'].includes(data.type)) out.push(data);
+   return await new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error('Timed out waiting for caught_up in session event replay')), 3000);
+    feed.addEventListener('error', () => reject(new Error('Session event replay ended or failed before caught_up')));
+    // The replay boundary is a named SSE event, not a type in its JSON data.
+    feed.addEventListener('caught_up', () => resolve(out));
+    for (const type of ['tool.use', 'tool.result', 'plan.updated', 'turn.aborted']) {
+     feed.addEventListener(type, event => {
+      try { out.push(JSON.parse(event.data)); }
+      catch (error) { reject(error); }
+     });
     }
-   }
-  } catch (error) { out.push({ diagnostic: String(error) }); }
-  finally { clearTimeout(timer); abort.abort(); }
-  return out;
+   });
+  } finally {
+   clearTimeout(timer);
+   feed.close();
+  }
  }, id);
 }
 
@@ -100,12 +108,27 @@ function planCase(delegated) {
  return {
   name: delegated ? 'delegated-plan' : 'native-plan',
   setup: ctx => setupChat(ctx, delegated),
-  async act({ page, variant, mark, log }) {
+  async act({ page, status, variant, mark, log }) {
    await mark('produce plan');
    const id = await produce(page, variant, delegated ? 'plan-delegated' : 'plan');
    const state = await readPlan(page, id);
-   if (state.revision !== 1) log(`unexpected producer state: ${JSON.stringify(await diagnosticEvents(page, id)).slice(0, 6000)}`);
+   const { model, provider_id: provider } = await api(page, 'GET', `/sessions/${id}`);
+   const events = await diagnosticEvents(page, id);
+   log(`session ${id}: model=${model}, provider=${provider}, plan revision=${state.revision}`);
+   if (state.revision !== 1) log(`unexpected producer state: ${JSON.stringify(events).slice(0, 6000)}`);
    expect(state.revision === 1, `real handler persisted revision one (got ${state.revision})`);
+   expect(model === planModel(status, delegated) && provider === (delegated ? null : status.seed.provider_id),
+    'the session saved the model and provider chosen for this leg');
+   const calls = events.filter(e => e.type === 'tool.use' && (delegated
+    ? e.name === 'mcp__fluid_bundled__Plan'
+    : e.name === 'run_python' && e.input?.code?.includes('from tools.Plan import Plan')));
+   expect(calls.length === 2, `the ${delegated ? 'delegated MCP' : 'native code-mode'} surface ran both Plan calls`);
+   if (delegated) expect(calls[0].input.action === 'update' && calls[1].input.action === 'get', 'delegated Plan updates then reads');
+   for (const call of calls) {
+    expect(events.some(e => e.type === 'tool.result' && e.tool_use_id === call.tool_use_id && e.is_error === false),
+     `${call.name} returned a successful result for ${call.tool_use_id}`);
+   }
+   log(`successful Plan calls: ${calls.map(call => call.name).join(', ')}`);
    const plan = plans(page).last();
    await plan.waitFor({ timeout: 8000 });
    await mark('expand plan');
@@ -212,7 +235,8 @@ const lifecycle = {
   } catch (error) {
    log(`lifecycle session: ${id}`);
    log(`lifecycle API state: ${JSON.stringify(await readPlan(page, id))}`);
-   log(`lifecycle events: ${JSON.stringify(await diagnosticEvents(page, id)).slice(-14000)}`);
+   const events = await diagnosticEvents(page, id).catch(error => ({ diagnostic: String(error) }));
+   log(`lifecycle events: ${JSON.stringify(events).slice(-14000)}`);
    log(`lifecycle visible state: ${(await page.locator('body').innerText()).slice(-4000)}`);
    throw error;
   }
