@@ -244,6 +244,21 @@ def test_a_part_runs_its_assigned_cases_and_bad_parts_fail_closed(tmp_path, monk
             ci.parse_parts(bad)
 
 
+def test_the_planner_s_own_parts_of_a_spaced_file_name_are_accepted(tmp_path, monkeypatch):
+    """A file name with a space is a valid selection; its parts must pass parse_parts and check_parts."""
+    name = "account settings.journey.mjs"
+    (tmp_path / name).touch()
+    _cases(monkeypatch, {name: 16})
+    weights = tmp_path / "weights.json"
+    weights.write_text(json.dumps({"seconds": {}, "seconds_per_case": 10, "case_counts": {name: 16}}))
+    only = ci.parse_only("account settings", tmp_path)
+    parts = ci.parse_parts(json.dumps(ci.split_heavy(ci.estimated_seconds(tmp_path, weights, only), 18, tmp_path)))
+    assert sorted(parts) == [f"{name}#1/2", f"{name}#2/2"]
+    ci.check_parts(parts, only, tmp_path)
+    buckets = ci.plan(18, tmp_path, weights, only=only, parts=parts)
+    assert sorted(entry for bucket in buckets for entry in bucket) == sorted(parts)
+
+
 def test_an_aliased_or_repeated_part_key_fails_closed(tmp_path, monkeypatch):
     """A part 1 alias ("#1/2\\n") must not stand in for part 2, which would then never run."""
     _cases(monkeypatch, {"big.journey.mjs": 4})

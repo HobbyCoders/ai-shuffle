@@ -96,7 +96,7 @@ SUMMARY_TOTAL_CHARS = 400_000
 # the runner's --case selection and never re-list or re-slice them.
 PART_SECONDS = 150
 # Matched only with fullmatch: no trailing newline or other alias of a part key.
-PART = re.compile(r"(?P<name>[^#/\s]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)")
+PART = re.compile(r"(?P<name>[^#]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)")
 
 
 # ─── plan ──────────────────────────────────────────────────────────────────
