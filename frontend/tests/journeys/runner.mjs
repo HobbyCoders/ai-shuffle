@@ -175,6 +175,7 @@ function parseArgs(argv) {
  *              ctx = { page, variant, status, mark?, log, recording?, deferCleanup }
  *              `deferCleanup(fn)` runs after the case even if setup or act fails.
  *   isolated   no shared devloop; the case must dispose its own worker
+ *   caseTimeoutMs  optional `() => ms` for setup/act/verify, excluding deferred cleanup
  *              `setup` runs unrecorded (navigate, stage the composer);
  *              `act` runs inside withRecording and must end in a settled UI;
  *              `verify` runs after it with `recording` (the recorder's stop()
@@ -206,7 +207,7 @@ function parseArgs(argv) {
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
  *              `selectors` are concatenated)
- *   browser    optional `(status) => ({ args, context })`: extra Chromium
+ *   browser    optional `(status) => ({ args, context, timeout })`: extra Chromium
  *              launch flags (fake microphone, see lib/voice.mjs) and options
  *              for every case's browser context (permissions)
  */
@@ -264,6 +265,7 @@ export async function runJourney(spec) {
 	const browser = await chromium.launch({
 		headless: process.env.JOURNEY_HEADED !== '1',
 		executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+		timeout: extra.timeout,
 		args: ['--no-sandbox', ...(extra.args || [])]
 	});
 
@@ -318,7 +320,8 @@ export async function runJourney(spec) {
 				sortAnomalies(judged.anomalies);
 			};
 			const cleanups = [];
-			try {
+			let caseTimer;
+			const exercise = async () => {
 				const ctx = { page, variant, status, log, deferCleanup: (fn) => cleanups.push(fn) };
 				if (item.testCase.setup) await item.testCase.setup(ctx);
 				phase = 'act';
@@ -340,11 +343,27 @@ export async function runJourney(spec) {
 				if (process.env.JOURNEY_SHEETS === '1') {
 					await contactSheet(recording.keyframes, join(out, `${item.id}.jpg`), { title: item.id }).catch(() => {});
 				}
+			};
+			try {
+				if (spec.caseTimeoutMs) {
+					const ms = spec.caseTimeoutMs();
+					if (ms <= 0) throw new Error('Journey work budget exhausted before case startup');
+					await Promise.race([exercise(), new Promise((_, reject) => {
+						caseTimer = setTimeout(() => reject(new Error(`Case exceeded ${ms}ms`)), ms);
+					})]);
+				} else {
+					await exercise();
+				}
 			} catch (error) {
+				result.ok = false;
 				result.error = error.stack || String(error);
 				result.phase = phase;
-				const now = await composerSnapshot(page).catch((e) => `unavailable (${e.message.split('\n')[0]})`);
-				trace.note(`at failure: ${JSON.stringify(now)}`);
+				// Deadline-limited cases must go straight to closing the context
+				// (cancelling outstanding browser work) and disposing the fixture.
+				if (!spec.caseTimeoutMs) {
+					const now = await composerSnapshot(page).catch((e) => `unavailable (${e.message.split('\n')[0]})`);
+					trace.note(`at failure: ${JSON.stringify(now)}`);
+				}
 				// A verify failure comes after a complete recording: keep its text.
 				result.text = error.flightRecording || result.text;
 				// A failed step still owes what it recorded before failing: a flicker
@@ -355,8 +374,9 @@ export async function runJourney(spec) {
 					result.recorded = true;
 					judge(error.flightRecordingData, error.flightAnomalies, { partial: true });
 				}
-				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
+				if (!spec.caseTimeoutMs) await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
+				clearTimeout(caseTimer);
 				if (status) {
 					const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
 						.catch((error) => `failed: ${error.message}`);

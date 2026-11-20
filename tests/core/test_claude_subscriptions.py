@@ -165,6 +165,47 @@ def test_refresh_rechecks_cached_negative_candidates(world):
     assert subs.shared_home(target, force=True)[0] is None
 
 
+def test_legacy_model_refresh_rejects_deleted_extra_after_stock_reprobe(world, monkeypatch, tmp_path):
+    from app.core import claude_cli_models as models
+    from scripts.devloop import fake_claude
+
+    account = _add(world, "alpha@devloop.invalid")
+    # An upgraded worker has the old local selection but no shared binding.
+    del world.values[claude_auth_mode.SELECTION_SETTING]
+    assert subs.shared_target() is None and subs._legacy_home_id() == account
+    extra = home.account_dir(account)
+    for folder in (world.base, extra):
+        (folder / "devloop-account.txt").write_text("alpha")
+    binary = str(fake_claude.install(tmp_path) / "claude")
+    monkeypatch.setattr(cs, "_default_resolver", lambda: binary)
+    for attr in ("_cached", "_cached_at", "_last_account"):
+        monkeypatch.setattr(cs, attr, getattr(cs, attr))
+    monkeypatch.setattr(models, "subscription_mode", lambda: True)
+    path = tmp_path / "claude-cli-models.json"
+    monkeypatch.setattr(models, "_path", lambda: path)
+    handshake = models._handshake
+
+    def delete_and_reprobe(binary, env):
+        launched = cs.peek()
+        assert launched.signed_in and launched.selected_home is None
+        assert env["CLAUDE_CONFIG_DIR"] == str(extra)
+        # Obtain a real fake-CLI reply in the extra folder, but don't let it
+        # reach store() until the owner deletes that login and status refreshes.
+        reply = handshake(binary, env)
+        subs.change(account, "delete")
+        assert not extra.exists() and cs.peek() is None
+        assert subs.legacy_home_env() == {}
+        stock = cs.get_status(force=True)
+        assert stock.signed_in and stock.selected_home is None and stock is not launched
+        assert (stock.email, stock.org_name, stock.org_id) == (launched.email, launched.org_name, launched.org_id)
+        return reply
+
+    monkeypatch.setattr(models, "_handshake", delete_and_reprobe)
+    with pytest.raises(RuntimeError, match="sign-in changed"):
+        models.refresh()
+    assert models.peek() is None and not path.exists()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("default", [True, False])
 async def test_fake_cli_turns_and_model_refresh_use_the_verified_folder(world, monkeypatch, tmp_path, default):

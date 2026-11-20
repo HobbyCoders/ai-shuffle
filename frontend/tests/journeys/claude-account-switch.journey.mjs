@@ -16,13 +16,19 @@ async function request(page, origin, method, path, data) {
 	return response.json();
 }
 const statusPath = `${auth}?refresh=true`;
+// Exact retries can request several variants, and a whole-file retry can run
+// all four. Share the work deadline rather than granting a new budget per case.
+// Stop work at 159s of the 180s retry window, reserving 13s for the last fixture
+// shutdown and 8s for browser/context closure and reports.
+const workDeadline = performance.now() + 159_000;
 
 await runJourney({
 	name: 'claude-account-switch',
 	isolated: true, // The cases provision private workers; never mutate the shard's worker.
 	allow: DEV_INSTANCE_NOISE,
 	throttles: ['fast'],
-	browser: async () => ({ context: { serviceWorkers: 'block' } }),
+	caseTimeoutMs: () => Math.min(42_000, Math.floor(workDeadline - performance.now())),
+	browser: async () => ({ timeout: 10_000, context: { serviceWorkers: 'block' } }),
 	cases: [false, true].map((existing) => ({
 		name: existing ? 'recover-with-extra-sign-in' : 'recover-pending-subscription',
 		async setup(ctx) {

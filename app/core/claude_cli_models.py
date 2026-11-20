@@ -184,14 +184,15 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
         status = claude_cli_status.peek()
         selected = status.selected_home if status else None
         if verified_status is not None:
-            # A forced status read can replace the cache without changing the
-            # sign-in. Compare the billing identity and the folder we launched.
-            if status is None or not status.signed_in or selected != verified_status.selected_home:
-                return None
-            if selected is not None:
-                if claude_subscriptions._binding(status) != selected[0]:
+            if verified_status.selected_home is None:
+                # Legacy status doesn't record the launch folder. A replacement
+                # could be stock home after deletion of an extra for the same account.
+                if status is not verified_status:
                     return None
-            elif (_account_of(status), status.org_id) != (_account_of(verified_status), verified_status.org_id):
+            # An explicit binding can survive a forced read, but not a change
+            # to the billing identity or the folder we launched.
+            elif (status is None or not status.signed_in or selected != verified_status.selected_home
+                  or claude_subscriptions._binding(status) != selected[0]):
                 return None
         if (selected[0] if selected else None) != claude_subscriptions.shared_target():
             return None

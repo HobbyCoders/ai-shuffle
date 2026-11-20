@@ -149,7 +149,7 @@ def test_record_ignores_other_modes(cli, monkeypatch):
 
 
 @pytest.mark.parametrize("concurrent_change", [
-    "same", "switch", "sign-out", "organization", "folder", "shared-selection", "invalidated",
+    "same", "same-default", "switch", "sign-out", "organization", "folder", "shared-selection", "invalidated",
 ])
 def test_refresh_checks_the_logical_sign_in(monkeypatch, tmp_path, concurrent_change):
     from dataclasses import replace
@@ -172,14 +172,18 @@ def test_refresh_checks_the_logical_sign_in(monkeypatch, tmp_path, concurrent_ch
         org_id="org-a", binary_path="/fake/claude", cli_version="2.1.325",
     )
     target = subs._binding(current)
-    current = replace(current, selected_home=(target, home))
+    # A verified stock home still has a binding; it is not a legacy probe.
+    current = replace(current, selected_home=(target, None if concurrent_change == "same-default" else home))
     state = {"status": current, "target": target}
     monkeypatch.setattr(subs, "shared_target", lambda: state["target"])
     monkeypatch.setattr(claude_cli_status, "probe", lambda resolver: state["status"])
 
     def handshake(binary, env):
         assert binary == current.binary_path
-        assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / home)
+        if concurrent_change == "same-default":
+            assert "CLAUDE_CONFIG_DIR" not in env
+        else:
+            assert env["CLAUDE_CONFIG_DIR"] == str(tmp_path / home)
         # Simulate a forced status read completing during this handshake, or a
         # replicated choice arriving before the next probe has run.
         observed = replace(current)
@@ -203,7 +207,7 @@ def test_refresh_checks_the_logical_sign_in(monkeypatch, tmp_path, concurrent_ch
         return REPLY
 
     monkeypatch.setattr(cm, "_handshake", handshake)
-    if concurrent_change == "same":
+    if concurrent_change in {"same", "same-default"}:
         assert cm.refresh()["account"] == cm.account_key(current.email, current.org_name)
         assert path.is_file()
     else:
