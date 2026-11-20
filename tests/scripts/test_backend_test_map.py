@@ -27,6 +27,8 @@ BASE = {
     "tests/conftest.py": "def helper():\n    return 1\n",
     # Reads every file of notes/2026/ without naming one.
     "tests/core/test_notes_walk.py": "def test_notes():\n    assert list((ROOT / \"notes/2026\").rglob(\"*.md\"))\n",
+    # A policy test the shards never run (tests/scripts/) naming a frontend file.
+    "tests/scripts/test_frontend_css.py": "def test_css():\n    assert (ROOT / 'frontend/src/app.css').read_text()\n",
 }
 NOTES_WALKER = "tests/core/test_notes_walk.py"
 
@@ -409,22 +411,86 @@ CHANGED_F = BASE["app/a.py"].replace("return 1\n\ndef g", "return 3\n\ndef g")
 def test_a_pull_request_runs_the_tests_of_what_it_changed(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
+    # Main's own change since the map is left to main's full run: NOTES_WALKER does not run.
     commit("main", "notes/2026/main.md", "main moved on\n")
     merge()
     found, reasons = tm.ci_select(map_path, PR)
-    expected = sorted(A_TESTS + [NOTES_WALKER])
+    expected = sorted(A_TESTS)
     assert found["tests"] == expected and found["shards"] == [1]
     assert found["selection"] == tm.shard_plan(expected, None)["selection"]
-    assert reasons[0].startswith("Test map from ")
+    assert reasons[0].startswith("Test map from ") and "1 files the pull request changed" in reasons[0]
 
 
-def test_a_pull_request_also_runs_the_tests_of_what_main_changed_since_the_map(pull_request):
+def test_what_only_main_changed_since_the_map_is_left_to_main(pull_request):
     _, map_path, commit, merge = pull_request
     commit("pr", "app/a.py", CHANGED_F)
     commit("main", "app/b.py", BASE["app/b.py"].replace("return LIMIT", "return LIMIT + 1"))
     merge()
     found, _ = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(A_TESTS)
+
+
+# Unmapped and run at import (#1861's app/core/claude_api_provider.py): changed
+# by a pull request it runs everything; left behind by main it must not.
+UNMAPPED_MODULE = "app/core/new_provider.py", "REGISTRY = {}\nREGISTRY['x'] = 1\n"
+
+
+def test_a_frontend_only_pull_request_ignores_an_unmapped_module_main_added(pull_request):
+    # PR #1870 (run 44695146908) ran every shard for app/core/claude_api_provider.py,
+    # which main had added after the map's commit.
+    _, map_path, commit, merge = pull_request
+    commit("main", *UNMAPPED_MODULE)
+    commit("pr", "frontend/src/app.css", "body { color: red; }\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    # Only a policy test outside the shards names the file.
+    assert found == {"selection": "none", "shards": [], "tests": []}, reasons
+    assert not any("new_provider" in reason for reason in reasons)
+
+
+def test_a_test_file_main_added_or_changed_since_the_map_runs(pull_request):
+    _, map_path, commit, merge = pull_request
+    commit("main", "tests/core/test_new_on_main.py", "def test_new():\n    pass\n")
+    commit("main", B_TESTS[0], "def test_changed():\n    pass\n")
+    # Not of the fast subset: main's helper changes decide nothing.
+    commit("main", "tests/core/helpers_main.py", "VALUE = 1\n")
+    commit("pr", "frontend/src/app.css", "body { color: red; }\n")
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["tests"] == sorted(["tests/core/test_new_on_main.py", B_TESTS[0]]), reasons
+    assert any("main added or changed" in reason for reason in reasons)
+
+
+@pytest.mark.parametrize("path, text, reason", [
+    ("frontend/package.json", "{}\n", "manifest or lockfile"),
+    ("tests/conftest.py", "def helper():\n    return 2\n", "conftest"),
+    (*UNMAPPED_MODULE, "no test names it"),
+], ids=["manifest", "conftest", "unmapped-python"])
+def test_a_pull_requests_own_change_the_map_cannot_see_through_runs_everything(pull_request, path, text, reason):
+    _, map_path, commit, merge = pull_request
+    commit("main", "notes/2026/main.md", "main moved on\n")
+    commit("pr", path, text)
+    merge()
+    found, reasons = tm.ci_select(map_path, PR)
+    assert found["selection"] == "all" and reason in reasons[-1], reasons
+
+
+def test_a_pull_request_file_main_also_changed_is_compared_with_the_maps_version(pull_request):
+    _, map_path, commit, merge = pull_request
+    # Main changed g after the map; the pull request changes f in the same file.
+    commit("main", "app/a.py", BASE["app/a.py"].replace("def g():\n    return 2", "def g():\n    return 5"))
+    commit("pr", "app/a.py", CHANGED_F)
+    merge()
+    found, _ = tm.ci_select(map_path, PR)
+    # Against main's version only f differs; against the map's, g's tests run too.
     assert found["tests"] == sorted(A_TESTS + B_TESTS)
+
+
+def test_tests_main_changed_do_not_count_toward_running_everything():
+    chosen, reasons = tm.select(["app/a.py"], fake_map(), head_files(**{"app/a.py": CHANGED_F}), BASE.get,
+                                also=FILLER + ["tests/core/gone.py", "tests/core/helper.py"])
+    assert chosen == sorted(A_TESTS + FILLER)
+    assert any("120 test files main added or changed" in reason for reason in reasons)
 
 
 def test_a_pull_request_no_shard_test_reaches_runs_no_shard(pull_request):

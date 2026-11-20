@@ -196,9 +196,16 @@ PostgreSQL safety always run in full.
   requests run every test, so nothing about saving it can fail a run:
   `backend-map` and the shards' upload of their records may fail
   (`continue-on-error`); the test receipts may not.
-- A pull request diffs from the commit the map was recorded on to its own merge
-  commit, so what main changed since the map is chosen too, and picks the test
-  files that ran a changed function (the rules are in the script's docstring).
+- Only the pull request's own files (the diff from main to the pull request's
+  head, the two parents of its merge commit) choose tests and decide whether
+  everything runs. Each changed Python file is compared with its version at the
+  commit the map was recorded on, the code the map saw run (so a change main
+  also made to that file since is compared too), and the selection picks the
+  test files that ran a changed function (the rules are in the script's
+  docstring). Files only main changed since the map choose nothing and never
+  make a pull request run everything: they are left to main's full run after
+  the merge. The one exception is test files main added or changed since the
+  map, which run too, because the map does not know what a new test needs.
   A file that is not Python chooses the tests that name it or list a folder of
   it, and the tests of the code that reads it. Tests that list the whole
   checkout or a top-level folder (`frontend`) run with them, but alone they

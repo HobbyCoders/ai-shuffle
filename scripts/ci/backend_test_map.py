@@ -27,6 +27,13 @@ tests/ that is not Python (fixtures, data, snapshots) print ``all``.
 
 ``select`` prints ``all``, ``none`` or one test file per line and explains its
 choice on stderr.
+
+    python scripts/ci/backend_test_map.py ci-select --map MAP
+
+``ci-select`` is CI Backend's choice for a pull request: only the pull
+request's own files decide, each compared with its version at the map's
+commit, plus the test files main added or changed since the map. What main
+alone changed is left to main's full run after the merge (see ``ci_select``).
 """
 from __future__ import annotations
 
@@ -596,8 +603,16 @@ class Selector:
                 self.selected.add(test)
 
 
-def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source) -> tuple[str | list[str], list[str]]:
-    """``("all" | [tests], reasons)``."""
+def select(changed: list[str], test_map: dict | None, files: dict[str, str], base_source,
+           also: list[str] = ()) -> tuple[str | list[str], list[str]]:
+    """``("all" | [tests], reasons)``.
+
+    ``changed`` drives the choice and every rule that runs everything.
+    ``also`` names test files to run as well that decide nothing: on a pull
+    request, the tests main added or changed since the map. They are added after
+    the share of the suite is judged, and only those of the fast subset that
+    still exist are run.
+    """
     try:
         if test_map is None:
             raise FullSuite("no test map from a full run on main")
@@ -631,7 +646,10 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
         chosen = sorted(t for t in selector.selected if t in files and fast_subset(t))
         if len(chosen) >= FULL_SUITE_SHARE * len(tests):
             raise FullSuite(f"{len(chosen)} of {len(tests)} test files are affected")
-        return chosen, selector.reasons
+        added = sorted({t for t in also if t in files and fast_subset(t)} - set(chosen))
+        if added:
+            selector.reasons.append(f"{len(added)} test files main added or changed since the map run too")
+        return sorted(set(chosen) | set(added)), selector.reasons
     except FullSuite as reason:
         return "all", [str(reason)]
 
@@ -658,14 +676,27 @@ def changed_names(base: str, head: str) -> list[str]:
     return names
 
 
-def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | list[str], list[str], dict | None]:
+def choose(map_path: Path, base_rev: str, head: str = "HEAD",
+           pull_request: tuple[str, str] | None = None) -> tuple[str | list[str], list[str], dict | None]:
     """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
+
+    With ``pull_request`` as ``(main, pr_head)``, the files that drive the
+    choice are the pull request's own (``main...pr_head``); a changed Python
+    file is still compared with its version at ``base_rev``, the map's commit,
+    since that is the code the map saw run (whatever main changed in that file
+    since is compared too). Files only main changed since ``base_rev`` choose
+    nothing and run nothing in full, except the test files main added or
+    changed, which run as well.
 
     Returns the selection, the reasons and the map it was made from.
     """
     try:
         base = git("rev-parse", base_rev).strip()
-        changed = changed_names(base, head)
+        if pull_request:
+            changed = changed_names(*pull_request)
+            main_tests = [name for name in changed_names(base, pull_request[0]) if fast_subset(name)]
+        else:
+            changed, main_tests = changed_names(base, head), []
         test_map = load_map(map_path) if map_path.is_file() else None
     except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
         return "all", [f"Running the full suite: {error}"], None
@@ -676,9 +707,10 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | lis
                                text=True, encoding="utf-8", errors="replace")
         return shown.stdout if shown.returncode == 0 else None
 
-    result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
+    result, reasons = select(changed, test_map, load_sources(ROOT), base_source, main_tests)
     if test_map is not None:
-        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} changed files.")
+        whose = "files the pull request changed" if pull_request else "changed files"
+        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} {whose}.")
     return result, reasons, test_map
 
 
@@ -723,9 +755,13 @@ def shard_plan(result: str | list[str], test_map: dict | None) -> dict:
 def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
     """The shard plan of this CI run. Only a pull request selects; anything else runs everything.
 
-    The change is read from the commit the map was recorded on (a full run on
-    main) to the pull request's merge into main, so the functions compared are
-    the ones the map saw run, and whatever main changed since is chosen too.
+    The pull request's own files (main...its head, the merge commit's two
+    parents) choose the tests and decide whether everything runs. Each is
+    compared with its version at the commit the map was recorded on (a full run
+    on main), so the functions compared are the ones the map saw run. What main
+    alone changed since the map is left to main's full run after the merge,
+    except the test files main added or changed, which run too: the map does
+    not know what they need.
     """
     event = environ.get("GITHUB_EVENT_NAME", "")
     if event != "pull_request":
@@ -741,7 +777,7 @@ def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
         if not recorded or subprocess.run(["git", "merge-base", "--is-ancestor", recorded, parents[1]],
                                           cwd=ROOT, capture_output=True, check=False).returncode != 0:
             return shard_plan("all", None), [f"The test map's commit {recorded[:12] or '?'} is not on main; running everything."]
-        result, reasons, test_map = choose(map_path, recorded, parents[0])
+        result, reasons, test_map = choose(map_path, recorded, parents[0], pull_request=(parents[1], parents[2]))
         return shard_plan(result, test_map), reasons
     except Exception as error:  # noqa: BLE001 - any doubt runs every test
         return shard_plan("all", None), [f"Selection failed, running everything: {type(error).__name__}: {error}"]
