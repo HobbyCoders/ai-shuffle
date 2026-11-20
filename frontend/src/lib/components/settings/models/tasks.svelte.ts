@@ -204,21 +204,6 @@ export class VoiceDefaults {
 		return provider ? providerLabel(provider) : '';
 	}
 
-	/** Grouped by provider, in server order. */
-	get inputModelGroups(): { label: string; options: { value: string; label: string }[] }[] {
-		const groups: { label: string; options: { value: string; label: string }[] }[] = [];
-		for (const m of this.inputModels) {
-			const label = providerLabel(m.provider);
-			let group = groups.find((g) => g.label === label);
-			if (!group) groups.push((group = { label, options: [] }));
-			group.options.push({ value: m.id, label: m.name });
-		}
-		if (!this.inputModels.some((m) => m.id === this.inputModel)) {
-			groups.unshift({ label: '', options: [{ value: this.inputModel, label: this.inputModel }] });
-		}
-		return groups;
-	}
-
 	/** Saving also drops the cached live-transcription answer (see saveVoiceSettings). */
 	async setInputModel(id: string): Promise<void> {
 		if (!this.settings || id === this.inputModel) return;

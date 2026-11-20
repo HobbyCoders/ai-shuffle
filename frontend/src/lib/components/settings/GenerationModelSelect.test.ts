@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 
 const get = vi.hoisted(() => vi.fn());
@@ -23,9 +23,12 @@ describe('Generation model catalog', () => {
 		get.mockResolvedValueOnce(payload());
 		await hydrateModelRegistry();
 		render(GenerationModelSelect);
-		const select = screen.getByRole('combobox', { name: /Generation model/ }) as HTMLSelectElement;
-		expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'prov:strong:vendor/astra:latest', 'opus']);
-		expect(select.value).toBe('');
+		const select = screen.getByRole('button', { name: 'Generation model' });
+		expect(select.textContent).toContain('Use Settings default');
+		await fireEvent.click(select);
+		expect(screen.getAllByRole('option').map((option) => option.dataset.value)).toEqual(['', 'prov:strong:vendor/astra:latest', 'opus']);
+		expect(screen.getByRole('option', { name: 'Astra', description: /OpenRouter/ }).querySelector('[data-provider-logo="openrouter"]')).toBeTruthy();
+		expect(screen.getByRole('option', { name: 'Opus', description: /Claude/ }).querySelector('[data-provider-logo="claude"]')).toBeTruthy();
 		expect(screen.queryByRole('option', { name: /Custom/ })).toBeNull();
 	});
 
@@ -33,11 +36,11 @@ describe('Generation model catalog', () => {
 		get.mockResolvedValueOnce({ ...payload(null), providers: [] });
 		await hydrateModelRegistry();
 		render(GenerationModelSelect);
-		const select = screen.getByRole('combobox', { name: /Generation model/ }) as HTMLSelectElement;
-		expect(Array.from(select.options, (option) => option.value)).toEqual(['']);
+		await fireEvent.click(screen.getByRole('button', { name: 'Generation model' }));
+		expect(screen.getAllByRole('option').map((option) => option.dataset.value)).toEqual(['']);
 		get.mockResolvedValueOnce(payload(null));
 		await hydrateModelRegistry();
 		await tick();
-		expect(Array.from(select.options, (option) => option.value)).toEqual(['', 'prov:strong:vendor/astra:latest']);
+		expect(screen.getAllByRole('option').map((option) => option.dataset.value)).toEqual(['', 'prov:strong:vendor/astra:latest']);
 	});
 });

@@ -18,10 +18,14 @@
 		| 'custom';
 
 	/**
-	 * Map a provider row's `provider_type` (or the native sentinel) onto a glyph.
-	 * ChatGPT/Codex rows share the OpenAI mark; xAI API rows share Grok's.
+	 * Map a provider row (or the native sentinel) onto a glyph. The registry
+	 * also emits legacy subscription rows stored as custom with a known auth mode.
 	 */
-	export function providerGlyphKind(providerType: string | null | undefined): ProviderGlyphKind {
+	export function providerGlyphKind(providerType: string | null | undefined, authMode?: string | null): ProviderGlyphKind {
+		if (providerType === 'custom') {
+			if (authMode === 'chatgpt') return 'openai';
+			if (authMode === 'grok') return 'grok';
+		}
 		switch (providerType) {
 			case 'claude':
 			case '__native__':
@@ -34,6 +38,7 @@
 			case 'codex':
 				return 'openai';
 			case 'grok':
+			case 'supergrok':
 			case 'xai':
 				return 'grok';
 			case 'openrouter':

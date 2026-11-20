@@ -30,6 +30,7 @@
 	import RowGroup from '../rows/RowGroup.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
 	import StatusDot from '../rows/StatusDot.svelte';
+	import ProviderGlyph, { providerGlyphKind } from '../ProviderGlyph.svelte';
 	import SearchBox from './SearchBox.svelte';
 	import Segmented from '../rows/Segmented.svelte';
 	import { groupByWorker, type AccountCatalog } from './account-catalog.svelte';
@@ -212,7 +213,7 @@
 							<StatusDot tone={status.tone} />
 							<div class="main">
 								<div class="top">
-									<span class="src">{accountText(entry)}</span>
+									<span class="src catalog-source"><ProviderGlyph kind={providerGlyphKind(entry.source)} size={14} />{accountText(entry)}</span>
 									<span class="pill {entry.status}">{status.text}</span>
 									{#if entry.verified}<span class="pill quiet" title="A verified route and option set"><ShieldCheck aria-hidden="true" />Verified</span>{/if}
 									{#if isRemembered}<span class="pill accent">Remembered</span>{/if}
@@ -258,6 +259,8 @@
 </div>
 
 <style>
+	.catalog-source { display: inline-flex; align-items: center; gap: 5px; }
+	.catalog-source :global(.provider-glyph) { flex: none; }
 	.acat {
 		display: grid;
 		gap: 12px;

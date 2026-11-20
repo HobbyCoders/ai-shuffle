@@ -20,6 +20,7 @@
 	import { TRANSCRIPT_PRESENTATION, TRANSCRIPT_ACTIONS, type TranscriptPresentation, type TranscriptActions } from './TranscriptHydrationBoundary.svelte';
 	import { ChevronDown, Check, Sparkles, TriangleAlert, Image as ImageIcon, Film, AudioLines, Box } from 'lucide-svelte';
 	import { activeSession } from '$lib/stores/active-session';
+	import ProviderGlyph, { providerGlyphKind } from '$lib/components/settings/ProviderGlyph.svelte';
 	import GenerationModelBrowser from './GenerationModelBrowser.svelte';
 	import { generationChoices } from '$lib/stores/generation-choices.svelte';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
@@ -655,7 +656,7 @@
 					onkeydown={(event) => onRadioKey(event, index)}
 				>
 					<span class="gcc-opt-top">
-						<span class="gcc-source">{sourceLabel(option.source)}</span>
+						<span class="gcc-source"><ProviderGlyph kind={providerGlyphKind(option.source)} size={14} />{sourceLabel(option.source)}</span>
 						{#if option.label}
 							<span class="gcc-badge card-badge card-badge--primary">{option.label}</span>
 						{:else if index >= options.length}
@@ -1027,6 +1028,9 @@
 		padding-right: 18px;
 	}
 	.gcc-source {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
 		flex: 0 1 auto;
 		max-width: 100%;
 		font-size: 0.6875rem;

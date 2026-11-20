@@ -102,6 +102,13 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it('names the checkbox after the visible model and announces the provider separately', async () => {
+	const model = entry('model-a', { label: 'Model A' });
+	render(ModelCuration, { row: router([model]) });
+	const checkbox = await screen.findByRole('checkbox', { name: 'model-a Model A', description: 'OpenRouter API key' });
+	expect((checkbox as HTMLInputElement).checked).toBe(true);
+});
+
 it('can re-enable the fixed Kimi Code model after disabling it and reopening Manage models', async () => {
 	const model = entry('kimi-for-coding');
 	const preset = { source: 'preset', binding: 'kimi-binding', models: [model] };

@@ -103,7 +103,7 @@ describe('setup: connecting an API key', () => {
 		await saveKey('good-key');
 		expect(mocks.patch).toHaveBeenCalledWith('/model-providers/row-1', { auth_token: 'good-key' });
 		// The roster's model is picked already, so one click continues.
-		const first = (await screen.findByRole('checkbox', { name: 'model-a Model A' })) as HTMLInputElement;
+		const first = await screen.findByRole<HTMLInputElement>('checkbox', { name: 'model-a Model A', description: 'OpenRouter' });
 		expect(first.checked).toBe(true);
 		await fireEvent.click(screen.getByRole('button', { name: 'Use selected (1)' }));
 		await waitFor(() => expect(onConnected).toHaveBeenCalledWith('openrouter'));

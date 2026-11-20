@@ -60,6 +60,6 @@
 	{#if refreshing}<p class="pv-msg" aria-live="polite">Asking Claude Code for its models</p>{/if}
 	{#if error}<p class="pv-msg err" role="alert">{error}</p>{/if}
 	<div data-testid="claude-cli-models">
-		<AvailableModelList {models} emptyMessage="No models reported yet." />
+		<AvailableModelList {models} emptyMessage="No models reported yet." providerGlyph="claude" />
 	</div>
 </RowGroup>
