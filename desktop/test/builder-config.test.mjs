@@ -177,7 +177,9 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   const rename = lines.indexOf('Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard < open && open < rename, 'guard, then temporary file, then rename');
   assert.ok(matchingEndif(lines, guard) > rename, 'the rename is inside the file-absent guard, not after it');
-  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*SHUFFLE_CHANNEL_FILE.*$/gm)].map(m => m[0].trim()), [
+  const channelDefinePrefix = 'SHUFFLE_CHANNEL_FILE'.replace(/FILE$/, '');
+  const channelWrites = new RegExp(`^\\s*(?:FileOpen|Rename|Delete|CopyFiles)\\b.*${channelDefinePrefix}.*$`, 'gm');
+  assert.deepEqual([...channelCode.matchAll(channelWrites)].map(m => m[0].trim()), [
     'FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w',
     'Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"',
     'Delete "${SHUFFLE_CHANNEL_FILE}.tmp"'

@@ -314,12 +314,22 @@ jobs:
           # These installer checks never write Run or StartupApproved values.
           $payload = Join-Path $perUserExe[0].DirectoryName 'resources\test-held-payload'
           [IO.File]::WriteAllText($payload, 'cannot be renamed while held')
+          $removalArgs = @('/KEEP_APP_DATA', '--updated')
           $held = [IO.File]::Open($payload, 'Open', 'Read', 'Read')
           try {
-            $failed = Invoke-UninstallerFixture 'locked-payload rollback' $perUserExe[0].DirectoryName @('/KEEP_APP_DATA', '--updated')
+            $failed = Invoke-UninstallerFixture 'locked-payload rollback' $perUserExe[0].DirectoryName $removalArgs
             if ($failed -eq 0) { throw 'locked payload file did not abort replacement' }
             if (-not (Test-Path -LiteralPath $stamp) -or -not (Test-Path -LiteralPath $perUserExe[0].FullName)) { throw 'failed replacement did not restore the old capable install' }
-          } finally { $held.Dispose(); Remove-Item -LiteralPath $payload }
+          } finally { $held.Dispose() }
+
+          # Same install, input file, and arguments; only the open handle changed.
+          $unlocked = Invoke-UninstallerFixture 'unlocked-payload control' $perUserExe[0].DirectoryName $removalArgs
+          if ($unlocked -ne 0) { throw 'removal failed even without the lock' }
+          foreach ($removed in @($stamp, $perUserExe[0].FullName, $payload)) {
+            if (Test-Path -LiteralPath $removed) { throw "unlocked removal left $removed" }
+          }
+          Check 'reinstall per-user before scope switch' @('/S', '/currentuser') $stable
+          if (-not (Test-Path -LiteralPath $stamp)) { throw 'scope switch fixture lacks per-user startup capability' }
           Remove-Item -LiteralPath $file
           Check '5. all-users nightly install' @('/S', '/allusers', '/CHANNEL=nightly') $nightly
           if (-not (Test-Path "$env:ProgramFiles\*\AI Shuffle.exe")) { throw '5. all-users nightly install: AI Shuffle.exe was not installed for all users' }
