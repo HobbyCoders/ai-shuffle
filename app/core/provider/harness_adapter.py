@@ -1475,6 +1475,8 @@ class HarnessAdapter(ProviderAdapter):
             opts.extra["session_mode"] = str(session_mode)
         if getattr(sdk_options, "aih_owner_coordinator", False):
             opts.extra["owner_coordinator"] = True
+        if getattr(sdk_options, "aih_no_project_cwd", False):
+            opts.extra["no_project_cwd"] = True
         # Owner sessions read the working record as per-turn context (#680).
         if getattr(sdk_options, "aih_working_record", False):
             opts.extra["working_record"] = True
@@ -8081,6 +8083,12 @@ MEMORY_BLOCK = _MEMORY_BLOCK_CORE + """ Note and Ledger are \
 session-scoped working files that can survive compaction and restarts, not \
 cross-session memory. Keep lasting facts with Remember."""
 
+WORKTREE_REMOVAL_RULE = """Never run `git worktree remove` or `rm -rf` on a provisioned worktree: its \
+links are Windows junctions that git's removal recurses through, deleting \
+the main checkout's files. Leave removal to the app. If you must remove one \
+by hand, first delete each link without recursing (`Remove-Item` on the \
+link, or `fsutil reparsepoint delete`), then the worktree."""
+
 GITHUB_BLOCK = """# GitHub
 Open a PR only when repository files changed for the user's request, inside \
 the git repository the task is for; this scopes every PR instruction above, \
@@ -8116,11 +8124,7 @@ reaches child processes through their inherited environment. Never copy a \
 password on disk and points your branch at the real database. If something \
 cannot start without a config value, say so.
 
-Never run `git worktree remove` or `rm -rf` on a provisioned worktree: its \
-links are Windows junctions that git's removal recurses through, deleting \
-the main checkout's files. Leave removal to the app. If you must remove one \
-by hand, first delete each link without recursing (`Remove-Item` on the \
-link, or `fsutil reparsepoint delete`), then the worktree."""
+""" + WORKTREE_REMOVAL_RULE
 
 # What "verified" has to mean before a code session says it. Written against
 # six sessions in one day that shipped user-facing changes checked only against
@@ -8586,6 +8590,11 @@ def _delegated_browser_prefix(
     return None
 
 
+def _windows_worktree_junctions() -> bool:
+    """Provisioned worktree links can be junctions on a Windows worker."""
+    return os.name == "nt"
+
+
 def _antigravity_guidance_blocks(
     options: SessionOptions,
     registry: Any,
@@ -8648,15 +8657,21 @@ def _antigravity_guidance_blocks(
     def permits(name: str) -> bool:
         return permit is None or permit(name)
 
+    github_playbook = False
     if options.extra.get("github_connected") and permits("Bash"):
-        if options.cwd and _is_git_repo(options.cwd):
+        if not options.extra.get("no_project_cwd") and options.cwd and _is_git_repo(options.cwd):
             blocks.append(GITHUB_BLOCK)
+            github_playbook = True
         else:
             blocks.append(
                 "# Repository work\nOnly open a PR when the user’s task changes files "
                 "in its repository. Do not look for a repository or open a PR for local "
                 "configuration, questions, or deliverables outside a repository."
             )
+    # A Windows shell can remove a provisioned worktree from any cwd, and
+    # without gh. Keep the warning even when the repository playbook is absent.
+    if not github_playbook and _windows_worktree_junctions() and (permits("Bash") or permits("PowerShell")):
+        blocks.append("# Worktree safety\n" + WORKTREE_REMOVAL_RULE)
     if _session_mode(options) == "code" and (permits("Edit") or permits("Write")):
         blocks.append(_delegated_verification(options, "antigravity", registry, host_servers))
     return blocks
