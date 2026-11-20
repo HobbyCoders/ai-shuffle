@@ -184,10 +184,16 @@ await runJourney({
 			await button.hover();
 			await tip(page).waitFor();
 			expect(await button.evaluate(el => el !== document.activeElement), 'pointer handoff does not rely on keyboard focus');
+			await mark('the neighboring Away control takes precedence over the hover corridor');
+			await sidebar(page).getByRole('switch', { name: 'Away for all chats', exact: true }).hover();
+			await tip(page).waitFor({ state: 'hidden', timeout: 1500 });
+			await button.hover();
+			await tip(page).waitFor();
 			const trigger = await button.boundingBox();
 			const card = await tip(page).boundingBox();
-			const from = { x: trigger.x + trigger.width - 2, y: trigger.y + 4 };
-			const to = { x: card.x + card.width / 2, y: card.y + card.height - 4 };
+			const from = { x: trigger.x + trigger.width - 2, y: trigger.y + trigger.height / 2 };
+			// Enter the nearest corner through the gap, not over the chat cards below it.
+			const to = { x: card.x + 4, y: card.y + card.height - 30 };
 			await page.mouse.move(from.x, from.y);
 			await mark('move slowly from the trigger across the gap into the scrollable tooltip');
 			let openThroughout = true;

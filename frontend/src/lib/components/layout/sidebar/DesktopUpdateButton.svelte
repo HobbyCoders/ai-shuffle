@@ -339,11 +339,17 @@
 		if (toward && event.relatedTarget instanceof Node) {
 			if (toward.contains(event.relatedTarget)) return;
 			tipTransit = { from: event.currentTarget as HTMLElement, toward };
-			trackTipTransit(event);
+			trackTipTransit(event, event.relatedTarget);
 		} else closeUnattendedTip();
 	}
-	function trackTipTransit(event: MouseEvent) {
+	function trackTipTransit(event: MouseEvent, target = event.target) {
 		if (!tipTransit) return;
+		// The gap is safe to cross, but it does not extend over other controls.
+		if (target instanceof Element && target.closest('button, a[href], input, select, textarea, summary, [role="button"], [role="link"], [role="switch"]')) {
+			tipTransit = null;
+			closeUnattendedTip();
+			return;
+		}
 		const from = tipTransit.from.getBoundingClientRect();
 		const toward = tipTransit.toward.getBoundingClientRect();
 		const { clientX, clientY } = event;
