@@ -361,6 +361,15 @@
 			]
 		},
 		{
+			"why": "first-copy notice priority and focus when transcript downloads complete",
+			"journeys": ["transcript-copy-completion-focus"],
+			"globs": [
+				"frontend/src/lib/components/FirstCopyBanner.svelte",
+				"frontend/src/lib/components/layout/AppLayout.svelte",
+				"frontend/tests/journeys/transcript-copy-completion-focus.journey.mjs"
+			]
+		},
+		{
 			"why": "bounded transcript windows and live text selection",
 			"journeys": ["transcript-reader", "transcript-boundary"],
 			"globs": [
