@@ -527,9 +527,12 @@ def resolve_automation_model(
     # provider's own default model, else the registry default. Same probe as
     # the run's own session build (query_options), so the report and the run
     # agree; every caller is already off the event loop.
-    from app.core.credential_gate import default_run_model
+    from app.core.credential_gate import NO_ENABLED_MODELS_MESSAGE, default_run_model
 
     default_provider, default_model = default_run_model(prefer_most_used=False)
+    if not default_model:
+        return {"selection": None, "model": None, "provider_id": None,
+                "source": MODEL_SOURCE_DEFAULT, "error": NO_ENABLED_MODELS_MESSAGE}
     return {"selection": None, "model": default_model, "provider_id": default_provider,
             "source": MODEL_SOURCE_DEFAULT, "error": None}
 

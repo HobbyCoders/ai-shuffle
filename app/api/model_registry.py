@@ -13,8 +13,10 @@ is a thin read-only projection of it.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Response
+from pydantic import BaseModel, Field, StrictBool
+
 from app.api.auth import require_admin, require_auth
-from app.core import claude_accounts, claude_api_models, claude_cli_models
+from app.core import claude_accounts, claude_api_models, claude_api_provider, claude_cli_models
 from app.core.model_registry import registry_payload
 from app.db.async_database import run_sync
 
@@ -22,28 +24,117 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/models", tags=["Models"])
 
 
+class ClaudeApiModelEntry(BaseModel):
+    """One model enabled for a saved Anthropic API key."""
+
+    id: str = Field(..., min_length=1, max_length=300)
+    label: str = Field(default="", max_length=300)
+
+
+class SaveClaudeApiModelsRequest(BaseModel):
+    """Curated model list for a saved Anthropic API key (empty = none enabled)."""
+
+    models: list[ClaudeApiModelEntry] = Field(default_factory=list)
+
+
+class ToggleClaudeSubscriptionModelRequest(BaseModel):
+    """Enable or disable a single Claude subscription model for pickers."""
+
+    model: str = Field(..., min_length=1, max_length=300)
+    enabled: StrictBool
+
+
 @router.get("/claude/api-key/{account_id}")
-async def list_claude_api_models(account_id: str, response: Response, token: str = Depends(require_admin)) -> dict:
-    """List the official Anthropic catalog for this saved key; do not send a prompt."""
+async def list_claude_api_models(
+    account_id: str,
+    response: Response,
+    token: str = Depends(require_admin),
+    refresh: bool = False,
+) -> dict:
+    """List the Anthropic catalog and curation state for this saved key.
+
+    When ``refresh`` is false and a cached catalog already exists for this key,
+    returns it without contacting Anthropic or writing to the database.
+    """
     try:
         key = await run_sync(claude_accounts.saved_api_key, account_id)
     except claude_accounts.AccountError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc)) from None
     if not key:
         raise HTTPException(status_code=404, detail="This Anthropic API key is no longer saved.")
-    try:
-        models = await claude_api_models.list_models(key)
-    except claude_api_models.CatalogError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from None
-    try:
-        # The active key's list becomes the Claude API provider's models.
-        from app.core.claude_api_provider import remember_models
 
-        await run_sync(remember_models, key, models)
-    except Exception:  # noqa: BLE001 — the list is still returned
-        logger.warning("Could not keep the Claude API model list", exc_info=True)
+    curated = await run_sync(claude_api_provider.curated_models, key)
+    cached = None if refresh else await run_sync(claude_api_provider.cached_catalog, key)
+    if cached is not None:
+        models = cached["models"]
+        fetched_at = cached.get("fetched_at")
+    else:
+        try:
+            models = await claude_api_models.list_models(key)
+        except claude_api_models.CatalogError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from None
+        fetched_at = None
+        try:
+            fetched_at = await run_sync(
+                claude_api_provider.remember_models,
+                key,
+                models,
+                touch_timestamp=refresh,
+            )
+        except Exception:  # noqa: BLE001 — the list is still returned
+            logger.warning("Could not keep the Claude API model list", exc_info=True)
     response.headers["Cache-Control"] = "no-store"
-    return {"models": models}
+    return {"models": models, "curated": curated, "fetched_at": fetched_at}
+
+
+@router.put("/claude/api-key/{account_id}/models")
+async def save_claude_api_models(
+    account_id: str,
+    body: SaveClaudeApiModelsRequest,
+    token: str = Depends(require_admin),
+) -> dict:
+    """Persist the curated enabled models for this saved Anthropic API key."""
+    try:
+        key = await run_sync(claude_accounts.saved_api_key, account_id)
+    except claude_accounts.AccountError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+    if not key:
+        raise HTTPException(status_code=404, detail="This Anthropic API key is no longer saved.")
+    entries = []
+    for item in body.models:
+        model_id = item.id.strip()
+        if not model_id:
+            raise HTTPException(status_code=422, detail="Model id cannot be blank.")
+        entries.append({"id": model_id, "label": item.label.strip() or model_id})
+    saved = await run_sync(claude_api_provider.save_curated_models, key, entries)
+    return {"models": saved}
+
+
+@router.get("/claude/subscription")
+async def list_claude_subscription_models(
+    response: Response,
+    token: str = Depends(require_admin),
+) -> dict:
+    """Return the full (unfiltered) Claude subscription model list with enabled flags."""
+    payload = await run_sync(claude_cli_models.subscription_catalog_rows)
+    response.headers["Cache-Control"] = "no-store"
+    return payload
+
+
+@router.put("/claude/subscription/models")
+async def toggle_claude_subscription_model(
+    body: ToggleClaudeSubscriptionModelRequest,
+    token: str = Depends(require_admin),
+) -> dict:
+    """Enable or disable a single Claude subscription model for pickers."""
+    model_id = body.model.strip()
+    if not model_id:
+        raise HTTPException(status_code=422, detail="Model id cannot be blank.")
+    try:
+        disabled = await run_sync(claude_cli_models.set_model_enabled, model_id, body.enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"disabled_models": disabled, "model": model_id, "enabled": body.enabled}
 
 
 @router.get("")

@@ -272,7 +272,9 @@ _PREVIEW_DEV_CHANGE = re.compile(
     r"|PUT /api/v1/projects/workers/[^/]+/folder"
     r"|POST /api/v1/agents"
     r"|PUT /api/v1/agents/[^/]+"
-    r"|PUT /api/v1/away-mode)"
+    r"|PUT /api/v1/away-mode"
+    r"|PUT /api/v1/models/claude/api-key/[^/]+/models"
+    r"|PUT /api/v1/models/claude/subscription/models)"
 )
 
 

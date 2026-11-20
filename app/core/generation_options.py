@@ -280,9 +280,15 @@ def text_generation_config() -> Dict[str, Any]:
         # chat model (that may be an expensive model for titles and
         # suggestions). Cached Claude probe only: some callers run on the
         # event loop.
-        from app.core.credential_gate import default_run_model
+        from app.core.credential_gate import (
+            AgentSetupRequired,
+            NO_ENABLED_MODELS_MESSAGE,
+            default_run_model,
+        )
 
         provider_id, model = default_run_model(probe=False, prefer_most_used=False)
+        if not model:
+            raise AgentSetupRequired(NO_ENABLED_MODELS_MESSAGE)
 
     return {
         "model": model or DEFAULT_MODEL,
