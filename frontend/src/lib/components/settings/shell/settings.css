@@ -610,11 +610,15 @@
 .settings-shell[data-stacked] .st-row .st-txt {
 	flex: 1 1 100%;
 }
-/* A path keeps the whole row width; its Check button goes under it rather
-   than leaving room for half a folder name. (Both :has() are needed to
-   outrank the no-wrap rule for text fields above.) */
+/* A path keeps at least 260px: on a phone its Check button goes under it
+   rather than leaving room for half a folder name; an unfolded screen keeps
+   them on one line. (Both :has() are needed to outrank the no-wrap rule for
+   text fields above.) */
 .settings-shell[data-stacked] .st-row:has(> .st-rc > .st-txt.st-mono + :is(.st-btn:not(.icon), .st-path-status)) > .st-rc:has(> .st-txt.st-mono) {
 	flex-wrap: wrap;
+}
+.settings-shell[data-stacked] .st-row > .st-rc > .st-txt.st-mono:has(+ :is(.st-btn:not(.icon), .st-path-status)) {
+	flex-basis: 260px;
 }
 .settings-shell[data-stacked] .st-row.mod .st-reset {
 	visibility: visible;
