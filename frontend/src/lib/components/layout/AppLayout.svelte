@@ -49,7 +49,7 @@
 	let narrow = $state(false);
 	let rail = $state(false);
 	let viewportWidth = $state(0);
-	let workspace = $state<HTMLDivElement>();
+	let workspaceStart = $state<HTMLDivElement>();
 
 	// --- resizable sidebar ---------------------------------------------------
 	// Matches the layout store's clamp: the icon rail takes 56px of this.
@@ -136,7 +136,9 @@
 	<ClaudeReloginBanner />
 	<PeerTerminalRequestBanner />
 
-	<div class="app-body" role="region" aria-label="Workspace" bind:this={workspace}>
+	<!-- Start Tab at Workspace after transcript completion, without making empty space clickable. -->
+	<div class="sr-only pointer-events-none" role="group" aria-label="Start of workspace" tabindex="-1" bind:this={workspaceStart}></div>
+	<div class="app-body" role="region" aria-label="Workspace">
 		{#if sidebarFloating}
 			<!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
 			<div class="sidebar-scrim" onclick={closeFloatingSidebar}></div>
@@ -187,7 +189,7 @@
 		/>
 	</div>
 	<!-- The minimized transcript chip takes its own space below the chat controls. -->
-	<FirstCopyBanner completionFocusTarget={workspace} />
+	<FirstCopyBanner completionFocusTarget={workspaceStart} />
 </div>
 
 <style>

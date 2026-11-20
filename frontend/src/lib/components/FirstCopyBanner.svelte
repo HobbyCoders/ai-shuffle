@@ -50,21 +50,6 @@
 		copyMessage?.focus();
 	}
 
-	function focusCompletionTarget() {
-		const target = completionFocusTarget;
-		if (!target) return;
-		const temporary = !target.hasAttribute('tabindex');
-		if (temporary) target.tabIndex = -1;
-		target.focus({ preventScroll: true });
-		if (!temporary) return;
-
-		// Removing tabindex immediately drops focus. Clear it when focus leaves
-		// so clicking empty Workspace doesn't take focus away from other controls.
-		const reset = () => target.removeAttribute('tabindex');
-		if (document.activeElement === target) target.addEventListener('blur', reset, { once: true });
-		else reset();
-	}
-
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = false;
 
@@ -101,7 +86,7 @@
 				await tick();
 				// Move focus only if the notice was removed and nothing else took focus.
 				if (!stopped && !focused.isConnected && document.activeElement === document.body) {
-					focusCompletionTarget();
+					completionFocusTarget?.focus({ preventScroll: true });
 				}
 			}
 		} catch {

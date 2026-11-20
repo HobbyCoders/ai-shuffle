@@ -133,19 +133,21 @@ it('keeps polling while minimized, restores the latest details, and clears on co
 // The first-copy handoff adds Reload to the transcript details.
 it.each(['chip', 'details', 'Minimize', 'Reload', 'composer', 'modal'] as const)(
 	'handles completion while %s owns focus', async (owner) => {
+		const workspaceStart = document.createElement('div');
+		workspaceStart.tabIndex = -1;
 		const workspace = document.createElement('section');
 		const composer = workspace.appendChild(document.createElement('textarea'));
 		const modal = document.createElement('div');
 		modal.setAttribute('role', 'dialog');
 		modal.setAttribute('aria-modal', 'true');
 		const modalAction = modal.appendChild(document.createElement('button'));
-		document.body.append(workspace, modal);
+		document.body.append(workspaceStart, workspace, modal);
 		try {
 			mocks.get
 				.mockResolvedValueOnce(status('syncing', downloading(60)))
 				.mockResolvedValueOnce(status('ready', null, transcripts(312)))
 				.mockResolvedValue(status('ready'));
-			render(FirstCopyBanner, { completionFocusTarget: workspace });
+			render(FirstCopyBanner, { completionFocusTarget: workspaceStart });
 			await vi.advanceTimersByTimeAsync(3000);
 			const minimize = screen.getByRole('button', { name: 'Minimize' });
 			let focused: HTMLElement;
@@ -165,13 +167,10 @@ it.each(['chip', 'details', 'Minimize', 'Reload', 'composer', 'modal'] as const)
 			await vi.advanceTimersByTimeAsync(10_000);
 			expect(screen.getByRole('status').textContent).toContain('Your data is copied');
 			const handedOff = owner !== 'composer' && owner !== 'modal';
-			expect(document.activeElement).toBe(handedOff ? workspace : focused);
-			if (handedOff) {
-				expect(workspace.getAttribute('tabindex')).toBe('-1');
-				composer.focus();
-			}
+			expect(document.activeElement).toBe(handedOff ? workspaceStart : focused);
 			expect(workspace.hasAttribute('tabindex')).toBe(false);
 		} finally {
+			workspaceStart.remove();
 			workspace.remove();
 			modal.remove();
 		}
