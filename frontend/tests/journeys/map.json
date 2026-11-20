@@ -71,6 +71,16 @@
 	],
 	"rules": [
 		{
+			"why": "first-run setup and the owner gate keep navigation reachable on short viewports",
+			"journeys": ["setup-scroll"],
+			"globs": [
+				"frontend/tests/journeys/setup-scroll.journey.mjs",
+				"frontend/src/routes/setup/**",
+				"frontend/src/lib/components/OwnerAccessGate.svelte",
+				"frontend/src/lib/components/setup/**"
+			]
+		},
+		{
 			"why": "Antigravity's grouped quota reply passes through the real parser and usage API to its ordered meters",
 			"journeys": ["antigravity-usage"],
 			"globs": [

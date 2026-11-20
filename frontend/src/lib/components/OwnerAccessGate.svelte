@@ -18,6 +18,7 @@
 	import { createOwnerPassword, ownerLogin, type OwnerStatus } from '$lib/api/owner';
 	import SetupProgress from '$lib/components/SetupProgress.svelte';
 	import WelcomeStep from '$lib/components/setup/WelcomeStep.svelte';
+	import SetupViewport from '$lib/components/setup/SetupViewport.svelte';
 	import { markWelcomeSeen, setupSteps, welcomeSeen } from '$lib/components/setup/setup-steps';
 
 	interface Props {
@@ -80,43 +81,41 @@
 
 {#if mode === 'create' && firstRun}
 	<!-- The setup wizard's first two steps, before this browser can sign in. -->
-	<div class="gate-viewport ui-surface ui-onboarding">
-		<div class="ui-onboarding-card">
-			<div class="text-center mb-6 sm:mb-8">
-				<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">{showWelcome ? 'Welcome to AI Shuffle' : 'Set an owner password'}</h1>
-				<p class="text-muted-foreground text-sm sm:text-base">
-					{showWelcome ? 'A few steps to set up this worker. It takes about five minutes.' : 'The password every browser on your network signs in with.'}
-				</p>
-			</div>
-			<SetupProgress steps={wizardSteps} current={showWelcome ? 'welcome' : 'owner'} completed={completedSteps} />
-			{#if showWelcome}
-				<WelcomeStep onContinue={continueFromWelcome} />
-			{:else}
-				<form onsubmit={submit} class="space-y-4" aria-label="Set an owner password">
-					<p class="text-muted-foreground text-sm">
-						Every browser on your network signs in with it once and then stays signed in on that device for 30 days.
-						Choose a long password you use nowhere else and keep it in a password manager: anyone who has it controls your agents.
-					</p>
-					<div>
-						<label for="owner-new-password" class="block text-xs text-muted-foreground mb-1">New password (at least {minLength} characters)</label>
-						<input id="owner-new-password" type="password" class="ui-input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
-					</div>
-					<div>
-						<label for="owner-confirm-password" class="block text-xs text-muted-foreground mb-1">Repeat it</label>
-						<input id="owner-confirm-password" type="password" class="ui-input" autocomplete="new-password" bind:value={confirm} required />
-					</div>
-					{#if error}<p role="alert" class="text-destructive text-sm">{error}</p>{/if}
-					<div class="flex gap-3">
-						<button type="button" class="ui-button flex-1 py-3" onclick={() => (showWelcome = true)} disabled={busy}>Back</button>
-						<button type="submit" class="ui-button primary flex-1 py-3" disabled={busy}>
-							{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Save password
-						</button>
-					</div>
-					<p class="text-xs text-muted-foreground text-center">Phones and browsers linked through your HobbyCoders account keep using their own device sign-in.</p>
-				</form>
-			{/if}
+	<SetupViewport step={showWelcome ? 'welcome' : 'owner'}>
+		<div class="text-center mb-6 sm:mb-8">
+			<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">{showWelcome ? 'Welcome to AI Shuffle' : 'Set an owner password'}</h1>
+			<p class="text-muted-foreground text-sm sm:text-base">
+				{showWelcome ? 'A few steps to set up this worker. It takes about five minutes.' : 'The password every browser on your network signs in with.'}
+			</p>
 		</div>
-	</div>
+		<SetupProgress steps={wizardSteps} current={showWelcome ? 'welcome' : 'owner'} completed={completedSteps} />
+		{#if showWelcome}
+			<WelcomeStep onContinue={continueFromWelcome} />
+		{:else}
+			<form onsubmit={submit} class="space-y-4" aria-label="Set an owner password">
+				<p class="text-muted-foreground text-sm">
+					Every browser on your network signs in with it once and then stays signed in on that device for 30 days.
+					Choose a long password you use nowhere else and keep it in a password manager: anyone who has it controls your agents.
+				</p>
+				<div>
+					<label for="owner-new-password" class="block text-xs text-muted-foreground mb-1">New password (at least {minLength} characters)</label>
+					<input id="owner-new-password" type="password" class="ui-input" autocomplete="new-password" bind:value={password} required minlength={minLength} />
+				</div>
+				<div>
+					<label for="owner-confirm-password" class="block text-xs text-muted-foreground mb-1">Repeat it</label>
+					<input id="owner-confirm-password" type="password" class="ui-input" autocomplete="new-password" bind:value={confirm} required />
+				</div>
+				{#if error}<p role="alert" class="text-destructive text-sm">{error}</p>{/if}
+				<div class="flex gap-3">
+					<button type="button" class="ui-button flex-1 py-3" onclick={() => (showWelcome = true)} disabled={busy}>Back</button>
+					<button type="submit" class="ui-button primary flex-1 py-3" disabled={busy}>
+						{#if busy}<Loader2 size={16} class="inline-block animate-spin mr-2" />{/if}Save password
+					</button>
+				</div>
+				<p class="text-xs text-muted-foreground text-center">Phones and browsers linked through your HobbyCoders account keep using their own device sign-in.</p>
+			</form>
+		{/if}
+	</SetupViewport>
 {:else}
 <div class="ui-surface ui-onboarding">
 	<div class="ui-onboarding-card">
@@ -171,11 +170,3 @@
 	</div>
 </div>
 {/if}
-
-<style>
-	/* The app disables document scrolling; the wizard owns its scroll area. */
-	.gate-viewport {
-		height: 100vh;
-		height: var(--app-viewport-height, 100dvh);
-	}
-</style>
