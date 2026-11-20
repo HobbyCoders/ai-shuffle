@@ -75,7 +75,12 @@ async def list_claude_api_models(
             raise HTTPException(status_code=502, detail=str(exc)) from None
         fetched_at = None
         try:
-            fetched_at = await run_sync(claude_api_provider.remember_models, key, models)
+            fetched_at = await run_sync(
+                claude_api_provider.remember_models,
+                key,
+                models,
+                touch_timestamp=refresh,
+            )
         except Exception:  # noqa: BLE001 — the list is still returned
             logger.warning("Could not keep the Claude API model list", exc_info=True)
     response.headers["Cache-Control"] = "no-store"

@@ -120,10 +120,23 @@ async def test_route_serves_cached_catalog_unless_refresh_and_saves_curation(moc
     assert len(fetches) == 1
     assert second == first
 
-    # Explicit refresh=True contacts upstream again.
+    # Explicit refresh=True contacts upstream again and advances fetched_at even when unchanged,
+    # while a follow-up refresh=False serves the updated timestamp with zero DB writes (no loop).
+    from app.db import database
+
+    writes = []
+    real_set = database.set_system_setting
+    monkeypatch.setattr(database, "set_system_setting", lambda k, v: (writes.append(k), real_set(k, v))[1])
     third = await list_claude_api_models("selected", Response(), "admin", refresh=True)
     assert len(fetches) == 2
     assert third["models"] == first["models"]
+    assert third["fetched_at"] is not None and third["fetched_at"] != first["fetched_at"]
+    assert len(writes) == 1 and writes[0].startswith(claude_api_provider.MODELS_FETCHED_AT_PREFIX)
+
+    after_refresh = await list_claude_api_models("selected", Response(), "admin", refresh=False)
+    assert len(fetches) == 2
+    assert len(writes) == 1
+    assert after_refresh == third
 
     # Save curated list and confirm GET returns it.
     saved = await save_claude_api_models(

@@ -436,12 +436,18 @@ export function resolveDefaultModel(
 	providers: readonly ProviderEntry[],
 	claudeModels: readonly ModelOption[]
 ): string {
+	// An explicit empty server default means eligible provider(s) exist with 0
+	// enabled models — keep it empty instead of falling back to another provider.
+	// (Older workers that omit `default` hydrate `STATIC_DEFAULT`, never `''`.)
+	if (!serverDefault) return '';
 	if (!ready || ready.length === 0) return serverDefault;
-	if (serverDefault && !serverDefaultCannotRun(serverDefault, ready, providers)) return serverDefault;
+	if (!serverDefaultCannotRun(serverDefault, ready, providers)) return serverDefault;
 	// Never Antigravity on its own (as `default_provider_model` on the server):
 	// a personal Google sign-in would carry ordinary chats unasked, and its
 	// guard refuses the background jobs an implicit default also serves.
-	const implicit = ready.filter((b) => b !== 'antigravity');
+	// Never `gw:claude-api` either (matching `credential_gate.py`): a saved
+	// Anthropic API key is never a last-resort default outside API-key mode.
+	const implicit = ready.filter((b) => b !== 'antigravity' && b !== 'gw:claude-api');
 	const order = [...implicit.filter((b) => b !== 'claude'), ...implicit.filter((b) => b === 'claude')];
 	for (const brand of order) {
 		if (brand === 'claude') {

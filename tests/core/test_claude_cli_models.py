@@ -665,3 +665,49 @@ def test_subscription_curation_filters_pickers_and_defaults_but_keeps_metadata(c
             assert _preview_may_change_dev_data(req) is True
         with patch("app.preview_run.disposable_preview_data", return_value=False):
             assert _preview_may_change_dev_data(req) is False
+
+
+def test_manual_refresh_updates_captured_at_without_announcing_when_unchanged(cli, monkeypatch, tmp_path):
+    """Live-QA #2: explicit refresh() advances captured_at in memory and on disk even when models match."""
+    from app.core import claude_cli_status
+
+    disk = tmp_path / "claude-cli-models.json"
+    monkeypatch.setattr(cm, "_path", lambda: disk)
+    monkeypatch.setattr(m, "_claude_payload", _REAL_CLAUDE_PAYLOAD)
+    old_ts = "2025-01-01T00:00:00+00:00"
+    initial = cm.parse_initialize(REPLY)
+    initial["captured_at"] = old_ts
+    # Seed disk + memory with old timestamp.
+    monkeypatch.setattr(cm, "_snapshot", None)
+    monkeypatch.setattr(cm, "_loaded", False)
+    assert cm.store(initial) is True
+    assert cm.peek()["captured_at"] == old_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == old_ts
+
+    announced = []
+    monkeypatch.setattr(claude_cli_status, "announce_account_change", lambda: announced.append(True))
+
+    # Passive store (touch_timestamp=False) leaves captured_at untouched.
+    passive = cm.parse_initialize(REPLY)
+    assert passive["captured_at"] != old_ts
+    assert cm.store(passive) is False
+    assert cm.peek()["captured_at"] == old_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == old_ts
+    assert announced == []
+
+    # Explicit refresh() updates captured_at in memory, on disk, and in API projections without announcing.
+    cli["status"] = claude_cli_status.ClaudeCliStatus(
+        installed=True, signed_in=True, email="a@example.invalid",
+        cli_version="2.1.325", binary_path="/fake/claude",
+    )
+    monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False: cli["status"])
+    monkeypatch.setattr(cm, "_handshake", lambda binary, env: REPLY)
+
+    refreshed = cm.refresh()
+    new_ts = refreshed["captured_at"]
+    assert new_ts != old_ts
+    assert cm.peek()["captured_at"] == new_ts
+    assert json.loads(disk.read_text(encoding="utf-8"))["captured_at"] == new_ts
+    assert cm.subscription_catalog_rows()["captured_at"] == new_ts
+    assert m.registry_payload()["claude"]["cli_models"]["captured_at"] == new_ts
+    assert announced == []

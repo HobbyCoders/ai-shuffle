@@ -179,14 +179,21 @@ def _cached_models(key: str) -> Optional[List[Dict[str, str]]]:
     return entry["models"] if entry is not None else None
 
 
-def remember_models(key: str, models: List[Dict[str, str]]) -> Optional[str]:
+def remember_models(
+    key: str,
+    models: List[Dict[str, str]],
+    *,
+    touch_timestamp: bool = False,
+) -> Optional[str]:
     """Cache the Anthropic catalog for ``key`` under its own hash slot.
 
     Stores ``{"by_key": {<hash>: [{"id", "label"}, ...]}}`` (plain list per key
     hash for rolling-update compatibility) and writes the ISO timestamp to
     ``claude_api_models_fetched_at:<hash>``. Caches valid empty lists ``[]`` so
     an empty refresh replaces stale cached models. Suppresses all DB writes
-    when both the model list and timestamp are already present and unchanged.
+    when both the model list and timestamp are already present and unchanged
+    (unless ``touch_timestamp=True`` for an explicit manual refresh, which
+    updates only ``fetched_at`` and leaves ``claude_api_models_cache`` untouched).
     """
     if not isinstance(models, list):
         return None
@@ -201,9 +208,10 @@ def remember_models(key: str, models: List[Dict[str, str]]) -> Optional[str]:
         existing_models = _parse_catalog_models(existing_map.get(digest)) if has_slot else None
         existing_is_plain_list = isinstance(existing_map.get(digest), list)
         existing_ts = database.get_system_setting(ts_key)
-        if has_slot and existing_is_plain_list and existing_models == cleaned and existing_ts:
+        cache_unchanged = has_slot and existing_is_plain_list and existing_models == cleaned
+        if cache_unchanged and existing_ts and not touch_timestamp:
             return existing_ts
-        if not has_slot or not existing_is_plain_list or existing_models != cleaned:
+        if not cache_unchanged:
             catalogs = {h: slot for h, slot in existing_map.items() if h != digest}
             catalogs = dict(list(catalogs.items())[-(_CATALOG_SLOTS - 1):])
             catalogs[digest] = cleaned

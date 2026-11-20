@@ -194,7 +194,24 @@ def _same(a: Optional[Dict[str, Any]], b: Dict[str, Any]) -> bool:
     return bool(a) and all(a.get(k) == b.get(k) for k in ("cli_version", "account", "models"))
 
 
-def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
+def _write_snapshot(snapshot: Dict[str, Any]) -> None:
+    path = _path()
+    if path is None:
+        return
+    try:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        logger.warning("Could not save the Claude Code model list", exc_info=True)
+
+
+def store(
+    snapshot: Dict[str, Any],
+    *,
+    verified_status=None,
+    touch_timestamp: bool = False,
+) -> Optional[bool]:
     """Keep ``snapshot``; True when it differs from the saved list, None when
     it is not the active sign-in's.
 
@@ -203,7 +220,9 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
     write; an unknown sign-in refuses. A saved-login switch drops that status
     first, so a capture started under the previous account cannot land.
     A changed list is written to the data directory and announced, so open
-    pickers re-read the registry.
+    pickers re-read the registry. When ``touch_timestamp=True`` (explicit
+    manual refresh) and the model list is unchanged, updates ``captured_at``
+    in memory and on disk without announcing an account change.
     """
     global _snapshot
     from app.core import claude_cli_status, claude_subscriptions
@@ -233,16 +252,12 @@ def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
                         snapshot["cli_version"], status.cli_version)
             return None
         if _same(_snapshot, snapshot):
+            if touch_timestamp and _snapshot is not None and snapshot.get("captured_at"):
+                _snapshot = {**_snapshot, "captured_at": snapshot["captured_at"]}
+                _write_snapshot(_snapshot)
             return False
         _snapshot = snapshot
-        path = _path()
-        if path is not None:
-            try:
-                tmp = path.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(snapshot, indent=1), encoding="utf-8")
-                os.replace(tmp, path)
-            except OSError:
-                logger.warning("Could not save the Claude Code model list", exc_info=True)
+        _write_snapshot(snapshot)
     logger.info("Claude Code %s reports %d models", snapshot.get("cli_version") or "", len(snapshot["models"]))
     claude_cli_status.announce_account_change()
     return True
@@ -508,7 +523,7 @@ def refresh() -> Dict[str, Any]:
         snapshot = parse_initialize(payload)
         if snapshot is None:
             raise RuntimeError("Claude Code did not list any models. Update it and try again.")
-        if not subscription_mode() or store(snapshot, verified_status=status) is None:
+        if not subscription_mode() or store(snapshot, verified_status=status, touch_timestamp=True) is None:
             raise RuntimeError("The Claude sign-in changed while Claude Code listed its models. Try again.")
         return snapshot
 

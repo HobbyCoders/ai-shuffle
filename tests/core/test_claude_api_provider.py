@@ -410,6 +410,21 @@ def test_remember_models_suppresses_noop_writes_and_keeps_plain_list_format(key,
     assert second_ts == first_ts
     assert len(writes) == 2
 
+    # Explicit manual refresh (touch_timestamp=True) with unchanged models updates
+    # ONLY fetched_at and leaves claude_api_models_cache untouched.
+    touched_ts = cap.remember_models(
+        KEY,
+        [{"id": "claude-live-1", "label": "Live One"}],
+        touch_timestamp=True,
+    )
+    assert touched_ts is not None and touched_ts != first_ts
+    assert [k for k, _ in writes] == [
+        cap.MODELS_CACHE_SETTING,
+        f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}",
+        f"{cap.MODELS_FETCHED_AT_PREFIX}{cap._key_hash(KEY)}",
+    ]
+    assert cap.cached_catalog(KEY)["fetched_at"] == touched_ts
+
 
 def test_empty_catalog_is_cached_and_replaces_stale_models(key, monkeypatch):
     """S4: a valid empty [] response caches [] (distinct from None) and hides stale models."""

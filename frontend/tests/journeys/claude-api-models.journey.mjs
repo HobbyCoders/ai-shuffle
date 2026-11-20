@@ -6,6 +6,11 @@ import { runJourney } from './runner.mjs';
 import { expect, gotoApp, isPhone, openPopup, showSidebar, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
+const DEV_CLAUDE_API_MODELS = [
+	{ id: 'claude-sonnet-dev-api', label: 'Claude Sonnet (dev API)' },
+	{ id: 'claude-haiku-dev-api', label: 'Claude Haiku (dev API)' }
+];
+
 async function activateAnthropicApiKey(status) {
 	const localPort = status?.app?.local_port;
 	if (!localPort) throw new Error('devloop status missing app.local_port');
@@ -28,15 +33,17 @@ async function activateAnthropicApiKey(status) {
 	const regRes = await fetch(`${origin}/api/v1/models`, { headers });
 	if (regRes.ok) {
 		const reg = await regRes.json();
-		const customModels = (reg.custom_providers ?? []).flatMap((p) => p.models ?? []);
-		const hasSonnet = customModels.some((m) => m.id === 'claude-sonnet-dev-api');
-		const hasHaiku = customModels.some((m) => m.id === 'claude-haiku-dev-api');
+		const claudeApiRow = (reg.providers ?? []).find((p) => p.id === 'claude-api');
+		const apiModels = claudeApiRow?.models ?? [];
+		const hasSonnet = apiModels.some((m) => m.id === 'claude-sonnet-dev-api');
+		const hasHaiku = apiModels.some((m) => m.id === 'claude-haiku-dev-api');
 		if (hasSonnet && !hasHaiku) {
-			await fetch(`${origin}/api/v1/models/claude/api-key/${encodeURIComponent(key.id)}/models`, {
+			const putRes = await fetch(`${origin}/api/v1/models/claude/api-key/${encodeURIComponent(key.id)}/models`, {
 				method: 'PUT',
 				headers: { ...headers, 'Content-Type': 'application/json' },
-				body: JSON.stringify({ models: ['claude-sonnet-dev-api', 'claude-haiku-dev-api'] })
+				body: JSON.stringify({ models: DEV_CLAUDE_API_MODELS })
 			});
+			if (!putRes.ok) throw new Error(`restore Claude API curation in setup failed: ${putRes.status}`);
 		}
 	}
 	return key.id;
@@ -46,11 +53,12 @@ async function resetAnthropicApiKeyCuration(status, keyId) {
 	const localPort = status?.app?.local_port;
 	if (!localPort || !keyId) return;
 	const origin = `http://127.0.0.1:${localPort}`;
-	await fetch(`${origin}/api/v1/models/claude/api-key/${encodeURIComponent(keyId)}/models`, {
+	const putRes = await fetch(`${origin}/api/v1/models/claude/api-key/${encodeURIComponent(keyId)}/models`, {
 		method: 'PUT',
 		headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
-		body: JSON.stringify({ models: ['claude-sonnet-dev-api', 'claude-haiku-dev-api'] })
-	}).catch(() => {});
+		body: JSON.stringify({ models: DEV_CLAUDE_API_MODELS })
+	});
+	if (!putRes.ok) throw new Error(`restore Claude API curation in cleanup failed: ${putRes.status}`);
 }
 
 async function closeModelPicker(page, picker) {
@@ -89,7 +97,7 @@ await runJourney({
 	// The built app’s service worker handles GETs before Playwright can inject the rejected refresh.
 	// Keep interception in this journey only; the successful requests still reach the app.
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
-	throttles: ['fast'],
+	throttles: ['fast', 'slow'],
 	allow: [...DEV_INSTANCE_NOISE, {
 		kind: 'failed_requests', status: 502, url: /\/models\/claude\/api-key\/[^/?]+/,
 		reason: 'the journey injects one rejected-key response; it asserts the error and then retries against the real dev endpoint'
@@ -190,12 +198,23 @@ await runJourney({
 				await finalPanel.getByText('claude-haiku-dev-api', { exact: true }).waitFor({ timeout: 10_000 });
 
 				await mark('refresh the model list');
+				const timeEl = finalPanel.locator('time').first();
+				const beforeRefreshTs = await timeEl.getAttribute('datetime');
+				expect(Boolean(beforeRefreshTs), 'Models tab must show a Last refreshed timestamp before manual refresh');
 				const refresh = finalPanel.getByRole('button', { name: 'Refresh model list', exact: true });
+				const getsBeforeManualRefresh = apiGetCount;
 				const refreshResp = page.waitForResponse((res) =>
 					res.request().method() === 'GET' && res.url().includes('/api/v1/models/claude/api-key/') && res.url().includes('refresh=true'));
 				await refresh.click();
 				if (!(await refreshResp).ok()) throw new Error('Refreshing the Anthropic model list failed');
 				await page.getByText('claude-haiku-dev-api', { exact: true }).waitFor({ timeout: 10_000 });
+				const afterRefreshTs = await timeEl.getAttribute('datetime');
+				expect(Boolean(afterRefreshTs) && afterRefreshTs !== beforeRefreshTs,
+					`manual refresh must update Last refreshed timestamp (${beforeRefreshTs} -> ${afterRefreshTs})`);
+				// Confirm manual refresh updating fetched_at does not trigger a refresh loop.
+				await page.waitForTimeout(1_000);
+				expect(apiGetCount - getsBeforeManualRefresh <= 3,
+					`manual refresh must settle without looping (saw ${apiGetCount - getsBeforeManualRefresh} GETs)`);
 
 				const rejection = 'Anthropic did not accept this API key for listing models.';
 				await page.route('**/api/v1/models/claude/api-key/*', (route) => route.fulfill({
