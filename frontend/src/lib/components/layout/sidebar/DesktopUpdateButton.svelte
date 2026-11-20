@@ -344,15 +344,19 @@
 	}
 	function trackTipTransit(event: MouseEvent, target = event.target) {
 		if (!tipTransit) return;
-		// The gap is safe to cross, but it does not extend over other controls.
-		if (target instanceof Element && target.closest('button, a[href], input, select, textarea, summary, [role="button"], [role="link"], [role="switch"]')) {
+		const toward = tipTransit.toward.getBoundingClientRect();
+		const { clientX, clientY } = event;
+		// A rounded tooltip corner can expose a chat row inside the card's box.
+		// Allow that last step into the card without taking the row's pointer events.
+		const enteringCard = tipTransit.toward === tipEl
+			&& clientX >= toward.left && clientX <= toward.right && clientY >= toward.top && clientY <= toward.bottom;
+		// Outside the card, real controls take precedence over the hover corridor.
+		if (!enteringCard && target instanceof Element && target.closest('button, a[href], input, select, textarea, summary, [role="button"], [role="link"], [role="switch"]')) {
 			tipTransit = null;
 			closeUnattendedTip();
 			return;
 		}
 		const from = tipTransit.from.getBoundingClientRect();
-		const toward = tipTransit.toward.getBoundingClientRect();
-		const { clientX, clientY } = event;
 		// Keep the tip open anywhere on a straight path between the two boxes.
 		// Interpolating their edges gives the corridor without creating a hit target.
 		let first = 0;

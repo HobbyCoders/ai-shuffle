@@ -213,5 +213,53 @@ await runJourney({
 			await page.mouse.move(500, 60);
 			await tip(page).waitFor({ state: 'hidden' });
 		}
-	}]
+	}, ...[
+		{ name: 'rounded-corner-handoff', width: 900, height: 560 },
+		{ name: 'rounded-corner-narrow-handoff', width: 390, height: 844 }
+	].map(({ name, width, height }) => ({
+		name,
+		viewports: ['desktop'], // Use a mouse in the web UI at both widths.
+		async setup({ page, status }) {
+			await page.setViewportSize({ width, height });
+			await fakeUpdates(page, { ...snapshot, workers: [
+				...snapshot.workers,
+				...Array.from({ length: 10 }, (_, i) => ({
+					...worker, device_id: `testing-${i}`, device_name: `Testing workstation ${i + 1}`,
+					phase: 'ready', role: 'staged', label: peerStatus
+				}))
+			] });
+			await gotoApp(page, status);
+			await showSidebar(page);
+			await sidebar(page).locator('.scard[role="button"]').first().waitFor({ timeout: 5000 });
+		},
+		async act({ page, mark }) {
+			const button = update(page);
+			await button.hover();
+			await tip(page).waitFor();
+			expect(await button.evaluate(el => el !== document.activeElement), 'the tooltip is held only by hover');
+			const trigger = await button.boundingBox();
+			const card = await tip(page).boundingBox();
+			const from = { x: trigger.x + trigger.width / 2, y: trigger.y + trigger.height / 2 };
+			const to = { x: card.x + 12, y: card.y + card.height - 15 };
+			await mark('move slowly through the rounded corner over a real chat row');
+			let crossedExposedCorner = false;
+			let openThroughout = true;
+			for (let step = 1; step <= 20; step++) {
+				const x = Math.floor(from.x + (to.x - from.x) * step / 20);
+				const y = Math.floor(from.y + (to.y - from.y) * step / 20);
+				await page.mouse.move(x, y);
+				if (x >= card.x && y < card.y + card.height && await tip(page).isVisible()) {
+					crossedExposedCorner ||= await page.evaluate(({ x, y }) =>
+						!!document.elementFromPoint(x, y)?.closest('.scard[role="button"]'), { x, y });
+				}
+				await page.waitForTimeout(40);
+				openThroughout &&= await tip(page).isVisible();
+			}
+			expect(openThroughout, 'the tooltip stays open across the rounded corner');
+			expect(crossedExposedCorner, 'an underlying chat row remains a pointer target in the cut-out');
+			expect(await tip(page).evaluate(el => el.matches(':hover')), 'the pointer reaches the tooltip');
+			await page.mouse.wheel(0, 250);
+			await page.waitForFunction(() => document.querySelector('.update-tooltip')?.scrollTop > 0);
+		}
+	}))]
 });
