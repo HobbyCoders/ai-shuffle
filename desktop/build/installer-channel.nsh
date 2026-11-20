@@ -17,18 +17,19 @@
 # the installer update the app runs itself, writes nothing.
 
 !include LogicLib.nsh
-!define SHUFFLE_LOGIN_ITEM_STAMP "resources\login-item-uninstall-v3"
-!define SHUFFLE_STARTUP_GUARD_DIR "$LOCALAPPDATA\${APP_PACKAGE_NAME}"
-!define SHUFFLE_STARTUP_GUARD "${SHUFFLE_STARTUP_GUARD_DIR}\login-item-lock"
-!define SHUFFLE_STARTUP_REPLACEMENT "AI_SHUFFLE_NSIS_STARTUP_REPLACEMENT"
-!define SHUFFLE_RUN "Software\Microsoft\Windows\CurrentVersion\Run"
-!define SHUFFLE_APPROVAL "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
-!define SHUFFLE_LOGIN_ITEM "com.hobbycoders.aishuffle.desktop"
+!define NSIS_STARTUP_STAMP "resources\login-item-uninstall-v3"
+!define NSIS_STARTUP_GUARD_DIR "$LOCALAPPDATA\${APP_PACKAGE_NAME}"
+!define NSIS_STARTUP_GUARD "${NSIS_STARTUP_GUARD_DIR}\login-item-lock"
+# Private environment of the installer and its child uninstaller, never a user setting.
+!define NSIS_STARTUP_REPLACEMENT "AI_SHUFFLE_NSIS_STARTUP_REPLACEMENT"
+!define NSIS_STARTUP_RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
+!define NSIS_STARTUP_APPROVAL_KEY "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+!define NSIS_STARTUP_VALUE_NAME "com.hobbycoders.aishuffle.desktop"
 
 !macro shuffleReadStartupOwner DIRECTORY
   StrCpy $1 ""
   ClearErrors
-  FileOpen $0 "${DIRECTORY}\${SHUFFLE_LOGIN_ITEM_STAMP}" r
+  FileOpen $0 "${DIRECTORY}\${NSIS_STARTUP_STAMP}" r
   ${ifNot} ${Errors}
     FileReadUTF16LE $0 $1
     FileClose $0
@@ -81,7 +82,7 @@
 
       # Also prevent an explicit destination from overwriting a stamped copy
       # owned by a different account (including when UAC changed accounts).
-      ${if} ${FileExists} "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}"
+      ${if} ${FileExists} "$INSTDIR\${NSIS_STARTUP_STAMP}"
         !insertmacro shuffleUserContext
         !insertmacro shuffleReadStartupOwner "$INSTDIR"
         StrCpy $2 "$LOCALAPPDATA"
@@ -95,7 +96,7 @@
       ${if} $installMode == "CurrentUser"
         StrCpy $0 "$INSTDIR"
       ${endif}
-      System::Call 'kernel32::SetEnvironmentVariableW(w "${SHUFFLE_STARTUP_REPLACEMENT}", w r0) i .r1'
+      System::Call 'kernel32::SetEnvironmentVariableW(w "${NSIS_STARTUP_REPLACEMENT}", w r0) i .r1'
       ${if} $1 == 0
         !insertmacro shuffleStartupRefuse "AI Shuffle could not pass the installation destination to its uninstaller."
       ${endif}
@@ -186,12 +187,12 @@
     # Provision in app-owned LocalAppData, not the roaming profile root.
     # Stamp only this user's installs, and only if opening the guard works.
     ${if} $installMode == "CurrentUser"
-      CreateDirectory "${SHUFFLE_STARTUP_GUARD_DIR}"
-      System::Call 'kernel32::CreateFileW(w "${SHUFFLE_STARTUP_GUARD}", i 0x80000000, i 7, p 0, i 4, i 0x80, p 0) p .r0'
+      CreateDirectory "${NSIS_STARTUP_GUARD_DIR}"
+      System::Call 'kernel32::CreateFileW(w "${NSIS_STARTUP_GUARD}", i 0x80000000, i 7, p 0, i 4, i 0x80, p 0) p .r0'
       ${if} $0 != -1
         System::Call 'kernel32::CloseHandle(p r0)'
         ClearErrors
-        FileOpen $0 "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}" w
+        FileOpen $0 "$INSTDIR\${NSIS_STARTUP_STAMP}" w
         ${ifNot} ${Errors}
           FileWriteUTF16LE $0 "$LOCALAPPDATA"
           FileClose $0
@@ -204,19 +205,19 @@
   Var shuffleRetireStartup
 
   !macro customUnInstall
-    ${if} ${FileExists} "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}"
+    ${if} ${FileExists} "$INSTDIR\${NSIS_STARTUP_STAMP}"
       !insertmacro shuffleReadStartupOwner "$INSTDIR"
       ${if} $installMode != "CurrentUser"
       ${orIf} $1 != "$LOCALAPPDATA"
         !insertmacro shuffleStartupRefuse "Uninstall this per-user copy of AI Shuffle from the Windows account that installed it."
       ${endif}
-      ReadEnvStr $2 "${SHUFFLE_STARTUP_REPLACEMENT}"
+      ReadEnvStr $2 "${NSIS_STARTUP_REPLACEMENT}"
       ${ifNot} ${isUpdated}
       ${orIf} $2 != "$INSTDIR"
         # After the close prompt, exclude the managed app's startup writes.
         # GENERIC_READ / no sharing / OPEN_EXISTING. Hold through removal or
         # rollback; Windows closes the handle when the uninstaller exits.
-        System::Call 'kernel32::CreateFileW(w "${SHUFFLE_STARTUP_GUARD}", i 0x80000000, i 0, p 0, i 3, i 0x80, p 0) p .r0 ?e'
+        System::Call 'kernel32::CreateFileW(w "${NSIS_STARTUP_GUARD}", i 0x80000000, i 0, p 0, i 3, i 0x80, p 0) p .r0 ?e'
         Pop $4
         ${if} $0 == -1
           ${if} $4 == 32
@@ -241,17 +242,17 @@
       # atomic rename/restore. Also check the exe in case RMDir was incomplete.
       ${if} $shuffleRetireStartup == "1"
         ${ifNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
-          ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+          ReadRegStr $3 HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
           ${if} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
             ClearErrors
-            DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+            DeleteRegValue HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
             ${if} ${Errors}
               !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Windows Startup Apps."
             ${endif}
             StrCpy $3 ""
           ${endif}
           ${if} $3 == ""
-            DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"
+            DeleteRegValue HKCU "${NSIS_STARTUP_APPROVAL_KEY}" "${NSIS_STARTUP_VALUE_NAME}"
             ClearErrors
           ${endif}
         ${endif}

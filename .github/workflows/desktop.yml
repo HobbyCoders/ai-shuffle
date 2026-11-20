@@ -245,9 +245,31 @@ jobs:
           $stable = '{"channel":"stable"}'
           $results = [System.Collections.Generic.List[string]]::new()
           function Show($text) { if ($null -eq $text) { 'no file' } else { $text } }
+          function Invoke-InstallerFixture([string]$label, [string]$exe, [string[]]$arguments) {
+            Write-Host "Starting ${label}"
+            $process = Start-Process -FilePath $exe -ArgumentList $arguments -PassThru
+            try {
+              if (-not $process.WaitForExit(90000)) {
+                $process.Kill($true)
+                throw "${label}: did not exit within 90 seconds (possible installer dialog)"
+              }
+              Write-Host "Finished ${label}: exit $($process.ExitCode)"
+              return $process.ExitCode
+            } finally { $process.Dispose() }
+          }
+          function Invoke-UninstallerFixture([string]$label, [string]$directory, [string[]]$arguments) {
+            $uninstaller = @(Get-ChildItem -LiteralPath $directory -Filter 'Uninstall*.exe' -File)
+            if ($uninstaller.Count -ne 1) { throw "${label}: expected a single uninstaller" }
+            $copy = Join-Path $env:RUNNER_TEMP "startup-check-$([guid]::NewGuid()).exe"
+            Copy-Item -LiteralPath $uninstaller[0].FullName -Destination $copy
+            try {
+              # Match the builder: run a temp copy and put the unquoted _?= path last.
+              return Invoke-InstallerFixture $label $copy (@('/S', '/currentuser') + $arguments + "_?=$directory")
+            } finally { Remove-Item -LiteralPath $copy }
+          }
           function Install([string]$label, [string[]]$arguments) {
-            $process = Start-Process -FilePath $installer -ArgumentList $arguments -Wait -PassThru
-            if ($process.ExitCode -ne 0) { throw "${label}: the installer exited with $($process.ExitCode)" }
+            $exitCode = Invoke-InstallerFixture $label $installer $arguments
+            if ($exitCode -ne 0) { throw "${label}: the installer exited with $exitCode" }
             $running = @(Get-Process -Name 'AI Shuffle' -ErrorAction SilentlyContinue)
             if ($running.Count -gt 0) { $running | Stop-Process -Force; throw "${label}: the installer started the app" }
           }
@@ -270,10 +292,8 @@ jobs:
             if ($unprovisioned.Count -ne 1) { throw 'expected a working install even when startup storage is unavailable' }
             $noGuardStamp = Join-Path $unprovisioned[0].DirectoryName 'resources\login-item-uninstall-v3'
             if (Test-Path -LiteralPath $noGuardStamp) { throw 'unavailable storage must not grant startup support' }
-            $uninstaller = @(Get-ChildItem $unprovisioned[0].DirectoryName -Filter 'Uninstall*.exe' -File)
-            if ($uninstaller.Count -ne 1) { throw 'expected a single uninstaller' }
-            $removed = Start-Process $uninstaller[0].FullName -ArgumentList '/S', '/currentuser' -Wait -PassThru
-            if ($removed.ExitCode -ne 0 -or (Test-Path -LiteralPath $unprovisioned[0].FullName)) { throw 'unavailable storage blocked uninstall' }
+            $removed = Invoke-UninstallerFixture 'uninstall with unavailable startup storage' $unprovisioned[0].DirectoryName @()
+            if ($removed -ne 0 -or (Test-Path -LiteralPath $unprovisioned[0].FullName)) { throw 'unavailable storage blocked uninstall' }
           } finally { Remove-Item -LiteralPath $guardDir }
           Check '1. default install' @('/S', '/currentuser') $null
           $perUserExe = @(Get-ChildItem "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe" -File)
@@ -288,14 +308,16 @@ jobs:
           Check '4. installer update' @('/S', '--updated') $stable
           if (-not (Test-Path -LiteralPath $stamp)) { throw '4. installer update: per-user startup capability missing' }
           if ((Get-Item -LiteralPath $guard).Length -ne 0) { throw '4. installer update: missing or nonempty guard' }
-          # Force the pinned uninstaller's atomic rename/restore path.
+          # Exercise the pinned uninstaller's atomic rename/restore path directly.
+          # The parent installer deliberately displays a dialog when its child fails,
+          # even when /S is set. Its successful all-users path is tested below.
           # These installer checks never write Run or StartupApproved values.
           $payload = Join-Path $perUserExe[0].DirectoryName 'resources\test-held-payload'
           [IO.File]::WriteAllText($payload, 'cannot be renamed while held')
           $held = [IO.File]::Open($payload, 'Open', 'Read', 'Read')
           try {
-            $failed = Start-Process $installer -ArgumentList '/S', '/allusers' -Wait -PassThru
-            if ($failed.ExitCode -eq 0) { throw 'locked payload file did not abort replacement' }
+            $failed = Invoke-UninstallerFixture 'locked-payload rollback' $perUserExe[0].DirectoryName @('/KEEP_APP_DATA', '--updated')
+            if ($failed -eq 0) { throw 'locked payload file did not abort replacement' }
             if (-not (Test-Path -LiteralPath $stamp) -or -not (Test-Path -LiteralPath $perUserExe[0].FullName)) { throw 'failed replacement did not restore the old capable install' }
           } finally { $held.Dispose(); Remove-Item -LiteralPath $payload }
           Remove-Item -LiteralPath $file

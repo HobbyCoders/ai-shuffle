@@ -27,7 +27,7 @@ function runStartupHook(name, { old = 'C:\\User app', target = old, mode = 'Curr
   const v = { $INSTDIR: target, $installMode: mode, $LOCALAPPDATA: owner, $hasPerMachineInstallation: silentMachineUpgrade ? '1' : '0', $shuffleRetireStartup: retire };
   const stampPath = '\\resources\\login-item-uninstall-v3';
   const resolve = token => token.replace(/^(['"])(.*)\1$/, '$2')
-    .replace(/\$\{SHUFFLE_LOGIN_ITEM_STAMP\}/g, stampPath.slice(1))
+    .replace(/\$\{NSIS_STARTUP_STAMP\}/g, stampPath.slice(1))
     .replace(/\$\{APP_EXECUTABLE_FILENAME\}/g, 'AI Shuffle.exe')
     .replace(/\$\w+/g, key => v[key] ?? '').toLowerCase();
   const condition = expr => {
@@ -72,13 +72,13 @@ function runStartupHook(name, { old = 'C:\\User app', target = old, mode = 'Curr
       v[dest] = source === '"$INSTDIR"' ? target : source === '"$LOCALAPPDATA"' ? owner : source.slice(1, -1);
     }
     else if (line.startsWith("System::Call 'kernel32::SetEnvironmentVariableW(")) { replacement = v.$0; v.$1 = '1'; }
-    else if (line === 'ReadEnvStr $2 "${SHUFFLE_STARTUP_REPLACEMENT}"') v.$2 = replacement;
+    else if (line === 'ReadEnvStr $2 "${NSIS_STARTUP_REPLACEMENT}"') v.$2 = replacement;
     else if (line.startsWith("System::Call 'kernel32::CreateFileW(")) v.$0 = guardError === '0' ? '123' : '-1';
     else if (line === 'Pop $4') v.$4 = guardError;
     else if (line === 'ClearErrors') continue;
-    else if (line === 'ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"') v.$3 = run;
-    else if (line === 'DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"') run = '';
-    else if (line === 'DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"') approved = '';
+    else if (line === 'ReadRegStr $3 HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"') v.$3 = run;
+    else if (line === 'DeleteRegValue HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"') run = '';
+    else if (line === 'DeleteRegValue HKCU "${NSIS_STARTUP_APPROVAL_KEY}" "${NSIS_STARTUP_VALUE_NAME}"') approved = '';
     else assert.fail(`Unexpected operation in ${name}: ${line}`);
   }
   return result(true);
@@ -170,14 +170,14 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   const lines = install.split('\n').map(line => line.trim()).filter(Boolean);
   assert.equal(lines[0], '${if} $shuffleChannel == "nightly"');
   const channelEnd = matchingEndif(lines, 0);
-  assert.ok(channelEnd < lines.indexOf('FileOpen $0 "$INSTDIR\\${SHUFFLE_LOGIN_ITEM_STAMP}" w'), 'the installer stamp is independent of channel');
+  assert.ok(channelEnd < lines.indexOf('FileOpen $0 "$INSTDIR\\${NSIS_STARTUP_STAMP}" w'), 'the installer stamp is independent of channel');
   const guard = lines.indexOf('${ifNot} ${FileExists} "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard > 0, 'the write is guarded by the file being absent');
   const open = lines.indexOf('FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w');
   const rename = lines.indexOf('Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"');
   assert.ok(guard < open && open < rename, 'guard, then temporary file, then rename');
   assert.ok(matchingEndif(lines, guard) > rename, 'the rename is inside the file-absent guard, not after it');
-  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*SHUFFLE_CHANNEL_.*$/gm)].map(m => m[0].trim()), [
+  assert.deepEqual([...channelCode.matchAll(/^\s*(FileOpen|Rename|Delete|CopyFiles)\b.*SHUFFLE_CHANNEL_FILE.*$/gm)].map(m => m[0].trim()), [
     'FileOpen $0 "${SHUFFLE_CHANNEL_FILE}.tmp" w',
     'Rename "${SHUFFLE_CHANNEL_FILE}.tmp" "${SHUFFLE_CHANNEL_FILE}"',
     'Delete "${SHUFFLE_CHANNEL_FILE}.tmp"'
@@ -188,8 +188,8 @@ test('the channel page never overwrites an existing choice and writes nothing fo
 });
 
 test('per-user installers provision the guard in app-owned LocalAppData before stamping', () => {
-  assert.match(channelCode, /!define SHUFFLE_LOGIN_ITEM_STAMP "resources\\login-item-uninstall-v3"/);
-  assert.match(channelCode, /!define SHUFFLE_STARTUP_GUARD_DIR "\$LOCALAPPDATA\\\$\{APP_PACKAGE_NAME\}"/);
+  assert.match(channelCode, /!define NSIS_STARTUP_STAMP "resources\\login-item-uninstall-v3"/);
+  assert.match(channelCode, /!define NSIS_STARTUP_GUARD_DIR "\$LOCALAPPDATA\\\$\{APP_PACKAGE_NAME\}"/);
   assert.equal(require('../package.json').name, 'ai-shuffle-desktop');
   const install = macro('customInstall').split('\n').map(line => line.trim()).filter(Boolean);
   const user = install.indexOf('${if} $installMode == "CurrentUser"');
@@ -197,11 +197,11 @@ test('per-user installers provision the guard in app-owned LocalAppData before s
   const write = install.indexOf('FileWriteUTF16LE $0 "$LOCALAPPDATA"');
   assert.ok(user > 0 && user < granted && granted < write && write < matchingEndif(install, granted));
   const uninstall = macro('customUnInstall');
-  assert.match(uninstall, /CreateFileW\(w "\$\{SHUFFLE_STARTUP_GUARD\}", i 0x80000000, i 0, p 0, i 3, i 0x80, p 0\)/);
+  assert.match(uninstall, /CreateFileW\(w "\$\{NSIS_STARTUP_GUARD\}", i 0x80000000, i 0, p 0, i 3, i 0x80, p 0\)/);
   assert.doesNotMatch(uninstall, /DeleteRegValue/);
   assert.deepEqual(channelCode.split('\n').map(l => l.trim()).filter(l => l.startsWith('DeleteRegValue')), [
-    'DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"',
-    'DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"'
+    'DeleteRegValue HKCU "${NSIS_STARTUP_RUN_KEY}" "${NSIS_STARTUP_VALUE_NAME}"',
+    'DeleteRegValue HKCU "${NSIS_STARTUP_APPROVAL_KEY}" "${NSIS_STARTUP_VALUE_NAME}"'
   ]);
 });
 

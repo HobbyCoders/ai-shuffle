@@ -147,8 +147,7 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		mkdirSync(resources);
 		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
 		const powershell = script => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
-		const env = { ...process.env, SHUFFLE_GUARD_FILE: guard };
-		const openExclusive = '[IO.File]::Open($env:SHUFFLE_GUARD_FILE, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)';
+		const openExclusive = `[IO.File]::Open('${guard.replaceAll("'", "''")}', [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)`;
 		let reads = 0;
 		let writes = 0;
 		const control = loginItemControl({
@@ -156,7 +155,7 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 			getLoginItemSettings() {
 				reads++;
 				const probe = spawnSync('powershell.exe', powershell(`try { (${openExclusive}).Dispose(); exit 1 } catch [IO.IOException] { if ((($_.Exception.GetBaseException()).HResult -band 65535) -ne 32) { throw }; exit 0 }`), {
-					encoding: 'utf8', timeout: 15_000, env
+					encoding: 'utf8', timeout: 15_000
 				});
 				assert.ifError(probe.error);
 				assert.equal(probe.status, 0, probe.stdout + probe.stderr);
@@ -169,7 +168,7 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		// Keep the native handle open until the actual JS caller has tested it.
 		// The same controller/host exercises both directions on the same file.
 		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::WriteLine('held'); [void][Console]::ReadLine() } finally { $lock.Dispose() }`), {
-			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000, env
+			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000
 		});
 		const closed = new Promise(resolve => {
 			holder.once('error', error => resolve({ error }));
