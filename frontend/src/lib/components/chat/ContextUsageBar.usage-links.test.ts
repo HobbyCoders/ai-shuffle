@@ -250,6 +250,31 @@ describe('usage links', () => {
 			expect(metaLines(container)).toContain(`Credit balance is shown only in the Claude Console -> ${CLAUDE_BILLING}`);
 		});
 
+		it('hiding the Claude plan and the key leaves two restore buttons that name each one', async () => {
+			await registry([
+				{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', auth_mode: 'api_key', auth_kind: 'api', models: [] },
+			]);
+			rateLimit.applySnapshot({
+				available: true,
+				windows: [{ type: 'five_hour', utilization: 30, resets_at: new Date(T0 + 3_600_000).toISOString() }],
+				providers: [],
+				usage_links: [CLAUDE_API_LINK],
+			});
+			const container = await open();
+			const hideLabels = () =>
+				Array.from(container.querySelectorAll('.provider-hide')).map((b) => b.getAttribute('aria-label'));
+			expect(hideLabels()).toEqual(['Hide Claude usage', 'Hide Claude · API usage']);
+			for (const label of hideLabels()) {
+				await fireEvent.click(container.querySelector(`.provider-hide[aria-label="${label}"]`)!);
+			}
+			const restore = Array.from(container.querySelectorAll('.provider-restore'));
+			expect(restore.map((b) => b.getAttribute('aria-label'))).toEqual(['Show Claude usage', 'Show Claude · API usage']);
+			expect(restore.map((b) => b.textContent?.trim())).toEqual(['Claude', 'Claude · API']);
+			// Restoring the key brings back only the key's section.
+			await fireEvent.click(restore[1]);
+			expect(headers(container)).toEqual(['Claude · API']);
+		});
+
 		it('a metered row keeps its registry header', async () => {
 			await registry([{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
 			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API], usage_links: [] });
