@@ -373,26 +373,38 @@ def _checkouts_for_branch(
 def list_checkouts_with_legacy_fallback(
     project_id: str, runner_id: str, branch: Optional[str] = None
 ) -> List[Dict[str, Any]]:
-    """All candidates, oldest first, preserving exact-runner precedence.
+    """Branch candidates in exact-runner order, falling back to unowned rows."""
+    if not branch:
+        return base_checkout_candidates(project_id, runner_id)[0]
+    with get_db() as conn:
+        return _checkout_candidates(conn.cursor(), project_id, runner_id, branch)
 
-    A missing directory must not hide another checkout on the same runner.
-    Legacy unowned rows are considered only when the runner has no rows for
-    this branch, matching ``get_checkout_with_legacy_fallback``.
+
+def _checkout_candidates(cursor, project_id, runner_id, branch=None):
+    rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
+    if not rows and runner_id != "":
+        rows = _checkouts_for_branch(cursor, project_id, "", branch)
+    return rows
+
+
+def base_checkout_candidates(project_id: str, runner_id: str) -> tuple[List[Dict[str, Any]], bool]:
+    """(Candidates, has live registration), before any filesystem probes.
+
+    A live base registration bounds selection even when its folder is missing.
+    A retired folder is a fallback only when there is no live registration.
     """
     with get_db() as conn:
         cursor = conn.cursor()
-        rows = _checkouts_for_branch(cursor, project_id, runner_id, branch)
-        if not rows and runner_id != "":
-            rows = _checkouts_for_branch(cursor, project_id, "", branch)
-        if not branch and len(rows) > 1:
-            # Old re-setup could reactivate ALL retained bases. In that case,
-            # the sole live registration tells us which active folder to use.
-            preferred = registered_base_key(cursor, project_id, runner_id)
-            rows.sort(key=lambda r: (
-                not is_active(r),
-                not (preferred and r.get("path") and base_folder_key(r["path"]) == preferred),
-            ))
-    return rows
+        registrations = live_base_registrations(cursor, project_id, runner_id)
+        rows = _checkout_candidates(cursor, project_id, runner_id)
+    if registrations:
+        keys = {base_folder_key(r['path']) for r in registrations if r['path']}
+        rows = [r for r in rows if r['path'] and base_folder_key(r['path']) in keys]
+    elif any(is_active(r) for r in rows):
+        # Self-seeded bases can be live without a legacy project row.
+        rows = [r for r in rows if is_active(r)]
+    rows.sort(key=lambda r: not is_active(r))
+    return rows, bool(registrations)
 
 
 def list_active_checkouts(
@@ -649,16 +661,18 @@ def is_active(row: Dict[str, Any]) -> bool:
     return (row.get("status") or "active") == "active"
 
 
-def registered_base_key(cursor: Any, project_id: str, runner_id: str) -> Optional[str]:
-    """One unambiguous live registration for this identity on this runner."""
+def live_base_registrations(cursor: Any, project_id: str, runner_id: str) -> List[Dict[str, Any]]:
+    """Actual project registrations, including a still-current proven first link."""
     cursor.execute(
-        "SELECT p.path FROM projects p JOIN projects_v2 v "
+        "SELECT p.id, p.path FROM projects p JOIN projects_v2 v "
         "ON v.origin = COALESCE(NULLIF(p.link_group_id, ''), 'local:' || p.id) "
-        "WHERE v.id = %s AND (p.instance_id = %s OR p.instance_id IS NULL OR p.instance_id = '')",
-        (project_id, runner_id),
+        "LEFT JOIN project_catalog_aliases a ON a.legacy_id = p.id "
+        "AND a.replacement_id = v.id AND a.revoked = FALSE "
+        "WHERE (v.id = %s OR a.original_id = %s) "
+        "AND (p.instance_id = %s OR p.instance_id IS NULL OR p.instance_id = '')",
+        (project_id, project_id, runner_id),
     )
-    keys = {base_folder_key(r["path"]) for r in cursor.fetchall() if r["path"]}
-    return next(iter(keys)) if len(keys) == 1 else None
+    return cursor.fetchall()
 
 
 def repair_relative_checkout_paths(runner_id: str, workspace_dir: Any) -> Dict[str, int]:

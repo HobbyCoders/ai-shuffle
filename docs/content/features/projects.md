@@ -31,7 +31,7 @@ A project's **Workers** tab lists each worker's folder and branch. From there yo
 
 - **Set up** the project on a worker that doesn't have it, or **Set up on all missing**.
 - Choose an existing folder on that worker instead of a new one. A folder that already holds the same repository is used as it is.
-- **Change folder** on a ready, online worker. Enter or browse to an existing directory on that worker. This changes only its project registration; no files are moved or copied. New chats and future turns in chats without worktrees use the new folder. Existing worktrees stay in place and still need their original checkout. If an older worktree’s Git registration cannot be verified, restore it or forget the stale registration in Worktree management before changing folders. Finish any queued or running chats on that worker before changing the folder.
+- **Change folder** on a ready, online worker. Enter or browse to an existing directory on that worker. This changes only its project registration; no files are moved or copied. New chats and future turns in chats without worktrees use the new folder. Existing worktrees stay in place and still need their original checkout. To reopen a removed worktree after changing folders, keep its branch during cleanup. Reopen requires the original checkout and the same branch tip; it does not recreate the branch from the new folder. If an older worktree’s Git registration cannot be verified, restore it or forget the stale registration in Worktree management before changing folders. Finish any queued or running chats on that worker before changing the folder.
 - Cancel a setup that is still running.
 - **Remove from** a worker. This drops that worker's record of the project; its files stay.
 

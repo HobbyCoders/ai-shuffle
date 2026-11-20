@@ -233,10 +233,9 @@ def resolve_local_checkout(
     """The ``checkouts`` row materializing this session's project on THIS runner,
     honoring ``session.branch`` (base checkout when no branch), or ``None``.
 
-    Prefer a row whose directory exists when an older checkout has moved.
-    ``None`` means no matching row on this runner. If all directories are gone,
-    retain the oldest row for metadata callers; ``resolve_existing_cwd`` rejects
-    its missing path. This lookup never materializes a checkout.
+    A live registration restricts base candidates before probing the disk.
+    If all candidates are missing, return a row for metadata callers;
+    ``resolve_existing_cwd`` rejects its missing path. Never materializes.
     """
     project = resolve_project_v2(session_row)
     if not project:
@@ -250,10 +249,8 @@ def resolve_local_checkout(
 def _local_checkout(
     project_id: str, runner_id: str, branch: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    # A moved checkout leaves the old row behind. Prefer an existing directory
-    # among this runner's candidates, without falling back to another branch.
-    # Legacy relative paths use the same runner-local normalization as writes;
-    # never rewrite the stored row or test it against the process cwd.
+    # Probe only the candidates shared with materialization. Legacy relative
+    # paths use the same runner-local normalization as writes.
     rows = checkouts_db.list_checkouts_with_legacy_fallback(
         project_id, runner_id, branch=branch
     )
@@ -292,6 +289,17 @@ def has_local_base_checkout(
     return bool(path and os.path.isdir(path))
 
 
+def _pinned_session_worktree(session_row: Dict[str, Any]) -> Optional[dict]:
+    """An explicit legacy binding takes precedence over a branch-name match."""
+    worktree_id = session_row.get("worktree_id")
+    if not worktree_id:
+        return None
+    from app.db import database
+
+    row = database.get_worktree(worktree_id)
+    return row if row and row.get("cleanup_owner") is not None else None
+
+
 def resolve_cwd(session_row: Dict[str, Any], *, raise_add_errors: bool = False) -> Optional[str]:
     """The ONE working-directory resolver.
 
@@ -303,6 +311,20 @@ def resolve_cwd(session_row: Dict[str, Any], *, raise_add_errors: bool = False) 
     authority). Session option building can opt into detailed checkout errors
     with ``raise_add_errors=True``; all other callers keep the None contract.
     """
+    pinned = _pinned_session_worktree(session_row)
+    if pinned:
+        from app.core.project_utils import get_worktree_working_dir
+        from app.core.worktree_manager import worktree_manager
+
+        try:
+            branch = _effective_branch(session_row)
+            if branch and branch != pinned["branch_name"]:
+                raise checkout_manager.WorktreeError("Session branch differs from its original worktree")
+            return get_worktree_working_dir(worktree_manager.recreate_worktree(pinned["id"]))
+        except checkout_manager.WorktreeError as exc:
+            if raise_add_errors:
+                raise checkout_manager.WorktreeAddError(str(exc)) from exc
+            return None
     project = resolve_project_v2(session_row)
     if not project:
         return None
@@ -321,6 +343,11 @@ def existing_checkout_path(session_row: Dict[str, Any]) -> Optional[str]:
     matching many sessions against one folder compares this path first and
     validates only a match. Pure read; never materializes.
     """
+    pinned = _pinned_session_worktree(session_row)
+    if pinned:
+        from app.core.worktree_manager import owned_active_path
+
+        return owned_active_path(pinned)
     row = resolve_local_checkout(session_row)
     if not row:
         return None

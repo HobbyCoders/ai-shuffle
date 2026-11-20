@@ -98,6 +98,10 @@ def _worktree_owner_proof(project: dict, main_dir: str, worktree: dict) -> dict:
     item, common_key = _inspect_worktree_owner(main_dir, target)
     if item is None:
         raise WorktreeError("the original repository no longer lists this worktree")
+    return _owner_record(project, worktree, main_dir, common_key, target)
+
+
+def _owner_record(project, worktree, main_dir, common_key, target):
     return {
         "runner": project["instance_id"], "project": project["id"],
         "repository": worktree["repository_id"], "target": os.path.normcase(os.path.abspath(target)),
@@ -113,14 +117,13 @@ def preserve_worktree_owners(cursor, project: dict, main_dir: str) -> None:
         (project["id"],),
     )
     for row in cursor.fetchall():
-        try:
-            proof = _worktree_owner_proof(project, main_dir, row)
-        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, WorktreeError) as exc:
-            if row["status"] in (WorktreeStatus.COMPLETED, WorktreeStatus.DELETED):
-                # Retained history must not become authority to prune or delete
-                # branches in the new clone.
-                proof = {}
-            else:
+        # Historical rows without proof cannot authorize a reopen or delete
+        # after the base moves, even if a branch has since reused their name.
+        proof = {}
+        if row["status"] not in (WorktreeStatus.COMPLETED, WorktreeStatus.DELETED):
+            try:
+                proof = _worktree_owner_proof(project, main_dir, row)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, WorktreeError) as exc:
                 from app.db.projects import FolderConflict
 
                 raise FolderConflict(
@@ -132,10 +135,8 @@ def preserve_worktree_owners(cursor, project: dict, main_dir: str) -> None:
                        (json.dumps(proof), row["id"]))
 
 
-def _cleanup_owner(project: dict, worktree: dict) -> Tuple[str, Optional[str]]:
+def _verified_owner(project: dict, worktree: dict) -> dict:
     proof = worktree.get("cleanup_owner")
-    if proof is None:
-        return get_project_working_dir(project), None
     if isinstance(proof, str):
         try:
             proof = json.loads(proof)
@@ -149,9 +150,48 @@ def _cleanup_owner(project: dict, worktree: dict) -> Tuple[str, Optional[str]]:
         and proof.get("target") == os.path.normcase(os.path.abspath(get_worktree_working_dir(worktree)))
         and all(isinstance(proof.get(k), str) and Path(proof[k]).is_absolute() for k in ("root", "common"))
     ):
-        return proof["root"], proof["common"]
-    raise WorktreeError("Cleanup refused: original owner could not be verified on this worker; "
-                        "directory and registry record preserved.")
+        return proof
+    raise WorktreeError("original owner could not be verified on this worker")
+
+
+def _owned_worktree_project(worktree: dict) -> dict:
+    repo = database.get_git_repository(worktree["repository_id"])
+    project = database.get_project(repo["project_id"]) if repo else None
+    if not project:
+        raise WorktreeError("original owner metadata is missing")
+    return project
+
+
+def owned_active_path(worktree: dict) -> Optional[str]:
+    """Pure read for a session explicitly bound to a pinned legacy worktree."""
+    from app.core.checkout_manager import _require_branch_binding
+
+    if worktree["status"] != WorktreeStatus.ACTIVE:
+        return None
+    try:
+        owner = _verified_owner(_owned_worktree_project(worktree), worktree)
+        path = get_worktree_working_dir(worktree)
+        listing, _ = _inspect_worktree_owner(owner["root"], path, owner["common"])
+        if listing and Path(path).is_dir():
+            _require_branch_binding(path, worktree["branch_name"])
+            return path
+    except (WorktreeError, OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def _git_dir_identity(common: str) -> Optional[list[int]]:
+    # A different clone can replace the owner at the exact same path. The
+    # retained ref alone does not prove the original common dir survived.
+    info = os.stat(common)
+    return [info.st_dev, info.st_ino] if info.st_ino else None
+
+
+def _local_branch_tip(root: str, branch: str) -> Optional[str]:
+    from app.core.worktree_report import _git
+
+    tip = _git(root, "show-ref", "--verify", "--hash", f"refs/heads/{branch}")
+    return tip.strip() if tip else None
 
 
 def _external_worktree_branch_name(git_wt: Dict[str, Any]) -> str:
@@ -1142,15 +1182,19 @@ class WorktreeManager:
             return early
 
         try:
-            main_dir, expected_common = _cleanup_owner(project, worktree)
+            owner = _verified_owner(project, worktree) if worktree.get("cleanup_owner") is not None else None
+            main_dir = owner["root"] if owner else get_project_working_dir(project)
+            expected_common = owner["common"] if owner else None
             worktree_abs_path = get_worktree_working_dir(worktree)
+        except WorktreeError as exc:
+            raise WorktreeError(f"Cleanup refused: {exc}; directory and registry record preserved.") from exc
         except (ValueError, TypeError, KeyError) as exc:
             raise WorktreeError(
                 "Cleanup refused: checkout path could not be resolved; "
                 "directory and registry record preserved."
             ) from exc
 
-        def _validate_cleanup() -> None:
+        def _validate_cleanup() -> Optional[dict]:
             from app.core import streaming_status
             from app.core.checkout_manager import _require_branch_binding
             from app.core.worktree_report import _git, _path_key, _sessions_by_path
@@ -1159,7 +1203,7 @@ class WorktreeManager:
             # registry row alone is never authority to recursively remove files.
             try:
                 target = Path(worktree_abs_path)
-                item, _ = _inspect_worktree_owner(main_dir, worktree_abs_path, expected_common)
+                item, common = _inspect_worktree_owner(main_dir, worktree_abs_path, expected_common)
                 if expected_common is not None and item is None:
                     raise WorktreeError("the original repository no longer lists this worktree")
                 if target.exists():
@@ -1185,13 +1229,25 @@ class WorktreeManager:
                                   repo.get("default_branch") or "main")
                     if merged is None or worktree["branch_name"] not in merged.splitlines():
                         raise WorktreeError("missing directory still has unmerged branch history; retry with keep_branch=true")
+
+                proof = dict(owner) if owner else None
+                if proof is not None:
+                    proof.pop("retained", None)
+                branch = worktree["branch_name"]
+                if (keep_branch and item and item["branch"] == branch
+                        and project.get("instance_id") == settings.effective_instance_id):
+                    tip = _local_branch_tip(main_dir, branch)
+                    if tip and tip == item["head"] and (identity := _git_dir_identity(common)):
+                        proof = _owner_record(project, worktree, main_dir, common, worktree_abs_path)
+                        proof["retained"] = {"branch": branch, "tip": tip, "git_dir": identity}
+                return proof
             except WorktreeError as exc:
                 raise WorktreeError(f"Cleanup refused: {exc}; directory and registry record preserved.") from exc
             except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
                 raise WorktreeError("Cleanup refused: Git ownership could not be verified; "
                                     "directory and registry record preserved.") from exc
 
-        await run_sync(_validate_cleanup)
+        cleanup_proof = await run_sync(_validate_cleanup)
 
         # Terminate idle pooled sessions BEFORE removing the worktree folder.
         # Their subprocess CWD is inside the worktree — if we don't kill
@@ -1239,7 +1295,8 @@ class WorktreeManager:
         # the session teardown and the git worktree removal above sit between
         # this write and the reads at the top.
         await run_sync(
-            database.update_worktree, worktree_id, status=WorktreeStatus.COMPLETED
+            database.update_worktree, worktree_id, status=WorktreeStatus.COMPLETED,
+            cleanup_owner=cleanup_proof,
         )
 
         logger.debug(f"Cleaned up worktree {worktree_id} (marked COMPLETED)")
@@ -1351,6 +1408,52 @@ class WorktreeManager:
         if session_id and project_id:
             database.set_session_project(session_id, project_id)
 
+    def _reopen_owned_worktree(self, worktree: dict) -> dict:
+        """Resume pinned work at its registered path, never via the current base."""
+        from app.core.checkout_manager import _require_branch_binding
+
+        try:
+            owner = _verified_owner(_owned_worktree_project(worktree), worktree)
+            root, target = owner["root"], get_worktree_working_dir(worktree)
+            branch = worktree["branch_name"]
+
+            def verified_tip() -> Optional[str]:
+                listing, _ = _inspect_worktree_owner(root, target, owner["common"])
+                if listing and Path(target).is_dir() and worktree["status"] == WorktreeStatus.ACTIVE:
+                    _require_branch_binding(target, branch)
+                    return None  # Already active; its tip can advance.
+                tip = _local_branch_tip(root, branch)
+                identity = _git_dir_identity(owner["common"])
+                if not tip or not identity or owner.get("retained") != {"branch": branch, "tip": tip, "git_dir": identity}:
+                    raise WorktreeError("the original Git directory and exact retained branch and tip could not be verified")
+                if listing is not None or os.path.lexists(target):
+                    raise WorktreeError("the original worktree path is occupied or still registered with Git")
+                return tip
+
+            # Fail before writing even the lock in an unverified Git directory.
+            verified_tip()
+            with repo_worktree_lock(root):
+                tip = verified_tip()
+                if tip is None:
+                    self._require_finished_materialization(target)
+                    return worktree
+                success, error = self.git_service.add_worktree(root, target, branch, new_branch=False)
+                if not success:
+                    raise WorktreeError(error or "Git could not reopen the retained branch")
+                listing, _ = _inspect_worktree_owner(root, target, owner["common"])
+                if not listing or listing["branch"] != branch or listing["head"] != tip:
+                    raise WorktreeError("the reopened worktree is not at the retained branch and tip")
+                self._require_finished_materialization(target)
+                # The active branch can advance; only a new Keep records a tip
+                # for the next reopen. Owner and path stay pinned.
+                owner = {key: value for key, value in owner.items() if key != "retained"}
+                return database.update_worktree(worktree["id"], status=WorktreeStatus.ACTIVE,
+                                                cleanup_owner=owner)
+        except WorktreeError as exc:
+            raise WorktreeError(f"Reopen refused: {exc}.") from exc
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            raise WorktreeError("Reopen refused: original Git checkout could not be verified.") from exc
+
     def recreate_worktree(
         self, worktree_id: str, rebind_session_id: Optional[str] = None
     ) -> Dict:
@@ -1358,11 +1461,9 @@ class WorktreeManager:
         Recreate a worktree from its branch (last git state) so the user can
         resume the session — regardless of the record's prior status.
 
-        Worktree sessions are never a dead end: this recreates from ANY status
-        (COMPLETED, DELETED, ORPHANED, or ACTIVE-but-invalid-on-disk). It reuses
-        the existing branch if it still exists locally, otherwise creates a new
-        branch off the default branch. The existing DB record is flipped back to
-        ACTIVE with the new path.
+        With ownership proof, only the original owner and exact kept branch
+        can reopen an inactive worktree. Unpinned legacy records retain their
+        branch recovery behavior. Reactivation updates the existing record.
 
         The only fast path: if the record is ACTIVE and still valid on disk, the
         existing worktree is returned unchanged.
@@ -1382,6 +1483,9 @@ class WorktreeManager:
         worktree = database.get_worktree(worktree_id)
         if not worktree:
             raise WorktreeError(f"Worktree not found: {worktree_id}")
+
+        if worktree.get("cleanup_owner") is not None:
+            return self._reopen_owned_worktree(worktree)
 
         if worktree["status"] == WorktreeStatus.ACTIVE:
             # Already active — check if valid on disk

@@ -629,34 +629,24 @@ def _ensure_base_checkout(
     project_id: str,
     runner_id: str,
     project_v2_row: Optional[Dict[str, Any]] = None,
+    *,
+    discover_worktrees: bool = False,
 ) -> Optional[str]:
-    """Resolve the base (branch-NULL) checkout path for a project on this runner.
-
-    Returns the path when a base checkout row exists AND its dir exists (refreshing
-    ``status`` to ``'active'`` if it had drifted). When there is NO base checkout row
-    on this runner, attempts a lazy self-seed (``_seed_base_checkout``, behind
-    ``AI_SHUFFLE_SELF_SEED``); if the seed cannot run (flag off, or no cloneable URL
-    resolved) it falls through to ``None`` — honestly "not materialized here". When a
-    row exists but its dir is gone we NEVER recreate it in place — honest ``None``.
-    """
-    # branch=None → base checkout; legacy fallback resolves the runner_id=''
-    # rows the v60 collapse seeded for pre-instance_id legacy projects.
-    rows = checkouts_db.list_checkouts_with_legacy_fallback(project_id, runner_id)
-    if not rows:
+    """Resolve an available base; only seed when no registration or row exists."""
+    rows, registered = checkouts_db.base_checkout_candidates(project_id, runner_id)
+    if not rows and not registered:
         return _seed_base_checkout(project_v2_row, project_id, runner_id)
     for row in rows:
         path = row.get("path")
         if not path:
             continue
-        # A removed checkout must not mask a later, usable checkout on this runner.
-        # Normalize legacy relative paths without rewriting their uniqueness key.
         resolved = _resolve_checkout_path(path)
         if not os.path.isdir(resolved):
             continue
-        if row.get("status") != "active" and os.path.isabs(path):
-            checkouts_db.upsert_checkout(project_id, runner_id, path, status="active")
+        # Retained folders serve bound chats, not catalog/worktree discovery.
+        if discover_worktrees and checkouts_db.is_active(row):
+            register_unregistered_worktrees(project_id, runner_id, resolved)
         return resolved
-    # Rows survive but every directory is gone — do not recreate them in place.
     return None
 
 
@@ -1861,10 +1851,7 @@ def ensure_checkout(
 
     branch = (branch or "").strip()
     if not branch:
-        base = _ensure_base_checkout(project_id, runner_id, project_v2_row)
-        if base:
-            register_unregistered_worktrees(project_id, runner_id, base)
-        return base
+        return _ensure_base_checkout(project_id, runner_id, project_v2_row, discover_worktrees=True)
     try:
         path = _ensure_branch_checkout(
             project_v2_row,

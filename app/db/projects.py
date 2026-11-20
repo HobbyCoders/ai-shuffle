@@ -298,14 +298,53 @@ class FolderConflict(Exception):
     """An unsafe or stale edit to a worker's base registration."""
 
 
+def _retarget_base(cursor, legacy_id, identity, runner, old_path, new_path, stored_path, *, original=False):
+    from app.db import checkouts
+
+    # The move is scoped to one legacy registration. A same-origin clone is
+    # not proof that its runner-local base can be edited or retired.
+    registrations = checkouts.live_base_registrations(cursor, identity, runner)
+    if [row['id'] for row in registrations] != [legacy_id]:
+        raise FolderConflict('This worker does not have a single matching base folder to change.')
+    cursor.execute(
+        'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
+        "AND (branch IS NULL OR branch = '') ORDER BY id FOR UPDATE", (identity, runner),
+    )
+    bases = cursor.fetchall()
+    old_key = checkouts.base_folder_key(old_path)
+    matching = [r for r in bases if (original or checkouts.is_active(r))
+                and r['path'] and checkouts.base_folder_key(r['path']) == old_key]
+    if not matching:
+        raise FolderConflict('This worker does not have a single matching base folder to change.')
+    # Old setup sometimes activated retained folders. Only the verified live
+    # path is writable; take stale active bases out of selection.
+    for row in bases:
+        if not original and row not in matching and checkouts.is_active(row):
+            cursor.execute('UPDATE checkouts SET status = %s, updated_at = NOW() WHERE id = %s',
+                           (checkouts.REMOVED_STATUS, row['id']))
+    # Setup can leave a legacy relative row beside its canonical absolute twin.
+    base = next((r for r in matching if checkouts.is_absolute_checkout_path(r['path'])), matching[0])
+    for duplicate in matching:
+        if duplicate['id'] != base['id']:
+            cursor.execute('DELETE FROM checkouts WHERE id = %s', (duplicate['id'],))
+    cursor.execute(
+        'SELECT 1 FROM checkouts WHERE project_id = %s AND runner_id = %s AND path IN (%s, %s) '
+        'AND id <> %s', (identity, runner, new_path, stored_path, base['id']),
+    )
+    if cursor.fetchone():
+        raise FolderConflict('That folder is already registered as a checkout.')
+    cursor.execute(
+        'UPDATE checkouts SET path = %s, status = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
+        'WHERE id = %s', (new_path, checkouts.REMOVED_STATUS if original else base['status'], base['id']),
+    )
+
+
 def retarget_folder(
     snapshot: dict, *, old_path: str, new_path: str, stored_path: str, same_folder: bool,
     name: Optional[str] = None, description: Optional[str] = None,
     settings_dict: Optional[Dict[str, Any]] = None,
 ) -> ProjectRow:
-    """Update exactly one worker's live base checkout and legacy row together."""
-    from app.db import checkouts
-
+    """Move the worker's live base and any proven first-link base in one transaction."""
     project_id = snapshot['id']
     runner = settings.effective_instance_id
     with get_db() as conn:
@@ -317,56 +356,32 @@ def retarget_folder(
         if not same_folder:
             from app.core.worktree_manager import preserve_worktree_owners
 
+            from app.db import project_catalog_aliases
+
             pv2_id = _catalog_project_v2_id(cursor, _catalog_origin(current))
-            # Lock chats before inspecting live/queued turns: turn admission
-            # takes the same session row lock. A running chat may still hold
-            # the old cwd while its tools resolve the project again.
-            cursor.execute(
-                'SELECT id FROM sessions WHERE (instance_id = %s OR instance_id IS NULL) '
-                'AND (project_id = %s OR project_v2_id = %s) ORDER BY id FOR UPDATE',
-                (runner, project_id, pv2_id),
+            original_id = project_catalog_aliases.original_for_legacy(cursor, project_id, pv2_id)
+            # Turn admission locks the same rows. Include shared-only chats on
+            # either identity, not explicit bindings to past, unrelated links.
+            scope = (
+                "(instance_id = %s OR instance_id IS NULL) AND "
+                "((project_v2_id IS NULL AND project_id = %s) OR project_v2_id IN (%s, %s))"
             )
+            params = (runner, project_id, pv2_id, original_id)
+            cursor.execute(f'SELECT id FROM sessions WHERE {scope} ORDER BY id FOR UPDATE', params)
             if cursor.fetchall():
                 cursor.execute(
-                    'SELECT 1 FROM turns t JOIN sessions s ON s.id = t.session_id '
-                    'WHERE (s.instance_id = %s OR s.instance_id IS NULL) '
-                    'AND (s.project_id = %s OR s.project_v2_id = %s) '
-                    "AND t.state IN ('queued','running','interrupting','draining') LIMIT 1",
-                    (runner, project_id, pv2_id),
+                    'SELECT 1 FROM turns WHERE session_id IN '
+                    f'(SELECT id FROM sessions WHERE {scope}) '
+                    "AND state IN ('queued','running','interrupting','draining') LIMIT 1",
+                    params,
                 )
                 if cursor.fetchone():
                     raise FolderConflict('Wait for queued and running chats on this worker to finish first.')
-            cursor.execute(
-                'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
-                "AND (branch IS NULL OR branch = '') FOR UPDATE", (pv2_id, runner),
-            )
-            bases = [row for row in cursor.fetchall() if checkouts.is_active(row)]
-            old_key = checkouts.base_folder_key(old_path)
-            matching = [row for row in bases if row['path'] and checkouts.base_folder_key(row['path']) == old_key]
-            stale = [row for row in bases if row not in matching]
-            if not matching or (stale and checkouts.registered_base_key(cursor, pv2_id, runner) != old_key):
-                raise FolderConflict('This worker does not have a single matching base folder to change.')
-            # Older setup reactivated retained bases too. Keep their rows and
-            # files, but take them out of active selection when fixing the edit.
-            for row in stale:
-                cursor.execute("UPDATE checkouts SET status = %s, updated_at = NOW() WHERE id = %s",
-                               (checkouts.REMOVED_STATUS, row['id']))
-            # Setup can leave a legacy relative row beside its canonical absolute twin.
-            base = next((row for row in matching if checkouts.is_absolute_checkout_path(row['path'])), matching[0])
-            for duplicate in matching:
-                if duplicate['id'] != base['id']:
-                    cursor.execute('DELETE FROM checkouts WHERE id = %s', (duplicate['id'],))
-            cursor.execute(
-                'SELECT 1 FROM checkouts WHERE project_id = %s AND runner_id = %s AND path IN (%s, %s) '
-                'AND id <> %s', (pv2_id, runner, new_path, stored_path, base['id']),
-            )
-            if cursor.fetchone():
-                raise FolderConflict('That folder is already registered as a checkout.')
+            _retarget_base(cursor, project_id, pv2_id, runner, old_path, new_path, stored_path)
+            if original_id:
+                _retarget_base(cursor, project_id, original_id, runner, old_path, new_path, stored_path,
+                               original=True)
             preserve_worktree_owners(cursor, current, old_path)
-            cursor.execute(
-                'UPDATE checkouts SET path = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
-                'WHERE id = %s', (new_path, base['id']),
-            )
         if same_folder and name is None and description is None and settings_dict is None:
             return current
         cursor.execute(

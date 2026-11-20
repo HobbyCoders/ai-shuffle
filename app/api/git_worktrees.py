@@ -816,9 +816,8 @@ async def reopen_worktree(
     """
     Recreate a completed worktree so the user can resume the session.
 
-    Creates a new git worktree with the same branch name (new branch from
-    default branch if the old branch was deleted). Updates the DB record
-    back to ACTIVE.
+    Reactivates the registered worktree. Pinned worktrees must reopen in their
+    original checkout on the exact retained branch and tip.
     """
     check_project_access(request, project_id)
 
@@ -868,7 +867,7 @@ async def reopen_worktree(
         sessions = database.get_sessions_for_worktree(worktree_id)
         for sess in sessions:
             sid = sess["id"]
-            if local_pid and sess.get("project_id") != local_pid:
+            if updated.get("cleanup_owner") is None and local_pid and sess.get("project_id") != local_pid:
                 database.set_session_project(sid, local_pid)
                 logger.info(
                     f"Repointed session {sid} to local project {local_pid} after worktree reopen"

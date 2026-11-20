@@ -389,6 +389,8 @@ def update_worktree(
     worktree_path: Optional[str] = None,
     branch_name: Optional[str] = None,
     repository_id: Optional[str] = None,
+    *,
+    cleanup_owner: Optional[Dict[str, Any]] = None,
 ) -> Optional[WorktreeRow]:
     """Update a worktree.
 
@@ -419,6 +421,9 @@ def update_worktree(
     if repository_id is not None:
         updates.append("repository_id = %s")
         values.append(repository_id)
+    if cleanup_owner is not None:
+        updates.append("cleanup_owner = %s::jsonb")
+        values.append(json.dumps(cleanup_owner))
 
     if updates:
         values.append(worktree_id)
