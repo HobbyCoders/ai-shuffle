@@ -9,21 +9,27 @@
 
 	let { loginItem, platform }: { loginItem: DesktopLoginItem; platform: DesktopPlatform } = $props();
 	const access = getSettingsAccess();
-	let status = $state<DesktopLoginItemState | null>(null);
-	let busy = $state(false);
+	type ConfirmedStatus = Exclude<DesktopLoginItemState, 'unavailable'>;
+	let status = $state<ConfirmedStatus | null>(null);
+	let pending = $state<'read' | 'write' | null>(null);
+	const busy = $derived(pending !== null);
 	let refreshQueued = false;
 	let mounted = false;
 	let error = $state<string>();
 	const osSettings = $derived(platform === 'darwin'
 		? 'System Settings → General → Login Items & Extensions'
 		: 'Windows Settings → Apps → Startup');
-	const hint = $derived(error ?? (status === 'blocked'
-		? `Startup is off. To allow it, check ${osSettings}.`
-		: status === 'unavailable' ? 'Startup is unavailable for this installation.'
-		: status === null ? 'Checking startup settings…' : undefined));
+	const hint = $derived(pending === 'write' ? 'Saving startup setting…'
+		: pending === 'read' ? 'Checking startup settings…'
+		: error ?? (status === 'blocked' ? `Startup is off. To allow it, check ${osSettings}.`
+			: status === null ? 'Checking startup settings…' : undefined));
+
+	function isConfirmed(value: unknown): value is ConfirmedStatus {
+		return value === 'enabled' || value === 'disabled' || value === 'blocked';
+	}
 
 	function finish() {
-		busy = false;
+		pending = null;
 		if (!mounted || !refreshQueued) return;
 		refreshQueued = false;
 		void refresh(true);
@@ -35,11 +41,16 @@
 			refreshQueued = true;
 			return;
 		}
-		busy = true;
+		pending = 'read';
 		try {
 			const current = await loginItem.get();
-			if (!keepError || current !== status) error = undefined;
-			status = current;
+			if (!isConfirmed(current)) {
+				status = null;
+				error = current === 'unavailable' ? 'Startup is unavailable for this installation.' : 'Could not read the startup setting.';
+			} else {
+				if (!keepError || current !== status) error = undefined;
+				status = current;
+			}
 		} catch {
 			status = null;
 			error = 'Could not read the startup setting.';
@@ -49,21 +60,29 @@
 	}
 
 	async function change(enabled: boolean) {
-		if (busy || access.readOnly || status === null || status === 'unavailable') return;
-		busy = true;
+		if (busy || access.readOnly || status === null) return;
+		pending = 'write';
 		error = undefined;
 		try {
 			const result = await loginItem.set(enabled);
-			status = result.state;
-			if (result.failed && (!enabled || status !== 'blocked')) {
-				error = `Could not ${enabled ? 'turn on' : 'turn off'} startup. Check ${osSettings}.`;
+			if (isConfirmed(result?.state)) {
+				status = result.state;
+				if ((result.failed || status !== (enabled ? 'enabled' : 'disabled')) && (!enabled || status !== 'blocked')) {
+					error = `Could not ${enabled ? 'turn on' : 'turn off'} startup. Check ${osSettings}.`;
+				}
+			} else {
+				unconfirmedWrite();
 			}
 		} catch {
-			status = null;
-			error = 'Could not confirm the startup setting. Try reading it again.';
+			unconfirmedWrite();
 		} finally {
 			finish();
 		}
+	}
+
+	function unconfirmedWrite() {
+		status = null;
+		error = 'Could not confirm the startup setting. Try reading it again.';
 	}
 
 	onMount(() => {
@@ -83,6 +102,8 @@
 		{:else if status === null && error}
 			<ActionButton disabled={busy} onclick={() => refresh()}>Try again</ActionButton>
 		{/if}
-		<Switch controlled checked={status === 'enabled'} disabled={busy || status === null || status === 'unavailable'} onchange={change} />
+		{#if status !== null}
+			<Switch controlled checked={status === 'enabled'} disabled={busy} onchange={change} />
+		{/if}
 	</SettingRow>
 </RowGroup>

@@ -20,6 +20,8 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 		async setup({ page, status, variant }) {
 			await page.addInitScript(() => {
 				let state = 'disabled';
+				let failNextWrite = false;
+				window.addEventListener('test:startup-fail-write', () => { failNextWrite = true; });
 				window.addEventListener('test:startup-blocked', () => { state = 'blocked'; });
 				const noSubscription = () => () => {};
 				window.shuffleDesktop = {
@@ -29,7 +31,15 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 					updates: { getState: async () => ({ phase: 'idle' }), onState: noSubscription },
 					loginItem: {
 						get: async () => state,
-						set: async (on) => ({ state: state = on ? 'enabled' : 'disabled', failed: false })
+						set: async (on) => {
+							if (failNextWrite) {
+								failNextWrite = false;
+								await new Promise((_, reject) => {
+									window.addEventListener('test:startup-finish-write', () => reject(Error('write failed')), { once: true });
+								});
+							}
+							return { state: state = on ? 'enabled' : 'disabled', failed: false };
+						}
 					}
 				};
 			});
@@ -45,6 +55,19 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 			await mark('Opt in via the keyboard');
 			await control.press('Space');
 			await control.and(page.locator('[aria-checked="true"]:enabled')).waitFor();
+			const row = page.locator('[data-setting-anchor="general.startAtSignIn"]');
+			await mark('Try to turn off startup; the OS does not confirm the write');
+			await page.evaluate(() => window.dispatchEvent(new Event('test:startup-fail-write')));
+			await control.click();
+			await control.and(page.locator('[aria-checked="true"]:disabled')).waitFor();
+			const savingVisible = await row.locator('.st-rh').getByText('Saving startup setting…').isVisible();
+			await page.evaluate(() => window.dispatchEvent(new Event('test:startup-finish-write')));
+			await row.locator('.st-rh').getByText(/Could not confirm the startup setting/).waitFor();
+			expect(await control.count() === 0, 'an unconfirmed write does not show an Off switch');
+			expect(savingVisible, 'the pending write shows progress without changing the confirmed state');
+			await mark('Retry the read with the keyboard; startup is still on');
+			await row.getByRole('button', { name: 'Try again' }).press('Enter');
+			await control.and(page.locator('[aria-checked="true"]:enabled')).waitFor();
 			await mark('Turn off startup');
 			await control.click();
 			await control.and(page.locator('[aria-checked="false"]:enabled')).waitFor();
@@ -53,7 +76,6 @@ await runJourney({ name: 'desktop-startup', allow: DEV_INSTANCE_NOISE, cases: [
 				window.dispatchEvent(new Event('test:startup-blocked'));
 				window.dispatchEvent(new Event('focus'));
 			});
-			const row = page.locator('[data-setting-anchor="general.startAtSignIn"]');
 			const hint = row.locator('.st-rh').getByText('Startup is off. To allow it, check Windows Settings → Apps → Startup.');
 			await hint.waitFor({ state: 'visible' });
 			await control.and(page.locator('[aria-checked="false"]:enabled')).waitFor();

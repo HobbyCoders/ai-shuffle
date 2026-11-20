@@ -95,8 +95,7 @@ describe('General page', () => {
 		native.bridge = { platform: 'win32', loginItem: native };
 		expect(query('startup')[0].target).toEqual({ category: 'general', anchor: 'general.startAtSignIn' });
 		render(GeneralPage);
-		const control = switchFor('Start AI Shuffle at sign-in');
-		await waitFor(() => expect(control.disabled).toBe(false));
+		const control = await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in' });
 		expect(native.set).not.toHaveBeenCalled();
 		let finish!: (result: { state: string; failed: boolean }) => void;
 		native.set.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
@@ -121,9 +120,8 @@ describe('General page', () => {
 			}));
 		}
 		render(GeneralPage);
-		const control = switchFor('Start AI Shuffle at sign-in');
 		if (operation === 'write') {
-			await waitFor(() => expect(control.disabled).toBe(false));
+			const control = await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in' });
 			native.set.mockImplementationOnce(() => new Promise((resolve) => {
 				finish = () => resolve({ state: 'enabled', failed: false });
 			}));
@@ -136,7 +134,7 @@ describe('General page', () => {
 		expect(native.get).toHaveBeenCalledTimes(1);
 		finish();
 		await waitFor(() => expect(screen.getByRole('status').textContent).toContain('Startup is off.'));
-		expect(control.getAttribute('aria-checked')).toBe('false');
+		expect(switchFor('Start AI Shuffle at sign-in').getAttribute('aria-checked')).toBe('false');
 		expect(native.get).toHaveBeenCalledTimes(2);
 	});
 
@@ -144,8 +142,7 @@ describe('General page', () => {
 		native.bridge = { platform: 'darwin', loginItem: native };
 		native.get.mockResolvedValueOnce('enabled');
 		render(GeneralPage);
-		const control = switchFor('Start AI Shuffle at sign-in');
-		await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('true'));
+		const control = await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in', checked: true });
 		native.get.mockResolvedValueOnce('blocked');
 		await fireEvent.focus(window);
 		await waitFor(() => expect(control.getAttribute('aria-checked')).toBe('false'));
@@ -156,7 +153,39 @@ describe('General page', () => {
 		await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove startup item' })).toBeNull());
 	});
 
-	it('disables the switch if reading fails and can retry safely', async () => {
+	it.each(['rejects', 'returns unknown', 'returns unavailable'])('does not claim Off when a turn-off write %s', async (mode) => {
+		native.bridge = { platform: 'win32', loginItem: native };
+		native.get.mockResolvedValue('enabled');
+		let fail!: () => void;
+		native.set.mockImplementationOnce(() => new Promise((resolve, reject) => {
+			fail = () => mode === 'rejects' ? reject(Error('OS denied'))
+				: resolve({ state: mode === 'returns unknown' ? 'unknown' : 'unavailable', failed: true });
+		}));
+		render(GeneralPage);
+		const control = await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in', checked: true });
+		await fireEvent.click(control);
+		expect((control as HTMLButtonElement).disabled).toBe(true);
+		expect(control.getAttribute('aria-checked')).toBe('true');
+		fail();
+		await waitFor(() => expect(screen.queryByRole('switch', { name: 'Start AI Shuffle at sign-in' })).toBeNull());
+		await fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+		await screen.findByRole('switch', { name: 'Start AI Shuffle at sign-in', checked: true });
+		expect(native.set.mock.calls).toEqual([[false]]);
+	});
+
+	it('does not render a switch during the initial read or on an unavailable host', async () => {
+		native.bridge = { platform: 'darwin', loginItem: native };
+		let finish!: (state: string) => void;
+		native.get.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+		render(GeneralPage);
+		expect(screen.queryByRole('switch', { name: 'Start AI Shuffle at sign-in' })).toBeNull();
+		expect(screen.getByRole('status').textContent).toMatch(/Checking startup settings/);
+		finish('unavailable');
+		await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/unavailable/));
+		expect(screen.queryByRole('switch', { name: 'Start AI Shuffle at sign-in' })).toBeNull();
+	});
+
+	it('hides the unconfirmed switch if reading fails and can retry safely', async () => {
 		native.bridge = { platform: 'darwin', loginItem: native };
 		native.get.mockRejectedValueOnce(Error('OS denied'));
 		render(GeneralPage);
