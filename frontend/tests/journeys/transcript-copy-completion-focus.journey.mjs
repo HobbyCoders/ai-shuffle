@@ -1,7 +1,7 @@
 // Named running-app check with controlled network status and scoped notification requests in the combined case.
 import assert from 'node:assert/strict';
 import { runJourney } from './runner.mjs';
-import { api, composer, gotoApp, uniq, waitChat } from './lib/app.mjs';
+import { composer, gotoApp, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const phases = new WeakMap();
 const downloading = { peer: 'peer-a', peer_name: 'ServerWorker', phase: 'downloading', pages_done: 30,
@@ -129,12 +129,39 @@ function makeCase(owner, viewports, throttle) {
 		}
 	};
 }
+// The runner skips act on a setup error. Keep the fixture only across
+// successful setup; POST directly so cleanup also works on about:blank.
+async function withNoticeCleanup(ctx, steps, { keepOnSuccess = false } = {}) {
+	const { page, status, log } = ctx;
+	async function dismiss() {
+		const id = page.__transcriptNotice;
+		assert.ok(id, 'transcript notification ID must be assigned before cleanup');
+		const url = new URL(`/api/v1/notifications/${encodeURIComponent(id)}/dismiss`, status.urls.ui);
+		const response = await page.request.post(url.href, { headers: { Origin: url.origin } });
+		assert.ok(response.ok(), `dismiss transcript notification ${id}: HTTP ${response.status()}`);
+		assert.equal((await response.json()).ok, true, `dismiss transcript notification ${id}: no owned row dismissed`);
+		log(`dismissed transcript notification ${id}`);
+	}
+	try {
+		await steps(ctx);
+	} catch (error) {
+		try {
+			await dismiss();
+		} catch (cleanupError) {
+			// The journey summary keeps only the first line of the error.
+			throw new AggregateError([error, cleanupError],
+				`${error.message.split('\n')[0]}; Fixture cleanup also failed: ${cleanupError.message.split('\n')[0]}`);
+		}
+		throw error;
+	}
+	if (!keepOnSuccess) await dismiss();
+}
+
 const historyAtCompletion = {
 	name: 'history-empty-tap-after-transcript-completion',
 	viewports: ['phone'],
 	throttles: ['fast'],
-	async setup(ctx) {
-		const { page, status, log } = ctx;
+	setup: (ctx) => withNoticeCleanup(ctx, async ({ page, status, log }) => {
 		const noticeId = page.__transcriptNotice = `transcript-focus-${uniq()}`;
 		// Persist the fixture before navigation, so the first history load can see it.
 		const url = new URL('/api/v1/notifications', status.urls.ui);
@@ -169,12 +196,12 @@ const historyAtCompletion = {
 		await openAtPhase(ctx, 'standalone-download');
 		await page.getByRole('button', { name: 'Notifications (1 unread)', exact: true })
 			.and(page.locator('header.topbar button.notif-btn')).waitFor();
-	},
-	async act({ page, mark, log }) {
-		const bell = page.locator('header.topbar button.notif-btn');
-		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
-		const restore = chip(page);
-		try {
+	}, { keepOnSuccess: true }),
+	async act(ctx) {
+		await withNoticeCleanup(ctx, async ({ page, mark, log }) => {
+			const bell = page.locator('header.topbar button.notif-btn');
+			const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
+			const restore = chip(page);
 			await mark('minimize by keyboard and open notification history');
 			await button(page, 'Minimize').press('Enter');
 			await focused(page, restore, 'transcript chip');
@@ -235,9 +262,7 @@ const historyAtCompletion = {
 			await panel.waitFor({ state: 'hidden' });
 			await focused(page, box, 'composer after tapping a real control');
 			await mark('composer kept focus');
-		} finally {
-			await api(page, 'POST', `/notifications/${page.__transcriptNotice}/dismiss`).catch(() => {});
-		}
+		});
 	}
 };
 
