@@ -36,7 +36,8 @@ draft skips. Which of them a run starts depends on the files the change touches
 - `ci-backend.yml`: `backend-select`, then up to eight backend shards (all eight
   off pull requests), parallel real PostgreSQL/boot contracts, unconditional
   security checks and the stable fail-closed `Backend tests` gate.
-- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment,
+- `ci-fluid.yml`: the complete fluid unit suite in its isolated environment
+  (four pytest workers, one test file per worker),
   plus a real-Claude-CLI tool-output contract matrix (2.1.286, 2.1.308,
   2.1.314). Each contract job fetches its versioned Linux CLI fixture from
   `downloads.claude.ai`, verifies the vendor manifest's checksum and size,
@@ -146,7 +147,7 @@ it skips nothing this way.
 | --- | --- |
 | `backend` | anything: its tests read sources all over the repository |
 | `javascript-checks` (every `ci-frontend.yml` job but the journeys) | `frontend/`, `mobile/`, `tools/`, `browser-mcp/`, the docs content, and the backend files those tests read (transcript views, the API contract, the connector catalog, shared fixtures) |
-| `fluid` | `fluid/`, `scripts/`, and the app's scratch-folder module its test setup loads |
+| `fluid` | `fluid/`, the scripts its tests and workflow load (the fake provider wire, the CLI fixture fetcher, the shared scratch helper and three measurement scripts; not the rest of `scripts/`), and the app's scratch-folder module its test setup loads |
 | `windows`, `desktop`, `desktop-source` | anything but prose, the UI's own source (`frontend/src/`, `frontend/tests/`, `mobile/src/`), `ios/` and `android/` (except `android/ci/`) |
 | `browser-workspace` | `browser-mcp/`, `frontend/`, `app/`, `fluid/`, `desktop/`, `docker/`, `scripts/`, the Python pins, its one test and the helpers every test loads |
 | `container` | what the image is built from and started with: not prose, the UI's own source, tests, other workflows, `android/`, `ios/` or `desktop/`. Of those it still reads the buyer's install files (`docs/install/compose/`), its UI smoke script and the setup wizard that script walks (`SETUP_UI` in `scripts/ci/plan.py`) |
@@ -236,7 +237,10 @@ The file lists are what makes a skip safe, and they have limits:
   `tests/scripts/test_ci_plan.py` fails when a path is outside its area's list
   that a workflow step names, that a Python file named there imports (however
   deep, test helpers and pytest plugins included), or that such a script
-  spells out itself. It cannot see a path a program builds at run time or a
+  spells out itself. For `fluid`, whose workflow names a folder of tests, it
+  also scans every file under `fluid/tests/` for the scripts they import or
+  open by a literal path, and follows those scripts in turn (leaving out their
+  `__main__` blocks, which loading a script by path never runs). It cannot see a path a program builds at run time or a
   file read by JavaScript or a shell script; the daily run checks everything
   on main within a day. When a test starts reading another part of the
   repository, add that part to its area in `scripts/ci/plan.py`.

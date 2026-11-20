@@ -115,10 +115,16 @@ AREAS = {
     },
     "fluid": {
         "jobs": ("fluid",),
-        # Its tests run and load the repository's scripts, and through
-        # scripts/ci/test_scratch.py the app's scratch-folder module.
-        "include": ("fluid/", "scripts/", "conftest.py", "app/__init__.py", "app/core/__init__.py",
-                    "app/core/temp_scratch.py", ".github/workflows/ci-fluid.yml"),
+        # The repository scripts its tests and workflow load, not all of
+        # scripts/ (test_ci_plan.py checks the list against the tests), and
+        # through scripts/ci/test_scratch.py the app's scratch-folder module.
+        "include": ("fluid/", "conftest.py", "app/__init__.py", "app/core/__init__.py",
+                    "app/core/temp_scratch.py", ".github/workflows/ci-fluid.yml",
+                    "scripts/__init__.py", "scripts/ci/test_scratch.py", "scripts/ci/bounded_apt.py",
+                    "scripts/ci/fetch_claude_fixture.py", "scripts/ci/publication_read_retry.py",
+                    "scripts/devloop/__init__.py", "scripts/devloop/fake_wire.py",
+                    "scripts/benchmark_compaction_target.py", "scripts/measure_learner_yield.py",
+                    "scripts/measure_workflow_learning.py"),
     },
     "windows": {"jobs": ("windows",), **DESKTOP},
     "desktop": {"jobs": ("desktop",), **DESKTOP},
