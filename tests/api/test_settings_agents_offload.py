@@ -178,11 +178,16 @@ async def test_create_profile_agent_keeps_read_decide_write_in_one_hop(
 async def test_get_integration_settings_makes_all_reads_in_one_hop(
     mock_db, loop_thread
 ):
+    from app.core import claude_auth_mode
+
     setting = _ThreadSpy(settings_api.database.get_system_setting)
     key = _ThreadSpy(settings_api.get_decrypted_api_key)
+    # The Anthropic key is the native Claude API provider's (the pinned key).
+    anthropic = _ThreadSpy(claude_auth_mode.selected_api_key)
 
     with patch.object(settings_api.database, "get_system_setting", setting), \
-         patch.object(settings_api, "get_decrypted_api_key", key):
+         patch.object(settings_api, "get_decrypted_api_key", key), \
+         patch.object(claude_auth_mode, "selected_api_key", anthropic):
         response = await settings_api.get_integration_settings(token="t")
 
     # Still the whole payload, with the defaults applied on empty settings.
@@ -190,8 +195,8 @@ async def test_get_integration_settings_makes_all_reads_in_one_hop(
     assert response.stt_model == "fal-ai/whisper"
     assert response.fal_api_key_set is False
     assert len(setting.threads) >= 19, "every setting is still read"
-    assert len(key.threads) == 2
-    _assert_one_worker_hop(loop_thread, setting, key)
+    assert len(key.threads) == 1 and len(anthropic.threads) == 1
+    _assert_one_worker_hop(loop_thread, setting, key, anthropic)
 
 
 async def test_get_integration_settings_does_not_stall_the_loop(mock_db):
