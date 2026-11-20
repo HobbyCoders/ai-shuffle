@@ -233,25 +233,29 @@
     ${endif}
   !macroend
 
-  Function un.onUninstSuccess
-    # NSIS does not call this after Abort, including the builder's failed
-    # atomic rename/restore. Also check the exe in case RMDir was incomplete.
-    ${if} $shuffleRetireStartup == "1"
-      ${ifNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
-        ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
-        ${if} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
-          ClearErrors
-          DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
-          ${if} ${Errors}
-            !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Windows Startup Apps."
+  !macro customHeader
+    # The builder includes this file before common.nsh defines the executable.
+    # Declare the callback only when the header hook runs, after common.nsh.
+    Function un.onUninstSuccess
+      # NSIS does not call this after Abort, including the builder's failed
+      # atomic rename/restore. Also check the exe in case RMDir was incomplete.
+      ${if} $shuffleRetireStartup == "1"
+        ${ifNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+          ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+          ${if} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+            ClearErrors
+            DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+            ${if} ${Errors}
+              !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Windows Startup Apps."
+            ${endif}
+            StrCpy $3 ""
           ${endif}
-          StrCpy $3 ""
-        ${endif}
-        ${if} $3 == ""
-          DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"
-          ClearErrors
+          ${if} $3 == ""
+            DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"
+            ClearErrors
+          ${endif}
         ${endif}
       ${endif}
-    ${endif}
-  FunctionEnd
+    FunctionEnd
+  !macroend
 !endif

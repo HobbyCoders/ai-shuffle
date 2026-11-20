@@ -208,7 +208,9 @@ test('per-user installers provision the guard in app-owned LocalAppData before s
 test('pinned NSIS selects the replacement before either ExecWait; old removal fences after the close check', () => {
   const template = file => readFileSync(path.join(require.resolve('app-builder-lib/package.json'), '..', 'templates/nsis', file), 'utf8');
   const section = template('installSection.nsh');
-  assert.match(template('installer.nsi'), /!insertmacro customHeader[\s\S]+Section "install"[\s\S]+!include "installSection.nsh"/);
+  assert.match(template('installer.nsi'), /!include "common.nsh"[\s\S]+!insertmacro customHeader[\s\S]+Section "install"[\s\S]+!include "installSection.nsh"/);
+  assert.match(template('common.nsh'), /!define APP_EXECUTABLE_FILENAME /);
+  assert.match(channelCode, /!macro customHeader\s+Function un\.onUninstSuccess\b/);
   assert.match(section, /CHECK_APP_RUNNING[\s\S]+!insertmacro uninstallOldVersion SHELL_CONTEXT[\s\S]+!insertmacro uninstallOldVersion HKEY_CURRENT_USER[\s\S]+!insertmacro installApplicationFiles/);
   assert.match(template('include/installUtil.nsh'), /StrCpy \$0 "\$0 --updated"[\s\S]+ExecWait .*\$uninstallerFileNameTemp[\s\S]+ExecWait .*\$uninstallerFileName/);
   const uninstaller = template('uninstaller.nsh');
