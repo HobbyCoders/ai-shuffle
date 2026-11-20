@@ -26,6 +26,8 @@ save_dialog='com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveD
 # About 135 of the suite's 860 seconds (run 44723603249): alone on the last part,
 # it no longer decides how long the slowest shard takes.
 longest='com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#workerFileLinkAboveTheBufferedCapStreamsWholeIntoTheSavedDocument'
+# The last part runs this in its own fresh process, so the shards leave it out.
+cold_chat='com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#coldChatStartsWithBootstrapAndNativeBridges'
 
 out="$RUNNER_TEMP/android-emulator/instrumentation"
 mkdir -p "$out"
@@ -106,7 +108,7 @@ elif (( ! last )); then
   timeout --kill-after=15s 600s adb -s emulator-5554 shell am instrument -w -r \
     -e timeout_msec 180000 \
     -e numShards "$(( parts - 1 ))" -e shardIndex "$(( part - 1 ))" \
-    -e notClass "$save_dialog,$longest" \
+    -e notClass "$save_dialog,$longest,$cold_chat" \
     -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
     com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
   python3 ci/check-instrumentation.py "$out/runner.txt"

@@ -244,8 +244,9 @@ jobs:
     needs: build
     continue-on-error: ${{ matrix.advisory }}
     runs-on: ubuntu-24.04
-    # One part takes about 7 minutes; leave room for the single retry after an emulator loss.
-    timeout-minutes: 30
+    # One part takes about 7 minutes, but the single retry after an emulator loss
+    # can need a second slow boot (up to 10 minutes each); keep the old headroom.
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: android

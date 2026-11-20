@@ -197,6 +197,7 @@ if "instrument" in args:
         save_dialog = "com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer"
         longest = ("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
                    "workerFileLinkAboveTheBufferedCapStreamsWholeIntoTheSavedDocument")
+        cold_chat = "com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#coldChatStartsWithBootstrapAndNativeBridges"
         every = []
         for part in (1, 2, 3, 4):
             with self.subTest(part=part):
@@ -213,7 +214,7 @@ if "instrument" in args:
                     self.assertEqual("180000", run[run.index("timeout_msec") + 1])
                     self.assertEqual(["3", str(part - 1)],
                                      [run[run.index("numShards") + 1], run[run.index("shardIndex") + 1]])
-                    self.assertEqual(f"{save_dialog},{longest}", run[run.index("notClass") + 1])
+                    self.assertEqual(f"{save_dialog},{longest},{cold_chat}", run[run.index("notClass") + 1])
                     self.assertEqual([], notification)
                     self.assertFalse(any("force-stop" in call for call in calls))
                     self.assertIn(f"PASSED (part {part} of 4: suite shard {part} of 3)", self.summary)
