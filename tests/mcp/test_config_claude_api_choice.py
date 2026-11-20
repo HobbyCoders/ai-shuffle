@@ -101,3 +101,58 @@ async def test_create_profile_cannot_pin_a_claude_api_subagent_model():
     payload = tool_result_json(result)
     assert payload["success"] is False and "Claude API" in payload["error"]
     write.assert_not_called()
+
+
+# ─── subagents (round 5) ──────────────────────────────────────────────────
+
+def _subagent_tool(name):
+    from app.mcp.config_subagents import _create_subagent_tools
+
+    return get_tool(_create_subagent_tools(is_admin=True), name)
+
+
+def _subagent_row(provider_models):
+    return {"id": "rev", "name": "Rev", "description": "d", "prompt": "p", "tools": None,
+            "model": None, "provider_models": provider_models, "skills": None,
+            "memory": None, "mcp_servers": None, "is_builtin": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slot", ["__native__", "__voice__"])
+async def test_create_subagent_cannot_pin_a_claude_api_model(slot):
+    with patch("app.db.database.get_subagent", return_value=None), \
+            patch("app.db.database.create_subagent") as write:
+        result = await _subagent_tool("createSubagent").handler(
+            {"name": "Rev", "description": "d", "prompt": "p", "provider_models": {slot: API}})
+    payload = tool_result_json(result)
+    assert payload["success"] is False and "Claude API" in payload["error"]
+    write.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("args", [
+    {"provider_models": {"__native__": API}},
+    {"add": {"provider_models": {"__native__": API}}},
+], ids=["replace", "map-add"])
+async def test_update_subagent_cannot_newly_pin_a_claude_api_model(args):
+    with patch("app.db.database.get_subagent",
+               return_value=_subagent_row({"__native__": "sonnet"})), \
+            patch("app.db.database.update_subagent") as write:
+        result = await _subagent_tool("updateSubagent").handler({"subagent_id": "rev", **args})
+    payload = tool_result_json(result)
+    assert payload["success"] is False and "Claude API" in payload["error"]
+    write.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_update_subagent_keeps_the_owners_saved_api_pin():
+    row = _subagent_row({"__native__": API})
+    with patch("app.db.database.get_subagent", return_value=row), \
+            patch("app.db.database.update_subagent", return_value={**row, "prompt": "new"}) as write:
+        kept = tool_result_json(await _subagent_tool("updateSubagent").handler(
+            {"subagent_id": "rev", "prompt": "new", "provider_models": {"__native__": API}}))
+        moved = tool_result_json(await _subagent_tool("updateSubagent").handler(
+            {"subagent_id": "rev", "provider_models": {"__native__": API_OPUS}}))
+    assert kept["success"] is True
+    assert moved["success"] is False and "Claude API" in moved["error"]
+    assert write.call_count == 1

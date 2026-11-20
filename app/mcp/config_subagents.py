@@ -22,7 +22,7 @@ from app.mcp.config_agent_edits import (
     unknown_op_fields,
     validate_profile_fields,
 )
-from app.mcp.config_helpers import _tool_result, _error
+from app.mcp.config_helpers import _tool_result, _error, claude_api_choice_error
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,8 @@ def _create_subagent_tools(is_admin: bool) -> list:
         provider_models, models_error = _provider_models_arg(args.get("provider_models"))
         if models_error:
             return _error(models_error)
+        if api_error := claude_api_choice_error(provider_models or {}, where="a subagent"):
+            return _error(api_error)
 
         import re
         # Generate ID from name using same logic as createProfile
@@ -341,6 +343,12 @@ def _create_subagent_tools(is_admin: bool) -> list:
                     unmatched[field] = missing
             if unmatched:
                 details["not_found_for_remove"] = unmatched
+            if "provider_models" in update_kwargs:
+                api_error = claude_api_choice_error(
+                    update_kwargs["provider_models"] or {}, existing.get("provider_models") or {},
+                    where="a subagent")
+                if api_error:
+                    return api_error, None, None, None, None
 
             tool_list = update_kwargs.get("tools")
             if tool_list is not None:

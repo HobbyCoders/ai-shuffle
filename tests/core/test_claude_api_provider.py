@@ -312,6 +312,30 @@ def test_a_claude_api_switch_always_asks_the_owner(key, monkeypatch):
                                              action="start a review")) is None
 
 
+def test_a_failed_approval_scope_lookup_refuses_without_asking(key, monkeypatch):
+    """S16: a transient DB error finding the approval's API user is a
+    retryable refusal, never an exception or the owner's ``None`` scope."""
+    import asyncio
+
+    from app.core import model_override
+
+    model = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:claude-sonnet-5"
+    monkeypatch.setattr(model_override, "chat_of", lambda sid: sid)
+    monkeypatch.setattr(model_override, "_APPROVED", {("chat-1", model, None)})
+
+    def broken(chat):
+        raise ConnectionError("database restarting")
+    monkeypatch.setattr("app.core.api_user_scope.viewer_api_user_id", broken)
+
+    async def approve(*a, **k):
+        raise AssertionError("must not prompt on a failed lookup")
+    monkeypatch.setattr(model_override, "_approve", approve)
+
+    with pytest.raises(PermissionError, match="Try again"):
+        asyncio.run(model_override.accept("chat-1", None, model=model, baseline="sonnet",
+                                          action="start a review"))
+
+
 def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):
     """A slow read for key A that passed the active-key check before the owner
     switched to B must not replace B's saved list."""

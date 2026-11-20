@@ -115,9 +115,15 @@ def stored_mode(*, cached: bool = False) -> Optional[str]:
 
 
 def default_mode(key_stored: bool, cli_signed_in: Optional[bool]) -> str:
-    """The mode an install without an explicit choice starts in (never ``off``)."""
-    if key_stored and not cli_signed_in:
-        return MODE_API_KEY
+    """The mode an install without an explicit choice starts in: subscription.
+
+    Never API key mode, even with only a key saved and the CLI signed out:
+    that mode makes the per-token key Claude's default, which only the owner
+    chooses (a restored or synced key is not that choice). The key still runs
+    any "Claude · API" model picked explicitly. The arguments are kept for
+    callers.
+    """
+    del key_stored, cli_signed_in
     return MODE_SUBSCRIPTION
 
 

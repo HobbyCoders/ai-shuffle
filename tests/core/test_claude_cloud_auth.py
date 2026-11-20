@@ -78,7 +78,7 @@ def _unset(env):
 def test_cloud_is_never_the_default_mode(store):
     assert claude_auth_mode.ensure_mode_recorded(cli_signed_in=False) == "subscription"
     assert claude_auth_mode.default_mode(key_stored=False, cli_signed_in=None) == "subscription"
-    assert claude_auth_mode.default_mode(key_stored=True, cli_signed_in=False) == "api_key"
+    assert claude_auth_mode.default_mode(key_stored=True, cli_signed_in=False) == "subscription"
 
 
 def test_default_install_cli_env_is_unchanged(store):

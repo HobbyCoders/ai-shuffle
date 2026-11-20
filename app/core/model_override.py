@@ -991,6 +991,25 @@ def _accepted_note(model: str, memory_id: str) -> str:
     return f"model {decoded[1] if decoded else model} accepted: owner memory {memory_id}"
 
 
+async def _approval_scope(chat_id: Optional[str]) -> Optional[str]:
+    """The API user an approval belongs to, or a retryable refusal.
+
+    A failed lookup refuses instead of guessing: ``None`` is the owner's own
+    scope, so substituting it could reuse the owner's approval for a key's chat.
+    """
+    import asyncio
+
+    from app.core.api_user_scope import viewer_api_user_id
+
+    try:
+        return await asyncio.to_thread(viewer_api_user_id, chat_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Model approval scope lookup failed: %s", type(exc).__name__)
+        raise PermissionError(
+            "Could not check who approved this model right now; nothing was started. "
+            "Try again in a moment.") from exc
+
+
 async def accept(session_id: str, profile_id: Optional[str], *, model: str,
                  baseline: Optional[str], action: str) -> Optional[Acceptance]:
     """How the user asked for ``model``: named, remembered or approved.
@@ -1004,7 +1023,6 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
     """
     import asyncio
 
-    from app.core.api_user_scope import viewer_api_user_id
     from app.core.model_registry import model_values
 
     key = (await asyncio.to_thread(chat_of, session_id), model)
@@ -1014,7 +1032,7 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
         # receipt counts (see named_by_user).
         if model == baseline:
             return None
-        cache_key = (*key, await asyncio.to_thread(viewer_api_user_id, key[0]))
+        cache_key = (*key, await _approval_scope(key[0]))
         if cache_key in _APPROVED:
             return Acceptance(APPROVED)
         if await asyncio.to_thread(_has_approval, *key):
@@ -1028,7 +1046,7 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
     except _NativeSearchIncomplete:
         # An unseen newer pin may supersede any saved routing or old approval.
         # This answer covers only this attempt, not another incomplete search.
-        cache_key = (*key, "incomplete", await asyncio.to_thread(viewer_api_user_id, key[0]))
+        cache_key = (*key, "incomplete", await _approval_scope(key[0]))
         return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
             action=action, cache_key=cache_key, key=key, incomplete=True))
     qualified = evidence is not None and not named_by_user(model, [evidence.get("text", "")])
@@ -1042,7 +1060,7 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
         # A fresh pin supersedes every older source, including a previous Yes.
         # Approval for this request survives restart, not a later version request.
         key = (*key, evidence["turn_id"])
-    cache_key = (*key, await asyncio.to_thread(viewer_api_user_id, key[0]))
+    cache_key = (*key, await _approval_scope(key[0]))
     if cache_key in _APPROVED:
         return Acceptance(APPROVED)
     if await asyncio.to_thread(_has_approval, *key):

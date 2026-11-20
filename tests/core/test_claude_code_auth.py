@@ -151,8 +151,9 @@ class TestModeDefault:
         (False, False, "subscription"),
         (False, True, "subscription"),
         (True, True, "subscription"),
-        (True, False, "api_key"),
-        (True, None, "api_key"),
+        # A saved key is not the owner choosing API key mode (S14).
+        (True, False, "subscription"),
+        (True, None, "subscription"),
     ])
     def test_default(self, key, signed_in, expected):
         assert claude_auth_mode.default_mode(key, signed_in) == expected
@@ -166,10 +167,19 @@ class TestModeDefault:
             assert claude_auth_mode.ensure_mode_recorded(False) == "subscription"
             assert claude_auth_mode.current_mode() == "subscription"
 
-    def test_existing_key_only_install_defaults_to_api_key(self, mock_db):
+    def test_a_key_only_install_is_not_opted_in_to_api_key_mode(self, mock_db):
+        """S14: a restored or synced key with no recorded mode and no CLI
+        sign-in records subscription; only the owner picks API key mode."""
+        with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
+            assert claude_auth_mode.current_mode() == "subscription"
+            assert not claude_auth_mode.prefers_claude_api()
+            assert claude_auth_mode.ensure_mode_recorded(False) == "subscription"
+        assert claude_auth_mode.stored_mode() == "subscription"
+
+    def test_an_explicit_api_key_choice_survives_startup(self, mock_db):
+        claude_auth_mode.set_mode("api_key")
         with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
             assert claude_auth_mode.ensure_mode_recorded(False) == "api_key"
-        assert claude_auth_mode.stored_mode() == "api_key"
 
     def test_set_mode_rejects_unknown(self, mock_db):
         with pytest.raises(ValueError):
