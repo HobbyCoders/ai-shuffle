@@ -68,6 +68,11 @@ class Check:
         self.networks = []
         self.results = []
         self.workspaces = {}
+        self.started = time.monotonic()
+
+    def mark(self, label):
+        # Elapsed time in the job log: where a slow run spent its minutes.
+        print(f"TIME: {time.monotonic() - self.started:6.1f}s {label}", flush=True)
 
     def docker(self, *args, input=None, check=True, timeout=120):
         result = subprocess.run(["docker", *map(str, args)], input=input,
@@ -170,7 +175,7 @@ class Check:
 
     def passed(self, name):
         self.results.append(name)
-        print("PASS:", name, flush=True)
+        print("PASS:", name, f"(+{time.monotonic() - self.started:.0f}s)", flush=True)
 
     def updater_lifecycle(self):
         """A synthetic signed release, real builds/install/PG and supervisor exec.
@@ -197,6 +202,7 @@ class Check:
         identity = self.system_id(initial)
         self.sql(initial, "CREATE TABLE updater_lifecycle_check (value text); INSERT INTO updater_lifecycle_check VALUES ('retained');")
         self.stop(initial)
+        self.mark("updater: initial install stopped; preparing the synthetic release")
         # A separate offline preparation process: the supervisor is stopped, so
         # no two processes can race state.json or own the managed database.
         # Track it even if docker run times out; cleanup must stop its builds
@@ -204,12 +210,21 @@ class Check:
         preparation = self.prefix + "-c" + str(len(self.containers))
         self.containers.append(preparation)
         try:
-            self.docker("run", "--name", preparation, "--network", "bridge", "--user", "99:100", "--entrypoint", "python",
-                        "-e", "DATA_DIR=/data", "-e", "AI_SHUFFLE_UPDATER_FIXTURE=1",
-                        "--mount", f"type=volume,src={volume},dst=/data",
-                        "--mount", fixture_mount,
-                        "--mount", f"type=bind,src={archive.resolve()},dst=/fixture-source.zip,readonly",
-                        self.image, fixture, "prepare", "/fixture-source.zip", timeout=900)
+            prepared = self.docker("run", "--name", preparation, "--network", "bridge", "--user", "99:100",
+                                   "--entrypoint", "python", "-e", "DATA_DIR=/data", "-e", "AI_SHUFFLE_UPDATER_FIXTURE=1",
+                                   "--mount", f"type=volume,src={volume},dst=/data",
+                                   "--mount", fixture_mount,
+                                   "--mount", f"type=bind,src={archive.resolve()},dst=/fixture-source.zip,readonly",
+                                   self.image, fixture, "prepare", "/fixture-source.zip", timeout=900)
+            # The producer's own stage timings (pip, npm, UI build, cache hits).
+            (self.artifacts / "updater-prepare.json").write_bytes(prepared.stdout)
+            try:
+                stages = json.loads(prepared.stdout.decode().strip().splitlines()[-1])["stages"]
+                print("TIME: updater build stages:", ", ".join(
+                    f"{item['stage']}={item['elapsed_ms'] / 1000:.1f}s/{item['outcome']}" for item in stages), flush=True)
+            except (ValueError, LookupError, TypeError):
+                pass  # timings are diagnostics; the fixture already asserted the result
+            self.mark("updater: synthetic release built and staged")
         finally:
             self.docker("cp", initial + ":/data/application-updates/build.log",
                         self.artifacts / "updater-build.log", check=False)
@@ -220,11 +235,14 @@ class Check:
                                   f"type=bind,src={public.resolve()},dst=/app/docker/application-update-key.pem,readonly"])
         try:
             self.ready(app)
+            self.mark("updater: resident app ready")
             self.docker("exec", "--user", "99:100", app, "python", fixture, "updater-ready")
+            self.mark("updater: resident updater finished its first pass")
             self.docker("exec", "--user", "99:100", app, "python", fixture, "install")
             installed = self.docker("exec", "--user", "99:100", app, "python", fixture, "installed", timeout=260)
             (self.artifacts / "updater-installed.json").write_bytes(installed.stdout)
             self.ready(app)
+            self.mark("updater: signed source installed and ready")
             assert self.system_id(app) == identity
             assert self.sql(app, "SELECT value FROM updater_lifecycle_check;") == "retained"
             # This CI-owned container restart is deliberately not an app/API
@@ -239,9 +257,10 @@ class Check:
                               "assert lock.acquire(); lock.close()")
             self.docker("run", "--rm", "--network", "none", "--user", "99:100", "--entrypoint", "python",
                         "--mount", f"type=volume,src={volume},dst=/data", self.image, "-c", available_lock)
+            self.mark("updater: container stopped for the controlled restart")
             self.docker("start", app)
             self.ready(app)
-            restarted = self.docker("exec", "--user", "99:100", app, "python", fixture, "restarted", timeout=260)
+            restarted =self.docker("exec", "--user", "99:100", app, "python", fixture, "restarted", timeout=260)
             (self.artifacts / "updater-restarted.json").write_bytes(restarted.stdout)
             self.ready(app)
             assert self.system_id(app) == identity
@@ -504,14 +523,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
     parser.add_argument("--artifacts", type=Path, required=True)
+    # PR CI runs the two groups on separate runners at once (container-postgres.yml);
+    # the release paths run both in one go. The groups share no container or volume.
+    parser.add_argument("--phases", choices=("all", "lifecycle", "updater"), default="all",
+                        help="lifecycle: boot, restore, identity and environment checks; updater: the signed update")
     args = parser.parse_args()
     check = Check(args.image, args.artifacts)
+    lifecycle = args.phases in ("all", "lifecycle")
     try:
         check.docker("image", "inspect", args.image)
-        check.fresh_persistence_and_restore()
-        check.updater_lifecycle()
-        check.identity_and_failure_safety()
-        check.removed_environment_regression()
+        if lifecycle:
+            check.fresh_persistence_and_restore()
+        if args.phases in ("all", "updater"):
+            check.updater_lifecycle()
+        if lifecycle:
+            # Needs the failing archive fresh_persistence_and_restore made.
+            check.identity_and_failure_safety()
+            check.removed_environment_regression()
     finally:
         check.cleanup()
 
