@@ -22,6 +22,8 @@ from pathlib import Path
 
 
 SHARD_COUNT = 8
+# xdist workers per shard (ci-backend.yml's -n): one per vCPU of ubuntu-24.04.
+SHARD_WORKERS = 4
 FULL = list(range(1, SHARD_COUNT + 1))
 REQUIRED_JOBS = frozenset({"backend-select", "backend-shard", "backend-contracts", "backend-security",
                            "backend-postgres"})
@@ -57,7 +59,7 @@ def check_gate(needs, receipts, head, shards=None, event="push", selection="all"
         raise ValueError("required backend job failed, cancelled, missing or skipped")
     if len(receipts) != len(shards) or {r.get("shard") for r in receipts} != set(shards):
         raise ValueError("missing/duplicate shard receipt")
-    if (any(r["head"] != head or r["count"] <= 0 or r["workers"] != 2 for r in receipts)
+    if (any(r["head"] != head or r["count"] <= 0 or r["workers"] != SHARD_WORKERS for r in receipts)
             or any(r.get("shards") != len(shards) or r.get("selection") != selection for r in receipts)
             or len({r["collection"] for r in receipts}) != 1
             or len({r["partition"] for r in receipts}) != 1

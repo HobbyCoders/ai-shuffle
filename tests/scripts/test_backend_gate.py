@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 import pytest
-from scripts.ci.backend_gate import check_gate
+from scripts.ci.backend_gate import SHARD_WORKERS, check_gate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -18,7 +18,7 @@ SELECTED = "files-0123456789abcdef"
 def healthy_gate(shards=8, selection="all"):
     needs = {name: {"result": "success"} for name in JOBS}
     receipts = [{"shard": i, "head": "head", "count": 2, "total": 2 * shards, "shards": shards,
-                 "selection": selection, "collection": "collection", "partition": "partition", "workers": 2}
+                 "selection": selection, "collection": "collection", "partition": "partition", "workers": SHARD_WORKERS}
                 for i in range(1, shards + 1)]
     return needs, receipts
 
@@ -44,7 +44,7 @@ def test_fault_injected_gate_blocks_unsuccessful_jobs(job, result):
         check_gate(needs, receipts, "head")
 
 
-@pytest.mark.parametrize("fault", ["missing-job", "missing-shard", "duplicate-shard", "empty-shard", "wrong-head", "wrong-total", "wrong-collection", "wrong-partition", "missing-worker", "extra-job", "wrong-shard-count", "no-shard-count", "wrong-selection", "no-selection"])
+@pytest.mark.parametrize("fault", ["missing-job", "missing-shard", "duplicate-shard", "empty-shard", "wrong-head", "wrong-total", "wrong-collection", "wrong-partition", "missing-worker", "old-two-workers", "extra-job", "wrong-shard-count", "no-shard-count", "wrong-selection", "no-selection"])
 def test_fault_injected_gate_blocks_incomplete_evidence(fault):
     needs, receipts = healthy_gate()
     if fault == "missing-job":
@@ -58,7 +58,7 @@ def test_fault_injected_gate_blocks_incomplete_evidence(fault):
     else:
         key, value = {"empty-shard": ("count", 0), "wrong-head": ("head", "other"),
                       "wrong-total": ("total", 9), "wrong-collection": ("collection", "other"),
-                      "wrong-partition": ("partition", "other"), "missing-worker": ("workers", 1),
+                      "wrong-partition": ("partition", "other"), "missing-worker": ("workers", SHARD_WORKERS - 1), "old-two-workers": ("workers", 2),
                       "wrong-shard-count": ("shards", 4), "no-shard-count": ("shards", None),
                       "wrong-selection": ("selection", SELECTED), "no-selection": ("selection", None)}[fault]
         receipts[0][key] = value

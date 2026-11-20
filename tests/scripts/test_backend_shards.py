@@ -11,6 +11,7 @@ import pytest
 import yaml
 
 from scripts.ci import backend_shards as bs
+from scripts.ci.backend_gate import SHARD_WORKERS
 
 ROOT = Path(__file__).resolve().parents[2]
 # Tests that start nested two-worker pytest runs. The policy step runs
@@ -250,7 +251,7 @@ def test_workflow_stable_fail_closed_gate_and_free_runner():
     for exclusion in ("--deselect=tests/test_scan_blocking_db.py",
                       "--ignore=tests/core/test_container_runtime.py", "--ignore=tests/core/test_container_image_contract.py"):
         assert exclusion in text
-    assert '-n 2' in text and 'scripts.ci.backend_shards' in text
+    assert f'-n {SHARD_WORKERS}' in text and 'scripts.ci.backend_shards' in text
     run = next(step["run"] for step in jobs["backend-shard"]["steps"] if "backend_shard_run.py" in step.get("run", ""))
     assert '--backend-shard-count "$SHARD_COUNT" --backend-selection "$SELECTION"' in run
     assert 'if [ "$SELECTION" = all ]; then' in run
@@ -415,7 +416,7 @@ def test_main_refresh_downloads_and_validates_complete_execution(
                 continue
             receipt = {"shard": index, "head": "head", "count": len(shard), "total": len(nodes),
                        "collection": bs.digest(sorted(nodes)), "partition": bs.digest(shards),
-                       "selected": bs.digest(shard), "workers": 2, "shards": bs.SHARD_COUNT, "selection": "all"}
+                       "selected": bs.digest(shard), "workers": SHARD_WORKERS, "shards": bs.SHARD_COUNT, "selection": "all"}
             timings = {node: 0.5 for node in shard}
             if fault == "wrong-selected" and index == 1:
                 receipt["selected"] = "invalid"

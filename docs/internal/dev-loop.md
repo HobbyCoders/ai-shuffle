@@ -705,6 +705,9 @@ hosted runtime from `scripts/devloop/journey_weights.json` when the current
 case counts automatically use a conservative case-count estimate (the global
 median per case, and at least the old runtime scaled up for case growth).
 Historical rows remain unchanged; feature PRs do not need a pre-merge measurement.
+With `--only`, a file estimated above about 2.5 minutes is split into parts
+(`name.journey.mjs#k/n`: every n-th case from case k) when that shortens the
+longest shard and each part gets its own shard; an unfiltered run never splits.
 `python -m scripts.devloop.ci plan --shards N` prints the JSON split, with
 estimated minutes in stderr and `$GITHUB_STEP_SUMMARY`. Refresh the medians
 with `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`

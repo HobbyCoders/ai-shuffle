@@ -169,6 +169,36 @@ def test_crashed_journey_is_retried_as_a_whole_file(driver, second, expected):
         assert "attempt 2 process error" in text or "retry case error" in text
 
 
+PART_CASES = ["a@desktop-fast", "b@desktop-fast", "c@phone-slow"]
+
+
+@pytest.fixture
+def part_driver(driver, monkeypatch):
+    # A pull request's plan split flow.journey.mjs; this shard runs part 1 of 2.
+    monkeypatch.setattr(ci, "plan", lambda _, only=None: [["flow.journey.mjs#1/2"], ["flow.journey.mjs#2/2"]])
+    monkeypatch.setattr(ci, "case_ids", lambda path: list(PART_CASES))
+    return driver
+
+
+def test_a_part_runs_exactly_its_own_cases(part_driver):
+    run, calls, *_ = part_driver
+    mine = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
+    assert run({"flow.journey.mjs": mine}, {}) == 0
+    assert [(a, n, ids) for a, n, ids, *_ in calls] == [(1, "flow.journey.mjs", ["a@desktop-fast", "c@phone-slow"])]
+
+
+@pytest.mark.parametrize("first", [None, [case("a@desktop-fast", "pass"), case("b@desktop-fast", "pass")]],
+                         ids=["crashed", "other-cases"])
+@pytest.mark.parametrize("second, expected", [(None, 1), ("own", 0)])
+def test_a_crashed_or_foreign_part_retries_only_its_own_cases(part_driver, first, second, expected):
+    run, calls, _, summary, *_ = part_driver
+    own = [case("a@desktop-fast", "pass"), case("c@phone-slow", "pass")]
+    assert run({"flow.journey.mjs": first}, {"flow.journey.mjs": own if second == "own" else None}) == expected
+    mine = ["a@desktop-fast", "c@phone-slow"]
+    assert [(a, ids) for a, _, ids, *_ in calls] == [(1, mine), (2, mine)]
+    assert "(whole journey)" in summary.read_text()
+
+
 def test_known_bug_verdict_is_not_retried(driver, capsys):
     run, calls, _, summary, outputs, *_ = driver
     assert run({"flow.journey.mjs": [case(status="known-bug")]}, {}) == 0

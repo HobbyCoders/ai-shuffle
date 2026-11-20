@@ -146,6 +146,76 @@ def test_shards_are_an_exact_balanced_partition():
         ci.partition(weights, 0)
 
 
+def _cases(monkeypatch, counts):
+    listed = []
+
+    def case_ids(path):
+        listed.append(path.name)
+        return [f"{path.name}-{i}@desktop-fast" for i in range(counts[path.name])]
+
+    monkeypatch.setattr(ci, "case_ids", case_ids)
+    return listed
+
+
+def test_a_selection_splits_heavy_files_into_parts_of_the_target_size(monkeypatch):
+    listed = _cases(monkeypatch, {"big.journey.mjs": 10})
+    entries = ci.split_heavy({"big.journey.mjs": 600, "small.journey.mjs": 100}, 18)
+    # 600s in 2.5-minute parts: four parts of 3, 3, 2 and 2 interleaved cases.
+    assert entries == {"big.journey.mjs#1/4": 180, "big.journey.mjs#2/4": 180,
+                       "big.journey.mjs#3/4": 120, "big.journey.mjs#4/4": 120, "small.journey.mjs": 100}
+    assert listed == ["big.journey.mjs"]  # only a file being split is listed again
+
+
+def test_splitting_never_puts_two_parts_of_a_file_on_one_shard(monkeypatch):
+    _cases(monkeypatch, {"big.journey.mjs": 10, "few.journey.mjs": 2, "a.journey.mjs": 8, "b.journey.mjs": 8})
+    weights = {"big.journey.mjs": 600, "small.journey.mjs": 100}
+    big = [f"big.journey.mjs#{i}/{n}" for n in (2, 3) for i in range(1, n + 1)]
+    assert sorted(ci.split_heavy(weights, 3)) == big[2:] + ["small.journey.mjs"]
+    assert sorted(ci.split_heavy(weights, 2)) == big[:2] + ["small.journey.mjs"]
+    assert ci.split_heavy(weights, 1) == weights
+    for buckets in (ci.partition(ci.split_heavy(weights, n), n) for n in (1, 2, 3, 18)):
+        assert all(len({ci.entry_file(e) for e in bucket}) == len(bucket) for bucket in buckets)
+    # Never more parts than cases; two equally heavy files are both split.
+    assert sorted(ci.split_heavy({"few.journey.mjs": 900}, 18)) == ["few.journey.mjs#1/2", "few.journey.mjs#2/2"]
+    assert sorted(ci.split_heavy({"a.journey.mjs": 400, "b.journey.mjs": 400}, 18)) == [
+        f"{f}.journey.mjs#{i}/3" for f in "ab" for i in (1, 2, 3)]
+
+
+def test_a_split_selection_gives_every_part_its_own_shard_and_every_case_once(tmp_path, monkeypatch):
+    for name in ("big.journey.mjs", "mid.journey.mjs", "small.journey.mjs"):
+        (tmp_path / name).touch()
+    counts = {"big.journey.mjs": 23, "mid.journey.mjs": 9, "small.journey.mjs": 4}
+    _cases(monkeypatch, counts)
+    weights = tmp_path / "weights.json"
+    weights.write_text(json.dumps({"seconds": {"big.journey.mjs": 560, "mid.journey.mjs": 400,
+                                               "small.journey.mjs": 60},
+                                   "seconds_per_case": 10, "case_counts": counts}))
+    buckets = ci.plan(18, tmp_path, weights, only=list(counts))
+    filled = [bucket for bucket in buckets if bucket]
+    assert all(len(bucket) == 1 for bucket in filled) and len(filled) == 4 + 3 + 1
+    ran = [id for (entry,) in filled
+           for id in (ci.part_cases(entry, tmp_path) or ci.case_ids(tmp_path / entry))]
+    assert sorted(ran) == sorted(id for name in counts for id in ci.case_ids(tmp_path / name))
+    assert ci.plan(18, tmp_path, weights, only=list(counts)) == buckets  # every shard plans the same
+    # The full run (no selection) is planned by whole files, as before.
+    assert sorted(n for b in ci.plan(18, tmp_path, weights) for n in b) == sorted(counts)
+
+
+def test_a_part_runs_its_exact_cases_and_a_bad_part_fails_closed(tmp_path, monkeypatch):
+    _cases(monkeypatch, {"big.journey.mjs": 5})
+    (tmp_path / "big.journey.mjs").touch()
+    commands = ci.commands_for(["big.journey.mjs#2/2", "small.journey.mjs"], 18, tmp_path, per_file=True)
+    assert commands == [["node", str(tmp_path / "big.journey.mjs"),
+                         "--case=big.journey.mjs-1@desktop-fast", "--case=big.journey.mjs-3@desktop-fast"],
+                        ["node", str(tmp_path / "small.journey.mjs")]]
+    assert ci.selected_cases(commands[0]) == ["big.journey.mjs-1@desktop-fast", "big.journey.mjs-3@desktop-fast"]
+    assert ci.selected_cases(commands[1]) is None
+    assert ci.entry_file("big.journey.mjs#2/2") == "big.journey.mjs"
+    for bad in ("big.journey.mjs#3/2", "big.journey.mjs#1/6"):
+        with pytest.raises(ValueError, match="no such part"):
+            ci.part_cases(bad, tmp_path)
+
+
 def test_one_shard_uses_run_all_when_it_exists(tmp_path):
     for name in ("a.journey.mjs", "b.journey.mjs"):
         (tmp_path / name).write_text("")

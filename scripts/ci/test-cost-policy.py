@@ -374,7 +374,9 @@ class CostPolicyTests(unittest.TestCase):
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertEqual(config["jobs"][key]["runs-on"], LINUX_RUNNER)
         command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")
-        self.assertIn('-n 2', command)
+        # One xdist worker per vCPU; backend_gate.py checks each receipt's count.
+        self.assertIn('-n 4 ', command)
+        self.assertIn("SHARD_WORKERS = 4\n", (ROOT / "scripts/ci/backend_gate.py").read_text())
         self.assertIn('-p scripts.ci.backend_shards', command)
 
     def test_public_app_workflows_use_standard_hosted_runners(self):

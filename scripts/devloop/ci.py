@@ -83,6 +83,14 @@ READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
 SUMMARY_TOTAL_CHARS = 400_000
+# A selected run (a pull request's) splits a heavy journey file into parts of
+# about this many seconds while the parts still fit one per shard: a shard
+# pays about two minutes of fixed setup, so a 2.5-minute part keeps each
+# shard near four minutes. Main's full run has more files than shards and
+# is never split. A part is "name.journey.mjs#k/n": every n-th listed case
+# id from the k-th, run with the runner's exact --case selection.
+PART_SECONDS = 150
+PART = re.compile(r"^(?P<name>[^#]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)$")
 
 
 # ─── plan ──────────────────────────────────────────────────────────────────
@@ -92,21 +100,95 @@ def journey_files(directory: Path = JOURNEYS) -> list[Path]:
     return sorted(directory.glob("*.journey.mjs"))
 
 
-def case_count(path: Path, *, strict: bool = False) -> int:
-    """Count all listed cases; strict callers reject unreadable inventories."""
+def case_ids(path: Path) -> list[str]:
+    """Every case id the journey lists, in run order; unreadable lists raise ValueError."""
     try:
         listed = subprocess.run(["node", str(path), "--list", "--only="], cwd=FRONTEND,
                                 capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
-        if strict:
-            raise ValueError(f"Cannot read case count for {path.name}: --list failed") from error
-        return 1
+        raise ValueError(f"Cannot read case count for {path.name}: --list failed") from error
     lines = [line for line in listed.stdout.splitlines() if line.strip()]
     if listed.returncode != 0 or not lines or len(lines) != len(set(lines)):
+        raise ValueError(f"Cannot read case count for {path.name}: --list did not return unique cases")
+    return lines
+
+
+def case_count(path: Path, *, strict: bool = False) -> int:
+    """Count all listed cases; strict callers reject unreadable inventories."""
+    try:
+        return len(case_ids(path))
+    except ValueError:
         if strict:
-            raise ValueError(f"Cannot read case count for {path.name}: --list did not return unique cases")
+            raise
         return 1
-    return len(lines)
+
+
+def entry_file(entry: str) -> str:
+    """The journey file a plan entry runs: the entry itself, or a part's file."""
+    match = PART.match(entry)
+    return match["name"] if match else entry
+
+
+def part_cases(entry: str, directory: Path = JOURNEYS) -> list[str] | None:
+    """A part's exact case ids (None for a whole file); fails closed on a bad part."""
+    match = PART.match(entry)
+    if match is None:
+        return None
+    index, parts = int(match["index"]), int(match["parts"])
+    ids = case_ids(directory / match["name"])
+    if not 1 <= index <= parts <= len(ids):
+        raise ValueError(f"{entry}: no such part of {len(ids)} cases")
+    return ids[index - 1::parts]
+
+
+def _expand(weights: dict[str, float], parts: dict[str, int], cases: dict[str, int]) -> dict[str, float]:
+    entries: dict[str, float] = {}
+    for name, count in parts.items():
+        if count == 1:
+            entries[name] = weights[name]
+            continue
+        for index in range(1, count + 1):
+            share = len(range(index - 1, cases[name], count)) / cases[name]
+            entries[f"{name}#{index}/{count}"] = weights[name] * share
+    return entries
+
+
+def _loads(entries: dict[str, float], shards: int) -> tuple[float, ...] | None:
+    """The packed plan's shard loads, longest first; None when two parts of a file share a shard."""
+    loads = []
+    for bucket in partition(entries, shards):
+        files = [entry_file(entry) for entry in bucket]
+        if len(files) != len(set(files)):
+            return None
+        if bucket:
+            loads.append(sum(entries[entry] for entry in bucket))
+    return tuple(sorted(loads, reverse=True))
+
+
+def split_heavy(weights: dict[str, float], shards: int, directory: Path = JOURNEYS) -> dict[str, float]:
+    """Split the heaviest file into one more part while that shortens the long shards.
+
+    A split is kept only when the shard loads, longest first, get smaller (two
+    equally long files both get split). Parts of one file never share a shard:
+    each part runs on its own fresh instance.
+    """
+    parts = dict.fromkeys(weights, 1)
+    cases: dict[str, int] = {}
+    longest = _loads(dict(weights), shards)
+    while True:
+        name = max(parts, key=lambda n: (weights[n] / parts[n], n))
+        if weights[name] / parts[name] <= PART_SECONDS:
+            break
+        if name not in cases:
+            cases[name] = len(case_ids(directory / name))
+        if parts[name] >= cases[name]:
+            break
+        trial = {**parts, name: parts[name] + 1}
+        packed = _loads(_expand(weights, trial, cases), shards)
+        if packed is None or longest is None or packed >= longest:
+            break
+        parts, longest = trial, packed
+    return _expand(weights, parts, cases)
 
 
 def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
@@ -122,7 +204,7 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
         for name in ordered:
             # x.journey.mjs, x-2.journey.mjs, x-3.journey.mjs share a family
             # even when a filtered run doesn't select the first part.
-            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", name.removesuffix(SUFFIX))
+            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", entry_file(name).removesuffix(SUFFIX))
             index = min(range(shards), key=lambda i: (
                 limit is not None and loads[i] + weights[name] > limit,
                 limit is not None and family in families[i],
@@ -211,10 +293,14 @@ def planning_budget_seconds(runtime: float) -> float:
 
 def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
          only: list[str] | None = None) -> list[list[str]]:
-    """Split the journeys (``only`` these file names, when given) across the shards."""
+    """Split the journeys (``only`` these file names, when given) across the shards.
+
+    A selection that leaves shards free also splits its heaviest files into
+    parts (split_heavy); the full run is planned by whole files, as before.
+    """
     # Two-argument call when unfiltered: tests replace estimated_seconds with that shape.
     weights = (estimated_seconds(directory, weights_path) if only is None
-               else estimated_seconds(directory, weights_path, only))
+               else split_heavy(estimated_seconds(directory, weights_path, only), shards, directory))
     buckets = partition(weights, shards)
     from scripts.devloop import journey_retry as retry
 
@@ -660,7 +746,13 @@ def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS
     """Use the unfiltered aggregate only for a full, single-shard run."""
     if shard_files and not per_file and shards == 1 and (directory / RUN_ALL).is_file():
         return [["node", str(directory / RUN_ALL)]]
-    return [["node", str(directory / name)] for name in shard_files]
+    return [["node", str(directory / entry_file(entry)),
+             *[f"--case={id}" for id in part_cases(entry, directory) or []]] for entry in shard_files]
+
+
+def selected_cases(command: list[str]) -> list[str] | None:
+    """The exact case ids a command selects, or None when it runs the whole file."""
+    return [arg.removeprefix("--case=") for arg in command[2:] if arg.startswith("--case=")] or None
 
 
 # ─── the dev instance ──────────────────────────────────────────────────────
@@ -834,8 +926,9 @@ def journeys(args: argparse.Namespace) -> int:
     only = parse_only(args.only)
     mine = (plan(shards) if only is None else plan(shards, only=only))[index - 1]
     commands = commands_for(mine, shards, per_file=args.only is not None or args.retry_failures)
-    print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
-          flush=True)
+    shown = [Path(c[1]).name + (f" ({len(cases)} cases)" if (cases := selected_cases(c)) else "")
+             for c in commands]
+    print(f"[ci] {label}: {', '.join(shown) or 'nothing'}", flush=True)
     if not commands:
         _write_summary(f"### UI journeys ({label})\n\nNo journey files in this shard.\n")
         return 0
@@ -852,7 +945,8 @@ def journeys(args: argparse.Namespace) -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        instance = DevInstance(out, args.ttl_seconds, fake_antigravity="antigravity-usage.journey.mjs" in mine)
+        instance = DevInstance(out, args.ttl_seconds,
+                               fake_antigravity="antigravity-usage.journey.mjs" in map(entry_file, mine))
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
                "DEVLOOP_PYTHON": sys.executable, "JOURNEY_OUT": str(attempt_out / "journeys")}
@@ -860,7 +954,7 @@ def journeys(args: argparse.Namespace) -> int:
             env.pop("JOURNEY_ONLY", None)  # a developer filter must not narrow a CI shard
         env.setdefault("JOURNEY_SHEETS", "1")
         for command in commands:
-            name = " ".join(Path(part).name for part in command[1:])
+            name, cases = Path(command[1]).name, selected_cases(command)
             if problem is None and not instance.alive():
                 problem = "the dev instance died during the journeys"
             if problem is not None:
@@ -871,7 +965,11 @@ def journeys(args: argparse.Namespace) -> int:
                                         args.journey_timeout)
             results.append({"name": name, "code": code, "seconds": seconds})
             if args.retry_failures:
-                attempts.append(retry.read_attempt(name, attempt_out, code, seconds))
+                # A part's summary must hold exactly its own cases.
+                attempt = retry.read_attempt(name, attempt_out, code, seconds, expected=cases)
+                if cases:
+                    attempt["selection"] = cases
+                attempts.append(attempt)
         if args.retry_failures:
             receipt = retry.retry_failed(attempts, out, env, run_command, directory=JOURNEYS,
                                          timeout=args.journey_timeout, started=started,

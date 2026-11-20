@@ -99,6 +99,8 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
                          "status": evidence["status"], "attempts": [evidence]})
     receipt = {"rows": rows, "retried": 0, "retry_seconds": 0.0, "skipped": None,
                "first_attempt_seconds": sum(a["seconds"] for a in first)}
+    # A crashed part of a split file (scripts/devloop/ci.py PART) retries only its own cases.
+    selections = {a["name"].removesuffix(".journey.mjs"): a["selection"] for a in first if a.get("selection")}
     failures = [r for r in rows if r["status"] in BAD]
     if not failures:
         return receipt
@@ -116,14 +118,16 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
         if remaining <= 0 or not alive():
             receipt["skipped"] = "No retry headroom before teardown, or the dev instance died."
             break
-        ids = None if failed[0]["status"] == "crashed" else [r["case"] for r in failed]
+        whole = failed[0]["status"] == "crashed"
+        ids = selections.get(journey) if whole else [r["case"] for r in failed]
         name = f"{journey}.journey.mjs"
         budget = min(timeout, remaining)
         reason = None
         if journey == "claude-account-switch" and budget < CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS:
             reason = (f"{journey} needs {CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS}s for work, "
                       f"fixture teardown and reporting; {budget:.1f}s available.")
-        elif ids is None:
+        elif whole:
+            # A part is judged by its whole file's estimate: never a longer retry than before.
             reason = _whole_file_skip(name, budget, weights_path)
         if reason:
             failed[0]["retry_skipped"] = reason
@@ -132,7 +136,9 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
         attempt_out = out / "attempt-2"
         (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
         command = ["node", str(directory / name), *[f"--case={id}" for id in ids or []]]
-        print(f"[ci] retrying {name}: {', '.join(ids) if ids else '(whole journey)'} "
+        target = (f"(whole part, {len(ids)} cases)" if whole and ids
+                  else ', '.join(ids) if ids else '(whole journey)')
+        print(f"[ci] retrying {name}: {target} "
               f"(budget {budget:.0f}s)", flush=True)
         code, seconds = run(command, {**env, "JOURNEY_OUT": str(attempt_out / "journeys")},
                             attempt_out / "logs" / f"{Path(name).stem}.log", budget)
@@ -140,7 +146,7 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
         receipt["retry_seconds"] += seconds
         second = read_attempt(name, attempt_out, code, seconds, expected=ids)
         for row in failed:
-            if ids is None and second["cases"]:
+            if whole and second["cases"]:
                 status = "pass" if code == 0 and all(c["status"] not in BAD for c in second["cases"]) else "fail"
                 evidence = {"status": status, "detail": "\n".join(
                     f"{c['id']}: {c['status']} {c['detail']}" for c in second["cases"]), "log": second["log"]}
