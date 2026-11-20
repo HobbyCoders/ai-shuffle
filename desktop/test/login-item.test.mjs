@@ -177,5 +177,5 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		writeFileSync(contenderFile, contender);
 		runPowerShell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { & $env:SHUFFLE_NODE (Join-Path $env:SHUFFLE_TEST_DIR 'contender.cjs'); exit $LASTEXITCODE } finally { $lock.Dispose() }`);
 		assert.deepEqual(control.set(false), { state: 'disabled', failed: false }, 'can write again when the exclusive holder exits');
-	} finally { rmSync(dir, { recursive: true, force: true }); }
+	} finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });

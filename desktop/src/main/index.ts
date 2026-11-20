@@ -359,7 +359,8 @@ async function main(): Promise<void> {
 	const loginItem = loginItemControl(app, {
 		platform: process.platform, packaged: app.isPackaged, preview: identity.preview,
 		installedExecutable, appData: app.getPath('appData'), appPath: app.getAppPath(),
-		systemVersion: process.getSystemVersion(), appId: identity.appId
+		systemVersion: process.platform === 'darwin' ? (process.getSystemVersion?.() ?? '') : '',
+		appId: identity.appId
 	});
 	registerIpc({ window, updater, worker, callPopout, loginItem });
 	updater.subscribe((state) => window.send('desktop:update-state', state));
