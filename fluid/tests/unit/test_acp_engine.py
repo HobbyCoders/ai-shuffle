@@ -151,6 +151,28 @@ async def test_streaming_turn_maps_chunks_usage_and_instructions(tmp_path: Path)
         await d.close()
 
 
+async def test_context_usage_is_the_agents_own_usage_update(tmp_path: Path) -> None:
+    # agy 1.5.13 sends usage_update {used, size} after each turn (live probe,
+    # 2026-11-20); the fake's "stream" turn sends used=120, size=1000.
+    d = await _driver(tmp_path, model="gemini-3.8-flash")
+    try:
+        assert await d.loop.get_context_usage() is None  # nothing reported yet
+        assert isinstance(await d.turn("stream"), TurnComplete)
+        usage = await d.loop.get_context_usage()
+        assert usage is not None
+        assert (usage["totalTokens"], usage["maxTokens"], usage["rawMaxTokens"]) == (120, 1000, 1000)
+        assert usage["percentage"] == 12.0 and usage["model"] == "gemini-3.8-flash"
+        assert usage["measured"] is True and usage["isAutoCompactEnabled"] is False
+        assert [(c["name"], c["tokens"]) for c in usage["categories"]] == [("In use", 120), ("Free space", 880)]
+        # Never "Messages": the agent's total holds its system prompt and tools too.
+        assert all(c["name"] != "Messages" for c in usage["categories"])
+        # The window belongs to the model it was read on.
+        await d.loop.submit(SetModel(model="gemini-4-argon"))
+        assert await d.loop.get_context_usage() is None
+    finally:
+        await d.close()
+
+
 async def test_permission_allow_and_deny_round_trip(tmp_path: Path) -> None:
     d = await _driver(tmp_path)
     try:
