@@ -118,3 +118,31 @@ def test_subscription_list_shows_while_key_storage_is_locked(monkeypatch):
     assert payload["storage_locked"] is True
     assert payload["subscription"] == [{"id": "x"}]
     assert payload["subscription_support"]["supported"] is True
+
+
+def test_a_local_cloud_override_keeps_the_owners_key_pin():
+    """A worker set to Cloud locally still bills the key the owner pinned on
+    the native Claude API provider, never a stale scalar from a peer."""
+    from app.core import claude_api_provider
+
+    accounts.add_api_key("example-anthropic-secret-key-1111")
+    accounts.add_api_key("example-anthropic-secret-key-2222", for_claude_code=True)
+    assert claude_auth_mode.shared_selection()["key_id"]
+    # A peer's older save lands its scalar after the owner's pin.
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("example-anthropic-secret-key-1111"))
+    db.set_system_setting(claude_auth_mode.setting_key(), "cloud")
+    assert claude_auth_mode.runtime_choice() == ("cloud", None)
+    assert claude_api_provider._active_key().endswith("2222")
+    active = [row["last4"] for row in accounts.accounts_payload()["api_key"] if row["active"]]
+    assert active == ["2222"]
+
+
+def test_changing_the_pinned_key_does_not_reconnect_cli_sessions():
+    import json
+
+    def fingerprint(key_id):
+        db.set_system_setting(claude_auth_mode.SELECTION_SETTING, json.dumps(
+            {"mode": "api_key", "subscription": None, "key_id": key_id}))
+        return claude_auth_mode.spawn_fingerprint()
+
+    assert fingerprint("key-a") == fingerprint("key-b")

@@ -92,7 +92,9 @@ def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(
     with patch.object(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-off-peer"):
         claude_auth_mode.set_mode("off")
         claude_accounts.change_account("api_key", alpha_id, "delete")
-        assert db.get_system_setting(claude_accounts.API_SETTING) is None
+        # The owner's pin still says Beta on this Off worker, so the stale
+        # Alpha scalar is replaced by Beta, never left holding a deleted key.
+        assert claude_accounts.active_api_key() == beta
         assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) == choice
     assert _native_key() == beta
     gamma_id = claude_accounts.add_api_key(gamma)

@@ -127,8 +127,8 @@ def _keys():
     bundle = _project_saved_keys(database.get_system_setting_snapshot(API_LIST_SETTING))
     from app.core import claude_auth_mode
 
-    mode, choice = claude_auth_mode.runtime_choice()
-    if choice is not None and ("key_id" in choice or mode == claude_auth_mode.MODE_API_KEY):
+    choice = claude_auth_mode.key_pin()
+    if choice is not None:
         account = _find_pinned_key(bundle, choice.get("key_id"))
         bundle["active_id"] = account["id"] if account else None
         return bundle
@@ -278,6 +278,9 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
             _error("not_found", "Saved Claude account not found.", 404)
         account_id = account["id"]
         was_active = bundle["active_id"] == account_id
+        # A peer's stale scalar can hold a key other than the pinned active
+        # one; deleting that key must not leave it stored there.
+        in_scalar = action == "delete" and active_api_key() == account["key"]
         if action == "rename":
             account["label"] = _label(label)
         elif action == "activate":
@@ -289,7 +292,7 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
         else:
             _error("invalid_action", "Unknown account action.", 400)
         _save_keys(
-            bundle, update_active=action == "activate" or (action == "delete" and was_active)
+            bundle, update_active=action == "activate" or (action == "delete" and (was_active or in_scalar))
         )
         if action == "activate":
             _update_shared_key(_pin_id(account))

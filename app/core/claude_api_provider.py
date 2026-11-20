@@ -73,8 +73,8 @@ def _active_key() -> Optional[str]:
     choice pins, never a stale scalar, else the saved active key."""
     from app.core import claude_auth_mode
 
-    mode, choice = claude_auth_mode.runtime_choice()
-    if choice is not None and ("key_id" in choice or mode == claude_auth_mode.MODE_API_KEY):
+    choice = claude_auth_mode.key_pin()
+    if choice is not None:
         return claude_auth_mode.selected_api_key(choice)
     return claude_auth_mode.stored_api_key()
 

@@ -274,6 +274,23 @@ def selected_api_key(choice: Optional[dict]) -> Optional[str]:
         return None
 
 
+def key_pin() -> Optional[dict]:
+    """The owner's synced choice when it pins an exact saved API key, else None.
+
+    Read from the shared row itself, not this worker's CLI mode: a worker-local
+    Cloud or Off override changes how the CLI runs here, never which key the
+    native Claude API provider bills (``claude_api_provider``) or which key
+    Settings marks active (``claude_accounts._keys``). With a pin, the key is
+    that exact saved key or none; the scalar never substitutes for it.
+    """
+    choice = shared_selection(cached=True)
+    if choice is None or choice.get("invalid"):
+        return None
+    if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
+        return choice
+    return None
+
+
 def spawn_fingerprint() -> str:
     """Non-secret pooled-session identity, without materializing CLI credentials."""
     from app.core import claude_cloud_auth
@@ -297,7 +314,10 @@ def spawn_fingerprint() -> str:
                 claude_cloud_auth.CONFIG_SETTING, claude_cloud_auth.SECRETS_SETTING,
             ))
     if choice is not None:
-        identity.append(choice)
+        # The key pin and the api_key/subscription distinction are the native
+        # provider's, not the CLI's: changing the active key must not
+        # reconnect a subscription chat.
+        identity.append({k: v for k, v in choice.items() if k not in ("key_id", "mode")})
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
