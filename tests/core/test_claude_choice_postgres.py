@@ -93,7 +93,7 @@ def test_subscription_activation_conflict_rolls_back_and_retry_keeps_latest_pin(
     assert auth.shared_selection() == {"mode": "subscription", "subscription": "new", "key_id": "K2"}
 
 
-@pytest.mark.parametrize("changed", ["scalar", "local", "shared"])
+@pytest.mark.parametrize("changed", ["scalar", "local", "shared", "40P01", "40001"])
 def test_legacy_confirmation_cas_rolls_back_a_prepared_migration(choice_cluster, changed, monkeypatch):
     def connect():
         conn = pg_connect(choice_cluster)
@@ -117,7 +117,7 @@ def test_legacy_confirmation_cas_rolls_back_a_prepared_migration(choice_cluster,
         "scalar": (scalar, "fixture-different-1111"),
         "local": (local, auth.MODE_OFF),
         "shared": (shared, json.dumps({"mode": auth.MODE_SUBSCRIPTION})),
-    }[changed]
+    }.get(changed)
     before = db_settings.get_system_setting_snapshots(scalar, local, shared, saved)
     original_write = db_settings._write_system_setting_if_unchanged
     original_commit = db_settings.write_system_settings_if_unchanged
@@ -129,7 +129,11 @@ def test_legacy_confirmation_cas_rolls_back_a_prepared_migration(choice_cluster,
         return original_commit(writes, guards=guards)
 
     def write(conn, key, value, expected):
-        if key == update[0] and changed != "scalar":
+        if update is None and key == local:
+            # Raise the real PG error in the still-open transaction after the
+            # list INSERT, rather than simulating a deadlock with a lock race.
+            conn.cursor().execute(f"DO $$ BEGIN RAISE SQLSTATE '{changed}'; END $$")
+        if update is not None and key == update[0] and changed != "scalar":
             assert db.get_system_setting(saved) is None  # Migration not visible yet.
             db.set_system_setting(*update)  # On a different connection, before the local/shared CAS.
         return original_write(conn, key, value, expected)
@@ -139,8 +143,10 @@ def test_legacy_confirmation_cas_rolls_back_a_prepared_migration(choice_cluster,
     with pytest.raises(claude_accounts.AccountError, match="API key or mode changed") as error:
         auth.confirm_legacy_api_key(revision)
     assert error.value.status == 409
-    before[update[0]] = db.get_system_setting_snapshot(update[0])
-    assert before[update[0]].value == update[1]
+    assert error.value.code == "confirmation_changed"
+    if update is not None:
+        before[update[0]] = db.get_system_setting_snapshot(update[0])
+        assert before[update[0]].value == update[1]
     assert db_settings.get_system_setting_snapshots(scalar, local, shared, saved) == before
 
 

@@ -147,6 +147,83 @@ def test_upgrade_pins_legacy_key_after_unlock(authenticated_client, monkeypatch,
 ACCOUNTS = ENDPOINT + "/accounts"
 
 
+def _save_with_shipped_writer(first, second):
+    """The scalar-to-list write from #840 (b933c0659), twice with different scalars."""
+    from hashlib import sha256
+
+    from app.core import claude_accounts as accounts
+
+    ids = []
+    for key in (first, second):
+        db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value(key))
+        stored = db.get_system_setting(accounts.API_LIST_SETTING)
+        bundle = json.loads(encryption.decrypt_value(stored)) if stored else {"accounts": []}
+        account_id = "legacy-" + sha256(key.encode()).hexdigest()[:24]
+        bundle["accounts"].append({"id": account_id, "label": "Anthropic API key", "key": key})
+        db.set_system_setting(accounts.API_LIST_SETTING, encryption.encrypt_value(json.dumps(bundle)))
+        ids.append(account_id)
+    return ids
+
+
+@pytest.mark.parametrize("old_pin", [False, True])
+def test_upgrade_saved_key_ids_are_opaque_and_actionable(authenticated_client, old_pin):
+    from app.core import claude_accounts as accounts
+    from app.core.environment import inject_claude_code_auth
+    from app.db.settings import get_system_setting_snapshots
+
+    first, second = "fixture-upgrade-first-ABCD", "fixture-upgrade-second-WXYZ"
+    first_old, second_old = _save_with_shipped_writer(first, second)
+    shared, local = claude_auth_mode.SELECTION_SETTING, claude_auth_mode.setting_key()
+    saved, scalar = accounts.API_LIST_SETTING, accounts.API_SETTING
+    db.set_system_setting(local, "api_key")
+    old_choice = {"mode": "api_key", "subscription": None, "key_id": second_old}
+    if old_pin:
+        db.set_system_setting(shared, json.dumps(old_choice))
+        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == second
+    before = get_system_setting_snapshots(shared, local, saved, scalar)
+
+    def safe(response):
+        assert response.status_code == 200, response.text
+        for secret in (first, second, first_old, second_old):
+            assert secret not in response.text
+        return response.json()
+
+    with _probe(False):
+        settings = safe(authenticated_client.get(ENDPOINT))
+        rows = {row["last4"]: row for row in safe(authenticated_client.get(ACCOUNTS))["accounts"]["api_key"]}
+        assert list(rows.values()) == settings["accounts"]["api_key"]
+        first_id, second_id = rows["ABCD"]["id"], rows["WXYZ"]["id"]
+        assert first_id != second_id and not rows["ABCD"]["active"] and rows["WXYZ"]["active"]
+        assert get_system_setting_snapshots(shared, local, saved, scalar) == before
+        if old_pin:
+            # Carrying forward an already-pinned key is also a new shared write.
+            safe(authenticated_client.put(ENDPOINT, json={"mode": "api_key"}))
+        else:
+            safe(authenticated_client.put(ENDPOINT, json={
+                "mode": "api_key", "api_key_confirmation": settings["api_key_confirmation"],
+            }))
+        assert claude_auth_mode.shared_selection()["key_id"] == second_id
+        assert accounts.pinned_api_key(second_old) == second  # A peer can still carry the old pin.
+        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == second
+        assert db.get_system_setting_snapshot(scalar) == before[scalar]
+
+        path = f"{ACCOUNTS}/api_key/{first_id}"
+        safe(authenticated_client.patch(path, json={"label": "First renamed"}))
+        assert accounts.pinned_api_key(second_old) == second
+        rows = {row["id"]: row for row in safe(authenticated_client.post(path + "/activate"))["accounts"]["api_key"]}
+        assert rows[first_id]["label"] == "First renamed" and rows[first_id]["active"]
+        assert not rows[second_id]["active"]
+        choice = db.get_system_setting(shared)
+        assert json.loads(choice)["key_id"] == first_id
+        assert all(value not in choice for value in (first, second, first_old, second_old))
+        assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == first
+        safe(authenticated_client.delete(path))
+        assert accounts.pinned_api_key(first_old) is None
+        accounts.add_api_key(first, activate=False)
+        assert accounts.pinned_api_key(first_old) is None  # A re-save must not revive a deleted pin.
+        assert json.loads(db.get_system_setting(shared))["key_id"] is None
+
+
 @pytest.fixture
 def saved_subscription(authenticated_client, monkeypatch, tmp_path):
     from app.core import claude_cli_home as home, claude_cli_login, claude_subscriptions as subs

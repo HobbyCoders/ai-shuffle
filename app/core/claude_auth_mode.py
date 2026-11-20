@@ -36,6 +36,7 @@ import logging
 from typing import Optional
 
 from psycopg2 import Error as DatabaseError
+from psycopg2.errors import DeadlockDetected, SerializationFailure
 
 from app.core.config import settings
 from app.db import database, settings as db_settings
@@ -246,13 +247,39 @@ def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str],
     # One replicated decision. The encrypted key list may lag behind it; a
     # reader must either find this exact ID there or refuse, never use a scalar.
     selection = {"mode": mode, "subscription": subscription}
+    if claude_accounts.is_shipped_legacy_id(key_id):
+        # An existing pin can still be read, but must not be republished verbatim.
+        saved = claude_accounts.API_LIST_SETTING
+        stored = database.get_system_setting_snapshot(saved)
+        if stored is None:
+            raise _selection_changed()
+        key_id, converted = claude_accounts.prepare_existing_key_pin(key_id, stored)
+        selection["key_id"] = key_id
+        writes = {SELECTION_SETTING: (json.dumps(selection, separators=(",", ":")), snapshot)}
+        if local_choice is not None:
+            local_key, local_value = local_choice
+            writes[local_key] = (local_value, database.get_system_setting_snapshot(local_key))
+        guards = {}
+        if converted is None:
+            guards[saved] = stored
+        else:
+            writes[saved] = (converted, stored)
+        if not db_settings.write_system_settings_if_unchanged(writes, guards=guards):
+            raise _selection_changed()
+        return
     if not defer_key_pin:
         selection["key_id"] = key_id
     value = json.dumps(selection, separators=(",", ":"))
     if not database.set_system_setting_if_unchanged(SELECTION_SETTING, value, snapshot, alongside=local_choice):
-        raise claude_accounts.AccountError(
-            "selection_changed", "The Claude account choice changed on another request. Review it and try again.", 409,
-        )
+        raise _selection_changed()
+
+
+def _selection_changed():
+    from app.core.claude_accounts import AccountError
+
+    return AccountError(
+        "selection_changed", "The Claude account choice changed on another request. Review it and try again.", 409,
+    )
 
 
 def _key_pin(choice: dict, *, choose_api_key: bool) -> tuple[str | None, bool]:
@@ -305,14 +332,15 @@ def update_shared_key(account_id: Optional[str]) -> None:
                  key_id=account_id, snapshot=snapshot)
 
 
-def clear_shared_key_if_selected(account_id: str) -> None:
+def clear_shared_key_if_selected(account_id: str, legacy_id: str | None) -> None:
     """Delete changes the pin only if it still names this exact key.
 
     Do not republish a stale mode or subscription over a concurrent choice.
     Missing list rows already fail closed, including if this update loses.
     """
     choice, snapshot = _read_selection()
-    if not (choice and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION) and choice.get("key_id") == account_id):
+    if not (choice and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION)
+            and choice.get("key_id") and choice["key_id"] in (account_id, legacy_id)):
         return
     choice["key_id"] = None
     database.set_system_setting_if_unchanged(
@@ -414,7 +442,7 @@ def _confirm_legacy_api_key(revision: str) -> None:
     mode, choice, _ = _settings_choice(rows, key)
     if not key or choice is not None or mode != MODE_API_KEY:
         raise _confirmation_changed()
-    key_id, migrated_list = accounts.prepare_legacy_key_pin(key, rows[saved].value if saved in rows else None)
+    key_id, migrated_list = accounts.prepare_legacy_key_pin(key, rows.get(saved))
     selection = {"mode": MODE_API_KEY, "subscription": claude_subscriptions.legacy_binding(), "key_id": key_id}
     guards = {scalar: rows[scalar]}
     writes = {}
@@ -424,7 +452,12 @@ def _confirm_legacy_api_key(revision: str) -> None:
         guards[saved] = rows[saved]
     writes[local] = (MODE_API_KEY, rows.get(local))
     writes[shared] = (json.dumps(selection, separators=(",", ":")), rows.get(shared))
-    if not db_settings.write_system_settings_if_unchanged(writes, guards=guards):
+    try:
+        committed = db_settings.write_system_settings_if_unchanged(writes, guards=guards)
+    except (DeadlockDetected, SerializationFailure):
+        # The guarded DB helper has already rolled back, including any list write.
+        raise _confirmation_changed() from None
+    if not committed:
         raise _confirmation_changed()
 
 
