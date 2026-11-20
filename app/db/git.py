@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, TypedDict
 
@@ -30,6 +31,7 @@ class WorktreeRow(TypedDict):
     session_id: Optional[str]
     branch_name: str
     worktree_path: str
+    cleanup_owner: Optional[Dict[str, Any]]
     base_branch: Optional[str]
     status: str
     created_at: str
@@ -348,7 +350,7 @@ def create_worktree(
     worktree_path: str,
     session_id: Optional[str] = None,
     base_branch: Optional[str] = None,
-    status: str = "active"
+    status: str = "active",
 ) -> Optional[WorktreeRow]:
     """Create a worktree record, or return the existing one for this path.
 
@@ -370,7 +372,8 @@ def create_worktree(
         if existing:
             return existing
         cursor.execute(
-            """INSERT INTO worktrees (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
+            """INSERT INTO worktrees
+               (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
             (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
         )
@@ -384,6 +387,8 @@ def update_worktree(
     worktree_path: Optional[str] = None,
     branch_name: Optional[str] = None,
     repository_id: Optional[str] = None,
+    *,
+    cleanup_owner: Optional[Dict[str, Any]] = None,
 ) -> Optional[WorktreeRow]:
     """Update a worktree.
 
@@ -414,6 +419,16 @@ def update_worktree(
     if repository_id is not None:
         updates.append("repository_id = %s")
         values.append(repository_id)
+    if cleanup_owner is not None:
+        # Cleanup can finish after a concurrent folder edit pins the old owner.
+        # Publish its Keep evidence without ever unpinning that registration.
+        updates.append(
+            "cleanup_owner = CASE WHEN cleanup_owner IS NOT NULL "
+            "AND (cleanup_owner->'retargeted') IS DISTINCT FROM 'false'::jsonb "
+            "THEN %s::jsonb ELSE %s::jsonb END"
+        )
+        values.extend((json.dumps({k: v for k, v in cleanup_owner.items() if k != "retargeted"}),
+                       json.dumps(cleanup_owner)))
 
     if updates:
         values.append(worktree_id)

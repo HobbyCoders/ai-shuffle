@@ -52,6 +52,17 @@ _LIVE_LINK = (
 )
 
 
+def original_for_legacy(cursor, legacy_id, replacement_id):
+    """Only this legacy generation's proven first link, still current."""
+    cursor.execute(
+        "SELECT alias.original_id " + _LIVE_LINK +
+        "AND alias.legacy_id = %s AND alias.replacement_id = %s",
+        (legacy_id, replacement_id),
+    )
+    row = cursor.fetchone()
+    return row["original_id"] if row else None
+
+
 def replacement_for(original_id):
     with get_db() as conn:
         cursor = conn.cursor()

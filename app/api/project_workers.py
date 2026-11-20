@@ -384,6 +384,7 @@ async def project_workers(
         has_copy = entry["state"] in ("ready", "offline_has")
         entry.update({
             "folder": detail.get("folder") if sees_paths and has_copy else None,
+            "folder_revision": detail.get("folder_revision") if sees_paths and entry["state"] == "ready" else None,
             "suggested_folder": (_join_folder(payload.get("workspace"), info["default_folder"])
                                  if sees_paths and not has_copy else None),
             "branch": detail.get("branch") if has_copy else None,
@@ -584,6 +585,72 @@ async def cancel_setup(op_id: str, token: str = Depends(require_admin)) -> Dict[
     return {"status": "cancelled"}
 
 
+class ChangeFolderRequest(BaseModel):
+    folder: str = Field(min_length=1, max_length=4096)
+    expected_revision: str = Field(min_length=64, max_length=64)
+
+
+async def _worker_folder_action(request: Request, install_id: str, project_id: Optional[str],
+                                project_v2_id: Optional[str], action: str, **fields: Any) -> Dict[str, Any]:
+    from app.network import control, engine
+
+    access = await run_sync(require_origin_access, request=request, project_id=project_id,
+                            project_v2_id=project_v2_id)
+    pv2 = access["project_v2"]
+    if not pv2:
+        raise HTTPException(404, "Project not found")
+    target = _find_install(await run_sync(_approved_workers), install_id)
+    target_id = target["id"]
+    payload = {"project_v2_id": pv2["id"], **fields}
+    local = target_id == _self_install_id()
+    if local:
+        result = await run_sync(setup.folder_action, action, payload)
+    elif not target.get("online"):
+        raise HTTPException(409, "That worker is offline. Try again when it is online.")
+    elif engine.context() is None:
+        raise HTTPException(409, "Change the folder directly on that worker.")
+    else:
+        try:
+            result = await control.call(target_id, setup.ACTION, {"action": action, **payload},
+                                        timeout=setup.PEER_TIMEOUT_SECONDS)
+        except control.ControlRefused as exc:
+            if "Unknown setup action" in str(exc) or setup._UNKNOWN_ACTION in str(exc):
+                raise HTTPException(409, setup.unsupported_message(target.get("device_name"))) from exc
+            raise HTTPException(409, "That worker refused the folder request. Reload and try again.") from exc
+        except control.RunnerUnreachable as exc:
+            raise HTTPException(409, "That worker did not answer. Check its current folder before trying again.") from exc
+    if "error" in result:
+        code = result.get("status", 409)
+        raise HTTPException(code if code in (400, 403, 404, 409) else 409, result["error"])
+    if action == "change-folder":
+        if local:
+            setup._after_local_registration_change()  # announce the updated local catalog
+        else:
+            setup.emit_changed()
+    return result
+
+
+@router.get("/workers/{install_id}/folder/browse")
+async def browse_worker_folder(request: Request, install_id: str,
+                               project_id: Optional[str] = Query(None),
+                               project_v2_id: Optional[str] = Query(None),
+                               path: Optional[str] = Query(None, max_length=4096),
+                               token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Browse directories on the worker that owns this project registration."""
+    return await _worker_folder_action(request, install_id, project_id, project_v2_id,
+                                       "browse-folder", folder=path)
+
+
+@router.put("/workers/{install_id}/folder")
+async def change_worker_folder(request: Request, install_id: str, body: ChangeFolderRequest,
+                               project_id: Optional[str] = Query(None),
+                               project_v2_id: Optional[str] = Query(None),
+                               token: str = Depends(require_admin)) -> Dict[str, Any]:
+    """Retarget one worker's project registration; do not move any files."""
+    return await _worker_folder_action(request, install_id, project_id, project_v2_id,
+                                       "change-folder", **body.model_dump())
+
+
 @router.delete("/workers/{install_id}")
 async def remove_from_worker(
     request: Request,
@@ -609,7 +676,7 @@ async def remove_from_worker(
             result = await run_sync(setup.remove_local, pv2["id"])
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        setup._after_local_remove()
+        setup._after_local_registration_change()
     elif engine.context() is None:
         raise HTTPException(status_code=409, detail=f"Remove it on {target.get('device_name') or 'that worker'}")
     elif not target.get("online"):

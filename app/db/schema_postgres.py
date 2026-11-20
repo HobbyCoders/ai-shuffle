@@ -22,7 +22,7 @@ from app.db.base import column_exists
 logger = logging.getLogger("app.db.schema_postgres")
 
 # Must match database.py SCHEMA_VERSION
-SCHEMA_VERSION = 96
+SCHEMA_VERSION = 97
 
 
 def session_recall_cache_ready(cursor, *, legacy_only: bool = False) -> bool:
@@ -246,6 +246,7 @@ def create_postgres_schema(cursor: Any) -> None:
             session_id TEXT,
             branch_name TEXT NOT NULL,
             worktree_path TEXT NOT NULL,
+            cleanup_owner JSONB,
             base_branch TEXT,
             status TEXT DEFAULT 'active',
             created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

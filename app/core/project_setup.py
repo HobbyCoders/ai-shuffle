@@ -518,6 +518,10 @@ def _checkout_detail(project_v2_id: str, runner_id: str) -> Dict[str, Any]:
     except (OSError, ValueError):
         return detail
     detail["folder"] = folder
+    if row.get("instance_id") == runner_id:
+        from app.core.project_folders import revision
+
+        detail["folder_revision"] = revision(row)
     base = next((ck for ck in checkouts_db.list_checkouts(pv2["id"])
                  if ck.get("runner_id") == runner_id and not ck.get("branch")), None)
     if base is not None and base.get("dirty") is not None:
@@ -1187,12 +1191,55 @@ async def handle_control(body: Dict[str, Any], from_device: str) -> Dict[str, An
         return result
     if action == "remove":
         result = await run_sync(remove_local, str(body.get("project_v2_id") or ""))
-        _after_local_remove()
+        _after_local_registration_change()
+        return result
+    if action in ("browse-folder", "change-folder"):
+        result = await run_sync(folder_action, action, body)
+        if action == "change-folder" and "error" not in result:
+            _after_local_registration_change()  # announce the updated local catalog
         return result
     raise ValueError("Unknown setup action")
 
 
-def _after_local_remove() -> None:
+def folder_action(action: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Target-side folder operations for local owners and authenticated peers."""
+    from fastapi import HTTPException
+
+    from app.api.system import browse_directories
+    from app.core.project_folders import retarget
+    from app.core.project_resolver import resolve_catalog_project
+
+    project_id = body.get("project_v2_id")
+    path = body.get("folder")
+    expected = body.get("expected_revision")
+    if not isinstance(project_id, str) or not 0 < len(project_id) <= 80:
+        return {"error": "Invalid project", "status": 400}
+    if path is not None and (not isinstance(path, str) or len(path) > 4096 or "\x00" in path):
+        return {"error": "Invalid folder path", "status": 400}
+    pv2 = resolve_catalog_project(project_id)
+    row = _own_rows_by_origin().get(pv2["origin"]) if pv2 else None
+    if not row or row.get("instance_id") != _me():
+        return {"error": "This worker has no worker-specific folder for this project.", "status": 409}
+    try:
+        if action == "browse-folder":
+            return browse_directories(path).model_dump()
+        if not isinstance(expected, str) or len(expected) != 64 or path is None:
+            return {"error": "A folder and its current revision are required.", "status": 400}
+        op = latest_ops(_me()).get(pv2["id"])
+        if op and op["status"] in ("queued", "running"):
+            return {"error": "Wait for project setup to finish on this worker.", "status": 409}
+        result = retarget(row, path, expected)
+    except HTTPException as exc:
+        return {"error": exc.detail, "status": exc.status_code}
+    except (OSError, RuntimeError, ValueError):
+        return {"error": "This worker could not read that folder.", "status": 400}
+    from app.core.project_folders import revision
+    from app.core.project_utils import get_project_working_dir
+
+    return {"folder": get_project_working_dir(result), "folder_revision": revision(result)}
+
+
+def _after_local_registration_change() -> None:
     from app.network.project_catalog import announce_soon
 
     announce_soon()

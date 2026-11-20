@@ -140,6 +140,37 @@ def test_symlinked_worktree_leaf_outside_checkout_is_refused(project, tmp_path):
 # =============================================================================
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [True, False])
+async def test_keep_without_retarget_reopens_an_advanced_branch(project, explicit):
+    from app.core import project_resolver
+    from app.db import projects_v2
+
+    repo, record = project
+    branch = "kept-topic"
+    row = _worktree_row(record, branch, repo / ".fluid" / "worktrees" / branch)
+    worktree_manager.recreate_worktree(row["id"])
+    identity = projects_v2.get_project_v2_by_origin("local:p1")["id"]
+    database.create_session("kept-session", "default", project_id="p1", project_v2_id=identity,
+                            worktree_id=row["id"], worktree_branch=branch)
+    assert await worktree_manager.cleanup_worktree(row["id"], keep_branch=True)
+    commit_file(repo, "a.txt", "advanced\n", "Advance kept branch")
+    git(repo, "branch", "-f", branch, "HEAD")
+    expected_tip = git(repo, "rev-parse", branch)
+    chat = database.get_session("kept-session")
+    if explicit:
+        updated = worktree_manager.recreate_worktree(row["id"])
+        path = updated["worktree_path"]
+        assert updated["status"] == WorktreeStatus.ACTIVE
+    else:
+        path = project_resolver.resolve_cwd(chat, raise_add_errors=True)
+    assert path
+    assert git(path, "rev-parse", "HEAD") == expected_tip
+    assert _branch_of(path) == branch
+    assert (Path(path) / "a.txt").read_text() == "advanced\n"
+    assert database.get_session("kept-session") == chat
+
+
 def test_recreate_reuses_existing_branch(project, tmp_path):
     repo, record = project
     git(repo, "branch", "feature/x")
