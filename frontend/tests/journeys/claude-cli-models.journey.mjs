@@ -100,7 +100,6 @@ await runJourney({
 		{
 			name: 'pick-and-run',
 			async setup({ page, status }) {
-				await gotoApp(page, status);
 				await openClaudeChat({ page, status });
 			},
 			async act({ page, status, mark, variant, log }) {

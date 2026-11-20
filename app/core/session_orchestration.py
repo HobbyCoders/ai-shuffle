@@ -705,6 +705,22 @@ def _inherited_model(sender, overrides, runtime_model=None):
     return model_override.app_id(provider_id, value)
 
 
+def _inherited_choice(model, *, runs_here):
+    """The model an inherited (not requested) binding names.
+
+    On a subscription a full Claude id such as ``claude-mythos-5-1`` stays
+    itself: the sender already runs it, and its CLI fails the turn visibly if
+    it does not know it. Explicit requests keep :func:`model_override.resolve`'s
+    alias-only rule; this path grants no new consent.
+    """
+    from app.core import model_override
+    from app.core.model_registry import keeps_own_id
+
+    if isinstance(model, str) and keeps_own_id(model.strip()):
+        return model_override.Choice(model.strip(), None, model.strip())
+    return model_override.resolve(model, runs_here=runs_here)
+
+
 def _request_identity(sender_id, data, action):
     request_id = _text(data, "request_id", 120)
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
@@ -980,7 +996,7 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         inherited = _inherited_model(sender, overrides, runtime_model)
         if not inherited:
             raise ValueError("The inherited remote model is unknown; pass an explicit model.")
-        picked = model_override.resolve(inherited, runs_here=False)
+        picked = _inherited_choice(inherited, runs_here=False)
         body.update(model=picked.model, provider_id=picked.provider_id,
                     model_choice={"model": picked.model, "provider_id": picked.provider_id},
                     model_inherited=True)
@@ -1014,7 +1030,7 @@ def _remote_replay_body(previous, command_id, fingerprint, permission_mode):
     one from a newly resolved model or the caller's current inherited settings.
     Tightened or unbound permissions likewise permit readback only.
     """
-    from app.core.model_registry import model_values
+    from app.core.model_registry import keeps_own_id, model_values
     from app.core.query_options import decode_provider_model
     from app.core.session_modes import strictest_permission_mode
 
@@ -1026,8 +1042,11 @@ def _remote_replay_body(previous, command_id, fingerprint, permission_mode):
         if isinstance(choice, dict):
             model, provider = choice.get("model"), choice.get("provider_id")
             decoded = decode_provider_model(model) if isinstance(model, str) else None
-            canonical = ((provider is None and isinstance(model, str) and model in model_values())
-                         or (decoded is not None and decoded[0] == provider))
+            # An inherited subscription binding may be a full Claude id (see
+            # _inherited_choice); an explicit choice is always an alias.
+            native = provider is None and isinstance(model, str) and (
+                model in model_values() or (body.get("model_inherited") is True and keeps_own_id(model)))
+            canonical = native or (decoded is not None and decoded[0] == provider)
             if (canonical and body.get("model") == model and body.get("provider_id") == provider
                     and all(key in body for key in (
                         "title", "prompt", "peer_message_content", "sender_session_id", "sender_label",
@@ -1148,7 +1167,8 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         # mapped against this worker's provider rows.
         from app.core import model_override
         try:
-            picked = model_override.resolve(choice.get("model"), runs_here=True)
+            picked = (_inherited_choice(choice.get("model"), runs_here=True) if inherited
+                      else model_override.resolve(choice.get("model"), runs_here=True))
         except ValueError as exc:
             raise ValueError(f"{exc} Nothing was started.") from None
         if picked.model != model_override.active_account_model(choice.get("model")):

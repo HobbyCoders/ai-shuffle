@@ -134,6 +134,48 @@ def test_mythos_is_its_own_family_and_ranks_no_alias(cli):
     assert _claude_alias("claude-opus-4-6") == "opus"
 
 
+def test_an_unknown_family_is_still_listed_and_selectable(cli, monkeypatch):
+    """A family this release does not know yet keeps its row, with no family."""
+    reply = {**REPLY, "models": [*REPLY["models"], _entry("claude-nova-6", "Nova 6", "claude-nova-6")]}
+    monkeypatch.setattr(cm, "_snapshot", cm.parse_initialize(reply))
+    payload = {e["value"]: e for e in m.registry_payload()["models"]}
+    assert payload["claude-nova-6"]["label"] == "Nova 6"
+    assert payload["claude-nova-6"]["family"] is None
+    assert payload["claude-nova-6"]["context_window"] == 1_000_000
+    assert m.native_choice("claude-nova-6") == "claude-nova-6"
+    assert m.selectable_model_values()[-1] == "claude-nova-6"
+
+
+def test_subagent_model_enums_offer_every_listed_version(cli):
+    from app.mcp import config_subagents
+
+    values = m.selectable_model_values()
+    assert values[:4] == m.model_values()
+    assert "claude-mythos-5-1" in values and "claude-opus-4-6" in values
+    tools = {t.name: t for t in config_subagents._create_subagent_tools(True)}
+    for name in ("createSubagent", "updateSubagent"):
+        assert "claude-mythos-5-1" in tools[name].input_schema["properties"]["model"]["enum"]
+    cli["mode"] = "api"
+    assert m.selectable_model_values() == m.model_values()
+
+
+def test_an_inherited_full_id_reaches_a_paired_worker_as_itself(cli, monkeypatch):
+    """Review S2: a chat on Mythos starts a paired-worker chat on Mythos.
+    An explicit request keeps the alias-only rule."""
+    from app.core import model_override, session_orchestration as so
+
+    monkeypatch.setattr(model_override, "_provider_rows", lambda: [])
+    for runs_here in (False, True):
+        picked = so._inherited_choice("claude-mythos-5-1", runs_here=runs_here)
+        assert (picked.model, picked.provider_id) == ("claude-mythos-5-1", None)
+    assert so._inherited_choice("opus", runs_here=False).model == "opus"
+    with pytest.raises(ValueError):
+        model_override.resolve("claude-mythos-5-1", runs_here=False)
+    cli["mode"] = "api"
+    with pytest.raises(ValueError):
+        so._inherited_choice("claude-mythos-5-1", runs_here=False)
+
+
 def test_other_modes_keep_the_static_registry(cli):
     cli["mode"] = "api"
     payload = m.registry_payload()

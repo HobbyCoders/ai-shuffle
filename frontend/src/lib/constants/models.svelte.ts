@@ -29,8 +29,8 @@ export interface ModelOption {
 	value: string;
 	/** Human-facing label for dropdowns and badges. */
 	label: string;
-	/** Badge family — maps to `.card-badge--{family}` CSS classes. */
-	family: ModelFamily;
+	/** Badge family — maps to `.card-badge--{family}` CSS classes; null shows the muted badge. */
+	family: ModelFamily | null;
 	/**
 	 * Maximum input context in tokens, as the model natively runs. The current
 	 * Claude slugs (haiku/sonnet/opus/fable) are 1M. There is no
@@ -829,7 +829,8 @@ interface RegistryModelPayload {
 	auto_permission_supported?: boolean;
 	value: string;
 	label: string;
-	family: ModelFamily;
+	/** Null for a model the subscription CLI lists whose family the app does not know. */
+	family: ModelFamily | null;
 	context_window?: number;
 	effort_levels?: string[] | null;
 	effort_metadata_version?: number;

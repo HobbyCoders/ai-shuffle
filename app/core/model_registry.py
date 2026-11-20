@@ -48,8 +48,9 @@ class ModelOption:
     label: str
     """Human-facing label for dropdowns and badges."""
 
-    family: ModelFamily
-    """Model family — drives badge colour."""
+    family: Optional[ModelFamily]
+    """Model family — drives badge colour. None only for a model the
+    subscription CLI lists whose family this release does not know yet."""
 
     context_window: int
     """Maximum input context in tokens, as the model natively runs.
@@ -177,9 +178,9 @@ def _cli_model(value: str) -> Optional[ModelOption]:
         return None
     concrete = found.get("resolved") or value
     base = _BY_VALUE.get(concrete) or _BY_VALUE.get(re.sub(r"-\d{8}$", "", concrete))
+    # A family this release does not know yet is still listed and selectable,
+    # with a neutral badge: the CLI lists it, so the CLI can run it.
     family = _family_of(value, concrete, found.get("label")) or (base.family if base else None)
-    if family is None:
-        return None
     window = base.context_window if base else (200_000 if "haiku-4" in concrete else 1_000_000)
     return ModelOption(value, found.get("label") or value, family, window)
 
@@ -282,6 +283,23 @@ def model_values() -> List[str]:
     """All selectable model IDs, for use in Pydantic ``Literal`` / JSON-schema
     enums."""
     return [m.value for m in MODELS]
+
+
+def selectable_model_values() -> List[str]:
+    """Every native model a picker offers: the aliases, then on a subscription
+    each other version the Claude Code CLI lists (``claude-mythos-5-1``).
+
+    For enums of what someone may pick. Routing's alias-only checks keep
+    :func:`model_values`."""
+    from app.core import claude_cli_models
+
+    aliases = model_values()
+    try:
+        listed = [m["value"] for m in claude_cli_models.versioned_entries()]
+    except Exception:  # noqa: BLE001 - an unreadable list offers the aliases
+        logger.warning("Could not read the Claude Code model list", exc_info=True)
+        listed = []
+    return aliases + [v for v in dict.fromkeys(listed) if isinstance(v, str) and v not in aliases]
 
 
 def _positive_int(value: Any) -> Optional[int]:
