@@ -222,8 +222,9 @@ async def generate_with_claude(
 
     Auth follows the bound provider: a native leg resolves the provider row's
     decrypted credentials; the delegated leg authenticates like every other
-    Claude Code session (stored `ANTHROPIC_API_KEY`, else the CLI's own
-    login). There is NO direct-HTTP path here.
+    Claude Code session (stored `ANTHROPIC_API_KEY`, else the CLI's own login).
+    Behavioral review is an internal exception: its sealed transport bypasses
+    the adapter, session state, request tracing and usage hooks.
 
     Args:
         prompt: The prompt to send.
@@ -239,6 +240,14 @@ async def generate_with_claude(
     Returns:
         Text response from the model.
     """
+    if review_binding is not None:
+        from app.core.provider.behavioral_review_transport import infer
+
+        if model is not None:
+            raise RuntimeError("Behavioral review cannot override its configured binding")
+        route, account = review_binding
+        return await infer(prompt, route, account, timeout_seconds)
+
     from app.core.generation_options import (
         build_generation_options,
         text_generation_config,
@@ -252,8 +261,7 @@ async def generate_with_claude(
     # Run them off the event loop: this function sits in front of interactive
     # flows (branch naming, commit messages) and a slow DB round-trip here used
     # to stall every other request in the process.
-    generation_config = (review_binding[0] if review_binding
-                         else await run_sync(text_generation_config))
+    generation_config = await run_sync(text_generation_config)
     if model:
         # A UI selection is a complete run binding, not a bare model on the
         # Settings provider. Native aliases explicitly clear that provider.
@@ -286,12 +294,6 @@ async def generate_with_claude(
     from app.core import credential_gate
 
     leg = await run_sync(credential_gate.leg_for_options, options)
-    if review_binding:
-        if (getattr(options, "aih_provider_id", None) != generation_config["provider"]
-                or getattr(options, "aih_provider_auth_mode", None) != "chatgpt"):
-            raise RuntimeError("Behavioral review route changed")
-        options.aih_review_account = review_binding[1]
-        options.env = {**(options.env or {}), "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "256"}
     if leg == "delegated":
         refusal = await credential_gate.turn_refusal_async(leg)
         if refusal:
@@ -361,10 +363,6 @@ async def generate_with_claude(
                                 f"len={len(block.text)}"
                             )
                         response_text.append(block.text)
-                        if review_binding:
-                            from app.core.behavioral_review import MAX_OUTPUT_CHARS
-                            if sum(map(len, response_text)) > MAX_OUTPUT_CHARS:
-                                raise RuntimeError("Behavioral review response exceeded its limit")
             elif isinstance(message, ResultMessage):
                 # Turn-terminal. A failed turn must not read back as an empty
                 # generation — surface the harness's error text so

@@ -62,6 +62,11 @@ def session(sid="source", *, model=MODEL, **kwargs):
 
 async def turn(user, answer, *, sid="source", more=(), flush=True, person_entered=True):
     row = turns.enqueue_turn(sid, "user", prompt=user, person_entered=person_entered)
+    # The synthetic pump below does not make a native HTTP call. Model the
+    # execution receipt; test_behavioral_privacy exercises its real producer.
+    from app.core.behavioral_provenance import Binding, record_settlement
+
+    record_settlement(sid, row["id"], Binding(PROVIDER, ACCOUNT, MODEL))
     real_recorder = session_runtime.TurnRecorder.create_for_run
     pump = make_pump([*more, {"type": "stream_delta", "delta_type": "text", "content": answer},
                       {"type": "done", "metadata": {"stop_reason": "end_turn"}}])

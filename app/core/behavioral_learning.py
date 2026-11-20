@@ -11,7 +11,7 @@ import logging
 import time
 from uuid import uuid4
 
-from app.core import behavioral_review as review
+from app.core import behavioral_provenance as provenance, behavioral_review as review
 from app.db.async_database import run_sync
 from app.db.base import get_db
 
@@ -100,7 +100,17 @@ def _owner_turn(row) -> bool:
             and not payload.get("interrupt_source"))
 
 
-def _transcript(session_id: str, turn_id: str) -> tuple[review.Exchange, ...]:
+def _execution_scope(session_id: str, turn_id: str) -> Scope | None:
+    from app.db import sessions
+
+    binding = provenance.settled_binding(session_id, turn_id)
+    if binding is None:
+        return None
+    scope = _scope(sessions.get_session(session_id), model=binding.model, provider_id=binding.provider_id)
+    return scope if scope is not None and scope.account == binding.account else None
+
+
+def _transcript(session_id: str, turn_id: str, scope: Scope) -> tuple[review.Exchange, ...]:
     from app.core.composer_suggestions import _successful
     from app.db.base import parse_jsonb
 
@@ -159,6 +169,12 @@ def _transcript(session_id: str, turn_id: str) -> tuple[review.Exchange, ...]:
             owner = review.excerpt(user["text"])
             if not owner or not reply or owner != user["text"].strip() or review.screen_findings(owner):
                 break
+            # Both ends of every exchange must be from this exact native
+            # provider/account/model. A session route is not past execution proof.
+            if provenance.settled_binding(session_id, row["turn_id"]) != provenance.Binding(
+                scope.provider_id, scope.account, scope.model
+            ):
+                return ()
             eligible.append((owner, reply))
     eligible.reverse()
     return tuple(review.Exchange(previous_reply=previous[1], owner=current[0])
@@ -212,9 +228,9 @@ def _claim(session_id: str, turn_id: str, prompt: str, *, verify: bool = False) 
 
 def _prepare(session_id: str, turn_id: str):
     from app.core import guidance_storage as storage
-    from app.db import sessions, turns
+    from app.db import turns
 
-    scope = _scope(sessions.get_session(session_id))
+    scope = _execution_scope(session_id, turn_id)
     if scope is None or turns.session_has_unsettled_turns(session_id):
         return None
     route = _route(scope)
@@ -227,7 +243,7 @@ def _prepare(session_id: str, turn_id: str):
         return None
     revision = saved.revision if saved else None
     existing = tuple(saved.content.removeprefix(review.HEADER).splitlines()) if saved else ()
-    exchanges = _transcript(session_id, turn_id)
+    exchanges = _transcript(session_id, turn_id, scope)
     if not exchanges:
         return None
     prompt = review.review_prompt(exchanges, existing)
@@ -236,11 +252,11 @@ def _prepare(session_id: str, turn_id: str):
 
 def _commit(session_id, turn_id, scope, route, revision, content):
     from app.core import guidance_storage as storage
-    from app.db import sessions, turns
+    from app.db import turns
 
     latest = turns.get_latest_turn(session_id)
     if (not latest or latest["id"] != turn_id or not _owner_turn(latest)
-            or _scope(sessions.get_session(session_id)) != scope or _route(scope) != route):
+            or _execution_scope(session_id, turn_id) != scope or _route(scope) != route):
         return
     try:
         storage.apply_automatic_guidance(scope.stem, content, expected_revision=revision,

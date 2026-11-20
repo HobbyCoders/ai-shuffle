@@ -1167,10 +1167,7 @@ class HarnessAdapter(ProviderAdapter):
                 await wait_for_matching_review(
                     options.extra["app_session_id"], options.model, options.extra["provider_id"]
                 )
-            # Review has a separately bounded prompt. Never attach checkout
-            # instructions, memory or the native tool catalog to its request.
-            review_only = bool(options.extra.get("review_account"))
-            compiled_prompt = None if review_only else await run_sync(
+            compiled_prompt = await run_sync(
                 self._compile_prompt_sections,
                 system, append_system, options,
                 **{k: v for k, v in self._prompt_inputs.items()
@@ -1230,8 +1227,7 @@ class HarnessAdapter(ProviderAdapter):
                 # (security + profile instructions) riding as an extra block,
                 # plus fluid's own instruction-file/skills/env gathering.
                 system=(
-                    "Return only the requested JSON classification." if review_only
-                    else compiled_prompt.text if compiled_prompt is not None
+                    compiled_prompt.text if compiled_prompt is not None
                     else "\n\n".join(part for part in (
                         system if system is not None else append_system,
                         prompt_block(attribution_enabled),
@@ -1471,9 +1467,6 @@ class HarnessAdapter(ProviderAdapter):
         # delegated leg sends the caller's prompt with no system prompt.
         if getattr(sdk_options, "aih_one_shot", False) is True:
             opts.extra["one_shot"] = True
-            review_account = getattr(sdk_options, "aih_review_account", None)
-            if review_account:
-                opts.extra["review_account"] = review_account
         if getattr(sdk_options, "aih_automatic_workflows", False):
             opts.extra["automatic_workflows"] = True
         profile_id = getattr(sdk_options, "aih_profile_id", None)
@@ -1878,6 +1871,15 @@ class HarnessAdapter(ProviderAdapter):
                 # Native child tasks inherit the producer's ContextVar. Even a
                 # delayed old task using the shared ctx cannot borrow this run.
                 lambda: proof if delegated or CURRENT_PLAN_RUN.get() == proof else None,
+            )
+        from app.core.behavioral_provenance import CURRENT
+
+        execution = CURRENT.get()
+        if execution is not None:
+            execution.submitted(
+                self._resolve_app_session_id(),
+                native=(isinstance(op, UserTurn) and isinstance(self._engine, NativeLoop)
+                        and self._provider_kind == "openai_responses"),
             )
         try:
             await self._engine.submit(op)
@@ -9923,7 +9925,7 @@ class _LearnerProvider:
 
 
 async def _build_provider_client(
-    kind: str, options: SessionOptions
+    kind: str, options: SessionOptions,
 ) -> tuple[Any, Optional[httpx.AsyncClient]]:
     """Construct the fluid native client for ``kind``, authenticated.
 
@@ -9946,13 +9948,9 @@ async def _build_provider_client(
     (a ``ValueError``) rather than yielding a client that 401s on first use.
     """
     provider_id = options.extra.get("provider_id")
-    review_account = options.extra.get("review_account")
     creds = None
     if provider_id:
-        if review_account:
-            creds = await resolve_provider_credentials(kind, str(provider_id), expected_account=review_account)
-        else:
-            creds = await resolve_provider_credentials(kind, str(provider_id))
+        creds = await resolve_provider_credentials(kind, str(provider_id))
         provider_id = creds.provider_id or provider_id
         # A switch may happen after SDK options were built but before the lazy
         # HTTP client connects. Headers and usage must name the credential row.
@@ -9965,24 +9963,21 @@ async def _build_provider_client(
     if kind == "openai_responses":
         timeouts = {**timeouts, **_responses_timeout_kwargs()}
         if creds is not None:
-            http_client = _usage_capture_http_client(
-                str(provider_id), creds.use_codex_backend
-            )
+            http_client = _usage_capture_http_client(str(provider_id), creds.use_codex_backend)
             if creds.use_codex_backend:
                 base_url = CODEX_RESPONSES_URL
             elif creds.base_url:
                 base_url = _responses_url(creds.base_url)
             else:
                 base_url = OPENAI_RESPONSES_URL
-            client = OpenAIResponsesClient(
-                api_key=creds.api_key,
-                auth=creds.auth,
-                base_url=base_url,
-                http_client=http_client,
-                retry=RetryPolicy(max_retries=0) if review_account else None,
-                **timeouts,
-            )
-            return client, http_client
+            kwargs = dict(api_key=creds.api_key, auth=creds.auth, base_url=base_url,
+                          http_client=http_client, **timeouts)
+            app_session_id = options.extra.get("app_session_id")
+            if creds.use_codex_backend and app_session_id:
+                from app.core.behavioral_provenance import SourceResponsesClient
+
+                return SourceResponsesClient(app_session_id, str(provider_id), **kwargs), http_client
+            return OpenAIResponsesClient(**kwargs), http_client
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(**timeouts), None
     if kind == "gemini":
