@@ -164,8 +164,8 @@ AREAS = {
     # shell or the phone UI itself changes, and in the scheduled run.
     "android": {
         "jobs": ("android",),
-        # android.yml lets this emulator fail (`continue-on-error`) until it is reliable.
-        "advisory": ("android / Android emulator verification (API 36)",),
+        # android.yml lets the API 36 emulator parts fail (`continue-on-error`) until they are reliable.
+        "advisory": tuple(f"android / Android emulator verification (API 36, {part}/4)" for part in range(1, 5)),
         # android/ci/test-ci-webview.py reads both Android workflows.
         "include": ("android/", "mobile/", "frontend/", ".github/workflows/android.yml",
                     ".github/workflows/ci-android-minified.yml"),

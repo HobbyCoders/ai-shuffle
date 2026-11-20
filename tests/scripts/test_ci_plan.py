@@ -483,8 +483,9 @@ def test_the_jobs_left_out_of_the_scan_cannot_run_from_ci():
 def test_the_advisory_job_is_the_one_its_workflow_lets_fail():
     android = workflow("android.yml")["jobs"]["android-ui"]
     assert android["continue-on-error"] == "${{ matrix.advisory }}"
-    names = [android["name"].replace("${{ matrix.api }}", leg["api"])
+    names = [android["name"].replace("${{ matrix.leg }}", leg["leg"])
              for leg in android["strategy"]["matrix"]["include"] if leg["advisory"] == "true"]
+    assert len(names) == 4 and all("(API 36, " in name for name in names)
     assert plan.AREAS["android"]["advisory"] == tuple("android / " + name for name in names)
     # The backend test map: a lost map only makes pull requests run every test.
     backend = workflow("ci-backend.yml")["jobs"]
@@ -531,8 +532,9 @@ def job(name, conclusion="success", status="completed"):
     return {"name": name, "status": status, "conclusion": conclusion}
 
 
-ANDROID = [job("android / Build and test Android app"), job("android / Android emulator verification (API 34)"),
-           job("android / Android emulator verification (API 36)"),
+EMULATOR_34 = [job(f"android / Android emulator verification (API 34, {part}/4)") for part in range(1, 5)]
+EMULATOR_36 = [job(f"android / Android emulator verification (API 36, {part}/4)") for part in range(1, 5)]
+ANDROID = [job("android / Build and test Android app"), *EMULATOR_34, *EMULATOR_36,
            job("android / Publish verified Android download", "skipped")]
 OTHER = [job("backend / backend-shard 1"), job("android-minified / Minified releaseSmoke (API 34)"), job("CI", None, "in_progress")]
 
@@ -551,20 +553,22 @@ def test_an_area_passed_when_its_own_jobs_all_finished_without_a_failure():
     assert plan.area_passed("android", ANDROID + OTHER)
     # Another area's failure, or the verdict job still running, takes nothing away.
     assert plan.area_passed("android", ANDROID + [job("backend / backend-shard 1", "failure")] + OTHER[1:])
-    # The emulator its workflow lets fail.
-    assert plan.area_passed("android", [ANDROID[0], ANDROID[1], {**ANDROID[2], "conclusion": "failure"}, ANDROID[3]])
+    # The emulator parts its workflow lets fail.
+    tolerated = EMULATOR_36[2]["name"]
+    assert plan.area_passed("android", [item if item["name"] != tolerated else {**item, "conclusion": "failure"}
+                                        for item in ANDROID])
 
 
 @pytest.mark.parametrize("bad", [
     job("android / Build and test Android app", "failure"),
-    job("android / Android emulator verification (API 34)", "failure"),
-    job("android / Android emulator verification (API 34)", "cancelled"),
-    job("android / Android emulator verification (API 34)", "timed_out"),
-    job("android / Android emulator verification (API 34)", "neutral"),
-    job("android / Android emulator verification (API 34)", None, "in_progress"),
-    job("android / Android emulator verification (API 34)", None, "queued"),
+    job("android / Android emulator verification (API 34, 2/4)", "failure"),
+    job("android / Android emulator verification (API 34, 2/4)", "cancelled"),
+    job("android / Android emulator verification (API 34, 2/4)", "timed_out"),
+    job("android / Android emulator verification (API 34, 2/4)", "neutral"),
+    job("android / Android emulator verification (API 34, 2/4)", None, "in_progress"),
+    job("android / Android emulator verification (API 34, 2/4)", None, "queued"),
     # Still running, even the tolerated emulator holds the record back.
-    job("android / Android emulator verification (API 36)", None, "in_progress"),
+    job("android / Android emulator verification (API 36, 4/4)", None, "in_progress"),
     job("android / A job added later", "failure"),
 ])
 def test_an_area_with_a_failed_or_unfinished_job_did_not_pass(bad):
@@ -578,7 +582,7 @@ def test_an_area_that_ran_nothing_did_not_pass():
     assert not plan.area_passed("android", None)
     assert not plan.area_passed("android", [job(item["name"], "skipped") for item in ANDROID])
     # Only the tolerated emulator succeeded.
-    assert not plan.area_passed("android", [job(ANDROID[0]["name"], "skipped"), ANDROID[2]])
+    assert not plan.area_passed("android", [job(ANDROID[0]["name"], "skipped"), EMULATOR_36[0]])
     # A name that only starts like the area's.
     assert not plan.area_passed("android", [job("android-minified / Minified releaseSmoke (API 34)")])
     assert not plan.area_passed("android", [job("android"), "odd", {}])

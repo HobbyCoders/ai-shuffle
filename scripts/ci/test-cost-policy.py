@@ -151,7 +151,10 @@ class CostPolicyTests(unittest.TestCase):
             self.assertEqual(job.get("permissions", config["permissions"]), {"contents": "read"})
         for job in config["jobs"].values():
             self.assertEqual(job["runs-on"], LINUX_RUNNER)
-        self.assertEqual([leg["api"] for leg in config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]], ["34", "36"])
+        # Each API level runs as four parts on four standard runners, not one larger runner.
+        legs = config["jobs"]["android-ui"]["strategy"]["matrix"]["include"]
+        self.assertEqual([(leg["api"], leg["part"]) for leg in legs],
+                         [(api, part) for api in ("34", "36") for part in ("1", "2", "3", "4")])
         # ci.yml calls it with no input, so it can only build and test.
         inputs = config["on"]["workflow_call"]["inputs"]
         self.assertEqual(inputs["publish_download"]["default"], "false")
