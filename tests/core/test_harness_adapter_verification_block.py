@@ -17,10 +17,8 @@ from app.core.provider.harness_adapter import (
 from app.core.provider.types import SessionOptions
 
 
-def _compile(tmp_path, **extra):
-    options = SessionOptions(
-        model="fake-model", cwd=str(tmp_path), extra=dict(extra) or None
-    )
+def _compile(tmp_path, *, extra=None):
+    options = SessionOptions(model="fake-model", cwd=str(tmp_path), extra=extra)
     compiled = HarnessAdapter._compile_prompt_sections(
         "AGENT PROMPT", None, options, native=True
     )
@@ -62,7 +60,7 @@ def test_every_clause_the_audit_asked_for_is_in_it(clause):
 def test_the_chat_lane_does_not_get_it(tmp_path):
     """A chat session cannot change anything the user sees, and the block is
     prefix that would be paid for on every turn."""
-    compiled = _compile(tmp_path, session_mode="chat")
+    compiled = _compile(tmp_path, extra={"session_mode": "chat"})
     assert VERIFICATION_BLOCK not in (compiled.text or "")
 
 
@@ -76,6 +74,10 @@ def test_a_read_only_surface_does_not_get_it(tmp_path):
     )
     assert compiled is not None
     assert VERIFICATION_BLOCK not in (compiled.text or "")
+
+
+def test_absent_metadata_matches_empty_metadata(tmp_path):
+    assert _compile(tmp_path).sections == _compile(tmp_path, extra={}).sections
 
 
 def test_the_block_is_fixed_text(tmp_path):

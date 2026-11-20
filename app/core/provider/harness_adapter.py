@@ -8778,11 +8778,16 @@ def _app_guidance_blocks(
     blocks.extend(_model_guidance_blocks(options.model))
     blocks.extend(_learned_guidance_blocks(options.model))
     if native:
-        if (not options.extra.get("one_shot") and options.extra.get("provider_auth_mode") == "chatgpt"
-                and options.extra.get("app_session_id") and options.extra.get("provider_id")):
+        extra = options.extra or {}
+        if (
+            not extra.get("one_shot")
+            and extra.get("provider_auth_mode") == "chatgpt"
+            and extra.get("app_session_id")
+            and extra.get("provider_id")
+        ):
             from app.core.behavioral_learning import prompt_block
 
-            scoped = prompt_block(options.extra["app_session_id"], options.model, options.extra["provider_id"])
+            scoped = prompt_block(extra["app_session_id"], options.model, extra["provider_id"])
             if scoped:
                 blocks.append(scoped)
         mcp_block = _mcp_instructions_block(registry, permitted)
