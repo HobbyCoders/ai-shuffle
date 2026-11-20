@@ -24,7 +24,7 @@
 	 *      fetch lands — a fresh session shows em-dash rows.
 	 *   2. Usage sections — Claude's plan limits (the resolved install's windows
 	 *      from the `rateLimit` store, via `usage-target.ts`) and each provider's
-	 *      usage, in one order (subscriptions first, then the Settings order).
+	 *      usage, in one order (subscriptions first, then API accounts, each A–Z).
 	 *      Every section has a FIXED skeleton whatever its state (fresh, stale,
 	 *      refreshing, unavailable, error, nothing reported yet): its header, its
 	 *      baseline window rows (placeholders until reported), a credits line for
@@ -51,7 +51,6 @@
 	import { obscuresTranscript } from './transcript-reading-area';
 	import { contextBreakdown, usageSections, hiddenUsageProviders } from '$lib/stores/expansion-preferences';
 	import { EyeOff, Eye, ExternalLink } from 'lucide-svelte';
-	import { AGENT_PROVIDER_ORDER } from '$lib/components/settings/providers/providers-model';
 	import { creditNumber as creditsNum, creditText } from './provider-credit';
 	import { providerStatusAt } from '$lib/stores/rate-limit';
 	import { activeSession } from '$lib/stores/active-session';
@@ -892,29 +891,15 @@
 	}
 
 	// One order for every usage section, Claude included (#1845):
-	// subscriptions (ChatGPT, SuperGrok, a Claude plan) above API accounts, so
-	// OpenAI · API never sits next to OpenAI · prolite and reads as one section
-	// (#1087); within each group, the Settings > Providers order (OpenAI, xAI
-	// Grok, Claude, OpenRouter), then fal.ai and anything else, by name.
-	function isSubscriptionProvider(pb: { providerType: string | null }): boolean {
-		const t = (pb.providerType || '').toLowerCase();
-		return t === 'chatgpt' || t === 'grok' || t === 'minimax_plan';
-	}
-
-	function providerFamily(type: string | null): string {
-		const t = (type || '').toLowerCase();
-		if (t === 'chatgpt' || t === 'openai') return 'openai';
-		if (t === 'grok' || t === 'xai') return 'grok';
-		// The saved Anthropic key ("Claude · API") sorts with Claude.
-		if (t === 'anthropic') return 'claude';
-		if (t.startsWith('openrouter')) return 'openrouter';
-		return t;
-	}
-
-	function familyRank(family: string): number {
-		const i = (AGENT_PROVIDER_ORDER as readonly string[]).indexOf(family);
-		if (i >= 0) return i;
-		return family === 'fal' ? AGENT_PROVIDER_ORDER.length : AGENT_PROVIDER_ORDER.length + 1;
+	// subscriptions (ChatGPT, SuperGrok, a Claude plan, an Antigravity sign-in)
+	// above API accounts, so OpenAI · API never sits next to OpenAI · prolite and
+	// reads as one section (#1087); within each group, alphabetical by brand
+	// name (case-insensitive), then by account subtext, so two accounts of one
+	// brand sit together. The group follows the header's own label: a row that
+	// reads "API" is an API account, anything else (a plan name) a subscription.
+	// A MiniMax M Plan key is a plan even before the registry labels it.
+	function isSubscriptionSection(display: ProviderDisplay, providerType: string | null): boolean {
+		return display.subtext !== 'API' || providerType === 'minimax_plan';
 	}
 
 	interface SectionEntry {
@@ -923,17 +908,19 @@
 		pb: ProviderUsageBucket | null;
 		link?: UsageLink;
 		name: string;
-		/** The header's subtext (plan, "API", device). */
 		subtext: string | null;
 		subscription: boolean;
-		rank: number;
+	}
+
+	function compareText(a: string | null, b: string | null): number {
+		return (a ?? '').localeCompare(b ?? '', undefined, { sensitivity: 'base' });
 	}
 
 	function compareSections(a: SectionEntry, b: SectionEntry): number {
 		return (
 			Number(!a.subscription) - Number(!b.subscription) ||
-			a.rank - b.rank ||
-			a.name.localeCompare(b.name) ||
+			compareText(a.name, b.name) ||
+			compareText(a.subtext, b.subtext) ||
 			a.id.localeCompare(b.id)
 		);
 	}
@@ -1036,28 +1023,30 @@
 	}
 
 	const sections = $derived.by<SectionEntry[]>(() => {
-		const entries: SectionEntry[] = sortedProviderBuckets().map((pb) => ({
-			id: `provider:${pb.providerId}`,
-			kind: 'provider',
-			pb,
-			name: providerDisplayFor(pb).name,
-			subtext: providerDisplayFor(pb).subtext ?? null,
-			subscription: isSubscriptionProvider(pb),
-			rank: familyRank(providerFamily(pb.providerType)),
-		}));
+		const entries: SectionEntry[] = sortedProviderBuckets().map((pb) => {
+			const display = providerDisplayFor(pb);
+			return {
+				id: `provider:${pb.providerId}`,
+				kind: 'provider',
+				pb,
+				name: display.name,
+				subtext: display.subtext,
+				subscription: isSubscriptionSection(display, pb.providerType),
+			};
+		});
 		// A key kind with no usage meter: the backend names the row, the line and
 		// the vendor's page. A row with a reading keeps its reading section.
 		for (const link of Object.values($usageLinks)) {
 			if ($rateLimit.providerBuckets?.[link.providerId]) continue;
+			const display = linkDisplay(link);
 			entries.push({
 				id: `provider:${link.providerId}`,
 				kind: 'link',
 				pb: null,
 				link,
-				name: linkDisplay(link).name,
-				subtext: linkDisplay(link).subtext ?? null,
-				subscription: link.subscription,
-				rank: familyRank(providerFamily(link.providerType)),
+				name: display.name,
+				subtext: display.subtext,
+				subscription: isSubscriptionSection(display, link.providerType),
 			});
 		}
 		if (hasClaude) {
@@ -1069,7 +1058,6 @@
 				subtext: claudeSubtext,
 				// A plan login is a subscription; an API-key login is an API account.
 				subscription: claudeDisplay.subtext !== 'API',
-				rank: familyRank('claude'),
 			});
 		}
 		return entries.sort(compareSections);

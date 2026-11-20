@@ -257,7 +257,7 @@ module names the CLI's credentials file or its `claudeAiOauth` token again.
 
 The saved Anthropic API key is its own provider ("Claude · API", the built-in
 `claude-api` row), so the usage popover gives it its own section after the
-subscription's, sorted with Claude. It has no meter. Anthropic shows the
+subscription's, among the API accounts by name. It has no meter. Anthropic shows the
 organization's prepaid credit balance only on the Claude Console
 [Billing page](https://platform.claude.com/settings/billing). No API returns
 it, and the Admin API cost report needs a separate `sk-ant-admin` key and

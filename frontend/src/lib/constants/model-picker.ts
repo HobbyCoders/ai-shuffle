@@ -9,6 +9,7 @@
  */
 import {
 	getModels,
+	getNativeModel,
 	getProviders,
 	encodeProviderModel,
 	getProviderDisplay,
@@ -190,7 +191,9 @@ export function selectionUsesSubscription(
 		const row = getProviders().find((p) => p.id === pid);
 		return !!row && row.auth_kind !== 'api';
 	}
-	if (model && getModels().some((m) => m.value === model)) return getClaudeAuth().auth_kind === 'subscription';
+	if (model && (getModels().some((m) => m.value === model) || !!getNativeModel(model) || model.toLowerCase().startsWith('claude-'))) {
+		return getClaudeAuth().auth_kind === 'subscription';
+	}
 	return false;
 }
 

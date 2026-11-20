@@ -137,7 +137,7 @@ const REGISTRY_ROWS = [
 	{ id: 'opencode-console', name: 'Sample OpenCode Console', provider_type: 'opencode', auth_mode: null, auth_kind: 'api', models: [] },
 ];
 
-// Plans above API accounts; within each group Kimi before OpenCode, as Settings orders them.
+// Plans above API accounts; within each group alphabetical (Kimi before OpenCode, MiniMax before OpenCode).
 const LINK_HEADERS = ['Kimi · Subscription', 'OpenCode · Subscription', 'MiniMax · API', 'OpenCode · API'];
 
 beforeEach(() => {
@@ -231,7 +231,7 @@ describe('usage links', () => {
 			expect(headers(await open())).toEqual(LINK_HEADERS);
 		});
 
-		it('the saved Anthropic key is its own "Claude · API" section beside the Claude plan, sorted with Claude', async () => {
+		it('the saved Anthropic key is its own "Claude · API" section beside the Claude plan, among the API rows by name', async () => {
 			await registry([
 				...REGISTRY_ROWS,
 				{ id: 'claude-api', name: 'Claude API', provider_type: 'anthropic', auth_mode: 'api_key', auth_kind: 'api', models: [] },
@@ -279,6 +279,17 @@ describe('usage links', () => {
 			await registry([{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] }]);
 			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API], usage_links: [] });
 			expect(headers(await open())).toEqual(['Kimi · API']);
+		});
+
+		it('group by the header label: an Antigravity sign-in sorts with plans, its key with API rows, each A–Z', async () => {
+			await registry([
+				{ id: 'kimi-api', name: 'Sample Kimi API', provider_type: 'kimi', auth_mode: null, auth_kind: 'api', models: [] },
+				{ id: 'agy-signin', name: 'Sample Antigravity', provider_type: 'antigravity', auth_mode: null, auth_kind: 'subscription', plan_type: 'Personal', models: [] },
+				{ id: 'agy-key', name: 'Sample Antigravity Key', provider_type: 'antigravity', auth_mode: null, auth_kind: 'api', models: [] },
+			]);
+			const agy = (id: string) => ({ ...KIMI_API, provider_id: id, provider_name: id, provider_type: 'antigravity', source: 'antigravity', source_info: undefined });
+			rateLimit.applySnapshot({ available: false, windows: [], providers: [KIMI_API, agy('agy-key'), agy('agy-signin')], usage_links: [] });
+			expect(headers(await open())).toEqual(['Antigravity · Personal', 'Antigravity · API', 'Kimi · API']);
 		});
 	});
 

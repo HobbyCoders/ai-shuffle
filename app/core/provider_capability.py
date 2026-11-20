@@ -236,7 +236,11 @@ def _unbound_picks(profile_id: Optional[str]) -> List[Optional[str]]:
     config = (profile or {}).get("config") or {}
     picks: List[Optional[str]] = [config.get("provider"), config.get("model")]
     for most_used in (True, False):
-        picks.extend(default_run_model(probe=False, prefer_most_used=most_used))
+        provider_id, model_id = default_run_model(probe=False, prefer_most_used=most_used)
+        if provider_id:
+            picks.append(provider_id)
+        if model_id:
+            picks.append(model_id)
     return picks
 
 

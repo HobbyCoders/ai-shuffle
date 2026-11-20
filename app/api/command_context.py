@@ -140,6 +140,8 @@ def command_provider_kind(
             session is None or _is_interactive_run({"turn_source": "user"}, session)
         )
         provider_id, raw_model = default_run_model(prefer_most_used=interactive)
+        if not raw_model:
+            return "unavailable"
     raw_model = raw_model or DEFAULT_MODEL
     decoded = decode_provider_model(selected)
     if decoded:

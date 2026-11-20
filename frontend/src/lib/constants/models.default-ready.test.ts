@@ -114,6 +114,31 @@ describe('resolveDefaultModel', () => {
 		const legacyGrok = entry({ id: 'grok-old', provider_type: 'custom', auth_mode: 'grok', models: [{ id: 'grok-5', label: 'Grok 5' }] });
 		expect(resolveDefaultModel('sonnet', ['grok'], [legacyGrok], claudeModels)).toBe('prov:grok-old:grok-5');
 	});
+
+	it('treats an explicit empty server default as final even when gw:claude-api is ready', () => {
+		const claudeApi = entry({
+			id: 'claude-api',
+			provider_type: 'anthropic',
+			models: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }],
+			default_model: 'claude-sonnet-5',
+			usable: true,
+		});
+		expect(resolveDefaultModel('', ['claude', 'gw:claude-api'], [claudeApi], [])).toBe('');
+		expect(resolveDefaultModel('', ['claude', 'openai'], [openaiKey], [])).toBe('');
+	});
+
+	it('never falls back to gw:claude-api on its own; an explicit API-key default still runs', () => {
+		const claudeApi = entry({
+			id: 'claude-api',
+			provider_type: 'anthropic',
+			models: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }],
+			default_model: 'claude-sonnet-5',
+			usable: true,
+		});
+		expect(resolveDefaultModel('sonnet', ['gw:claude-api'], [claudeApi], claudeModels)).toBe('sonnet');
+		expect(resolveDefaultModel('prov:claude-api:claude-sonnet-5', ['gw:claude-api'], [claudeApi], claudeModels))
+			.toBe('prov:claude-api:claude-sonnet-5');
+	});
 });
 
 describe('getDefaultModel', () => {
@@ -159,6 +184,19 @@ describe('getDefaultModel', () => {
 		expect(getDefaultModel()).toBe('prov:oa-key:gpt-5.5');
 		setReadyProviders(['claude', 'openai']);
 		expect(getDefaultModel()).toBe('sonnet');
+		setReadyProviders(null);
+	});
+
+	it('keeps an explicit empty server default empty even when gw:claude-api is usable and ready', async () => {
+		const claudeApiRow = {
+			id: 'claude-api', name: 'Claude API', provider_type: 'anthropic',
+			models: [{ id: 'claude-sonnet-5', label: 'Sonnet 5' }], default_model: 'claude-sonnet-5', usable: true,
+		};
+		mocks.get.mockResolvedValueOnce({ models: [], default: '', legacy_map: {}, providers: [claudeApiRow] });
+		await hydrateModelRegistry();
+		setReadyProviders(['claude', 'gw:claude-api']);
+		expect(getServerDefaultModel()).toBe('');
+		expect(getDefaultModel()).toBe('');
 		setReadyProviders(null);
 	});
 });
