@@ -135,6 +135,17 @@ def test_a_local_cloud_override_keeps_the_owners_key_pin():
     assert claude_api_provider._active_key().endswith("2222")
     active = [row["last4"] for row in accounts.accounts_payload()["api_key"] if row["active"]]
     assert active == ["2222"]
+    # Settings names the same key outside API key mode too.
+    assert claude_auth_mode.summary(cli={})["api_key"]["last4"] == "2222"
+
+
+def test_settings_shows_no_key_while_the_pinned_key_has_not_synced():
+    import json
+
+    db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("example-anthropic-secret-key-1111"))
+    db.set_system_setting(claude_auth_mode.SELECTION_SETTING, json.dumps(
+        {"mode": "subscription", "subscription": None, "key_id": "not-synced-yet"}))
+    assert claude_auth_mode.summary(cli={})["api_key"] == {"set": False, "last4": None}
 
 
 def test_changing_the_pinned_key_does_not_reconnect_cli_sessions():

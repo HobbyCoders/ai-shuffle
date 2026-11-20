@@ -87,7 +87,7 @@ describe('agent credentials', () => {
 	});
 
 	it('reads API key mode as ready from the Claude API provider, not the CLI sign-in', () => {
-		const gate = { ready: true, reason: null, mode: 'subscription', claude_credential_ready: false, startup_state: 'ready' };
+		const gate = { ready: true, reason: null, mode: 'subscription' as const, claude_credential_ready: false, startup_state: 'ready' as const };
 		// The key runs natively while this worker's CLI is signed in elsewhere.
 		expect(credentialsFromSummary(summary({
 			mode: 'api_key', gate: { ...gate, ready_providers: ['gw:claude-api'] },

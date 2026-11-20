@@ -30,7 +30,7 @@
 	interface Props {
 		isAdmin: boolean;
 		/** The chosen way's credential exists. */
-		onReady?: () => void;
+		onReady?: (way: Way) => void;
 		/** How often to re-check while waiting, in ms. */
 		pollMs?: number;
 	}
@@ -68,7 +68,7 @@
 	const MODES_DOC = 'https://hobbycoders.com/docs/getting-started/modes-and-costs';
 
 	$effect(() => {
-		if (ready && !announced) { announced = true; onReady?.(); }
+		if (ready && way && !announced) { announced = true; onReady?.(way); }
 		if (!ready) announced = false;
 	});
 

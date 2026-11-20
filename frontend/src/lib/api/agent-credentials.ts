@@ -43,6 +43,9 @@ export interface AgentCredentials {
 	apiKey: ClaudeAuthSummary['api_key'];
 }
 
+/** The gate's id for the saved Anthropic key's native "Claude API" provider. */
+export const CLAUDE_API_READY_ID = 'gw:claude-api';
+
 export function isClaudeAuthMode(value: unknown): value is ClaudeAuthMode {
 	return value === 'subscription' || value === 'api_key' || value === 'cloud' || value === 'off';
 }
@@ -56,7 +59,7 @@ export function credentialsFromSummary(summary: ClaudeAuthSummary): AgentCredent
 	// readiness is that provider's, not the Claude Code CLI's sign-in.
 	const credentialReady = gate
 		? mode === 'api_key' && gate.ready_providers
-			? gate.ready_providers.includes('gw:claude-api')
+			? gate.ready_providers.includes(CLAUDE_API_READY_ID)
 			: gate.claude_credential_ready === true
 		: mode === 'subscription'
 			? summary.cli.signed_in

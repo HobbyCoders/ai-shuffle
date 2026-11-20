@@ -283,7 +283,10 @@ def key_pin() -> Optional[dict]:
     Settings marks active (``claude_accounts._keys``). With a pin, the key is
     that exact saved key or none; the scalar never substitutes for it.
     """
-    choice = shared_selection(cached=True)
+    return _pin_of(shared_selection(cached=True))
+
+
+def _pin_of(choice: Optional[dict]) -> Optional[dict]:
     if choice is None or choice.get("invalid"):
         return None
     if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
@@ -560,6 +563,13 @@ def summary(cli: Optional[dict] = None) -> dict:
                 key = selected_api_key(choice)
             elif key:
                 confirmation = _confirmation_revision(rows)
+        else:
+            # The native Claude API provider bills the owner's pinned key in
+            # every mode (key_pin), so Settings shows that key, never a stale scalar.
+            shared = rows.get(SELECTION_SETTING)
+            pin = _pin_of(_decode_selection(shared.value if shared else None))
+            if pin is not None:
+                key = selected_api_key(pin)
     except DatabaseError:
         mode, choice, key, explicit = MODE_OFF, {"invalid": True}, None, False
     signed_in = bool(cli.get("signed_in"))
