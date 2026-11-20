@@ -175,6 +175,17 @@ def test_a_test_listing_a_top_level_folder_never_narrows():
     assert select(["frontend/src/a.svelte"], **top)[0] == "all"
 
 
+@pytest.mark.parametrize("path", ["frontend/package-lock.json", "frontend/package.json",
+                                  "browser-mcp/npm-shrinkwrap.json", "fluid/pyproject.toml",
+                                  "requirements-dev.txt", "docker/requirements-extra.txt", "tools/uv.lock"])
+def test_a_package_manifest_or_lockfile_anywhere_runs_everything(path):
+    # test_version_source builds the path to frontend/package-lock.json at run time.
+    named = {"tests/core/test_version_source.py":
+             "def test_x():\n    (ROOT / 'frontend' / ('package' + '-lock.json')).read_text()\n"}
+    result, reasons = select([path], **named)
+    assert result == "all" and ("manifest or lockfile" in reasons[0] or "dependencies" in reasons[0])
+
+
 @pytest.mark.parametrize("path", ["tests/db/fixtures/schema_v88.sql", "tests/fixtures/x.json",
                                   "tests/core/__snapshots__/a.snap"])
 def test_test_data_runs_everything(path):

@@ -208,7 +208,7 @@ PostgreSQL safety always run in full.
   policy suite's `tests/scripts/` and the docs tests) are left out of the
   choice; their jobs run anyway.
 - Any doubt runs every test: no map, a map whose commit is not on main, a
-  change to the dependencies, the pytest setup (any `conftest.py`, the root one
+  change to the dependencies (any package manifest or lockfile, in any folder), the pytest setup (any `conftest.py`, the root one
   too) or how the shards run and are judged, a file under `tests/` that is not
   Python (fixtures, data, snapshots, read by names built at run time), a file
   that no code or test names, nor any folder of it below the top level, a file

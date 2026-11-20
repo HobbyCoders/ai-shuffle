@@ -822,6 +822,18 @@ def merged(checkout, *paths):
     return checkout
 
 
+def test_a_pull_request_changing_only_the_api_base_runs_the_container_job(checkout):
+    # runtime.ts holds apiBase(), which every call of the container smoke script goes through.
+    path = "frontend/src/lib/api/runtime.ts"
+    assert plan.reads("container", path)
+    merged(checkout, path)
+    found = plan.plan(checkout, environment(), lambda path, token: {"artifacts": []})
+    assert not found["container"]["proven"]
+    entries = [("100644", "a" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    changed = [("100644", "c" * 40, path), ("100644", "b" * 40, "Dockerfile")]
+    assert plan.key_of("container", entries) != plan.key_of("container", changed)
+
+
 def test_a_pull_request_skips_the_areas_it_changes_no_file_of(checkout):
     merged(checkout, "android/a.kt")
     lookups = []

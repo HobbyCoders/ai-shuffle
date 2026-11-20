@@ -74,7 +74,9 @@ SETUP_UI = (
     "frontend/src/lib/components/settings/providers/", "frontend/src/lib/components/settings/ClaudeCliPanel.svelte",
     # The API modules behind each call the script makes or waits for (owner
     # password, license, Claude pay mode, auth status) and the stores they fill.
-    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/owner.ts", "frontend/src/lib/api/license.ts",
+    # runtime.ts holds apiBase(), which every one of those calls goes through.
+    "frontend/src/lib/api/client.ts", "frontend/src/lib/api/runtime.ts",
+    "frontend/src/lib/api/owner.ts", "frontend/src/lib/api/license.ts",
     "frontend/src/lib/api/auth.ts", "frontend/src/lib/api/claude-auth.ts", "frontend/src/lib/api/claude-cli.ts",
     "frontend/src/lib/api/network.ts", "frontend/src/lib/api/model-providers.ts",
     "frontend/src/lib/api/agent-credentials.ts", "frontend/src/lib/api/cli-history.ts",

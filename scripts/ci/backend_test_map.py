@@ -68,6 +68,12 @@ FULL_SUITE_PATTERNS = (
     # How CI Backend splits, reruns and judges its shards.
     "scripts/ci/backend_shard*.py", "scripts/ci/backend_gate.py", "scripts/ci/record_failures.py",
 )
+# Package manifests and lockfiles anywhere: tests read them by paths built at
+# run time (the version source reads frontend/package-lock.json), and a
+# dependency change reaches code no map follows.
+MANIFEST_NAMES = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "pyproject.toml",
+                  "requirements*.txt", "requirements*.in", "requirements*.lock", "uv.lock",
+                  "poetry.lock", "Pipfile", "Pipfile.lock", "setup.py", "setup.cfg")
 SOURCE_DIRS = ("app", "fluid/fluid", "tests", "scripts", "docker")
 ROOT_SCRIPTS = ("run_local.py",)
 # At this share of the fast subset a selected run saves little; run it all.
@@ -598,6 +604,8 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
         for path in changed:
             if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
                 raise FullSuite(f"{path} changes the test setup or dependencies")
+            if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
+                raise FullSuite(f"{path} is a package manifest or lockfile")
             # Any conftest, the root one too: pytest loads it for every test beneath it.
             if PurePosixPath(path).name == "conftest.py":
                 raise FullSuite(f"{path} is a conftest")
