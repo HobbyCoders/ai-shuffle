@@ -134,8 +134,8 @@ test('Windows rechecks install authority inside the guard and never writes if it
 	assert.equal(writes, 1);
 });
 
-test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, async () => {
-	const dir = mkdtempSync(path.join(os.tmpdir(), 'shuffle-startup-guard-'));
+const windowsGuardCase = (name, root) => test(`Windows guard excludes native no-share handles in both directions (${name})`, { skip: process.platform !== 'win32' }, async t => {
+	const dir = mkdtempSync(path.join(root(), 'shuffle-startup-guard-'));
 	try {
 		const installedExecutable = path.join(dir, 'AI Shuffle.exe');
 		const resources = path.join(dir, 'resources');
@@ -187,6 +187,19 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		try {
 			const held = await Promise.race([once(lines, 'line').then(([line]) => line), closed.then(() => stderr)]);
 			assert.equal(held, 'held', 'native holder must acknowledge opening the guard');
+			const nativeReader = spawnSync('powershell.exe', powershell(`
+				$ErrorActionPreference = 'Stop'
+				$disk = [IO.DriveInfo]::new([IO.Path]::GetPathRoot(${psPath(guard)}))
+				[Console]::WriteLine('driveFormat=' + $disk.DriveFormat + ', driveType=' + $disk.DriveType + ', holderAlive=' + ($null -ne (Get-Process -Id ${holder.pid} -ErrorAction SilentlyContinue)))
+				try {
+					[IO.File]::Open(${psPath(guard)}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read).Dispose()
+					[Console]::WriteLine('native reader opened the file')
+				} catch { [Console]::WriteLine('native reader Win32=' + (($_.Exception.GetBaseException()).HResult -band 65535)) }
+			`), { encoding: 'utf8', timeout: 15_000 });
+			const diagnostics = `${dir}: ${nativeReader.stdout.trim()} ${nativeReader.stderr.trim()}`;
+			t.diagnostic(diagnostics);
+			assert.ifError(nativeReader.error);
+			assert.equal(nativeReader.status, 0, diagnostics);
 			assert.throws(() => closeSync(openSync(guard, 'r')), { code: 'EBUSY' }, 'the real guard path must be locked');
 			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
 			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
@@ -201,3 +214,6 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 		assert.deepEqual([writes, reads], [2, 2]);
 	} finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
+
+windowsGuardCase('runner TEMP', () => os.tmpdir());
+windowsGuardCase('profile LOCALAPPDATA', () => process.env.LOCALAPPDATA);
