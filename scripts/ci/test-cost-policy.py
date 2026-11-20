@@ -27,9 +27,7 @@ ANDROID = {"android.yml", "ci-android-minified.yml"}
 # The only workflows that may start without a person dispatching them.
 AUTOMATIC = {
     "desktop-source.yml": {"schedule", "workflow_dispatch", "workflow_run"},
-    # merge_group: a merge queue for main runs the checks once on the merged
-    # result; nothing starts on it until the repository has such a queue.
-    "ci.yml": {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"},
+    "ci.yml": {"pull_request", "push", "schedule", "workflow_dispatch"},
     "android-webview-cache.yml": {"push", "schedule", "workflow_dispatch"},
     "runtime-overlay-acceptance.yml": {"pull_request", "workflow_dispatch"},
 }
@@ -227,6 +225,8 @@ class CostPolicyTests(unittest.TestCase):
     def test_edge_publication_waits_for_the_owner_local_pass(self):
         config = workflow("desktop-source.yml")
         self.assertEqual(set(config["on"]), {"schedule", "workflow_dispatch", "workflow_run"})
+        # A started publish is never cancelled; a newer trigger replaces only a waiting one.
+        self.assertEqual(config["concurrency"], {"group": "desktop-source", "cancel-in-progress": "false"})
         gate = config["jobs"]["gate"]
         for clause in ("github.event_name == 'schedule'", "github.ref == 'refs/heads/main'",
                        "github.actor_id == '76577322'", "github.triggering_actor == github.actor"):

@@ -19,6 +19,14 @@ permissions:
   statuses: read
   actions: read
 
+# One publisher at a time, whatever started it. A started run always finishes;
+# GitHub keeps only the newest waiting run and drops older waiting ones. That
+# is enough: the gate selects the newest attested revision on main when it
+# starts, so a run that waited publishes everything the dropped ones would have.
+concurrency:
+  group: desktop-source
+  cancel-in-progress: false
+
 jobs:
   gate:
     # Read-only: unchanged main stops before setup, attestation reads or signing.
