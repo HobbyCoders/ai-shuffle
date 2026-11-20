@@ -3,19 +3,22 @@ import { runJourney } from './runner.mjs';
 import { expect, gotoApp, showSidebar } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 
-const imageBrands = ['minimax', 'google', 'antigravity'];
-const vectorBrands = ['openai', 'grok', 'claude', 'openrouter', 'kimi', 'opencode', 'fal'];
+const builtInBrands = ['openai', 'grok', 'claude', 'openrouter', 'kimi', 'minimax', 'opencode', 'google', 'antigravity', 'fal'];
 
-async function assertImage(logo, label) {
+async function assertVectorMark(logo, label) {
 	await logo.waitFor();
-	await logo.evaluate(async (element, name) => {
-		if (!(element instanceof HTMLImageElement)) throw new Error(`${name}: expected a provider image`);
-		try {
-			await element.decode();
-		} catch (error) {
-			throw new Error(`${name}: provider image did not decode`, { cause: error });
-		}
-	}, label);
+	const isBrandMark = await logo.evaluate((element) => {
+		if (!(element instanceof SVGSVGElement) || element.querySelector('text, rect')) return false;
+		if (element.getAttribute('fill') !== 'currentColor') return false;
+		const inherited = getComputedStyle(element).color;
+		const paths = [...element.querySelectorAll('path[d]')];
+		// These marks are filled monochrome silhouettes inheriting currentColor; the generic cube is a stroked outline.
+		return paths.length > 0 && paths.every((path) => {
+			const { fill, stroke } = getComputedStyle(path);
+			return fill !== 'none' && fill === inherited && stroke === 'none' && path.getTotalLength() > 0;
+		});
+	});
+	expect(isBrandMark, `${label}: expected a filled monochrome currentColor vector mark, not an image, cube, or initial`);
 }
 
 runJourney({
@@ -36,28 +39,14 @@ runJourney({
 				.getByRole('button', { name: 'Providers', exact: true }).click();
 			const row = (id) => page.locator(`button[data-settings-item="provider:${id}"]`).filter({ visible: true });
 			const logo = (id) => row(id).locator(`[data-provider-logo="${id}"]`);
-			for (const id of vectorBrands) {
-				const vector = logo(id);
-				await vector.waitFor();
-				const isBrandMark = await vector.evaluate((element) => {
-					if (!(element instanceof SVGSVGElement) || element.querySelector('text, rect')) return false;
-					const paths = [...element.querySelectorAll('path[d]')];
-					// These marks are filled silhouettes; the generic cube is a stroked outline.
-					return paths.length > 0 && paths.every(path => {
-						const { fill, stroke } = getComputedStyle(path);
-						return fill !== 'none' && stroke === 'none' && path.getTotalLength() > 0;
-					});
-				});
-				expect(isBrandMark, `${id} list: expected a filled vector mark, not the generic cube or an initial`);
-			}
-			for (const id of imageBrands) await assertImage(logo(id), `${id} list`);
-			log(`Provider list: ${vectorBrands.join(', ')} vector marks; ${imageBrands.join(', ')} images decoded`);
+			for (const id of builtInBrands) await assertVectorMark(logo(id), `${id} list`);
+			log(`Provider list: ${builtInBrands.join(', ')} monochrome vector marks verified`);
 
 			await mark('open Antigravity');
 			await row('antigravity').click();
 			const detail = page.locator('.st-identity [data-provider-logo="antigravity"]').filter({ visible: true });
-			await assertImage(detail, 'antigravity detail');
-			log('Antigravity detail: image decoded');
+			await assertVectorMark(detail, 'antigravity detail');
+			log('Antigravity detail: monochrome vector mark verified');
 		}
 	}]
 });

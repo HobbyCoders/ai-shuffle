@@ -3,10 +3,10 @@ Provider artwork attribution
 Source: LobeHub Lobe Icons, commit 9752d967494e48d8f83f2808feb2b0207bf70997
 https://github.com/lobehub/lobe-icons/tree/9752d967494e48d8f83f2808feb2b0207bf70997/packages/static-svg/icons
 
-Antigravity, Gemini, and MiniMax use the upstream -color SVGs. Kimi, OpenCode,
-and fal.ai use monochrome geometry from kimi.svg, opencode.svg, and fal.svg,
-respectively. Kimi and OpenCode use their designed letterforms, not typeset
-initials.
+Antigravity, Gemini, MiniMax, Kimi, OpenCode, and fal.ai use monochrome
+geometry from antigravity.svg, gemini.svg, minimax.svg, kimi.svg, opencode.svg,
+and fal.svg, respectively. Kimi and OpenCode use their designed letterforms,
+not typeset initials.
 
 The upstream artwork distribution is MIT-licensed (see accompanying license).
 The marks identify the respective providers; trademark rights remain with their owners.

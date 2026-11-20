@@ -38,7 +38,12 @@ async function checkRows(page, providers = opusProviders) {
 		expect(described, `${provider} is exposed as the row's accessible description`);
 		const art = row.locator(`[data-provider-logo="${glyph}"]`);
 		expect(await art.isVisible(), `${provider} row renders ${glyph} artwork`);
-		if (glyph === 'antigravity') await art.evaluate((el) => el.decode());
+		const isMonochromeSvg = await art.evaluate((el) => {
+			if (!(el instanceof SVGSVGElement) || el.getAttribute('fill') !== 'currentColor') return false;
+			const paths = [...el.querySelectorAll('path[d]')];
+			return paths.length > 0 && paths.every((p) => p.getTotalLength() > 0);
+		});
+		expect(isMonochromeSvg, `${provider} row renders monochrome currentColor SVG artwork`);
 	}
 }
 
@@ -59,7 +64,7 @@ function composerCase(native = false) {
 			await mark('search for the same model on different providers');
 			await picker(page).getByRole('textbox', { name: 'Search models' }).fill('opus');
 			await checkRows(page);
-			log('Grouped and searched Opus rows name the serving provider; Antigravity image decoded, Claude vector and custom fallback visible.');
+			log('Grouped and searched Opus rows name the serving provider; Antigravity, Claude, and custom monochrome vector marks visible.');
 		}
 	};
 }
