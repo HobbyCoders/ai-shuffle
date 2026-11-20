@@ -417,10 +417,19 @@ async def test_the_turns_usage_reaches_what_the_app_books(tmp_path):
 async def test_the_subscription_cli_never_sees_a_host_api_key_or_host_secrets(
     tmp_path, monkeypatch,
 ):
-    from app.core import claude_auth_mode
+    from app.core import claude_cli_status as status
+    from app.core import claude_subscriptions as subscriptions
     from app.core.environment import inject_claude_code_auth
 
-    monkeypatch.setattr(claude_auth_mode, "current_mode", lambda: claude_auth_mode.MODE_SUBSCRIPTION)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setattr(status, "probe_home", lambda *a, **kw: status.ClaudeCliStatus(
+        installed=True, signed_in=True, auth_method="claude.ai",
+        email="fixture@example.com", org_id="fixture-org",
+    ))
+    monkeypatch.setattr(subscriptions, "_identity_cache", {})
+    monkeypatch.setattr(subscriptions, "_identity_generation", 0)
+    monkeypatch.setattr(subscriptions, "_reap_due", False)
+    subscriptions.select_default()
     for name, value in {
         "ANTHROPIC_API_KEY": "sk-host", "ANTHROPIC_AUTH_TOKEN": "host-token",
         "OWNER_PASSWORD": "pw", "DATABASE_URL": "postgres://x", "CLUSTER_SECRET": "c",

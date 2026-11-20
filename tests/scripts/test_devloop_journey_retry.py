@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,13 +51,17 @@ def driver(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ci, "DevInstance", Instance)
 
-    def run(first, second=None, *, opt=True, only=None):
+    real_command = ci.run_command
+
+    def run(first, second=None, *, opt=True, only=None, real_retry=False, command_timeout=None):
         def command(argv, env, log, timeout):
             assert not instances[0].stopped  # same live instance on both attempts
             attempt = 2 if "attempt-2" in str(log) else 1
             name = Path(argv[1]).name
             selected = [a.removeprefix("--case=") for a in argv[2:]]
             calls.append((attempt, name, selected, timeout, env.copy()))
+            if attempt == 2 and real_retry:
+                return real_command([sys.executable, *argv[1:]], env, log, timeout)
             responses = first if attempt == 1 else second
             rows = responses.get(name, [case("untouched@phone-slow", "pass")])
             log.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +86,8 @@ def driver(tmp_path, monkeypatch):
             argv.append("--retry-failures")
         if only is not None:
             argv.extend(["--only", only])
+        if command_timeout is not None:
+            argv.extend(["--journey-timeout", str(command_timeout)])
         code = ci.main(argv)
         return code
 
@@ -309,3 +317,61 @@ def test_skipping_long_crash_does_not_block_short_crash(driver):
     rows = json.loads((out / "summary.json").read_text())["rows"]
     assert [row["status"] for row in rows] == ["crashed", "passed-on-retry"]
     assert "Estimated whole-file runtime 461.7s exceeds" in summary.read_text()
+
+@pytest.mark.parametrize("budget_source", ["earlier-retry", "shard-cutoff", "command-timeout"])
+def test_account_switch_retry_skips_before_provisioning(driver, monkeypatch, budget_source):
+    from scripts.devloop import journey_retry as retry
+
+    run, calls, out, summary, outputs, _ = driver
+    name = "claude-account-switch.journey.mjs"
+    earlier = "other.journey.mjs"
+    files = [earlier, name] if budget_source == "earlier-retry" else [name]
+    monkeypatch.setattr(ci, "plan", lambda _: [files, [], [], []])
+    phase_start = 1318.5 if budget_source == "shard-cutoff" else 0
+    clock = iter([0, phase_start, phase_start, 178.5] if budget_source == "earlier-retry"
+                 else [0, phase_start])
+    monkeypatch.setattr(retry, "time", SimpleNamespace(monotonic=lambda: next(clock, phase_start)))
+    assert run({name: [case(error="original account failure")], earlier: [case()]},
+               {name: [case(status="pass")], earlier: [case(status="pass")]},
+               command_timeout=1.5 if budget_source == "command-timeout" else None) == 1
+    assert not any(attempt == 2 and file == name for attempt, file, *_ in calls)
+    receipt = json.loads((out / "summary.json").read_text())
+    row = next(row for row in receipt["rows"] if row["journey"] == "claude-account-switch")
+    assert row["status"] == "fail" and len(row["attempts"]) == 1
+    assert "1.5s available" in row["retry_skipped"]
+    assert row["retry_skipped"] in summary.read_text()
+    assert "original account failure" in summary.read_text()
+    assert receipt["retried"] == (1 if budget_source == "earlier-retry" else 0)
+    assert outputs.exists() == (budget_source == "earlier-retry")
+
+
+@pytest.mark.parametrize("crashed", [False, True])
+@pytest.mark.parametrize("headroom", [1.5, 180.0])
+def test_account_switch_retry_uses_hosted_timeout(driver, monkeypatch, tmp_path, crashed, headroom):
+    from scripts.devloop import journey_retry as retry
+    run, calls, out, summary, _, _ = driver
+    name = "claude-account-switch.journey.mjs"
+    monkeypatch.setattr(ci, "plan", lambda _: [[name], [], [], []])
+    monkeypatch.setattr(ci, "JOURNEYS", tmp_path)
+    ci.WEIGHTS.write_text(json.dumps({"seconds": {name: 1}}))
+    fake_tmp = tmp_path / "private-status-dir"
+    # If incorrectly admitted under a tiny budget, this launcher is really killed
+    # by CI's timer, without a summary or a chance to clean up the private dir.
+    if headroom < 180:
+        (tmp_path / name).write_text(
+            f"from pathlib import Path\nimport time\nPath({str(fake_tmp)!r}).mkdir()\ntime.sleep(600)\n"
+        )
+    started = 1320 - headroom
+    clock = iter([0, started])
+    monkeypatch.setattr(retry, "time", SimpleNamespace(monotonic=lambda: next(clock, started)))
+    assert run({name: None if crashed else [case()]}, {name: [case(status="pass")]},
+               real_retry=headroom < 180) == (1 if headroom < 180 else 0)
+    receipt = json.loads((out / "summary.json").read_text())
+    row = receipt["rows"][0]
+    if headroom < 180:
+        assert not fake_tmp.exists(), row
+        assert row["status"] == ("crashed" if crashed else "fail") and len(row["attempts"]) == 1
+        assert "1.5s available" in summary.read_text()
+    else:
+        assert row["status"] == "passed-on-retry" and len(row["attempts"]) == 2
+        assert calls[-1][2:4] == ([] if crashed else ["copy@desktop-fast"], 180.0)

@@ -352,8 +352,11 @@ function claudeCredentials(claude: ClaudeAuthSummary | null, keyMasked?: string 
 	const saved = claudeSubscriptionAccounts(claude);
 	if (saved.length) {
 		for (const account of saved) out.push(subscriptionCredential(claude, account));
-		// The CLI's own sign-in, in use but not saved as an entry yet: still a row.
-		if (!saved.some((a) => a.kind === 'default') && claude.accounts?.default_in_use && cli.signed_in) {
+		// Recovery must keep the default detail reachable even if only extra
+		// sign-ins have been saved. The detail verifies before binding it.
+		if (!saved.some((a) => a.kind === 'default') && (
+			claude.accounts?.recovery_required || (claude.accounts?.default_in_use && cli.signed_in)
+		)) {
 			out.unshift(cliCredential(claude));
 		}
 	} else if (cli.signed_in || subActive) {

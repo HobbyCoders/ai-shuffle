@@ -262,13 +262,37 @@ def remove(account_id: str) -> None:
     _remove_tree(home)
 
 
-def env_for(account_id: Optional[str]) -> dict[str, str]:
-    """The overlay a ``claude`` spawn needs for this sign-in.
+CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
+_HOME_ENV = {"HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"}
 
-    ``None`` is the default sign-in: nothing is set, so the CLI uses the
-    worker's own ``$CLAUDE_CONFIG_DIR`` or ``~/.claude`` exactly as before
-    (setting it to ``~/.claude`` explicitly would move the CLI's global config
-    file, so it is deliberately left alone).
+
+def bind_sign_in(env: dict[str, str], folder: dict[str, str], *, overlay: bool = False) -> None:
+    """Bind the CLI's verified folder, including an explicitly unset config dir.
+
+    For the stock home, absence is significant: setting ~/.claude explicitly
+    also moves the CLI's global config file. A delegated overlay must remove
+    inherited aliases at merge time and cannot redirect the worker's home.
+    A fully constructed subprocess env needs neither an unset marker nor a
+    home override. Legacy callers can continue to inherit their own folder.
+    """
+    from app.core.claude_cloud_auth import is_cloud_unset_name
+
+    for name in tuple(env):
+        if (name.upper() == CONFIG_DIR_ENV or (overlay and name.upper() in _HOME_ENV)
+                or (not overlay and is_cloud_unset_name(name))):
+            env.pop(name)
+    if overlay:
+        from fluid.tools.child_env import UNSET_ENV
+
+        env[UNSET_ENV] = ",".join(filter(None, (env.get(UNSET_ENV), CONFIG_DIR_ENV)))
+    env.update(folder)
+
+
+def env_for(account_id: Optional[str]) -> dict[str, str]:
+    """Explicit folder values: no config-dir variable for the stock home.
+
+    Use ``bind_sign_in`` to enforce that absence over a worker or profile
+    override. Legacy callers overlay these values without clearing inheritance.
     """
     if account_id is None:
         return {}

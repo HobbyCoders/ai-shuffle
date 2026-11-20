@@ -36,7 +36,8 @@ def test_fresh_install_without_cli_is_blocked(mock_db):
 
 
 def test_subscription_mode_needs_a_cli_sign_in(mock_db):
-    claude_auth_mode.set_mode("subscription")
+    # An upgraded worker's local mode is not a shared billing identity.
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (
         False, credential_gate.NOT_SIGNED_IN_MESSAGE)
     assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (True, None)
@@ -47,7 +48,9 @@ def test_subscription_mode_ignores_a_stored_key(mock_db):
     claude_auth_mode.set_mode("subscription")
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
     ready, reason = credential_gate.agent_credentials_ready(_cli(signed_in=False))
-    assert not ready and reason == credential_gate.NOT_SIGNED_IN_MESSAGE
+    from app.core.claude_subscriptions import SELECTION_UNAVAILABLE
+
+    assert not ready and reason == SELECTION_UNAVAILABLE
 
 
 def test_api_key_mode_needs_a_stored_key_not_a_cli_login(mock_db):
@@ -55,7 +58,9 @@ def test_api_key_mode_needs_a_stored_key_not_a_cli_login(mock_db):
     assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (
         False, credential_gate.NO_KEY_MESSAGE)
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
-    assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (True, None)
+    # A later scalar must not silently switch an owner-wide selection.
+    assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (
+        False, credential_gate.NO_KEY_MESSAGE)
 
 
 def test_off_mode_refuses_claude_whatever_credentials_exist(mock_db):
@@ -120,8 +125,7 @@ def test_another_provider_makes_the_worker_ready_without_claude(mock_db):
 
 
 def test_ready_providers_lists_each_usable_provider_once(mock_db):
-    claude_auth_mode.set_mode("api_key")
-    database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+    _claude_api_key_ready()
     _provider_row("codex", "chatgpt", auth_mode="chatgpt", codex_access_token="enc:tok")
     _provider_row("oa", "openai", auth_token="enc:key", checked=True)
     _provider_row("sg", "grok", auth_mode="grok", codex_access_token="enc:tok")
@@ -215,8 +219,7 @@ def _build_turn(tmp_path, session_id, source="user", **session_fields):
 
 
 def test_no_model_named_follows_the_most_used_model_with_claude_set_up(mock_db, tmp_path):
-    claude_auth_mode.set_mode("api_key")
-    database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+    _claude_api_key_ready()
     _openai_with_default()
     # No usage history: Claude is just another candidate, the row's default leads.
     assert _build_turn(tmp_path, "c1").model == "gpt-5"
@@ -464,8 +467,7 @@ def test_startup_with_no_provider_warns_with_the_neutral_reason(mock_db, caplog)
 
 
 def test_an_unlinked_worker_can_run_every_configured_provider(mock_db, monkeypatch):
-    database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
-    claude_auth_mode.set_mode("api_key")
+    _claude_api_key_ready()
     monkeypatch.setattr(license_mod, "status", lambda: (_ for _ in ()).throw(AssertionError("Cloud state must not gate runs")))
     assert credential_gate.agent_credentials_ready() == (True, None)
     # A provider-row turn needs no Claude credential or Cloud plan.
@@ -641,7 +643,8 @@ async def test_fresh_install_refuses_the_rest_query_paths(mock_db, tmp_path):
 # ---------------------------------------------------------------------------
 
 def _claude_api_key_ready():
-    claude_auth_mode.set_mode("api_key")
+    # Setup for routing tests: a pre-existing legacy install, not a new pin.
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
 
 
@@ -1041,9 +1044,10 @@ def _requesters():
 
 def _claude(mode):
     def setup():
-        claude_auth_mode.set_mode(mode)
         if mode == "api_key":
-            database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+            _claude_api_key_ready()
+        else:
+            claude_auth_mode.set_mode(mode)
         return "sonnet"
     return setup
 

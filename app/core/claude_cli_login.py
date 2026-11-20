@@ -77,11 +77,16 @@ def _login_env(home_env: Optional[dict] = None) -> dict:
     None is the active saved sign-in (``{}`` would be the default folder)."""
     env = {k: v for k, v in scrub_child_env().items()
            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")}
-    if home_env is None:
-        from app.core import claude_subscriptions
+    from app.core import claude_cli_home, claude_subscriptions
 
-        home_env = claude_subscriptions.active_home_env()
-    env.update(home_env)
+    if home_env is None:
+        try:
+            claude_subscriptions.apply_cli_home(env)
+        except claude_subscriptions.SubscriptionError:
+            # Login can repair the default folder; turns still require a match.
+            claude_cli_home.bind_sign_in(env, {})
+    else:
+        claude_cli_home.bind_sign_in(env, home_env)
     env["TERM"] = "dumb"
     env["NO_COLOR"] = "1"
     return env

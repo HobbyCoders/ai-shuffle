@@ -31,8 +31,15 @@ MEASURED_MEMORY_TOKENS = {"native": 43_629, "delegated": 43_323}
 
 @pytest.fixture(scope="module")
 def runs():
+    from app.core import claude_auth_mode
+
+    def no_worker_settings(*args, **kwargs):
+        raise AssertionError("the offline benchmark must not read worker settings")
+
     prefixes = (4_000, 4_000)
-    return m.measure(True, prefixes), m.measure(False, prefixes)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(claude_auth_mode.database, "get_system_setting_cached", no_worker_settings)
+        return m.measure(True, prefixes), m.measure(False, prefixes)
 
 
 @pytest.mark.parametrize("leg", ["native", "delegated"])

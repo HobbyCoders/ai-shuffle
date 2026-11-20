@@ -85,7 +85,7 @@ def test_default_install_cli_env_is_unchanged(store):
     """Regression: subscription mode, even with a cloud method saved, passes the
     host env exactly as before (only the two Anthropic names removed)."""
     cloud.save("gateway", {"base_url": "https://gw.example", "auth_token": FAKE["gateway_token"]})
-    claude_auth_mode.set_mode("subscription")
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")  # legacy local row
     overlay = inject_claude_code_auth({})
     assert overlay == {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN"}
     env = child_env_with_overlay(overlay, HOST)
@@ -98,7 +98,7 @@ def test_default_install_cli_env_is_unchanged(store):
 def test_api_key_mode_env_is_unchanged(store):
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-fake-ABCD")
     cloud.save("bedrock", {"region": "us-east-1", "bearer_token": FAKE["bedrock_key"]})
-    claude_auth_mode.set_mode("api_key")
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local row
     overlay = inject_claude_code_auth({})
     assert overlay == {"ANTHROPIC_API_KEY": "sk-ant-api03-fake-ABCD",
                        UNSET_ENV: "ANTHROPIC_AUTH_TOKEN,CLAUDE_CODE_OAUTH_TOKEN"}
@@ -174,12 +174,15 @@ def test_cloud_mode_without_settings_or_worker_configuration_passes_no_credentia
     assert {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"} <= _unset(inject_claude_code_auth({}))
 
 
-def test_switching_back_restores_todays_behaviour(store):
+def test_switching_from_cloud_to_pending_subscription_refuses_fallback(store):
     cloud.save("gateway", {"base_url": "https://gw.example", "auth_token": FAKE["gateway_token"]})
     claude_auth_mode.set_mode("cloud")
     assert inject_claude_code_auth({})["ANTHROPIC_AUTH_TOKEN"] == FAKE["gateway_token"]
     claude_auth_mode.set_mode("subscription")
-    assert inject_claude_code_auth({}) == {UNSET_ENV: "ANTHROPIC_API_KEY,ANTHROPIC_AUTH_TOKEN"}
+    from app.core.environment import ProviderTurnRefused
+
+    with pytest.raises(ProviderTurnRefused, match="selected Claude subscription"):
+        inject_claude_code_auth({})
 
 
 @pytest.mark.parametrize("case", sorted(METHOD_CASES) + ["vertex"])
@@ -253,7 +256,7 @@ def test_worker_environment_methods_are_cli_only_and_report_cloud(store, method,
     from app.core import environment, generation_options
     from app.core.terminals import shell_environment
 
-    claude_auth_mode.set_mode("subscription")
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")  # legacy local row
     # Only obvious fakes. This test never reads an ADC/AWS/Entra file or account.
     with patch.dict(os.environ, {"PATH": "/usr/bin", **env, "PRIVATE_SERVICE_TOKEN": "fake-unrelated"}, clear=True):
         assert claude_auth_mode.current_mode() == "cloud"
@@ -271,6 +274,17 @@ def test_worker_environment_methods_are_cli_only_and_report_cloud(store, method,
                       generation_options._resolve_env({"env": env}),
                       shell_environment("bash", "/bin/bash")):
             assert not set(child) & set(env)
+        # An explicit owner choice wins over automatic environment Cloud;
+        # an explicit local Cloud (or Off) override still wins on this worker.
+        claude_auth_mode.set_mode("subscription")
+        assert claude_auth_mode.current_mode() == "subscription"
+        from app.core.environment import ProviderTurnRefused
+
+        with pytest.raises(ProviderTurnRefused, match="selected Claude subscription"):
+            inject_claude_code_auth({})
+        claude_auth_mode.set_mode("cloud")
+        assert claude_auth_mode.current_mode() == "cloud"
+        assert {name: inject_claude_code_auth({})[name] for name in env} == env
         claude_auth_mode.set_mode("off")
         assert claude_auth_mode.current_mode() == "off"
         assert not set(inject_claude_code_auth({})) & set(env)

@@ -19,14 +19,9 @@ and the user picks it:
   credential reaches a CLI child. Only the user turns this on; the startup
   default never picks it.
 
-The mode is an explicit per-worker setting (``claude_auth_mode:<instance id>``).
-When both a CLI sign-in and a stored key exist, the setting decides; the app
-does not infer a cloud credential from a stray key. An explicit worker cloud
-configuration takes precedence unless a saved Settings cloud method is selected
-(or Claude is off). An install that predates the setting gets a
-one-time default at startup (:func:`ensure_mode_recorded`): ``api_key`` when a
-key is stored and the CLI reports no sign-in, otherwise ``subscription``. That
-default is written down, so a later change in credentials cannot flip it.
+Explicit Subscription and API key choices follow the owner. Off and Cloud
+are worker-local overrides. Startup defaults remain local until there is a
+shared choice.
 
 Saved API keys follow the encrypted system-settings network policy. This
 module never reads the CLI's own credential files; CLI sign-in state comes from
@@ -42,8 +37,11 @@ import json
 import logging
 from typing import Optional
 
+from psycopg2 import Error as DatabaseError
+from psycopg2.errors import DeadlockDetected, SerializationFailure
+
 from app.core.config import settings
-from app.db import database
+from app.db import database, settings as db_settings
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +59,7 @@ MODE_LABELS = {
 }
 
 SETTING_PREFIX = "claude_auth_mode:"
+SELECTION_SETTING = "claude_auth_selection"
 API_KEY_SETTING = "anthropic_api_key"
 
 # Environment names the CLI reads as an Anthropic credential. In each mode the
@@ -77,7 +76,10 @@ def setting_key() -> str:
 
 def stored_api_key() -> Optional[str]:
     """The decrypted Anthropic API key from Settings, or None."""
-    value = database.get_system_setting(API_KEY_SETTING)
+    return _decrypt_api_key(database.get_system_setting(API_KEY_SETTING))
+
+
+def _decrypt_api_key(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
     from app.core import encryption
@@ -95,7 +97,8 @@ def stored_api_key() -> Optional[str]:
 
 
 def has_stored_api_key() -> bool:
-    return bool(stored_api_key())
+    mode, choice = runtime_choice()
+    return bool(selected_api_key(choice) if mode == MODE_API_KEY else stored_api_key())
 
 
 def key_last4(key: Optional[str]) -> Optional[str]:
@@ -104,10 +107,66 @@ def key_last4(key: Optional[str]) -> Optional[str]:
     return key[-4:]
 
 
-def stored_mode(*, cached: bool = False) -> Optional[str]:
+def shared_selection(*, cached: bool = False) -> Optional[dict]:
     getter = database.get_system_setting_cached if cached else database.get_system_setting
-    value = (getter(setting_key()) or "").strip()
-    return value if value in MODES else None
+    return _decode_selection(getter(SELECTION_SETTING))
+
+
+def _decode_selection(raw: Optional[str], *, for_write: bool = False) -> Optional[dict]:
+    from app.core import claude_accounts
+
+    if raw is None:
+        return None
+    try:
+        value = json.loads(claude_accounts._decode_setting(raw))
+        if isinstance(value, dict) and value.get("mode") in MODES:
+            return value
+    except claude_accounts.AccountError:
+        if for_write:
+            raise
+    except (TypeError, ValueError):
+        pass
+    # An unreadable shared selection is not permission to use a local default.
+    return {"mode": MODE_OFF, "invalid": True}
+
+
+def _encode_selection(selection: dict) -> str:
+    from app.core import claude_accounts
+
+    value = json.dumps(selection, separators=(",", ":"))
+    if claude_accounts.is_shipped_legacy_id(selection.get("key_id")):
+        # Reuse whole-value credential custody and the existing encrypted
+        # system-settings sync path. Do not emit a plaintext legacy pin.
+        return claude_accounts._encrypt(value)
+    return value
+
+
+def _stored_choice(*, cached: bool) -> tuple[Optional[str], Optional[dict]]:
+    getter = database.get_system_setting_cached if cached else database.get_system_setting
+    local = getter(setting_key())
+    if local and local.strip() in (MODE_OFF, MODE_CLOUD):
+        return local.strip(), None
+    return _resolve_stored_choice(local, shared_selection(cached=cached))
+
+
+def _resolve_stored_choice(local: Optional[str], choice: Optional[dict]) -> tuple[Optional[str], Optional[dict]]:
+    local = (local or "").strip()
+    if local in (MODE_OFF, MODE_CLOUD):
+        return local, None
+    if choice:
+        if choice.get("invalid"):
+            return MODE_OFF, choice
+        if choice["mode"] in (MODE_SUBSCRIPTION, MODE_API_KEY):
+            return choice["mode"], choice
+        # Honor legacy Cloud only on its originating worker. Old shared Off
+        # rows have no origin, so they cannot be recovered as local choices.
+        if choice["mode"] == MODE_CLOUD and choice.get("worker") == settings.effective_instance_id:
+            return MODE_CLOUD, None
+    return (local if local in MODES else None), None
+
+
+def stored_mode(*, cached: bool = False) -> Optional[str]:
+    return _stored_choice(cached=cached)[0]
 
 
 def default_mode(key_stored: bool, cli_signed_in: Optional[bool]) -> str:
@@ -124,51 +183,56 @@ def _cli_signed_in_peek() -> Optional[bool]:
     return None if status is None else bool(status.signed_in)
 
 
-_mode_pin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("claude_auth_mode_pin", default=None)
+_mode_pin: contextvars.ContextVar[str | None] = contextvars.ContextVar("claude_auth_mode_pin", default=None)
 
 
 @contextlib.contextmanager
 def pinned_mode():
-    """Answer :func:`current_mode` with one read for the whole block, so a
-    projection that asks several times (the model registry payload) describes
-    one mode even if the owner switches midway. Yields that mode."""
+    """Keep model registry reads on one mode without pinning turn credentials."""
     held = _mode_pin.get()
     if held is not None:
         yield held
         return
-    token = _mode_pin.set(current_mode())
+    mode = current_mode()
+    token = _mode_pin.set(mode)
     try:
-        yield _mode_pin.get()
+        yield mode
     finally:
         _mode_pin.reset(token)
+
+
+def runtime_choice() -> tuple[str, Optional[dict]]:
+    """Resolve the mode and its shared account from one selection snapshot."""
+    from app.core import claude_cloud_auth
+
+    try:
+        mode, choice = _stored_choice(cached=True)
+        if choice is not None or mode in (MODE_OFF, MODE_CLOUD):
+            return mode, choice
+        if claude_cloud_auth.has_environment_auth():
+            return MODE_CLOUD, None
+        return mode or default_mode(bool(stored_api_key()), _cli_signed_in_peek()), None
+    except Exception:  # noqa: BLE001 — never substitute a local identity on a read failure
+        logger.warning("Could not read the Claude Code auth mode; refusing Claude runs", exc_info=True)
+        return MODE_OFF, {"invalid": True}
 
 
 def current_mode() -> str:
     """The active mode (the pinned one inside :func:`pinned_mode`)."""
     held = _mode_pin.get()
-    return held if held is not None else _read_mode()
+    return held if held is not None else runtime_choice()[0]
 
 
-def _read_mode() -> str:
-    """Reads the setting; before startup has recorded one it answers with the
-    default without writing anything."""
+def selected_api_key(choice: Optional[dict]) -> Optional[str]:
+    if choice is None:
+        return stored_api_key()
+    from app.core import claude_accounts
+
+    key_id = choice.get("key_id")
     try:
-        mode = stored_mode(cached=True)
-    except Exception:  # noqa: BLE001 — a DB hiccup must not pick a mode silently
-        logger.warning("Could not read the Claude Code auth mode; assuming subscription", exc_info=True)
-        return MODE_SUBSCRIPTION
-    if mode == MODE_OFF:
-        return mode
-    from app.core import claude_cloud_auth
-
-    if claude_cloud_auth.has_environment_auth():
-        return MODE_CLOUD
-    if mode:
-        return mode
-    try:
-        return default_mode(has_stored_api_key(), _cli_signed_in_peek())
-    except Exception:  # noqa: BLE001
-        return MODE_SUBSCRIPTION
+        return claude_accounts.pinned_api_key(key_id) if key_id else None
+    except claude_accounts.AccountError:
+        return None
 
 
 def spawn_fingerprint() -> str:
@@ -177,10 +241,12 @@ def spawn_fingerprint() -> str:
 
     from app.core import claude_subscriptions
 
-    mode = current_mode()
+    mode, choice = runtime_choice()
     # Which sign-in folder the CLI runs in (a saved subscription switch must
     # reconnect pooled sessions), as an opaque id, never an email.
-    identity = [mode, claude_subscriptions.fingerprint_part()]
+    identity = [mode]
+    if mode == MODE_SUBSCRIPTION:
+        identity.append(claude_subscriptions.fingerprint_part())
     if mode == MODE_CLOUD:
         if claude_cloud_auth._use_environment():
             identity.append(json.dumps(claude_cloud_auth.environment_env_for_cli(), sort_keys=True))
@@ -189,7 +255,9 @@ def spawn_fingerprint() -> str:
                 claude_cloud_auth.CONFIG_SETTING, claude_cloud_auth.SECRETS_SETTING,
             ))
     elif mode == MODE_API_KEY:
-        identity.append(database.get_system_setting(API_KEY_SETTING) or "")
+        identity.append(selected_api_key(choice) or "")
+    if choice is not None:
+        identity.append(choice)
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
@@ -204,13 +272,128 @@ def is_explicit() -> bool:
         return False
 
 
-def set_mode(mode: str) -> str:
+def _read_selection() -> tuple[Optional[dict], Optional[database.SystemSettingSnapshot]]:
+    snapshot = database.get_system_setting_snapshot(SELECTION_SETTING)
+    return _decode_selection(snapshot.value if snapshot is not None else None, for_write=True), snapshot
+
+
+def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str],
+             snapshot: Optional[database.SystemSettingSnapshot], defer_key_pin: bool = False,
+             local_choice: tuple[str, str] | None = None) -> None:
+    from app.core import claude_accounts
+
+    # The list and choice replicate independently. The reader must find this
+    # exact member in the list or refuse, never substitute the scalar.
+    selection = {"mode": mode, "subscription": subscription}
+    if not defer_key_pin:
+        selection["key_id"] = key_id
+    if not database.set_system_setting_if_unchanged(
+        SELECTION_SETTING, _encode_selection(selection), snapshot, alongside=local_choice,
+    ):
+        raise _selection_changed()
+
+
+def _selection_changed():
+    from app.core.claude_accounts import AccountError
+
+    return AccountError(
+        "selection_changed", "The Claude account choice changed on another request. Review it and try again.", 409,
+    )
+
+
+def _key_pin(choice: dict, *, choose_api_key: bool) -> tuple[str | None, bool]:
+    """Preserve explicit pins; only an API-key action can resolve a deferred pin."""
+    from app.core import claude_accounts
+
+    if "key_id" in choice or choice.get("mode") == MODE_API_KEY:
+        return choice.get("key_id"), False
+    if choose_api_key:
+        return claude_accounts.pin_legacy_key(), False
+    # The scalar can be missing, unreadable, or stale on this worker. None
+    # would be an explicit empty pin, so omit the field until an API action.
+    return None, True
+
+
+def publish_subscription(target: str, *, local_subscription: tuple[str, str] | None = None) -> None:
+    """Explicitly select a verified subscription without changing the auth mode."""
+    from app.core import claude_accounts
+
+    choice, snapshot = _read_selection()
+    choice = choice or {}
+    mode = choice.get("mode")
+    if mode not in (MODE_SUBSCRIPTION, MODE_API_KEY):
+        if current_mode() == MODE_API_KEY:
+            # Publishing a shared API choice would require pinning its key.
+            # Leave the legacy route intact until the owner confirms it.
+            raise claude_accounts.AccountError(
+                "key_selection_required",
+                "In Settings → Providers → Claude, use Confirm API key, then choose the subscription again. "
+                "If no key is shown, unlock or save it first.",
+                503,
+            )
+        mode = MODE_SUBSCRIPTION
+    key_id, deferred = _key_pin(choice, choose_api_key=False)
+    try:
+        _publish(mode, subscription=target, key_id=key_id, snapshot=snapshot,
+                 defer_key_pin=deferred, local_choice=local_subscription)
+    except DatabaseError:
+        raise claude_accounts.AccountError(
+            "storage_unavailable", "Claude account storage is unavailable. Retry choosing this sign-in.", 503,
+        ) from None
+
+
+def update_shared_key(account_id: Optional[str]) -> None:
+    from app.core import claude_subscriptions
+
+    choice, snapshot = _read_selection()
+    if choice is not None and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION):
+        _publish(choice["mode"], subscription=claude_subscriptions.shared_target(choice, read_choice=False),
+                 key_id=account_id, snapshot=snapshot)
+
+
+def clear_shared_key_if_selected(account_id: str, legacy_id: str | None) -> None:
+    """Delete changes the pin only if it still names this exact key.
+
+    Do not republish a stale mode or subscription over a concurrent choice.
+    Missing list rows already fail closed, including if this update loses.
+    """
+    choice, snapshot = _read_selection()
+    if not (choice and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION)
+            and choice.get("key_id") and choice["key_id"] in (account_id, legacy_id)):
+        return
+    choice["key_id"] = None
+    database.set_system_setting_if_unchanged(SELECTION_SETTING, _encode_selection(choice), snapshot)
+
+
+def set_mode(mode: str, *, key_id: Optional[str] = None, require_legacy_confirmation: bool = False) -> str:
     if mode not in MODES:
         raise ValueError(f"Unknown Claude Code auth mode: {mode!r}. Use one of: {', '.join(MODES)}")
-    database.set_system_setting(setting_key(), mode)
+    if mode in (MODE_OFF, MODE_CLOUD):
+        database.set_system_setting(setting_key(), mode)
+    else:
+        from app.core import claude_subscriptions
+
+        choice, snapshot = _read_selection()
+        if require_legacy_confirmation and mode == MODE_API_KEY and key_id is None:
+            rows = db_settings.get_system_setting_snapshots(setting_key(), SELECTION_SETTING, API_KEY_SETTING)
+            scalar = rows.get(API_KEY_SETTING)
+            key = _decrypt_api_key(scalar.value) if scalar else None
+            current, current_choice, _ = _settings_choice(rows, key)
+            if current == MODE_API_KEY and current_choice is None:
+                raise _confirmation_changed()
+        target = claude_subscriptions.shared_target(choice, read_choice=False)
+        if target is None:
+            # A pending choice requires the separate, verified Use this sign-in action.
+            target = claude_subscriptions.legacy_binding()
+        deferred = False
+        if key_id is None:
+            key_id, deferred = _key_pin(choice or {}, choose_api_key=mode == MODE_API_KEY)
+        _publish(mode, subscription=target, key_id=key_id, snapshot=snapshot,
+                 defer_key_pin=deferred, local_choice=(setting_key(), mode))
+        from app.core import claude_cli_status
+
+        claude_cli_status.invalidate()
     if mode != MODE_CLOUD:
-        # A credential file written for the CLI in cloud mode does not outlive
-        # it; the saved settings stay, so switching back needs no re-entry.
         from app.core import claude_cloud_auth
 
         claude_cloud_auth.remove_materialized_files()
@@ -224,9 +407,75 @@ def ensure_mode_recorded(cli_signed_in: Optional[bool]) -> str:
     if mode:
         return mode
     mode = default_mode(has_stored_api_key(), cli_signed_in)
-    set_mode(mode)
+    database.set_system_setting(setting_key(), mode)
     logger.info("Claude Code auth mode was not set; recorded %s for this worker", mode)
     return mode
+
+
+def _settings_choice(
+    rows: dict[str, database.SystemSettingSnapshot], key: str | None,
+) -> tuple[str, dict | None, bool]:
+    from app.core import claude_cloud_auth
+
+    local, shared = rows.get(setting_key()), rows.get(SELECTION_SETTING)
+    mode, choice = _resolve_stored_choice(local.value if local else None,
+                                          _decode_selection(shared.value if shared else None))
+    explicit = mode is not None
+    if choice is None and mode not in (MODE_OFF, MODE_CLOUD) and claude_cloud_auth.has_environment_auth():
+        mode = MODE_CLOUD
+    return mode or default_mode(bool(key), _cli_signed_in_peek()), choice, explicit
+
+
+def _confirmation_revision(rows: dict[str, database.SystemSettingSnapshot]) -> str | None:
+    # Only random DB write generations, never the value (even a hash of it).
+    keys = (setting_key(), SELECTION_SETTING, API_KEY_SETTING)
+    if any(k in rows and not rows[k].revision for k in keys):
+        return None
+    generations = [rows[k].revision if k in rows else None for k in keys]
+    return hashlib.sha256(json.dumps([setting_key(), MODE_API_KEY, *generations]).encode()).hexdigest()
+
+
+def _confirmation_changed():
+    from app.core.claude_accounts import AccountError
+
+    return AccountError("confirmation_changed", "The Claude API key or mode changed. Review the current selection before confirming again.")
+
+
+def confirm_legacy_api_key(revision: str) -> None:
+    from app.core.claude_accounts import key_write_lock
+
+    with key_write_lock():
+        _confirm_legacy_api_key(revision)
+
+
+def _confirm_legacy_api_key(revision: str) -> None:
+    from app.core import claude_accounts as accounts, claude_subscriptions
+
+    scalar, local, shared, saved = API_KEY_SETTING, setting_key(), SELECTION_SETTING, accounts.API_LIST_SETTING
+    rows = db_settings.get_system_setting_snapshots(scalar, local, shared, saved)
+    if not revision or revision != _confirmation_revision(rows):
+        raise _confirmation_changed()
+    key = _decrypt_api_key(rows[scalar].value) if scalar in rows else None
+    mode, choice, _ = _settings_choice(rows, key)
+    if not key or choice is not None or mode != MODE_API_KEY:
+        raise _confirmation_changed()
+    key_id, migrated_list = accounts.prepare_legacy_key_pin(key, rows.get(saved))
+    selection = {"mode": MODE_API_KEY, "subscription": claude_subscriptions.legacy_binding(), "key_id": key_id}
+    guards = {scalar: rows[scalar]}
+    writes = {}
+    if migrated_list is not None:
+        writes[saved] = (migrated_list, rows.get(saved))
+    else:
+        guards[saved] = rows[saved]
+    writes[local] = (MODE_API_KEY, rows.get(local))
+    writes[shared] = (_encode_selection(selection), rows.get(shared))
+    try:
+        committed = db_settings.write_system_settings_if_unchanged(writes, guards=guards)
+    except (DeadlockDetected, SerializationFailure):
+        # The guarded DB helper has already rolled back, including any list write.
+        raise _confirmation_changed() from None
+    if not committed:
+        raise _confirmation_changed()
 
 
 def summary(cli: Optional[dict] = None) -> dict:
@@ -240,13 +489,24 @@ def summary(cli: Optional[dict] = None) -> dict:
 
         status = claude_cli_status.peek()
         cli = status.to_dict() if status is not None else {}
-    key = stored_api_key()
-    mode = current_mode()
+    confirmation = None
+    try:
+        rows = db_settings.get_system_setting_snapshots(setting_key(), SELECTION_SETTING, API_KEY_SETTING)
+        scalar = rows.get(API_KEY_SETTING)
+        key = _decrypt_api_key(scalar.value) if scalar else None
+        mode, choice, explicit = _settings_choice(rows, key)
+        if mode == MODE_API_KEY:
+            if choice is not None:
+                key = selected_api_key(choice)
+            elif key:
+                confirmation = _confirmation_revision(rows)
+    except DatabaseError:
+        mode, choice, key, explicit = MODE_OFF, {"invalid": True}, None, False
     signed_in = bool(cli.get("signed_in"))
     return {
         "mode": mode,
         "mode_label": MODE_LABELS[mode],
-        "explicit": is_explicit(),
+        "explicit": explicit,
         "modes": [{"value": m, "label": MODE_LABELS[m]} for m in MODES],
         "cli": {
             "installed": bool(cli.get("installed")),
@@ -258,6 +518,8 @@ def summary(cli: Optional[dict] = None) -> dict:
             "error": cli.get("error"),
         },
         "api_key": {"set": bool(key), "last4": key_last4(key)},
+        "api_key_confirmation_required": mode == MODE_API_KEY and choice is None and bool(key),
+        "api_key_confirmation": confirmation,
         "cloud": cloud_status(),
     }
 

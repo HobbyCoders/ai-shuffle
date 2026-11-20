@@ -149,8 +149,8 @@ def child_env_with_overlay(overlay: Mapping[str, str] | None,
     ``FLUID_CHILD_ENV_UNSET`` lists, with the overlay on top."""
     env = scrub_child_env(environ)
     extra = dict(overlay or {})
-    for name in _names(extra.pop(UNSET_ENV, None)):
-        env.pop(name, None)
+    unset = {name.upper() for name in _names(extra.pop(UNSET_ENV, None))}
+    env = {name: value for name, value in env.items() if name.upper() not in unset}
     env.update(scrub_claude_auth_env(extra))
     return env
 

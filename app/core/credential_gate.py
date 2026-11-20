@@ -111,11 +111,11 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
     """
     from app.core import claude_auth_mode
 
-    mode = claude_auth_mode.current_mode()
+    mode, choice = claude_auth_mode.runtime_choice()
     if mode == claude_auth_mode.MODE_OFF:
         return False, OFF_MESSAGE
     if mode == claude_auth_mode.MODE_API_KEY:
-        if claude_auth_mode.has_stored_api_key():
+        if claude_auth_mode.selected_api_key(choice):
             return True, None
         return False, NO_KEY_MESSAGE
     if mode == claude_auth_mode.MODE_CLOUD:
@@ -139,6 +139,11 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
         cli = claude_cli_status.get_status()
     if not isinstance(cli, dict):
         cli = cli.to_dict()
+    from app.core import claude_subscriptions
+
+    if claude_subscriptions.shared_target() is not None:
+        if not cli.get("signed_in"):
+            return False, claude_subscriptions.SELECTION_UNAVAILABLE
     if cli.get("signed_in"):
         return True, None
     if not cli.get("installed"):

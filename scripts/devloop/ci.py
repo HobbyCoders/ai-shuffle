@@ -855,7 +855,7 @@ def journeys(args: argparse.Namespace) -> int:
         instance = DevInstance(out, args.ttl_seconds, fake_antigravity="antigravity-usage.journey.mjs" in mine)
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
-               "JOURNEY_OUT": str(attempt_out / "journeys")}
+               "DEVLOOP_PYTHON": sys.executable, "JOURNEY_OUT": str(attempt_out / "journeys")}
         if args.retry_failures:
             env.pop("JOURNEY_ONLY", None)  # a developer filter must not narrow a CI shard
         env.setdefault("JOURNEY_SHEETS", "1")

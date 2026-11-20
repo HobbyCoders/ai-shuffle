@@ -20,7 +20,7 @@
 	import { getSettingsAccess } from '$lib/settings/access.svelte';
 	import { flashSaved } from '$lib/settings/save-status.svelte';
 	import { getErrorMessage } from '$lib/api/client';
-	import { claudeAccountError } from '$lib/api/claude-auth';
+	import { claudeAccountError, repairClaudeSubscription, selectDefaultClaudeSubscription, type ClaudeSubscriptionLogin } from '$lib/api/claude-auth';
 
 	/** Saved-account routes refuse with `detail: {code, message}`; show the message. */
 	const accountErrorText = (e: unknown, fallback: string): string =>
@@ -60,13 +60,8 @@
 	const guard = new LoopGuard();
 	const cli = new ClaudeCliLogin({
 		onStatus: (next) => {
-			// Keep the mode summary (list rows, header) in step with the CLI.
-			if (!!providers.current.claude?.cli.signed_in !== !!next.signed_in) void providers.loadClaude();
-			// Signed in again to the active saved entry: re-read its identity
-			// (activating the active entry re-runs its `claude auth status`).
-			const saved = credential.subscription;
-			if (saved?.active && saved.needs_sign_in && next.signed_in) {
-				void providers.activateClaudeSubscriptionAccount(saved.id).catch(() => {});
+			if (repair || account?.needs_sign_in || !!providers.current.claude?.cli.signed_in !== !!next.signed_in) {
+				void providers.loadClaude(true);
 			}
 		}
 	});
@@ -78,6 +73,7 @@
 	const several = $derived(!!provider.claudeSubscriptions);
 	let saving = $state(false);
 	let accountError = $state('');
+	let repair = $state<ClaudeSubscriptionLogin | null>(null);
 
 	const mode = $derived(providers.current.claude?.mode ?? 'subscription');
 	const status = $derived(cli.status);
@@ -168,7 +164,7 @@
 						account.kind === 'default'
 							? 'Claude Code’s own sign-in stays signed in'
 							: account.active
-								? 'Signs it out; Claude Code goes back to its own sign-in'
+								? 'Signs it out. Claude cannot run here until this account is available or you select another'
 								: 'Signs it out and removes it from this worker',
 					button: 'Remove',
 					question: `Remove ${credential.name}?`,
@@ -197,16 +193,30 @@
 		void cli.startLogin();
 	}
 
-	/** A saved entry that is not active: make it the active one, then sign in to its folder. */
 	async function signInAgain() {
-		if (!account) return;
+		if (!account || saving) return;
+		accountError = '';
+		saving = true;
+		try {
+			const response = await repairClaudeSubscription(account.id, canUseTerminal);
+			repair = response.login ?? null;
+			if (response.terminal_run) cli.attach(response.terminal_run);
+		} catch (e) {
+			accountError = accountErrorText(e, 'Could not start sign-in');
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function useDefault() {
 		accountError = '';
 		try {
-			if (!account.active) await providers.activateClaudeSubscriptionAccount(account.id);
+			await selectDefaultClaudeSubscription();
+			await providers.loadClaude(true);
 			await cli.load(true);
-			if (cli.terminalAvailable(!access.readOnly, platform.isMobile) && !cli.status?.signed_in) startSignIn();
+			flashSaved();
 		} catch (e) {
-			accountError = accountErrorText(e, 'Could not switch to this sign-in');
+			accountError = accountErrorText(e, 'Could not select this sign-in');
 		}
 	}
 
@@ -230,15 +240,13 @@
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}
 		{#if account}<CredentialControl {credential} showState />{/if}
-		{#if inactive}
-			{#if account?.needs_sign_in}
-				<button type="button" class="st-btn primary" disabled={access.readOnly} onclick={signInAgain}><SquareTerminal />Sign in again</button>
-			{/if}
-		{:else if mode !== 'subscription'}
+		{#if account?.kind === 'saved' && account.needs_sign_in}
+			{#if !cli.terminalOpen}<button type="button" class="st-btn primary" disabled={access.readOnly || saving} onclick={signInAgain}><SquareTerminal />Sign in again</button>{/if}
+		{:else if !inactive && mode !== 'subscription'}
 			<button type="button" class="st-btn" onclick={() => changeClaudeMode('subscription')}>Use for Claude</button>
-		{:else if !signedIn && canUseTerminal && status?.installed && !cli.terminalOpen}
+		{:else if !inactive && !signedIn && canUseTerminal && status?.installed && !cli.terminalOpen}
 			<button type="button" class="st-btn primary" onclick={startSignIn}><SquareTerminal />Sign in</button>
-		{:else}
+		{:else if !inactive}
 			<button type="button" class="st-btn" disabled={cli.checking} onclick={() => cli.load(true)}
 				><RefreshCw />Check again</button
 			>
@@ -262,19 +270,31 @@
 					<SettingRow label="Account selection" hint="Switching keeps the Claude Code mode unchanged">
 						<ValueText value={credential.statusText} status={credential.status} />
 					</SettingRow>
-					{#if inactive && account.needs_sign_in}
-						<SettingRow label="Sign in again" hint="Becomes the active subscription, then signs in">
-							<button type="button" class="st-btn" disabled={access.readOnly} onclick={signInAgain}><SquareTerminal />Sign in again</button>
-						</SettingRow>
-					{/if}
-					<SettingRow label="Another Subscription" hint="Becomes active after sign-in">
+					<SettingRow label="Another Subscription" hint="Saved after sign-in; select it when ready">
 						<button type="button" class="st-btn" disabled={access.readOnly} onclick={() => startSetup(provider, 'cli')}>Add</button>
 					</SettingRow>
 				</RowGroup>
-				{#if accountError}<p class="pv-msg err" role="alert">{accountError}</p>{/if}
 			{/if}
+			{#if repair}
+				<RowGroup title="Repair saved sign-in">
+					{#each Object.entries(repair.commands ?? {}) as [shell, command] (shell)}
+						{#if command}<SettingRow label={shell}><CodeBlock code={command} /></SettingRow>{/if}
+					{/each}
+					<SettingRow label="After signing in">
+						<button type="button" class="st-btn" onclick={() => providers.loadClaude(true)}>Check again</button>
+					</SettingRow>
+				</RowGroup>
+			{/if}
+			{#if (!account || account.kind === 'default') && status?.installed && !cli.terminalOpen && !access.readOnly}
+				<RowGroup title="Subscription selection">
+					<SettingRow label="Default CLI sign-in" hint="After signing in, verify and select this account for your workers">
+						<button type="button" class="st-btn" onclick={useDefault}>Use this sign-in</button>
+					</SettingRow>
+				</RowGroup>
+			{/if}
+			{#if accountError}<p class="pv-msg err" role="alert">{accountError}</p>{/if}
 		{/if}
-		{#if inactive}
+		{#if inactive && !cli.terminalOpen}
 			{#if tab === 'Models'}<BuiltInModels />{/if}
 		{:else if tab === 'Models'}
 			{#if mode === 'subscription'}<ClaudeCliModels readOnly={access.readOnly} />{:else}<BuiltInModels />{/if}
@@ -302,7 +322,7 @@
 					<SettingRow label="Binary"><ValueText mono value={status.binary_path} /></SettingRow>
 				{/if}
 				{#if several && !account}
-					<SettingRow label="Another Subscription" hint="Becomes active after sign-in">
+					<SettingRow label="Another Subscription" hint="Saved after sign-in; select it when ready">
 						<button type="button" class="st-btn" onclick={() => startSetup(provider, 'cli')}>Add</button>
 					</SettingRow>
 				{:else if !several}

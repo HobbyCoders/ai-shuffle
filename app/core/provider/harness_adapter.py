@@ -697,6 +697,24 @@ class HarnessAdapter(ProviderAdapter):
                 commit_attribution=attribution_enabled,
             )
         elif self._is_delegated:
+            from fluid.tools.child_env import UNSET_ENV
+
+            from app.core.claude_cli_home import CONFIG_DIR_ENV
+            from app.core.environment import (
+                apply_delegated_cli_limits,
+                inject_claude_code_auth,
+            )
+
+            # Keep the CLAUDE-only overlay private; SessionOptions.env also
+            # feeds tools and MCPs. Use this same folder for transcript resume.
+            cli_env = apply_delegated_cli_limits(await run_sync(
+                inject_claude_code_auth, dict(options.env or {}),
+                options.extra.get("provider_id"),
+            ))
+            self._bound_cli_projects = None
+            if CONFIG_DIR_ENV in cli_env.get(UNSET_ENV, "").split(","):
+                folder = cli_env.get(CONFIG_DIR_ENV)
+                self._bound_cli_projects = (Path(folder) if folder else Path.home() / ".claude") / "projects"
             cli_session_id = await self._resolve_cli_session_id(fluid_session_id, options)
             # The app's compiled prompt replaces Claude Code's (--system-prompt)
             # for every profile shape: the profile's prompt is the base (a
@@ -764,17 +782,6 @@ class HarnessAdapter(ProviderAdapter):
             # recency tail against (the window the CLI is pinned to).
             delegated_window = await run_sync(_delegated_context_window, options)
 
-            # Never put Claude cloud credentials in SessionOptions.env, which
-            # also feeds tools and MCPs. This private copy is for claude only.
-            from app.core.environment import (
-                apply_delegated_cli_limits,
-                inject_claude_code_auth,
-            )
-
-            cli_env = apply_delegated_cli_limits(await run_sync(
-                inject_claude_code_auth, dict(options.env or {}),
-                options.extra.get("provider_id"),
-            ))
             # The learning journal, as on the native JSON-mode leg (#687).
             delegated_journal, delegated_bus = await self._delegated_journal(
                 options, fluid_session_id
@@ -3561,7 +3568,7 @@ class HarnessAdapter(ProviderAdapter):
             return None
         if not handle:
             return "the session has history but no Claude Code conversation"
-        root = fluid_transcript.cli_projects_root(options.env)
+        root = getattr(self, "_bound_cli_projects", None) or fluid_transcript.cli_projects_root(options.env)
         transcript = await run_sync(
             fluid_transcript.find_cli_transcript,
             handle, root, options.cwd or os.getcwd(),
@@ -3616,7 +3623,7 @@ class HarnessAdapter(ProviderAdapter):
             fluid_transcript.reseed_delegated_cli_session,
             fluid_session_id,
             cwd,
-            fluid_transcript.cli_projects_root(options.env),
+            getattr(self, "_bound_cli_projects", None) or fluid_transcript.cli_projects_root(options.env),
             force=True,
             context_window=window,
             generation=claimed(fluid_session_id) if claimed is not None else None,

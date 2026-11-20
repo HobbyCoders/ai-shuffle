@@ -190,7 +190,7 @@ def _same(a: Optional[Dict[str, Any]], b: Dict[str, Any]) -> bool:
     return bool(a) and all(a.get(k) == b.get(k) for k in ("cli_version", "account", "models"))
 
 
-def store(snapshot: Dict[str, Any]) -> Optional[bool]:
+def store(snapshot: Dict[str, Any], *, verified_status=None) -> Optional[bool]:
     """Keep ``snapshot``; True when it differs from the saved list, None when
     it is not the active sign-in's.
 
@@ -202,11 +202,25 @@ def store(snapshot: Dict[str, Any]) -> Optional[bool]:
     pickers re-read the registry.
     """
     global _snapshot
-    from app.core import claude_cli_status
+    from app.core import claude_cli_status, claude_subscriptions
 
     with _lock:
         _load()
         status = claude_cli_status.peek()
+        selected = status.selected_home if status else None
+        if verified_status is not None:
+            if verified_status.selected_home is None:
+                # Legacy status doesn't record the launch folder. A replacement
+                # could be stock home after deletion of an extra for the same account.
+                if status is not verified_status:
+                    return None
+            # An explicit binding can survive a forced read, but not a change
+            # to the billing identity or the folder we launched.
+            elif (status is None or not status.signed_in or selected != verified_status.selected_home
+                  or claude_subscriptions._binding(status) != selected[0]):
+                return None
+        if (selected[0] if selected else None) != claude_subscriptions.shared_target():
+            return None
         if not snapshot.get("account") or snapshot["account"] != _account_of(status):
             logger.info("Claude Code model list from another sign-in ignored")
             return None
@@ -391,16 +405,23 @@ def refresh() -> Dict[str, Any]:
     if not subscription_mode():
         raise RuntimeError("The Claude Code model list is used only with a Claude subscription sign-in.")
     with _refresh_lock:
-        claude_cli_status.get_status()  # the active sign-in, before asking
-        binary = claude_cli_status._default_resolver()
+        from app.core import claude_cli_home, claude_subscriptions
+
+        status = claude_cli_status.get_status(force=True)
+        selected = status.selected_home
+        if (selected[0] if selected else None) != claude_subscriptions.shared_target():
+            raise RuntimeError(status.error or "The Claude sign-in changed. Try again.")
+        if not status.signed_in or not status.binary_path:
+            raise RuntimeError(status.error or "Sign in to Claude Code before refreshing models.")
         try:
-            payload = _handshake(binary, claude_cli_status._probe_env())
+            home_env = claude_cli_home.env_for(selected[1]) if selected else None
+            payload = _handshake(status.binary_path, claude_cli_status._probe_env(home_env))
         except (OSError, subprocess.SubprocessError, TimeoutError) as exc:
             raise RuntimeError(f"Could not ask Claude Code for its models: {exc}") from exc
         snapshot = parse_initialize(payload)
         if snapshot is None:
             raise RuntimeError("Claude Code did not list any models. Update it and try again.")
-        if store(snapshot) is None:
+        if not subscription_mode() or store(snapshot, verified_status=status) is None:
             raise RuntimeError("The Claude sign-in changed while Claude Code listed its models. Try again.")
         return snapshot
 

@@ -567,6 +567,15 @@ def stamped_build_problem(root: Path = ROOT) -> str | None:
 def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if sys.platform != "linux":
         parser.error("The dev loop's owned PostgreSQL lease needs Linux")
+    lease_fd = args.guardian_lease_fd
+    if lease_fd is not None:
+        if lease_fd < 3 or args.workers != 1:
+            parser.error("The guardian lease requires a separate inherited fd and one worker")
+        try:
+            # Keep it in this launcher, but never in app/database subprocesses.
+            os.set_inheritable(lease_fd, False)
+        except OSError:
+            parser.error("The guardian lease fd is not open")
     _validate(parser, args)
     try:
         ensure_private_dir(args.status.parent)
@@ -610,10 +619,9 @@ def up(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     try:
         with scratch_directory("ai-shuffle-preview-") as raw:
             directory = Path(raw)
-            # First, before anything it would have to clean up exists: a
-            # detached process that finishes the teardown if this one is
-            # SIGKILLed (TaskStop does that a second after its SIGTERM).
-            guardian = spawn_guardian(args.status, directory)
+            # Before publishing status or starting any services, give the
+            # detached guardian its own copy of the harness's lease fd.
+            guardian = spawn_guardian(args.status, directory, lease_fd=lease_fd)
             fake = FakeAI(log_path=directory / "fake-ai-requests.jsonl",
                           latency_ms=args.latency_ms, tps=args.tps, models=DEV_MODELS)
             # The app always reaches it over loopback; --fake-voice-host only
@@ -885,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
                        help="Non-interactive run (also DEVLOOP_CI=1): loopback only, the "
                             "stamped build instead of Vite, no restarts, one "
                             f"{READY_LINE}/{FAILED_LINE} JSON line, exit 1 if unusable")
+    # Internal launcher/harness ownership channel, not a devloop user option.
+    start.add_argument("--guardian-lease-fd", type=int, help=argparse.SUPPRESS)
     status_command = commands.add_parser("status", help="Print the running instance's status")
     status_command.add_argument("--wait", type=float, default=0, metavar="SECONDS",
                                 help="Wait up to SECONDS for the instance to be ready; "
