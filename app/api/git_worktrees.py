@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 from app.core.git_service import git_service
 from app.core.checkout_events import checkout_events
-from app.core.worktree_manager import worktree_manager, WorktreeError
+from app.core.worktree_manager import worktree_manager, WorktreeError, is_retarget_pinned
 from app.core.project_utils import get_worktree_working_dir
 from app.db import database
 from app.db.async_database import run_sync
@@ -816,8 +816,8 @@ async def reopen_worktree(
     """
     Recreate a completed worktree so the user can resume the session.
 
-    Reactivates the registered worktree. Pinned worktrees must reopen in their
-    original checkout on the exact retained branch and tip.
+    After a folder change, automatic recreation is limited to verified kept
+    branches at the original app-managed path.
     """
     check_project_access(request, project_id)
 
@@ -867,7 +867,7 @@ async def reopen_worktree(
         sessions = database.get_sessions_for_worktree(worktree_id)
         for sess in sessions:
             sid = sess["id"]
-            if updated.get("cleanup_owner") is None and local_pid and sess.get("project_id") != local_pid:
+            if not is_retarget_pinned(updated) and local_pid and sess.get("project_id") != local_pid:
                 database.set_session_project(sid, local_pid)
                 logger.info(
                     f"Repointed session {sid} to local project {local_pid} after worktree reopen"

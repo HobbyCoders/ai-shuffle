@@ -305,6 +305,8 @@ def _retarget_base(cursor, legacy_id, identity, runner, old_path, new_path, stor
     # not proof that its runner-local base can be edited or retired.
     registrations = checkouts.live_base_registrations(cursor, identity, runner)
     if [row['id'] for row in registrations] != [legacy_id]:
+        if original:
+            return False
         raise FolderConflict('This worker does not have a single matching base folder to change.')
     cursor.execute(
         'SELECT id, path, status FROM checkouts WHERE project_id = %s AND runner_id = %s '
@@ -315,6 +317,10 @@ def _retarget_base(cursor, legacy_id, identity, runner, old_path, new_path, stor
     matching = [r for r in bases if (original or checkouts.is_active(r))
                 and r['path'] and checkouts.base_folder_key(r['path']) == old_key]
     if not matching:
+        # A relink can make the first-link alias current again without moving
+        # its historical base along with the current registration.
+        if original:
+            return False
         raise FolderConflict('This worker does not have a single matching base folder to change.')
     # Old setup sometimes activated retained folders. Only the verified live
     # path is writable; take stale active bases out of selection.
@@ -337,6 +343,7 @@ def _retarget_base(cursor, legacy_id, identity, runner, old_path, new_path, stor
         'UPDATE checkouts SET path = %s, status = %s, head_sha = NULL, dirty = NULL, updated_at = NOW() '
         'WHERE id = %s', (new_path, checkouts.REMOVED_STATUS if original else base['status'], base['id']),
     )
+    return True
 
 
 def retarget_folder(
@@ -360,6 +367,11 @@ def retarget_folder(
 
             pv2_id = _catalog_project_v2_id(cursor, _catalog_origin(current))
             original_id = project_catalog_aliases.original_for_legacy(cursor, project_id, pv2_id)
+            _retarget_base(cursor, project_id, pv2_id, runner, old_path, new_path, stored_path)
+            if original_id and not _retarget_base(
+                cursor, project_id, original_id, runner, old_path, new_path, stored_path, original=True
+            ):
+                original_id = None
             # Turn admission locks the same rows. Include shared-only chats on
             # either identity, not explicit bindings to past, unrelated links.
             scope = (
@@ -377,10 +389,6 @@ def retarget_folder(
                 )
                 if cursor.fetchone():
                     raise FolderConflict('Wait for queued and running chats on this worker to finish first.')
-            _retarget_base(cursor, project_id, pv2_id, runner, old_path, new_path, stored_path)
-            if original_id:
-                _retarget_base(cursor, project_id, original_id, runner, old_path, new_path, stored_path,
-                               original=True)
             preserve_worktree_owners(cursor, current, old_path)
         if same_folder and name is None and description is None and settings_dict is None:
             return current

@@ -351,7 +351,6 @@ def create_worktree(
     session_id: Optional[str] = None,
     base_branch: Optional[str] = None,
     status: str = "active",
-    *, cleanup_owner: Optional[Dict[str, Any]] = None,
 ) -> Optional[WorktreeRow]:
     """Create a worktree record, or return the existing one for this path.
 
@@ -374,10 +373,9 @@ def create_worktree(
             return existing
         cursor.execute(
             """INSERT INTO worktrees
-               (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at, cleanup_owner)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)""",
-            (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now,
-             json.dumps(cleanup_owner) if cleanup_owner is not None else None)
+               (id, repository_id, session_id, branch_name, worktree_path, base_branch, status, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (worktree_id, repository_id, session_id, branch_name, worktree_path, base_branch, status, now)
         )
     return get_worktree(worktree_id)
 
@@ -422,8 +420,15 @@ def update_worktree(
         updates.append("repository_id = %s")
         values.append(repository_id)
     if cleanup_owner is not None:
-        updates.append("cleanup_owner = %s::jsonb")
-        values.append(json.dumps(cleanup_owner))
+        # Cleanup can finish after a concurrent folder edit pins the old owner.
+        # Publish its Keep evidence without ever unpinning that registration.
+        updates.append(
+            "cleanup_owner = CASE WHEN cleanup_owner IS NOT NULL "
+            "AND (cleanup_owner->'retargeted') IS DISTINCT FROM 'false'::jsonb "
+            "THEN %s::jsonb ELSE %s::jsonb END"
+        )
+        values.extend((json.dumps({k: v for k, v in cleanup_owner.items() if k != "retargeted"}),
+                       json.dumps(cleanup_owner)))
 
     if updates:
         values.append(worktree_id)

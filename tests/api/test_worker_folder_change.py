@@ -1,5 +1,4 @@
 """A worker folder edit is a guarded base registration update, not a move."""
-import json
 import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -150,7 +149,7 @@ def test_remove_setup_different_folder_and_edit(registered, pre_upgrade, resolve
 
 
 @pytest.fixture
-def synced_worktree(registered):
+def synced_worktree(registered, request):
     from app.core.project_links import auto_link_group_id
     from app.core.worktree_manager import WorktreeManager
 
@@ -168,14 +167,21 @@ def synced_worktree(registered):
         clone = dest.with_name(dest.name + '-clone')
         git(origin, 'clone', str(origin), str(clone))
         (clone / '.git').rename(dest / '.git')
-    topic = old.parent / 'external-topic'
-    git(old, 'worktree', 'add', '-b', 'topic', str(topic))
     database.create_session('before-link', 'default', project_v2_id=projects_v2.get_project_v2_by_origin('local:moving')['id'])
     row = database.set_project_link_group(row['id'], auto_link_group_id(str(origin)))
     repo = database.create_git_repository('repo', row['id'], str(origin))
-    assert WorktreeManager().sync_worktrees_for_project(row['id'])['imported'] == 1
-    worktree = database.get_active_worktrees_for_repository(repo['id'])[0]
-    assert worktree['worktree_path'] == str(topic)
+    manager = WorktreeManager()
+    if getattr(request, 'param', 'external') == 'managed':
+        topic = old / '.fluid' / 'worktrees' / 'topic'
+        seed = database.create_worktree('managed-topic', repo['id'], 'topic', str(topic),
+                                        status='completed')
+        worktree = manager.recreate_worktree(seed['id'])
+    else:
+        topic = old.parent / 'external-topic'
+        git(old, 'worktree', 'add', '-b', 'topic', str(topic))
+        assert manager.sync_worktrees_for_project(row['id'])['imported'] == 1
+        worktree = database.get_active_worktrees_for_repository(repo['id'])[0]
+        assert worktree['worktree_path'] == str(topic)
     return row, old, new, topic, worktree, git
 
 
@@ -200,7 +206,9 @@ def test_retarget_first_link_aligns_both_base_chats(synced_worktree):
     assert checkouts.get_checkout(original_id, ME)['status'] == 'removed'
     assert checkouts.get_checkout(original_id, 'peer') == peer
     assert checkouts.get_checkout(original_id, ME, branch='topic') == branch
-    assert database.get_worktree(worktree['id']) == worktree
+    retained = database.get_worktree(worktree['id'])
+    assert retained['cleanup_owner'] is not None
+    assert {**retained, 'cleanup_owner': None} == worktree
     unavailable = new.rename(new.with_name('current-unavailable'))
     for chat in (before, after):
         assert project_resolver.resolve_existing_cwd(chat) is None
@@ -274,72 +282,113 @@ def test_retarget_refuses_multiple_local_owners_of_shared_identity(synced_worktr
     assert database.get_project(other['id']) == other
 
 
+def test_retarget_back_to_first_link_leaves_stale_alias_base_alone(synced_worktree):
+    from app.core.project_links import auto_link_group_id
+
+    row, old, new, _, _, git = synced_worktree
+    before = database.get_session('before-link')
+    historical = checkouts.get_checkout(before['project_v2_id'], ME)
+    first_link = row['link_group_id']
+    identity = projects_v2.get_project_v2_by_origin(first_link)['id']
+    other_origin = old.parent / 'second-origin'
+    git(old.parent, 'clone', git(old, 'remote', 'get-url', 'origin'), str(other_origin))
+    for clone in (old, new):
+        git(clone, 'remote', 'set-url', 'origin', str(other_origin))
+    row = database.set_project_link_group(row['id'], auto_link_group_id(str(other_origin)))
+    project_folders.retarget(row, str(new), project_folders.revision(row))
+
+    for clone in (old, new):
+        git(clone, 'remote', 'set-url', 'origin', str(old.parent / 'origin'))
+    row = database.set_project_link_group(row['id'], first_link)
+    destination = old.parent / 'third-clone'
+    git(old.parent, 'clone', str(old.parent / 'origin'), str(destination))
+    turns.enqueue_turn('before-link', 'user', prompt='Use the historical folder')
+    project_folders.retarget(row, str(destination), project_folders.revision(row))
+    assert project_resolver.resolve_cwd({'project_v2_id': identity}) == str(destination)
+    assert checkouts.get_checkout(before['project_v2_id'], ME) == historical
+    assert database.get_session('before-link')['project_v2_id'] == before['project_v2_id']
+    assert (old / 'old-only').read_text() == 'keep me'
+    assert (new / 'new-only').read_text() == 'leave me'
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize('other_topic', ['absent', 'different'])
-@pytest.mark.parametrize('legacy', [False, True])
-async def test_reopen_retained_topic_in_original_clone(synced_worktree, other_topic, legacy):
-    from app.core.worktree_manager import WorktreeManager
+@pytest.mark.parametrize('synced_worktree', ['managed', 'external'], indirect=True)
+@pytest.mark.parametrize('keep_first', [True, False])
+@pytest.mark.parametrize('explicit', [True, False])
+async def test_kept_worktree_after_retarget(synced_worktree, keep_first, explicit):
+    from app.core.checkout_manager import WorktreeAddError
+    from app.core.worktree_manager import WorktreeManager, is_retarget_pinned
 
     row, old, new, topic, worktree, git = synced_worktree
     wid = worktree['id']
-    if legacy:
-        with database.get_db() as conn:
-            conn.cursor().execute('UPDATE worktrees SET cleanup_owner = NULL WHERE id = %s', (wid,))
-    if other_topic == 'different':
-        git(new, 'branch', 'topic')
+    managed = topic.is_relative_to(old)
+    git(new, 'branch', 'topic')  # A matching name in B is not a candidate.
     database.create_session('branch-chat', 'default', project_id=row['id'], worktree_id=wid,
                             worktree_branch='topic')
-    project_folders.retarget(row, str(new), project_folders.revision(row))
     chat = database.get_session('branch-chat')
-    assert project_resolver.resolve_existing_cwd(chat) == str(topic)
-    assert project_resolver.resolve_cwd(chat) == str(topic)
-    # Work after the retarget can still advance this worktree's branch.
+    manager = WorktreeManager()
+    if not keep_first:
+        (topic / 'keep-local.txt').write_text('keep working here')
+        project_folders.retarget(row, str(new), project_folders.revision(row))
+        assert project_resolver.resolve_existing_cwd(chat) == str(topic)
+        assert project_resolver.resolve_cwd(chat) == str(topic)
+        assert (topic / 'keep-local.txt').read_text() == 'keep working here'
     git(topic, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
         'commit', '--allow-empty', '-m', 'only in the original clone')
     retained = git(topic, 'rev-parse', 'HEAD')
-    new_refs = git(new, 'show-ref')
-    new_listing = git(new, 'worktree', 'list', '--porcelain')
-    assert await WorktreeManager().cleanup_worktree(wid, keep_branch=True)
+    assert await manager.cleanup_worktree(wid, keep_branch=True)
+    if keep_first:
+        assert not is_retarget_pinned(database.get_worktree(wid))
+        project_folders.retarget(row, str(new), project_folders.revision(row))
+    completed = database.get_worktree(wid)
+    assert is_retarget_pinned(completed)
     assert not topic.exists()
     assert project_resolver.resolve_existing_cwd(chat) is None
-    if legacy:
-        # Explicit Worktree management action on an upgraded legacy row.
-        request = Request({'type': 'http', 'headers': []})
-        await git_worktrees.reopen_worktree(request, row['id'], wid, token='test')
+    new_refs = git(new, 'show-ref')
+    new_listing = git(new, 'worktree', 'list', '--porcelain')
+    old_git_paths = set((old / '.git').rglob('*'))
+    request = Request({'type': 'http', 'headers': []})
+    if managed:
+        if explicit:
+            await git_worktrees.reopen_worktree(request, row['id'], wid, token='test')
+        else:
+            assert project_resolver.resolve_cwd(chat, raise_add_errors=True) == str(topic)
+        reopened = database.get_worktree(wid)
+        assert reopened == {**completed, 'status': 'active'}
+        assert git(topic, 'rev-parse', 'HEAD') == retained
+        assert git(topic, 'symbolic-ref', 'HEAD') == 'refs/heads/topic'
     else:
-        # A send must not bypass proof and resolve a same-named branch in B.
-        assert project_resolver.resolve_cwd(chat) == str(topic)
-    reopened = database.get_worktree(wid)
-    assert reopened['status'] == 'active'
-    assert reopened['worktree_path'] == str(topic)
-    assert git(topic, 'rev-parse', 'HEAD') == retained
-    assert git(topic, 'symbolic-ref', 'HEAD') == 'refs/heads/topic'
-    assert await WorktreeManager().cleanup_worktree(wid, keep_branch=False)
-    assert git(old, 'branch', '--list', 'topic') == ''
+        if explicit:
+            with pytest.raises(HTTPException, match='check out the kept branch manually') as error:
+                await git_worktrees.reopen_worktree(request, row['id'], wid, token='test')
+            assert error.value.status_code == 400
+        else:
+            with pytest.raises(WorktreeAddError, match='check out the kept branch manually'):
+                project_resolver.resolve_cwd(chat, raise_add_errors=True)
+        assert database.get_worktree(wid) == completed
+        assert not topic.exists()
+        assert not (old / '.fluid').exists()
+        assert set((old / '.git').rglob('*')) == old_git_paths
+    assert database.get_session('branch-chat') == chat
+    assert git(old, 'rev-parse', 'topic') == retained
     assert git(new, 'show-ref') == new_refs
     assert git(new, 'worktree', 'list', '--porcelain') == new_listing
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('unavailable', ['clone', 'clone-replaced', 'tip-changed', 'branch-deleted',
-                                         'no-retained-tip', 'no-owner', 'available'])
+@pytest.mark.parametrize('synced_worktree', ['managed'], indirect=True)
+@pytest.mark.parametrize('unavailable', ['clone', 'clone-replaced', 'tip-changed', 'branch-deleted', 'no-owner'])
 async def test_reopen_refuses_unproven_retained_checkout(synced_worktree, unavailable):
     from app.core.worktree_manager import WorktreeError, WorktreeManager
 
     row, old, new, topic, worktree, git = synced_worktree
     wid = worktree['id']
-    git(topic, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
-        'commit', '--allow-empty', '-m', 'only in the original clone')
-    # The cleanup can precede the retarget, as well as happen after it.
     assert await WorktreeManager().cleanup_worktree(wid, keep_branch=True)
-    if unavailable in ('no-retained-tip', 'no-owner'):
-        # Simulate completed rows written by an older build, without the tip.
-        proof = worktree['cleanup_owner'] if unavailable == 'no-retained-tip' else None
+    if unavailable == 'no-owner':
+        # Completed pre-upgrade rows never recorded Keep provenance.
         with database.get_db() as conn:
-            conn.cursor().execute('UPDATE worktrees SET cleanup_owner = %s::jsonb WHERE id = %s',
-                                  (json.dumps(proof) if proof else None, wid))
+            conn.cursor().execute('UPDATE worktrees SET cleanup_owner = NULL WHERE id = %s', (wid,))
     project_folders.retarget(row, str(new), project_folders.revision(row))
-    # Even a same-name branch on the new clone is never a candidate.
     git(new, 'branch', 'topic')
     new_refs = git(new, 'show-ref')
     new_listing = git(new, 'worktree', 'list', '--porcelain')
@@ -349,26 +398,21 @@ async def test_reopen_refuses_unproven_retained_checkout(synced_worktree, unavai
     elif unavailable == 'clone-replaced':
         original = old.rename(old.with_name('moved-owner'))
         git(old.parent, 'clone', '--no-local', str(original), str(old))
-        git(old, 'remote', 'set-url', 'origin', git(new, 'remote', 'get-url', 'origin'))
-        git(old, 'branch', 'topic', 'origin/topic')
-        assert git(old, 'rev-parse', 'refs/heads/topic') == git(original, 'rev-parse', 'refs/heads/topic')
+        git(old, 'branch', 'topic')
     elif unavailable == 'tip-changed':
-        git(old, 'branch', '-f', 'topic', 'main')
+        git(old, '-c', 'user.name=Test', '-c', 'user.email=test@example.test',
+            'commit', '--allow-empty', '-m', 'advanced after Keep')
+        git(old, 'branch', '-f', 'topic', 'HEAD')
     elif unavailable == 'branch-deleted':
         git(old, 'branch', '-D', 'topic')
-    if unavailable == 'available':
-        reopened = WorktreeManager().recreate_worktree(wid)
-        assert reopened['status'] == 'active'
-        assert reopened['worktree_path'] == str(topic)
-    else:
-        original_git_files = set((old / '.git').rglob('*'))
-        with pytest.raises(WorktreeError, match='Reopen refused'):
-            WorktreeManager().recreate_worktree(wid)
-        with pytest.raises(WorktreeError, match='Cleanup refused'):
-            await WorktreeManager().cleanup_worktree(wid, keep_branch=False)
-        assert set((old / '.git').rglob('*')) == original_git_files
-        assert database.get_worktree(wid) == completed
-        assert not topic.exists()
+    original_git_files = set((old / '.git').rglob('*'))
+    with pytest.raises(WorktreeError, match='Reopen refused'):
+        WorktreeManager().recreate_worktree(wid)
+    with pytest.raises(WorktreeError, match='Cleanup refused'):
+        await WorktreeManager().cleanup_worktree(wid, keep_branch=False)
+    assert set((old / '.git').rglob('*')) == original_git_files
+    assert database.get_worktree(wid) == completed
+    assert not topic.exists()
     assert git(new, 'show-ref') == new_refs
     assert git(new, 'worktree', 'list', '--porcelain') == new_listing
 
@@ -414,7 +458,7 @@ async def test_imported_worktree_cleanup_keeps_original_clone(synced_worktree, p
     assert git(new, 'branch', '--list', 'topic') == 'topic'
     assert other_topic.is_dir()
     assert database.get_worktree(wid)['status'] == 'completed'
-    with pytest.raises(WorktreeError, match='exact retained branch and tip'):
+    with pytest.raises(WorktreeError, match='check out the kept branch manually'):
         manager.recreate_worktree(wid)
     assert git(new, 'branch', '--list', 'topic') == 'topic'
 
@@ -426,6 +470,7 @@ async def test_pinned_cleanup_refuses_active_turn(synced_worktree):
     row, old, new, topic, worktree, git = synced_worktree
     wid = worktree['id']
     project_folders.retarget(row, str(new), project_folders.revision(row))
+    pinned = database.get_worktree(wid)
     database.create_session('busy-worktree', 'default', project_id=row['id'], worktree_id=wid,
                             worktree_branch='topic')
     turn = turns.enqueue_turn('busy-worktree', 'user', prompt='Do work in the old worktree')
@@ -433,7 +478,7 @@ async def test_pinned_cleanup_refuses_active_turn(synced_worktree):
     for keep in (True, False):
         with pytest.raises(WorktreeError, match='a session is working in this checkout'):
             await WorktreeManager().cleanup_worktree(wid, keep_branch=keep)
-    assert database.get_worktree(wid) == worktree
+    assert database.get_worktree(wid) == pinned
     assert topic.is_dir()
     assert git(old, 'branch', '--list', 'topic') == '+ topic'
     assert git(new, 'branch', '--list', 'topic') == ''

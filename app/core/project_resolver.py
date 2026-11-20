@@ -294,10 +294,11 @@ def _pinned_session_worktree(session_row: Dict[str, Any]) -> Optional[dict]:
     worktree_id = session_row.get("worktree_id")
     if not worktree_id:
         return None
+    from app.core.worktree_manager import is_retarget_pinned
     from app.db import database
 
     row = database.get_worktree(worktree_id)
-    return row if row and row.get("cleanup_owner") is not None else None
+    return row if row and is_retarget_pinned(row) else None
 
 
 def resolve_cwd(session_row: Dict[str, Any], *, raise_add_errors: bool = False) -> Optional[str]:
