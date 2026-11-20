@@ -1,4 +1,4 @@
-// Named running-app check; only GET /api/v1/network/status is controlled.
+// Named running-app check with controlled network status and a scoped history read in the combined case.
 import assert from 'node:assert/strict';
 import { runJourney } from './runner.mjs';
 import { api, composer, openNewChat, uniq } from './lib/app.mjs';
@@ -128,12 +128,23 @@ const historyAtCompletion = {
 	viewports: ['phone'],
 	throttles: ['fast'],
 	async setup(ctx) {
-		const { page } = ctx;
+		const { page, log } = ctx;
 		await openAtPhase(ctx, 'standalone-download');
 		page.__transcriptNotice = `transcript-focus-${uniq()}`;
 		await api(page, 'POST', '/notifications', {
 			id: page.__transcriptNotice, severity: 'warning', surface: 'notification',
 			category: 'journey', title: 'A notification to open during a download', message: 'Journey notice'
+		});
+		// A full phone history can cover the empty space this case must tap. Scope
+		// only this page's history GET; leave stored rows and other requests alone.
+		await page.route((url) => url.pathname === '/api/v1/notifications', async (route) => {
+			if (route.request().method() !== 'GET') return route.fallback();
+			const response = await route.fetch();
+			if (!response.ok()) return route.fulfill({ response });
+			const history = await response.json();
+			const notifications = history.notifications.filter(({ id }) => id === page.__transcriptNotice);
+			log(`GET /api/v1/notifications: showing ${notifications.length} test-owned row of ${history.notifications.length}`);
+			return route.fulfill({ response, json: { ...history, notifications, unread: notifications.filter((row) => !row.read).length } });
 		});
 		await openNewChat(ctx);
 	},
