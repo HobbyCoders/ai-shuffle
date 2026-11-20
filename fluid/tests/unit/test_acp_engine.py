@@ -166,8 +166,30 @@ async def test_context_usage_is_the_agents_own_usage_update(tmp_path: Path) -> N
         assert [(c["name"], c["tokens"]) for c in usage["categories"]] == [("In use", 120), ("Free space", 880)]
         # Never "Messages": the agent's total holds its system prompt and tools too.
         assert all(c["name"] != "Messages" for c in usage["categories"])
-        # The window belongs to the model it was read on.
+        # The window belongs to the model it was read on, and switching back
+        # does not bring the old reading back before the agent reports again.
         await d.loop.submit(SetModel(model="gemini-4-argon"))
+        assert await d.loop.get_context_usage() is None
+        await d.loop.submit(SetModel(model="gemini-3.8-flash"))
+        assert await d.loop.get_context_usage() is None
+    finally:
+        await d.close()
+
+
+async def test_context_usage_belongs_to_its_agent_session(tmp_path: Path) -> None:
+    d = await _driver(tmp_path, session_id="s-1", auth_mode="gemini-api-key", api_key="test-key-old")
+    try:
+        assert isinstance(await d.turn("stream"), TurnComplete)
+        # A new process that resumes the same conversation keeps its reading.
+        await d.loop.replace_spec(_spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-new"))
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert _received(tmp_path, "session/resume")
+        assert (await d.loop.get_context_usage() or {}).get("totalTokens") == 120
+        # One the agent cannot resume starts a fresh conversation with no reading.
+        await d.loop.replace_spec(_spec(tmp_path, auth_mode="gemini-api-key", api_key="test-key-new"))
+        d.loop.cli_session_id = "gone"
+        assert isinstance(await d.turn("hello"), TurnComplete)
+        assert len(_received(tmp_path, "session/new")) == 2
         assert await d.loop.get_context_usage() is None
     finally:
         await d.close()

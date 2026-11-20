@@ -394,8 +394,9 @@ class AcpLoop:
         (Gemini 4 Argon: ``size`` 1048576). It is one total with no breakdown,
         so it is a single row (never "Messages", which would claim the system
         prompt and tools are not in it) and Free space. None before the agent
-        has reported, and after a model switch until it reports again, since
-        the window belongs to the model it was read on.
+        has reported, after a model switch until it reports again (the window
+        belongs to the model it was read on), and once a fresh agent session
+        replaces the one it was read on.
         """
         reading = self._context_reading
         if reading is None:
@@ -481,6 +482,7 @@ class AcpLoop:
             fut.set_result(op)
         elif isinstance(op, SetModel):
             self.model = op.model
+            self._context_reading = None  # the window was the previous model's
             await self._apply_config("model", op.model)
             if self.effort:
                 await self._apply_config("thought_level", self.spec.effort_value(self.effort))
@@ -776,6 +778,8 @@ class AcpLoop:
                         logger.warning("ACP agent did not resume session %s (%s); starting a new one",
                                        self.cli_session_id, exc.message)
                 if not self._session_resumed:
+                    # A new conversation: the last one's context reading is not its own.
+                    self._context_reading = None
                     params: dict[str, Any] = {"cwd": self.cwd, "mcpServers": servers}
                     if self.add_dirs and info.session_capability("additionalDirectories"):
                         params["additionalDirectories"] = self.add_dirs
