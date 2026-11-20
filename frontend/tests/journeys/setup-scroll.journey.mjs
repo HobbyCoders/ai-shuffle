@@ -6,21 +6,24 @@ import { runJourney } from './runner.mjs';
 const step = (page, name) => page.getByTestId(`setup-${name}`);
 const button = (scope, name) => scope.getByRole('button', { name, exact: true });
 
-async function stage(page, status, gate = false) {
+async function stage(page, status, gate) {
+	const signIn = gate === 'sign-in';
 	await page.route('**/api/v1/auth/status', async (route) => {
 		const response = await route.fetch();
-		await route.fulfill({ response, json: { ...(await response.json()), onboarding_complete: false } });
+		await route.fulfill({ response, json: {
+			...(await response.json()), onboarding_complete: false, ...(signIn && { authenticated: false })
+		} });
 	});
 	if (gate) {
 		await page.route('**/api/v1/owner/status', async (route) => {
 			const response = await route.fetch();
 			await route.fulfill({ response, json: {
-				...(await response.json()), required: true, password_set: false, desktop_handoff: false
+				...(await response.json()), required: !signIn, password_set: signIn, login_available: signIn, desktop_handoff: false
 			} });
 		});
 	}
 	await page.goto(new URL('/setup', status.urls.ui).href);
-	await step(page, 'welcome').waitFor();
+	if (!signIn) await step(page, 'welcome').waitFor();
 }
 
 async function measure(target) {
@@ -113,7 +116,7 @@ await runJourney({
 			name: 'short-owner-gate',
 			async setup({ page, status }) {
 				await page.setViewportSize({ width: 390, height: 360 });
-				await stage(page, status, true);
+				await stage(page, status, 'create');
 			},
 			async act({ page, mark, log }) {
 				const next = button(step(page, 'welcome'), 'Continue');
@@ -123,6 +126,21 @@ await runJourney({
 				await reachFooter(page, button(form, 'Save password'), mark, log);
 				await click(button(form, 'Back'), mark, 'return to welcome without saving a password');
 				await step(page, 'welcome').waitFor();
+			}
+		},
+		{
+			name: 'short-owner-sign-in',
+			async setup({ page, status }) {
+				await page.setViewportSize({ width: 390, height: 220 });
+				// A fresh Docker install with OWNER_PASSWORD set shows the login gate,
+				// not the Welcome/password-creation branch. Do not enter credentials.
+				await stage(page, status, 'sign-in');
+				await page.getByRole('form', { name: 'Sign in to AI Shuffle' }).waitFor();
+			},
+			async act({ page, mark, log }) {
+				const signIn = button(page.getByRole('form', { name: 'Sign in to AI Shuffle' }), 'Sign in');
+				await reachFooter(page, signIn, mark, log);
+				expect(await signIn.isDisabled(), 'sign-in still requires entering a password');
 			}
 		},
 		{

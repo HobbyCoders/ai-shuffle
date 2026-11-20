@@ -79,9 +79,9 @@
 	}
 </script>
 
-{#if mode === 'create' && firstRun}
-	<!-- The setup wizard's first two steps, before this browser can sign in. -->
-	<SetupViewport step={showWelcome ? 'welcome' : 'owner'}>
+<SetupViewport step={mode === 'create' && firstRun && showWelcome ? 'welcome' : 'owner'}>
+	{#if mode === 'create' && firstRun}
+		<!-- The setup wizard's first two steps, before this browser can sign in. -->
 		<div class="text-center mb-6 sm:mb-8">
 			<h1 class="text-xl sm:text-2xl font-semibold text-foreground mb-2">{showWelcome ? 'Welcome to AI Shuffle' : 'Set an owner password'}</h1>
 			<p class="text-muted-foreground text-sm sm:text-base">
@@ -115,10 +115,7 @@
 				<p class="text-xs text-muted-foreground text-center">Phones and browsers linked through your HobbyCoders account keep using their own device sign-in.</p>
 			</form>
 		{/if}
-	</SetupViewport>
-{:else}
-<div class="ui-surface ui-onboarding">
-	<div class="ui-onboarding-card">
+	{:else}
 		{#if mode === 'create'}
 			<form onsubmit={submit} class="space-y-4" aria-labelledby="owner-create-heading">
 				<div class="text-center">
@@ -167,6 +164,5 @@
 				<button type="button" class="ui-button primary" onclick={onRetry}>Try again</button>
 			</div>
 		{/if}
-	</div>
-</div>
-{/if}
+	{/if}
+</SetupViewport>
