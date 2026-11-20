@@ -177,6 +177,11 @@
 			"globs": ["frontend/tests/journeys/settings-memory.journey.mjs", "frontend/src/lib/components/settings/memory/**", "frontend/src/lib/settings/entries/memory.ts"]
 		},
 		{
+			"why": "Owner edits and deletes saved model guidance in Memory; subsequent chat prompts follow the saved block",
+			"journeys": ["settings-learned-guidance"],
+			"globs": ["frontend/tests/journeys/settings-learned-guidance.journey.mjs", "frontend/src/lib/components/settings/memory/MemoryCollection.svelte", "frontend/src/lib/components/settings/memory/LearnedGuidance.svelte", "frontend/src/lib/components/settings/memory/GuidanceEditor.svelte", "frontend/src/lib/settings/entries/memory.ts", "app/api/learned_guidance.py", "app/core/guidance_storage.py", "app/core/guidance_surface.py", "fluid/fluid/context/guidance.py"]
+		},
+		{
 			"why": "Settings pages keep their loaded row shapes while a reload waits for the worker",
 			"journeys": ["settings-reload"],
 			"globs": ["frontend/tests/journeys/settings-reload.journey.mjs", "frontend/src/lib/components/settings/pages/SecurityPage.svelte", "frontend/src/lib/components/settings/pages/editors/SecurityInstructionsEditor.svelte", "frontend/src/lib/components/settings/pages/SpendingRows.svelte", "frontend/src/lib/components/settings/pages/UsagePage.svelte", "frontend/src/lib/components/settings/rows/ExpandToggle.svelte"]
