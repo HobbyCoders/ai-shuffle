@@ -80,7 +80,11 @@ def _login_env(home_env: Optional[dict] = None) -> dict:
     if home_env is None:
         from app.core import claude_subscriptions
 
-        home_env = claude_subscriptions.active_home_env()
+        try:
+            home_env = claude_subscriptions.active_home_env()
+        except claude_subscriptions.SubscriptionError:
+            # Login can repair the default folder; turns still require a match.
+            home_env = {}
     env.update(home_env)
     env["TERM"] = "dumb"
     env["NO_COLOR"] = "1"

@@ -584,7 +584,7 @@ async def get_claude_auth(refresh: bool = False, token: str = Depends(require_au
 async def set_claude_auth(request: ClaudeAuthModeRequest, token: str = Depends(require_admin)):
     """Choose the mode (admin only). Takes effect for the next agent run.
 
-    ``off`` turns Claude off on this worker: Claude models leave the pickers
+    ``off`` turns Claude off on the owner's synced workers: Claude models leave the pickers
     and Claude runs are refused with the gate's off message (``gate.reason``).
     """
     from app.core import claude_auth_mode, claude_cloud_auth

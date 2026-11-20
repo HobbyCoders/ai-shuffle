@@ -1251,7 +1251,7 @@ def auth_status() -> dict:
     plan = fake_plan()
     subscription = ("max" if plan == "ultra" else plan) or "fake"
     return {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty",
-            "email": FAKE_EMAIL, "orgName": FAKE_ORG,
+            "email": FAKE_EMAIL, "orgName": FAKE_ORG, "orgId": "devloop-fake-org",
             "subscriptionType": subscription, "configDirectory": None}
 
 

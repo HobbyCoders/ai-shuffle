@@ -39,6 +39,7 @@ def world(tmp_path, monkeypatch):
     for name in ("get_system_setting", "get_system_setting_cached"):
         monkeypatch.setattr(subs.database, name, lambda key, *a, **k: values.get(key))
     monkeypatch.setattr(subs.database, "set_system_setting", values.__setitem__)
+    monkeypatch.setattr(subs.database, "get_or_create_system_setting", lambda key, factory: values.setdefault(key, factory()))
     monkeypatch.setattr(subs, "setting_key", lambda: "claude_cli_logins:test-worker")
     monkeypatch.setattr(subs, "_verified", {})
     monkeypatch.setattr(subs, "_identity_cache", {})
@@ -54,6 +55,7 @@ def world(tmp_path, monkeypatch):
         probed.append(folder)
         email = signed.get(folder)
         return cs.ClaudeCliStatus(installed=True, signed_in=bool(email), email=email,
+                                  auth_method="claude.ai", org_id="fixture-org" if email else None,
                                   plan="max" if email else None, checked_at=subs.time.time())
 
     def run_home(args, home_env):
@@ -82,6 +84,42 @@ def _add(world, email):
     assert login["id"] == account_id
     subs.payload()
     return account_id
+
+
+def test_synced_selection_resolves_to_a_different_local_folder(world):
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
+
+    origin_id = _add(world, "paid@example.com")
+    selection = world.values[subs.SELECTION_SETTING]
+    assert is_shared_setting_key(subs.SELECTION_SETTING)
+    assert origin_id not in selection and "paid@" not in selection
+
+    # The same subscription on the peer is installed with a different local id.
+    peer_folder = "0123456789abcdef"
+    home.ensure(peer_folder)
+    peer_path = str(world.root / peer_folder)
+    world.signed[peer_path] = "PAID@example.com"
+    subs._save({**subs._empty(), "accounts": [{"id": peer_folder, "kind": subs.KIND_SAVED}]})
+    before = claude_auth_mode.spawn_fingerprint()
+    env = inject_claude_code_auth({"ANTHROPIC_API_KEY": "other-key", "CLAUDE_CODE_OAUTH_TOKEN": "other-sub"})
+    assert env["CLAUDE_CONFIG_DIR"] == peer_path
+    assert "ANTHROPIC_API_KEY" not in env and "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+    # A cached positive status must not authorize a launch after this folder
+    # is signed into another identity. The default is signed in, too.
+    world.signed[peer_path] = "different@example.com"
+    assert claude_auth_mode.spawn_fingerprint() != before
+    with pytest.raises(ProviderTurnRefused, match="selected Claude subscription"):
+        inject_claude_code_auth({})
+
+
+def test_subscription_mode_arriving_before_its_selection_refuses_default(world):
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
+
+    world.values[claude_auth_mode.SELECTION_SETTING] = '{"mode":"subscription"}'
+    with pytest.raises(ProviderTurnRefused, match="selected Claude subscription"):
+        inject_claude_code_auth({})
+    assert cs.probe().signed_in is False
 
 
 # ─── Folder layout ───────────────────────────────────────────────────────────
@@ -227,7 +265,8 @@ def test_every_claude_spawn_gets_the_active_folder(world, monkeypatch):
     subs.change(default_id, "activate")
     assert "CLAUDE_CONFIG_DIR" not in inject_claude_code_auth({})
     assert "CLAUDE_CONFIG_DIR" not in cs._probe_env()
-    assert claude_auth_mode.spawn_fingerprint() == default_fingerprint
+    assert subs.fingerprint_part().endswith(":default")
+    assert claude_auth_mode.spawn_fingerprint() != default_fingerprint
 
 
 def test_transcripts_are_shared_across_sign_ins(world):
@@ -291,9 +330,10 @@ def test_indeterminate_identity_keeps_last_readable_authentication(world, monkey
     if not signed_in:
         world.signed.pop(str(world.root / account_id))
     monkeypatch.setattr(subs.time, "time", lambda: 123.0)
-    # Produce the stored auth state through the real activation/refresh path,
-    # rather than seeding the state that the listing will consume.
-    subs.change(account_id, "activate")
+    # Produce the stored auth state through an actual listing probe, without
+    # trying to select an account known to be signed out.
+    subs.invalidate_identity()
+    subs.payload()
     if not active:
         _add(world, "other@example.com")
     subs.invalidate_identity()
@@ -306,7 +346,9 @@ def test_indeterminate_identity_keeps_last_readable_authentication(world, monkey
     assert row["needs_sign_in"] is (not signed_in)
     assert row["checked_at"] == 123.0
     assert row["email"] == "saved@example.com"
-    assert listing["recovery_required"] is (active and not signed_in)
+    # Neither an unreadable active sign-in nor a signed-out one can authorize
+    # a turn. The last determinate result remains visible on the saved row.
+    assert listing["recovery_required"] is True
 
 
 @pytest.mark.parametrize("reader", ["payload", "activate", "save_current", "pending_poll", "pending_cancel"])
@@ -329,7 +371,8 @@ def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch,
             email = "before@example.com"
         else:
             email = "after@example.com"
-        return cs.ClaudeCliStatus(installed=True, signed_in=True, email=email)
+        return cs.ClaudeCliStatus(installed=True, signed_in=True, email=email,
+                                  auth_method="claude.ai", org_id="fixture-org")
 
     monkeypatch.setattr(subs, "_probe", probe)
     # Complete the real terminal reader path while the listing/activation holds
@@ -367,8 +410,9 @@ def test_login_completion_rejects_an_inflight_identity_probe(world, monkeypatch,
         assert row["label"] == "after@example.com"
         assert subs._load()["accounts"][0]["email"] == "after@example.com"
     assert subs._identity_cache[account_id][1].email == "after@example.com"
-    # Adoption changes the active folder and deliberately invalidates again.
-    assert len(probes) == (3 if reader.startswith("pending_") else 2)
+    # Activation/adoption invalidate the selected folder again; a listing with
+    # no matching sign-in also probes the default rather than trusting it.
+    assert len(probes) >= 2
 
 
 def test_cached_listing_keeps_probe_time_without_rewriting_storage(world, monkeypatch):
@@ -461,18 +505,18 @@ def test_one_active_at_a_time_and_delete_rules(world):
     subs.change(first, "rename", "Work")
     assert next(r for r in subs.payload()["subscription"] if r["id"] == first)["label"] == "Work"
 
-    # Deleting the active saved sign-in: the CLI signs itself out of that
-    # folder, the folder goes, and Claude Code returns to the default folder
-    # without activating the other saved sign-in.
+    # Deleting the local sign-in removes its folder, but does not change the
+    # owner's selection on peers or let this worker bill a different account.
     first_folder = world.root / first
     subs.change(first, "delete")
     assert world.ran == [(["auth", "logout"], {"CLAUDE_CONFIG_DIR": str(first_folder)})]
     assert not os.path.lexists(first_folder)
     after = subs.payload()
-    assert after["default_in_use"] is True
+    assert after["default_in_use"] is False and after["recovery_required"] is True
     rows = {r["id"]: r["active"] for r in after["subscription"]}
-    assert rows == {default_id: True, second: False}
-    assert subs.active_home_env() == {}
+    assert rows == {default_id: False, second: False}
+    with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+        subs.active_home_env()
 
     # Forgetting the default entry never signs the CLI out or touches its folder.
     subs.change(default_id, "delete")
@@ -613,22 +657,20 @@ def test_delete_drops_the_entry_before_removing_its_folder(world, monkeypatch):
     seen = []
 
     def run_home(args, home_env):
-        # The folder is still there, but the list no longer has the entry and
-        # a spawn now uses the default folder.
+        # The folder is still there, but the list already excludes it. Do not
+        # race deletion by reusing it or by falling back to another account.
+        with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+            subs.active_home_env()
         seen.append((account_id in [a["id"] for a in subs._load()["accounts"]],
-                     subs._load()["active_id"], subs.active_home_env()))
+                     subs._load()["active_id"]))
         return subprocess.CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr(cs, "run_home", run_home)
     subs.change(account_id, "delete")
-    assert seen == [(False, None, {})]
+    assert seen == [(False, None)]
     assert not os.path.lexists(folder)
-    # A spawn that read the old active entry just before the delete re-checks
-    # under the folder lock and does not bring the folder back.
-    real = subs.active_home_id
-    stale = iter([account_id])
-    monkeypatch.setattr(subs, "active_home_id", lambda: next(stale, None) or real())
-    assert subs.active_home_env() == {}
+    with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+        subs.active_home_env()
     assert not os.path.lexists(folder)
 
 
@@ -640,17 +682,19 @@ def test_claude_off_mode_does_not_point_spawns_at_a_saved_folder(world, monkeypa
     assert "CLAUDE_CONFIG_DIR" not in inject_claude_code_auth({})
 
 
-def test_missing_active_folder_is_repaired_and_flagged(world):
+def test_missing_selected_folder_blocks_spawns_and_can_be_repaired_by_sign_in(world):
     account_id = _add(world, "second@example.com")
     folder = world.root / account_id
     home.remove(account_id)
     world.signed.pop(str(folder))
     subs._verified.clear()
-    # The spawn still uses that folder (never another account), rebuilt with
-    # its shared links, and the CLI now reports no sign-in there.
-    assert subs.active_home_env() == {"CLAUDE_CONFIG_DIR": str(folder)}
+    with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+        subs.active_home_env()
+    assert not folder.exists()
+    subs.sign_in_commands(account_id)
     assert home.intact(account_id)
-    subs.change(account_id, "activate")
+    with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+        subs.active_home_env()
     listing = subs.payload()
     assert listing["recovery_required"] is True
     assert listing["subscription"][0]["needs_sign_in"] is True
@@ -660,17 +704,21 @@ def test_list_is_worker_local_and_never_synced(world):
     assert not is_shared_setting_key("claude_cli_logins:any-worker")
     assert not is_shared_setting_key("claude_cli_logins")
     _add(world, "second@example.com")
-    assert list(world.values) == ["claude_cli_logins:test-worker"]
+    assert set(world.values) == {"claude_cli_logins:test-worker", subs.SELECTION_SETTING}
     stored = world.values["claude_cli_logins:test-worker"]
     assert "CLAUDE_CONFIG_DIR" not in stored and "token" not in stored.lower()
 
 
-def test_macos_reports_unavailable_neutrally_and_uses_the_default(world, monkeypatch):
+def test_macos_reports_unavailable_and_can_only_match_the_default(world, monkeypatch):
     _add(world, "second@example.com")
     monkeypatch.setattr(home.sys, "platform", "darwin")
     support = subs.support()
     assert support["supported"] is False
     assert "unofficial" not in support["reason"].lower() and "unsupported" not in support["reason"].lower()
+    with pytest.raises(subs.SubscriptionError, match="selected Claude subscription"):
+        subs.active_home_env()
+    world.signed[""] = "second@example.com"
+    subs.invalidate_identity()
     assert subs.active_home_env() == {}
     with pytest.raises(subs.SubscriptionError) as exc:
         subs.start_login()

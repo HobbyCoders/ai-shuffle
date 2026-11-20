@@ -231,6 +231,19 @@ _auth_support: dict[tuple[str, Optional[str]], bool] = {}
 
 def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
     """Run the CLI's own status command once, uncached, for the active sign-in. Never raises."""
+    from app.core import claude_subscriptions as subscriptions
+
+    target = subscriptions.shared_target()
+    if target is not None:
+        try:
+            _, status = subscriptions.shared_home(target, force=True)
+            return status
+        except subscriptions.SubscriptionError as exc:
+            try:
+                binary = (resolver or _default_resolver)()
+            except Exception:  # The CLI may not be installed on this peer yet.
+                binary = None
+            return ClaudeCliStatus(installed=bool(binary), binary_path=binary, signed_in=False, error=str(exc))
     return _probe(resolver, None)
 
 
@@ -241,6 +254,9 @@ def probe_home(home_env: dict, resolver: Optional[Callable[[], str]] = None) -> 
     sign-in. This is the only way a saved sign-in's email and plan are read.
     """
     env = _probe_env(home_env)
+    # A saved folder identifies the local CLI account, not a host token that
+    # would make every folder report the same identity.
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     return _probe(resolver, lambda argv: _run(argv, env))
 
 

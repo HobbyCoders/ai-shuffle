@@ -1207,10 +1207,11 @@ label. Concurrent edits use normal settings sync conflict handling.
 #### Saved subscription sign-ins
 
 Each saved subscription is a Claude Code CLI sign-in on **this worker**. The
-list and the active choice are kept per worker in `claude_cli_logins:<instance
-id>` and never sync: every worker keeps its own CLI sign-ins. AI Shuffle never
-reads, copies or stores CLI credentials; email, plan and organization come only
-from running `claude auth status` against an entry's folder. Account listings
+list in `claude_cli_logins:<instance id>` and the sign-in folders never sync.
+The selection syncs to the owner's other workers as an account fingerprint,
+not a credential or folder id. Each worker matches that fingerprint against
+its own `claude auth status` results (account email and organization ID).
+AI Shuffle never reads, copies or stores CLI credentials. Account listings
 refresh that result at most every 30 seconds, and an in-app login completion or
 account switch invalidates the cached result. If deletion cannot remove a saved
 folder, its app-owned id stays in a worker-local cleanup queue and startup retries
@@ -1229,10 +1230,12 @@ it without touching listed accounts, a pending login, or shared link targets.
   only where Windows allows a symbolic link (Developer Mode or administrator),
   otherwise that sign-in keeps its own copy of the file.
 
-`active` is true for the entry Claude Code uses. When no saved entry is active,
-Claude Code uses its own folder: `default_in_use` is then `true` and a saved
-`default` entry shows as active. Deleting the active saved sign-in returns
-Claude Code to its own folder; it never activates another saved entry.
+`active` is true for the local entry that matches the selection. `default_in_use`
+is true when the default folder is selected. If the selected account cannot be
+verified here, `recovery_required` is true and Claude subscription turns are
+refused. Deleting a local sign-in does not change the selection or bill a
+fallback account. Sign in to the same account and organization on this worker,
+or explicitly select a different account.
 `signed_in`, `email`, `plan` and `org_name` are from the last `claude auth
 status` of that entry (`checked_at`, Unix seconds). `needs_sign_in` is true
 when that check found no sign-in or the entry's folder is missing;
@@ -1290,7 +1293,10 @@ forget a saved key permanently.
 
 ### PUT /api/v1/settings/claude-auth
 
-Choose the mode. Takes effect on the next agent run.
+Choose the mode for the owner's synced workers. It takes effect on new turns
+as each worker receives the choice. Missing credentials never select another
+mode. In cloud mode only the worker that selected its local cloud configuration
+can run Claude. Existing worker-local defaults apply until the first shared choice.
 
 **Auth:** Owner only
 

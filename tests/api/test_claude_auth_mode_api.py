@@ -45,6 +45,22 @@ def test_put_switches_mode_and_integrations_follow(authenticated_client):
     assert integrations["claude_code_auth_method"] == "api_key"
 
 
+def test_owner_mode_selection_is_shared_and_does_not_fall_back(authenticated_client, monkeypatch):
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
+    from app.network.policy import is_shared_setting_key
+
+    assert is_shared_setting_key(claude_auth_mode.SELECTION_SETTING)
+    assert not is_shared_setting_key(claude_auth_mode.setting_key())
+    # Simulate the peer's legacy startup choice and a configured host gateway.
+    db.set_system_setting(claude_auth_mode.setting_key(), "subscription")
+    with _probe(True):
+        assert authenticated_client.put(ENDPOINT, json={"mode": "api_key"}).status_code == 200
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fixture.invalid")
+    assert claude_auth_mode.current_mode() == "api_key"
+    with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
+        inject_claude_code_auth({"ANTHROPIC_API_KEY": "not-the-owner-key"})
+
+
 def test_put_rejects_unknown_mode(authenticated_client):
     with _probe(False):
         assert authenticated_client.put(ENDPOINT, json={"mode": "auto"}).status_code == 400
