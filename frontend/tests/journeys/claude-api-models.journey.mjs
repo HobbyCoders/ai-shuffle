@@ -97,7 +97,8 @@ await runJourney({
 	// The built app’s service worker handles GETs before Playwright can inject the rejected refresh.
 	// Keep interception in this journey only; the successful requests still reach the app.
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
-	throttles: ['fast', 'slow'],
+	// Keep desktop/phone refresh-loop and SSE race checks at 4x CPU; duplicate fast variants cost hosted retry headroom.
+	throttles: ['slow'],
 	allow: [...DEV_INSTANCE_NOISE, {
 		kind: 'failed_requests', status: 502, url: /\/models\/claude\/api-key\/[^/?]+/,
 		reason: 'the journey injects one rejected-key response; it asserts the error and then retries against the real dev endpoint'
