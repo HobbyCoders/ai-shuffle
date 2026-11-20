@@ -227,6 +227,10 @@ def test_upgraded_sender_rejects_persisted_pre_upgrade_transfer(workers, monkeyp
         assert engine.scan_collection(SETTINGS, record_ids=[competing]) == 1
 
     with sender.active():
+        # The safe prefix fills the batch, but the retired op later in the
+        # signed stream still forces a snapshot instead of sending that prefix.
+        ops, _, needs_snapshot = store.exchange_batch(marks, limit=1, exclude_origin=receiver.device_id)
+        assert needs_snapshot and not ops
         # Up-to-date frontier, unexpired, same membership and format: only the
         # retired-key policy makes the already signed transfer unsafe to serve.
         assert not store.requires_snapshot(old["watermarks"], exclude_origin=receiver.device_id)

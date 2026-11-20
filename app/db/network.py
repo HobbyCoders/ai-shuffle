@@ -762,19 +762,27 @@ _LOG_HEADS_QUERY = """
     SELECT origin_device_id, incarnation,
            (SELECT MAX(seq) FROM sync_ops op
             WHERE op.origin_device_id = sync_streams.origin_device_id
-              AND op.incarnation = sync_streams.incarnation) AS s
+              AND op.incarnation = sync_streams.incarnation) AS s,
+           FALSE AS is_applied
     FROM sync_streams WHERE origin_device_id IS NOT NULL
+"""
+_APPLIED_WATERMARKS_UNION = """
+    UNION ALL
+    SELECT origin_device_id, incarnation, last_seq AS s, TRUE AS is_applied FROM sync_watermarks
 """
 
 
-def _log_heads(cursor) -> list[dict]:
-    cursor.execute(_LOG_HEADS_QUERY, (HEAD_PROBE_LIMIT,))
+def _log_heads(cursor, *, include_applied: bool = False) -> list[dict]:
+    # One frontier read for exchange; retention still needs raw log anchors only.
+    applied = _APPLIED_WATERMARKS_UNION if include_applied else ""
+    cursor.execute(_LOG_HEADS_QUERY + applied, (HEAD_PROBE_LIMIT,))
     rows = cursor.fetchall()
-    if len(rows) >= HEAD_PROBE_LIMIT:
+    stream_count = sum(not row["is_applied"] for row in rows) if include_applied else len(rows)
+    if stream_count >= HEAD_PROBE_LIMIT:
         # The bounded probe may not have reached the final stream. Re-read a
         # complete frontier in one statement, never advertise a partial one.
-        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s FROM sync_ops "
-                       "GROUP BY origin_device_id, incarnation")
+        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s, FALSE AS is_applied "
+                       "FROM sync_ops GROUP BY origin_device_id, incarnation " + applied)
         rows = cursor.fetchall()
     return rows
 
@@ -876,13 +884,13 @@ def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
     """
     def _query(cursor):
         out: Dict[str, Dict[str, int]] = {}
-        for row in _log_heads(cursor):
-            out.setdefault(row["origin_device_id"], {})[str(int(row["incarnation"]))] = int(row["s"] or 0)
-        cursor.execute("SELECT origin_device_id, incarnation, last_seq FROM sync_watermarks")
-        for row in cursor.fetchall():
+        for row in _log_heads(cursor, include_applied=True):
             bucket = out.setdefault(row["origin_device_id"], {})
             key = str(int(row["incarnation"]))
-            bucket[key] = int(row["last_seq"])
+            if row["is_applied"]:
+                bucket[key] = int(row["s"])
+            else:
+                bucket.setdefault(key, int(row["s"] or 0))
         return out
     if _conn is not None:
         return _query(_conn.cursor())

@@ -714,6 +714,33 @@ def test_exchange_batch_bounds_queries_frontier_and_detects_pruned_gaps(workers,
         assert store.exchange_batch({}, exclude_origin=a.device_id)[2] is False
 
 
+@pytest.mark.parametrize("probe_limit", [1, 2])
+def test_frontier_combines_applied_watermarks_without_counting_them_toward_probe_limit(
+        workers, monkeypatch, probe_limit):
+    a = workers("frontier")
+    with a.active():
+        engine.create_network("Frontier")
+        database.set_system_setting("tts_model", "first")
+        assert engine.scan_collection("system_settings") > 0
+        log_head = store.local_watermarks()[a.device_id]["1"]
+        with store.get_db() as conn:
+            cursor = conn.cursor()
+            # A legacy forwarder can retain a log head beyond the applied mark.
+            store.set_watermark(cursor, a.device_id, 1, log_head - 1)
+            store.set_watermark(cursor, "snapshot-only", 2, 7)
+
+        monkeypatch.setattr(store, "HEAD_PROBE_LIMIT", probe_limit)
+        queries = []
+        a.raw.set_trace_callback(queries.append)
+        try:
+            assert store.local_watermarks() == {a.device_id: {"1": log_head - 1}, "snapshot-only": {"2": 7}}
+        finally:
+            a.raw.set_trace_callback(None)
+        # There is just one log stream: only the cap of one invokes fallback.
+        assert len([q for q in queries if q.lstrip().upper().startswith(("SELECT", "WITH"))]) == (
+            2 if probe_limit == 1 else 1)
+
+
 @pytest.mark.parametrize("key", [
     "cluster_secret", "workspace_path:peer", "claude_auth_mode:peer",
     "claude_auth_mode:local", "claude_cloud_config", "claude_cloud_secrets",
