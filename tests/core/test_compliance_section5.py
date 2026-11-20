@@ -290,7 +290,7 @@ async def test_subscription_run_touches_no_token_file_and_hands_over_no_key(
     mock_db, tmp_path, fake_cli, file_audit, monkeypatch
 ):
     monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
-    claude_auth_mode.set_mode("subscription")
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     # Both credentials present: a stored key and host variables. The explicit
     # subscription choice must win and none of them may reach the CLI.
     database.set_system_setting("anthropic_api_key", USER_KEY)
@@ -320,7 +320,7 @@ async def test_subscription_host_oauth_token_reaches_only_the_cli(
     """#2079: a worker-set CLAUDE_CODE_OAUTH_TOKEN goes to the stock CLI's turn
     and to no other child (process tree, hooks, git)."""
     monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
-    claude_auth_mode.set_mode("subscription")
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", HOST_OAUTH)
@@ -350,7 +350,7 @@ async def test_api_key_mode_runs_a_subscription_pick_on_the_cli_without_the_key(
     worker still in the old API key mode: the CLI on the subscription sign-in,
     never the saved key and never an API call."""
     monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(True))
-    claude_auth_mode.set_mode("api_key")
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local choice
     database.set_system_setting("anthropic_api_key", USER_KEY)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
@@ -377,7 +377,8 @@ async def test_explicit_worker_gateway_reaches_only_the_cli(
     mock_db, tmp_path, fake_cli, file_audit, monkeypatch, saved_mode,
 ):
     monkeypatch.setattr(claude_cli_status, "get_status", lambda force=False, resolver=None: _cli_status(False))
-    claude_auth_mode.set_mode(saved_mode)
+    # An upgraded worker with no owner-wide choice still honors its gateway.
+    database.set_system_setting(claude_auth_mode.setting_key(), saved_mode)
     database.set_system_setting("anthropic_api_key", USER_KEY)
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fake-gateway.invalid")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", HOST_TOKEN)

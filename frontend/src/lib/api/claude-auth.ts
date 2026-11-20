@@ -128,13 +128,24 @@ export function saveCurrentClaudeSubscription(label = ''): Promise<ClaudeAccount
 	return api.post('/settings/claude-auth/accounts/subscription/save-current', { label });
 }
 
+export function selectDefaultClaudeSubscription(): Promise<ClaudeAccountsResponse> {
+	return api.post('/settings/claude-auth/accounts/subscription/use-default');
+}
+
+export function repairClaudeSubscription(id: string, terminal: boolean): Promise<{
+	login?: ClaudeSubscriptionLogin;
+	terminal_run?: import('./claude-cli').ClaudeCliLoginState;
+}> {
+	return api.post(`/settings/claude-auth/accounts/subscription/${id}/sign-in?terminal=${terminal}`);
+}
+
 export function addAnotherClaudeSubscription(): Promise<ClaudeAccountsResponse> {
 	return api.post('/settings/claude-auth/accounts/subscription/add-another');
 }
 
 /**
  * Stop a pending add-another sign-in. When the CLI had already finished
- * signing in, the worker keeps it (active) and returns its `account_id`.
+ * signing in, the worker keeps it without selecting it and returns its `account_id`.
  */
 export function cancelClaudeSubscriptionLogin(): Promise<ClaudeAccountsResponse> {
 	return api.post('/settings/claude-auth/accounts/subscription/cancel-login');
@@ -192,6 +203,10 @@ export interface ClaudeAuthSummary {
 	};
 	/** Whether a key is stored, and its last four characters. Never the key. */
 	api_key: { set: boolean; last4: string | null };
+	/** Legacy API mode uses a saved key that the owner has not yet pinned. */
+	api_key_confirmation_required?: boolean;
+	/** Opaque revision for the exact legacy selection shown above. */
+	api_key_confirmation?: string | null;
 	/** The cloud provider or gateway method. Absent on older workers. */
 	cloud?: ClaudeCloudStatus;
 	/** Whether new Claude agent runs can start on this worker, and why not. */
@@ -210,6 +225,10 @@ export function getClaudeAuth(refresh = false): Promise<ClaudeAuthSummary> {
  */
 export function setClaudeAuthMode(mode: ClaudeAuthMode, acknowledgeWarning = false): Promise<ClaudeAuthSummary> {
 	return api.put('/settings/claude-auth', acknowledgeWarning ? { mode, acknowledge_warning: true } : { mode });
+}
+
+export function confirmClaudeApiKey(revision: string): Promise<ClaudeAuthSummary> {
+	return api.put('/settings/claude-auth', { mode: 'api_key', api_key_confirmation: revision });
 }
 
 // ============================================================================

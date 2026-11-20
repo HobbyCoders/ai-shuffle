@@ -206,7 +206,10 @@ describe('the Tuning tab', () => {
 	it('tunes the picked model only', async () => {
 		start([gatewayRow({ models: [{ ...qwen, local_settings: tuned }, other] })]);
 		await open('mp:gw-1', 'Tuning');
-		await fireEvent.change(screen.getByRole('combobox', { name: 'Model' }), { target: { value: 'llama-3.3' } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Model' }));
+		const model = screen.getByRole('option', { name: /^llama-3\.3/ });
+		expect(model.querySelector('[data-provider-logo="custom"]')).toBeTruthy();
+		await fireEvent.click(model);
 		await flush();
 		expect(screen.queryByRole('textbox', { name: 'Temperature' })).toBeNull();
 		await fireEvent.click(within(screen.getByRole('group', { name: 'Server' })).getByRole('button', { name: 'vLLM' }));
@@ -238,13 +241,13 @@ describe('the Tuning tab', () => {
 		const b: ProviderModelEntry = { id: 'b-model', label: 'B', local_settings: { server: 'llama_cpp', sampling: { top_k: 5 } } };
 		start([gatewayRow({ models: [{ ...qwen, local_settings: tuned }, b, other] })]);
 		await open('mp:gw-1', 'Tuning');
-		const model = () => (screen.getByRole('combobox', { name: 'Model' }) as HTMLSelectElement).value;
-		expect(model()).toBe('qwen3-8b');
+		const model = () => screen.getByRole('button', { name: 'Model', description: /^qwen3-8b\b/ });
+		expect(model()).toBeTruthy();
 		await fireEvent.click(within(screen.getByRole('group', { name: 'Server' })).getByRole('button', { name: 'Not set' }));
 		await fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
 		await waitFor(() => expect(patches()).toHaveLength(1));
 		await flush();
-		expect(model()).toBe('qwen3-8b');
+		expect(model()).toBeTruthy();
 		expect(
 			within(screen.getByRole('group', { name: 'Server' })).getByRole('button', { name: 'Not set' }).getAttribute('aria-pressed')
 		).toBe('true');

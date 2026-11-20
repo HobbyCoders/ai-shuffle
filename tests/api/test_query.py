@@ -89,7 +89,7 @@ class TestPerLegCredentialGate:
         from app.core import license as license_mod
         from app.db import database
 
-        claude_auth_mode.set_mode("subscription")
+        database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
         database.create_model_provider(
             "chatgpt", "ChatGPT", "openai", "https://example.invalid/v1",
             models=[{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-sol"}],

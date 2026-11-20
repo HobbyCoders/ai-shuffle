@@ -172,7 +172,10 @@ function parseArgs(argv) {
  *   name       journey name (output folder)
  *   cases      [{ name, setup?(ctx), act(ctx), verify?(ctx), viewports?, throttles?,
  *                 allow?, expectShift?, knownBug?, recorder? }]
- *              ctx = { page, variant, status, mark?, log, recording? }
+ *              ctx = { page, variant, status, mark?, log, recording?, deferCleanup }
+ *              `deferCleanup(fn)` runs after the case even if setup or act fails.
+ *   isolated   no shared devloop; the case must dispose its own worker
+ *   caseTimeoutMs  optional `() => ms` for setup/act/verify, excluding deferred cleanup
  *              `setup` runs unrecorded (navigate, stage the composer);
  *              `act` runs inside withRecording and must end in a settled UI;
  *              `verify` runs after it with `recording` (the recorder's stop()
@@ -204,7 +207,7 @@ function parseArgs(argv) {
  *   throttles  default Object.keys(THROTTLES)
  *   recorder   extra withRecording options (a case's `recorder` adds to it;
  *              `selectors` are concatenated)
- *   browser    optional `(status) => ({ args, context })`: extra Chromium
+ *   browser    optional `(status) => ({ args, context, timeout })`: extra Chromium
  *              launch flags (fake microphone, see lib/voice.mjs) and options
  *              for every case's browser context (permissions)
  */
@@ -240,10 +243,10 @@ export async function runJourney(spec) {
 	}
 	if (!plan.length) throw new Error(`no case matches --only=${args.only}`);
 
-	const status = readDevloopStatus();
+	const status = spec.isolated ? null : readDevloopStatus();
 	// Hold the private lease for this whole process, including setup, slow
 	// browser actions and long voice waits. PID/start time makes crashes safe.
-	if (status.pause?.enabled) {
+	if (status?.pause?.enabled) {
 		const fields = readFileSync(`/proc/${process.pid}/stat`, 'utf8').split(') ').at(-1).split(' ');
 		const lease = join(status.scratch_dir, `journey-${process.pid}.lease`);
 		writeFileSync(lease, `${process.pid} ${fields[19]}`, { mode: 0o600 });
@@ -262,16 +265,20 @@ export async function runJourney(spec) {
 	const browser = await chromium.launch({
 		headless: process.env.JOURNEY_HEADED !== '1',
 		executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+		timeout: extra.timeout,
 		args: ['--no-sandbox', ...(extra.args || [])]
 	});
 
-	// Open the one-time access link once; every case starts from its cookie.
-	const bootstrap = await browser.newContext();
-	const bootPage = await bootstrap.newPage();
-	await bootPage.goto(status.access_link);
-	await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
-	const cookies = await bootstrap.cookies();
-	await bootstrap.close();
+	let cookies = [];
+	if (status) {
+		// Open the one-time access link once; every case starts from its cookie.
+		const bootstrap = await browser.newContext();
+		const bootPage = await bootstrap.newPage();
+		await bootPage.goto(status.access_link);
+		await bootPage.waitForURL((url) => !url.pathname.includes('/preview-access'), { timeout: 60_000 });
+		cookies = await bootstrap.cookies();
+		await bootstrap.close();
+	}
 
 	const results = [];
 	try {
@@ -312,8 +319,10 @@ export async function runJourney(spec) {
 				for (const problem of judged.problems) result.anomalies.push({ kind: 'expect_shift', message: problem });
 				sortAnomalies(judged.anomalies);
 			};
-			try {
-				const ctx = { page, variant, status, log };
+			const cleanups = [];
+			let caseTimer;
+			const exercise = async () => {
+				const ctx = { page, variant, status, log, deferCleanup: (fn) => cleanups.push(fn) };
 				if (item.testCase.setup) await item.testCase.setup(ctx);
 				phase = 'act';
 				trace.note('> setup done; act (recorded) starts');
@@ -334,11 +343,27 @@ export async function runJourney(spec) {
 				if (process.env.JOURNEY_SHEETS === '1') {
 					await contactSheet(recording.keyframes, join(out, `${item.id}.jpg`), { title: item.id }).catch(() => {});
 				}
+			};
+			try {
+				if (spec.caseTimeoutMs) {
+					const ms = spec.caseTimeoutMs();
+					if (ms <= 0) throw new Error('Journey work budget exhausted before case startup');
+					await Promise.race([exercise(), new Promise((_, reject) => {
+						caseTimer = setTimeout(() => reject(new Error(`Case exceeded ${ms}ms`)), ms);
+					})]);
+				} else {
+					await exercise();
+				}
 			} catch (error) {
+				result.ok = false;
 				result.error = error.stack || String(error);
 				result.phase = phase;
-				const now = await composerSnapshot(page).catch((e) => `unavailable (${e.message.split('\n')[0]})`);
-				trace.note(`at failure: ${JSON.stringify(now)}`);
+				// Deadline-limited cases must go straight to closing the context
+				// (cancelling outstanding browser work) and disposing the fixture.
+				if (!spec.caseTimeoutMs) {
+					const now = await composerSnapshot(page).catch((e) => `unavailable (${e.message.split('\n')[0]})`);
+					trace.note(`at failure: ${JSON.stringify(now)}`);
+				}
 				// A verify failure comes after a complete recording: keep its text.
 				result.text = error.flightRecording || result.text;
 				// A failed step still owes what it recorded before failing: a flicker
@@ -349,12 +374,27 @@ export async function runJourney(spec) {
 					result.recorded = true;
 					judge(error.flightRecordingData, error.flightAnomalies, { partial: true });
 				}
-				await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
+				if (!spec.caseTimeoutMs) await page.screenshot({ path: join(out, `${item.id}.error.png`) }).catch(() => {});
 			} finally {
-				const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
-					.catch((error) => `failed: ${error.message}`);
-				if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
-				await context.close();
+				clearTimeout(caseTimer);
+				if (status) {
+					const cleaned = await createdChats().then(ids => deleteCaseChats(context, status, started, ids))
+						.catch((error) => `failed: ${error.message}`);
+					if (typeof cleaned !== 'number') lines.push(`cleanup of this case's chats ${cleaned}`);
+				}
+				try {
+					await context.close();
+				} finally {
+					for (const cleanup of cleanups.reverse()) {
+						try {
+							await cleanup();
+						} catch (error) {
+							result.ok = false;
+							result.phase = 'cleanup';
+							result.error = [`Fixture cleanup failed: ${error.message}`, result.error].filter(Boolean).join('\n');
+						}
+					}
+				}
 			}
 			result.ms = Date.now() - started;
 			const known = item.testCase.knownBug;

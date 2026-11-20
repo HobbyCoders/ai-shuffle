@@ -204,9 +204,10 @@
 		},
 		{
 			"why": "the model picker panel: rows inside the pane it opens in, keyboard focus on open and Escape, closing when Settings is hidden",
-			"journeys": ["model-picker"],
+			"journeys": ["model-picker", "model-picker-provider-artwork"],
 			"globs": [
 				"frontend/tests/journeys/model-picker.journey.mjs",
+					"frontend/tests/journeys/model-picker-provider-artwork.journey.mjs",
 				"frontend/src/lib/components/settings/ModelPicker.svelte",
 				"frontend/src/lib/components/settings/ModelPickerPanel.svelte",
 				"frontend/src/lib/components/settings/model-picker-focus.ts",
@@ -794,11 +795,24 @@
 			]
 		},
 		{
+			"why": "a pending Claude subscription can recover only after explicitly choosing a verified default sign-in",
+			"journeys": ["claude-account-switch"],
+			"globs": [
+				"frontend/tests/journeys/claude-account-switch.journey.mjs",
+				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
+				"frontend/src/lib/components/settings/providers/ClaudeModeRow.svelte",
+				"app/core/claude_auth_mode.py",
+				"app/core/claude_subscriptions.py",
+				"app/api/settings_claude_accounts.py"
+			]
+		},
+		{
 			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",
 				"frontend/src/lib/components/settings/providers/tabs/ClaudeCliModels.svelte",
+				"frontend/src/lib/components/settings/providers/tabs/AvailableModelList.svelte",
 				"frontend/src/lib/components/settings/providers/ClaudeSubDetail.svelte",
 				"frontend/src/lib/constants/models.svelte.ts",
 				"app/core/claude_cli_models.py",

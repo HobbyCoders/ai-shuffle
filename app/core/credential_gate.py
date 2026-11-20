@@ -130,6 +130,11 @@ def claude_credential_ready(cli=None) -> Tuple[bool, Optional[str]]:
         cli = claude_cli_status.get_status()
     if not isinstance(cli, dict):
         cli = cli.to_dict()
+    from app.core import claude_subscriptions
+
+    if claude_subscriptions.shared_target() is not None:
+        if not cli.get("signed_in"):
+            return False, claude_subscriptions.SELECTION_UNAVAILABLE
     if cli.get("signed_in"):
         return True, None
     if not cli.get("installed"):

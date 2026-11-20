@@ -25,6 +25,9 @@
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
 	import SelectField from '../rows/SelectField.svelte';
+	import ModelPicker from '../ModelPicker.svelte';
+	import { groupModelChoices } from '$lib/constants/model-picker';
+	import { getProviderDisplay } from '$lib/constants/models';
 	import Segmented from '../rows/Segmented.svelte';
 	import TextField from '../rows/TextField.svelte';
 	import InlineConfirm from '../rows/InlineConfirm.svelte';
@@ -92,9 +95,10 @@
 	);
 	const settings = $derived<LocalModelSettings | null>(model?.local_settings ?? null);
 	const preset = $derived(presetOf(settings?.preset));
-	const modelOptions = $derived(
-		models.map((m) => ({ value: m.id, label: m.local_settings ? `${m.id} · tuned` : m.id }))
-	);
+	const catalog = $derived(groupModelChoices(models.map((m) => ({
+		value: m.id, label: m.local_settings ? `${m.id} · tuned` : m.id,
+		providerType: row.provider_type, providerName: getProviderDisplay(row).name
+	}))));
 	const reasoningChoice = $derived<ReasoningChoice>(
 		settings?.reasoning === undefined ? 'default' : settings.reasoning ? 'on' : 'off'
 	);
@@ -203,13 +207,9 @@
 	>
 		{#if pinned === undefined}
 			<SettingRow label="Model" hint={models.length > 1 ? 'Tuning is per model' : undefined}>
-				<SelectField
-					value={model.id}
-					options={modelOptions}
-					mono
-					width={240}
-					disabled={saving}
-					onchange={pickModel}
+				<ModelPicker
+					value={model.id} catalogOverride={catalog} formSelect allowCustom={false}
+					disabled={saving} onSelect={pickModel}
 				/>
 			</SettingRow>
 		{/if}

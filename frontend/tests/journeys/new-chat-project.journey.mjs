@@ -144,7 +144,9 @@ await runJourney({
 				// Pick through the real model picker; no component/store is mounted
 				// or mutated by the test. The model identity stays constant below.
 				await page.getByRole('button', { name: /^Model: / }).first().click();
-				await page.getByRole('option', { name: /^Sonnet\b/ }).click();
+				const picker = page.getByRole('dialog', { name: 'Choose model' });
+				// Select the alias that the capability fixture below updates, not a versioned Sonnet.
+				await picker.getByRole('option').and(picker.locator('[data-value="sonnet"]')).click();
 				await page.getByRole('button', { name: SONNET_CHIP }).first().waitFor();
 				await page.locator('.mcp-scrim').waitFor({ state: 'detached' });
 				await openChatSetup(page);

@@ -550,8 +550,9 @@ describe('GenerationChoiceCard: provider, then any model, then its options', () 
 		expect(recraft.textContent).not.toMatch(/Free|Included/);
 		expect(screen.getByText('2 of 3')).toBeTruthy();
 		await fireEvent.click(screen.getByRole('button', { name: 'Show more' }));
-		expect((await screen.findByRole('button', { name: /SDXL/ }) as HTMLButtonElement).disabled).toBe(true);
-		expect(screen.getByText('fal is down.')).toBeTruthy();
+		const sdxl = await screen.findByRole<HTMLButtonElement>('button', { name: /SDXL/ });
+		expect(sdxl.disabled).toBe(true);
+		expect(within(sdxl).getByText('fal.ai · fal is down.')).toBeTruthy();
 		expect(mocks.get).toHaveBeenCalledWith(expect.stringMatching(/\/generation\/models\/image\?source=fal&offset=2&limit=20/));
 		await fireEvent.input(screen.getByPlaceholderText('Search 3 models'), { target: { value: 'nothing' } });
 		expect(await screen.findByText('No model matches “nothing”.')).toBeTruthy();

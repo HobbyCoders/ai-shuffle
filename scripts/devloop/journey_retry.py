@@ -21,6 +21,10 @@ RETRY_SECONDS = 180
 STEP_SECONDS = 25 * 60
 TEARDOWN_SECONDS = 180  # down: 90s + wait: 60s + kill: 10s + reader: 10s
 BAD = {"fail", "crashed"}
+# The account-switch journey provisions external services per case. Its 145s
+# work window plus up to 24.5s fixture shutdown and 8s for browser/reporting
+# must fit before run_command's hard kill. See claude-account-switch.journey.mjs.
+CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS = 178
 
 
 def _tail(path: Path) -> str:
@@ -114,19 +118,24 @@ def retry_failed(first: list[dict], out: Path, env: dict, run, *, directory: Pat
             break
         ids = None if failed[0]["status"] == "crashed" else [r["case"] for r in failed]
         name = f"{journey}.journey.mjs"
-        if ids is None:
-            reason = _whole_file_skip(name, min(timeout, remaining), weights_path)
-            if reason:
-                failed[0]["retry_skipped"] = reason
-                print(f"[ci] retry skipped {name}: {reason}", flush=True)
-                continue
+        budget = min(timeout, remaining)
+        reason = None
+        if journey == "claude-account-switch" and budget < CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS:
+            reason = (f"{journey} needs {CLAUDE_ACCOUNT_SWITCH_RETRY_SECONDS}s for work, "
+                      f"fixture teardown and reporting; {budget:.1f}s available.")
+        elif ids is None:
+            reason = _whole_file_skip(name, budget, weights_path)
+        if reason:
+            failed[0]["retry_skipped"] = reason
+            print(f"[ci] retry skipped {name}: {reason}", flush=True)
+            continue
         attempt_out = out / "attempt-2"
         (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
         command = ["node", str(directory / name), *[f"--case={id}" for id in ids or []]]
         print(f"[ci] retrying {name}: {', '.join(ids) if ids else '(whole journey)'} "
-              f"(budget {remaining:.0f}s)", flush=True)
+              f"(budget {budget:.0f}s)", flush=True)
         code, seconds = run(command, {**env, "JOURNEY_OUT": str(attempt_out / "journeys")},
-                            attempt_out / "logs" / f"{Path(name).stem}.log", min(timeout, remaining))
+                            attempt_out / "logs" / f"{Path(name).stem}.log", budget)
         receipt["retried"] += len(failed)
         receipt["retry_seconds"] += seconds
         second = read_attempt(name, attempt_out, code, seconds, expected=ids)

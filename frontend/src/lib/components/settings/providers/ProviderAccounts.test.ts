@@ -406,16 +406,23 @@ describe('saved Claude subscriptions', () => {
 		expect(providers.current.claude?.mode).toBe('subscription');
 	});
 
-	it('shows "Sign in again" for a lapsed saved sign-in, with no warning wording', async () => {
+	it('starts repair for a lapsed saved sign-in without activating it', async () => {
 		worker = fakeWorker({
 			rows: [chatgptRow()],
 			claude: claudeSummary({ accounts: claudeAccounts({
 				subscription: [subAccount(), subAccount({ id: 'old', kind: 'saved', label: 'Old', active: false, signed_in: false, needs_sign_in: true })]
 			}) })
+		}, {
+			'POST /settings/claude-auth/accounts/subscription/old/sign-in': () => ({
+				login: { commands: { posix: "CLAUDE_CONFIG_DIR='/fixture/old' claude auth login" } }
+			})
 		});
 		await show();
 		await fireEvent.click(group('Claude').getByRole('button', { name: 'Old, Sign in again' }));
-		expect((await screen.findAllByRole('button', { name: /Sign in again/ })).length).toBeGreaterThan(0);
+		await fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }));
+		await screen.findByText(/CLAUDE_CONFIG_DIR=.*fixture\/old/);
+		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/old/activate')).toHaveLength(0);
+		expect(providers.current.claude?.accounts?.subscription.map((a) => a.active)).toEqual([true, false]);
 		expect(document.body.textContent).not.toMatch(/unofficial|unsupported/i);
 	});
 });

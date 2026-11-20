@@ -521,12 +521,25 @@ describe('saved Claude subscriptions', () => {
 		]);
 	});
 
+	it('keeps default sign-in recovery reachable when no saved subscription resolves as active', () => {
+		const claude = withSubs({
+			default_in_use: false,
+			subscription: [subAccount({ id: 'work', label: 'Work', kind: 'saved', active: false })],
+			recovery_required: true
+		}, { cli: { ...claudeSummary().cli, signed_in: false } });
+		expect(claude.credentials.map((c) => [c.item, c.statusText, c.status, c.on, c.attention])).toEqual([
+			[CLAUDE_SUB_ITEM, 'Not signed in', 'warn', false, true],
+			[claudeSubItem('work'), 'Saved', 'standby', false, false]
+		]);
+		expect(attentionCount([claude])).toBe(1);
+	});
+
 	it('shows a neutral "Sign in again" for a sign-in that lapsed; attention only when it is the active one', () => {
 		const saved = withSubs({
 			default_in_use: false,
 			subscription: [
 				subAccount({ active: true, kind: 'saved', id: 'a', label: 'A', signed_in: false, needs_sign_in: true }),
-				subAccount({ active: false, kind: 'saved', id: 'b', label: 'B', signed_in: false, needs_sign_in: true })
+				subAccount({ active: false, kind: 'default', id: 'b', label: 'B', signed_in: false, needs_sign_in: true })
 			],
 			recovery_required: true
 		}, { cli: { ...claudeSummary().cli, signed_in: false } });

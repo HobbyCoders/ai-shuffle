@@ -19,12 +19,14 @@ measured per-case median, with conservative floors (not measurements). A stale
 measurement is also a lower bound, scaled by its per-case cost when cases grow.
 
 ``matrix`` is the workflow's one selection step. A pull request runs the
-journeys its changed files need (``frontend/tests/journeys/select.mjs --ci``
-over the merge commit's diff); every other event, and a diff or selection that
-cannot be read, runs them all. It prints ``only=`` (``*`` for every journey,
-else the comma-separated names, empty for none) and ``shards=`` (the shard
-numbers that got a file) as step outputs; ``plan`` and ``journeys`` take that
-``only`` value so each shard splits the same selection.
+journeys a map rule names for its changed files
+(``frontend/tests/journeys/select.mjs --ci --named-only`` over the merge
+commit's diff); a push to main runs the full ``--ci`` selection for what
+changed since the last commit CI passed on; every other event, and a diff or
+selection that cannot be read, runs them all. It prints ``only=`` (``*`` for
+every journey, else the comma-separated names, empty for none) and
+``shards=`` (the shard numbers that got a file) as step outputs; ``plan`` and
+``journeys`` take that ``only`` value so each shard splits the same selection.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -68,7 +70,6 @@ RUN_ALL = "run-all.mjs"
 WEIGHTS = Path(__file__).with_name("journey_weights.json")
 HOSTED_SHARDS = 18
 EVERY_JOURNEY = "*"
-QUEUE_EVENT = "merge_group"  # GitHub's merge queue; scripts/ci/proven.py
 SELECTOR = JOURNEYS / "select.mjs"
 SUFFIX = ".journey.mjs"
 JOURNEY_MAP = "frontend/tests/journeys/map.json"
@@ -285,22 +286,20 @@ def base_journey_map(root: Path = ROOT, base: str = "HEAD^1") -> str | None:
 def last_green_main(root: Path = ROOT) -> str | None:
     """The nearest ancestor of HEAD that CI passed on; None if unknown.
 
-    CI passed there on main or in the merge queue for main. Every journey held
-    there: by running, or because that run narrowed the same way from an older
-    green commit. Needs main's history fetched.
+    Every journey held there: by running, or because that run narrowed the same
+    way from an older green commit. Needs main's history fetched.
     """
     from scripts.ci import proven
 
-    where = proven.history_environment()
+    where = proven.environment()
     if where is None:
         return None
     try:
         head = _git(root, "rev-parse", "HEAD").strip()
-        green = dict.fromkeys([*proven.green_main_commits(*where), *proven.green_queue_commits(*where)])
-        ancestors = [commit for commit in green
+        ancestors = [commit for commit in dict.fromkeys(proven.green_main_commits(*where))
                      if commit != head and subprocess.run(["git", "merge-base", "--is-ancestor", commit, "HEAD"],
                                                           cwd=root, capture_output=True, timeout=60).returncode == 0]
-        # The one with the fewest commits after it: the lists are in run order, not history order.
+        # The one with the fewest commits after it: the list is in run order, not history order.
         return min(ancestors, key=lambda commit: int(_git(root, "rev-list", "--count", f"{commit}..HEAD")),
                    default=None)
     except Exception as error:  # noqa: BLE001 - not knowing means running every journey
@@ -308,42 +307,20 @@ def last_green_main(root: Path = ROOT) -> str | None:
     return None
 
 
-def merge_queue_follows() -> bool:
-    """True when this pull request can reach main only through main's merge queue.
-
-    The queue then runs the full selection on the merged result before main
-    moves, so the pull request's own runs keep to the journeys a rule names.
-    Any doubt answers False: the pull request runs the full selection itself.
-    """
-    from scripts.ci import proven
-
-    repository = os.environ.get("GITHUB_REPOSITORY", "")
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    path = os.environ.get("GITHUB_EVENT_PATH", "")
-    if not repository or not token or not path:
-        return False
-    try:
-        base = json.loads(Path(path).read_text(encoding="utf-8"))["pull_request"]["base"]["ref"]
-        return base == "main" and proven.merge_queue_guards(repository, token, base)
-    except Exception as error:  # noqa: BLE001 - not knowing means the full selection
-        print(f"[ci] merge queue unknown, the full selection runs: {error}", file=sys.stderr)
-        return False
-
-
 def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path = JOURNEYS,
-                    previous_map: str | None = None, before_queue: bool = False) -> list[str] | None:
+                    previous_map: str | None = None, named_only: bool = False) -> list[str] | None:
     """The journey files those changed files need; None for all, or when unsure.
 
     ``previous_map`` is the base's map.json text. With it an edited map selects
     what either map names for the other files; without it an edit runs them all.
-    ``before_queue`` keeps to the journeys a rule names (select.mjs --before-queue).
+    ``named_only`` keeps to the journeys a rule names (select.mjs --named-only).
     """
     with tempfile.TemporaryDirectory() as temporary:
         listing = Path(temporary) / "changed-files.txt"
         listing.write_text("\n".join(files) + "\n", encoding="utf-8")
         command = ["node", str(selector), "--ci", "--json", "--files-from", str(listing)]
-        if before_queue:
-            command.append("--before-queue")
+        if named_only:
+            command.append("--named-only")
         if previous_map is not None:
             previous = Path(temporary) / "base-map.json"
             previous.write_text(previous_map, encoding="utf-8")
@@ -367,21 +344,17 @@ def select_journeys(files: list[str], selector: Path = SELECTOR, directory: Path
 def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str] | None, str]:
     """(journey files or None for all, why) for a workflow event.
 
-    A pull request runs what its merge changes. A push to main and the merge
-    queue's run of a group headed for main run what changed since the last
-    commit CI passed on. All narrow only when the diff and the selection are
-    readable; schedules, dispatches and other callers run all.
-
-    When main moves only through a merge queue, the queue's run is the one
-    that selects in full, and a pull request keeps to the journeys a rule
-    names for its files: the whole suite then runs once per pull request,
-    before main moves, not on every push to it.
+    A pull request runs the journeys a map rule names for the files its merge
+    changes. A push to main runs what changed since the last commit CI passed
+    on, with the `all` rules and the unmapped fallback: it is where every
+    journey a change needs runs at least once, so main's run, not each push to
+    a pull request, carries the wide selection. Both narrow only when the diff
+    and the selection are readable; schedules, dispatches and other callers
+    run all.
     """
-    before_queue = False
     if event == "pull_request":
         base, files, what = "HEAD^1", pull_request_files(root), "the pull request's merge diff"
-        before_queue = files is not None and merge_queue_follows()
-    elif event in ("push", QUEUE_EVENT):
+    elif event == "push":
         base = last_green_main(root)
         if base is None:
             return None, "every journey: no earlier commit that CI passed on was found"
@@ -390,13 +363,14 @@ def selection_for_event(event: str | None, root: Path = ROOT) -> tuple[list[str]
         return None, f"every journey: a {event or 'local'} run is not narrowed"
     if files is None:
         return None, f"every journey: {what} could not be read"
+    pull_request = event == "pull_request"
     only = select_journeys(files, previous_map=base_journey_map(root, base) if JOURNEY_MAP in files else None,
-                           before_queue=before_queue)
+                           named_only=pull_request)
     if only is None:
         return None, f"every journey: {len(files)} changed files need the whole suite, or selection failed"
-    if before_queue:
+    if pull_request:
         return only, (f"{len(only)} of the journeys are named for the {len(files)} files in {what}; "
-                      "the merge queue runs the full selection before main moves")
+                      "the run on main after the merge adds what the `all` rules and unmapped UI files select")
     return only, f"{len(only)} of the journeys cover the {len(files)} files in {what}"
 
 
@@ -410,8 +384,7 @@ def selection_key(only: list[str] | None) -> str:
 def already_proven(key: str, root: Path = ROOT) -> str | None:
     """On a push to main, what already passed this selection; None when it has to run.
 
-    The merge queue's run on this very commit, or a pull request that passed
-    the same selection on these exact files.
+    A pull request that passed the same selection on these exact files.
     """
     from scripts.ci import proven
 
@@ -419,8 +392,6 @@ def already_proven(key: str, root: Path = ROOT) -> str | None:
     if where is None:
         return None
     try:
-        if proven.queue_passed(*where):
-            return "the merge queue already passed its journeys on this very commit"
         tree = proven.head_tree(root)
         if any(proven.exists(proven.record_name("journeys", tree, name), *where, area="journeys", tree=tree)
                for name in dict.fromkeys((key, "all"))):
@@ -572,15 +543,11 @@ def _run_revision(run_id: int, repo: str) -> str:
         raise ValueError(f"Run {run_id} cannot be used for runtime weights: "
                          f"attempt {state.get('attempt')} is not 1; re-run logs omit earlier jobs. "
                          "Choose a clean first-attempt run.")
-    # CI push jobs check out headSha, and so does the merge queue's run (with
-    # a queue the journeys run there, not on the push that follows). PR runs
-    # check out a merge revision the run's headSha does not name, so their
-    # source is not recorded.
-    event, branch = state.get("event"), state.get("headBranch")
-    on_main = event == "push" and branch == "main"
-    queued = event == QUEUE_EVENT and isinstance(branch, str) and branch.startswith("gh-readonly-queue/main/")
-    if not (on_main or queued) or state.get("workflowName") != "CI":
-        raise ValueError(f"Run {run_id} must be a push to main, or the merge queue's run for main, from CI; "
+    # CI push jobs check out headSha. PR runs check out a merge revision
+    # the run's headSha does not name, so their source is not recorded.
+    if (state.get("event"), state.get("headBranch"), state.get("workflowName")) != (
+            "push", "main", "CI"):
+        raise ValueError(f"Run {run_id} must be a push to main from CI; "
                          "PR/other runs do not establish the checkout revision. "
                          "No weights were replaced.")
     revision = state.get("headSha")
@@ -888,7 +855,7 @@ def journeys(args: argparse.Namespace) -> int:
         instance = DevInstance(out, args.ttl_seconds, fake_antigravity="antigravity-usage.journey.mjs" in mine)
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
-               "JOURNEY_OUT": str(attempt_out / "journeys")}
+               "DEVLOOP_PYTHON": sys.executable, "JOURNEY_OUT": str(attempt_out / "journeys")}
         if args.retry_failures:
             env.pop("JOURNEY_ONLY", None)  # a developer filter must not narrow a CI shard
         env.setdefault("JOURNEY_SHEETS", "1")

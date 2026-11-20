@@ -23,9 +23,16 @@ def key(mock_db, monkeypatch, _api_unit_credentials):
     return KEY
 
 
+def _api_key_mode():
+    """API key mode on a worker whose choice pins no key (the legacy local
+    setting): the active saved key is the scalar the fixture patches. A synced
+    choice pins an exact key instead (tests/core/test_claude_accounts.py)."""
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")
+
+
 def test_no_active_key_means_no_row(mock_db, monkeypatch):
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: None)
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     assert cap.virtual_row() is None
     assert database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID) is None
     assert all(r["id"] != cap.CLAUDE_API_PROVIDER_ID for r in database.get_enabled_model_providers())
@@ -60,7 +67,7 @@ def test_models_follow_the_active_keys_catalog_only(key):
 def test_management_readers_and_writers_never_see_the_virtual_row(key, authenticated_client):
     """Runtime readers resolve claude-api; the exact reader that management,
     writers and sync use is stored rows only, so they answer 404."""
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     assert database.resolve_model_provider(cap.CLAUDE_API_PROVIDER_ID)["id"] == cap.CLAUDE_API_PROVIDER_ID
     assert database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID) is None
     base = f"/api/v1/model-providers/{cap.CLAUDE_API_PROVIDER_ID}"
@@ -95,7 +102,7 @@ def test_a_bound_model_missing_after_a_key_switch_reads_the_catalog_once(key, mo
     from app.core import claude_api_models
     from app.core.provider_agent import validate_provider_model
 
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     cap.remember_models(KEY, [{"id": "claude-old-only", "label": "Old"}])
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-new-key")
     monkeypatch.setattr(cap, "_refresh_tried", {})
@@ -121,7 +128,7 @@ def test_concurrent_callers_share_one_catalog_read(key, monkeypatch):
 
     from app.core import claude_api_models
 
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     monkeypatch.setattr(cap, "_refresh_tried", {})
     started, release, reads = threading.Event(), threading.Event(), []
 
@@ -146,7 +153,7 @@ def test_concurrent_callers_share_one_catalog_read(key, monkeypatch):
 def test_a_failed_read_refuses_without_retrying_and_keeps_the_key_out_of_logs(key, monkeypatch, caplog):
     from app.core import claude_api_models
 
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     monkeypatch.setattr(cap, "_refresh_tried", {})
     reads = []
 
@@ -222,7 +229,7 @@ def test_bound_turns_take_the_native_anthropic_leg(key):
 async def test_credentials_are_the_saved_key(key):
     from app.core.provider.fluid_credentials import resolve_provider_credentials
 
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     creds = await resolve_provider_credentials("anthropic", cap.CLAUDE_API_PROVIDER_ID)
     assert creds.api_key == KEY
     assert creds.base_url == "https://api.anthropic.com"
@@ -362,7 +369,7 @@ def test_a_failed_first_chat_lookup_refuses_without_asking(key, monkeypatch):
 def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):
     """A slow read for key A that passed the active-key check before the owner
     switched to B must not replace B's saved list."""
-    claude_auth_mode.set_mode("api_key")
+    _api_key_mode()
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-b")
     cap.remember_models("sk-ant-b", [{"id": "claude-b-only", "label": "B"}])
     monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: KEY)

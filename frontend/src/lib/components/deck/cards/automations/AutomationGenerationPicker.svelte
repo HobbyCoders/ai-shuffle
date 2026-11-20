@@ -8,6 +8,8 @@
  import { LatestRequests, choiceOf, formatValue, modelIdentity, modelLabel, optionsKey, priceView, quoteKey, saveOutcome, sourceLabel,
   type GenerationChoice, type GenerationKind, type GenerationOption, type GenerationPrice,
   type ModelRow, type NativeValue, type SaveOutcome, type SaveQuote, type SchemaField } from '$lib/utils/generation-choice';
+ import ModelPicker from '$lib/components/settings/ModelPicker.svelte';
+ import { groupModelChoices } from '$lib/constants/model-picker';
  import { SettingRow, SelectField, Switch, InlineBanner } from '$lib/components/layout/view';
  import TextField from '$lib/components/settings/rows/TextField.svelte';
  import TextAreaField from '$lib/components/layout/view/TextAreaField.svelte';
@@ -294,9 +296,12 @@
 <div class="picker" aria-label="Pick a generation source">
  <SettingRow label="Source and model">
   {#snippet expanded()}
-   <SelectField label="Source and model" width={620} value={String(selected)}
-    options={list.map((option,index) => ({value:String(index),label:optionLabel(option),disabled:!option.available}))}
-    onchange={(value) => select(Number(value))} />
+   <ModelPicker label="Source and model" formSelect allowCustom={false} value={String(selected)}
+    catalogOverride={groupModelChoices(list.map((option,index) => ({
+     value:String(index), label:optionLabel(option), disabled:!option.available,
+     providerType:option.source, providerName:sourceLabel(option.source)
+    })))}
+    onSelect={(value) => select(Number(value))} />
   {/snippet}
  </SettingRow>
  <button class="st-btn" aria-expanded={browseOpen} onclick={() => { browseOpen = !browseOpen; if (!browseOpen) { browseSeq++; browseLoading = false; } }}>All models</button>

@@ -148,7 +148,8 @@ def suite_state(api, commit, *, now, cache=None):
                  else f"ended {run.get('conclusion')}")
         return "failed", (f"The newest CI run covering this commit {ended} "
                           f"on {run['head_sha'][:9]} and nothing newer is waiting: {run['html_url']}\n"
-                          "The nightly waits for the next green main run: fix or re-run it.")
+                          "The nightly waits for the next green main run, which the next merge starts; "
+                          "fix a real failure in a pull request. Do not re-run or dispatch main's CI.")
     return "none", f"No CI run in flight covers this commit yet: {RUNS_URL}"
 
 

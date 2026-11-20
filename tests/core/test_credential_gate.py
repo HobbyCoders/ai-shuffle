@@ -36,7 +36,8 @@ def test_fresh_install_without_cli_is_blocked(mock_db):
 
 
 def test_subscription_mode_needs_a_cli_sign_in(mock_db):
-    claude_auth_mode.set_mode("subscription")
+    # An upgraded worker's local mode is not a shared billing identity.
+    database.set_system_setting(claude_auth_mode.setting_key(), "subscription")
     assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (
         False, credential_gate.NOT_SIGNED_IN_MESSAGE)
     assert credential_gate.agent_credentials_ready(_cli(signed_in=True)) == (True, None)
@@ -47,13 +48,15 @@ def test_subscription_mode_ignores_a_stored_key(mock_db):
     claude_auth_mode.set_mode("subscription")
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
     ready, reason = credential_gate.agent_credentials_ready(_cli(signed_in=False))
-    assert not ready and reason == credential_gate.NOT_SIGNED_IN_MESSAGE
+    from app.core.claude_subscriptions import SELECTION_UNAVAILABLE
+
+    assert not ready and reason == SELECTION_UNAVAILABLE
 
 
 def test_api_key_mode_leaves_the_claude_leg_on_the_subscription(mock_db):
     """The key never makes the CLI ready: an unbound Claude model still needs
     the subscription sign-in, and the refusal names the Claude · API models."""
-    claude_auth_mode.set_mode("api_key")
+    database.set_system_setting(claude_auth_mode.setting_key(), "api_key")  # legacy local choice
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
     assert credential_gate.agent_credentials_ready(_cli(signed_in=False)) == (
         False, credential_gate.NOT_SIGNED_IN_MESSAGE)
@@ -123,8 +126,7 @@ def test_another_provider_makes_the_worker_ready_without_claude(mock_db):
 
 
 def test_ready_providers_lists_each_usable_provider_once(mock_db):
-    claude_auth_mode.set_mode("api_key")
-    database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+    _claude_api_key_ready()
     _provider_row("codex", "chatgpt", auth_mode="chatgpt", codex_access_token="enc:tok")
     _provider_row("oa", "openai", auth_token="enc:key", checked=True)
     _provider_row("sg", "grok", auth_mode="grok", codex_access_token="enc:tok")
@@ -652,7 +654,8 @@ def _claude_signed_in():
 
 
 def _claude_api_key_saved(mode="api_key"):
-    claude_auth_mode.set_mode(mode)
+    # Setup for routing tests: a pre-existing legacy install, not a new pin.
+    database.set_system_setting(claude_auth_mode.setting_key(), mode)
     database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
 
 
@@ -1114,9 +1117,10 @@ def _requesters():
 
 def _claude(mode):
     def setup():
-        claude_auth_mode.set_mode(mode)
         if mode == "api_key":
-            database.set_system_setting("anthropic_api_key", "sk-ant-api03-plain-ABCD")
+            _claude_api_key_ready()
+        else:
+            claude_auth_mode.set_mode(mode)
         return "sonnet"
     return setup
 
@@ -1468,3 +1472,7 @@ def test_connector_warning_and_save_check_follow_the_owner_account(authenticated
     _owner_connector(connector_type="msteams", api_user_id=API_USER, connector_id="c-teams")
     assert client.get(f"/api/v1/api-users/{API_USER}").json()["subscription_warning"] == (
         api_user_scope.SUBSCRIPTION_MODEL_WARNING)
+
+
+def _claude_api_key_ready():
+    _claude_api_key_saved()

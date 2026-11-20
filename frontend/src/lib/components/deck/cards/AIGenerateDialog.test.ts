@@ -5,8 +5,8 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 vi.mock('$lib/api/client', () => ({ generateProfile: vi.fn(), generateSubagent: vi.fn(), continueGeneration: vi.fn() }));
 vi.mock('$lib/constants/model-picker', () => ({ buildModelPickerCatalog: () => ({
-	groups: [{ key: 'strong', name: 'Provider', subtext: 'api' }],
-	options: [{ value: 'prov:strong:astra', label: 'Astra', groupKey: 'strong' }]
+	groups: [{ key: 'strong', name: 'Provider', subtext: 'api', glyph: 'openrouter' }],
+	options: [{ value: 'prov:strong:astra', label: 'Astra', groupKey: 'strong', group: 'Provider', groupSubtext: 'api' }]
 }) }));
 import { generateProfile, generateSubagent, continueGeneration } from '$lib/api/client';
 import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
@@ -44,7 +44,7 @@ describe('AIGenerateDialog keyboard and focus', () => {
 
 beforeEach(() => vi.resetAllMocks());
 
-const modelPicker = () => screen.getByRole('combobox', { name: /Generation model/ }) as HTMLSelectElement;
+const modelPicker = () => screen.getByRole('button', { name: /Generation model/ }) as HTMLButtonElement;
 const openDialog = (type: 'profile' | 'subagent') => render(AIGenerateDialog, {
 	props: { type, isOpen: true, onClose: vi.fn(), onGenerated: vi.fn() }
 });
@@ -54,7 +54,8 @@ describe('per-request generation model', () => {
 		const generate = type === 'profile' ? generateProfile : generateSubagent;
 		vi.mocked(generate).mockResolvedValue({ status: 'complete', result: {} });
 		openDialog(type);
-		await fireEvent.change(modelPicker(), { target: { value: 'prov:strong:astra' } });
+		await fireEvent.click(modelPicker());
+		await fireEvent.click(screen.getByRole('option', { name: 'Astra' }));
 		await fireEvent.input(screen.getByLabelText('Describe what you want'), { target: { value: 'A security review specialist' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
 		expect(generate).toHaveBeenCalledWith('A security review specialist', 'prov:strong:astra', false, undefined);
@@ -63,7 +64,7 @@ describe('per-request generation model', () => {
 	it('leaves the Settings binding untouched when no override is chosen', async () => {
 		vi.mocked(generateProfile).mockResolvedValue({ status: 'complete', result: {} });
 		openDialog('profile');
-		expect(modelPicker().value).toBe('');
+		expect(modelPicker().textContent).toContain('Use Settings default');
 		await fireEvent.input(screen.getByLabelText('Describe what you want'), { target: { value: 'A security review specialist' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
 		expect(generateProfile).toHaveBeenCalledWith('A security review specialist', undefined, false, undefined);
@@ -75,13 +76,14 @@ describe('per-request generation model', () => {
 		vi.mocked(generate).mockReturnValue(new Promise((r) => { resolve = r; }));
 		vi.mocked(continueGeneration).mockResolvedValue({ status: 'complete', result: {} });
 		openDialog(type);
-		await fireEvent.change(modelPicker(), { target: { value: 'prov:strong:astra' } });
+		await fireEvent.click(modelPicker());
+		await fireEvent.click(screen.getByRole('option', { name: 'Astra' }));
 		await fireEvent.input(screen.getByLabelText('Describe what you want'), { target: { value: 'A security review specialist' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
 		expect(modelPicker().disabled).toBe(true);
 		resolve({ status: 'needs_clarification', questions: [{ id: 'scope', question: 'Which files?' }] });
 		await screen.findByText('Which files?');
-		expect(modelPicker().value).toBe('prov:strong:astra');
+		expect(modelPicker().textContent).toContain('Astra');
 		expect(modelPicker().disabled).toBe(true);
 		await fireEvent.input(screen.getByPlaceholderText('Your answer...'), { target: { value: 'Changed files' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
@@ -92,14 +94,15 @@ describe('per-request generation model', () => {
 		vi.mocked(generateProfile).mockRejectedValue({ detail: 'Provider unavailable' });
 		const props = { type: 'profile' as const, isOpen: true, onClose: vi.fn(), onGenerated: vi.fn() };
 		const view = render(AIGenerateDialog, { props });
-		await fireEvent.change(modelPicker(), { target: { value: 'prov:strong:astra' } });
+		await fireEvent.click(modelPicker());
+		await fireEvent.click(screen.getByRole('option', { name: 'Astra' }));
 		await fireEvent.input(screen.getByLabelText('Describe what you want'), { target: { value: 'A security review specialist' } });
 		await fireEvent.click(screen.getByRole('button', { name: 'Generate' }));
 		await screen.findByText('Provider unavailable');
-		expect(modelPicker().value).toBe('prov:strong:astra');
+		expect(modelPicker().textContent).toContain('Astra');
 		expect(modelPicker().disabled).toBe(false);
 		await view.rerender({ ...props, isOpen: false });
 		await view.rerender(props);
-		expect(modelPicker().value).toBe('');
+		expect(modelPicker().textContent).toContain('Use Settings default');
 	});
 });

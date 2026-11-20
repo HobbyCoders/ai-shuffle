@@ -9,11 +9,11 @@ worker keeps its own CLI sign-ins. A saved entry is either:
 - ``saved``: an extra sign-in in an app-made folder
   (:mod:`app.core.claude_cli_home`), added with *add another*.
 
-One subscription is active at a time. No active entry means the default
-folder, exactly as before saved sign-ins existed. Activating an entry turns its
-siblings off; deleting the active one returns Claude Code to the default
-folder without activating another saved entry. The Claude Code mode
-(subscription, API key, cloud, off) is separate and never changed here.
+A shared selection names the sign-in identity, not a folder or credential.
+Each worker resolves it against its own CLI sign-ins. Missing or different
+sign-ins must not fall back to the default folder. Until the first explicit
+choice, the legacy worker-local selection still applies. Selecting a saved
+subscription does not change the Claude Code auth mode.
 
 Every ``claude`` spawn applies :func:`apply_cli_home`, which points it at the
 active entry's folder. Identity (email, plan, organization) only ever comes from
@@ -27,6 +27,7 @@ has none, and deleting a saved entry removes its app-made folder entirely after
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -41,6 +42,12 @@ from app.db import database
 logger = logging.getLogger(__name__)
 
 SETTING_PREFIX = "claude_cli_logins:"
+SELECTION_SETTING = "claude_subscription_selection"
+UNRESOLVED = "unresolved"
+SELECTION_UNAVAILABLE = (
+    "The selected Claude subscription is not signed in on this worker. "
+    "Sign in to that Claude account and organization here, or select a different account in Settings > Providers."
+)
 KIND_DEFAULT = "default"
 KIND_SAVED = "saved"
 DEFAULT_LABEL = "Claude subscription"
@@ -126,8 +133,8 @@ def _active_saved_id(state: dict) -> Optional[str]:
 
 # ─── What every claude spawn uses ────────────────────────────────────────────
 
-def active_home_id() -> Optional[str]:
-    """The active extra sign-in's id, or None (the default folder). Never raises."""
+def _legacy_home_id() -> Optional[str]:
+    """The active extra sign-in's id, or None (the default folder)."""
     try:
         if not home.platform_support()[0]:
             return None
@@ -137,7 +144,66 @@ def active_home_id() -> Optional[str]:
         return None
 
 
-def active_home_env() -> dict[str, str]:
+def _binding(status) -> Optional[str]:
+    # An email alone does not distinguish this user's billing organizations.
+    # CLI auth status supplies both; never inspect its credential store.
+    if not (status.signed_in and status.auth_method == "claude.ai" and status.email and status.org_id):
+        return None
+    identity = [status.email.strip().casefold(), status.org_id.strip().lower()]
+    if not all(identity):
+        return None
+    return hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+
+
+def shared_target(choice: Optional[dict] = None, *, read_choice: bool = True) -> Optional[str]:
+    from app.core import claude_auth_mode
+
+    if read_choice:
+        choice = claude_auth_mode.shared_selection(cached=True)
+    if choice and "subscription" in choice:
+        target = choice["subscription"]
+        return target if isinstance(target, str) and target else UNRESOLVED
+    # Read old subscription rows during upgrade, but never for a new choice.
+    target = database.get_system_setting_cached(SELECTION_SETTING)
+    if target is not None:
+        return target
+    return UNRESOLVED if choice and choice["mode"] == claude_auth_mode.MODE_SUBSCRIPTION else None
+
+
+def legacy_binding() -> Optional[str]:
+    return _binding(_current_identity(_legacy_home_id(), force=True))
+
+
+def select_default() -> None:
+    """Owner explicitly chooses this worker's verified default CLI sign-in."""
+    from app.core import claude_auth_mode
+
+    with _lock:
+        target = _binding(_current_identity(None, force=True))
+        if target is None:
+            raise SubscriptionError("unverified_subscription", SELECTION_UNAVAILABLE)
+        claude_auth_mode.publish_subscription(target)
+        _switched()
+
+
+def shared_home(target: str, *, force: bool = False):
+    """Return (local home id, matching CLI status), or raise if unavailable."""
+    if re.fullmatch(r"[0-9a-f]{64}", target):
+        state = _load(cached=True) if home.platform_support()[0] else _empty()
+        saved = [a["id"] for a in state["accounts"]
+                 if a["kind"] == KIND_SAVED and home.valid_id(a["id"]) and home.intact(a["id"])]
+        preferred = _active_saved_id(state)
+        homes = [preferred, *(candidate for candidate in [None, *saved] if candidate != preferred)]
+        if preferred is not None and preferred not in saved:
+            homes.remove(preferred)
+        for home_id in homes:
+            status = _current_identity(home_id, force=force)
+            if _binding(status) == target:
+                return home_id, status
+    raise SubscriptionError("selected_subscription_unavailable", SELECTION_UNAVAILABLE)
+
+
+def active_home_env(*, force: bool = False) -> dict[str, str]:
     """``{"CLAUDE_CONFIG_DIR": <folder>}`` for an extra sign-in, ``{}`` for the default.
 
     The folder's shared links are re-checked at most every 30 seconds and
@@ -146,7 +212,18 @@ def active_home_env() -> dict[str, str]:
     CLI then reports no sign-in and the credential gate asks to sign in again,
     rather than running on a different account.
     """
-    account_id = active_home_id()
+    target = shared_target()
+    if target is not None:
+        return verified_home_env(target, force=force)
+    return legacy_home_env()
+
+
+def verified_home_env(target: str, *, force: bool = True) -> dict[str, str]:
+    return home.env_for(shared_home(target, force=force)[0])
+
+
+def legacy_home_env() -> dict[str, str]:
+    account_id = _legacy_home_id()
     if account_id is None:
         return {}
     now = time.monotonic()
@@ -154,7 +231,7 @@ def active_home_env() -> dict[str, str]:
         with _folder_lock:
             # Re-read under the lock: a delete saves the shortened list before
             # it removes the folder, so a deleted entry is never recreated.
-            account_id = active_home_id()
+            account_id = _legacy_home_id()
             if account_id is None:
                 return {}
             try:
@@ -167,13 +244,24 @@ def active_home_env() -> dict[str, str]:
 
 def apply_cli_home(env: dict) -> dict:
     """Point a ``claude`` spawn env at the active sign-in. Returns ``env``."""
-    env.update(active_home_env())
+    target = shared_target()
+    if target is not None:
+        home.bind_sign_in(env, verified_home_env(target))
+    else:
+        env.update(legacy_home_env())
     return env
 
 
 def fingerprint_part() -> str:
     """Non-secret pooled-session identity of the active sign-in folder."""
-    return active_home_id() or "default"
+    target = shared_target()
+    if target is None:
+        return _legacy_home_id() or "default"
+    try:
+        local_home, _ = shared_home(target, force=True)
+    except SubscriptionError:
+        return target + ":unavailable"
+    return f"{target}:{local_home or 'default'}"
 
 
 # ─── Identity, from `claude auth status` only ────────────────────────────────
@@ -304,12 +392,25 @@ def payload() -> dict[str, Any]:
             logger.warning("Could not read saved Claude sign-ins", exc_info=True)
             return {"subscription": [], "default_in_use": True, "login_pending": False, "login": None,
                     "recovery_required": False, "subscription_error": "storage_unavailable"}
-        active_saved = _active_saved_id(state)
+        target = shared_target()
+        unavailable = False
+        if target is None:
+            active_saved = _active_saved_id(state)
+        else:
+            try:
+                active_saved, _ = shared_home(target)
+            except SubscriptionError:
+                active_saved, unavailable = None, True
         rows = []
         identities_changed = False
         for account in state["accounts"]:
-            active = (account["id"] == state["active_id"]) if state["active_id"] else (
-                account["kind"] == KIND_DEFAULT)
+            if target is None:
+                active = (account["id"] == state["active_id"]) if state["active_id"] else (
+                    account["kind"] == KIND_DEFAULT)
+            else:
+                active = not unavailable and (
+                    account["kind"] == KIND_DEFAULT if active_saved is None else account["id"] == active_saved
+                )
             folder_ok = account["kind"] == KIND_DEFAULT or home.intact(account["id"])
             if folder_ok:
                 home_id = account["id"] if account["kind"] == KIND_SAVED else None
@@ -336,10 +437,10 @@ def payload() -> dict[str, Any]:
         return {
             "subscription": rows,
             # True while Claude Code runs in the CLI's own default folder.
-            "default_in_use": active_saved is None,
+            "default_in_use": active_saved is None and not unavailable,
             "login_pending": state["pending"] is not None,
             "login": _login_state(state["pending"]),
-            "recovery_required": bool(active_row and active_row["needs_sign_in"]),
+            "recovery_required": unavailable or bool(active_row and active_row["needs_sign_in"]),
             **refresh_error,
         }
 
@@ -409,12 +510,21 @@ def change(account_id: str, action: str, label: str = "") -> None:
                     home.ensure(account["id"])
                 except home.HomeError as exc:
                     raise SubscriptionError("folder_unavailable", str(exc), 409) from None
-            previous = _active_saved_id(state)
+            home_id = account["id"] if account["kind"] == KIND_SAVED else None
+            status = _current_identity(home_id, force=True)
+            target = _binding(status)
+            if not target:
+                raise SubscriptionError("unverified_subscription", SELECTION_UNAVAILABLE)
+            _record_identity(account, status)
             state["active_id"] = account["id"]
-            _save(state)
-            if _active_saved_id(state) != previous:
-                _switched()
-            _refresh_quietly(account["id"])
+            from app.core import claude_auth_mode
+
+            # The legacy folder preference and shared billing identity must
+            # commit together. A rejected activation cannot steer a later mode switch.
+            claude_auth_mode.publish_subscription(
+                target, local_subscription=(setting_key(), json.dumps(state, separators=(",", ":"))),
+            )
+            _switched()
             return
         if action == "delete":
             was_active_folder = _active_saved_id(state) == account["id"]
@@ -446,25 +556,6 @@ def change(account_id: str, action: str, label: str = "") -> None:
         raise SubscriptionError("invalid_action", "Unknown account action.", 400)
 
 
-def _refresh_quietly(account_id: str) -> None:
-    """Re-read one entry's identity from the CLI; failures keep the old values."""
-    try:
-        account = _find(_load(), account_id)
-        if account is None:
-            return
-        home_id = account["id"] if account["kind"] == KIND_SAVED else None
-        status = _current_identity(home_id, force=True)
-        if status.signed_in is None:
-            return
-        state = _load()
-        account = _find(state, account_id)
-        if account is not None:
-            _record_identity(account, status)
-            _save(state)
-    except Exception:  # noqa: BLE001 — display data only
-        logger.debug("Could not refresh a saved Claude sign-in", exc_info=True)
-
-
 def _sign_out_folder(account_id: str) -> None:
     """Let the CLI remove its own sign-in from an extra folder (best effort)."""
     from app.core import claude_cli_status
@@ -477,7 +568,7 @@ def _sign_out_folder(account_id: str) -> None:
 
 # ─── Add another: a CLI sign-in into a fresh folder ──────────────────────────
 
-def sign_in_commands(account_id: str) -> dict:
+def sign_in_commands(account_id: str, terminal: bool = False) -> dict:
     """Folder-scoped external login commands, without switching the active account."""
     _require_support()
     with _lock:
@@ -488,7 +579,16 @@ def sign_in_commands(account_id: str) -> dict:
             home.ensure(account_id)
         except home.HomeError as exc:
             raise SubscriptionError("folder_unavailable", str(exc), 409) from None
-        return _login_state({"id": account_id, "status": "waiting"}, terminal=False)
+        invalidate_identity()
+        if terminal:
+            from app.core import claude_cli_login
+
+            if claude_cli_login.terminal_supported():
+                try:
+                    return {"terminal_run": claude_cli_login.login_terminal.start(home_env=home.env_for(account_id))}
+                except RuntimeError as exc:
+                    raise SubscriptionError("login_unavailable", str(exc)) from None
+        return {"login": _login_state({"id": account_id, "status": "waiting"}, terminal=False)}
 
 
 def start_login() -> dict:
@@ -496,7 +596,7 @@ def start_login() -> dict:
 
     With the in-app terminal (Docker, Linux) the login runs there; otherwise the
     owner runs the returned command on this worker. The sign-in becomes a saved,
-    active entry once ``claude auth status`` in that folder reports it.
+    entry once ``claude auth status`` in that folder reports it.
     """
     _require_support()
     with _lock:
@@ -527,17 +627,18 @@ def start_login() -> dict:
 
 
 def _adopt(state: dict, pending: dict, status) -> str:
-    """Save the pending folder's finished sign-in as the active entry."""
+    """Save the finished sign-in. Only an explicit owner switch selects it.
+
+    Even a revision check in this worker's database cannot see a peer's switch
+    while offline, so a late poll must never publish an owner-wide choice.
+    """
     account = {"id": pending["id"], "kind": KIND_SAVED,
                "label": status.email or DEFAULT_LABEL}
     _record_identity(account, status)
     state["accounts"].append(account)
-    state["active_id"] = account["id"]
     state["pending"] = None
     _save(state)
-    _verified[account["id"]] = time.monotonic()
-    logger.info("Saved another Claude subscription sign-in and made it active")
-    _switched()
+    logger.info("Saved another Claude subscription sign-in")
     return account["id"]
 
 
@@ -586,8 +687,8 @@ def cancel_login() -> Optional[str]:
     """Stop a pending add-another login and remove its folder.
 
     When the CLI already finished signing in to that folder (before the poll
-    caught up), the sign-in is kept instead: it is saved and made active just
-    as the poll would, and its id is returned. Otherwise returns None.
+    caught up), the sign-in is kept without selecting it and its id is
+    returned. Otherwise returns None.
     """
     _require_support()
     with _lock:

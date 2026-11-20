@@ -35,13 +35,14 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
-it('lists every model Claude Code offers, aliases and versions, with no checkboxes', () => {
+it('lists every model Claude Code offers with Claude artwork and no checkboxes', () => {
 	render(ClaudeCliModels);
 	const list = screen.getByTestId('claude-cli-models');
 	for (const label of ['Opus 5.5', 'Fable 5.2', 'Mythos 5.1', 'Opus 4.6']) {
 		expect(within(list).getByText(label)).toBeTruthy();
 	}
 	expect(within(list).getByText('claude-mythos-5-1')).toBeTruthy();
+	expect(list.querySelectorAll('.pv-mrow [data-provider-logo="claude"][aria-hidden="true"]')).toHaveLength(payload.models.length);
 	expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
 	expect(screen.queryByText(/Listed by Claude Code/)).toBeNull();
 });

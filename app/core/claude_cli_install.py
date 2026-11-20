@@ -207,7 +207,10 @@ def _installer_env():
     # `claude update` and the installer use the active saved sign-in's folder,
     # like every other spawn (only CLAUDE_CONFIG_DIR, never a credential).
     from app.core import claude_subscriptions
-    claude_subscriptions.apply_cli_home(env)
+    try:
+        claude_subscriptions.apply_cli_home(env)
+    except claude_subscriptions.SubscriptionError:
+        pass  # Updating the CLI does not run a model or require sign-in.
     path_key = next((k for k in env if fold(k) == "PATH"), "PATH")
     env[path_key] = str(_launcher().parent) + os.pathsep + env.get(path_key, "")
     return env

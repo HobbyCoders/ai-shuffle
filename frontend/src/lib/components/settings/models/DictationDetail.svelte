@@ -10,13 +10,20 @@
 	import type { Fact } from '../shell/FactsStrip.svelte';
 	import RowGroup from '../rows/RowGroup.svelte';
 	import SettingRow from '../rows/SettingRow.svelte';
-	import SelectField from '../rows/SelectField.svelte';
+	import ModelPicker from '../ModelPicker.svelte';
+	import { groupModelChoices } from '$lib/constants/model-picker';
 	import LinkValue from '../rows/LinkValue.svelte';
 	import InlineBanner from '../rows/InlineBanner.svelte';
-	import { DEFAULT_DICTATION_MODEL, getModelsState } from './tasks.svelte';
+	import { DEFAULT_DICTATION_MODEL, getModelsState, providerLabel } from './tasks.svelte';
 	import { DICTATION_ICON } from './icons';
 
 	const { voice, tools } = getModelsState();
+	const catalog = $derived(groupModelChoices([
+		...(!voice.inputModels.some((m) => m.id === voice.inputModel)
+			? [{ value: voice.inputModel, label: voice.inputModel, providerName: 'Unknown provider' }]
+			: []),
+		...voice.inputModels.map((m) => ({ value: m.id, label: m.name, providerType: m.provider, providerName: providerLabel(m.provider) }))
+	]));
 
 	const blocked = $derived(tools.falEnabled === false && !!voice.settings && voice.inputOnFal);
 	const facts = $derived<Fact[]>([
@@ -63,11 +70,12 @@
 				value={voice.settings ? voice.inputModel : undefined}
 				onReset={() => voice.setInputModel(DEFAULT_DICTATION_MODEL)}
 			>
-				<SelectField
+				<ModelPicker
 					value={voice.inputModel}
-					groups={voice.inputModelGroups}
+					catalogOverride={catalog}
+					formSelect allowCustom={false}
 					disabled={!voice.settings || voice.saving}
-					onchange={(v) => voice.setInputModel(v)}
+					onSelect={(v) => voice.setInputModel(v)}
 				/>
 			</SettingRow>
 		</RowGroup>

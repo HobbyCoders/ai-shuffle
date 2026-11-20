@@ -32,6 +32,8 @@
 	import { getErrorMessage } from '$lib/api/client';
 	import { hasModelRefresh, getModelCatalog, listCatalogIdentity, rowCatalogIdentity, updateModelProvider, type ModelCatalogSnapshot, type ModelProvider } from '$lib/api/model-providers';
 	import { providers } from '$lib/stores/providers.svelte';
+	import ProviderGlyph, { providerGlyphKind } from '../ProviderGlyph.svelte';
+	import { getProviderDisplay } from '$lib/constants/models';
 	import { notify } from '$lib/stores/notifications';
 	import { refreshWorkerPresence, workerInstalls } from '$lib/stores/worker-presence';
 	import { workerDisplayName } from '$lib/components/ui/worker-name';
@@ -84,6 +86,7 @@
 		onRejected,
 		onRemove
 	}: Props = $props();
+	const providerDescriptionId = $props.id();
 	let failure = $state<FetchFailure | null>(null);
 
 	const id = $derived(row?.id ?? providerId ?? '');
@@ -428,10 +431,15 @@
 			</p>
 		{:else}
 			<div class="pv-mlist">
+				<!-- Describe the provider without inserting it between the model ID and its visible label. -->
+				<span id={providerDescriptionId} hidden>{current ? getProviderDisplay(current).name : providerName}</span>
 				{#each shown as r (r.id)}
 					<label class="pv-mrow">
-						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
-						<span class="id">{r.id}</span>
+						<Checkbox checked={r.checked} disabled={saving} aria-describedby={providerDescriptionId} onchange={() => toggle(r.id)} />
+						<span class="id curated-identity">
+							<ProviderGlyph kind={providerGlyphKind(current?.provider_type, current?.auth_mode)} />
+							<span>{r.id}</span>
+						</span>
 						{#if r.unlisted}
 							<!-- Kept as ticked, but a chat on it is rerouted to a listed model (#1634). -->
 							<span class="lbl" data-testid="curation-unlisted" title="The agent's last list does not include this model; a chat on it uses another model.">Not listed by the agent</span>
@@ -508,6 +516,9 @@
 	.listed {
 		margin-bottom: 8px;
 	}
+	.curated-identity { display: flex; align-items: center; gap: 8px; }
+	.curated-identity :global(.provider-glyph) { flex: none; }
+	.curated-identity > span { overflow-wrap: anywhere; }
 	.typed {
 		display: flex;
 		flex-wrap: wrap;

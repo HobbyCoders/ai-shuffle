@@ -23,9 +23,14 @@ from fluid.tools.child_env import UNSET_ENV, child_env_with_overlay
 
 
 def _mode(value):
-    if value == "api_key":  # what the owner chose; the CLI reads current_mode
-        return patch.object(claude_auth_mode, "selected_mode", return_value=value)
-    return patch.object(claude_auth_mode, "current_mode", return_value=value)
+    return patch.object(claude_auth_mode, "_stored_choice", return_value=(value, None))
+
+
+@pytest.fixture(autouse=True)
+def _legacy_worker_environment(monkeypatch):
+    from app.core import claude_cloud_auth
+
+    monkeypatch.setattr(claude_cloud_auth, "has_environment_auth", lambda: False)
 
 
 def _unset(env):
@@ -202,10 +207,11 @@ class TestModeDefault:
         with patch.object(claude_auth_mode, "has_stored_api_key", return_value=True):
             assert claude_auth_mode.ensure_mode_recorded(True) == "off"
 
-    def test_summary_shows_last_four_only(self, mock_db):
-        claude_auth_mode.set_mode("api_key")
-        with patch.object(claude_auth_mode, "stored_api_key", return_value="sk-ant-api03-secret-WXYZ"):
-            out = claude_auth_mode.summary({"installed": True, "signed_in": True, "email": "a@b.c"})
+    def test_summary_shows_last_four_only(self, mock_db, _api_unit_credentials):
+        from app.core import claude_accounts
+
+        claude_accounts.add_api_key("sk-ant-api03-secret-WXYZ", for_claude_code=True)
+        out = claude_auth_mode.summary({"installed": True, "signed_in": True, "email": "a@b.c"})
         assert out["mode"] == "api_key" and out["explicit"] is True
         assert out["api_key"] == {"set": True, "last4": "WXYZ"}
         assert "secret" not in repr(out)

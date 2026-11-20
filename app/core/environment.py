@@ -399,9 +399,9 @@ def inject_claude_code_auth(
     ``FLUID_CHILD_ENV_UNSET`` marker, which the delegated loop honors and never
     passes on.
 
-    In every mode but ``off`` the CLI runs in the active saved subscription
-    sign-in's folder (``CLAUDE_CONFIG_DIR``, :mod:`app.core.claude_subscriptions`);
-    with no saved sign-in active the folder is left as inherited.
+    In subscription mode the CLI runs in the local folder for the selected
+    sign-in (``CLAUDE_CONFIG_DIR``, :mod:`app.core.claude_subscriptions`). An
+    explicit selection with no matching local sign-in refuses the launch.
 
     When ``provider_id`` is truthy the session targets a non-Anthropic model
     provider: ``apply_provider_env`` owns auth for those spawns (provider token
@@ -412,16 +412,40 @@ def inject_claude_code_auth(
         return env
     from fluid.tools.child_env import UNSET_ENV
 
-    from app.core import claude_auth_mode, claude_subscriptions
+    from app.core import claude_auth_mode, claude_cli_home, claude_cloud_auth, claude_subscriptions, credential_gate
 
-    mode = claude_auth_mode.current_mode()
-    if mode != claude_auth_mode.MODE_OFF:
-        claude_subscriptions.apply_cli_home(env)
+    selected, choice = claude_auth_mode.runtime_choice()
+    # API key mode runs the CLI on the subscription: the saved key is the
+    # separate "Claude API" provider (app.core.claude_api_provider) and never
+    # reaches the CLI.
+    mode = (claude_auth_mode.MODE_SUBSCRIPTION if selected == claude_auth_mode.MODE_API_KEY
+            else selected)
+    target = (claude_subscriptions.shared_target(choice, read_choice=False)
+              if mode == claude_auth_mode.MODE_SUBSCRIPTION else None)
+    enforced = choice is not None or target is not None
+    if enforced and mode == claude_auth_mode.MODE_OFF:
+        raise ProviderTurnRefused(credential_gate.OFF_MESSAGE)
+    if mode == claude_auth_mode.MODE_SUBSCRIPTION:
+        try:
+            # Do not let a profile override the folder we verified.
+            if target is not None:
+                claude_cli_home.bind_sign_in(
+                    env, claude_subscriptions.verified_home_env(target), overlay=True,
+                )
+            else:
+                env.update(claude_subscriptions.legacy_home_env())
+        except claude_subscriptions.SubscriptionError as exc:
+            raise ProviderTurnRefused(str(exc)) from None
+    unset = claude_auth_mode.SUBSCRIPTION_UNSET
+    if enforced and mode == claude_auth_mode.MODE_SUBSCRIPTION:
+        # Host or profile OAuth, gateway URLs and cloud selectors cannot win.
+        unset = (*claude_auth_mode.OFF_UNSET, *claude_cloud_auth.host_names_to_unset(),
+                 *(n for n in env if claude_cloud_auth.is_cloud_unset_name(n)))
+        for name in unset:
+            env.pop(name, None)
     if mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
     elif mode == claude_auth_mode.MODE_CLOUD:
-        from app.core import claude_cloud_auth
-
         # Every method's variables and every other Claude credential go,
         # whether they came from the host or the profile; then only the
         # chosen method's allowlisted owner configuration is put back.
@@ -440,8 +464,6 @@ def inject_claude_code_auth(
             raise ClaudeCloudSetupError() from None
         env.update(cloud_env)
         return env
-    else:
-        unset = claude_auth_mode.SUBSCRIPTION_UNSET
     for name in unset:
         env.pop(name, None)
     existing = [n for n in (env.get(UNSET_ENV) or "").split(",") if n.strip()]
