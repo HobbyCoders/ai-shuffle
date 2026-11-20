@@ -419,7 +419,7 @@ describe('saved Claude subscriptions', () => {
 		});
 		await show();
 		await fireEvent.click(group('Claude').getByRole('button', { name: 'Old, Sign in again' }));
-		await fireEvent.click(await screen.findByRole('button', { name: 'Sign in again', exact: true }));
+		await fireEvent.click(await screen.findByRole('button', { name: 'Sign in again' }));
 		await screen.findByText(/CLAUDE_CONFIG_DIR=.*fixture\/old/);
 		expect(worker.sent('POST', '/settings/claude-auth/accounts/subscription/old/activate')).toHaveLength(0);
 		expect(providers.current.claude?.accounts?.subscription.map((a) => a.active)).toEqual([true, false]);

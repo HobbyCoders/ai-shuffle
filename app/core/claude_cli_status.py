@@ -36,7 +36,7 @@ import re
 import subprocess
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -93,11 +93,15 @@ class ClaudeCliStatus:
     # the CLI's config directory (where its sign-in lives).
     org_id: Optional[str] = None
     config_dir: Optional[str] = None
+    # The shared selection and local folder actually used by this probe.
+    # None as the folder id denotes the stock home, not inheritance.
+    selected_home: Optional[tuple[str, Optional[str]]] = None
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data.pop("org_id", None)
         data.pop("config_dir", None)
+        data.pop("selected_home", None)
         return data
 
 
@@ -105,20 +109,23 @@ def _probe_env(home_env: Optional[dict] = None) -> dict:
     """The probe's env. ``home_env`` picks one sign-in folder (``{}`` is the
     default folder); None uses the active saved sign-in
     (:mod:`app.core.claude_subscriptions`)."""
-    from fluid.tools.child_env import claude_program_env
+    from fluid.tools.child_env import claude_program_env, scrub_child_env
 
-    from app.core.claude_cloud_auth import is_cloud_unset_name
+    from app.core import claude_cli_home, claude_subscriptions
 
-    env = {k: v for k, v in claude_program_env().items()
-           if k not in _STRIPPED_ENV and (home_env is None or (
-               k.upper() != "CLAUDE_CONFIG_DIR" and not is_cloud_unset_name(k)
-           ))}
+    if home_env is None:
+        target = claude_subscriptions.shared_target()
+        if target is not None:
+            home_env = claude_subscriptions.verified_home_env(target)
+    # Only unpinned legacy behavior may restore the worker's OAuth token.
+    # A folder probe must identify the sign-in on disk, not the host token.
+    inherited = claude_program_env() if home_env is None else scrub_child_env()
+    env = {k: v for k, v in inherited.items() if k.upper() not in _STRIPPED_ENV}
     env.setdefault("NO_COLOR", "1")
     if home_env is None:
-        from app.core import claude_subscriptions
-
-        home_env = claude_subscriptions.active_home_env()
-    env.update(home_env)
+        env.update(claude_subscriptions.legacy_home_env())
+    else:
+        claude_cli_home.bind_sign_in(env, home_env)
     return env
 
 
@@ -241,8 +248,8 @@ def probe(resolver: Optional[Callable[[], str]] = None) -> ClaudeCliStatus:
     target = subscriptions.shared_target()
     if target is not None:
         try:
-            _, status = subscriptions.shared_home(target, force=True)
-            return status
+            home_id, status = subscriptions.shared_home(target, force=True)
+            return replace(status, selected_home=(target, home_id))
         except subscriptions.SubscriptionError as exc:
             try:
                 binary = (resolver or _default_resolver)()
@@ -259,9 +266,6 @@ def probe_home(home_env: dict, resolver: Optional[Callable[[], str]] = None) -> 
     sign-in. This is the only way a saved sign-in's email and plan are read.
     """
     env = _probe_env(home_env)
-    # A saved folder identifies the local CLI account, not a host token that
-    # would make every folder report the same identity.
-    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     return _probe(resolver, lambda argv: _run(argv, env))
 
 

@@ -227,8 +227,10 @@ def change_account(kind: str, account_id: str, action: str, label: str = "") -> 
         )
         if action == "activate":
             _update_shared_key(account_id)
-        elif action == "delete" and was_active:
-            _update_shared_key(None)
+        elif action == "delete":
+            from app.core import claude_auth_mode
+
+            claude_auth_mode.clear_shared_key_if_selected(account_id)
 
 
 def deactivate_api_key() -> None:

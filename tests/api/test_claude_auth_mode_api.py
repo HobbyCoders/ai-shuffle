@@ -67,7 +67,7 @@ def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(
     from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
 
     alpha, beta, gamma = "fixture-alpha-1111", "fixture-beta-2222", "fixture-gamma-3333"
-    claude_accounts.add_api_key(alpha)
+    alpha_id = claude_accounts.add_api_key(alpha)
     old_keys = db.get_system_setting(claude_accounts.API_LIST_SETTING)
     with patch("app.api.settings.validate_anthropic_key", new_callable=AsyncMock):
         response = authenticated_client.post("/api/v1/settings/integrations/anthropic", json={
@@ -85,6 +85,12 @@ def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(
     with pytest.raises(ProviderTurnRefused, match="Anthropic API key"):
         inject_claude_code_auth({"ANTHROPIC_API_KEY": alpha})
     db.set_system_setting(claude_accounts.API_LIST_SETTING, new_keys)
+    assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == beta
+    with patch.object(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-off-peer"):
+        claude_auth_mode.set_mode("off")
+        claude_accounts.change_account("api_key", alpha_id, "delete")
+        assert db.get_system_setting(claude_accounts.API_SETTING) is None
+        assert db.get_system_setting(claude_auth_mode.SELECTION_SETTING) == choice
     assert inject_claude_code_auth({})["ANTHROPIC_API_KEY"] == beta
     gamma_id = claude_accounts.add_api_key(gamma)
     assert gamma_id != beta_id

@@ -22,6 +22,7 @@ from app.core import claude_subscriptions as subs
 from app.network.policy import is_shared_setting_key
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink layout")
+_real_probe_home = cs.probe_home
 
 
 @pytest.fixture
@@ -164,29 +165,73 @@ def test_refresh_rechecks_cached_negative_candidates(world):
     assert subs.shared_home(target, force=True)[0] is None
 
 
-def test_model_handshake_uses_the_verified_folder_without_host_oauth(world, monkeypatch):
-    from app.core import claude_cli_models
-    from app.core.environment import inject_claude_code_auth
+@pytest.mark.asyncio
+@pytest.mark.parametrize("default", [True, False])
+async def test_fake_cli_turns_and_model_refresh_use_the_verified_folder(world, monkeypatch, tmp_path, default):
+    import asyncio
 
-    account_id = _add(world, "alpha@example.com")
-    folder = str(world.root / account_id)
+    from fluid.engine.delegated import DelegatedLoop
+    from fluid.events import UserTurn
+    from fluid.store.base import MemoryStore
+    from scripts.devloop import fake_claude
+    from scripts.devloop.fake_claude.cli import FAKE_ORG
+
+    from app.core import claude_cli_models
+    from app.core.environment import ProviderTurnRefused, inject_claude_code_auth
+
+    account_id = None if default else _add(world, "alpha@devloop.invalid")
+    folder = world.base if default else world.root / account_id
+    conflict = tmp_path / "conflicting-worker-folder"
+    conflict.mkdir()
+    (conflict / "devloop-account.txt").write_text("wrong-worker")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(conflict))
+    monkeypatch.setenv("claude_config_dir", str(conflict))
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "fixture-host-oauth")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://fixture.invalid")
-    monkeypatch.setattr(cs, "_default_resolver", lambda: "fake-claude")
-    monkeypatch.setattr(claude_cli_models, "store", lambda snapshot: True)
-    snapshot = {"models": ["fixture-model"]}
-    monkeypatch.setattr(claude_cli_models, "parse_initialize", lambda payload: snapshot)
+    binary = str(fake_claude.install(tmp_path) / "claude")
+    monkeypatch.setattr(cs, "_default_resolver", lambda: binary)
+    monkeypatch.setattr(cs, "probe_home", _real_probe_home)
+    monkeypatch.setattr(cs, "_cached", None)
+    monkeypatch.setattr(cs, "_cached_at", 0.0)
+    monkeypatch.setattr(claude_cli_models, "_loaded", True)
+    monkeypatch.setattr(claude_cli_models, "_snapshot", None)
+    monkeypatch.setattr(claude_cli_models, "_path", lambda: None)
+    monkeypatch.setattr(claude_cli_models, "refresh_soon", lambda: None)
+    marker = folder / "devloop-account.txt"
+    marker.write_text("alpha")
+    if default:
+        subs.select_default()
+    else:
+        subs.change(account_id, "activate")  # bind the actual fake CLI's org, not the stub's
+    marker.write_text("")
+    assert cs.get_status(force=True).signed_in is False
+    with pytest.raises(ProviderTurnRefused, match="selected Claude subscription"):
+        inject_claude_code_auth({})
+    marker.write_text("alpha")  # external login, without invalidating the negative cache
+    assert cs.get_status().signed_in is False
+    snapshot = claude_cli_models.refresh()
+    assert snapshot["account"] == claude_cli_models.account_key("alpha@devloop.invalid", FAKE_ORG)
+    assert claude_cli_models.catalog() == snapshot
 
-    def handshake(binary, env):
-        assert binary == "fake-claude"
-        launch = inject_claude_code_auth({"claude_config_dir": "wrong-windows-folder"})
-        assert env["CLAUDE_CONFIG_DIR"] == launch["CLAUDE_CONFIG_DIR"] == folder
-        assert "claude_config_dir" not in launch
-        assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and "ANTHROPIC_BASE_URL" not in env
-        return {}
+    overlay = inject_claude_code_auth({"claude_config_dir": str(conflict), "HOME": str(conflict)})
+    loop = DelegatedLoop(store=MemoryStore(), model="sonnet", claude_path=binary,
+                         cwd=str(tmp_path), env=overlay)
+    try:
+        child = loop._child_env()
+        assert child.get("CLAUDE_CONFIG_DIR") == (None if default else str(folder))
+        assert "claude_config_dir" not in child
+        for prompt in ("fresh B turn", "warm B turn"):
+            await loop.submit(UserTurn(content=prompt))
+            await asyncio.wait_for(loop.wait_turn(), timeout=12)
+    finally:
+        await loop.aclose()
 
-    monkeypatch.setattr(claude_cli_models, "_handshake", handshake)
-    assert claude_cli_models.refresh() is snapshot
+    turns = [event for line in fake_claude.log_path(tmp_path).read_text().splitlines()
+             if (event := json.loads(line))["kind"] == "turn"]
+    assert [turn["prompt"] for turn in turns] == ["fresh B turn", "warm B turn"]
+    assert turns[0]["pid"] == turns[1]["pid"]
+    assert all(turn["subscription_email"] == "alpha@devloop.invalid" and not turn["auth_env"]
+               for turn in turns)
 
 
 def test_folder_links_shared_state_back_to_the_default_folder(world):

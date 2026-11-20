@@ -249,6 +249,34 @@ def update_shared_key(account_id: Optional[str]) -> None:
                  key_id=account_id)
 
 
+def clear_shared_key_if_selected(account_id: str) -> None:
+    """Delete changes the pin only if it still names this exact key.
+
+    Do not republish a stale mode or subscription over a concurrent choice.
+    Missing list rows already fail closed, including if this update loses.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    raw = database.get_system_setting(SELECTION_SETTING)
+    try:
+        choice = json.loads(raw) if raw is not None else None
+    except (TypeError, ValueError):
+        return
+    if not (isinstance(choice, dict) and choice.get("mode") in (MODE_API_KEY, MODE_SUBSCRIPTION)
+            and choice.get("key_id") == account_id):
+        return
+    choice["key_id"] = None
+    with database.get_db() as conn:
+        conn.cursor().execute(
+            """UPDATE system_settings SET value = %s, updated_at = %s, revision = %s
+               WHERE key = %s AND value = %s""",
+            (json.dumps(choice, separators=(",", ":")), datetime.now(timezone.utc).isoformat(),
+             str(uuid4()), SELECTION_SETTING, raw),
+        )
+    database.invalidate_system_setting_memo(SELECTION_SETTING)
+
+
 def set_mode(mode: str, *, key_id: Optional[str] = None) -> str:
     if mode not in MODES:
         raise ValueError(f"Unknown Claude Code auth mode: {mode!r}. Use one of: {', '.join(MODES)}")

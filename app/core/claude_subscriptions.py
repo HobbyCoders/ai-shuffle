@@ -244,7 +244,11 @@ def legacy_home_env() -> dict[str, str]:
 
 def apply_cli_home(env: dict) -> dict:
     """Point a ``claude`` spawn env at the active sign-in. Returns ``env``."""
-    env.update(active_home_env())
+    target = shared_target()
+    if target is not None:
+        home.bind_sign_in(env, verified_home_env(target))
+    else:
+        env.update(legacy_home_env())
     return env
 
 

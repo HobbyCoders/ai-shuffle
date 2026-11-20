@@ -413,7 +413,7 @@ def inject_claude_code_auth(
         return env
     from fluid.tools.child_env import UNSET_ENV
 
-    from app.core import claude_auth_mode, claude_cloud_auth, claude_subscriptions, credential_gate
+    from app.core import claude_auth_mode, claude_cli_home, claude_cloud_auth, claude_subscriptions, credential_gate
 
     mode, choice = claude_auth_mode.runtime_choice()
     target = (claude_subscriptions.shared_target(choice, read_choice=False)
@@ -425,10 +425,9 @@ def inject_claude_code_auth(
         try:
             # Do not let a profile override the folder we verified.
             if target is not None:
-                for name in tuple(env):
-                    if name.upper() == "CLAUDE_CONFIG_DIR":
-                        env.pop(name)
-                env.update(claude_subscriptions.verified_home_env(target))
+                claude_cli_home.bind_sign_in(
+                    env, claude_subscriptions.verified_home_env(target), overlay=True,
+                )
             else:
                 env.update(claude_subscriptions.legacy_home_env())
         except claude_subscriptions.SubscriptionError as exc:
@@ -436,7 +435,7 @@ def inject_claude_code_auth(
     unset = claude_auth_mode.SUBSCRIPTION_UNSET
     if enforced and mode in (claude_auth_mode.MODE_API_KEY, claude_auth_mode.MODE_SUBSCRIPTION):
         # Host or profile OAuth, gateway URLs and cloud selectors cannot win.
-        unset = (*claude_cloud_auth.host_names_to_unset(),
+        unset = (*claude_auth_mode.OFF_UNSET, *claude_cloud_auth.host_names_to_unset(),
                  *(n for n in env if claude_cloud_auth.is_cloud_unset_name(n)))
         for name in unset:
             env.pop(name, None)

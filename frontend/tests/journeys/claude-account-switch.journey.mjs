@@ -36,9 +36,9 @@ await runJourney({
 	allow: DEV_INSTANCE_NOISE,
 	throttles: ['fast'],
 	browser: async () => ({ context: { serviceWorkers: 'block' } }),
-	cases: [{
-		name: 'recover-pending-subscription',
-		async setup({ page, status }) {
+	cases: [false, true].map((existing) => ({
+		name: existing ? 'recover-with-extra-sign-in' : 'recover-pending-subscription',
+		async setup({ page, status, variant }) {
 			const worker = status.workers?.[0] ?? status;
 			if (worker.claude_cli?.mode !== 'fake' || !worker.app.local_port) {
 				throw new Error('requires a private devloop with fake Claude and a local owner port');
@@ -49,23 +49,38 @@ await runJourney({
 			mkdirSync(folder, { recursive: true });
 			const marker = join(folder, 'devloop-account.txt');
 			try {
+				const headers = { Origin: origin, 'Sec-Fetch-Site': 'same-origin' };
+				if (existing) {
+					const add = await page.request.post(`${origin}${auth}/accounts/subscription/add-another`, { headers });
+					if (!add.ok()) throw new Error(`Add saved sign-in returned ${add.status()}`);
+					const { login } = await add.json();
+					writeFileSync(join(login.env.CLAUDE_CONFIG_DIR, 'devloop-account.txt'), 'fixture-extra');
+					// Complete the add before we check the navigation invariant.
+					const saved = await page.request.post(`${origin}${auth}/accounts/subscription/cancel-login`, { headers });
+					if (!saved.ok() || !(await saved.json()).account_id) throw new Error('Extra sign-in was not saved');
+				}
 				writeFileSync(marker, '');
 				await write(page, origin, auth, { mode: 'api_key' });
 				await write(page, origin, auth, { mode: 'subscription' });
 				const state = await (await page.request.get(`${origin}${auth}?refresh=true`)).json();
-				if (state.cli.signed_in) throw new Error('subscription must start unavailable');
-				// Fake external `claude auth login`. It changes only the local CLI state.
-				writeFileSync(marker, 'fake-claude');
-				await gotoApp(page, { ...status, urls: { ui: origin } });
+				if (state.cli.signed_in || !state.accounts.recovery_required) throw new Error('subscription must start unavailable');
+				if (existing && (!state.accounts.subscription.some(row => row.kind === 'saved') ||
+					state.accounts.subscription.some(row => row.kind === 'default'))) {
+					throw new Error('requires a saved extra sign-in and no saved default');
+				}
+				// Use a different local identity each time so a prior run's pin cannot match.
+				writeFileSync(marker, `recovered-${existing ? 'existing' : 'fresh'}-${variant.viewport}-${Date.now()}`);
+				await gotoApp(page, { ...status, urls: { ui: origin } }, '/');
 				const sidebar = await showSidebar(page);
 				await sidebar.getByRole('navigation', { name: 'Workspace', exact: true }).getByRole('button', { name: 'Settings', exact: true }).click();
 				await page.getByRole('navigation', { name: 'Settings', exact: true }).getByRole('button', { name: 'Providers', exact: true }).click();
 				await page.locator('[data-settings-item="provider:claude"]:visible').first().click();
 				await page.getByText(/Update all workers before relying on a switch/).waitFor();
-				await page.getByRole('button', { name: /Open Claude subscription/i }).click();
+				await page.getByRole('button', { name: /^Open Claude(?: .+)? subscription$/i }).click();
 				await page.getByRole('button', { name: 'Use this sign-in', exact: true }).waitFor();
-			} finally {
-				rmSync(marker, { force: true }); // default fake CLI reports the same identity
+			} catch (error) {
+				rmSync(marker, { force: true });
+				throw error;
 			}
 		},
 		async act({ page, mark }) {
@@ -75,10 +90,10 @@ await runJourney({
 			if (!(await changed).ok()) throw new Error('verified default selection failed');
 			const result = await page.request.get(new URL(`${auth}?refresh=true`, page.url()).href);
 			const state = await result.json();
-			if (!state.cli.signed_in || state.cli.email !== 'fake-claude@devloop.invalid' ||
+			if (!state.cli.signed_in || !state.cli.email?.startsWith('recovered-') ||
 				!state.gate.claude_credential_ready || state.accounts.recovery_required) {
-				throw new Error('status, gate and account list disagree after the explicit selection');
+				throw new Error(`default selection: signed in=${state.cli.signed_in}, recovered identity=${state.cli.email?.startsWith('recovered-')}, gate=${state.gate.claude_credential_ready}, recovery=${state.accounts.recovery_required}`);
 			}
 		}
-	}]
+	}))
 });
