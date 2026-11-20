@@ -37,6 +37,8 @@ versioned ids in the CLI's order.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -61,6 +63,29 @@ _lock = threading.Lock()
 _refresh_lock = threading.Lock()
 _snapshot: Optional[Dict[str, Any]] = None
 _loaded = False
+
+_UNPINNED = object()
+# Set by :func:`pinned`: one served list for every read in a projection.
+_pin: contextvars.ContextVar[Any] = contextvars.ContextVar("claude_cli_models_pin", default=_UNPINNED)
+
+
+@contextlib.contextmanager
+def pinned():
+    """Serve one :func:`catalog` read for the whole block.
+
+    A projection that reads the list several times (the registry payload)
+    would otherwise mix two accounts' lists if the sign-in switched midway.
+    Yields that one read (None when no list is served)."""
+    current = _pin.get()
+    if current is not _UNPINNED:
+        yield current
+        return
+    snap = catalog()
+    token = _pin.set(snap)
+    try:
+        yield snap
+    finally:
+        _pin.reset(token)
 
 
 # ─── Parsing ────────────────────────────────────────────────────────────────
@@ -218,6 +243,9 @@ def catalog() -> Optional[Dict[str, Any]]:
 
     Only on a subscription sign-in, and only while the active sign-in is the
     account the list was captured under (unknown counts as different)."""
+    held = _pin.get()
+    if held is not _UNPINNED:
+        return held
     snap = peek()
     if not snap or not snap.get("account"):
         return None

@@ -33,7 +33,9 @@ afterEach(() => {
 	vi.clearAllMocks();
 });
 
-it("a standby or inactive credential shows plain names, nothing from the running subscription", () => {
+it("shows plain names, never the loaded subscription's labels or versions", () => {
+	// Also covers Cloud just switched on: the loaded list is still the
+	// subscription's until (or if) the reload lands.
 	render(BuiltInModels);
 	for (const label of ['Haiku', 'Sonnet', 'Opus', 'Fable']) {
 		expect(screen.getByText(label)).toBeTruthy();
@@ -41,13 +43,4 @@ it("a standby or inactive credential shows plain names, nothing from the running
 	for (const label of ['Haiku 5.5', 'Fable 5.2', 'Mythos 5.1', 'Opus 4.6']) {
 		expect(screen.queryByText(label)).toBeNull();
 	}
-});
-
-it('the running credential labels the short ids with what they run, still without versions', () => {
-	render(BuiltInModels, { props: { active: true } });
-	for (const label of ['Haiku 5.5', 'Sonnet 5.5', 'Opus 5.5', 'Fable 5.2']) {
-		expect(screen.getByText(label)).toBeTruthy();
-	}
-	expect(screen.queryByText('Mythos 5.1')).toBeNull();
-	expect(screen.queryByText('Opus 4.6')).toBeNull();
 });

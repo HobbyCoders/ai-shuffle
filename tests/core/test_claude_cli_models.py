@@ -282,6 +282,31 @@ def test_a_full_id_is_never_folded_when_stored_inherited_or_sent(cli, monkeypatc
         assert m.native_choice("claude-opus-9") is None
 
 
+def test_a_sign_in_switch_mid_payload_never_mixes_two_lists(cli, monkeypatch):
+    """Review R7-S1: one payload describes one account's list."""
+    from app.core import claude_cli_status
+
+    account_b = claude_cli_status.ClaudeCliStatus(installed=True, signed_in=True, email="b@example.invalid",
+                                                  cli_version="2.1.325")
+    first_read = m.delegated_model_aliases
+
+    def switch_after_the_aliases():
+        aliases = first_read()
+        cli["status"] = account_b  # the owner switches accounts mid-projection
+        return aliases
+
+    monkeypatch.setattr(m, "delegated_model_aliases", switch_after_the_aliases)
+    by = {e["value"]: e for e in m.registry_payload()["models"]}
+    # Still entirely account A's list: its alias labels and its versions.
+    assert by["opus"]["label"] == "Opus 5.5" and by["fable"]["label"] == "Fable 5.2"
+    assert "claude-mythos-5-1" in by and "claude-opus-4-6" in by
+    # The pin ends with the payload: the next read is B's (none captured yet).
+    assert cm.catalog() is None
+    monkeypatch.setattr(m, "delegated_model_aliases", first_read)
+    by = {e["value"]: e for e in m.registry_payload()["models"]}
+    assert list(by) == ["haiku", "sonnet", "opus", "fable"]
+
+
 def test_the_list_belongs_to_the_account_it_was_captured_under(cli, monkeypatch):
     """Review S3: another sign-in never sees, keeps or overwrites the list."""
     from app.core import claude_cli_status, claude_subscriptions

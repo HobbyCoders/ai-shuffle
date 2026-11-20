@@ -772,7 +772,18 @@ def _default_selection() -> str:
 
 
 def registry_payload() -> Dict[str, object]:
-    """Serialized registry for the ``GET /api/models`` endpoint."""
+    """Serialized registry for the ``GET /api/models`` endpoint.
+
+    Every catalog read in it sees one account's list (see
+    ``claude_cli_models.pinned``), so a sign-in switch midway cannot pair
+    one account's aliases with another's versions."""
+    from app.core import claude_cli_models
+
+    with claude_cli_models.pinned():
+        return _registry_payload()
+
+
+def _registry_payload() -> Dict[str, object]:
     from app.core import claude_cli_models
 
     aliases = delegated_model_aliases()
