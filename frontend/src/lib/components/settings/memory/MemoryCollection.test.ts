@@ -80,6 +80,14 @@ beforeEach(() => {
 });
 afterEach(() => cleanup());
 
+it('shows the same-account Text Generation requirement with no saved guidance', async () => {
+	http.get.mockImplementation(async (path) => path === '/memories' ? { items: rows, limits }
+		: { blocks: [], max_chars: 4000 });
+	await show('learned-guidance');
+	await screen.findByText('No saved guidance on this worker.');
+	await screen.findByText(/Text Generation.*same ChatGPT provider and account/i);
+});
+
 it('manages learned guidance separately, retaining a stale draft until explicit reload', async () => {
 	const block = { id: 'saved-glm', stem: 'glm', model: 'glm', scope: 'model_substring',
 		provider: null, inactive_reason: null, content: 'Saved instructions', revision: 'r1' };

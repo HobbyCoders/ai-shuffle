@@ -47,6 +47,9 @@
 		<RowGroup title="Shipped defaults">
 			<SettingRow label="Built-in model guidance" hint="AI Shuffle ships model guidance in code. It stays in place when a saved block is edited or deleted." />
 		</RowGroup>
+		<RowGroup title="Automatic learning">
+			<SettingRow label="ChatGPT setup" hint="Choose a Text Generation model under Settings → Models → Text tasks using the same ChatGPT provider and account as the chat. Without that match, automatic learning is off for that chat." />
+		</RowGroup>
 		{#if loading}
 			<p class="st-empty" role="status">Loading saved guidance…</p>
 		{:else if error}

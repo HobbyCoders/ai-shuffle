@@ -28,6 +28,12 @@ When you correct how agents work, for example which model handles which job, or 
 
 Open **Settings → Memory → Learned guidance** to manage saved model instructions. Each block shows which model or models it applies to. These blocks are local to the worker you’re using, not synced like saved memories. Built-in model guidance ships with AI Shuffle and is not editable here.
 
+For eligible owner chats in Code mode, AI Shuffle can learn how you want it to report progress or handle routine work you already authorized. It can learn from clear corrections after a plain reply, even if no tools ran. An explicit correction about future behavior or the same expectation in two separate exchanges can support a rule. Status questions, one-off requests, and quoted examples don't count on their own. A separate review checks that the evidence supports the rule; if the reviews disagree or the evidence is unclear, nothing is saved. A clear correction can replace a conflicting rule even when all four slots in the block are in use.
+
+To enable this for a ChatGPT chat, choose a Text Generation model in **Settings → Models → Text tasks** using the same ChatGPT provider and account as the chat. With no matching setup, the learner skips that chat. Automatic learning also requires Fluid's continual learning to be on.
+
+The worker uses at most six review calls in a rolling 24 hours, including the separate verification calls. When three initial proposals have been reviewed in that window, the worker skips the next three distinct eligible candidates, reviews the fourth if there is room for verification, and repeats. Skipped candidates aren't queued for later. This leaves room after a run of routine replies but can still miss a correction. It does not look for particular words or signs of frustration.
+
 Choose **Save guidance** to keep an edit, or **Delete guidance** and confirm to remove a block. Automatic learning can’t overwrite your edit or restore a deleted block. These changes affect future prompts, not past chats.
 
 ## Deleting a memory

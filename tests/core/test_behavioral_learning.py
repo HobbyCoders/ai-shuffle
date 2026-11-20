@@ -25,11 +25,11 @@ INFERENCE_1 = "I expected you to investigate that check and make the local corre
 INFERENCE_2 = "I was expecting a routine local fix to that check, not just a status."
 
 
-def decision(text, *, condition="a routine check blocks a PR", preference="investigating and fixing the issue locally before reporting status", exchange=1):
+def decision(text, *, condition="a routine check blocks a PR", preference="investigating and fixing the issue locally before reporting status", exchange=1, replace=None):
     quotes = [(exchange, text)] if isinstance(text, str) else text
     return json.dumps({"basis": "explicit" if len(quotes) == 1 else "repeated",
                        "evidence": [{"exchange": i, "quote": q} for i, q in quotes],
-                       "when": condition, "prefer": preference})
+                       "when": condition, "prefer": preference, "replace": replace})
 
 
 @pytest.fixture
@@ -89,17 +89,17 @@ async def test_no_tools_runtime_learns_then_matching_native_prompt_reads(env):
     session()
     await turn("Check the PR locally", "The check failed. Should I investigate?")
     fake.assert_not_awaited()
-    fake.return_value = decision(BLOCKER)
+    fake.side_effect = [decision(BLOCKER), '{"replace":null}']
     result = await turn(BLOCKER, "I will inspect the check and repair it locally.")
     assert saved() and "fixing the issue locally" in saved().content
-    fake.assert_awaited_once()
-    prompt = fake.call_args.args[0]
-    assert BLOCKER in prompt and "Should I investigate?" in prompt
-    assert fake.call_args.kwargs["review_binding"] == (ROUTE, ACCOUNT)
+    assert fake.await_count == 2
+    for call in fake.await_args_list:
+        assert BLOCKER in call.args[0] and "Should I investigate?" in call.args[0]
+        assert call.kwargs["review_binding"] == (ROUTE, ACCOUNT)
     assert not any(event["event_type"].startswith("tool.") for event in session_events.get_events("source"))
     await session_runtime._fire_on_turn_settled("source", result["id"], "completed")
     await learning._worker
-    fake.assert_awaited_once()
+    assert fake.await_count == 2
     assert saved().content in later_prompt()
     assert saved().content not in later_prompt("other-model", model="gpt-else")
     old = saved().content
@@ -129,11 +129,12 @@ async def test_independent_recurrence_and_non_pr_correction(env):
     fake.return_value = decision([(1, INFERENCE_1), (1, INFERENCE_1)])
     await turn(INFERENCE_1, "A second check failed and I have no further update.")
     assert saved() is None
-    fake.return_value = decision([(1, INFERENCE_1), (2, INFERENCE_2)])
+    fake.side_effect = [decision([(1, INFERENCE_1), (2, INFERENCE_2)]), '{"replace":null}']
     await turn(INFERENCE_2, "I can fix that locally.")
     assert "routine check blocks a PR" in saved().content
-    fake.return_value = decision(FORMAT, exchange=3, condition="handing off test results",
-                                 preference="leading with the failed check and exact local rerun command")
+    fake.side_effect = [decision(FORMAT, exchange=3, condition="handing off test results",
+                                 preference="leading with the failed check and exact local rerun command"),
+                        '{"replace":null}']
     await turn(FORMAT, "Noted.")
     assert "leading with the failed check" in later_prompt()
     assert saved().content.count("- When ") == 2
@@ -188,14 +189,16 @@ async def test_manual_edit_wins_during_review_then_delete_stays_deleted(env):
     fake, _ = env
     session()
     await turn("Check the PR", "The check failed. Should I investigate?")
-    fake.return_value = decision(BLOCKER)
+    fake.side_effect = [decision(BLOCKER), '{"replace":null}']
     await turn(BLOCKER, "I will investigate.")
     initial = saved()
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def review_in_flight(*args, **kwargs):
-        started.set()
-        await release.wait()
+    async def review_in_flight(prompt, **kwargs):
+        if prompt.startswith("Independently verify"):
+            started.set()
+            await release.wait()
+            return '{"replace":null}'
         return decision(FORMAT, exchange=2, condition="handing off test results",
                         preference="leading with the failed check and exact local rerun command")
 
@@ -209,7 +212,7 @@ async def test_manual_edit_wins_during_review_then_delete_stays_deleted(env):
     assert "leading with the failed check" not in saved().content
     guidance_storage.delete_saved_guidance(owner.id, owner.revision)
     await turn("For future handoffs, report the shortest rerun command.", "Understood.")
-    assert fake.await_count == 2
+    assert fake.await_count == 4
     assert saved() is None and review.HEADER not in later_prompt("after-delete")
 
 
@@ -220,9 +223,11 @@ async def test_immediate_next_matching_session_waits_but_other_model_does_not(en
     await turn("Check the PR", "The check failed.")
     started, release = asyncio.Event(), asyncio.Event()
 
-    async def slow(*args, **kwargs):
-        started.set()
-        await release.wait()
+    async def slow(prompt, **kwargs):
+        if prompt.startswith("Independently verify"):
+            started.set()
+            await release.wait()
+            return '{"replace":null}'
         return decision(BLOCKER)
 
     fake.side_effect = slow
@@ -276,8 +281,10 @@ async def test_same_session_pending_notifications_coalesce(env, monkeypatch):
 def test_rolling_budget_and_prompt_byte_caps(mock_db, monkeypatch):
     assert review.review_prompt((review.Exchange("界" * 480, "界" * 480),) * 3, ()) is None
     monkeypatch.setattr(learning.time, "time", lambda: 100_000)
-    for i in range(learning.DAILY_CALLS):
+    for i in range(learning.DAILY_CALLS // 2):
         assert learning._claim("s", str(i), f"prompt-{i}")
+        assert learning._claim("s", str(i), f"prompt-{i}", verify=True)
+        assert not learning._claim("s", str(i), f"prompt-{i}", verify=True)
     assert not learning._claim("s", "overflow", "new prompt")
     monkeypatch.setattr(learning.time, "time", lambda: 186_401)
     assert not learning._claim("s", "0", "other prompt")

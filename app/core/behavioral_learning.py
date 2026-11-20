@@ -16,7 +16,11 @@ from app.db.async_database import run_sync
 from app.db.base import get_db
 
 logger = logging.getLogger(__name__)
-DAILY_CALLS = 6  # Hard installation-wide ceiling, even across restarts or owners.
+DAILY_CALLS = 6  # Rolling installation-wide ceiling on proposal + verification calls.
+BURST_PROPOSALS = 3
+DEFER_CANDIDATES = 3
+BUDGET_WINDOW_SECONDS = 86_400
+RECEIPT_LIMIT = 64
 DEBOUNCE_SECONDS = 1.0
 TIMEOUT_SECONDS = 12.0
 MAX_PENDING = 8
@@ -161,8 +165,8 @@ def _transcript(session_id: str, turn_id: str) -> tuple[review.Exchange, ...]:
                  for previous, current in zip(eligible, eligible[1:]))
 
 
-def _claim(session_id: str, turn_id: str, prompt: str) -> bool:
-    """Serialize durable budget and dedupe. Store only digests and counters."""
+def _claim(session_id: str, turn_id: str, prompt: str, *, verify: bool = False) -> bool:
+    """Charge each model call durably. Space later proposals without classifying text."""
     now = int(time.time())
     updated_at = datetime.fromtimestamp(now, timezone.utc).isoformat()
     turn_key = sha256(f"{session_id}:{turn_id}".encode()).hexdigest()
@@ -174,17 +178,36 @@ def _claim(session_id: str, turn_id: str, prompt: str) -> bool:
                     (_STATE_KEY, "{}", updated_at, str(uuid4())))
         cur.execute("SELECT value FROM system_settings WHERE key=%s FOR UPDATE", (_STATE_KEY,))
         state = json.loads(cur.fetchone()["value"])
-        # Keep a rolling day, not midnight bursts. Carry receipt hashes across
-        # days as a bounded tail to absorb retries and exact repeated contexts.
         claims = state.get("claims", [])
-        if any(turn_key == turn or prompt_key == text for _, turn, text in claims):
-            return False
-        if sum(ts > now - 86400 for ts, _, _ in claims) >= DAILY_CALLS:
-            return False
-        claims = (claims + [[now, turn_key, prompt_key]])[-64:]
+        cutoff = now - BUDGET_WINDOW_SECONDS
+        active = [entry for entry in claims if entry[0] > cutoff]
+        # Receipts store proposal time and, if charged, verification time.
+        # Old three-field receipts already represent one call.
+        used = len(active) + sum(len(entry) == 4 and entry[3] > cutoff for entry in claims)
+        admitted = True
+        if verify:
+            receipt = next((entry for entry in active if entry[1:3] == [turn_key, prompt_key]), None)
+            if receipt is None or len(receipt) != 3 or used >= DAILY_CALLS:
+                return False
+            receipt.append(now)
+        else:
+            # A proposal is useful only if there's also room to verify it.
+            if used + 2 > DAILY_CALLS:
+                return False
+            deferred = state.get("deferred", [])
+            if any(turn == turn_key or text == prompt_key for _, turn, text, *_ in (*claims, *deferred)):
+                return False
+            remaining = state.get("defer_remaining", 0) if len(active) >= BURST_PROPOSALS else 0
+            if remaining:
+                admitted = False
+                state["deferred"] = (deferred + [[now, turn_key, prompt_key]])[-RECEIPT_LIMIT:]
+                state["defer_remaining"] = remaining - 1
+            else:
+                state["claims"] = (claims + [[now, turn_key, prompt_key]])[-RECEIPT_LIMIT:]
+                state["defer_remaining"] = DEFER_CANDIDATES if len(active) + 1 >= BURST_PROPOSALS else 0
         cur.execute("UPDATE system_settings SET value=%s, updated_at=%s, revision=%s WHERE key=%s",
-                    (json.dumps({"claims": claims}), updated_at, str(uuid4()), _STATE_KEY))
-    return True
+                    (json.dumps(state), updated_at, str(uuid4()), _STATE_KEY))
+    return admitted
 
 
 def _prepare(session_id: str, turn_id: str):
@@ -204,8 +227,6 @@ def _prepare(session_id: str, turn_id: str):
         return None
     revision = saved.revision if saved else None
     existing = tuple(saved.content.removeprefix(review.HEADER).splitlines()) if saved else ()
-    if len(existing) >= review.MAX_RULES:
-        return None
     exchanges = _transcript(session_id, turn_id)
     if not exchanges:
         return None
@@ -237,16 +258,25 @@ async def review_settlement(session_id: str, turn_id: str) -> None:
     if prepared is None:
         return
     scope, route, revision, existing, exchanges, prompt = prepared
-    if (not await run_sync(_claim, session_id, turn_id, scope.stem + prompt)
+    claim_prompt = scope.stem + prompt
+    if (not await run_sync(_claim, session_id, turn_id, claim_prompt)
             or not settings.fluid_continual or _stopping):
         return
     async with asyncio.timeout(TIMEOUT_SECONDS):
-        raw = await generate_with_claude(prompt, timeout_seconds=TIMEOUT_SECONDS,
-                                        review_binding=(route, scope.account))
-    rule = review.validated_preference(raw, exchanges, existing)
-    if rule:
+        binding = (route, scope.account)
+        raw = await generate_with_claude(prompt, timeout_seconds=TIMEOUT_SECONDS, review_binding=binding)
+        candidate = review.validated_preference(raw, exchanges, existing)
+        if candidate is None:
+            return
+        check = review.verification_prompt(exchanges, existing, candidate)
+        if (check is None or not settings.fluid_continual or _stopping
+                or not await run_sync(_claim, session_id, turn_id, claim_prompt, verify=True)):
+            return
+        verdict = await generate_with_claude(check, timeout_seconds=TIMEOUT_SECONDS, review_binding=binding)
+    rules = review.verified_rules(verdict, candidate, existing)
+    if rules:
         await run_sync(_commit, session_id, turn_id, scope, route, revision,
-                       review.HEADER + "\n".join((*existing, rule)) + "\n")
+                       review.HEADER + "\n".join(rules) + "\n")
 
 
 def enqueue(session_id: str, turn_id: str) -> None:
