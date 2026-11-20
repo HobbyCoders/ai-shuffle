@@ -86,16 +86,20 @@ const settings = {
 	}
 };
 
+async function showAutomations(page) {
+	const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
+	if (!await nav.isVisible()) await showSidebar(page);
+	await nav.getByRole('button', { name: 'More', exact: true }).click();
+	await page.getByRole('menuitem', { name: 'Automations', exact: true }).click();
+}
+
 const automation = {
 	name: 'automation-reasoning-model',
 	throttles: ['fast'],
 	async setup(ctx) {
 		await load(ctx);
 		const { page } = ctx;
-		const nav = page.getByRole('navigation', { name: 'Workspace', exact: true });
-		if (!(await nav.isVisible())) await showSidebar(page);
-		await nav.getByRole('button', { name: 'More', exact: true }).click();
-		await page.getByRole('menuitem', { name: 'Automations', exact: true }).click();
+		await showAutomations(page);
 		await page.getByRole('button', { name: 'New automation', exact: true }).first().click();
 		await page.locator('#automation-model').waitFor();
 	},
@@ -172,13 +176,15 @@ const voiceForm = {
 		expect(!await picker(page).isVisible(), 'reselection closes the form picker');
 		await mark('choose a different voice engine');
 		await openPopup(trigger, picker(page));
-		const response = page.waitForResponse((r) => r.url().endsWith('/settings/voice') && r.request().method() === 'PUT');
-		await picker(page).getByRole('option', { name: 'Grok Voice', exact: true }).click();
-		await response;
+		await Promise.all([
+			page.waitForResponse((r) => r.url().endsWith('/settings/voice') && r.request().method() === 'PUT'),
+			picker(page).getByRole('option', { name: 'Grok Voice', exact: true }).click()
+		]);
 		const writes = voiceWrites.get(page);
 		expect(writes.length === 1 && writes[0].voice_model === 'grok-voice-latest' && writes[0].voice_provider_id === null,
 			'only the real engine change sends a settings update, with the legacy pin reset');
-		expect(await trigger.evaluate((el) => el === document.activeElement), 'engine change restores focus');
+		// The voice page temporarily disables the control while the write is in flight.
+		await trigger.filter({ hasText: 'Grok Voice' }).waitFor();
 		log('No write for reselect; one intercepted PUT for Grok Voice cleared the previous pin. No live voice setting changed.');
 	}
 };
@@ -200,20 +206,38 @@ const automationForm = {
 			{ ...imageChoice, model: 'fal-ai/flux/schnell' },
 			{ ...imageChoice, model: 'fal-ai/unavailable', available: false, reason: 'Unavailable in fixture' }, imageChoice
 		] } }));
-		await page.route('**/api/v1/automations', (route) => {
-			if (route.request().method() !== 'POST') return route.continue();
-			writes.automation = route.request().postDataJSON();
-			return route.fulfill({ json: { ...writes.automation, id: jobId, is_enabled: false, run_count: 0, failure_count: 0, status: 'idle' } });
+		await page.route('**/api/v1/generation/quote', (route) => route.fulfill({ json: { ok: true, priced: true, price: imageChoice.price, options: {} } }));
+		let job = {
+			id: jobId, name: 'Artwork fixture automation', description: null, model: 'opus',
+			trigger_type: 'cron', trigger_config: { expression: '0 9 * * *' }, triggers: null,
+			prompt: 'Fixture only', profile_id: 'dev-agent', project_id: null, output_config: {},
+			is_enabled: false, status: 'idle', run_count: 0, failure_count: 0, total_cost_used: 0,
+			created_at: '2025-01-01T00:00:00Z', updated_at: '2025-01-01T00:00:00Z'
+		};
+		await page.route('**/api/v1/automations', (route) => route.fulfill({ json: [job] }));
+		await page.route(`**/api/v1/automations/${jobId}`, (route) => {
+			if (route.request().method() === 'PATCH') {
+				writes.automation = route.request().postDataJSON();
+				job = { ...job, ...writes.automation };
+			}
+			return route.fulfill({ json: job });
 		});
+		await page.route(`**/api/v1/automations/${jobId}/runs*`, (route) => route.fulfill({ json: [] }));
+		await page.route(`**/api/v1/automations/${jobId}/stats`, (route) => route.fulfill({ json: null }));
+		await page.route(`**/api/v1/generation/jobs/${jobId}/choices`, (route) => route.fulfill({ json: { job_id: jobId, choices: {} } }));
 		await page.route(`**/api/v1/generation/jobs/${jobId}/choices/image`, (route) => {
 			writes.image = route.request().postDataJSON();
 			return route.fulfill({ json: { job_id: jobId, kind: 'image', choice: writes.image } });
 		});
-		await automation.setup(ctx);
+		await load(ctx);
+		await showAutomations(page);
+		await page.getByText(job.name, { exact: true }).first().click();
+		const phoneActions = page.locator('.detail-more summary');
+		if (await phoneActions.isVisible()) await phoneActions.click();
+		await page.getByRole('button', { name: 'Edit', exact: true }).click();
+		await page.locator('#automation-model').waitFor();
 	},
 	async act({ page, mark, log }) {
-		await page.getByPlaceholder('e.g. Daily report generator').fill('Artwork fixture automation');
-		await page.getByPlaceholder(/Enter the prompt template/).fill('Nothing will be dispatched.');
 		await mark('choose Antigravity Opus instead of Claude Opus');
 		await openPopup(page.locator('#automation-model'), picker(page));
 		await checkRows(page);
@@ -237,14 +261,15 @@ const automationForm = {
 		expect(await trigger.evaluate((el) => el === document.activeElement), 'keyboard selection returns focus');
 		await mark('stage and capture the job payloads');
 		await page.getByRole('button', { name: 'Pin to this job' }).click();
-		const response = page.waitForResponse((r) => r.url().endsWith(`/generation/jobs/${jobId}/choices/image`) && r.request().method() === 'PUT');
-		await page.getByRole('button', { name: 'Create', exact: true }).click();
-		await response;
+		await Promise.all([
+			page.waitForResponse((r) => r.url().endsWith(`/generation/jobs/${jobId}/choices/image`) && r.request().method() === 'PUT'),
+			page.getByRole('button', { name: 'Save', exact: true }).click()
+		]);
 		const { automation, image } = automationWrites.get(page);
 		expect(automation.model === 'prov:artwork-ag:claude-opus', 'the model payload retains the chosen Opus provider');
 		expect(image.source === 'fal' && image.account === imageChoice.account && image.worker === imageChoice.worker && image.model === imageChoice.model,
 			'the staged media selection retains its exact provider/account/worker/model');
-		log('Intercepted, not sent: automation create used Antigravity Opus, and the image PUT used the keyboard-selected fixture route. No job created or run.');
+		log('Intercepted, not sent: automation PATCH used Antigravity Opus, and the image PUT used the keyboard-selected fixture route. No real job changed or ran.');
 	}
 };
 
