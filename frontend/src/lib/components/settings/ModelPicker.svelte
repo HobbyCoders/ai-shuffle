@@ -81,7 +81,8 @@
 	const access = getSettingsAccess();
 	const row = getRowContext();
 	const blocked = $derived(disabled || (formSelect && access.readOnly));
-	const selectionId = `${$props.id()}-selection`;
+	const pickerId = $props.id();
+	const selectionId = `${pickerId}-selection`;
 
 	const leadingRows = $derived(allowEmpty ? [{ value: '', label: emptyLabel }] : []);
 	const trailingRows = $derived(
