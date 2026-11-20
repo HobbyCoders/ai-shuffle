@@ -690,16 +690,32 @@ def test_subscription_mode_never_defaults_to_the_key_while_claude_can_run(
     assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
 
 
-def test_the_key_is_the_default_only_when_nothing_else_can_run(mock_db, _api_unit_credentials):
-    """S3: subscription signed out and no other provider: the saved key, bound
-    to Claude API, instead of a default that cannot run."""
-    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
+def test_saving_a_key_never_makes_it_the_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+    """S14: subscription signed out and no other provider: still not the key.
+    Saving it is not choosing it; the run gets Claude's setup message."""
+    from app.core.model_registry import DEFAULT_MODEL
 
     _claude_api_key_saved("subscription")
     claude_cli_status.get_status()  # the CLI is missing
-    assert credential_gate.default_run_model() == ("claude-api", API_MODEL_IDS[DEFAULT_MODEL])
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+    assert credential_gate.default_run_model(prefer_most_used=False) == (None, DEFAULT_MODEL)
     _openai_with_default()  # another provider can run: it keeps the default
     assert credential_gate.default_run_model() == ("oa", "gpt-5")
+
+
+def test_claude_api_usage_history_is_not_a_default_outside_api_key_mode(mock_db, _api_unit_credentials):
+    """S14: Claude API picked in some chats is not consent for runs that name
+    no model; API key mode, the owner's own choice, still is."""
+    from app.core.model_registry import API_MODEL_IDS, DEFAULT_MODEL
+
+    _claude_api_key_saved("subscription")
+    _claude_signed_in()
+    _book(_chat("s1"), API_MODEL_IDS["opus"], "claude-api", turns=5)
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model() == (None, DEFAULT_MODEL)
+    claude_auth_mode.set_mode("api_key")
+    credential_gate.invalidate_most_used_cache()
+    assert credential_gate.default_run_model()[0] == "claude-api"
 
 
 def test_default_run_model_follows_the_ready_providers(mock_db):

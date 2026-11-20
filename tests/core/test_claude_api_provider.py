@@ -267,17 +267,49 @@ def test_one_shot_generation_on_the_subscription_stays_delegated(key):
     assert options.aih_provider_id is None
 
 
-def test_a_bare_model_name_is_not_consent_to_bill_the_key(key):
-    """Task/StartSession consent: the API model's names are also the
-    subscription's, so the owner must name the Claude API leg itself."""
-    from app.core.model_override import named_by_user
+def test_no_message_text_is_consent_to_bill_the_key(key):
+    """S13: the API model's names are also the subscription's, and phrasing
+    ("don't use the Claude API") cannot be judged safely: no text consents."""
+    from app.core.model_override import memory_names, named_by_user
 
     model = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:claude-sonnet-5"
     catalog = {model: ("claude-sonnet-5", "Claude Sonnet 5")}
-    assert not named_by_user(model, ["Start the review on claude-sonnet-5."], catalog)
-    assert not named_by_user(model, ["Use Claude Sonnet 5 for this."], catalog)
-    assert named_by_user(model, ["Run it on Claude API with claude-sonnet-5."], catalog)
-    assert named_by_user(model, [f"Use {model}."], catalog)
+    for text in ("Start the review on claude-sonnet-5.",
+                 "Use claude-sonnet-5, but don't use the Claude API.",
+                 f"Don't use {model}.",
+                 "Run it on Claude API with claude-sonnet-5.",
+                 f"Use {model}."):
+        assert not named_by_user(model, [text], catalog), text
+        assert not memory_names(model, text, catalog), text
+
+
+def test_a_claude_api_switch_always_asks_the_owner(key, monkeypatch):
+    """S13: Task/StartSession onto Claude API skips named, remembered and
+    receipt evidence and goes to the owner's prompt; the chat already on it
+    (the owner's pick) needs nothing."""
+    import asyncio
+
+    from app.core import model_override
+
+    model = f"prov:{cap.CLAUDE_API_PROVIDER_ID}:claude-sonnet-5"
+    monkeypatch.setattr(model_override, "chat_of", lambda sid: sid)
+    monkeypatch.setattr(model_override, "_has_approval", lambda *a, **k: False)
+    monkeypatch.setattr(model_override, "_has_named", lambda *a, **k: True)
+    monkeypatch.setattr(model_override, "remembered_by_owner", lambda *a, **k: object())
+    monkeypatch.setattr("app.core.api_user_scope.viewer_api_user_id", lambda chat: "u1")
+    asked = []
+
+    async def approve(session_id, profile_id, **kwargs):
+        asked.append(kwargs["model"])
+        raise PermissionError("owner said no")
+    monkeypatch.setattr(model_override, "_approve", approve)
+
+    with pytest.raises(PermissionError):
+        asyncio.run(model_override.accept("chat-1", None, model=model, baseline="sonnet",
+                                          action="start a review"))
+    assert asked == [model]
+    assert asyncio.run(model_override.accept("chat-1", None, model=model, baseline=model,
+                                             action="start a review")) is None
 
 
 def test_a_late_catalog_write_for_an_old_key_keeps_the_new_keys_list(key, monkeypatch):

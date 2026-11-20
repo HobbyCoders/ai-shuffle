@@ -43,6 +43,30 @@ def _error(message: str) -> dict:
     return _tool_result({"success": False, "error": message})
 
 
+def claude_api_choice_error(new: Any, old: Any = None, *, where: str) -> str | None:
+    """Refusal when an agent's config write would newly choose a Claude API model.
+
+    Claude API bills the saved Anthropic key; only the owner chooses it (the
+    picker, the Automations or Agents page). A saved choice the owner already
+    made may be kept as is. ``new`` and ``old`` are a selection or a
+    ``{key: selection}`` map.
+    """
+    from app.core.model_override import is_claude_api_model
+
+    if isinstance(new, dict):
+        before = old if isinstance(old, dict) else {}
+        for key, value in new.items():
+            error = claude_api_choice_error(value, before.get(key), where=where)
+            if error:
+                return error
+        return None
+    if is_claude_api_model(new) and new != old:
+        return (f"Not saved: {new} is a Claude API model, billed to the saved Anthropic API key, "
+                f"and only the owner can choose one for {where} (in the app's settings). "
+                "Use a subscription model, or ask the owner to set it.")
+    return None
+
+
 def _sanitize_hook(hook: dict) -> dict:
     """Expose signing-secret presence, never its value, to the agent."""
     safe = dict(hook)

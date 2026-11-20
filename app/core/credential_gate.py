@@ -720,6 +720,8 @@ def most_used_model(
         ranking = _most_used_ranking()
         if not ranking:
             return None
+        from app.core import claude_auth_mode
+        from app.core.claude_api_provider import is_claude_api_id
         from app.core.provider_agent import curated_model_ids
 
         rows: Optional[dict] = None
@@ -730,6 +732,10 @@ def most_used_model(
                 picked = _claude_default(model, probe, servable_only=servable_only)
                 if picked:
                     return picked
+                continue
+            # Picking the key in some chats is not choosing it for runs that
+            # name no model; only API key mode makes it a default.
+            if is_claude_api_id(provider_id) and not claude_auth_mode.prefers_claude_api():
                 continue
             if rows is None:
                 rows = {r.get("id"): r for r in _default_candidate_rows(servable_only)}
@@ -753,10 +759,12 @@ def default_run_model(
     2. the oldest usable provider row's own default model
        (:func:`default_provider_model`); Claude is the remaining candidate,
        whose default is the registry default;
-    3. the saved Anthropic API key (the Claude API provider) when nothing
-       else can run;
-    4. the registry default, so a worker with nothing set up still gets the
+    3. the registry default, so a worker with nothing set up still gets the
        Claude setup message.
+
+    The saved Anthropic API key (the Claude API provider) is billed per
+    token, so it is a default only on a worker whose owner chose API key
+    mode: never as a last resort, and never from usage history otherwise.
 
     Claude's place in this order is the unbound alias (the subscription),
     or on a worker whose owner chose API key mode, the same model bound to
@@ -795,9 +803,8 @@ def default_run_model(
             picked = _claude_default(DEFAULT_MODEL, probe, servable_only=servable_only)
             if picked:
                 return picked[0], picked[1]
-        picked = _claude_api_default(DEFAULT_MODEL, servable_only=servable_only)
-        if picked:
-            return picked
+        # Never the saved key as a last resort: saving a key is not choosing
+        # it. Only API key mode (``_claude_default``) makes it the default.
     except Exception:  # noqa: BLE001 — a failed check keeps the registry default
         logger.warning("Could not pick a default model", exc_info=True)
     return None, DEFAULT_MODEL

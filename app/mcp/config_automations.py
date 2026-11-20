@@ -15,6 +15,7 @@ from app.mcp.config_helpers import (
     _error,
     _sanitize_automation,
     _automation_summary,
+    claude_api_choice_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -304,6 +305,9 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                 )
             except ValueError as e:
                 return str(e), None, None, None
+            api_error = claude_api_choice_error(model, where="an automation")
+            if api_error:
+                return api_error, None, None, None
 
             # Enforce budget defaults if not provided
             max_cost = args.get("max_cost_per_run")
@@ -498,6 +502,10 @@ def _create_automation_tools(is_admin: bool, project_id: Optional[str]) -> list:
                     )
                 except ValueError as e:
                     return str(e), None, None
+                api_error = claude_api_choice_error(
+                    kwargs["model"], existing.get("model"), where="an automation")
+                if api_error:
+                    return api_error, None, None
 
             if args.get("permission_mode"):
                 from app.core.automation_service import normalize_permission_mode_choice

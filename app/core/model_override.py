@@ -397,21 +397,25 @@ def _family_consent(model: str, text: str) -> Optional[bool]:
     return False if mentioned else None
 
 
-def named_by_user(model: str, texts: Iterable[str],
-                  catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
-    """Whether any of ``texts`` names ``model``."""
+def is_claude_api_model(model: Any) -> bool:
+    """Whether ``model`` is bound to the saved Anthropic key (Claude API)."""
     from app.core.claude_api_provider import is_claude_api_id
-    from app.core.model_registry import model_values
     from app.core.query_options import decode_provider_model
 
-    decoded = decode_provider_model(model)
-    if decoded and is_claude_api_id(decoded[0]):
-        # Its model names are also the Claude subscription's, so naming one is
-        # not consent to bill the key: the text must name the Claude API leg
-        # itself (its exact composite, or "Claude API") as well as the model.
-        texts = [text for text in texts
-                 if model.lower() in str(text or "").lower()
-                 or _mentions(_tokens(text), "claude api")]
+    decoded = decode_provider_model(model) if isinstance(model, str) else None
+    return bool(decoded and is_claude_api_id(decoded[0]))
+
+
+def named_by_user(model: str, texts: Iterable[str],
+                  catalog: Optional[Dict[str, Tuple[str, ...]]] = None) -> bool:
+    """Whether any of ``texts`` names ``model``. Never for a Claude API model."""
+    from app.core.model_registry import model_values
+
+    if is_claude_api_model(model):
+        # Its model names are also the Claude subscription's, and no phrasing
+        # test separates "use the Claude API" from "don't use the Claude API"
+        # reliably enough to bill a key on it: the owner approves in a prompt.
+        return False
     if model in model_values():
         return any(_family_consent(model, text) is True for text in texts)
     full, words = names_for(model, catalog)
@@ -1004,6 +1008,20 @@ async def accept(session_id: str, profile_id: Optional[str], *, model: str,
     from app.core.model_registry import model_values
 
     key = (await asyncio.to_thread(chat_of, session_id), model)
+    if is_claude_api_model(model):
+        # Billed to the key: the chat already on it (the owner's own pick) or
+        # the owner's Yes in a prompt. No message, memory or saved naming
+        # receipt counts (see named_by_user).
+        if model == baseline:
+            return None
+        cache_key = (*key, await asyncio.to_thread(viewer_api_user_id, key[0]))
+        if cache_key in _APPROVED:
+            return Acceptance(APPROVED)
+        if await asyncio.to_thread(_has_approval, *key):
+            _APPROVED.add(cache_key)
+            return Acceptance(APPROVED)
+        return Acceptance(await _approve(session_id, profile_id, model=model, baseline=baseline,
+                                         action=action, cache_key=cache_key, key=key))
     native = model in model_values()
     try:
         evidence = await asyncio.to_thread(_find_named, session_id, model) if native else None
@@ -1061,6 +1079,9 @@ async def _approve(session_id: str, profile_id: Optional[str], *, model: str,
 
     why = ("no owner message named it and no applicable chat approval was found" if model.startswith("prov:")
            else "the current model request did not establish consent and no applicable chat approval was found")
+    if is_claude_api_model(model):
+        why = ("Claude API models bill the saved Anthropic API key, so only the owner's Yes at a prompt "
+               "starts one (naming the model in a message is not enough)")
     if incomplete:
         why = ("the model history search failed, omitted oversized text, or exceeded its five-second budget; "
                "a fresh owner answer is required")
