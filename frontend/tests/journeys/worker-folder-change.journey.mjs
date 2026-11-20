@@ -38,11 +38,13 @@ await runJourney({
 				worker = detail.workers.find(w => !w.is_self && w.online);
 				expect(worker, 'the paired worker must be online');
 				await api(page, 'POST', '/projects/setup', { project_v2_id: identity, install_id: worker.install_id, folder: `${id}-peer` });
-				const ready = await page.waitForFunction(async ({ identity, workerId }) => {
-					const response = await fetch(`/api/v1/projects/workers?project_v2_id=${identity}`);
-					return response.ok && (await response.json()).workers.find(w => w.install_id === workerId && w.state === 'ready' && w.folder && w.folder_revision);
-				}, { identity, workerId: worker.install_id }, { polling: 500, timeout: 25_000 });
-				worker = await ready.jsonValue();
+				const workerId = worker.install_id;
+				for (let attempt = 0; attempt < 40; attempt++) {
+					worker = (await workers(page, identity)).workers.find(w => w.install_id === workerId);
+					if (worker?.state === 'ready' && worker.folder && worker.folder_revision) break;
+					await page.waitForTimeout(250);
+				}
+				expect(worker?.state === 'ready' && worker.folder && worker.folder_revision, 'setup finished and the peer returned its editable registration');
 				writeFileSync(join(worker.folder, 'peer-original.txt'), 'keep the peer file');
 				expect(!existsSync(join(status.workspace_dir, nextName)), 'relative destination exists on B, not on A');
 			}
