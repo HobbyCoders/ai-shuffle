@@ -44,6 +44,8 @@ export interface PickerOption {
 	/** Raw model id / blurb shown as the search haystack and row tooltip. */
 	description: string;
 	groupKey: string;
+	/** Listed but not selectable (for provider availability in form pickers). */
+	disabled?: boolean;
 	/** Convenience copies of the owning group's display — kept in sync by the builder. */
 	group: string;
 	groupSubtext: string | null;
@@ -52,6 +54,25 @@ export interface PickerOption {
 export interface PickerCatalog {
 	groups: PickerGroup[];
 	options: PickerOption[];
+}
+
+/** Presentation adapter for model lists whose values are not chat registry IDs. */
+export function groupModelChoices(rows: readonly {
+	value: string;
+	label: string;
+	providerType?: string;
+	providerName: string;
+	disabled?: boolean;
+}[]): PickerCatalog {
+	const groups = new Map<string, PickerGroup>();
+	const options = rows.map(({ value, label, providerType, providerName, disabled }) => {
+		const groupKey = providerType || '__unknown__';
+		if (!groups.has(groupKey)) {
+			groups.set(groupKey, { key: groupKey, name: providerName, glyph: providerGlyphKind(providerType), subtext: null, isApi: false });
+		}
+		return { value, label, description: label, disabled, groupKey, group: providerName, groupSubtext: null };
+	});
+	return { groups: [...groups.values()], options };
 }
 
 const MODEL_FAMILY_BLURB: Record<ModelFamily, string> = {

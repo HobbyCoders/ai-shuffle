@@ -34,7 +34,6 @@ vi.mock('$lib/services/watch-resources', () => ({
 		for (const kind of kinds) watchers.set(kind, fn);
 	})
 }));
-vi.mock('$lib/components/settings/ModelPicker.svelte', () => import('$lib/test-stubs/EmptyRouteDependency.svelte'));
 vi.mock('$lib/stores/worker-presence', async () => {
 	const { readable } = await import('svelte/store');
 	return { workerInstalls: readable([]), refreshWorkerPresence: vi.fn(async () => []) };
@@ -197,7 +196,12 @@ describe('creating an automation with a pinned generation choice', () => {
 
 		// Replace image (A -> B), clear audio, pin video (this write fails).
 		await fireEvent.click(within(row('image')).getByRole('button', { name: 'Change' }));
-		await fireEvent.change(await screen.findByRole('combobox', {name:'Source and model'}), {target:{value:'1'}});
+		await fireEvent.click(await screen.findByRole('button', {name:'Source and model'}));
+		const shortlist = within(screen.getByRole('listbox', { name: 'Source and model' }));
+		const replacement = shortlist.getByRole('option', { name: /^SuperGrok/, description: 'SuperGrok' });
+		expect(replacement.dataset.value).toBe('1');
+		expect(replacement.querySelector('[data-provider-logo="grok"]')).toBeTruthy();
+		await fireEvent.click(replacement);
 		await fireEvent.click(screen.getByRole('button', { name: /Pin to this job/ }));
 		await fireEvent.click(within(row('audio')).getByRole('button', { name: /Clear the job choice/ }));
 		await fireEvent.click(within(row('video')).getByRole('button', { name: /Pin a choice/ }));

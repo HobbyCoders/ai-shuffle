@@ -11,6 +11,7 @@
 	import { RefreshCw } from 'lucide-svelte';
 	import { api, getErrorMessage } from '$lib/api/client';
 	import Checkbox from '$lib/components/ui/Checkbox.svelte';
+	import ProviderGlyph from '../../ProviderGlyph.svelte';
 	import {
 		getClaudeAuth,
 		getClaudeVersionedModels,
@@ -122,7 +123,7 @@
 				{#each shown as m (m.value)}
 					<label class="pv-mrow">
 						<Checkbox checked={checkedOf(m.value, m.enabled)} disabled={busy || readOnly} onchange={() => toggle(m.value)} />
-						<span class="id">{m.value}</span>
+						<span class="id cli-model"><ProviderGlyph kind="claude" /><span>{m.value}</span><span class="sr-only">Claude subscription</span></span>
 						<span class="lbl">{m.label}</span>
 					</label>
 				{/each}
@@ -135,6 +136,8 @@
 </RowGroup>
 
 <style>
+	.cli-model { display: flex; align-items: center; gap: 8px; }
+	.cli-model :global(.provider-glyph) { flex: none; }
 	.filter {
 		margin: 8px 0;
 	}

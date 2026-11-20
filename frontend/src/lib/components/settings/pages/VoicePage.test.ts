@@ -108,7 +108,10 @@ it('switches engines, shows xAI funding and server-provided voices without retai
   return structuredClone(server);
  });
  await mountPage();
- await fireEvent.change(screen.getByRole('combobox', { name: 'Voice engine' }), { target: { value: 'grok-voice-latest' } });
+ await fireEvent.click(screen.getByRole('button', { name: 'Voice engine' }));
+ const grok = screen.getByRole('option', { name: 'Grok Voice', description: 'xAI API key' });
+ expect(grok.querySelector('[data-provider-logo="grok"]')).toBeTruthy();
+ await fireEvent.click(grok);
  await waitFor(() => expect(transport.put).toHaveBeenCalledWith('/settings/voice', { voice_model: 'grok-voice-latest', voice_provider_id: null }));
  await waitFor(() => expect((screen.getByRole('combobox', { name: 'Voice' }) as HTMLSelectElement).value).toBe('eve'));
  expect(screen.getByRole('option', { name: 'Ara' })).toBeTruthy();

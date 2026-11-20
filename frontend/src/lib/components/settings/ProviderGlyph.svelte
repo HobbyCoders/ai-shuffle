@@ -34,6 +34,7 @@
 			case 'codex':
 				return 'openai';
 			case 'grok':
+			case 'supergrok':
 			case 'xai':
 				return 'grok';
 			case 'openrouter':

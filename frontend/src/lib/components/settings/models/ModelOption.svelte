@@ -3,6 +3,8 @@
 	 * ModelOption: one pickable model row (radio, name, id and badges, a
 	 * price or note on the right). Used by a tool's Model tab and the catalog.
 	 */
+	import ProviderGlyph from '../ProviderGlyph.svelte';
+
 	interface Props {
 		name: string;
 		/** Endpoint id, shown in mono. */
@@ -50,11 +52,12 @@
 		if (!unusable && !pressed) onpick?.();
 	}}
 >
-	<span class="radio" aria-hidden="true"></span>
+	<span class="marks"><span class="radio" aria-hidden="true"></span><ProviderGlyph kind="fal" /></span>
 	<span class="body">
 		<span class="t">{name}</span>
 		<span class="d">
 			{#if kind}<span>{kind}</span>{/if}
+			<span class="sr-only">fal.ai</span>
 			<span class="st-mono id">{id}</span>
 			{#each badges as badge (badge)}<span class="badge">{badge}</span>{/each}
 		</span>
@@ -86,6 +89,7 @@
 	.mopt:focus-visible {
 		outline-offset: -2px;
 	}
+	.marks { display: inline-flex; align-items: center; gap: 8px; }
 	.radio {
 		width: 15px;
 		height: 15px;

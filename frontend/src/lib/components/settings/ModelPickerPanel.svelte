@@ -25,6 +25,7 @@
 	 */
 	import { Check, Lock, Search, Star } from 'lucide-svelte';
 	import { onDestroy, onMount, tick } from 'svelte';
+	import ProviderGlyph from './ProviderGlyph.svelte';
 	import type { PickerGroup, PickerOption } from '$lib/constants/model-picker';
 	import { matchesPickerQuery } from '$lib/constants/model-picker';
 	import {
@@ -66,6 +67,7 @@
 		/** One-line warning rendered above the list (e.g. a reroute explanation). */
 		notice?: string;
 		ariaLabel?: string;
+		showFavorites?: boolean;
 		/** Optional session context control. Omit both props on profile-only pickers. */
 		contextChoice?: ContextWindowChoice;
 		onContextChoiceSelect?: (choice: ContextWindowChoice) => void;
@@ -95,6 +97,7 @@
 		trailingRows = [],
 		notice,
 		ariaLabel = 'Model',
+		showFavorites = true,
 		contextChoice,
 		onContextChoiceSelect,
 		contextStandardTokens = null,
@@ -133,11 +136,12 @@
 	// Favorites that actually exist in this panel's catalog (a pin made in the
 	// chat dock for a provider this scoped picker can't offer is simply skipped).
 	const favoriteOptions = $derived(
-		getFavoriteModels()
+		(showFavorites ? getFavoriteModels() : [])
 			.map((v) => options.find((o) => o.value === v))
 			.filter((o): o is PickerOption => o != null)
 	);
 	const hasFavorites = $derived(favoriteOptions.length > 0);
+	const groupsByKey = $derived(new Map(groups.map((group) => [group.key, group])));
 	/** The host opted into the context section and the value is one of its models. */
 	const contextHosted = $derived(
 		onContextChoiceSelect != null && options.some(option => option.value === value)
@@ -198,7 +202,7 @@
 	// search box without moving focus off it (T3 behaviour).
 	const rowValues = $derived<string[]>([
 		...visibleLeading.map((r) => r.value),
-		...visibleOptions.map((o) => o.value),
+		...visibleOptions.filter((o) => !o.disabled).map((o) => o.value),
 		...visibleTrailing.map((r) => r.value)
 	]);
 	let highlighted = $state<string | null>(null);
@@ -616,8 +620,11 @@
 					<div class="mpp-group-name" id={`${editorId}-${section.key}`} data-provider-heading>
 						<span>{section.name}</span>{#if section.subtext}<small>{section.subtext}</small>{/if}
 					</div>
-					{#each section.options as o (o.value)}
-						{@const fav = isFavoriteModel(o.value)}
+					{#each section.options as o, index (o.value)}
+						{@const fav = showFavorites && isFavoriteModel(o.value)}
+						{@const glyph = groupsByKey.get(o.groupKey)?.glyph ?? 'custom'}
+						{@const providerId = `${editorId}-${section.key}-${index}-provider`}
+						{@const provider = [o.group || 'Unknown provider', o.groupSubtext].filter(Boolean).join(' · ')}
 						<!-- svelte-ignore a11y_click_events_have_key_events -->
 						<div
 							class="mpp-row"
@@ -625,16 +632,24 @@
 							class:highlighted={keyboardCursor && effectiveHighlighted === o.value}
 							role="option"
 							aria-selected={value === o.value}
+							aria-disabled={o.disabled || undefined}
+							aria-label={o.label}
+							aria-describedby={providerId}
 							tabindex="-1"
-							id={rowId(o.value)}
+							id={o.disabled ? undefined : rowId(o.value)}
 							data-value={o.value}
 							title={o.description}
-							onclick={() => onSelect(o.value)}
-							onmouseenter={() => { highlighted = o.value; keyboardCursor = false; }}
+							onclick={() => { if (!o.disabled) onSelect(o.value); }}
+							onmouseenter={() => { if (!o.disabled) highlighted = o.value; keyboardCursor = false; }}
 						>
 							<div class="mpp-row-copy">
-								<div class="mpp-row-label">{o.label}</div>
+								<div class="mpp-row-label model-identity">
+									<ProviderGlyph kind={glyph} size={16} />
+									<span class="model-name">{o.label}</span>
+									<span class="model-provider" id={providerId}>{provider}</span>
+								</div>
 							</div>
+							{#if showFavorites && !o.disabled}
 							<button
 								type="button"
 								class="mpp-fav"
@@ -645,6 +660,7 @@
 							>
 								<Star size={16} strokeWidth={1.75} />
 							</button>
+							{/if}
 							<span class="mpp-check" aria-hidden="true">{#if value === o.value}<Check size={16} />{/if}</span>
 						</div>
 					{/each}
@@ -1056,7 +1072,7 @@
 	   never leaves a second row lit; the arrow keys draw a thin outline instead. */
 	.mpp-row.selected { background: var(--mpp-hover); }
 	@media (hover: hover) {
-		.mpp-row:not(.selected):hover { background: var(--mpp-row-hover); }
+		.mpp-row:not(.selected, [aria-disabled="true"]):hover { background: var(--mpp-row-hover); }
 	}
 	.mpp-row.highlighted { outline: 1px solid var(--ring); outline-offset: -1px; }
 	.mpp-row.selected .mpp-row-label { font-weight: 500; }
