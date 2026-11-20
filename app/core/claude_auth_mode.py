@@ -7,13 +7,15 @@ and the user picks it:
 - ``subscription``: the CLI uses its own sign-in, which the user completed in
   Anthropic's flow (``claude auth login``). Nothing is injected; any Anthropic
   key in the host or profile environment is kept away from the CLI.
-- ``api_key``: Claude runs on the Anthropic API key the user stored in
-  Settings, through fluid's native Anthropic client (the "Claude API"
-  provider, :mod:`app.core.claude_api_provider`), not the CLI. The CLI never
-  receives the key: a Claude model picked without a provider is moved onto the
-  Claude API provider for the turn, and every Anthropic credential is kept
-  away from any CLI child. Installs that used to hand the key to the CLI keep
-  working without reconfiguration through that move.
+- ``api_key``: the worker's Claude default is the Anthropic API key the user
+  stored in Settings, which runs on fluid's native Anthropic client as the
+  "Claude API" provider (:mod:`app.core.claude_api_provider`), never through
+  the CLI. Only a run that names no model takes that default
+  (``credential_gate.default_run_model``), and it is bound to the Claude API
+  provider explicitly, so the picker shows it. A Claude model picked without a
+  provider still means the Claude subscription: for the CLI this mode is
+  subscription mode (:func:`current_mode`), and with no CLI sign-in the turn
+  is refused with a message pointing at the "Claude · API" models.
 - ``cloud``: "Cloud provider or gateway". The CLI runs on the one method the
   owner set up in Settings (Amazon Bedrock, Google Vertex AI, Microsoft Foundry
   or an LLM gateway), with only that method's allowlisted values
@@ -69,9 +71,6 @@ API_KEY_SETTING = "anthropic_api_key"
 # Environment names the CLI reads as an Anthropic credential. In each mode the
 # ones that do not belong to it are removed from what the CLI child inherits.
 SUBSCRIPTION_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-# The API key runs natively, never through the CLI: nothing credential-like
-# reaches a CLI child in this mode.
-API_KEY_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 OFF_UNSET = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
 
 
@@ -130,8 +129,29 @@ def _cli_signed_in_peek() -> Optional[bool]:
 
 
 def current_mode() -> str:
-    """The active mode. Reads the setting; before startup has recorded one it
-    answers with the default without writing anything."""
+    """The mode the Claude Code CLI runs in.
+
+    The API-key choice is not a CLI mode: the key never reaches the CLI, so a
+    Claude run on the CLI there is a subscription run (its sign-in, its
+    guards, its billing). Settings shows :func:`selected_mode`.
+    """
+    mode = selected_mode()
+    return MODE_SUBSCRIPTION if mode == MODE_API_KEY else mode
+
+
+def prefers_claude_api() -> bool:
+    """Whether this worker's Claude default is the saved API key (the owner
+    chose API key mode). Never raises."""
+    try:
+        return selected_mode() == MODE_API_KEY
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the Claude sign-in mode", exc_info=True)
+        return False
+
+
+def selected_mode() -> str:
+    """The mode the owner chose. Reads the setting; before startup has
+    recorded one it answers with the default without writing anything."""
     try:
         mode = stored_mode(cached=True)
     except Exception:  # noqa: BLE001 — a DB hiccup must not pick a mode silently
@@ -168,8 +188,6 @@ def spawn_fingerprint() -> str:
             identity.extend(database.get_system_setting(key) or "" for key in (
                 claude_cloud_auth.CONFIG_SETTING, claude_cloud_auth.SECRETS_SETTING,
             ))
-    elif mode == MODE_API_KEY:
-        identity.append(database.get_system_setting(API_KEY_SETTING) or "")
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
@@ -221,7 +239,7 @@ def summary(cli: Optional[dict] = None) -> dict:
         status = claude_cli_status.peek()
         cli = status.to_dict() if status is not None else {}
     key = stored_api_key()
-    mode = current_mode()
+    mode = selected_mode()
     signed_in = bool(cli.get("signed_in"))
     return {
         "mode": mode,

@@ -75,16 +75,23 @@ def test_payload_carries_the_credential_gate(authenticated_client):
     from app.core import credential_gate
 
     claude_auth_mode.set_mode("api_key")
-    with _probe(True):
+    with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
+    assert body["mode"] == "api_key"
     assert body["gate"]["ready"] is False
     assert body["gate"]["reason"] == credential_gate.NO_PROVIDER_MESSAGE
-    assert body["claude_reason"] == credential_gate.NO_KEY_MESSAGE
+    assert body["claude_reason"] == credential_gate.NOT_SIGNED_IN_MESSAGE
+    # The key is its own provider; the CLI still needs the subscription sign-in.
     db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
     with _probe(False):
         body = authenticated_client.get(ENDPOINT).json()
     assert body["gate"]["ready"] is True and body["gate"]["reason"] is None
-    assert body["gate"]["ready_providers"] == ["claude"] and body["claude_reason"] is None
+    assert body["gate"]["ready_providers"] == ["gw:claude-api"]
+    assert body["claude_reason"] == credential_gate.NOT_SIGNED_IN_MESSAGE
+    with _probe(True):
+        body = authenticated_client.get(ENDPOINT).json()
+    assert body["gate"]["ready_providers"] == ["claude", "gw:claude-api"]
+    assert body["claude_reason"] is None
 
 
 @pytest.mark.real_agent_gate

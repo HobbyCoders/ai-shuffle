@@ -424,6 +424,14 @@ def validate_provider_model(
         )
 
     ids = curated_model_ids(row)
+    from app.core import claude_api_provider
+
+    if mid not in ids and claude_api_provider.is_claude_api_id(pid):
+        # After a switch of key the row lists the built-in models until the new
+        # key's catalog is read: read it once before refusing a bound model.
+        if claude_api_provider.refresh_models_once():
+            row = claude_api_provider.virtual_row() or row
+            ids = curated_model_ids(row)
     if mid not in ids:
         return ModelValidation(
             ok=False,

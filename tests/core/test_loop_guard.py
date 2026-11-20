@@ -135,9 +135,9 @@ def test_attended_sources_are_never_counted(mock_db, source):
     assert loop_guard.usage("s") == {"install_last_hour": 0, "session_last_hour": 0}
 
 
-def test_api_key_mode_disabled_guard_and_provider_legs_are_exempt(mock_db):
+def test_cloud_mode_disabled_guard_and_provider_legs_are_exempt(mock_db):
     loop_guard.update_config(session_turns_per_hour=1)
-    claude_auth_mode.set_mode("api_key")
+    claude_auth_mode.set_mode("cloud")
     for _ in range(3):
         assert loop_guard.check("s", "automation", "delegated") is None
     _subscription()
@@ -173,8 +173,8 @@ def test_unattended_claude_worker_gets_the_default_cap_in_subscription_mode(mock
     assert provider_agent._worker_deadlines(True, None, None, None, "automation")[1:] == (3600.0, True)
     # A worker on another provider keeps the lane default.
     assert provider_agent._worker_deadlines(True, None, None, "prov-1", "automation")[1:] == (0.0, False)
-    # In API key mode it is still the guard's to time, but the guard is off.
-    claude_auth_mode.set_mode("api_key")
+    # In cloud mode it is still the guard's to time, but the guard is off.
+    claude_auth_mode.set_mode("cloud")
     assert provider_agent._worker_deadlines(True, None, None, None, "wakeup")[1:] == (0.0, True)
 
 
@@ -223,7 +223,8 @@ def test_scheduled_run_guidance_only_in_subscription_mode_for_claude_profiles(mo
     assert loop_guard.scheduled_run_guidance({"config": {}}) == loop_guard.SCHEDULED_RUN_GUIDANCE
     assert "use an API key for scheduled runs" in loop_guard.SCHEDULED_RUN_GUIDANCE
     assert loop_guard.scheduled_run_guidance({"config": {"provider": "prov-1"}}) is None
-    claude_auth_mode.set_mode("api_key")
+    assert loop_guard.scheduled_run_guidance(provider_id="claude-api", model="claude-sonnet-4-5") is None
+    claude_auth_mode.set_mode("cloud")
     assert loop_guard.scheduled_run_guidance({"config": {}}) is None
 
 

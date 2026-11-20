@@ -33,7 +33,7 @@ def test_no_active_key_means_no_row(mock_db, monkeypatch):
 
 def test_row_is_an_api_key_anthropic_provider_without_its_secret(key):
     claude_auth_mode.set_mode("subscription")
-    row = database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID)
+    row = database.resolve_model_provider(cap.CLAUDE_API_PROVIDER_ID)
     assert row["provider_type"] == "anthropic" and row["auth_mode"] == "api_key"
     assert row["base_url"] == "https://api.anthropic.com"
     assert row["enabled"] is True and "auth_token" not in row
@@ -57,17 +57,61 @@ def test_models_follow_the_active_keys_catalog_only(key):
     assert cap.virtual_row()["models_json"] == [{"id": "claude-live-1", "label": "Live One"}]
 
 
-@pytest.mark.parametrize("mode,model,expected", [
-    ("api_key", "sonnet", (cap.CLAUDE_API_PROVIDER_ID, API_MODEL_IDS["sonnet"])),
-    ("api_key", "claude-opus-5", (cap.CLAUDE_API_PROVIDER_ID, "claude-opus-5")),
-    ("api_key", "gpt-5", None),
-    ("subscription", "sonnet", None),
-    ("cloud", "sonnet", None),
-    ("off", "sonnet", None),
-])
-def test_only_api_key_mode_moves_claude_picks_onto_the_claude_api(key, mode, model, expected):
+def test_management_readers_and_writers_never_see_the_virtual_row(key, authenticated_client):
+    """Runtime readers resolve claude-api; the exact reader that management,
+    writers and sync use is stored rows only, so they answer 404."""
+    claude_auth_mode.set_mode("api_key")
+    assert database.resolve_model_provider(cap.CLAUDE_API_PROVIDER_ID)["id"] == cap.CLAUDE_API_PROVIDER_ID
+    assert database.get_model_provider(cap.CLAUDE_API_PROVIDER_ID) is None
+    base = f"/api/v1/model-providers/{cap.CLAUDE_API_PROVIDER_ID}"
+    assert authenticated_client.post(f"{base}/codex/device/start").status_code == 404
+    assert authenticated_client.patch(base, json={"name": "Renamed"}).status_code == 404
+    assert authenticated_client.delete(base).status_code == 404
+
+
+@pytest.mark.parametrize("mode", ["api_key", "subscription", "cloud"])
+def test_an_unbound_claude_pick_is_never_moved_onto_the_key(key, mode, tmp_path):
+    """Unbound means the subscription in every mode: a chat turn and a one-shot
+    generation keep the Claude Code CLI. Only an explicit binding spends the key."""
+    from unittest.mock import patch
+
+    import app.core.query_options as qo
+    from app.core.generation_options import build_generation_options
+
     claude_auth_mode.set_mode(mode)
-    assert cap.native_claude_rebind(model) == expected
+    profile = {"id": "t", "config": {"model": "sonnet", "tools_preset": "claude_code",
+                                     "cwd": str(tmp_path)}}
+    with patch.object(qo, "get_security_instructions", return_value=""):
+        chat, _ = qo.build_options_from_profile(profile=profile)
+    assert getattr(chat, "aih_provider_id", None) is None and chat.model == "sonnet"
+    assert "ANTHROPIC_API_KEY" not in {k for k, v in (chat.env or {}).items() if v}
+    one_shot = build_generation_options({"model": "sonnet"})
+    assert one_shot.aih_provider_id is None
+
+
+def test_a_bound_model_missing_after_a_key_switch_reads_the_catalog_once(key, monkeypatch):
+    """The saved list belongs to the old key: read the new key's catalog once
+    before refusing a bound model; a model it does not list is still refused."""
+    from app.core import claude_api_models
+    from app.core.provider_agent import validate_provider_model
+
+    claude_auth_mode.set_mode("api_key")
+    cap.remember_models(KEY, [{"id": "claude-old-only", "label": "Old"}])
+    monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-new-key")
+    monkeypatch.setattr(cap, "_refresh_tried", {})
+    reads = []
+
+    async def list_models(key, *, client=None):
+        reads.append(key)
+        return [{"id": "claude-new-only", "label": "New"}]
+
+    monkeypatch.setattr(claude_api_models, "list_models", list_models)
+    ok = validate_provider_model(cap.CLAUDE_API_PROVIDER_ID, "claude-new-only", require_servable=False)
+    assert ok.ok, ok.reason
+    assert reads == ["sk-ant-new-key"]
+    missing = validate_provider_model(cap.CLAUDE_API_PROVIDER_ID, "claude-nowhere", require_servable=False)
+    assert not missing.ok
+    assert reads == ["sk-ant-new-key"]  # the list now belongs to this key: no second read
 
 
 def test_bound_turns_take_the_native_anthropic_leg(key):
@@ -90,16 +134,35 @@ async def test_credentials_are_the_saved_key(key):
     assert creds.base_url == "https://api.anthropic.com"
 
 
-def test_one_shot_generation_in_api_key_mode_runs_natively(key):
+def test_one_shot_generation_bound_to_claude_api_runs_natively(key):
     from app.core.generation_options import build_generation_options
 
-    claude_auth_mode.set_mode("api_key")
-    options = build_generation_options({"model": "sonnet"})
+    claude_auth_mode.set_mode("subscription")
+    options = build_generation_options({"model": API_MODEL_IDS["sonnet"],
+                                        "provider": cap.CLAUDE_API_PROVIDER_ID})
     assert options.aih_provider_id == cap.CLAUDE_API_PROVIDER_ID
     assert options.aih_provider_type == "anthropic"
     assert options.model == API_MODEL_IDS["sonnet"]
     # The standard provider overlay: the Anthropic fallback is blocked.
     assert (options.env or {}).get("ANTHROPIC_API_KEY") == ""
+
+
+@pytest.mark.parametrize("state", ["no_key", "off", "locked"])
+def test_a_claude_api_binding_without_its_key_fails_plainly(key, monkeypatch, state):
+    """Key removed, Claude off or storage locked: a clear refusal, never the
+    CLI or another key."""
+    from app.core.provider_agent import validate_provider_model
+
+    claude_auth_mode.set_mode("off" if state == "off" else "api_key")
+    if state == "no_key":
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: None)
+    elif state == "locked":
+        def locked():
+            raise RuntimeError("credential storage locked")
+        monkeypatch.setattr(claude_auth_mode, "stored_api_key", locked)
+    result = validate_provider_model(cap.CLAUDE_API_PROVIDER_ID, API_MODEL_IDS["sonnet"],
+                                     require_servable=False)
+    assert not result.ok and result.reason
 
 
 def test_one_shot_generation_on_the_subscription_stays_delegated(key):

@@ -1132,7 +1132,7 @@ Update status of this worker and, when `update_all_workers` is on or an install 
 
 Which credential Claude Code agents run on: your Claude subscription (the signed-in CLI), an Anthropic API key, or a cloud provider or gateway you set up.
 
-In `api_key` mode Claude Code gets no credential. A Claude model chosen without a provider runs on the Claude API provider with the active key, so installs already on this mode keep working with no changes. Switching back to `subscription` moves those chats back to the CLI. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
+Claude Code never receives the key. Only a model bound to the Claude API provider (`prov:claude-api:<model>`) runs on it; a Claude model chosen without a provider always runs on the subscription through the CLI, in every mode, and fails with a message naming the "Claude · API" models when the CLI is not signed in. In `api_key` mode the default model for new chats is the Claude API provider's, shown in the picker; existing chats keep their model. When the subscription is signed out and no other provider can run, the default also falls back to the Claude API provider. The Claude API provider is listed whenever a key is active and the mode is not `off`, so the subscription and the key can be used side by side.
 
 **Auth:** Required. Add `?refresh=true` to ask the CLI again instead of using its last answer.
 

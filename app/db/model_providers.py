@@ -219,9 +219,15 @@ def resolve_model_provider(provider_id: str, include_token: bool = False) -> Opt
     Management, credential refresh and historical billing use the exact reader
     below. Deleted rows retain the existing missing-provider behavior: their
     slot cannot be inferred safely from an opaque id.
+
+    The built-in Claude API row (``claude-api``) resolves only here: it is
+    not stored, so the exact reader, and every writer behind it, never sees it.
     """
+    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
     from app.db import database
 
+    if provider_id == CLAUDE_API_PROVIDER_ID:
+        return _claude_api_row(include_token)
     row = (database.get_model_provider(provider_id, include_token=True) if include_token
            else database.get_model_provider(provider_id))
     slot = model_provider_slot(row) if row else None
@@ -236,7 +242,8 @@ def _claude_api_row(include_token: bool = False) -> Optional[ModelProviderRow]:
     """The built-in Claude API row (the active saved Anthropic key), or None.
 
     Not stored here: :mod:`app.core.claude_api_provider` builds it from the
-    Settings > Claude key. Run-time readers include it; the management list
+    Settings > Claude key. Run-time readers include it; the exact reader
+    (:func:`get_model_provider`), the management list
     (:func:`get_all_model_providers`) and every writer do not.
     """
     from app.core import claude_api_provider
@@ -256,11 +263,12 @@ def _with_claude_api(rows: List[ModelProviderRow], include_token: bool = False) 
 def get_model_provider(
     provider_id: str, include_token: bool = False
 ) -> Optional[ModelProviderRow]:
-    """Get one provider by id. Token blob included only when requested."""
-    from app.core.claude_api_provider import CLAUDE_API_PROVIDER_ID
+    """Get one stored provider by id. Token blob included only when requested.
 
-    if provider_id == CLAUDE_API_PROVIDER_ID:
-        return _claude_api_row(include_token)
+    Stored rows only: management, writers and sync read here, so the built-in
+    Claude API row is never edited, enrolled or deleted as if it were stored.
+    Run-time readers use :func:`resolve_model_provider`.
+    """
     cols = _PUBLIC_COLUMNS if not include_token else _PUBLIC_COLUMNS + ", " + _TOKEN_COLUMNS
     with get_db() as conn:
         cursor = conn.cursor()

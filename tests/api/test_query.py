@@ -471,12 +471,14 @@ class TestConversation:
         event log, so the seams to stub are ``turn_manager`` (the off-loop
         ``submit_async`` twin) and ``turn_outcome``.
 
-        Claude runs on an API key: in subscription mode an API user's Claude
-        run is refused for using the owner's plan before anything is submitted.
+        Claude runs on a cloud account: on the subscription (also in API key
+        mode, where an unbound Claude model is the subscription) an API user's
+        Claude run is refused for using the owner's plan before anything is
+        submitted.
         """
         from app.core import claude_auth_mode
 
-        claude_auth_mode.set_mode("api_key")
+        claude_auth_mode.set_mode("cloud")
         with patch("app.api.query.require_api_key") as mock_api_key, \
              patch("app.api.query.require_claude_auth") as mock_claude, \
              patch("app.core.turn_manager.submit_async",

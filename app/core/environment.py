@@ -371,10 +371,10 @@ def inject_claude_code_auth(
     The owner chooses the mode (``app.core.claude_auth_mode``) in Settings or
     through an explicit built-in cloud/gateway worker-environment configuration:
 
-    - ``api_key``: nothing is injected and every Anthropic credential variable
-      is kept away. The stored key runs on the native Claude API provider
-      (:mod:`app.core.claude_api_provider`); the CLI never receives it.
-    - ``subscription``: no credential is injected, and any
+    - ``subscription`` (also the CLI's mode when the owner chose API key
+      mode: the stored key runs on the native Claude API provider,
+      :mod:`app.core.claude_api_provider`, and never reaches the CLI): no
+      credential is injected, and any
       ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN`` from the host or the
       profile env is kept away, so the CLI runs on the sign-in the user
       completed with ``claude auth login``. With a saved sign-in active, only
@@ -417,13 +417,7 @@ def inject_claude_code_auth(
     mode = claude_auth_mode.current_mode()
     if mode != claude_auth_mode.MODE_OFF:
         claude_subscriptions.apply_cli_home(env)
-    if mode == claude_auth_mode.MODE_API_KEY:
-        # The key runs on the native Claude API provider; the CLI never gets
-        # it, nor any other Anthropic credential from the host or profile.
-        unset = claude_auth_mode.API_KEY_UNSET
-        for name in unset:
-            env.pop(name, None)
-    elif mode == claude_auth_mode.MODE_OFF:
+    if mode == claude_auth_mode.MODE_OFF:
         unset = claude_auth_mode.OFF_UNSET
     elif mode == claude_auth_mode.MODE_CLOUD:
         from app.core import claude_cloud_auth

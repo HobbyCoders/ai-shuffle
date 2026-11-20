@@ -67,6 +67,15 @@ def test_native_claude_leg_is_billed_by_the_claude_auth_mode(mock_db, claude_mod
     assert usage_attribution(None)["billing"] == "api"
 
 
+def test_an_unbound_claude_turn_in_api_key_mode_books_as_the_subscription(mock_db):
+    """The CLI runs on the subscription in API key mode too, so a turn (or a
+    killed turn's recovery) with no provider books there, never as the key."""
+    claude_auth_mode.set_mode("api_key")
+    assert usage_attribution(None) == {
+        "provider_id": None, "provider_type": "claude", "billing": "subscription",
+    }
+
+
 def test_claude_api_key_turns_book_on_their_own_provider(mock_db):
     """The saved Anthropic key's turns never mix with the subscription leg."""
     assert usage_attribution("claude-api") == {

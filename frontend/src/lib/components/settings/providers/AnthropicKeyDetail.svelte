@@ -55,7 +55,7 @@
 
 <DetailPane name={credential.name}
 	status={credential.attention ? credential.status : undefined} statusText={credential.attention ? credential.statusText : undefined}
-	subtitle={detailLine(!credential.attention && credential.statusText, credential.on ? 'Runs Claude chats on the API, not Claude Code' : account?.active ? 'Listed as Claude · API in model pickers' : 'Saved Anthropic account', 'Billed per use')}
+	subtitle={detailLine(!credential.attention && credential.statusText, credential.on ? 'New chats default to Claude · API' : account?.active ? 'Listed as Claude · API in model pickers' : 'Saved Anthropic account', 'Billed per use')}
 	tabs={['Overview', 'Models']} {danger} item={credential.item}>
 	{#snippet tile()}<ProviderTile {provider} size="lg" />{/snippet}
 	{#snippet primary()}

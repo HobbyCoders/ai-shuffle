@@ -681,16 +681,16 @@ class TestRegistryPayloadClaude:
         assert set(payload["claude"]) == {"auth_kind", "plan_type", "enabled"}
 
     def test_api_key_mode_lists_the_key_as_the_claude_api_provider(self, mock_db, monkeypatch):
-        """API-key mode: the native Claude group has no auth kind (the CLI has no
-        credential), and the key appears as its own "Claude API" provider row,
-        even while the CLI is signed in (the explicit mode decides)."""
+        """API-key mode: the key appears as its own "Claude API" provider row,
+        and the subscription group stays while the CLI is signed in (an
+        unbound Claude model is the subscription in every mode)."""
         from app.core import claude_auth_mode
         from app.core import claude_cli_status as cs
         monkeypatch.setattr(cs, "_cached", cs.ClaudeCliStatus(installed=True, signed_in=True, plan="max"))
         monkeypatch.setattr(claude_auth_mode, "stored_api_key", lambda: "sk-ant-key")
         claude_auth_mode.set_mode("api_key")
         payload = m.registry_payload()
-        assert payload["claude"] == {"auth_kind": None, "plan_type": None, "enabled": True}
+        assert payload["claude"] == {"auth_kind": "subscription", "plan_type": "max", "enabled": True}
         row = next(p for p in payload["providers"] if p["id"] == "claude-api")
         assert row["provider_type"] == "anthropic" and row["auth_kind"] == "api"
 

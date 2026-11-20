@@ -26,7 +26,10 @@ def test_reports_defaults_and_whether_it_applies(authenticated_client):
     assert body["defaults"] == loop_guard.DEFAULTS
     assert body["enabled"] is True and body["applies"] is True
     assert body["held"] == []
+    # An unbound Claude model is the subscription in API key mode too.
     claude_auth_mode.set_mode("api_key")
+    assert authenticated_client.get(ENDPOINT).json()["applies"] is True
+    claude_auth_mode.set_mode("cloud")
     assert authenticated_client.get(ENDPOINT).json()["applies"] is False
 
 
@@ -67,9 +70,15 @@ def test_automation_create_in_subscription_mode_recommends_an_api_key(
 
 
 def test_automation_create_in_api_key_mode_has_no_notice(authenticated_client, mock_encryption, cli_signed_in):
+    """API key mode with a saved key: the default is the key bound to Claude
+    API, so the run does not use the subscription."""
+    from app.core import encryption
+
+    db.set_system_setting("anthropic_api_key", encryption.encrypt_value("sk-ant-api03-secret-ABCD"))
     claude_auth_mode.set_mode("api_key")
     r = _automation(authenticated_client)
     assert r.status_code == 201, r.text
+    assert r.json()["effective_provider_id"] == "claude-api"
     assert r.json()["notices"] == []
 
 

@@ -18,10 +18,11 @@ The row's ``auth_mode`` is always ``api_key``: a subscription sign-in never
 becomes this row, and ``fluid_credentials`` refuses subscription modes for the
 native Anthropic client anyway.
 
-Migration of the old ``api_key`` Claude sign-in mode: that mode used to hand the
-key to the Claude Code CLI. The CLI never gets the key now; on a worker still in
-that mode, a Claude model chosen without a provider runs on this provider
-instead (:func:`native_claude_rebind`). Nothing is rewritten in storage.
+Only a model bound to this row runs on the key. A Claude model chosen without a
+provider is the Claude subscription on the CLI, in every sign-in mode. The old
+``api_key`` sign-in mode used to hand the key to the CLI; the CLI never gets it
+now, and on a worker still in that mode the default model is this row's
+(:func:`app.core.credential_gate.default_run_model`), shown in the picker.
 """
 
 from __future__ import annotations
@@ -30,7 +31,8 @@ import hashlib
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
@@ -45,6 +47,11 @@ MODELS_CACHE_SETTING = "claude_api_models_cache"
 # Sorts before every real row, so "oldest created first" readers keep a stable
 # order; the default model never comes from this row (see credential_gate).
 _CREATED_AT = "1970-01-01T00:00:00+00:00"
+# refresh_models_once: last try per key hash, so a missing model is not a
+# catalog read on every turn.
+_REFRESH_INTERVAL = 300.0
+_refresh_tried: Dict[str, float] = {}
+_refresh_lock = threading.Lock()
 
 
 def is_claude_api_id(provider_id: Optional[str]) -> bool:
@@ -176,26 +183,50 @@ def api_model_id(model: Optional[str]) -> Optional[str]:
     return resolve_api_model_id(model)
 
 
-def native_claude_rebind(model: Optional[str]) -> Optional[Tuple[str, str]]:
-    """``(provider id, API model id)`` for a Claude pick made without a provider
-    on a worker whose Claude sign-in mode is the API key, else None.
+def refresh_models_once() -> bool:
+    """Read the active key's catalog when the saved list belongs to another key.
 
-    The migration of the old ``api_key`` mode: those chats used to reach the
-    CLI with the key; they now run natively on the Claude API provider.
-    Subscription, cloud and off modes keep the pick as it is.
+    For a bound model the row does not list, right after a switch of key: the
+    row then shows the built-in list until someone opens the key's Models tab.
+    One read per key per few minutes, and never on an event loop (it blocks).
+    True when a fresh list was saved, so the caller checks the model again.
     """
-    from app.core import claude_auth_mode
-    from app.core.query_options import is_native_claude_model
+    import asyncio
+    import time
 
-    if not model or not is_native_claude_model(model):
-        return None
+    import httpx
+
+    from app.core import claude_api_models
+
     try:
-        if claude_auth_mode.current_mode() != claude_auth_mode.MODE_API_KEY:
-            return None
-    except Exception:  # noqa: BLE001 — an unreadable mode keeps the pick as is
-        logger.warning("Could not read the Claude sign-in mode", exc_info=True)
-        return None
-    if virtual_row() is None:
-        return None
-    resolved = api_model_id(model)
-    return (CLAUDE_API_PROVIDER_ID, resolved) if resolved else None
+        if _claude_off():
+            return False
+        key = _active_key()
+    except Exception:  # noqa: BLE001 — an unreadable key is no refresh
+        return False
+    if not key or _cached_models(key) is not None:
+        return False
+    try:
+        asyncio.get_running_loop()
+        return False
+    except RuntimeError:
+        pass
+    digest = _key_hash(key)
+    now = time.monotonic()
+    with _refresh_lock:
+        last = _refresh_tried.get(digest)
+        if last is not None and now - last < _REFRESH_INTERVAL:
+            return False
+        _refresh_tried[digest] = now
+
+    async def read() -> List[Dict[str, str]]:
+        async with httpx.AsyncClient() as client:
+            return await claude_api_models.list_models(key, client=client)
+
+    try:
+        models = asyncio.run(read())
+        remember_models(key, models)
+    except Exception:  # noqa: BLE001 — the caller rejects the model as before
+        logger.warning("Could not refresh the Claude API model list", exc_info=True)
+        return False
+    return bool(models)
