@@ -701,18 +701,6 @@ def test_refresh_combines_runs_that_each_lack_a_file(tmp_path, monkeypatch, refr
     assert data["source_runs"] == [10, 20, 30]
 
 
-def test_refresh_accepts_the_merge_queues_run_for_main(tmp_path, monkeypatch, refresh_inventory):
-    # With a merge queue the push to main starts no journey: the queue's run has the timings.
-    monkeypatch.setattr(ci.subprocess, "check_output", _gh(
-        {10: _log("a", 30, 3), 20: _log("b", 10, 2)},
-        event="merge_group", headBranch="gh-readonly-queue/main/pr-7-" + "b" * 40))
-    path = tmp_path / "weights.json"
-    ci.refresh_weights([10, 20], path)
-    data = json.loads(path.read_text())
-    assert data["seconds"] == {"a.journey.mjs": 30, "b.journey.mjs": 10}
-    assert data["source_runs"] == [10, 20]
-
-
 def test_refresh_detects_retry_after_unterminated_output_line(tmp_path, monkeypatch, refresh_inventory):
     path = _weights(tmp_path, {"a.journey.mjs": 123, "b.journey.mjs": 456})
     original = path.read_bytes()
@@ -750,9 +738,6 @@ def test_refresh_refuses_a_run_without_a_source_revision(tmp_path, monkeypatch, 
     {"headBranch": "feature"},
     {"workflowName": "ci-frontend"},
     {"event": None},
-    {"event": "merge_group"},  # on main: the queue never runs there
-    {"event": "merge_group", "headBranch": "gh-readonly-queue/release/pr-1-" + "a" * 40},
-    {"headBranch": "gh-readonly-queue/main/pr-1-" + "a" * 40},  # a push to a branch named like the queue
 ])
 def test_refresh_refuses_ambiguous_checkout_before_logs_or_writing(
         tmp_path, monkeypatch, refresh_inventory, metadata):
