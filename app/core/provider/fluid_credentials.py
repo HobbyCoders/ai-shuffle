@@ -285,8 +285,8 @@ class CodexSubscriptionAuth:
 
     async def get_access_token(self) -> str:
         access, account_id = await _load_codex_access_token(self.provider_id)
-        if account_id:
-            self.account_id = account_id
+        # Never pair a newly read token with a cached account header.
+        self.account_id = account_id
         self._last_access_token = access
         return access
 
@@ -305,9 +305,7 @@ class CodexSubscriptionAuth:
             await _raise_if_renewed_elsewhere("ChatGPT", self.provider_id)
 
 
-async def resolve_provider_credentials(
-    kind: str, provider_id: str
-) -> ProviderCredentials:
+async def resolve_provider_credentials(kind: str, provider_id: str) -> ProviderCredentials:
     """Resolve credentials for the session's bound provider row.
 
     ``kind`` is the fluid provider kind (``openai_responses`` / ``openrouter`` /

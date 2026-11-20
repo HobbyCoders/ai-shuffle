@@ -87,6 +87,10 @@ class Collection:
 # system_settings key policy
 # ---------------------------------------------------------------------------
 
+# Exact keys that used to sync. Their signed history cannot be edited in-place;
+# a peer behind those entries must catch up with a snapshot instead.
+RETIRED_SHARED_SETTING_KEYS = ("behavioral_review_budget_v1",)
+
 _LOCAL_SETTING_PATTERNS = [
     re.compile(p) for p in (
         r"^workspace_path(:|$)",
@@ -126,7 +130,7 @@ _LOCAL_SETTING_PATTERNS = [
 
 def is_shared_setting_key(key: str) -> bool:
     """Shared unless it names something bound to this worker or its host."""
-    if not isinstance(key, str) or not key:
+    if not isinstance(key, str) or not key or key in RETIRED_SHARED_SETTING_KEYS:
         return False
     if ":" in key and key.rsplit(":", 1)[1] and _looks_like_instance_suffix(key):
         return False
@@ -576,8 +580,11 @@ CATALOG_COLLECTIONS: tuple[str, ...] = tuple(
 
 def settings_policy_table() -> List[Dict[str, Any]]:
     """Human-readable dump of the settings policy for the docs and the API."""
-    return [{"pattern": p.pattern, "sharing": "local"} for p in _LOCAL_SETTING_PATTERNS] + [
-        {"pattern": "(everything else)", "sharing": "shared"}]
+    return (
+        [{"pattern": f"^{re.escape(key)}$", "sharing": "local"} for key in RETIRED_SHARED_SETTING_KEYS]
+        + [{"pattern": p.pattern, "sharing": "local"} for p in _LOCAL_SETTING_PATTERNS]
+        + [{"pattern": "(everything else)", "sharing": "shared"}]
+    )
 
 
 def inventory() -> List[Dict[str, Any]]:

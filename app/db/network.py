@@ -762,19 +762,27 @@ _LOG_HEADS_QUERY = """
     SELECT origin_device_id, incarnation,
            (SELECT MAX(seq) FROM sync_ops op
             WHERE op.origin_device_id = sync_streams.origin_device_id
-              AND op.incarnation = sync_streams.incarnation) AS s
+              AND op.incarnation = sync_streams.incarnation) AS s,
+           FALSE AS is_applied
     FROM sync_streams WHERE origin_device_id IS NOT NULL
+"""
+_APPLIED_WATERMARKS_UNION = """
+    UNION ALL
+    SELECT origin_device_id, incarnation, last_seq AS s, TRUE AS is_applied FROM sync_watermarks
 """
 
 
-def _log_heads(cursor) -> list[dict]:
-    cursor.execute(_LOG_HEADS_QUERY, (HEAD_PROBE_LIMIT,))
+def _log_heads(cursor, *, include_applied: bool = False) -> list[dict]:
+    # One frontier read for exchange; retention still needs raw log anchors only.
+    applied = _APPLIED_WATERMARKS_UNION if include_applied else ""
+    cursor.execute(_LOG_HEADS_QUERY + applied, (HEAD_PROBE_LIMIT,))
     rows = cursor.fetchall()
-    if len(rows) >= HEAD_PROBE_LIMIT:
+    stream_count = sum(not row["is_applied"] for row in rows) if include_applied else len(rows)
+    if stream_count >= HEAD_PROBE_LIMIT:
         # The bounded probe may not have reached the final stream. Re-read a
         # complete frontier in one statement, never advertise a partial one.
-        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s FROM sync_ops "
-                       "GROUP BY origin_device_id, incarnation")
+        cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS s, FALSE AS is_applied "
+                       "FROM sync_ops GROUP BY origin_device_id, incarnation " + applied)
         rows = cursor.fetchall()
     return rows
 
@@ -876,13 +884,13 @@ def local_watermarks(_conn=None) -> Dict[str, Dict[str, int]]:
     """
     def _query(cursor):
         out: Dict[str, Dict[str, int]] = {}
-        for row in _log_heads(cursor):
-            out.setdefault(row["origin_device_id"], {})[str(int(row["incarnation"]))] = int(row["s"] or 0)
-        cursor.execute("SELECT origin_device_id, incarnation, last_seq FROM sync_watermarks")
-        for row in cursor.fetchall():
+        for row in _log_heads(cursor, include_applied=True):
             bucket = out.setdefault(row["origin_device_id"], {})
             key = str(int(row["incarnation"]))
-            bucket[key] = int(row["last_seq"])
+            if row["is_applied"]:
+                bucket[key] = int(row["s"])
+            else:
+                bucket.setdefault(key, int(row["s"] or 0))
         return out
     if _conn is not None:
         return _query(_conn.cursor())
@@ -2183,7 +2191,12 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
     """Read one frontier for a bounded batch and its snapshot-gap check."""
     with get_db() as conn:
         heads = local_watermarks(conn)
-        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
+        if _has_retired_settings_tail(conn.cursor(), watermarks, exclude_origin):
+            return [], heads, True
+        # A normal gap still advertises reconciliation, but available deltas
+        # can flow while a peer is unable to serve a snapshot during backfill.
+        snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin,
+                                     _conn=conn, _heads=heads, _check_retired_tail=False)
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
@@ -2207,9 +2220,29 @@ def preserved_builtin_ids(_conn=None) -> List[str]:
         return _query(conn)
 
 
+def _has_retired_settings_tail(cursor, watermarks: dict, exclude_origin: str | None) -> bool:
+    from app.network import policy
+    retired_keys = policy.RETIRED_SHARED_SETTING_KEYS
+    if not retired_keys:
+        return False
+    # Look up the few retired rows by (collection, record_id). Do not filter a
+    # signed stream in place: peers behind those rows need a snapshot instead.
+    placeholders = ", ".join(["%s"] * len(retired_keys))
+    cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS seq FROM sync_ops "
+                   f"WHERE collection='system_settings' AND record_id IN ({placeholders}) "
+                   "GROUP BY origin_device_id, incarnation", retired_keys)
+    for row in cursor.fetchall():
+        origin = row["origin_device_id"]
+        if origin != exclude_origin and int(row["seq"]) > int(
+                (watermarks.get(origin) or {}).get(str(row["incarnation"]), 0)):
+            return True
+    return False
+
+
 def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
                       check_tail_compatibility: bool = False, _conn=None,
-                      _heads: Optional[Dict[str, Dict[str, int]]] = None) -> bool:
+                      _heads: Optional[Dict[str, Dict[str, int]]] = None,
+                      _check_retired_tail: bool = True) -> bool:
     """Detect log gaps; only cached snapshots need whole-tail compatibility.
 
     Normal exchanges validate just the bounded batch they are about to send.
@@ -2225,6 +2258,9 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
         permission_only_projection = None
         legacy_recipient = None
         protected = ()
+        from app.network import policy
+        if _check_retired_tail and _has_retired_settings_tail(cursor, watermarks, exclude_origin):
+            return True
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -2238,7 +2274,7 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
                 if check_tail_compatibility and legacy_recipient is None:
-                    from app.network import nested_secret_sync, policy
+                    from app.network import nested_secret_sync
                     legacy_recipient = exclude_origin is not None and not nested_secret_sync.enabled(cursor, recipient=exclude_origin)
                     if legacy_recipient:
                         protected = tuple(c.name for c in policy.COLLECTIONS.values() if c.map_secrets is not None)

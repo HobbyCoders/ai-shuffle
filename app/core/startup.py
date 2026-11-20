@@ -424,6 +424,8 @@ async def start_services() -> None:
     global_events.start()
     from app.core import composer_suggestions
     composer_suggestions.start()
+    from app.core import behavioral_learning
+    behavioral_learning.start()
     from app.core.connectors.manager import connector_manager
     connector_manager.reopen()  # a previous shutdown in this process refused starts
     await connector_manager.start_all()
@@ -844,6 +846,8 @@ async def shutdown_services() -> bool:
     await global_events.shutdown()
     from app.core import composer_suggestions
     await composer_suggestions.stop()
+    from app.core import behavioral_learning
+    await behavioral_learning.stop()
     from app.core import lifecycle_events
     await lifecycle_events.stop()
 

@@ -1167,6 +1167,13 @@ class HarnessAdapter(ProviderAdapter):
                 "workspace_card": self._workspace_card,
                 "worker": self._worker_identity,
             }
+            if (not one_shot and options.extra.get("provider_auth_mode") == "chatgpt"
+                    and options.extra.get("app_session_id") and options.extra.get("provider_id")):
+                from app.core.behavioral_learning import wait_for_matching_review
+
+                await wait_for_matching_review(
+                    options.extra["app_session_id"], options.model, options.extra["provider_id"]
+                )
             compiled_prompt = await run_sync(
                 self._compile_prompt_sections,
                 system, append_system, options,
@@ -1227,8 +1234,7 @@ class HarnessAdapter(ProviderAdapter):
                 # (security + profile instructions) riding as an extra block,
                 # plus fluid's own instruction-file/skills/env gathering.
                 system=(
-                    compiled_prompt.text
-                    if compiled_prompt is not None
+                    compiled_prompt.text if compiled_prompt is not None
                     else "\n\n".join(part for part in (
                         system if system is not None else append_system,
                         prompt_block(attribution_enabled),
@@ -1872,6 +1878,15 @@ class HarnessAdapter(ProviderAdapter):
                 # Native child tasks inherit the producer's ContextVar. Even a
                 # delayed old task using the shared ctx cannot borrow this run.
                 lambda: proof if delegated or CURRENT_PLAN_RUN.get() == proof else None,
+            )
+        from app.core.behavioral_provenance import CURRENT
+
+        execution = CURRENT.get()
+        if execution is not None:
+            execution.submitted(
+                self._resolve_app_session_id(),
+                native=(isinstance(op, UserTurn) and isinstance(self._engine, NativeLoop)
+                        and self._provider_kind == "openai_responses"),
             )
         try:
             await self._engine.submit(op)
@@ -8763,6 +8778,18 @@ def _app_guidance_blocks(
     blocks.extend(_model_guidance_blocks(options.model))
     blocks.extend(_learned_guidance_blocks(options.model))
     if native:
+        extra = options.extra or {}
+        if (
+            not extra.get("one_shot")
+            and extra.get("provider_auth_mode") == "chatgpt"
+            and extra.get("app_session_id")
+            and extra.get("provider_id")
+        ):
+            from app.core.behavioral_learning import prompt_block
+
+            scoped = prompt_block(extra["app_session_id"], options.model, extra["provider_id"])
+            if scoped:
+                blocks.append(scoped)
         mcp_block = _mcp_instructions_block(registry, permitted)
         if mcp_block:
             blocks.append(mcp_block)
@@ -9910,7 +9937,7 @@ class _LearnerProvider:
 
 
 async def _build_provider_client(
-    kind: str, options: SessionOptions
+    kind: str, options: SessionOptions,
 ) -> tuple[Any, Optional[httpx.AsyncClient]]:
     """Construct the fluid native client for ``kind``, authenticated.
 
@@ -9948,23 +9975,21 @@ async def _build_provider_client(
     if kind == "openai_responses":
         timeouts = {**timeouts, **_responses_timeout_kwargs()}
         if creds is not None:
-            http_client = _usage_capture_http_client(
-                str(provider_id), creds.use_codex_backend
-            )
+            http_client = _usage_capture_http_client(str(provider_id), creds.use_codex_backend)
             if creds.use_codex_backend:
                 base_url = CODEX_RESPONSES_URL
             elif creds.base_url:
                 base_url = _responses_url(creds.base_url)
             else:
                 base_url = OPENAI_RESPONSES_URL
-            client = OpenAIResponsesClient(
-                api_key=creds.api_key,
-                auth=creds.auth,
-                base_url=base_url,
-                http_client=http_client,
-                **timeouts,
-            )
-            return client, http_client
+            kwargs = dict(api_key=creds.api_key, auth=creds.auth, base_url=base_url,
+                          http_client=http_client, **timeouts)
+            app_session_id = options.extra.get("app_session_id")
+            if creds.use_codex_backend and app_session_id:
+                from app.core.behavioral_provenance import SourceResponsesClient
+
+                return SourceResponsesClient(app_session_id, str(provider_id), **kwargs), http_client
+            return OpenAIResponsesClient(**kwargs), http_client
         _require_env_credential("OPENAI_API_KEY", kind)
         return OpenAIResponsesClient(**timeouts), None
     if kind == "gemini":

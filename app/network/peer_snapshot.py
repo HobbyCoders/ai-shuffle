@@ -71,11 +71,18 @@ def _download_allowance(pages: list) -> int:
     return int(min(MAX_LIFETIME - TTL, len(pages) * PAGE_SECONDS + total / BYTES_PER_SECOND))
 
 
+def _matches_settings_policy(manifest: dict) -> bool:
+    # Old captures may contain retired rows even at a fully retained frontier.
+    # This is a sender-side cache check, not a new requirement for receivers.
+    return manifest.get("retired_setting_keys", []) == sorted(policy.RETIRED_SHARED_SETTING_KEYS)
+
+
 def _reusable(manifest: dict) -> bool:
     """A finished capture may start a new download only within TTL of capture."""
     # Preservation changes a local projection, not the log frontier. A cached
     # pre-upgrade copy (including one on disk) cannot repair a missing parent.
-    return (manifest["expires_at"] - _download_allowance(manifest["pages"]) > time.time()
+    return (_matches_settings_policy(manifest)
+            and manifest["expires_at"] - _download_allowance(manifest["pages"]) > time.time()
             and manifest.get("preserved_builtin_ids", []) == store.preserved_builtin_ids())
 
 
@@ -145,7 +152,8 @@ def state(recipient: str, *, prepare: bool = False, fmt: int = FORMAT_FULL) -> d
         if (manifest["network_id"] != current.network_id or manifest["generation"] != current.generation
                 or manifest["recipient"] != recipient):
             raise ValueError("Membership changed during peer capture; retry")
-        if (not needs_snapshot and manifest.get("nested_secret_rekey") == mode
+        if (not needs_snapshot and _matches_settings_policy(manifest)
+                and manifest.get("nested_secret_rekey") == mode
                 and nested_secret_sync.transfer_compatible(manifest, recipient)):
             return manifest
         # Pruning or adopting another worker's snapshot can advance our head
@@ -262,6 +270,8 @@ def capture(recipient: str, fmt: int = FORMAT_FULL) -> dict:
                             "preserved_builtin_ids": store.preserved_builtin_ids(_conn=conn),
                             "nested_secret_rekey": nested_secret_sync.enabled(cursor) and
                                 nested_secret_sync.enabled(cursor, recipient=recipient)}
+                if policy.RETIRED_SHARED_SETTING_KEYS:
+                    manifest["retired_setting_keys"] = sorted(policy.RETIRED_SHARED_SETTING_KEYS)
                 if fmt >= FORMAT_DEFERRED:
                     # Left out here; the recipient fetches them once it is ready.
                     manifest["deferred"] = deferred
@@ -315,7 +325,7 @@ def page(recipient: str, transfer: str, index: int) -> bytes:
     directory = _directory(transfer)
     manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
     from app.network import nested_secret_sync
-    if (not nested_secret_sync.transfer_compatible(manifest, recipient)
+    if (not _matches_settings_policy(manifest) or not nested_secret_sync.transfer_compatible(manifest, recipient)
             or manifest["recipient"] != recipient or manifest["expires_at"] <= time.time()
             or manifest["network_id"] != engine.require_context().network_id
             or manifest["generation"] != engine.require_context().generation

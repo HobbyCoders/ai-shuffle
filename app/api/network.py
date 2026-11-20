@@ -660,6 +660,9 @@ async def peer_op(origin: str, incarnation: int, seq: int, at_or_after: bool = F
                 from app.network import nested_secret_sync
                 cursor = conn.cursor()
                 op = store.get_op(cursor, origin, incarnation, seq, at_or_after=at_or_after, highest=highest)
+                if (op and op["collection"] == "system_settings"
+                        and op["record_id"] in policy.RETIRED_SHARED_SETTING_KEYS and device_id != origin):
+                    return None  # only the original signer may use it as rollback proof
                 return op if op and nested_secret_sync.ops_compatible([op], device_id, cursor) else None
 
         op = await run_sync(_work)
