@@ -86,6 +86,7 @@
 		onRejected,
 		onRemove
 	}: Props = $props();
+	const providerDescriptionId = $props.id();
 	let failure = $state<FetchFailure | null>(null);
 
 	const id = $derived(row?.id ?? providerId ?? '');
@@ -430,13 +431,14 @@
 			</p>
 		{:else}
 			<div class="pv-mlist">
+				<!-- Describe the provider without inserting it between the model ID and its visible label. -->
+				<span id={providerDescriptionId} hidden>{current ? getProviderDisplay(current).name : providerName}</span>
 				{#each shown as r (r.id)}
 					<label class="pv-mrow">
-						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
+						<Checkbox checked={r.checked} disabled={saving} aria-describedby={providerDescriptionId} onchange={() => toggle(r.id)} />
 						<span class="id curated-identity">
 							<ProviderGlyph kind={providerGlyphKind(current?.provider_type, current?.auth_mode)} />
 							<span>{r.id}</span>
-							<span class="sr-only">{current ? getProviderDisplay(current).name : providerName}</span>
 						</span>
 						{#if r.unlisted}
 							<!-- Kept as ticked, but a chat on it is rerouted to a listed model (#1634). -->

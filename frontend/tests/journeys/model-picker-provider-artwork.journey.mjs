@@ -286,6 +286,8 @@ const automationForm = {
 
 await runJourney({
 	name: 'model-picker-provider-artwork',
+	// On CI's loopback origin the service worker can handle GETs before page.route.
+	browser: async () => ({ context: { serviceWorkers: 'block' } }),
 	allow: DEV_INSTANCE_NOISE,
 	cases: [composerCase(), settings, automation, longDuplicate, voiceForm, automationForm, ...(process.argv.includes('--mobile-shell') ? [composerCase(true)] : [])]
 });
