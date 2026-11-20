@@ -162,6 +162,92 @@ def test_request_body_envelope_and_tools() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("model", "moved"),
+    [
+        ("gpt-6.2-sol", True),
+        ("gpt-6.2-astra", True),
+        ("GPT-6.2-Sol", True),
+        ("gpt-6.3-sol", True),
+        ("gpt-6.10-sol", True),
+        ("gpt-7-sol", True),
+        ("gpt-6.1-sol", False),
+        ("gpt-6-luna", False),
+        ("gpt-5.6-sol", False),
+        ("grok-4.7", False),
+        ("m", False),
+    ],
+)
+def test_system_prompt_is_a_leading_developer_message_from_gpt_6_2(
+    model: str, moved: bool
+) -> None:
+    # GPT 6.2 and later never read top-level ``instructions`` from cache, so
+    # the system prompt is sent as the first input item for them. Every other
+    # model keeps the old body byte for byte.
+    from dataclasses import replace
+
+    from fluid.providers.openai_responses.serialize import SYSTEM_IN_INPUT_NOTE
+
+    request = replace(_request_with_history(), model=model)
+    body = build_request_body(request)
+    history = build_request_body(replace(request, system=None))["input"]
+    if not moved:
+        assert body["instructions"] == "be terse"
+        assert body["input"] == history
+        return
+    assert body["instructions"] == SYSTEM_IN_INPUT_NOTE
+    assert body["input"][0] == {
+        "type": "message",
+        "role": "developer",
+        "content": [{"type": "input_text", "text": "be terse"}],
+    }
+    assert body["input"][1:] == history
+
+
+def test_moved_system_prompt_survives_an_input_override_and_skips_an_empty_prompt() -> None:
+    from dataclasses import replace
+
+    request = replace(_request_with_history(), model="gpt-6.2-sol")
+    # ``extra["input"]`` replaces the input list, so the prompt stays in
+    # ``instructions`` where the override cannot drop it.
+    override = [{"type": "message", "role": "user", "content": []}]
+    body = build_request_body(replace(request, extra={"input": override}))
+    assert body["input"] == override
+    assert body["instructions"] == "be terse"
+    # No prompt means no developer item and no instructions.
+    for empty in (None, "", []):
+        body = build_request_body(replace(request, system=empty))
+        assert all(item.get("role") != "developer" for item in body["input"])
+        assert body.get("instructions") in (None, "")
+
+
+def test_probe_reports_a_moved_system_prompt_as_system_not_history() -> None:
+    # The fingerprint's ``system`` hash is the prompt text wherever it is
+    # sent, and ``mK`` covers messages only: the hashes match the ones a
+    # pre-6.2 model gets for the same request, and a prompt edit changes
+    # ``system`` alone.
+    from dataclasses import replace
+
+    from fluid.context.cache_probe import fingerprint_prefix, fingerprint_responses_request
+
+    def probe(request: ProviderRequest) -> dict[str, str]:
+        fingerprint = fingerprint_prefix(
+            system=request.system, tools=request.tools, messages=request.messages,
+        )
+        fingerprint_responses_request(request, fingerprint, previous_count=0)
+        return fingerprint
+
+    old = replace(_request_with_history(), model="gpt-6.1-sol")
+    new = replace(old, model="gpt-6.2-sol")
+    before, after = probe(old), probe(new)
+    segments = [key for key in after if key in ("system", "tools") or key[:1] == "m"]
+    assert segments[:3] == ["system", "tools", "m1"]
+    assert all(before[key] == after[key] for key in segments)
+
+    edited = probe(replace(new, system="be verbose"))
+    assert [key for key in segments if edited[key] != after[key]] == ["system"]
+
+
 def test_request_body_reasoning_verbatim_and_foreign_dropped() -> None:
     body = build_request_body(_request_with_history())
     items = body["input"]

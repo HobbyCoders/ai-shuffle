@@ -73,6 +73,36 @@ Expected: HTTP with `session-id` should read at least 85-95% of the prompt
 from cache. The rest of the gap to Codex Desktop (88-99% observed, 97-99% typical) is its WebSocket
 transport with `previous_response_id` continuations, a possible follow-up.
 
+## System prompt placement on GPT 6.2 and later
+
+OpenAI's prompt caching guide says that GPT 6.2 and later append top-level
+`instructions` after `input` and bill them at the uncached rate on every
+request. Fluid sent the whole system prompt as `instructions`, so on those
+models it was never read from cache. Production Usage rows showed it. Over
+calls sent within 60 seconds of the previous one, 85% of 22,800 gpt-6.1-sol
+calls read at least 95% of the previous prompt from cache; none of 21,502
+gpt-6.2-sol calls did (median 79%). Each gpt-6.2-sol call fell short by a
+constant amount per session that matched the size of the system prompt
+(median 10.6k tokens), and the daily token-hit rate fell from 92-96% to
+74-81%.
+
+For models named `gpt-<major>[.<minor>]` at 6.2 or later the serializer now
+sends the system prompt as a `developer` message at the start of `input`,
+which is where the guide says reusable instructions belong, and `instructions`
+carries one fixed line pointing at it. Every other model, and a request whose
+`extra` replaces `input`, keeps the old body byte for byte. The cache probe's
+`system` hash covers the prompt in either place and its `mK` hashes cover
+messages only, so fingerprints stay comparable across the upgrade.
+
+A session already running on GPT 6.2 rebuilds its cache once on the first call
+after the upgrade, because the input now starts with a new item.
+
+Live check: start a fresh gpt-6.2-sol session through the ChatGPT provider row
+and run a turn with five or more tool calls. From the second call on,
+`raw.prev_prompt_coverage` should be at least 0.95 on most calls, where no
+call reached it before, and the cache read should fall short of the previous
+prompt by a few tokens, not by the size of the system prompt.
+
 ## Follow-ups outside this change
 
 - The `# Workspace facts` block in the system prompt is rebuilt on every
