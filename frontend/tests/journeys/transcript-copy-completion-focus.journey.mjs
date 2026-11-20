@@ -1,7 +1,7 @@
 // Named running-app check with controlled network status and scoped notification requests in the combined case.
 import assert from 'node:assert/strict';
 import { runJourney } from './runner.mjs';
-import { api, composer, openNewChat, uniq } from './lib/app.mjs';
+import { api, composer, gotoApp, uniq, waitChat } from './lib/app.mjs';
 import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const phases = new WeakMap();
 const downloading = { peer: 'peer-a', peer_name: 'ServerWorker', phase: 'downloading', pages_done: 30,
@@ -36,8 +36,7 @@ async function focused(page, locator, description, timeout = 2000) {
 		assert.fail(`expected focus on ${description}; actual ${focus}`);
 	}
 }
-async function openAtPhase(ctx, initialPhase) {
-	const { page, log } = ctx;
+async function openAtPhase({ page, status, log }, initialPhase) {
 	phases.set(page, initialPhase);
 	await page.route('**/api/v1/network/status', async (route) => {
 		if (route.request().method() !== 'GET') return route.continue();
@@ -45,7 +44,9 @@ async function openAtPhase(ctx, initialPhase) {
 		log(`GET /api/v1/network/status -> 200 ${phase}`);
 		await route.fulfill({ json: networkStatus(phase) });
 	});
-	await openNewChat(ctx);
+	// These cases need the new-chat surface, not an agent selection or its phone sheet.
+	await gotoApp(page, status);
+	await waitChat(page, { surface: 'new' });
 	// Settings uses the same top bar; keep its implicit banner landmark exposed.
 	await page.getByRole('banner').and(page.locator('header.topbar')).waitFor({ timeout: 5000 });
 }
@@ -62,7 +63,7 @@ function makeCase(owner, viewports, throttle) {
 			if (standalone) await button(page, 'Minimize').waitFor();
 			else await page.getByRole('status').filter({ hasText: /Copying your data from ServerWorker/ }).waitFor({ timeout: 15000 });
 		},
-		async act({ page, mark }) {
+		async act({ page, mark, log }) {
 			const reload = button(page, 'Reload');
 			const minimize = button(page, 'Minimize');
 			let keptFocus;
@@ -119,7 +120,10 @@ function makeCase(owner, viewports, throttle) {
 			if (standalone) {
 				await mark('Tab from Start of workspace to the first chat control');
 				await page.keyboard.press('Tab');
-				await focused(page, button(page, 'Chats'), 'Chats after Tab from Start of workspace');
+				// The phone sidebar toggle's name includes the unread count when nonzero.
+				const chats = page.locator('header.topbar button.tb-icon.phone');
+				await focused(page, chats, 'Chats after Tab from Start of workspace');
+				log(`Tab focused the sidebar toggle: ${await chats.getAttribute('aria-label')}`);
 				await mark('Tab reached Chats');
 			}
 		}
@@ -130,13 +134,16 @@ const historyAtCompletion = {
 	viewports: ['phone'],
 	throttles: ['fast'],
 	async setup(ctx) {
-		const { page, log } = ctx;
-		await openAtPhase(ctx, 'standalone-download');
-		page.__transcriptNotice = `transcript-focus-${uniq()}`;
-		await api(page, 'POST', '/notifications', {
-			id: page.__transcriptNotice, severity: 'warning', surface: 'notification',
-			category: 'journey', title: 'A notification to open during a download', message: 'Journey notice'
+		const { page, status, log } = ctx;
+		const noticeId = page.__transcriptNotice = `transcript-focus-${uniq()}`;
+		// Persist the fixture before navigation, so the first history load can see it.
+		const url = new URL('/api/v1/notifications', status.urls.ui);
+		const created = await page.request.post(url.href, {
+			headers: { Origin: url.origin },
+			data: { id: noticeId, severity: 'warning', surface: 'notification',
+				category: 'journey', title: 'A notification to open during a download', message: 'Journey notice' }
 		});
+		assert.ok(created.ok(), `create transcript notification: HTTP ${created.status()}`);
 		// A full phone history can cover the empty space this case must tap. Show
 		// only this page's fixture, without clearing or dismissing stored history.
 		await page.route((url) => url.pathname === '/api/v1/notifications', async (route) => {
@@ -144,14 +151,14 @@ const historyAtCompletion = {
 			const response = await route.fetch();
 			if (!response.ok()) return route.fulfill({ response });
 			const history = await response.json();
-			const notifications = history.notifications.filter(({ id }) => id === page.__transcriptNotice);
+			const notifications = history.notifications.filter(({ id }) => id === noticeId);
 			log(`GET /api/v1/notifications: showing ${notifications.length} test-owned row of ${history.notifications.length}`);
 			return route.fulfill({ response, json: { ...history, notifications, unread: notifications.filter((row) => !row.read).length } });
 		});
 		// Opening the bell would mark the whole account read, not just the fixture.
 		await page.route((url) => url.pathname === '/api/v1/notifications/read-all', async (route) => {
 			if (route.request().method() !== 'POST') return route.fallback();
-			const path = `/api/v1/notifications/${encodeURIComponent(page.__transcriptNotice)}/read`;
+			const path = `/api/v1/notifications/${encodeURIComponent(noticeId)}/read`;
 			const url = new URL(path, route.request().url());
 			const response = await route.fetch({ url: url.href });
 			log(`POST /api/v1/notifications/read-all scoped to POST ${path}: HTTP ${response.status()}`);
@@ -159,10 +166,12 @@ const historyAtCompletion = {
 			const { ok } = await response.json();
 			return route.fulfill({ response, json: { updated: ok ? 1 : 0 } });
 		});
-		await openNewChat(ctx);
+		await openAtPhase(ctx, 'standalone-download');
+		await page.getByRole('button', { name: 'Notifications (1 unread)', exact: true })
+			.and(page.locator('header.topbar button.notif-btn')).waitFor();
 	},
 	async act({ page, mark, log }) {
-		const bell = page.getByRole('button', { name: /^Notifications(?: \(\d+ unread\))?$/ }).first();
+		const bell = page.locator('header.topbar button.notif-btn');
 		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
 		const restore = chip(page);
 		try {
@@ -170,7 +179,7 @@ const historyAtCompletion = {
 			await button(page, 'Minimize').press('Enter');
 			await focused(page, restore, 'transcript chip');
 			await bell.tap();
-			await panel.waitFor();
+			await panel.locator(`[data-notif-id="${page.__transcriptNotice}"]`).waitFor();
 			await mark('Tab from notification history to the transcript chip');
 			for (let i = 0; i < 40 && !(await restore.evaluate((el) => document.activeElement === el)); i++) {
 				await page.keyboard.press('Tab');
@@ -215,9 +224,16 @@ const historyAtCompletion = {
 			await mark('bell restored; reopen history and tap the composer');
 			await bell.tap();
 			await panel.waitFor();
-			await composer(page).tap();
+			const box = composer(page);
+			await box.evaluate((el) => el.addEventListener('click', (event) => {
+				window.__transcriptComposerTap = { target: event.target.localName, x: event.clientX, y: event.clientY };
+			}, { capture: true, once: true }));
+			await box.tap();
+			const hit = await page.evaluate(() => window.__transcriptComposerTap);
+			assert.ok(hit, 'the actual click reached the composer');
+			log(`composer tap at ${hit.x},${hit.y}; click target: ${hit.target}`);
 			await panel.waitFor({ state: 'hidden' });
-			await focused(page, composer(page), 'composer after tapping a real control');
+			await focused(page, box, 'composer after tapping a real control');
 			await mark('composer kept focus');
 		} finally {
 			await api(page, 'POST', `/notifications/${page.__transcriptNotice}/dismiss`).catch(() => {});
