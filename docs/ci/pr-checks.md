@@ -107,8 +107,7 @@ records are not reused.
 `ci.yml` groups concurrency by pull request (or ref): a newer push to a pull
 request cancels its running checks. Permissions are `contents: read`, with
 these exceptions: the `plan` and `javascript` jobs read Actions data; the `CI`
-job may cancel its own run and, on a push to main or the merge queue's run for
-it, report journey issues; and
+job may cancel its own run and, on a push to main, report journey issues; and
 the `android` call is allowed `contents: write` because `android.yml` holds the
 owner's publishing job, which never runs from `ci.yml`. None of the workflows
 in the list above references secrets or requires private checkout access.
@@ -349,76 +348,24 @@ only: it compares with what main has published.
 
 A dispatch on another ref skips the suites and fails the verdict.
 
-### With a merge queue on main
+### Merging and the run on main
 
-`ci.yml` also starts on `merge_group`, for main's queue only. Nothing sends
-that event until the `main` ruleset has a merge queue rule, so without one this
-section describes nothing that runs. With one, a pull request is not merged
-directly: GitHub builds the commit main would get (the pull request on top of
-main as it is then, and of the pull requests queued ahead of it), runs `ci.yml`
-on that commit, and moves main to exactly that commit when `CI` passes. A red
-run removes the pull request from the queue and main does not move.
+There is no merge queue. A pull request merges as soon as its own `CI` check
+is green. Its run checks only what its changed files affect: the areas whose
+files changed, and only the UI journeys a `map.json` rule names for those
+files. The run on main after the merge adds the rest: every area no pull
+request passed on the same files, and every journey the changes select,
+including the `all` rules and UI files no rule covers
+([UI journeys](#ui-journeys)). The nightly publishes only the newest main
+commit whose run passed all of it.
 
-The queue lets the expensive part run once per pull request instead of once
-per push to it:
-
-- **A pull request's own runs make the narrow journey selection.** The
-  journeys a `map.json` rule names for its changed files still run on every
-  push. What selects *every* journey (an `all` rule, or a UI source file no
-  rule covers) is left to the queue's run. `Select UI journeys` reads GitHub's
-  active rules for main
-  (`GET /repos/{repository}/rules/branches/main`) and narrows only when they
-  include a `merge_queue` rule and the pull request's base is `main`. An
-  unreadable answer, a missing token, another base branch or an unreadable diff
-  keep the full selection. Every other area runs on a pull request as before.
-- **The queue's run makes the full selection once.** It selects like a push to
-  main: the files changed since the nearest earlier commit `ci.yml` passed on,
-  whether main's own run or the queue's run passed there, with every `all` rule
-  and the unmapped fallback. Areas are skipped on pass records as on any run:
-  an area whose files are what the pull request's last run tested (main did
-  not change them since) does not run again. Like a run on main it stops at
-  the first failure.
-- **The push to main repeats nothing.** Main moves to the commit the queue
-  tested, so the push run finds the queue's pass records for every area and,
-  for the journeys, the queue's green `ci.yml` run on that very commit
-  (`queue_passed` in `scripts/ci/proven.py`: this repository's `ci.yml`,
-  event `merge_group`, a `gh-readonly-queue/main/` branch, completed
-  successfully, the same commit). If that run cannot be found (the listing
-  failed, or the push run started first) the push runs its journeys itself.
-  `update-reach` still runs on the push only, and the nightly still follows
-  the push run.
-- **A merge that bypasses the queue is checked on main.** The pull request's
-  journey record carries the narrow selection's key, so it stands for the push
-  only when the narrow and the full selection are the same journeys.
-  Otherwise the push runs the full selection after the merge, as it did before
-  the queue.
-
-A commit the queue passed counts as green for later selections for the same
-reason a green main commit does: its run made the full selection from the
-nearest green commit before it. While main is red the queue's run therefore
-selects everything changed since main was last green, and keeps failing on
-whatever broke main until that is fixed.
-
-The queue's run reports journeys that passed only on retry and can be used to
-refresh the journey weights, like a push to main: with a queue the push run
-starts no journey, so the queue's run is where both show.
-
-To turn the queue on (repository settings, not a file in this repository):
-
-1. Add the **Require merge queue** rule to the `main` ruleset. Merges then go
-   through `gh pr merge` or the merge button as before, but only enqueue; main
-   moves when the queue's run is green.
-2. Let the queue create its branches: a ruleset that restricts branch creation
-   must exclude `refs/heads/gh-readonly-queue/**/*`. The queue's branches are
-   two levels deep (`gh-readonly-queue/main/pr-<N>-<sha>`) and a pattern ending
-   in `/**` reaches one level only: with it GitHub removes every pull request
-   from the queue within seconds (`branch_protection_failure`) and no run
-   starts. Check with
-   `gh api 'repos/<owner>/<repo>/rules/branches/gh-readonly-queue%2Fmain%2Fpr-1'`,
-   which must list no rule of that ruleset.
-
-Turning it off again needs no change here: the pull request selection returns
-to the full one with the next run.
+A started run on main is never cancelled by a later merge. Merges that land
+while it runs wait as one run: GitHub keeps one run going and the newest one
+waiting, and a newer merge replaces the waiting one. That run selects from the
+last commit CI passed on, so it covers every merge it folded in. Apart from
+the dispatch before a stable release (above), nobody starts, dispatches or
+re-runs main's CI by hand: the next merge starts the next run, and the daily
+run checks everything.
 
 **The verdict never waits for a runner.** Runners are shared with every open
 pull request, so a job that starts only after the last test job finishes can
@@ -478,7 +425,7 @@ full test selection and gates remain in force. No test job has signing
 secrets; workflow-default permissions are `contents: read`, using only
 standard free hosted runners. Only the `CI` job can cancel the run
 (`actions: write`) and write issues, for the non-blocking journey
-reporting step of a push to main and of the merge queue's run (see below). Windows calls select the existing
+reporting step of a push to main (see below). Windows calls select the existing
 three desktop shards, not the separate stable-release portability matrix.
 
 | Local `full` stage | Hosted job / reusable workflow |
@@ -1322,9 +1269,6 @@ Both run in `ci-frontend.yml` on free standard runners and feed the required
 visual comparison runs on every pull request; the journeys a pull request runs
 are selected from its changed files, a push to main runs the journeys for what
 changed since main last passed, and the daily and dispatched runs run all of them.
-With a merge queue on main the pull request makes a narrower selection and the
-queue's run the full one
-([With a merge queue on main](#with-a-merge-queue-on-main)).
 
 ### UI journeys
 
@@ -1349,36 +1293,32 @@ the journey names), `shards` (the shard numbers that got a file) and `key`
 record).
 
 - A scheduled run, a dispatch and any other caller run **every** journey.
-- A push to main, and the merge queue's run of a commit headed for main, run
-  the journeys for the files changed since the nearest earlier commit that
-  `ci.yml` passed on, on main or in its queue (hence the full
-  history, `fetch-depth: 0`), with the same rules as a pull request below and
-  that commit's `map.json` as the base copy. Every journey held at that commit:
-  it ran there, or that run narrowed the same way from an older green commit.
-  When no such commit is found among the last 30 green runs of either kind,
+- A pull request runs the journeys `select.mjs --ci --named-only` names for
+  its changed files: the union of every matching `map.json` rule. The files
+  are the merge commit's own changes (`git diff HEAD^1 HEAD` on GitHub's merge
+  of the branch into its base, hence `fetch-depth: 2`; a rename lists both
+  paths). The `all` rules and the unmapped fallback below are left to the run
+  on main, so a pull request's selection is always a subset of main's.
+- A push to main runs the journeys `select.mjs --ci` names for the files
+  changed since the nearest earlier commit that `ci.yml` passed on (hence the
+  full history, `fetch-depth: 0`), with that commit's `map.json` as the base
+  copy. Besides the rules, a file matching an `all` rule (the harness,
+  `select.mjs`, this workflow, `scripts/devloop/**`, the core chat surface and
+  the session event stream) selects everything. Every journey held at that
+  commit: it ran there, or that run narrowed the same way from an older green
+  commit. When no such commit is found among the last 30 green runs on main,
   every journey runs.
-- A push then starts **no** shard when the merge queue's run passed on this
-  very commit, or when a pull request left a `journeys` record
+- A push then starts **no** shard when a pull request left a `journeys` record
   for the same tree with the same `key` (or with `all`): the same journeys
   already passed on these exact files. A pull request leaves that record when
-  its selection and all its journey shards succeed.
-- A pull request runs the journeys `select.mjs --ci` names for its changed
-  files. The files are the merge commit's own changes (`git diff HEAD^1 HEAD`
-  on GitHub's merge of the branch into its base, hence `fetch-depth: 2`; a
-  rename lists both paths). The union of every matching `map.json` rule is
-  selected; a file matching an `all` rule (the harness, `select.mjs`, this
-  workflow, `scripts/devloop/**`, the core chat surface and the session event
-  stream) selects everything.
-- When a merge queue guards main, a pull request runs `select.mjs --ci
-  --before-queue` instead: the same rules without the `all` rules and without
-  the unmapped fallback below, so always a subset of the full selection. The
-  queue's run makes the full one before main moves.
-- A changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
+  its selection and all its journey shards succeed, so it stands for the push
+  only when main's selection is the pull request's.
+- On a push to main, a changed non-test file under `unmapped_runs_all` (`frontend/src/**`,
   `frontend/static/**`) that **no** rule covers also selects everything: the
   map says what a file needs, it does not prove an unlisted UI file needs
   nothing. Files outside those globs that no rule covers (docs, most backend
-  code) select nothing. Only the CI selection widens like this; a local
-  `select.mjs` keeps naming what the rules name.
+  code) select nothing. Only main's selection widens like this; a pull request
+  and a local `select.mjs` keep naming what the rules name.
 - An edit to `map.json` is judged against the base's copy
   (`git show HEAD^1:frontend/tests/journeys/map.json`): the other changed files
   select what **either** copy names, so an edit can add journeys to the run but
@@ -1392,8 +1332,7 @@ each repeats the same split with `--only`. With an empty selection the
 `UI journeys` job is skipped; the aggregate accepts that only when
 `Select UI journeys` succeeded with `shards` equal to `[]`, and requires
 success in every other case. A regression in a journey the pull request did
-not select is caught by the merge queue's run before main moves or, without a
-queue, by the run on main before the nightly is published.
+not select is caught by the run on main before the nightly is published.
 
 `UI journeys (N/18)`: each shard installs the Python and JavaScript
 dependencies (pip/npm caches) and Chromium (browser-mcp's pinned
@@ -1476,7 +1415,7 @@ the stronger planning bound address both causes; the frozen historical
 calibration remains unchanged. Continued hosted headroom is tracked in #1197.
 
 Refresh after journey runtime changes, using one or more recent green
-`ci.yml` run IDs of pushes to main (or of the merge queue's runs for main) with authenticated `gh`, in a checkout of the runs'
+`ci.yml` run IDs of pushes to main with authenticated `gh`, in a checkout of the runs'
 revision (for example a detached checkout of the newest run's commit):
 `python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]`
 (`--out` writes elsewhere and leaves the checked-in file alone). A matching
@@ -1555,7 +1494,7 @@ and the CI driver without the flag still run once.
 
 **Main retries too:** on main `ci.yml` calls `ci-frontend.yml` with the same
 retry behavior. A main run that passes only on retry can authorize nightly
-publication. On **push-to-main runs and the merge queue's runs for main only**, the last step of the `CI`
+publication. On **push-to-main runs only**, the last step of the `CI`
 job (after the verdict, so it adds no queued job) reads the root `summary.json` receipts from the existing `ui-journeys-<N>`
 artifacts and opens one issue per recovered journey + full case ID (including
 viewport/throttle). A crashed file without per-case evidence retains the

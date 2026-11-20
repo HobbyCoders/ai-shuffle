@@ -1,8 +1,7 @@
 name: CI
 
-# The one workflow that checks a change: every pull request, every merge the
-# merge queue prepares for main, every push to main, a daily run of
-# everything, and a manual run on main.
+# The one workflow that checks a change: every pull request, every push to
+# main, a daily run of everything, and a manual run on main.
 #
 # Each area (backend, JavaScript, Android, ...) lists the files its checks read
 # (scripts/ci/plan.py). The "plan" job skips an area whose files are unchanged
@@ -15,13 +14,6 @@ name: CI
 # A manual run on any ref but main fails closed: its jobs do not run.
 on:
   pull_request:
-  # Only when the main ruleset has a merge queue: GitHub then tests each pull
-  # request merged onto the main it will land on, and main moves to that very
-  # commit. The run selects like a push to main; the push that follows finds
-  # this run and the pass records it left, and repeats nothing
-  # (docs/ci/pr-checks.md, "Merge queue"). Without a queue it never starts.
-  merge_group:
-    branches: [main]
   push:
     branches: [main]
   schedule:
@@ -35,9 +27,11 @@ permissions:
 
 # A newer push to a pull request replaces its running checks. On main a started
 # run always finishes; GitHub keeps only the newest waiting run and drops older
-# waiting ones. Cancelling in progress let a burst of merges cancel every run,
-# so nothing was proven and the nightly stalled until main went quiet. The
-# daily run has its own group so it can never displace a waiting push run.
+# waiting ones, so merges that land during a run fold into one follow-up run.
+# Cancelling in progress let a burst of merges cancel every run, so nothing
+# was proven and the nightly stalled until main went quiet. Nobody needs to
+# start or re-run main's CI by hand. The daily run has its own group so it can
+# never displace a waiting push run.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}${{ github.event_name == 'schedule' && '-daily' || github.event_name == 'workflow_dispatch' && '-manual' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -263,8 +257,7 @@ jobs:
   # job finishes (runners are shared with every open pull request). It reads
   # this run's jobs as they finish (scripts/ci/main_gate.py). On main the first
   # failed, cancelled or timed-out required job cancels the run, since it can
-  # no longer publish, and so does a merge in the queue, which leaves the queue
-  # at once; a pull request's run goes on, so one round shows every
+  # no longer publish; a pull request's run goes on, so one round shows every
   # failure. The called workflows skip their own verdict jobs here
   # (gated_by_caller); this job applies their rules, receipts included. The
   # publisher and nightly_wait.py read this job by its name.
@@ -278,7 +271,7 @@ jobs:
       contents: read
       # Read the run's jobs and artifacts; cancel the run on the first failure.
       actions: write
-      # Recovered UI journeys are reported as issues (main and its merge queue only).
+      # Recovered UI journeys are reported as issues (push to main only).
       issues: write
     steps:
       - uses: actions/checkout@v4
@@ -444,7 +437,7 @@ jobs:
       # and the reporting step together stay within 4 minutes; a shard still
       # uploading after that is not collected.
       - name: Wait for cancelled jobs to stop
-        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
         timeout-minutes: 2
         continue-on-error: true
         env:
@@ -454,7 +447,7 @@ jobs:
       # of another shard, and a reporting failure changes no result.
       - name: Open or update flaky journey issues
         id: report
-        if: always() && (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main'))
+        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main'
         timeout-minutes: 2
         continue-on-error: true
         env:

@@ -282,15 +282,13 @@ jobs:
 
   journey-plan:
     name: Select UI journeys
-    # A pull request runs the journeys its changed files need
-    # (frontend/tests/journeys/map.json; an uncovered UI source file, or a diff
-    # that cannot be read, runs them all). When a merge queue guards main, the
-    # pull request runs only the journeys a map rule names and the queue's run
-    # makes the full selection once, on the merged result. A push to main and
-    # the queue's run select what changed since the last commit CI passed on;
-    # the push runs nothing when the queue passed this very commit or a pull
-    # request already passed those journeys on these exact files. A scheduled
-    # or dispatched run always runs every journey.
+    # A pull request runs only the journeys a map rule names for its changed
+    # files (frontend/tests/journeys/map.json; a diff that cannot be read runs
+    # them all). A push to main runs what changed since the last commit CI
+    # passed on, with the `all` rules and every journey for an uncovered UI
+    # source file, and nothing when a pull request already passed those
+    # journeys on these exact files. A scheduled or dispatched run always runs
+    # every journey.
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -304,9 +302,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # A pull request needs its merge commit's parents; a push and a
-          # merge in the queue need the history back to the last commit CI
-          # passed on.
+          # A pull request needs its merge commit's parents; a push needs the
+          # history back to the last commit CI passed on.
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       - name: Select the journeys and their shards
         id: select

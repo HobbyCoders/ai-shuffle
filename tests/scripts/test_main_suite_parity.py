@@ -51,12 +51,10 @@ def test_one_workflow_checks_pull_requests_and_main_and_requires_all_parity_jobs
     config = workflow()
     assert config["name"] == "CI"
     assert config["permissions"] == {"contents": "read"}
-    assert set(config["on"]) == {"pull_request", "merge_group", "push", "schedule", "workflow_dispatch"}
+    assert set(config["on"]) == {"pull_request", "push", "schedule", "workflow_dispatch"}
     # Every pull request, whatever it changes: the plan decides what runs.
     assert config["on"]["pull_request"] == ""
     assert config["on"]["push"] == {"branches": ["main"]}
-    # A merge queue for main, when the repository has one; no other branch's queue.
-    assert config["on"]["merge_group"] == {"branches": ["main"]}
     # The daily run skips nothing and cannot displace a waiting push run.
     assert config["on"]["schedule"] == [{"cron": "0 8 * * *"}]
     assert config["concurrency"]["group"] == "ci-${{ github.event.pull_request.number || github.ref }}" + SUFFIX
@@ -240,18 +238,15 @@ def main_gate():
     return module
 
 
-def test_the_gate_reports_journeys_for_main_only_and_never_fails_on_it():
+def test_the_gate_reports_journeys_on_main_pushes_only_and_never_fails_on_it():
     jobs = workflow()["jobs"]
     gate = jobs["ci"]
     steps = {step.get("id"): step for step in gate["steps"]}
     report = steps["report"]
     # A red sibling shard must not suppress recovered cases from another shard.
-    # A push to main, and the merge queue's run that stands for it: with a queue
-    # the push repeats no journey, so the queue's run is where a flake shows.
-    for_main = ("always() && (github.event_name == 'merge_group' || "
-                "(github.event_name == 'push' && github.ref == 'refs/heads/main'))")
-    assert report["if"] == for_main
-    assert next(step for step in gate["steps"] if step.get("name") == "Wait for cancelled jobs to stop")["if"] == for_main
+    on_main = "always() && github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    assert report["if"] == on_main
+    assert next(step for step in gate["steps"] if step.get("name") == "Wait for cancelled jobs to stop")["if"] == on_main
     assert report["run"] == "python3 -m scripts.devloop.journey_issues"
     assert report["continue-on-error"] == "true"
     assert report["timeout-minutes"] == "2"
@@ -385,31 +380,24 @@ def test_aggregate_accepts_a_skip_only_for_an_area_the_lookup_proved():
         suite.aggregate(results)
 
 
-def test_aggregate_accepts_the_main_only_jobs_skipped_before_main_moves_only():
+def test_aggregate_accepts_the_main_only_jobs_skipped_on_a_pull_request_only():
     assert suite.MAIN_ONLY == ("update-reach",)
-    # A pull request, and the merge queue's run of one: main has not moved yet.
-    assert suite.BEFORE_MAIN == ("pull_request", "merge_group")
     for name in suite.MAIN_ONLY:
         results = full()
         results[name]["result"] = "skipped"
-        for event in suite.BEFORE_MAIN:
-            suite.aggregate(results, event)
+        suite.aggregate(results, "pull_request")
         for event in ("push", "schedule", "workflow_dispatch", ""):
             with pytest.raises(ValueError):
                 suite.aggregate(results, event)
         results[name]["result"] = "failure"
-        for event in suite.BEFORE_MAIN:
-            with pytest.raises(ValueError):
-                suite.aggregate(results, event)
-    # Nothing else may be skipped there without a recorded pass.
+        with pytest.raises(ValueError):
+            suite.aggregate(results, "pull_request")
+    # Nothing else may be skipped on a pull request without a recorded pass.
     for name in set(suite.REQUIRED) - set(suite.MAIN_ONLY):
         results = full()
         results[name]["result"] = "skipped"
-        for event in suite.BEFORE_MAIN:
-            with pytest.raises(ValueError):
-                suite.aggregate(results, event)
-    # The job the queue's run skips is the one the workflow keeps off it.
-    assert workflow()["jobs"]["update-reach"]["if"] == "github.event_name != 'pull_request' && github.ref == 'refs/heads/main'"
+        with pytest.raises(ValueError):
+            suite.aggregate(results, "pull_request")
 
 
 @pytest.mark.parametrize("name", suite.REQUIRED)

@@ -271,6 +271,11 @@
 			]
 		},
 		{
+			"why": "update details stay inside the open sidebar and installer actions stay in the notification dock",
+			"journeys": ["desktop-update-popup"],
+			"globs": ["frontend/tests/journeys/desktop-update-popup.journey.mjs", "frontend/src/lib/components/layout/sidebar/DesktopUpdateButton.svelte", "frontend/src/lib/components/layout/Sidebar.svelte"]
+		},
+		{
 			"why": "resident updater identity and preparation timings stay separate from app version, and refresh is connected-worker only",
 			"journeys": ["update-runtime"],
 			"globs": [
@@ -353,6 +358,15 @@
 				"app/core/message_resolver.py",
 				"app/core/jsonl_rewind.py",
 				"app/core/provider/fluid_transcript.py"
+			]
+		},
+		{
+			"why": "first-copy notice priority and focus when transcript downloads complete",
+			"journeys": ["transcript-copy-completion-focus"],
+			"globs": [
+				"frontend/src/lib/components/FirstCopyBanner.svelte",
+				"frontend/src/lib/components/layout/AppLayout.svelte",
+				"frontend/tests/journeys/transcript-copy-completion-focus.journey.mjs"
 			]
 		},
 		{
@@ -780,7 +794,7 @@
 			]
 		},
 		{
-			"why": "a Claude subscription's models come from Claude Code: turning a version on in Settings and running a turn on exactly that version",
+			"why": "a Claude subscription's models come from Claude Code: Settings lists every version, Mythos included, and a turn runs on exactly the picked version",
 			"journeys": ["claude-cli-models"],
 			"globs": [
 				"frontend/tests/journeys/claude-cli-models.journey.mjs",

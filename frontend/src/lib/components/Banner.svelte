@@ -26,6 +26,7 @@
 		action,
 		secondaryAction,
 		icon = true,
+		element = $bindable<HTMLDivElement>(),
 		children,
 	}: {
 		severity?: NotificationSeverity;
@@ -40,6 +41,8 @@
 		/** A second, quieter action after `action`. */
 		secondaryAction?: { label: string; onClick: () => void };
 		icon?: boolean;
+		/** Bound by notices that need to detect focus anywhere in the card. */
+		element?: HTMLDivElement;
 		/** Optional rich content; overrides `message` when provided. */
 		children?: Snippet;
 	} = $props();
@@ -56,6 +59,7 @@
 </script>
 
 <div
+	bind:this={element}
 	class="banner sev-{severity} variant-{variant}"
 	role={severity === 'error' ? 'alert' : 'status'}
 >

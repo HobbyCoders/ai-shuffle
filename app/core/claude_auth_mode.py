@@ -35,6 +35,8 @@ module never reads the CLI's own credential files; CLI sign-in state comes from
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -122,9 +124,34 @@ def _cli_signed_in_peek() -> Optional[bool]:
     return None if status is None else bool(status.signed_in)
 
 
+_mode_pin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("claude_auth_mode_pin", default=None)
+
+
+@contextlib.contextmanager
+def pinned_mode():
+    """Answer :func:`current_mode` with one read for the whole block, so a
+    projection that asks several times (the model registry payload) describes
+    one mode even if the owner switches midway. Yields that mode."""
+    held = _mode_pin.get()
+    if held is not None:
+        yield held
+        return
+    token = _mode_pin.set(current_mode())
+    try:
+        yield _mode_pin.get()
+    finally:
+        _mode_pin.reset(token)
+
+
 def current_mode() -> str:
-    """The active mode. Reads the setting; before startup has recorded one it
-    answers with the default without writing anything."""
+    """The active mode (the pinned one inside :func:`pinned_mode`)."""
+    held = _mode_pin.get()
+    return held if held is not None else _read_mode()
+
+
+def _read_mode() -> str:
+    """Reads the setting; before startup has recorded one it answers with the
+    default without writing anything."""
     try:
         mode = stored_mode(cached=True)
     except Exception:  # noqa: BLE001 — a DB hiccup must not pick a mode silently
