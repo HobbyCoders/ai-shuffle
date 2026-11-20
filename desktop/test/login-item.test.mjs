@@ -167,7 +167,7 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 
 		// Keep the native handle open until the actual JS caller has tested it.
 		// The same controller/host exercises both directions on the same file.
-		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::WriteLine('held'); [void][Console]::ReadLine() } finally { $lock.Dispose() }`), {
+		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::Error.WriteLine('exe=' + (Get-Process -Id $PID).Path + ' arch=' + [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture + ' stdinRedirected=' + [Console]::IsInputRedirected); [Console]::WriteLine('held'); $reply = [Console]::ReadLine(); [Console]::Error.WriteLine('consoleEof=' + ($null -eq $reply)) } finally { $lock.Dispose() }`), {
 			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000
 		});
 		const closed = new Promise(resolve => {
@@ -187,6 +187,7 @@ test('Windows guard excludes native no-share handles in both directions', { skip
 			lines.close();
 			holder.stdin.end();
 			const { error, status, signal } = await closed;
+			console.log(`startup guard diagnostics: Node ${process.version} ${process.arch}, NODE_OPTIONS present=${Boolean(process.env.NODE_OPTIONS)}, NODE_TEST_CONTEXT=${process.env.NODE_TEST_CONTEXT}, holder exit=${status}/${signal}, ${stderr.trim()}`);
 			assert.ifError(error);
 			assert.equal(status, 0, stderr || signal);
 		}
