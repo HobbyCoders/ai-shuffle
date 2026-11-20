@@ -17,7 +17,9 @@
 # the installer update the app runs itself, writes nothing.
 
 !include LogicLib.nsh
-!define SHUFFLE_LOGIN_ITEM_STAMP "resources\login-item-uninstall-v1"
+!define SHUFFLE_LOGIN_ITEM_STAMP "resources\login-item-uninstall-v2"
+!define SHUFFLE_STARTUP_GUARD "$APPDATA\${APP_PACKAGE_NAME}.login-item-lock"
+!define SHUFFLE_STARTUP_REPLACEMENT "AI_SHUFFLE_NSIS_STARTUP_REPLACEMENT"
 !define SHUFFLE_RUN "Software\Microsoft\Windows\CurrentVersion\Run"
 !define SHUFFLE_APPROVAL "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
 !define SHUFFLE_LOGIN_ITEM "com.hobbycoders.aishuffle.desktop"
@@ -65,10 +67,9 @@
   !macroend
 
   !macro customHeader
-    # The pinned assisted installer inserts this Section before its install
-    # Section, after scope/directory selection but BEFORE it runs either old
-    # uninstaller. --updated alone cannot tell an upgrade from a move.
-    Section "-Check startup registration"
+    # The pinned assisted installer runs this after destination selection.
+    # It passes the chosen target to old uninstallers launched by ExecWait.
+    Section "-Identify startup replacement"
       SectionIn RO
       # installer.nsi selects all-users in its silent machine-upgrade path.
       # Resolve that same destination before comparing it below.
@@ -89,16 +90,13 @@
         ${endif}
       ${endif}
 
-      ReadRegStr $2 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
-      ${if} $2 != ""
-      ${andIf} ${FileExists} "$2\${SHUFFLE_LOGIN_ITEM_STAMP}"
-        ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
-        ${if} $3 != ""
-          ${if} $installMode != "CurrentUser"
-          ${orIf} $INSTDIR != $2
-            !insertmacro shuffleStartupRefuse "AI Shuffle is registered to start at sign-in. In Settings > General, turn it off or remove the startup item, or uninstall this per-user copy before changing the install scope or folder."
-          ${endif}
-        ${endif}
+      StrCpy $0 ""
+      ${if} $installMode == "CurrentUser"
+        StrCpy $0 "$INSTDIR"
+      ${endif}
+      System::Call 'kernel32::SetEnvironmentVariableW(w "${SHUFFLE_STARTUP_REPLACEMENT}", w r0) i .r1'
+      ${if} $1 == 0
+        !insertmacro shuffleStartupRefuse "AI Shuffle could not pass the installation destination to its uninstaller."
       ${endif}
     SectionEnd
   !macroend
@@ -205,14 +203,30 @@
       ${orIf} $1 != "$APPDATA"
         !insertmacro shuffleStartupRefuse "Uninstall this per-user copy of AI Shuffle from the Windows account that installed it."
       ${endif}
-      # New installers allow --updated to replace this copy only in place
-      # while startup is registered. Preserve the entry and Windows approval.
+      ReadEnvStr $2 "${SHUFFLE_STARTUP_REPLACEMENT}"
       ${ifNot} ${isUpdated}
+      ${orIf} $2 != "$INSTDIR"
+        # After the close prompt, fence off the managed app's synchronous
+        # startup writes. GENERIC_READ / no sharing / OPEN_ALWAYS; an existing
+        # Node read handle also prevents us opening it. Keep the handle until
+        # process exit, through the builder's removal/rollback. The empty
+        # guard lives outside the install tree and is never removed here.
+        System::Call 'kernel32::CreateFileW(w "${SHUFFLE_STARTUP_GUARD}", i 0x80000000, i 0, p 0, i 4, i 0x80, p 0) p .r0'
+        ${if} $0 == -1
+          !insertmacro shuffleStartupRefuse "AI Shuffle could not lock its start-at-sign-in setting. Close Settings and retry."
+        ${endif}
         ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
-        ${if} $3 == ""
-        ${orIf} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+        ${if} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+          ClearErrors
           DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+          ${if} ${Errors}
+            !insertmacro shuffleStartupRefuse "AI Shuffle could not remove its start-at-sign-in entry. Remove it in Settings and retry."
+          ${endif}
+          StrCpy $3 ""
+        ${endif}
+        ${if} $3 == ""
           DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"
+          ClearErrors
         ${endif}
       ${endif}
     ${endif}

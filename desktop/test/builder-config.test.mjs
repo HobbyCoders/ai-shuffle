@@ -22,9 +22,9 @@ const macro = name => {
 // This models only the instructions these hooks use, not the installer runtime.
 function runStartupHook(name, { old = 'C:\\User app', target = old, mode = 'CurrentUser',
   owner = 'C:\\Roaming', stamp = owner, stampAt = old, run = `"${old}\\AI Shuffle.exe"`, approved = 'blocked',
-  updated = false, silentMachineUpgrade = false } = {}) {
+  updated = false, silentMachineUpgrade = false, replacement = '', writerActive = false } = {}) {
   const v = { $INSTDIR: target, $installMode: mode, $APPDATA: owner, $hasPerMachineInstallation: silentMachineUpgrade ? '1' : '0' };
-  const stampPath = '\\resources\\login-item-uninstall-v1';
+  const stampPath = '\\resources\\login-item-uninstall-v2';
   const resolve = token => token.replace(/^(['"])(.*)\1$/, '$2')
     .replace(/\$\{SHUFFLE_LOGIN_ITEM_STAMP\}/g, stampPath.slice(1))
     .replace(/\$\{APP_EXECUTABLE_FILENAME\}/g, 'AI Shuffle.exe')
@@ -32,6 +32,7 @@ function runStartupHook(name, { old = 'C:\\User app', target = old, mode = 'Curr
   const condition = expr => {
     if (expr === '${Silent}') return silentMachineUpgrade;
     if (expr === '${isUpdated}') return updated;
+    if (expr === '${Errors}') return false;
     if (expr.startsWith('${FileExists} ')) return !!stamp && resolve(expr.slice(14)) === resolve(stampAt + stampPath);
     const comparison = expr.match(/^(.*) (==|!=) (.*)$/);
     assert.ok(comparison, expr);
@@ -51,17 +52,23 @@ function runStartupHook(name, { old = 'C:\\User app', target = old, mode = 'Curr
     }
     if (active.includes(false)) continue;
     if (/^Section(?:In|End| )/.test(line) || /^!insertmacro shuffle(?:User|Restore)Context$/.test(line)) continue;
-    if (line.startsWith('!insertmacro shuffleStartupRefuse ')) return { proceeds: false, run, approved };
+    if (line.startsWith('!insertmacro shuffleStartupRefuse ')) return { proceeds: false, run, approved, replacement };
     if (line === '!insertmacro setInstallModePerAllUsers') v.$installMode = 'all';
     else if (line.startsWith('!insertmacro shuffleReadStartupOwner ')) v.$1 = stamp;
-    else if (line === 'StrCpy $2 "$APPDATA"') v.$2 = owner;
-    else if (line === 'ReadRegStr $2 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation') v.$2 = old;
+    else if (/^StrCpy \$[023] /.test(line)) {
+      const [, dest, source] = line.match(/^StrCpy (\$\d) (.*)$/);
+      v[dest] = source === '"$INSTDIR"' ? target : source === '"$APPDATA"' ? owner : '';
+    }
+    else if (line.startsWith("System::Call 'kernel32::SetEnvironmentVariableW(")) { replacement = v.$0; v.$1 = '1'; }
+    else if (line === 'ReadEnvStr $2 "${SHUFFLE_STARTUP_REPLACEMENT}"') v.$2 = replacement;
+    else if (line.startsWith("System::Call 'kernel32::CreateFileW(")) v.$0 = writerActive ? '-1' : '123';
+    else if (line === 'ClearErrors') continue;
     else if (line === 'ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"') v.$3 = run;
     else if (line === 'DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"') run = '';
     else if (line === 'DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"') approved = '';
     else assert.fail(`Unexpected operation in ${name}: ${line}`);
   }
-  return { proceeds: true, run, approved };
+  return { proceeds: true, run, approved, replacement };
 }
 
 // Index of the ${endif} that closes the ${if}/${ifNot} at lines[start], counting nesting.
@@ -167,53 +174,65 @@ test('the channel page never overwrites an existing choice and writes nothing fo
   assert.ok(lines.indexOf('!insertmacro shuffleRestoreContext') > rename);
 });
 
-test('per-user installers stamp uninstall support and remove only their startup entries, never on upgrade', () => {
-  assert.match(channelCode, /!define SHUFFLE_LOGIN_ITEM_STAMP "resources\\login-item-uninstall-v1"/);
+test('per-user installers stamp uninstall support and use the same feature-only guard as Electron', () => {
+  assert.match(channelCode, /!define SHUFFLE_LOGIN_ITEM_STAMP "resources\\login-item-uninstall-v2"/);
+  assert.match(channelCode, /!define SHUFFLE_STARTUP_GUARD "\$APPDATA\\\$\{APP_PACKAGE_NAME\}\.login-item-lock"/);
+  assert.equal(require('../package.json').name, 'ai-shuffle-desktop');
   const install = macro('customInstall').split('\n').map(line => line.trim()).filter(Boolean);
   const currentUser = install.indexOf('${if} $installMode == "CurrentUser"');
   const stamp = install.indexOf('FileOpen $0 "$INSTDIR\\${SHUFFLE_LOGIN_ITEM_STAMP}" w');
   const write = install.indexOf('FileWriteUTF16LE $0 "$APPDATA"');
   assert.ok(currentUser > 0 && currentUser < stamp && stamp < write && write < matchingEndif(install, currentUser));
-  assert.match(channelCode, /!else\s+!macro customUnInstall/);
-  const uninstall = macro('customUnInstall').split('\n').map(line => line.trim()).filter(Boolean);
-  const upgradeGuard = uninstall.indexOf('${ifNot} ${isUpdated}');
-  assert.ok(upgradeGuard > 0);
-  assert.deepEqual(uninstall.slice(upgradeGuard, matchingEndif(uninstall, upgradeGuard)).filter(line => line.startsWith('Delete')), [
+  const uninstall = macro('customUnInstall');
+  assert.match(uninstall, /CreateFileW\(w "\$\{SHUFFLE_STARTUP_GUARD\}", i 0x80000000, i 0, p 0, i 4, i 0x80, p 0\)[\s\S]+ReadRegStr/);
+  assert.deepEqual(uninstall.split('\n').map(l => l.trim()).filter(l => l.startsWith('Delete')), [
     'DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"',
     'DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"'
   ]);
 });
 
-test('pinned NSIS runs the startup guard before either old installation is removed', () => {
+test('pinned NSIS selects the replacement before either ExecWait; old removal fences after the close check', () => {
   const template = file => readFileSync(path.join(require.resolve('app-builder-lib/package.json'), '..', 'templates/nsis', file), 'utf8');
-  const installer = template('installer.nsi');
   const section = template('installSection.nsh');
-  assert.match(installer, /!insertmacro customHeader[\s\S]+Section "install"[\s\S]+!include "installSection.nsh"/);
-  assert.match(section, /!insertmacro uninstallOldVersion SHELL_CONTEXT[\s\S]+!insertmacro uninstallOldVersion HKEY_CURRENT_USER[\s\S]+!insertmacro installApplicationFiles/);
-  assert.match(template('include/installUtil.nsh'), /StrCpy \$0 "\$0 --updated"[\s\S]+ExecWait/);
+  assert.match(template('installer.nsi'), /!insertmacro customHeader[\s\S]+Section "install"[\s\S]+!include "installSection.nsh"/);
+  assert.match(section, /CHECK_APP_RUNNING[\s\S]+!insertmacro uninstallOldVersion SHELL_CONTEXT[\s\S]+!insertmacro uninstallOldVersion HKEY_CURRENT_USER[\s\S]+!insertmacro installApplicationFiles/);
+  assert.match(template('include/installUtil.nsh'), /StrCpy \$0 "\$0 --updated"[\s\S]+ExecWait .*\$uninstallerFileNameTemp[\s\S]+ExecWait .*\$uninstallerFileName/);
+  const uninstaller = template('uninstaller.nsh');
+  assert.match(uninstaller, /\$\{If\} \$\{Silent\}\s+call un\.checkAppRunning/);
+  assert.match(uninstaller, /Section "un\.[\s\S]+call un\.checkAppRunning[\s\S]+!insertmacro customUnInstall[\s\S]+Call un\.atomicRMDir[\s\S]+Call un\.restoreFiles/);
 });
 
-test('a registered per-user copy can upgrade in place, but cannot change folder or scope', () => {
-  const install = options => runStartupHook('customHeader', options);
-  const unchanged = { run: '"C:\\User app\\AI Shuffle.exe"', approved: 'blocked' };
-  assert.deepEqual(install({ target: 'c:\\user APP' }), { proceeds: true, ...unchanged });
-  for (const options of [{ target: 'C:\\New app' }, { mode: 'all' }, { silentMachineUpgrade: true }]) {
-    assert.deepEqual(install(options), { proceeds: false, ...unchanged });
+const oldRun = '"C:\\User app\\AI Shuffle.exe"';
+
+test('opt-in during the close prompt is carried only for a same-folder per-user upgrade', () => {
+  for (const [destination, preserve] of [
+    [{ target: 'c:\\user APP' }, true], [{ target: 'C:\\New app' }, false],
+    [{ mode: 'all' }, false], [{ silentMachineUpgrade: true }, false]
+  ]) {
+    const wait = runStartupHook('customHeader', { ...destination, run: '', approved: '' });
+    assert.equal(wait.proceeds, true);
+    const atPrompt = { run: oldRun, approved: 'blocked' };
+    // Cancel does not invoke the child uninstaller, so the opt-in stands.
+    assert.deepEqual(runStartupHook('customHeader', { ...destination, ...atPrompt }), { ...wait, ...atPrompt });
+    const remove = opts => runStartupHook('customUnInstall', { ...atPrompt, updated: true, replacement: wait.replacement, ...opts });
+    if (!preserve) {
+      assert.deepEqual(remove({ writerActive: true }), { proceeds: false, ...atPrompt, replacement: wait.replacement });
+    }
+    assert.deepEqual(remove({}), {
+      proceeds: true, run: preserve ? oldRun : '', approved: preserve ? 'blocked' : '', replacement: wait.replacement
+    });
   }
-  assert.equal(install({ stamp: '', target: 'C:\\New app' }).proceeds, true, 'legacy installer');
-  assert.equal(install({ run: '', approved: '', mode: 'all' }).proceeds, true, 'after opting out');
-  assert.equal(install({ old: '', run: '', mode: 'all', target: 'C:\\Machine app' }).proceeds, true, 'another account installs elsewhere');
-  assert.equal(install({ old: '', run: '', mode: 'all', target: 'C:\\User app', stampAt: 'C:\\User app', stamp: 'C:\\Other' }).proceeds, false, 'another account cannot overwrite the stamped target');
 });
 
-test('uninstall preserves upgrade approval, and cleanup requires the matching account and target', () => {
+test('only the owning user can replace or uninstall a stamped copy; true uninstall ignores the replacement hint', () => {
+  assert.equal(runStartupHook('customHeader', { old: '', target: 'C:\\Machine app', mode: 'all' }).proceeds, true);
+  assert.equal(runStartupHook('customHeader', { stamp: 'C:\\Another user', mode: 'all' }).proceeds, false);
   const uninstall = options => runStartupHook('customUnInstall', options);
-  const unchanged = { run: '"C:\\User app\\AI Shuffle.exe"', approved: 'blocked' };
-  assert.deepEqual(uninstall({ updated: true }), { proceeds: true, ...unchanged });
-  assert.deepEqual(uninstall({}), { proceeds: true, run: '', approved: '' });
-  assert.deepEqual(uninstall({ stamp: 'C:\\Other' }), { proceeds: false, ...unchanged });
-  assert.deepEqual(uninstall({ mode: 'all' }), { proceeds: false, ...unchanged });
-  assert.deepEqual(uninstall({ stamp: '' }), { proceeds: true, ...unchanged });
+  assert.equal(uninstall({ stamp: 'C:\\Another user' }).proceeds, false);
+  assert.equal(uninstall({ mode: 'all' }).proceeds, false);
+  assert.equal(uninstall({ stamp: '' }).run, oldRun, 'legacy unstamped copies have no authority');
+  assert.equal(uninstall({ replacement: 'C:\\User app' }).run, '', 'true uninstall cleans up even with a replacement hint');
+  assert.equal(uninstall({ updated: true }).run, '', 'an unknown installer destination does not justify carrying the registration');
   const differentRun = '"C:\\Other app\\AI Shuffle.exe"';
-  assert.deepEqual(uninstall({ run: differentRun }), { proceeds: true, run: differentRun, approved: 'blocked' });
+  assert.deepEqual(uninstall({ run: differentRun }), { proceeds: true, run: differentRun, approved: 'blocked', replacement: '' });
 });

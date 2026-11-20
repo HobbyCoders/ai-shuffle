@@ -230,6 +230,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npx electron-builder --win nsis --x64 --publish never
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify the Windows startup guard using disposable files
+        run: node --test --test-name-pattern 'Windows guard' test/login-item.test.mjs
       - name: Silent installs write the channel file only when asked, and never overwrite it
         run: |
           $ErrorActionPreference = 'Stop'
@@ -260,15 +262,23 @@ jobs:
 
           if (Test-Path -LiteralPath (Split-Path $updates)) { throw 'The runner already has an AI Shuffle profile' }
           Check '1. default install' @('/S', '/currentuser') $null
-          if (-not (Test-Path "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe")) { throw '1. default install: AI Shuffle.exe was not installed for the current user' }
+          $perUserExe = @(Get-ChildItem "$env:LOCALAPPDATA\Programs\*\AI Shuffle.exe" -File)
+          if ($perUserExe.Count -ne 1) { throw '1. default install: expected one per-user AI Shuffle.exe' }
+          $stamp = Join-Path $perUserExe[0].DirectoryName 'resources\login-item-uninstall-v2'
+          $guard = Join-Path $env:APPDATA 'ai-shuffle-desktop.login-item-lock'
+          if ([IO.File]::ReadAllText($stamp, [Text.Encoding]::Unicode) -ne $env:APPDATA) { throw '1. default install: missing or wrong startup capability owner' }
           if (Test-Path -LiteralPath $updates) { throw '1. default install: Stable created the updates folder' }
           Check '2. nightly install' @('/S', '/currentuser', '/CHANNEL=nightly') $nightly
           [IO.File]::WriteAllText($file, $stable)
           Check '3. existing choice kept' @('/S', '/CHANNEL=nightly') $stable
           Check '4. installer update' @('/S', '--updated') $stable
+          if (-not (Test-Path -LiteralPath $stamp)) { throw '4. installer update: per-user startup capability missing' }
+          if (Test-Path -LiteralPath $guard) { throw '4. installer update: same-folder replacement used the destructive guard' }
           Remove-Item -LiteralPath $file
           Check '5. all-users nightly install' @('/S', '/allusers', '/CHANNEL=nightly') $nightly
           if (-not (Test-Path "$env:ProgramFiles\*\AI Shuffle.exe")) { throw '5. all-users nightly install: AI Shuffle.exe was not installed for all users' }
+          if (Test-Path -LiteralPath $stamp) { throw '5. all-users nightly install: the per-user capability survived removal' }
+          if ((Get-Item -LiteralPath $guard).Length -ne 0) { throw '5. all-users nightly install: destructive removal did not use an empty guard' }
           if (Test-Path -LiteralPath $machineFile) { throw "5. all-users nightly install: wrote $machineFile instead of the user's profile" }
 
           $results | ForEach-Object { Write-Host $_ }
