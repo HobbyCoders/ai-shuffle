@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { closeSync, mkdtempSync, mkdirSync, openSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { test } from 'node:test';
 import { loginItemControl } from '../dist/main/login-item.js';
 
@@ -131,12 +134,63 @@ test('Windows rechecks install authority inside the guard and never writes if it
 	assert.equal(writes, 1);
 });
 
-test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, () => {
-	const require = createRequire(import.meta.url);
-	const fixture = fileURLToPath(new URL('./helpers/windows-login-item-guard.cjs', import.meta.url));
-	const result = spawnSync(require('electron'), [fixture, JSON.stringify(win)], {
-		env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000, windowsHide: true
-	});
-	assert.ifError(result.error);
-	assert.equal(result.status, 0, result.stdout + result.stderr);
+test('Windows guard excludes native no-share handles in both directions', { skip: process.platform !== 'win32' }, async () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), 'shuffle-startup-guard-'));
+	try {
+		const installedExecutable = path.join(dir, 'AI Shuffle.exe');
+		const resources = path.join(dir, 'resources');
+		const host = { ...win, installedExecutable, localAppData: dir };
+		const guard = path.join(dir, 'ai-shuffle-desktop', 'login-item-lock');
+		mkdirSync(path.dirname(guard));
+		writeFileSync(guard, '');
+		writeFileSync(installedExecutable, '');
+		mkdirSync(resources);
+		writeFileSync(path.join(resources, 'login-item-uninstall-v3'), `\uFEFF${dir}`, 'utf16le');
+		const powershell = script => ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+		const openExclusive = `[IO.File]::Open('${guard.replaceAll("'", "''")}', [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)`;
+		let reads = 0;
+		let writes = 0;
+		const control = loginItemControl({
+			setLoginItemSettings() { writes++; },
+			getLoginItemSettings() {
+				reads++;
+				const probe = spawnSync('powershell.exe', powershell(`try { (${openExclusive}).Dispose(); exit 1 } catch [IO.IOException] { if ((($_.Exception.GetBaseException()).HResult -band 65535) -ne 32) { throw }; exit 0 }`), {
+					encoding: 'utf8', timeout: 15_000
+				});
+				assert.ifError(probe.error);
+				assert.equal(probe.status, 0, probe.stdout + probe.stderr);
+				return { openAtLogin: false };
+			}
+		}, host);
+		assert.deepEqual(control.set(false), { state: 'disabled', failed: false });
+		assert.deepEqual([writes, reads], [1, 1]);
+
+		// Keep the native handle open until the actual JS caller has tested it.
+		// The same controller/host exercises both directions on the same file.
+		const holder = spawn('powershell.exe', powershell(`$ErrorActionPreference = 'Stop'; $lock = ${openExclusive}; try { [Console]::WriteLine('held'); [void][Console]::ReadLine() } finally { $lock.Dispose() }`), {
+			stdio: ['pipe', 'pipe', 'pipe'], timeout: 15_000
+		});
+		const closed = new Promise(resolve => {
+			holder.once('error', error => resolve({ error }));
+			holder.once('close', (status, signal) => resolve({ status, signal }));
+		});
+		let stderr = '';
+		holder.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+		const lines = createInterface({ input: holder.stdout });
+		try {
+			const held = await Promise.race([once(lines, 'line').then(([line]) => line), closed.then(() => stderr)]);
+			assert.equal(held, 'held', 'native holder must acknowledge opening the guard');
+			assert.throws(() => closeSync(openSync(guard, 'r')), { code: 'EBUSY' }, 'the real guard path must be locked');
+			assert.deepEqual(control.set(true), { state: 'unavailable', failed: true });
+			assert.deepEqual([writes, reads], [1, 1], 'no Electron call while the native handle is held');
+		} finally {
+			lines.close();
+			holder.stdin.end();
+			const { error, status, signal } = await closed;
+			assert.ifError(error);
+			assert.equal(status, 0, stderr || signal);
+		}
+		assert.deepEqual(control.set(false), { state: 'disabled', failed: false }, 'can write again when the exclusive holder exits');
+		assert.deepEqual([writes, reads], [2, 2]);
+	} finally { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
 });
