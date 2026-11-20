@@ -2,6 +2,7 @@ import { tick } from 'svelte';
 import { cleanup, fireEvent, render, screen, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ModelPickerPanel from './ModelPickerPanel.svelte';
+import ModelPicker from './ModelPicker.svelte';
 import { reloadFavoriteModels } from '$lib/stores/modelFavorites.svelte';
 import { hydrateModelRegistry } from '$lib/constants/models';
 import { buildModelPickerCatalog } from '$lib/constants/model-picker';
@@ -78,6 +79,30 @@ beforeEach(async () => {
 afterEach(() => cleanup());
 
 describe('ModelPickerPanel', () => {
+	it('keeps normal picker callbacks and controls when the current model is picked', async () => {
+		const onSelect = vi.fn();
+		render(ModelPicker, { props: { catalogOverride: { groups, options }, value: 'sonnet', onSelect } });
+		await fireEvent.click(screen.getByRole('button', { name: 'Sonnet' }));
+		await fireEvent.click(screen.getByRole('option', { name: 'Sonnet' }));
+		expect(onSelect).toHaveBeenCalledExactlyOnceWith('sonnet');
+		expect(screen.getByRole('textbox', { name: 'Search models' })).toBeTruthy();
+	});
+
+	it('draws legacy subscription artwork without changing the producer route IDs', async () => {
+		const registry = mocks.registry as { providers: unknown[] };
+		registry.providers.push(
+			{ id: 'legacy-codex', name: 'Legacy ChatGPT', provider_type: 'custom', auth_mode: 'chatgpt', auth_kind: 'subscription', models: [{ id: 'duplicate-id', label: 'Shared label' }] },
+			{ id: 'legacy-xai', name: 'Legacy SuperGrok', provider_type: 'custom', auth_mode: 'grok', auth_kind: 'subscription', models: [{ id: 'duplicate-id', label: 'Shared label' }] },
+			{ id: 'local', name: 'Local gateway', provider_type: 'custom', auth_mode: null, auth_kind: 'api', models: [{ id: 'duplicate-id', label: 'Shared label' }] }
+		);
+		await hydrateModelRegistry();
+		const onSelect = vi.fn();
+		render(ModelPickerPanel, { props: { ...buildModelPickerCatalog(), value: '', onSelect } });
+		const rows = screen.getAllByRole('option', { name: 'Shared label' });
+		expect(rows.map((row) => row.querySelector('[data-provider-logo]')?.getAttribute('data-provider-logo'))).toEqual(['openai', 'grok', 'custom']);
+		for (const row of rows) await fireEvent.click(row);
+		expect(onSelect.mock.calls.map(([value]) => value)).toEqual(['prov:legacy-codex:duplicate-id', 'prov:legacy-xai:duplicate-id', 'prov:local:duplicate-id']);
+	});
 	it('opens on a plain-HTTP address, where the browser has no crypto.randomUUID', () => {
 		const original = crypto.randomUUID;
 		Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });

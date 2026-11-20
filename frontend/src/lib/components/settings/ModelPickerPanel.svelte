@@ -635,7 +635,7 @@
 							aria-disabled={o.disabled || undefined}
 							aria-label={o.label}
 							aria-describedby={providerId}
-							tabindex="-1"
+							tabindex={o.disabled ? undefined : -1}
 							id={o.disabled ? undefined : rowId(o.value)}
 							data-value={o.value}
 							title={o.description}
@@ -1102,6 +1102,28 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+	}
+	.model-identity {
+		display: grid;
+		grid-template-columns: 16px minmax(0, 1fr);
+		column-gap: 6px;
+		align-items: center;
+		overflow: visible;
+		white-space: normal;
+	}
+	.model-identity :global(.provider-glyph) {
+		grid-row: 1 / span 2;
+	}
+	.model-name {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.model-provider {
+		grid-column: 2;
+		font-size: 12px;
+		color: var(--muted-foreground);
+		overflow-wrap: anywhere;
 	}
 	.mpp-fav {
 		display: inline-flex;

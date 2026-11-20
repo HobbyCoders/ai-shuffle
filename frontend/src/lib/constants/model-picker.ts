@@ -120,7 +120,7 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 			key: p.id,
 			name: display.name,
 			subtext: display.subtext,
-			glyph: providerGlyphKind(p.provider_type),
+			glyph: providerGlyphKind(p.provider_type, p.auth_mode),
 			isApi: p.auth_kind === 'api'
 		});
 		for (const pm of p.models) {

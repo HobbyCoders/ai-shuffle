@@ -193,10 +193,13 @@
 	});
 
 	function selectOption(optionValue: string) {
-		// Keep the panel open so the user can still tweak options like context
-		// window size; outside click / Escape still dismiss via onRequestClose.
 		if (blocked) return;
-		if (formSelect) close(true);
+		if (formSelect) {
+			close(true);
+			// Like a native select, picking the current value is not a change.
+			if (optionValue === value) return;
+		}
+		// Chat pickers still notify on every pick and stay open for context controls.
 		onSelect(optionValue);
 	}
 

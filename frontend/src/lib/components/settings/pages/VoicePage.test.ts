@@ -99,6 +99,18 @@ async function mountPage() {
 	};
 }
 
+it('does not write voice settings when the selected engine is picked again', async () => {
+	server.voice_provider_id = 'openai-key';
+	await mountPage();
+	const trigger = screen.getByRole('button', { name: 'Voice engine' });
+	await fireEvent.click(trigger);
+	await fireEvent.click(document.querySelector<HTMLElement>('[data-model-picker-panel] [role="option"][aria-selected="true"]')!);
+	expect(screen.queryByRole('textbox', { name: 'Search models' })).toBeNull();
+	expect(document.activeElement).toBe(trigger);
+	expect(transport.put).not.toHaveBeenCalled();
+	expect(server.voice_provider_id).toBe('openai-key');
+});
+
 it('switches engines, shows xAI funding and server-provided voices without retaining the OpenAI pin', async () => {
  providers.push({ id: 'xai-key', name: 'xAI API key', provider_type: 'xai' });
  transport.put.mockImplementation(async (_path: string, patch: Partial<Settings>) => {

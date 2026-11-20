@@ -434,7 +434,7 @@
 					<label class="pv-mrow">
 						<Checkbox checked={r.checked} disabled={saving} onchange={() => toggle(r.id)} />
 						<span class="id curated-identity">
-							<ProviderGlyph kind={providerGlyphKind(current?.provider_type)} />
+							<ProviderGlyph kind={providerGlyphKind(current?.provider_type, current?.auth_mode)} />
 							<span>{r.id}</span>
 							<span class="sr-only">{current ? getProviderDisplay(current).name : providerName}</span>
 						</span>
