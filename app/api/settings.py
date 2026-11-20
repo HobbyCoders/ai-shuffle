@@ -235,8 +235,10 @@ async def get_integration_settings(token: str = Depends(require_auth)):
         fal_key = get_decrypted_api_key("fal_api_key")
         from app.core import fal_credential
         fal_enabled = fal_credential.is_enabled()
-        anthropic_key = get_decrypted_api_key("anthropic_api_key")
         from app.core import claude_auth_mode
+        # The key the native Claude API provider uses: the owner's pinned key
+        # (none while it has not synced here), never a stale scalar.
+        anthropic_key = claude_auth_mode.selected_api_key(claude_auth_mode.key_pin())
         auth_mode = claude_auth_mode.selected_mode()
         image_model = database.get_system_setting("image_model")
         image_edit_model = database.get_system_setting("image_edit_model")

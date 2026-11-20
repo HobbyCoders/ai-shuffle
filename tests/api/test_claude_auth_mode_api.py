@@ -87,8 +87,13 @@ def test_combined_key_mode_pins_account_across_partial_sync_rotation_and_delete(
     db.set_system_setting(claude_accounts.API_SETTING, encryption.encrypt_value(alpha))
     db.set_system_setting(claude_accounts.API_LIST_SETTING, old_keys)
     assert _native_key() is None
+    # Settings' key detail agrees: no key to show (or remove) until Beta syncs.
+    integrations = authenticated_client.get("/api/v1/settings/integrations").json()
+    assert integrations["anthropic_api_key_set"] is False
     db.set_system_setting(claude_accounts.API_LIST_SETTING, new_keys)
     assert _native_key() == beta
+    integrations = authenticated_client.get("/api/v1/settings/integrations").json()
+    assert integrations["anthropic_api_key_set"] is True
     with patch.object(claude_auth_mode, "setting_key", lambda: "claude_auth_mode:fixture-off-peer"):
         claude_auth_mode.set_mode("off")
         claude_accounts.change_account("api_key", alpha_id, "delete")
