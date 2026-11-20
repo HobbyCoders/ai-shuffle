@@ -203,6 +203,8 @@ export interface ClaudeAuthSummary {
 	};
 	/** Whether a key is stored, and its last four characters. Never the key. */
 	api_key: { set: boolean; last4: string | null };
+	/** Legacy API mode uses a saved key that the owner has not yet pinned. */
+	api_key_confirmation_required?: boolean;
 	/** The cloud provider or gateway method. Absent on older workers. */
 	cloud?: ClaudeCloudStatus;
 	/** Whether new Claude agent runs can start on this worker, and why not. */

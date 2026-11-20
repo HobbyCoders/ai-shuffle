@@ -81,7 +81,16 @@ def sign_ins(client, tmp_path, monkeypatch):
     for name in ("get_system_setting", "get_system_setting_cached"):
         monkeypatch.setattr(claude_subscriptions.database, name, lambda key, *a, **k: values.get(key))
     monkeypatch.setattr(claude_subscriptions.database, "set_system_setting", values.__setitem__)
-    monkeypatch.setattr(claude_subscriptions.database, "set_system_settings", values.update)
+    def write_choice(key, value, _expected, *, alongside=None):
+        if alongside is not None:
+            values[alongside[0]] = alongside[1]
+        values[key] = value
+        return True
+
+    monkeypatch.setattr(claude_subscriptions.database, "get_system_setting_snapshot", lambda key: (
+        claude_subscriptions.database.SystemSettingSnapshot(values[key], None) if key in values else None
+    ))
+    monkeypatch.setattr(claude_subscriptions.database, "set_system_setting_if_unchanged", write_choice)
     monkeypatch.setattr(claude_subscriptions, "setting_key", lambda: "claude_cli_logins:test")
     monkeypatch.setattr(claude_subscriptions, "_last_pending_probe", 0.0)
     monkeypatch.setattr(claude_subscriptions, "_identity_cache", {})

@@ -232,6 +232,7 @@ export function fakeWorker(init: Partial<FakeWorkerState> = {}, routes: Record<s
 			state.claude = claudeSummary({
 				...state.claude,
 				mode,
+				api_key_confirmation_required: mode === 'api_key' ? false : state.claude.api_key_confirmation_required,
 				gate: claudeSummary({ mode }).gate
 			});
 			return state.claude;

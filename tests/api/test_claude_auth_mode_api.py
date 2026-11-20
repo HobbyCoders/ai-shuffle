@@ -231,6 +231,8 @@ def test_failed_legacy_api_activation_does_not_steer_later_choice(
     db.set_system_setting(accounts.API_SETTING, encryption.encrypt_value("fixture-api-3333"))
     before = db.get_system_setting(subs.setting_key())
     activate = ACCOUNTS + f"/subscription/{saved_subscription}/activate"
+    assert authenticated_client.get(ENDPOINT).json()["api_key_confirmation_required"] is True
+    assert claude_auth_mode.shared_selection() is None
     with monkeypatch.context() as locked:
         locked.setattr(encryption, "is_encryption_ready", lambda: False)
         response = authenticated_client.post(activate)
@@ -239,7 +241,10 @@ def test_failed_legacy_api_activation_does_not_steer_later_choice(
     assert claude_auth_mode.shared_selection() is None
     assert claude_auth_mode.current_mode() == "api_key"
     target = subs.legacy_binding()
-    assert authenticated_client.put(ENDPOINT, json={"mode": "api_key"}).status_code == 200
+    confirmation = authenticated_client.put(ENDPOINT, json={"mode": "api_key"})
+    assert confirmation.status_code == 200
+    assert confirmation.json()["api_key_confirmation_required"] is False
+    assert accounts.pinned_api_key(claude_auth_mode.shared_selection()["key_id"]) == "fixture-api-3333"
     assert claude_auth_mode.shared_selection()["subscription"] == target
     assert authenticated_client.post(activate).status_code == 200
     assert claude_auth_mode.shared_selection()["subscription"] != target
@@ -262,14 +267,25 @@ def test_activation_storage_failure_rolls_back_both_choices_and_retries(
     before = (db.get_system_setting(local_key), db.get_system_setting(shared_key))
     write = db_settings._write_system_setting
 
-    def fail_write(conn, key, value):
-        # Fail after the SQL statement so even the last row needs rollback.
+    def fail_local(conn, key, value):
         write(conn, key, value)
-        if key == (local_key if failed_row == "local" else shared_key):
+        if key == local_key:
             raise OperationalError("fixture write failure")
 
+    conditional_write = db_settings._write_system_setting_if_unchanged
+
+    def fail_shared(conn, key, value, expected):
+        # Fail after the SQL statement so even the last row needs rollback.
+        assert conditional_write(conn, key, value, expected)
+        if key == shared_key:
+            raise OperationalError("fixture write failure")
+        return True
+
     with monkeypatch.context() as failing:
-        failing.setattr(db_settings, "_write_system_setting", fail_write)
+        if failed_row == "local":
+            failing.setattr(db_settings, "_write_system_setting", fail_local)
+        else:
+            failing.setattr(db_settings, "_write_system_setting_if_unchanged", fail_shared)
         response = authenticated_client.post(activate)
         assert response.status_code == 503, response.text
         assert response.json()["detail"]["code"] == "storage_unavailable"

@@ -103,7 +103,10 @@ def key_last4(key: Optional[str]) -> Optional[str]:
 
 def shared_selection(*, cached: bool = False) -> Optional[dict]:
     getter = database.get_system_setting_cached if cached else database.get_system_setting
-    raw = getter(SELECTION_SETTING)
+    return _decode_selection(getter(SELECTION_SETTING))
+
+
+def _decode_selection(raw: Optional[str]) -> Optional[dict]:
     if raw is None:
         return None
     try:
@@ -221,19 +224,26 @@ def is_explicit() -> bool:
         return False
 
 
-def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str], defer_key_pin: bool = False,
-             local_subscription: tuple[str, str] | None = None) -> None:
+def _read_selection() -> tuple[Optional[dict], Optional[database.SystemSettingSnapshot]]:
+    snapshot = database.get_system_setting_snapshot(SELECTION_SETTING)
+    return _decode_selection(snapshot.value if snapshot is not None else None), snapshot
+
+
+def _publish(mode: str, *, subscription: Optional[str], key_id: Optional[str],
+             snapshot: Optional[database.SystemSettingSnapshot], defer_key_pin: bool = False,
+             local_choice: tuple[str, str] | None = None) -> None:
+    from app.core import claude_accounts
+
     # One replicated decision. The encrypted key list may lag behind it; a
     # reader must either find this exact ID there or refuse, never use a scalar.
     selection = {"mode": mode, "subscription": subscription}
     if not defer_key_pin:
         selection["key_id"] = key_id
     value = json.dumps(selection, separators=(",", ":"))
-    if local_subscription is None:
-        database.set_system_setting(SELECTION_SETTING, value)
-    else:
-        local_key, local_value = local_subscription
-        database.set_system_settings({local_key: local_value, SELECTION_SETTING: value})
+    if not database.set_system_setting_if_unchanged(SELECTION_SETTING, value, snapshot, alongside=local_choice):
+        raise claude_accounts.AccountError(
+            "selection_changed", "The Claude account choice changed on another request. Review it and try again.", 409,
+        )
 
 
 def _key_pin(choice: dict, *, choose_api_key: bool) -> tuple[str | None, bool]:
@@ -253,7 +263,8 @@ def publish_subscription(target: str, *, local_subscription: tuple[str, str] | N
     """Explicitly select a verified subscription without changing the auth mode."""
     from app.core import claude_accounts
 
-    choice = shared_selection() or {}
+    choice, snapshot = _read_selection()
+    choice = choice or {}
     mode = choice.get("mode")
     if mode not in (MODE_SUBSCRIPTION, MODE_API_KEY):
         if current_mode() == MODE_API_KEY:
@@ -261,14 +272,15 @@ def publish_subscription(target: str, *, local_subscription: tuple[str, str] | N
             # Leave the legacy route intact until the owner confirms it.
             raise claude_accounts.AccountError(
                 "key_selection_required",
-                "Select Anthropic API key mode to confirm its key before choosing a subscription.",
+                "In Settings → Providers → Claude, use Confirm API key, then choose the subscription again. "
+                "If no key is shown, unlock or save it first.",
                 503,
             )
         mode = MODE_SUBSCRIPTION
     key_id, deferred = _key_pin(choice, choose_api_key=False)
     try:
-        _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred,
-                 local_subscription=local_subscription)
+        _publish(mode, subscription=target, key_id=key_id, snapshot=snapshot,
+                 defer_key_pin=deferred, local_choice=local_subscription)
     except DatabaseError:
         raise claude_accounts.AccountError(
             "storage_unavailable", "Claude account storage is unavailable. Retry choosing this sign-in.", 503,
@@ -278,10 +290,10 @@ def publish_subscription(target: str, *, local_subscription: tuple[str, str] | N
 def update_shared_key(account_id: Optional[str]) -> None:
     from app.core import claude_subscriptions
 
-    choice = shared_selection()
+    choice, snapshot = _read_selection()
     if choice is not None and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION):
         _publish(choice["mode"], subscription=claude_subscriptions.shared_target(choice, read_choice=False),
-                 key_id=account_id)
+                 key_id=account_id, snapshot=snapshot)
 
 
 def clear_shared_key_if_selected(account_id: str) -> None:
@@ -290,26 +302,13 @@ def clear_shared_key_if_selected(account_id: str) -> None:
     Do not republish a stale mode or subscription over a concurrent choice.
     Missing list rows already fail closed, including if this update loses.
     """
-    from datetime import datetime, timezone
-    from uuid import uuid4
-
-    raw = database.get_system_setting(SELECTION_SETTING)
-    try:
-        choice = json.loads(raw) if raw is not None else None
-    except (TypeError, ValueError):
-        return
-    if not (isinstance(choice, dict) and choice.get("mode") in (MODE_API_KEY, MODE_SUBSCRIPTION)
-            and choice.get("key_id") == account_id):
+    choice, snapshot = _read_selection()
+    if not (choice and choice["mode"] in (MODE_API_KEY, MODE_SUBSCRIPTION) and choice.get("key_id") == account_id):
         return
     choice["key_id"] = None
-    with database.get_db() as conn:
-        conn.cursor().execute(
-            """UPDATE system_settings SET value = %s, updated_at = %s, revision = %s
-               WHERE key = %s AND value = %s""",
-            (json.dumps(choice, separators=(",", ":")), datetime.now(timezone.utc).isoformat(),
-             str(uuid4()), SELECTION_SETTING, raw),
-        )
-    database.invalidate_system_setting_memo(SELECTION_SETTING)
+    database.set_system_setting_if_unchanged(
+        SELECTION_SETTING, json.dumps(choice, separators=(",", ":")), snapshot,
+    )
 
 
 def set_mode(mode: str, *, key_id: Optional[str] = None) -> str:
@@ -320,15 +319,16 @@ def set_mode(mode: str, *, key_id: Optional[str] = None) -> str:
     else:
         from app.core import claude_subscriptions
 
-        target = claude_subscriptions.shared_target()
+        choice, snapshot = _read_selection()
+        target = claude_subscriptions.shared_target(choice, read_choice=False)
         if target is None:
             # A pending choice requires the separate, verified Use this sign-in action.
             target = claude_subscriptions.legacy_binding()
         deferred = False
         if key_id is None:
-            key_id, deferred = _key_pin(shared_selection() or {}, choose_api_key=mode == MODE_API_KEY)
-        _publish(mode, subscription=target, key_id=key_id, defer_key_pin=deferred)
-        database.set_system_setting(setting_key(), mode)
+            key_id, deferred = _key_pin(choice or {}, choose_api_key=mode == MODE_API_KEY)
+        _publish(mode, subscription=target, key_id=key_id, snapshot=snapshot,
+                 defer_key_pin=deferred, local_choice=(setting_key(), mode))
         from app.core import claude_cli_status
 
         claude_cli_status.invalidate()
@@ -380,6 +380,7 @@ def summary(cli: Optional[dict] = None) -> dict:
             "error": cli.get("error"),
         },
         "api_key": {"set": bool(key), "last4": key_last4(key)},
+        "api_key_confirmation_required": mode == MODE_API_KEY and choice is None and bool(key),
         "cloud": cloud_status(),
     }
 

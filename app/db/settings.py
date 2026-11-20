@@ -7,7 +7,7 @@ import threading
 import time
 from uuid import uuid4
 from datetime import datetime, timezone
-from typing import Optional, List, Dict, Any, TypedDict
+from typing import Optional, List, Dict, Any, NamedTuple, TypedDict
 
 from app.db.base import get_db, row_to_dict, rows_to_list
 
@@ -273,6 +273,20 @@ def get_system_setting_cached(
     return value
 
 
+class SystemSettingSnapshot(NamedTuple):
+    value: Optional[str]
+    revision: Optional[str]
+
+
+def get_system_setting_snapshot(key: str) -> Optional[SystemSettingSnapshot]:
+    """Read the value and its revision together. None means no row exists."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value, revision FROM system_settings WHERE key = %s", (key,))
+        row = cursor.fetchone()
+        return SystemSettingSnapshot(row["value"], row["revision"]) if row else None
+
+
 def get_system_setting_revision(key: str) -> Optional[str]:
     """Opaque write generation, without disclosing the setting's value."""
     with get_db() as conn:
@@ -308,16 +322,53 @@ def _write_system_setting(conn, key: str, value: str) -> None:
 
 def set_system_setting(key: str, value: str) -> None:
     """Set a system setting (upsert)."""
-    set_system_settings({key: value})
-
-
-def set_system_settings(values: dict[str, str]) -> None:
-    """Commit related settings together and invalidate their memos on success."""
     with get_db() as conn:
-        for key, value in values.items():
-            _write_system_setting(conn, key, value)
-    for key in values:
-        invalidate_system_setting_memo(key)
+        _write_system_setting(conn, key, value)
+    invalidate_system_setting_memo(key)
+
+
+class _SystemSettingConflict(Exception):
+    pass
+
+
+def _write_system_setting_if_unchanged(conn, key: str, value: str, expected: Optional[SystemSettingSnapshot]) -> bool:
+    cursor = conn.cursor()
+    now, revision = datetime.now(timezone.utc).isoformat(), str(uuid4())
+    if expected is None:
+        cursor.execute(
+            """INSERT INTO system_settings (key, value, updated_at, revision)
+               VALUES (%s, %s, %s, %s) ON CONFLICT (key) DO NOTHING""",
+            (key, value, now, revision),
+        )
+    else:
+        cursor.execute(
+            """UPDATE system_settings SET value = %s, updated_at = %s, revision = %s
+               WHERE key = %s AND revision IS NOT DISTINCT FROM %s AND value IS NOT DISTINCT FROM %s""",
+            (value, now, revision, key, expected.revision, expected.value),
+        )
+    return cursor.rowcount == 1
+
+
+def set_system_setting_if_unchanged(
+    key: str, value: str, expected: Optional[SystemSettingSnapshot], *, alongside: Optional[tuple[str, str]] = None,
+) -> bool:
+    """Compare against the actual row, rolling back the companion write on a miss.
+
+    For plain settings without special write side effects. A conflicting insert
+    counts as a miss, too; an absent row cannot be locked with SELECT FOR UPDATE.
+    """
+    try:
+        with get_db() as conn:
+            if alongside is not None:
+                _write_system_setting(conn, *alongside)
+            if not _write_system_setting_if_unchanged(conn, key, value, expected):
+                raise _SystemSettingConflict
+    except _SystemSettingConflict:
+        return False
+    invalidate_system_setting_memo(key)
+    if alongside is not None:
+        invalidate_system_setting_memo(alongside[0])
+    return True
 
 
 def delete_system_setting(key: str) -> bool:
@@ -382,7 +433,7 @@ from app.core.resource_sync import install_database_mutations as _install_resour
 
 _install_resource_sync(
     globals(), "settings",
-    "set_system_setting delete_system_setting get_or_create_system_setting",
+    "set_system_setting set_system_setting_if_unchanged delete_system_setting get_or_create_system_setting",
 )
 if replicated_wakes_enabled():
     _install_resource_sync(globals(), "preferences", "set_user_preference delete_user_preference")

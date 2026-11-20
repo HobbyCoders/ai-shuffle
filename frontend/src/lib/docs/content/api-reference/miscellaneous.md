@@ -1281,11 +1281,14 @@ Service errors use `detail: {"code":"…","message":"…"}`: `400` invalid key o
 label, `404 not_found`, `409 not_signed_in` (save-current),
 `409 login_busy` (another Claude sign-in is running), `409 cli_missing`,
 `409 folder_unavailable` (a sign-in folder could not be prepared),
+`409 selection_changed` (another request changed the shared Claude choice),
 `501 unsupported` (macOS), and `503 storage_locked`,
 `storage_unreadable`, `storage_unavailable` or `key_selection_required`. If
-Claude uses a legacy API key that has not been explicitly selected, confirm
-API key mode before choosing a subscription sign-in without changing modes.
-A failed subscription activation leaves the previous choice in place.
+Claude Code uses an unconfirmed legacy key, open Settings → Providers →
+Claude and select **Confirm API key**. That keeps Claude Code in API key
+mode. Then choose the subscription sign-in again.
+A rejected subscription activation leaves both choices untouched by the
+request. For `selection_changed`, review the latest choice and retry.
 Key validation keeps the legacy error strings: `400` authentication/API error,
 `429` rate limit; a transient network error still saves the key. Invalid request
 shapes return `422`.
