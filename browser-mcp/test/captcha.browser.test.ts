@@ -1,6 +1,6 @@
 /**
  * Withheld-captcha detection against a real Chromium (#2378 in the tracker).
- * Gated like integration.browser.test.ts: skipped when no system browser is
+ * Gated like integration.browser.suite.ts: skipped when no system browser is
  * found. Fixtures are data: URLs, so nothing leaves the machine; a "rendered"
  * widget is an iframe whose src names a reCAPTCHA anchor without loading it.
  */

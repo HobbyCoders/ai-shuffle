@@ -1,5 +1,5 @@
 name: CI Backend
-run-name: "${{ github.workflow }} (8 shards, 2 workers each)"
+run-name: "${{ github.workflow }} (8 shards, 4 workers each)"
 
 # Backend coverage and security checks on every PR, including drafts.
 # A pull request's shards run the tests its change can reach, chosen from the
@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       runner_cpus:
-        description: 'Legacy input (retained for callers); shards use two workers on ubuntu-24.04'
+        description: 'Legacy input (retained for callers); shards use four workers on ubuntu-24.04'
         type: choice
         options: ['2', '4']
         default: '2'
@@ -139,7 +139,8 @@ jobs:
         # --timeout=120 bounds the rare hard-wedge per test: a wedged run fails
         # in ~2 minutes with the hung test named, instead of billing the job
         # timeout with no diagnosis.
-        # Eight deterministic partitions of the hermetic collection, two workers each.
+        # Eight deterministic partitions of the hermetic collection, four workers
+        # each: one per vCPU (backend_gate.SHARD_WORKERS checks every receipt).
         # Policy, blocking-DB and serial container tests run in other required jobs.
         # Use --deselect for excluded top-level files: the glob passes them by
         # name, and --ignore does not apply to explicit file arguments. The
@@ -171,7 +172,7 @@ jobs:
               --deselect=tests/test_buyer_docs.py --deselect=tests/test_scan_blocking_db.py \
               --ignore=tests/core/test_container_runtime.py \
               --ignore=tests/core/test_container_image_contract.py \
-              -o addopts="" -q -p no:cacheprovider --timeout=120 -n 2 "${record[@]}" \
+              -o addopts="" -q -p no:cacheprovider --timeout=120 -n 4 "${record[@]}" \
               -p scripts.ci.backend_shards --backend-shard "${{ matrix.shard }}" \
               --backend-shard-count "$SHARD_COUNT" --backend-selection "$SELECTION"
 

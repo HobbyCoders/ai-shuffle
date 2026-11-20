@@ -165,10 +165,14 @@ class ShardRun:
         if self.collection_failed or not (
                 exitstatus == 0 or (exitstatus == pytest.ExitCode.TESTS_FAILED and self.failed)):
             return
-        if (len(self.workers) != 2 or any(not evidence for evidence in self.workers)
-                or self.workers[0] != self.workers[1]):
+        # Every worker the run asked for (-n; CI's is backend_gate.SHARD_WORKERS,
+        # which the gate checks on the receipt) must report the same partition.
+        expected = self.config.getoption("numprocesses", None)
+        if (not isinstance(expected, int) or expected < 2 or len(self.workers) != expected
+                or any(not evidence for evidence in self.workers)
+                or any(evidence != self.workers[0] for evidence in self.workers)):
             session.exitstatus = pytest.ExitCode.TESTS_FAILED
-            print("Missing/disagreeing shard worker evidence; expected exactly two workers")
+            print(f"Missing/disagreeing shard worker evidence; expected exactly {expected} workers")
             return
         evidence = {**self.workers[0], "workers": len(self.workers), "failed": sorted(self.failed)}
         if (len(self.durations) != evidence["count"]

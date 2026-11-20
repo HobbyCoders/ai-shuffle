@@ -1,8 +1,8 @@
 """Run the UI journeys against a fresh dev instance, non-interactively (CI).
 
-    python -m scripts.devloop.ci plan [--shards N] [--only NAMES]
+    python -m scripts.devloop.ci plan [--shards N] [--only NAMES] [--parts JSON]
     python -m scripts.devloop.ci matrix [--shards N]
-    python -m scripts.devloop.ci journeys [--shard I/N] [--only NAMES] [--out DIR] [--build]
+    python -m scripts.devloop.ci journeys [--shard I/N] [--only NAMES] [--parts JSON] [--out DIR] [--build]
     python -m scripts.devloop.ci refresh-weights RUN_ID [RUN_ID ...] [--out PATH]
 
 ``journeys`` starts ``python -m scripts.devloop up --ci`` as its own child (so
@@ -27,6 +27,9 @@ selection that cannot be read, runs them all. It prints ``only=`` (``*`` for
 every journey, else the comma-separated names, empty for none) and
 ``shards=`` (the shard numbers that got a file) as step outputs; ``plan`` and
 ``journeys`` take that ``only`` value so each shard splits the same selection.
+On a pull request it also prints ``parts=``: heavy files split into parts,
+each with the exact case ids it runs (``{}`` otherwise); shards take it as
+``--parts``.
 
 Outputs under ``--out``: ``devloop.log`` (the instance's whole log),
 ``logs/<journey>.log``, and the runner's per-case text timelines (and contact
@@ -83,6 +86,17 @@ READY_SECONDS = 420
 JOURNEY_SECONDS = 1500
 SUMMARY_CASE_CHARS = 12_000
 SUMMARY_TOTAL_CHARS = 400_000
+# A pull request's selection splits a heavy journey file into parts of about
+# this many seconds while the parts still fit one per shard: a shard pays
+# about two minutes of fixed setup, so a 2.5-minute part keeps each shard near
+# four minutes. Only `matrix` on a pull_request event splits; main's runs keep
+# whole files (refresh-weights measures those). A part is "name.journey.mjs#k/n":
+# every n-th case id from the k-th, listed once by the matrix job, which hands
+# each part its exact ids ("parts": entry -> ids). Shards run those ids with
+# the runner's --case selection and never re-list or re-slice them.
+PART_SECONDS = 150
+# Matched only with fullmatch: no trailing newline or other alias of a part key.
+PART = re.compile(r"(?P<name>[^#]+\.journey\.mjs)#(?P<index>[1-9][0-9]*)/(?P<parts>[1-9][0-9]*)")
 
 
 # ─── plan ──────────────────────────────────────────────────────────────────
@@ -92,21 +106,142 @@ def journey_files(directory: Path = JOURNEYS) -> list[Path]:
     return sorted(directory.glob("*.journey.mjs"))
 
 
-def case_count(path: Path, *, strict: bool = False) -> int:
-    """Count all listed cases; strict callers reject unreadable inventories."""
+def case_ids(path: Path) -> list[str]:
+    """Every case id the journey lists, in run order; unreadable lists raise ValueError."""
     try:
         listed = subprocess.run(["node", str(path), "--list", "--only="], cwd=FRONTEND,
                                 capture_output=True, text=True, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
-        if strict:
-            raise ValueError(f"Cannot read case count for {path.name}: --list failed") from error
-        return 1
+        raise ValueError(f"Cannot read case count for {path.name}: --list failed") from error
     lines = [line for line in listed.stdout.splitlines() if line.strip()]
     if listed.returncode != 0 or not lines or len(lines) != len(set(lines)):
+        raise ValueError(f"Cannot read case count for {path.name}: --list did not return unique cases")
+    return lines
+
+
+def case_count(path: Path, *, strict: bool = False) -> int:
+    """Count all listed cases; strict callers reject unreadable inventories."""
+    try:
+        return len(case_ids(path))
+    except ValueError:
         if strict:
-            raise ValueError(f"Cannot read case count for {path.name}: --list did not return unique cases")
+            raise
         return 1
-    return len(lines)
+
+
+def entry_file(entry: str) -> str:
+    """The journey file a plan entry runs: the entry itself, or a part's file."""
+    match = PART.fullmatch(entry)
+    return match["name"] if match else entry
+
+
+def parse_parts(value: str | None) -> dict[str, list[str]]:
+    """A ``--parts`` value (JSON: part entry -> its exact case ids); empty for none."""
+    if not value:
+        return {}
+    def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("--parts repeats a part entry")
+        return dict(pairs)
+
+    data = json.loads(value, object_pairs_hook=unique)
+    if not isinstance(data, dict) or any(
+            PART.fullmatch(entry) is None or not isinstance(ids, list) or not ids
+            or any(not isinstance(id, str) or not id for id in ids) for entry, ids in data.items()):
+        raise ValueError("--parts must map name.journey.mjs#k/n entries to non-empty case id lists")
+    return data
+
+
+def check_parts(parts: dict[str, list[str]], files: list[str], directory: Path = JOURNEYS) -> None:
+    """Fail closed unless each split file's parts are #1..#n and hold every listed case exactly once."""
+    split: dict[str, dict[int, list[str]]] = defaultdict(dict)
+    counts: dict[str, set[int]] = defaultdict(set)
+    for entry, ids in parts.items():
+        match = PART.fullmatch(entry)
+        if match is None:
+            raise ValueError(f"{entry!r}: not a name.journey.mjs#k/n part")
+        name, index = match["name"], int(match["index"])
+        if index in split[name]:
+            raise ValueError(f"--parts for {name} repeat part {index}")
+        split[name][index] = ids
+        counts[name].add(int(match["parts"]))
+        if int(match["parts"]) < 2:
+            raise ValueError(f"{entry}: a part needs at least two parts")
+    for name, numbered in split.items():
+        total = counts[name]
+        if name not in files or len(total) != 1 or sorted(numbered) != list(range(1, min(total) + 1)):
+            raise ValueError(f"--parts for {name} are not parts 1..n of a selected file")
+        union = [id for ids in numbered.values() for id in ids]
+        listed = case_ids(directory / name)
+        if len(union) != len(set(union)) or set(union) != set(listed):
+            raise ValueError(f"--parts for {name} do not hold each of its {len(listed)} cases exactly once")
+
+
+def apply_parts(weights: dict[str, float], parts: dict[str, list[str]]) -> dict[str, float]:
+    """Replace each split file by its parts, each weighted by its share of the cases."""
+    totals: dict[str, int] = defaultdict(int)
+    for entry, ids in parts.items():
+        totals[entry_file(entry)] += len(ids)
+    entries = {name: seconds for name, seconds in weights.items() if name not in totals}
+    for entry, ids in parts.items():
+        entries[entry] = weights[entry_file(entry)] * len(ids) / totals[entry_file(entry)]
+    return entries
+
+
+def _expand(weights: dict[str, float], parts: dict[str, int], cases: dict[str, int]) -> dict[str, float]:
+    entries: dict[str, float] = {}
+    for name, count in parts.items():
+        if count == 1:
+            entries[name] = weights[name]
+            continue
+        for index in range(1, count + 1):
+            share = len(range(index - 1, cases[name], count)) / cases[name]
+            entries[f"{name}#{index}/{count}"] = weights[name] * share
+    return entries
+
+
+def _loads(entries: dict[str, float], shards: int) -> tuple[float, ...] | None:
+    """The packed plan's shard loads, longest first; None when two parts of a file share a shard."""
+    loads = []
+    for bucket in partition(entries, shards):
+        files = [entry_file(entry) for entry in bucket]
+        if len(files) != len(set(files)):
+            return None
+        if bucket:
+            loads.append(sum(entries[entry] for entry in bucket))
+    return tuple(sorted(loads, reverse=True))
+
+
+def split_heavy(weights: dict[str, float], shards: int, directory: Path = JOURNEYS) -> dict[str, list[str]]:
+    """Each part's exact case ids (entry -> ids), splitting the heaviest file while that helps.
+
+    A split is kept only when the shard loads, longest first, get smaller (two
+    equally long files both get split). Parts of one file never share a shard:
+    each part runs on its own fresh instance. Each split file is listed once,
+    here; the parts it returns are what the shards run.
+    """
+    if not weights:
+        return {}
+    parts = dict.fromkeys(weights, 1)
+    cases: dict[str, int] = {}
+    listed: dict[str, list[str]] = {}
+    longest = _loads(dict(weights), shards)
+    while True:
+        name = max(parts, key=lambda n: (weights[n] / parts[n], n))
+        if weights[name] / parts[name] <= PART_SECONDS:
+            break
+        if name not in cases:
+            listed[name] = case_ids(directory / name)
+            cases[name] = len(listed[name])
+        if parts[name] >= cases[name]:
+            break
+        trial = {**parts, name: parts[name] + 1}
+        packed = _loads(_expand(weights, trial, cases), shards)
+        if packed is None or longest is None or packed >= longest:
+            break
+        parts, longest = trial, packed
+    return {f"{name}#{index}/{count}": listed[name][index - 1::count]
+            for name, count in sorted(parts.items()) if count > 1 for index in range(1, count + 1)}
 
 
 def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
@@ -122,7 +257,7 @@ def partition(weights: dict[str, float], shards: int) -> list[list[str]]:
         for name in ordered:
             # x.journey.mjs, x-2.journey.mjs, x-3.journey.mjs share a family
             # even when a filtered run doesn't select the first part.
-            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", name.removesuffix(SUFFIX))
+            family = re.sub(r"-(?:[2-9]|[1-9][0-9]+)$", "", entry_file(name).removesuffix(SUFFIX))
             index = min(range(shards), key=lambda i: (
                 limit is not None and loads[i] + weights[name] > limit,
                 limit is not None and family in families[i],
@@ -210,11 +345,20 @@ def planning_budget_seconds(runtime: float) -> float:
 
 
 def plan(shards: int, directory: Path = JOURNEYS, weights_path: Path = WEIGHTS,
-         only: list[str] | None = None) -> list[list[str]]:
-    """Split the journeys (``only`` these file names, when given) across the shards."""
+         only: list[str] | None = None, parts: dict[str, list[str]] | None = None) -> list[list[str]]:
+    """Split the journeys (``only`` these file names, when given) across the shards.
+
+    ``parts`` (from split_heavy, a pull request's matrix only) replaces each
+    split file by its parts; without it every file runs whole, as before.
+    """
+    if parts and only is None:
+        raise ValueError("--parts needs an --only selection")
     # Two-argument call when unfiltered: tests replace estimated_seconds with that shape.
     weights = (estimated_seconds(directory, weights_path) if only is None
                else estimated_seconds(directory, weights_path, only))
+    if parts:
+        check_parts(parts, only, directory)
+        weights = apply_parts(weights, parts)
     buckets = partition(weights, shards)
     from scripts.devloop import journey_retry as retry
 
@@ -402,19 +546,24 @@ def already_proven(key: str, root: Path = ROOT) -> str | None:
 
 
 def matrix(shards: int) -> int:
-    only, why = selection_for_event(os.environ.get("GITHUB_EVENT_NAME"))
+    event = os.environ.get("GITHUB_EVENT_NAME")
+    only, why = selection_for_event(event)
     key = selection_key(only)
-    buckets = plan(shards) if only is None else plan(shards, only=only)
+    # Only a pull request's selection is split (PART_SECONDS); main keeps whole files.
+    parts = (split_heavy(estimated_seconds(JOURNEYS, WEIGHTS, only), shards)
+             if event == "pull_request" and only else {})
+    buckets = plan(shards) if only is None else plan(shards, only=only, parts=parts)
     numbers = [index for index, bucket in enumerate(buckets, 1) if bucket]
     proven_by = already_proven(key) if numbers else None
     if proven_by:
         numbers, why = [], f"none: {proven_by} ({why})"
     print(f"[ci] UI journeys: {why}", file=sys.stderr, flush=True)
     _write_summary(f"\n**UI journeys for this run:** {why}.\n")
-    # stdout is the step's output file: exactly these three lines.
+    # stdout is the step's output file: exactly these four lines.
     print(f"only={EVERY_JOURNEY if only is None else ','.join(name.removesuffix(SUFFIX) for name in only)}")
     print(f"shards={json.dumps(numbers, separators=(',', ':'))}")
     print(f"key={key}")
+    print(f"parts={json.dumps(parts if numbers else {}, separators=(',', ':'))}")
     return 0
 
 
@@ -656,11 +805,23 @@ def refresh_weights(run_ids: list[int], weights_path: Path = WEIGHTS, out: Path 
 
 
 def commands_for(shard_files: list[str], shards: int, directory: Path = JOURNEYS,
-                 *, per_file: bool = False) -> list[list[str]]:
-    """Use the unfiltered aggregate only for a full, single-shard run."""
+                 *, per_file: bool = False, parts: dict[str, list[str]] | None = None) -> list[list[str]]:
+    """Use the unfiltered aggregate only for a full, single-shard run; a part runs its assigned ids."""
     if shard_files and not per_file and shards == 1 and (directory / RUN_ALL).is_file():
         return [["node", str(directory / RUN_ALL)]]
-    return [["node", str(directory / name)] for name in shard_files]
+    parts = parts or {}
+    if any(PART.fullmatch(entry) and entry not in parts for entry in shard_files):
+        raise ValueError("a planned part has no assigned case ids")
+    files = [entry_file(entry) for entry in shard_files]
+    if len(files) != len(set(files)):  # their logs and summaries would overwrite each other
+        raise ValueError("two parts of one journey file landed on one shard")
+    return [["node", str(directory / entry_file(entry)), *[f"--case={id}" for id in parts.get(entry, [])]]
+            for entry in shard_files]
+
+
+def selected_cases(command: list[str]) -> list[str] | None:
+    """The exact case ids a command selects, or None when it runs the whole file."""
+    return [arg.removeprefix("--case=") for arg in command[2:] if arg.startswith("--case=")] or None
 
 
 # ─── the dev instance ──────────────────────────────────────────────────────
@@ -831,11 +992,17 @@ def journeys(args: argparse.Namespace) -> int:
     (attempt_out / "logs").mkdir(parents=True, exist_ok=True)
     (attempt_out / "journeys").mkdir(parents=True, exist_ok=True)
     label = f"shard {index}/{shards}"
-    only = parse_only(args.only)
-    mine = (plan(shards) if only is None else plan(shards, only=only))[index - 1]
-    commands = commands_for(mine, shards, per_file=args.only is not None or args.retry_failures)
-    print(f"[ci] {label}: {', '.join(' '.join(Path(part).name for part in c[1:]) for c in commands) or 'nothing'}",
-          flush=True)
+    only, parts = parse_only(args.only), parse_parts(args.parts)
+    mine = (plan(shards, only=only, parts=parts) if parts
+            else plan(shards) if only is None else plan(shards, only=only))[index - 1]
+    commands = commands_for(mine, shards, per_file=args.only is not None or args.retry_failures, parts=parts)
+    # A part's share of its file's cases scales the whole-file retry estimate.
+    totals: dict[str, int] = defaultdict(int)
+    for entry, ids in parts.items():
+        totals[entry_file(entry)] += len(ids)
+    shown = [Path(c[1]).name + (f" ({len(cases)} cases)" if (cases := selected_cases(c)) else "")
+             for c in commands]
+    print(f"[ci] {label}: {', '.join(shown) or 'nothing'}", flush=True)
     if not commands:
         _write_summary(f"### UI journeys ({label})\n\nNo journey files in this shard.\n")
         return 0
@@ -852,7 +1019,8 @@ def journeys(args: argparse.Namespace) -> int:
 
     old = {sig: signal.signal(sig, stop) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     try:
-        instance = DevInstance(out, args.ttl_seconds, fake_antigravity="antigravity-usage.journey.mjs" in mine)
+        instance = DevInstance(out, args.ttl_seconds,
+                               fake_antigravity="antigravity-usage.journey.mjs" in map(entry_file, mine))
         problem = instance.wait_ready(args.ready_timeout)
         env = {**os.environ, "DEVLOOP_STATUS": str(instance.status),
                "DEVLOOP_PYTHON": sys.executable, "JOURNEY_OUT": str(attempt_out / "journeys")}
@@ -860,7 +1028,7 @@ def journeys(args: argparse.Namespace) -> int:
             env.pop("JOURNEY_ONLY", None)  # a developer filter must not narrow a CI shard
         env.setdefault("JOURNEY_SHEETS", "1")
         for command in commands:
-            name = " ".join(Path(part).name for part in command[1:])
+            name, cases = Path(command[1]).name, selected_cases(command)
             if problem is None and not instance.alive():
                 problem = "the dev instance died during the journeys"
             if problem is not None:
@@ -871,7 +1039,12 @@ def journeys(args: argparse.Namespace) -> int:
                                         args.journey_timeout)
             results.append({"name": name, "code": code, "seconds": seconds})
             if args.retry_failures:
-                attempts.append(retry.read_attempt(name, attempt_out, code, seconds))
+                # A part's summary must hold exactly its own cases.
+                attempt = retry.read_attempt(name, attempt_out, code, seconds, expected=cases)
+                if cases:
+                    attempt["selection"] = cases
+                    attempt["share"] = len(cases) / totals[name]
+                attempts.append(attempt)
         if args.retry_failures:
             receipt = retry.retry_failed(attempts, out, env, run_command, directory=JOURNEYS,
                                          timeout=args.journey_timeout, started=started,
@@ -936,7 +1109,10 @@ def main(argv: list[str] | None = None) -> int:
     show.add_argument("--shards", type=int, default=1)
     only_help = f"Comma-separated journey names to split instead of all ({EVERY_JOURNEY} = all)"
     show.add_argument("--only", help=only_help)
-    choose = commands.add_parser("matrix", help="Print this workflow event's journey selection and shards")
+    parts_help = ("JSON from `matrix` (a pull request's split): name.journey.mjs#k/n -> its exact case ids. "
+                  "Empty or {} runs every file whole")
+    show.add_argument("--parts", default="", help=parts_help)
+    choose =commands.add_parser("matrix", help="Print this workflow event's journey selection and shards")
     choose.add_argument("--shards", type=int, default=HOSTED_SHARDS)
     refresh = commands.add_parser("refresh-weights", help="Measure journey runtimes from green hosted runs")
     refresh.add_argument("run_ids", type=int, nargs="+", metavar="RUN_ID")
@@ -945,6 +1121,7 @@ def main(argv: list[str] | None = None) -> int:
     run = commands.add_parser("journeys", help="Run a shard of the journeys on a fresh instance")
     run.add_argument("--shard", type=_shard, default=(1, 1), metavar="I/N")
     run.add_argument("--only", help=only_help)
+    run.add_argument("--parts", default="", help=parts_help)
     run.add_argument("--out", type=Path,
                      default=Path(tempfile.gettempdir()) / "ai-shuffle-journeys-ci")
     run.add_argument("--build", action="store_true",
@@ -956,8 +1133,9 @@ def main(argv: list[str] | None = None) -> int:
                      help="CI only: retry up to three failed cases/crashed files once, in the same instance")
     args = parser.parse_args(argv)
     if args.command == "plan":
-        only = parse_only(args.only)
-        print(json.dumps(plan(args.shards) if only is None else plan(args.shards, only=only)))
+        only, parts = parse_only(args.only), parse_parts(args.parts)
+        print(json.dumps(plan(args.shards) if only is None and not parts
+                         else plan(args.shards, only=only, parts=parts)))
         return 0
     if args.command == "matrix":
         return matrix(args.shards)

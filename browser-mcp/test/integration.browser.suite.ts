@@ -4,9 +4,13 @@
  * port, connects over CDP exactly as the server does, and drives the core tools
  * against a static fixture. When no browser is found the whole suite is skipped
  * so `npm test` stays green in browser-less CI.
+ *
+ * Not a test file itself: integration.browser.<k>.test.ts each run one part
+ * of it (integration-part.ts), so Vitest's workers share the suite.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, onTestFailed, vi } from "vitest";
+import { expect, onTestFailed, vi } from "vitest";
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach, rootDescribeSkipIf } from "./integration-part.js";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
@@ -304,7 +308,7 @@ const browserPath = findBrowser();
 const fixtureUrl = new URL("./fixtures/basic.html", import.meta.url).href;
 const uploadFixtureUrl = new URL("./fixtures/upload.html", import.meta.url).href;
 
-describe.skipIf(!browserPath)("integration: core tools over CDP", () => {
+rootDescribeSkipIf(!browserPath)("integration: core tools over CDP", () => {
   let proc: ChildProcess;
   let userDataDir: string;
   let manager: BrowserManager;

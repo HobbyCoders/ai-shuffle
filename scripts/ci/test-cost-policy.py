@@ -197,7 +197,8 @@ class CostPolicyTests(unittest.TestCase):
             self.assertNotIn(forbidden, plan)
         self.assertEqual(plan["outputs"], {"only": "${{ steps.select.outputs.only }}",
                                            "shards": "${{ steps.select.outputs.shards }}",
-                                           "key": "${{ steps.select.outputs.key }}"})
+                                           "key": "${{ steps.select.outputs.key }}",
+                                           "parts": "${{ steps.select.outputs.parts }}"})
         # Reads earlier CI runs, pass records and the merged pull request; never writes.
         self.assertEqual(plan["permissions"], {"contents": "read", "actions": "read", "pull-requests": "read"})
         # The third step only names the selection for CI's gate (main_gate.py).
@@ -217,7 +218,14 @@ class CostPolicyTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", journeys)
         self.assertEqual(journeys["strategy"]["matrix"]["shard"],
                          "${{ fromJSON(needs.journey-plan.outputs.shards) }}")
-        self.assertEqual(journeys["env"], {"JOURNEY_SELECTION": "${{ needs.journey-plan.outputs.only }}"})
+        # Split parts reach the shards only on a pull request; every other event runs whole files.
+        self.assertEqual(journeys["env"], {
+            "JOURNEY_SELECTION": "${{ needs.journey-plan.outputs.only }}",
+            "JOURNEY_PARTS": "${{ github.event_name == 'pull_request' && needs.journey-plan.outputs.parts || '{}' }}",
+        })
+        for step in journeys["steps"]:
+            if "scripts.devloop.ci" in step.get("run", ""):
+                self.assertIn('--parts "$JOURNEY_PARTS"', step["run"])
         self.assertLessEqual({"journey-plan", "journeys"}, set(gate["needs"]))
         check = gate["steps"][0]["run"]
         expected = json.loads(check.split("const expected = ", 1)[1].split(";", 1)[0])
@@ -374,7 +382,9 @@ class CostPolicyTests(unittest.TestCase):
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)
             self.assertEqual(config["jobs"][key]["runs-on"], LINUX_RUNNER)
         command = next(step["run"] for step in shard["steps"] if step.get("name") == "Run fast test subset")
-        self.assertIn('-n 2', command)
+        # One xdist worker per vCPU; backend_gate.py checks each receipt's count.
+        self.assertIn('-n 4 ', command)
+        self.assertIn("SHARD_WORKERS = 4\n", (ROOT / "scripts/ci/backend_gate.py").read_text())
         self.assertIn('-p scripts.ci.backend_shards', command)
 
     def test_public_app_workflows_use_standard_hosted_runners(self):

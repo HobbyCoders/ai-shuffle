@@ -579,7 +579,8 @@ tools-only and workflow-only changes. Backend credential-path checks and contrac
 read those trees too, and `docs/content/` is served at runtime. There is no path
 classifier, skip approval, or reduced-coverage lane.
 
-Full coverage runs eight `ubuntu-24.04` shards with two xdist workers apiece and
+Full coverage runs eight `ubuntu-24.04` shards with four xdist workers apiece (one
+per vCPU) and
 `fail-fast: false`, plus serial real boot/schema, checkpoint/crash recovery, Mobile
 PostgreSQL and network migration contracts on a separate runner. Each worker
 partitions the actual unsharded collection using `scripts/ci/backend_shards.py` and
@@ -587,7 +588,8 @@ proves exact union, no duplicates and no empty shard. Workers must agree on the
 collection and assignment. Controllers also verify executed node IDs, then upload
 per-shard receipts, timings and JUnit. The unchanged hermetic exclusions
 still run with their stronger real-environment prerequisites. The legacy dispatch
-input remains accepted; shard parallelism is fixed at two workers.
+input remains accepted; shard parallelism is fixed at four workers, and the
+backend gate refuses a receipt from any other count.
 
 A shard whose tests fail reruns only those tests, once, serially
 (`scripts/ci/backend_shard_run.py`, the same `local_ci.run` retry with
@@ -1364,7 +1366,14 @@ scripted fake AI, loopback only), waits for its ready line and `status`, runs
 the shard's `frontend/tests/journeys/*.journey.mjs` files in Chromium, then
 `down`. The plan step splits the selected journey files across the eighteen shards by
 measured hosted runtime, longest first, each file exactly once
-(`python -m scripts.devloop.ci plan --shards 18 --only <selection>`). The checked-in medians are
+(`python -m scripts.devloop.ci plan --shards 18 --only <selection>`). On a pull
+request only, the plan job also splits a heavy file into parts of about 2.5
+minutes (`name.journey.mjs#k/n`, every n-th case from k) while that shortens the
+longest shard and no shard holds two parts of one file. It lists each split
+file's cases once and passes every part its exact case ids (the `parts` output,
+`--parts` on the shards, run with `--case`), so each case runs exactly once. A
+failed part retries only its own cases, budgeted by its share of the file's
+runtime. Main's runs, selected or full, never split a file. The checked-in medians are
 in `scripts/devloop/journey_weights.json`, when the current unfiltered `--list`
 case count matches the recorded inventory. New files and changed case counts
 use the current count times the measured median seconds per case. For stale measurements the estimate is also at least the
