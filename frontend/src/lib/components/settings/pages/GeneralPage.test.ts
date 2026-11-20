@@ -100,7 +100,7 @@ describe('General page', () => {
 		let finish!: (result: { state: string; failed: boolean }) => void;
 		native.set.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
 		await fireEvent.click(control);
-		expect(control.disabled).toBe(true);
+		expect(control.hasAttribute('disabled')).toBe(true);
 		expect(control.getAttribute('aria-checked')).toBe('false');
 		finish({ state: 'disabled', failed: true });
 		await waitFor(() => expect(screen.getByRole('status').textContent).toMatch(/Could not turn on startup/));

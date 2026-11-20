@@ -16,10 +16,30 @@
 # Silent installs: /CHANNEL=nightly. Without it a silent install, including
 # the installer update the app runs itself, writes nothing.
 
-!define SHUFFLE_LOGIN_ITEM_STAMP "$INSTDIR\resources\login-item-uninstall-v1"
+!include LogicLib.nsh
+!define SHUFFLE_LOGIN_ITEM_STAMP "resources\login-item-uninstall-v1"
+!define SHUFFLE_RUN "Software\Microsoft\Windows\CurrentVersion\Run"
+!define SHUFFLE_APPROVAL "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
+!define SHUFFLE_LOGIN_ITEM "com.hobbycoders.aishuffle.desktop"
+
+!macro shuffleReadStartupOwner DIRECTORY
+  StrCpy $1 ""
+  ClearErrors
+  FileOpen $0 "${DIRECTORY}\${SHUFFLE_LOGIN_ITEM_STAMP}" r
+  ${ifNot} ${Errors}
+    FileReadUTF16LE $0 $1
+    FileClose $0
+  ${endif}
+!macroend
+
+!macro shuffleStartupRefuse MESSAGE
+  DetailPrint "${MESSAGE}"
+  MessageBox MB_OK|MB_ICONSTOP "${MESSAGE}" /SD IDOK
+  SetErrorLevel 2
+  Quit
+!macroend
 
 !ifndef BUILD_UNINSTALLER
-  !include LogicLib.nsh
   !include nsDialogs.nsh
   !include FileFunc.nsh
 
@@ -42,6 +62,45 @@
     ${if} $installMode == "all"
       SetShellVarContext all
     ${endif}
+  !macroend
+
+  !macro customHeader
+    # The pinned assisted installer inserts this Section before its install
+    # Section, after scope/directory selection but BEFORE it runs either old
+    # uninstaller. --updated alone cannot tell an upgrade from a move.
+    Section "-Check startup registration"
+      SectionIn RO
+      # installer.nsi selects all-users in its silent machine-upgrade path.
+      # Resolve that same destination before comparing it below.
+      ${if} ${Silent}
+      ${andIf} $hasPerMachineInstallation == "1"
+        !insertmacro setInstallModePerAllUsers
+      ${endif}
+
+      # Also prevent an explicit destination from overwriting a stamped copy
+      # owned by a different account (including when UAC changed accounts).
+      ${if} ${FileExists} "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}"
+        !insertmacro shuffleUserContext
+        !insertmacro shuffleReadStartupOwner "$INSTDIR"
+        StrCpy $2 "$APPDATA"
+        !insertmacro shuffleRestoreContext
+        ${if} $1 != $2
+          !insertmacro shuffleStartupRefuse "This folder contains AI Shuffle installed for another account. Choose a different folder."
+        ${endif}
+      ${endif}
+
+      ReadRegStr $2 HKCU "${INSTALL_REGISTRY_KEY}" InstallLocation
+      ${if} $2 != ""
+      ${andIf} ${FileExists} "$2\${SHUFFLE_LOGIN_ITEM_STAMP}"
+        ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+        ${if} $3 != ""
+          ${if} $installMode != "CurrentUser"
+          ${orIf} $INSTDIR != $2
+            !insertmacro shuffleStartupRefuse "AI Shuffle is registered to start at sign-in. In Settings > General, turn it off or remove the startup item, or uninstall this per-user copy before changing the install scope or folder."
+          ${endif}
+        ${endif}
+      ${endif}
+    SectionEnd
   !macroend
 
   !macro customInit
@@ -130,7 +189,7 @@
     ${if} $installMode == "CurrentUser"
       Push $0
       ClearErrors
-      FileOpen $0 "${SHUFFLE_LOGIN_ITEM_STAMP}" w
+      FileOpen $0 "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}" w
       ${ifNot} ${Errors}
         FileWriteUTF16LE $0 "$APPDATA"
         FileClose $0
@@ -140,13 +199,22 @@
   !macroend
 !else
   !macro customUnInstall
-    # electron-builder also runs the old uninstaller with --updated during
-    # an in-place installer upgrade. Keep both registration and OS approval.
-    ${ifNot} ${isUpdated}
-    ${andIf} $installMode == "CurrentUser"
-    ${andIf} ${FileExists} "${SHUFFLE_LOGIN_ITEM_STAMP}"
-      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "com.hobbycoders.aishuffle.desktop"
-      DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "com.hobbycoders.aishuffle.desktop"
+    ${if} ${FileExists} "$INSTDIR\${SHUFFLE_LOGIN_ITEM_STAMP}"
+      !insertmacro shuffleReadStartupOwner "$INSTDIR"
+      ${if} $installMode != "CurrentUser"
+      ${orIf} $1 != "$APPDATA"
+        !insertmacro shuffleStartupRefuse "Uninstall this per-user copy of AI Shuffle from the Windows account that installed it."
+      ${endif}
+      # New installers allow --updated to replace this copy only in place
+      # while startup is registered. Preserve the entry and Windows approval.
+      ${ifNot} ${isUpdated}
+        ReadRegStr $3 HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+        ${if} $3 == ""
+        ${orIf} $3 == '"$INSTDIR\${APP_EXECUTABLE_FILENAME}"'
+          DeleteRegValue HKCU "${SHUFFLE_RUN}" "${SHUFFLE_LOGIN_ITEM}"
+          DeleteRegValue HKCU "${SHUFFLE_APPROVAL}" "${SHUFFLE_LOGIN_ITEM}"
+        ${endif}
+      ${endif}
     ${endif}
   !macroend
 !endif
