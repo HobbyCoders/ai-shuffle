@@ -77,7 +77,8 @@ draft skips. Which of them a run starts depends on the files the change touches
   and `Container checks (install)` (Compose configuration, agent isolation and
   the buyer compose file). The gate requires all three. Pull requests read
   main's cache and do not write it; main and the daily run write it. The
-  release workflows still run every group in one job.
+  release workflows still run both phases of `verify_container_postgres.py`
+  (lifecycle and updater) in one job.
 - `ci-android-minified.yml`: build the R8/resource-shrunk Play release bundle and
   test the non-debuggable `releaseSmoke` variant on API 34/36. Its fixture launcher
   and disposable signing are test-only; release keep rules are unchanged.

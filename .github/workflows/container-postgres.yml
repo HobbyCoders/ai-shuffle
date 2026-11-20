@@ -21,7 +21,8 @@ jobs:
     # Actions. A rebuild from cache is quicker than passing a saved image
     # between jobs, and the slowest group (the signed update, about 4.5 min)
     # sets the wall time. The release paths (docker-publish.yml,
-    # build-branch.yml) still run every check in one job.
+    # build-branch.yml) still run both phases of verify_container_postgres.py
+    # (lifecycle and updater) in one job.
     name: Container checks (${{ matrix.lane }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
