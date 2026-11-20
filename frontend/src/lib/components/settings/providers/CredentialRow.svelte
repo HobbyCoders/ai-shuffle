@@ -117,13 +117,14 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* Phone: the account line wraps to a second line instead of cutting an
-	   email short. Its two parts flow as one text, so the limit covers both. */
+	/* Phone: the account line wraps instead of cutting an email short, up to
+	   three lines: a sign-in kind, an email and a plan need the third beside a
+	   status. Its two parts flow as one text, so the limit covers both. */
 	:global(.settings-shell[data-stacked]) .sm {
 		display: -webkit-box;
 		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		line-clamp: 2;
+		-webkit-line-clamp: 3;
+		line-clamp: 3;
 		overflow: hidden;
 		white-space: normal;
 		overflow-wrap: anywhere;
