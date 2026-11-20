@@ -55,9 +55,17 @@ def test_fallback_list_and_default_are_the_5_5_generation(key):
     # Opus 5.5 and Sonnet 5.5 are the generation Anthropic's CVP covers.
     claude_auth_mode.set_mode("subscription")
     row = cap.virtual_row()
+    # The ids the list offered before stay pickable after them, so an old pin
+    # still validates before the key's catalog is read.
     assert [m["id"] for m in row["models_json"]] == [
-        "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2"]
+        "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-2",
+        "claude-sonnet-5", "claude-opus-5", "claude-fable-5"]
+    assert row["models_json"][5] == {"id": "claude-opus-5", "label": "Opus 5"}
     assert row["default_model"] == "claude-sonnet-5-5"
+    from app.core.provider_agent import validate_provider_model
+
+    assert validate_provider_model(cap.CLAUDE_API_PROVIDER_ID, "claude-opus-5",
+                                   provider_row=row, require_servable=False).ok
 
 
 @pytest.mark.parametrize("picked", ["claude-opus-5", "claude-sonnet-5"])

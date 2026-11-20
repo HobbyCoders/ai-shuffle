@@ -93,9 +93,17 @@ def _base_url(key: str) -> Optional[str]:
 
 
 def _default_models() -> List[Dict[str, str]]:
-    from app.core.model_registry import API_MODEL_IDS, MODELS
+    """The built-in list, used until the key's own catalog is read: the
+    aliases' current ids first, then the ids it offered before the 5.5
+    defaults, so a pin made from the old list still validates."""
+    from app.core.model_registry import _BY_VALUE, API_MODEL_IDS, FROZEN_MODEL_IDS, MODELS
 
-    return [{"id": API_MODEL_IDS[m.value], "label": m.label} for m in MODELS if m.value in API_MODEL_IDS]
+    models = [{"id": API_MODEL_IDS[m.value], "label": m.label} for m in MODELS if m.value in API_MODEL_IDS]
+    for old in FROZEN_MODEL_IDS.values():
+        if all(m["id"] != old for m in models):
+            option = _BY_VALUE.get(old)
+            models.append({"id": old, "label": option.label if option else old})
+    return models
 
 
 def _catalogs() -> Dict[str, Any]:
