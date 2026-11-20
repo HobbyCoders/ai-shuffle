@@ -262,8 +262,14 @@ time with push turned on for the debug build (`-PpushEnabledDebug=true`, the cod
 path release builds take once Firebase config is present; no `google-services.json`
 is needed or committed), builds the debug and test APKs,
 and exercises the full native instrumentation suite on API 34 and API 36 when
-the `android` area runs: after a change to `android/`, `mobile/`, the
-frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
+the `android` area runs. Each API level runs as four emulator jobs
+(`Android emulator verification (API 34, 1/4)` … `(API 36, 4/4)`): parts 1–3
+each run one AndroidJUnitRunner hash shard (`numShards`/`shardIndex`) of the
+suite, and part 4 runs the fresh-process cold-chat check, the suite's longest
+test, the notification-permission decisions and the host-only parser checks.
+Every test still runs once per API level, on pull requests and on main alike;
+one job running everything took about 17 minutes, a part about 7. The area
+runs after a change to `android/`, `mobile/`, the frontend's build setup and dependencies (`frontend/` except `frontend/src/` and
 `frontend/tests/`), the workflow itself or the files that decide a run, and in
 the daily run. The asset paths matter: the APK's offline demo is built from
 `mobile/` and shared `frontend/` dependencies;
@@ -412,8 +418,9 @@ workflows (`ci-backend.yml`, `ci-frontend.yml`, `windows-suite.yml`,
 job must succeed (or, for the JavaScript checks, be skipped exactly when their
 pass record proved them; the journeys only when the selection chose none), and
 the backend and Windows desktop shard receipts are checked in the gate job
-itself. The one job that may fail is the API 36 emulator of `android.yml`,
-which that workflow already marks advisory. Advisory jobs (`source-ui`, the
+itself. The only jobs that may fail are the four API 36 emulator parts of
+`android.yml`, which that workflow already marks advisory; the gate still waits
+for them to finish. Advisory jobs (`source-ui`, the
 `plan` lookup) never decide.
 
 A started run on main finishes unless a required job fails, is cancelled or

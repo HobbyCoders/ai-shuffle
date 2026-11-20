@@ -421,7 +421,7 @@ def test_a_green_run_names_a_record_for_every_area_it_ran():
     ("javascript / Frontend and mobile production build", {"javascript-checks"}),
     ("javascript / Frontend tests (3/4)", {"javascript-checks"}),
     ("android / Build and test Android app", {"android"}),
-    ("android / Android emulator verification (API 34)", {"android"}),
+    ("android / Android emulator verification (API 34, 3/4)", {"android"}),
     ("android-minified / Minified releaseSmoke (API 36)", {"android-minified"}),
     # Not part of any record: these have no files of their own.
     ("update-reach", set()), ("supply-chain", set()),
@@ -446,7 +446,7 @@ def test_a_failed_journey_does_not_lose_the_record_of_the_other_javascript_check
 
 def test_an_area_with_a_job_not_listed_yet_is_not_recorded():
     """A job waiting on another is listed only once that one finished."""
-    for name, area in (("android / Android emulator verification (API 34)", "android"),
+    for name, area in (("android / Android emulator verification (API 34, 1/4)", "android"),
                        ("fluid / delegated tool-output contract (2.1.308)", "fluid"),
                        ("windows / Windows desktop", "windows"),
                        ("javascript / JavaScript package checks", "javascript-checks")):
@@ -458,10 +458,15 @@ def test_an_area_with_a_job_not_listed_yet_is_not_recorded():
 
 
 def test_the_emulator_its_own_workflow_lets_fail_does_not_lose_the_record():
-    advisory = "android / Android emulator verification (API 36)"
-    assert gate.TOLERATED == {advisory, MAP_JOB}
+    parts = {f"android / Android emulator verification (API 36, {part}/4)" for part in range(1, 5)}
+    advisory = "android / Android emulator verification (API 36, 2/4)"
+    assert gate.TOLERATED == parts | {MAP_JOB}
     matrix = workflow("android.yml")["jobs"]["android-ui"]["strategy"]["matrix"]["include"]
-    assert [item["api"] for item in matrix if item["advisory"] == "true"] == ["36"]
+    assert [item["api"] for item in matrix if item["advisory"] == "true"] == ["36"] * 4
+    # Every part is listed under its own name, and the gate waits for each.
+    assert {f"android / Android emulator verification ({item['leg']})" for item in matrix} <= {
+        job["name"] for job in listing()}
+    assert gate.missing(PLAN, [job for job in listing() if job["name"] != advisory]) == [advisory]
     assert workflow("android.yml")["jobs"]["android-ui"]["continue-on-error"] == "${{ matrix.advisory }}"
     jobs = listing() + [SELF]
     named(jobs, advisory)["conclusion"] = "failure"

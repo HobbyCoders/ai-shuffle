@@ -1,8 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# android.yml splits the run over UI_TEST_PARTS emulator jobs per API level, so
+# no job runs the whole 14-minute suite. Parts 1..N-1 each run one
+# AndroidJUnitRunner hash shard of the suite (every test lands in exactly one
+# shard, new tests included). The last part runs the fresh-process cold-chat
+# check, the suite's longest test and the notification-permission decisions.
+# Unset, one job runs everything, as before the split.
+parts="${UI_TEST_PARTS:-1}"
+part="${UI_TEST_PART:-1}"
+if ! [[ "$parts" =~ ^[1-9][0-9]*$ && "$part" =~ ^[1-9][0-9]*$ ]] || (( part > parts )); then
+  echo "::error::UI_TEST_PART=$part of UI_TEST_PARTS=$parts is not a part of this run." >&2
+  exit 2
+fi
+last=$(( part == parts ))
+if (( parts == 1 )); then
+  scope="cold-start and full suite"
+elif (( last )); then
+  scope="part $part of $parts: cold-start, longest suite test and notification decisions"
+else
+  scope="part $part of $parts: suite shard $part of $(( parts - 1 ))"
+fi
+# The real Save dialog needs an external driver and has a separate manual run.
+save_dialog='com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer'
+# About 135 of the suite's 860 seconds (run 44723603249): alone on the last part,
+# it no longer decides how long the slowest shard takes.
+longest='com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#workerFileLinkAboveTheBufferedCapStreamsWholeIntoTheSavedDocument'
+
 out="$RUNNER_TEMP/android-emulator/instrumentation"
 mkdir -p "$out"
+
 on_exit() {
   local status=$?
   trap - EXIT
@@ -16,7 +43,7 @@ on_exit() {
   fi
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
     if (( status == 0 )); then
-      printf '%s\n' '- Android emulator verification: PASSED (cold-start and full suite).' >> "$GITHUB_STEP_SUMMARY"
+      printf '%s\n' "- Android emulator verification: PASSED ($scope)." >> "$GITHUB_STEP_SUMMARY"
     else
       printf '%s\n' "- Android emulator verification: FAILED (exit $status). No app failure was retried or excused; release-advisory policy does not change this failed result." >> "$GITHUB_STEP_SUMMARY"
     fi
@@ -48,29 +75,53 @@ if (( api_level >= 33 )); then
   adb -s emulator-5554 shell pm grant com.hobbycoders.aishuffle android.permission.POST_NOTIFICATIONS
 fi
 
-# Start chat in its own fresh app process: a previous WebView can hide startup
-# ordering bugs in document-start script registration (seen on WebView 151).
-adb -s emulator-5554 shell am force-stop com.hobbycoders.aishuffle
-timeout --kill-after=15s 180s adb -s emulator-5554 shell am instrument -w -r \
-  -e timeout_msec 120000 \
-  -e class 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#coldChatStartsWithBootstrapAndNativeBridges' \
-  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/cold-chat.txt"
-python3 ci/check-instrumentation.py "$out/cold-chat.txt"
+if (( parts == 1 || last )); then
+  # Start chat in its own fresh app process: a previous WebView can hide startup
+  # ordering bugs in document-start script registration (seen on WebView 151).
+  adb -s emulator-5554 shell am force-stop com.hobbycoders.aishuffle
+  timeout --kill-after=15s 180s adb -s emulator-5554 shell am instrument -w -r \
+    -e timeout_msec 120000 \
+    -e class 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#coldChatStartsWithBootstrapAndNativeBridges' \
+    com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/cold-chat.txt"
+  python3 ci/check-instrumentation.py "$out/cold-chat.txt"
+fi
 
-# The real Save dialog needs an external driver and has a separate manual run.
-# Exclude only that opt-in test, so the strict result parser continues rejecting
-# every unexpected skip or failure.
+# Exclude only the opt-in Save dialog test, so the strict result parser
+# continues rejecting every unexpected skip or failure; a shard that selects no
+# test fails it too.
 # On ubuntu-24.04 the 61-test suite reached test 59 at 596 seconds;
 # the old 600s suite deadline killed a healthy test, not a hung refresh.
 # Give the full suite room while bounding each test independently (milliseconds).
 # Keep the host deadline as a backstop for an unresponsive instrumentation process.
 # Consent coverage also exercises a separate APK so the bundled WebView is not the target.
-timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
-  -e timeout_msec 180000 \
-  -e notClass 'com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer' \
-  -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
-  com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
-python3 ci/check-instrumentation.py "$out/runner.txt"
+if (( parts == 1 )); then
+  timeout --kill-after=15s 1200s adb -s emulator-5554 shell am instrument -w -r \
+    -e timeout_msec 180000 \
+    -e notClass "$save_dialog" \
+    -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
+    com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
+  python3 ci/check-instrumentation.py "$out/runner.txt"
+elif (( ! last )); then
+  # A shard takes about 4 minutes; the host deadline still leaves it twice that.
+  timeout --kill-after=15s 600s adb -s emulator-5554 shell am instrument -w -r \
+    -e timeout_msec 180000 \
+    -e numShards "$(( parts - 1 ))" -e shardIndex "$(( part - 1 ))" \
+    -e notClass "$save_dialog,$longest" \
+    -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
+    com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/runner.txt"
+  python3 ci/check-instrumentation.py "$out/runner.txt"
+else
+  timeout --kill-after=15s 300s adb -s emulator-5554 shell am instrument -w -r \
+    -e timeout_msec 180000 \
+    -e class "$longest" \
+    -e additionalTestOutputDir /sdcard/Android/media/com.hobbycoders.aishuffle/ui-smoke \
+    com.hobbycoders.aishuffle.test/androidx.test.runner.AndroidJUnitRunner | tee "$out/longest.txt"
+  python3 ci/check-instrumentation.py "$out/longest.txt"
+fi
+
+if (( parts > 1 && ! last )); then
+  exit 0
+fi
 
 # Deliberately NOT granted POST_NOTIFICATIONS. Clear data/permission flags before
 # each decision; never retry a failed test. The debug-only push build has no FCM

@@ -54,7 +54,7 @@ class StorageHeadroomTest(unittest.TestCase):
 
 class UiRunnerTest(unittest.TestCase):
     def run_runner(self, mode="pass", phase="suite", runner="run-android-ui-tests.sh", api=34,
-                   qemu=True, adb_state=None):
+                   qemu=True, adb_state=None, part=None):
         with tempfile.TemporaryDirectory(prefix="ui runner ") as directory:
             root = Path(directory)
             (root / "ci").mkdir()
@@ -91,7 +91,8 @@ if "instrument" in args:
              "denying-launcher" if any("#denyingLauncher" in arg for arg in args) else
              "allowing" if any("#allowingStartup" in arg for arg in args) else
              "denying" if any("#denyingStartup" in arg for arg in args) else
-             "minified" if any("MinifiedReleaseSmokeTest" in arg for arg in args) else "cold")
+             "minified" if any("MinifiedReleaseSmokeTest" in arg for arg in args) else
+             "longest" if any("#workerFileLinkAboveTheBufferedCap" in arg for arg in args) else "cold")
     mode = os.environ["MODE"] if phase == os.environ["PHASE"] else "pass"
     if mode == "timeout":
         sys.exit(124)
@@ -122,7 +123,8 @@ if "instrument" in args:
                 'adb() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" adb "$@"; }\n'
                 'timeout() { "$UI_RUNNER_TEST_PYTHON" "$UI_RUNNER_TEST_FAKE" timeout "$@"; }\n',
                 encoding="utf-8", newline="\n")
-            env = dict(os.environ, BASH_ENV=shell_env.as_posix(),
+            parts = {} if part is None else {"UI_TEST_PART": str(part[0]), "UI_TEST_PARTS": str(part[1])}
+            env = dict(os.environ, **parts, BASH_ENV=shell_env.as_posix(),
                        RUNNER_TEMP=str(root / "output"), CALLS=str(root / "calls"), MODE=mode, PHASE=phase,
                        API_LEVEL=str(api), DIAGNOSTIC_PHASE=str(root / "diagnostic-phase"),
                        GITHUB_STEP_SUMMARY=str(root / "summary"),
@@ -190,6 +192,67 @@ if "instrument" in args:
         excluded = runs[1][runs[1].index("notClass") + 1]
         self.assertEqual("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
                          "realSystemSaveDialogReturnsToChatAndCompletesTransfer", excluded)
+
+    def test_parts_split_the_suite_into_shards_and_keep_every_other_run_once(self):
+        save_dialog = "com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#realSystemSaveDialogReturnsToChatAndCompletesTransfer"
+        longest = ("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
+                   "workerFileLinkAboveTheBufferedCapStreamsWholeIntoTheSavedDocument")
+        every = []
+        for part in (1, 2, 3, 4):
+            with self.subTest(part=part):
+                result, calls = self.run_runner(part=(part, 4))
+                self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+                runs = [call for call in calls if call[0] == "timeout" and "instrument" in call]
+                every.extend(runs)
+                notification = [call for call in calls if "install" in call and
+                                any("notification-instrumentation-apks/" in arg for arg in call)]
+                self.assertEqual(1, sum("grant" in call for call in calls))
+                if part < 4:
+                    (run,) = runs
+                    self.assertEqual(["--kill-after=15s", "600s"], run[1:3])
+                    self.assertEqual("180000", run[run.index("timeout_msec") + 1])
+                    self.assertEqual(["3", str(part - 1)],
+                                     [run[run.index("numShards") + 1], run[run.index("shardIndex") + 1]])
+                    self.assertEqual(f"{save_dialog},{longest}", run[run.index("notClass") + 1])
+                    self.assertEqual([], notification)
+                    self.assertFalse(any("force-stop" in call for call in calls))
+                    self.assertIn(f"PASSED (part {part} of 4: suite shard {part} of 3)", self.summary)
+                else:
+                    self.assertEqual(6, len(runs))
+                    self.assertFalse(any("numShards" in run or "notClass" in run for run in runs))
+                    self.assertEqual("com.hobbycoders.aishuffle.ChatCapabilitiesSmokeTest#"
+                                     "coldChatStartsWithBootstrapAndNativeBridges", runs[0][runs[0].index("class") + 1])
+                    self.assertEqual(longest, runs[1][runs[1].index("class") + 1])
+                    self.assertEqual(["--kill-after=15s", "300s"], runs[1][1:3])
+                    self.assertEqual(2, len(notification))
+                    self.assertIn("PASSED (part 4 of 4: cold-start, longest suite test", self.summary)
+                self.assertEqual(len(runs), result.stdout.count("1 passed; no failed or skipped tests"))
+        # Across the parts: each shard once, and every run the single job makes outside the suite once.
+        whole = self.run_runner()[1]
+        outside = sorted(call[call.index("class") + 1] for call in whole
+                         if call[0] == "timeout" and "instrument" in call and "class" in call)
+        self.assertEqual(sorted([*outside, longest]), sorted(run[run.index("class") + 1] for run in every if "class" in run))
+        self.assertEqual(["0", "1", "2"], [run[run.index("shardIndex") + 1] for run in every if "shardIndex" in run])
+
+    def test_a_failure_in_any_part_fails_it_without_retries(self):
+        for part, phase, count in ((2, "suite", 1), (4, "cold", 1), (4, "longest", 2), (4, "denying-launcher", 6)):
+            for mode in ("failure", "app-crash", "timeout"):
+                with self.subTest(part=part, phase=phase, mode=mode):
+                    result, calls = self.run_runner(mode, phase, part=(part, 4))
+                    self.assertNotEqual(0, result.returncode, result.stdout + result.stderr)
+                    self.assertIn(f"Android emulator verification: FAILED (exit {result.returncode})", self.summary)
+                    self.assertIsNone(self.marker)
+                    self.assertEqual(count, sum(call[0] == "adb" and "instrument" in call for call in calls))
+
+    def test_a_part_outside_the_split_runs_nothing(self):
+        for part, parts in (("5", "4"), ("0", "4"), ("x", "4"), ("1", "0"), ("1", "two")):
+            with self.subTest(part=part, parts=parts), tempfile.TemporaryDirectory() as directory:
+                env = dict(os.environ, RUNNER_TEMP=directory, UI_TEST_PART=part, UI_TEST_PARTS=parts,
+                           PATH=directory)  # No adb, python3 or timeout to call.
+                result = subprocess.run([shutil.which(BASH) or BASH, str(CI / "run-android-ui-tests.sh")],
+                                        cwd=CI.parent, env=env, text=True, capture_output=True, timeout=10)
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("is not a part of this run", result.stderr)
 
     def test_notification_decisions_start_clean_without_pregrant_or_retries(self):
         result, calls = self.run_runner()

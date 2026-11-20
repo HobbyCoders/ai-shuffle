@@ -222,7 +222,7 @@ def test_a_job_that_failed_or_has_an_unknown_state_proves_nothing(bad):
 
 def test_only_the_javascript_jobs_stand_behind_the_journeys():
     """The other areas of the same run keep their own records (scripts/ci/plan.py)."""
-    other = job(conclusion="failure", name="android / Android emulator verification (API 36)")
+    other = job(conclusion="failure", name="android / Android emulator verification (API 36, 1/4)")
     assert found(artifact(), jobs=[job(), other])
     assert not found(artifact(), jobs=[other])
     assert not found(artifact(), jobs=[job(), job(conclusion="failure", name="javascript / Build")])
