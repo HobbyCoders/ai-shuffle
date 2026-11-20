@@ -32,13 +32,44 @@ async function leavingItOff(page, body) {
 	}
 }
 
+/**
+ * The switch lives in the sidebar: the rail from 768px, the drawer below that
+ * (the phone bars do not carry it). Open the drawer when it is closed, run
+ * `body`, and close it again so the page is left the way it was found.
+ */
+async function withSwitch(page, body) {
+	const sidebar = page.getByRole('complementary', { name: 'Chats', exact: true });
+	// The phone bar's ☰ (web: "Chats", the phone app: "Open menu"); desktop has none.
+	const opener = page.locator('header.topbar').getByRole('button', { name: /^(Chats|Open menu)\b/ });
+	// Wait for the page to draw either the sidebar (the rail) or the way to the drawer.
+	await sidebar.or(opener).first().waitFor({ timeout: TIMEOUT });
+	const opened = !(await sidebar.isVisible());
+	if (opened) {
+		await opener.click();
+		await sidebar.waitFor({ timeout: TIMEOUT });
+	}
+	try {
+		return await body();
+	} finally {
+		if (opened) {
+			// The web drawer closes on its scrim; the phone app's on its own Close.
+			const scrim = page.locator('.sidebar-scrim');
+			if (await scrim.isVisible()) await scrim.click({ position: { x: page.viewportSize().width - 8, y: 300 } });
+			else await page.locator('.drawer-close').click();
+			await sidebar.waitFor({ state: 'hidden', timeout: TIMEOUT });
+		}
+	}
+}
+
 async function waitSwitch(page, on) {
-	await allChatsSwitch(page, on).waitFor({ timeout: TIMEOUT });
+	await withSwitch(page, () => allChatsSwitch(page, on).waitFor({ timeout: TIMEOUT }));
 }
 
 async function flip(page, to) {
-	await allChatsSwitch(page, !to).click();
-	await waitSwitch(page, to);
+	await withSwitch(page, async () => {
+		await allChatsSwitch(page, !to).click();
+		await allChatsSwitch(page, to).waitFor({ timeout: TIMEOUT });
+	});
 }
 
 /** The band across the very top: it must be there, full width and click-through, or gone. */
@@ -163,7 +194,7 @@ function bandCase(name, open) {
 			await leavingItOff(page, async () => {
 				await mark(`${name}: Away is on and the band says so`);
 				await waitBand(page, true);
-				await mark(`${name}: one tap turns it off from here`);
+				await mark(`${name}: the sidebar's switch turns it off from here`);
 				await flip(page, false);
 				await waitBand(page, false);
 			});
@@ -330,7 +361,7 @@ await runJourney({
 						async setup({ page, status }) {
 							await page.goto(new URL('/mobile/', status.urls.preview_listener).href);
 							expect(new URL(page.url()).pathname === '/mobile/', 'native evidence uses the real phone bundle');
-							await allChatsSwitch(page).waitFor({ timeout: 90_000 });
+							await page.getByRole('button', { name: /^Open menu\b/ }).waitFor({ timeout: 90_000 });
 							await setGlobal(page, false);
 							await waitSwitch(page, false);
 						},
