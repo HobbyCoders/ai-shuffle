@@ -243,7 +243,7 @@ async def evaluate_pending(
     Raises :class:`GateUnavailable` when no replay runner was supplied and
     none can be built from fluid's configuration.
     """
-    from fluid.cli.evolve import apply_guidance, guidance_validator
+    from fluid.cli.evolve import guidance_validator
     from fluid.codemode.anchors import AnchorStore
     from fluid.codemode.evolution import (
         CommitGate,
@@ -263,7 +263,10 @@ async def evaluate_pending(
     if budget is None:
         budget = DEFAULT_BUDGET
 
-    home = guidance_home()
+    from app.core.guidance_storage import (
+        GuidanceConflict, GuidanceValidationError, apply_automatic_guidance, guidance_revision,
+    )
+
     gate = CommitGate(AnchorStore(root), runner, budget=budget)
     verdicts: List[Dict[str, Any]] = []
     for record in records:
@@ -272,12 +275,24 @@ async def evaluate_pending(
             # Unknown kinds stay queued for a newer fluid, exactly as the CLI
             # leaves them.
             continue
-        verdict = await gate.evaluate(
-            proposal,
-            validator=guidance_validator,
-            apply=lambda p: apply_guidance(p, home=home),
-            require_motivation=True,
-        )
+        try:
+            revision = guidance_revision(proposal.target)
+            def apply(candidate, expected_revision=revision):
+                apply_automatic_guidance(
+                    candidate.target, candidate.content, expected_revision=expected_revision,
+                )
+
+            verdict = await gate.evaluate(
+                proposal,
+                validator=guidance_validator,
+                apply=apply,
+                require_motivation=True,
+            )
+        except (GuidanceConflict, GuidanceValidationError) as exc:
+            # Replay may have overlapped an owner edit/delete. Park instead of
+            # registering a commit for a change that was never written.
+            reason = str(exc)
+            verdict = await gate.evaluate(proposal, validator=lambda _p, reason=reason: [reason])
         remove_pending(root, kind=proposal.kind, target=proposal.target)
         verdicts.append(
             {
