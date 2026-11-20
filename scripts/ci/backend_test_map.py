@@ -620,10 +620,10 @@ def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | lis
         return "all", [f"Running the full suite: {error}"], None
 
     def base_source(path: str) -> str | None:
-        try:
-            return git("show", f"{base}:{path}")
-        except subprocess.CalledProcessError:
-            return None
+        # A file the change adds has no base version; git's "fatal:" line would only mislead the log.
+        shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True, check=False,
+                               text=True, encoding="utf-8", errors="replace")
+        return shown.stdout if shown.returncode == 0 else None
 
     result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
     if test_map is not None:
