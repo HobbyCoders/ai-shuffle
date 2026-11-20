@@ -42,6 +42,8 @@ module never reads the CLI's own credential files; CLI sign-in state comes from
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import logging
@@ -134,6 +136,30 @@ def _cli_signed_in_peek() -> Optional[bool]:
     return None if status is None else bool(status.signed_in)
 
 
+_mode_pin: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("claude_auth_mode_pin", default=None)
+
+
+@contextlib.contextmanager
+def pinned_mode():
+    """Answer :func:`selected_mode` (and so :func:`current_mode` and
+    :func:`prefers_claude_api`) with one read for the whole block, so a
+    projection that asks several times (the model registry payload) describes
+    one mode even if the owner switches midway. Yields the CLI's mode."""
+    held = _mode_pin.get()
+    if held is not None:
+        yield _cli_mode(held)
+        return
+    token = _mode_pin.set(selected_mode())
+    try:
+        yield _cli_mode(_mode_pin.get())
+    finally:
+        _mode_pin.reset(token)
+
+
+def _cli_mode(selected: str) -> str:
+    return MODE_SUBSCRIPTION if selected == MODE_API_KEY else selected
+
+
 def current_mode() -> str:
     """The mode the Claude Code CLI runs in.
 
@@ -141,8 +167,7 @@ def current_mode() -> str:
     Claude run on the CLI there is a subscription run (its sign-in, its
     guards, its billing). Settings shows :func:`selected_mode`.
     """
-    mode = selected_mode()
-    return MODE_SUBSCRIPTION if mode == MODE_API_KEY else mode
+    return _cli_mode(selected_mode())
 
 
 def prefers_claude_api() -> bool:
@@ -156,8 +181,14 @@ def prefers_claude_api() -> bool:
 
 
 def selected_mode() -> str:
-    """The mode the owner chose. Reads the setting; before startup has
-    recorded one it answers with the default without writing anything."""
+    """The mode the owner chose (the pinned one inside :func:`pinned_mode`)."""
+    held = _mode_pin.get()
+    return held if held is not None else _read_mode()
+
+
+def _read_mode() -> str:
+    """Reads the setting; before startup has recorded one it answers with the
+    default without writing anything."""
     try:
         mode = stored_mode(cached=True)
     except Exception:  # noqa: BLE001 — a DB hiccup must not pick a mode silently

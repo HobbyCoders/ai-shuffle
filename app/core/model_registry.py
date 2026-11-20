@@ -32,7 +32,9 @@ if TYPE_CHECKING:  # pragma: no cover — annotation-only, avoids an import cycl
 
 logger = logging.getLogger(__name__)
 
-ModelFamily = Literal["haiku", "sonnet", "opus", "fable"]
+# Mythos has no CLI alias; it appears only as the full ids a subscription CLI lists.
+ModelFamily = Literal["haiku", "sonnet", "opus", "fable", "mythos"]
+_FAMILIES: Tuple[str, ...] = ("haiku", "sonnet", "opus", "fable", "mythos")
 
 
 @dataclass(frozen=True)
@@ -46,8 +48,9 @@ class ModelOption:
     label: str
     """Human-facing label for dropdowns and badges."""
 
-    family: ModelFamily
-    """Model family — drives badge colour."""
+    family: Optional[ModelFamily]
+    """Model family — drives badge colour. None only for a model the
+    subscription CLI lists whose family this release does not know yet."""
 
     context_window: int
     """Maximum input context in tokens, as the model natively runs.
@@ -159,7 +162,7 @@ def normalize_model(value: Optional[str]) -> str:
 def _family_of(*texts: Optional[str]) -> Optional[ModelFamily]:
     for text in texts:
         lowered = (text or "").lower()
-        for family in ("haiku", "sonnet", "opus", "fable"):
+        for family in _FAMILIES:
             if family in lowered:
                 return family  # type: ignore[return-value]
     return None
@@ -175,9 +178,9 @@ def _cli_model(value: str) -> Optional[ModelOption]:
         return None
     concrete = found.get("resolved") or value
     base = _BY_VALUE.get(concrete) or _BY_VALUE.get(re.sub(r"-\d{8}$", "", concrete))
+    # A family this release does not know yet is still listed and selectable,
+    # with a neutral badge: the CLI lists it, so the CLI can run it.
     family = _family_of(value, concrete, found.get("label")) or (base.family if base else None)
-    if family is None:
-        return None
     window = base.context_window if base else (200_000 if "haiku-4" in concrete else 1_000_000)
     return ModelOption(value, found.get("label") or value, family, window)
 
@@ -280,6 +283,23 @@ def model_values() -> List[str]:
     """All selectable model IDs, for use in Pydantic ``Literal`` / JSON-schema
     enums."""
     return [m.value for m in MODELS]
+
+
+def selectable_model_values() -> List[str]:
+    """Every native model a picker offers: the aliases, then on a subscription
+    each other version the Claude Code CLI lists (``claude-mythos-5-1``).
+
+    For enums of what someone may pick. Routing's alias-only checks keep
+    :func:`model_values`."""
+    from app.core import claude_cli_models
+
+    aliases = model_values()
+    try:
+        listed = [m["value"] for m in claude_cli_models.versioned_entries()]
+    except Exception:  # noqa: BLE001 - an unreadable list offers the aliases
+        logger.warning("Could not read the Claude Code model list", exc_info=True)
+        listed = []
+    return aliases + [v for v in dict.fromkeys(listed) if isinstance(v, str) and v not in aliases]
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -749,7 +769,18 @@ def _default_selection() -> str:
 
 
 def registry_payload() -> Dict[str, object]:
-    """Serialized registry for the ``GET /api/models`` endpoint."""
+    """Serialized registry for the ``GET /api/models`` endpoint.
+
+    Every catalog read in it sees one account's list (see
+    ``claude_cli_models.pinned``), so a sign-in switch midway cannot pair
+    one account's aliases with another's versions."""
+    from app.core import claude_cli_models
+
+    with claude_cli_models.pinned():
+        return _registry_payload()
+
+
+def _registry_payload() -> Dict[str, object]:
     from app.core import claude_cli_models
 
     aliases = delegated_model_aliases()
@@ -774,23 +805,19 @@ def registry_payload() -> Dict[str, object]:
             **effort_capabilities(value, route="delegated"),
         }
 
-    enabled = set(claude_cli_models.enabled_models()) if snapshot else set()
     versioned = []
     for item in claude_cli_models.versioned_entries():
         option = get_model(item["value"])
         if option is None:
             continue
-        versioned.append({**entry(item["value"], option), "description": item.get("description") or "",
-                          "enabled": item["value"] in enabled})
+        versioned.append(entry(item["value"], option))
     claude = _claude_payload()
     if snapshot:
         claude["cli_models"] = {"cli_version": snapshot.get("cli_version"),
                                 "captured_at": snapshot.get("captured_at")}
     return {
-        # The four aliases, then the CLI versions the owner turned on.
-        "models": [entry(m.value, m) for m in MODELS] + [v for v in versioned if v["enabled"]],
-        # Every version the subscription CLI lists (Settings > Claude > Models).
-        "versioned_models": versioned,
+        # The four aliases, then every other version the subscription CLI lists.
+        "models": [entry(m.value, m) for m in MODELS] + versioned,
         "default": _default_selection(),
         "inherit_value": INHERIT_VALUE,
         "legacy_map": legacy_map,

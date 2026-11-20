@@ -705,6 +705,35 @@ def _inherited_model(sender, overrides, runtime_model=None):
     return model_override.app_id(provider_id, value)
 
 
+_FULL_CLAUDE_ID = re.compile(r"claude-[a-z0-9][a-z0-9.\-]*(?:\[1m\])?")
+
+
+def _full_claude_id(model):
+    """``model`` if it has the shape of a full Claude id an inherited binding
+    may carry (the resolver's 300-character limit; the stored ``[1m]`` suffix
+    is allowed), else None. Shape only: says nothing about who may run it."""
+    if isinstance(model, str) and len(model) <= 300 and _FULL_CLAUDE_ID.fullmatch(model):
+        return model
+    return None
+
+
+def _inherited_choice(model, *, runs_here):
+    """The model an inherited (not requested) binding names.
+
+    On a subscription a full Claude id such as ``claude-mythos-5-1`` stays
+    itself: the sender already runs it, and its CLI fails the turn visibly if
+    it does not know it. Explicit requests keep :func:`model_override.resolve`'s
+    alias-only rule; this path grants no new consent.
+    """
+    from app.core import model_override
+    from app.core.model_registry import keeps_own_id
+
+    text = _full_claude_id(model.strip() if isinstance(model, str) else None)
+    if text and keeps_own_id(text):
+        return model_override.Choice(text, None, text)
+    return model_override.resolve(model, runs_here=runs_here)
+
+
 def _request_identity(sender_id, data, action):
     request_id = _text(data, "request_id", 120)
     command_id = "orchestration:" + action + ":" + hashlib.sha256(
@@ -980,7 +1009,7 @@ def _remote_body(sender, data, overrides, payload, prompt, command_id, fingerpri
         inherited = _inherited_model(sender, overrides, runtime_model)
         if not inherited:
             raise ValueError("The inherited remote model is unknown; pass an explicit model.")
-        picked = model_override.resolve(inherited, runs_here=False)
+        picked = _inherited_choice(inherited, runs_here=False)
         body.update(model=picked.model, provider_id=picked.provider_id,
                     model_choice={"model": picked.model, "provider_id": picked.provider_id},
                     model_inherited=True)
@@ -1026,8 +1055,13 @@ def _remote_replay_body(previous, command_id, fingerprint, permission_mode):
         if isinstance(choice, dict):
             model, provider = choice.get("model"), choice.get("provider_id")
             decoded = decode_provider_model(model) if isinstance(model, str) else None
-            canonical = ((provider is None and isinstance(model, str) and model in model_values())
-                         or (decoded is not None and decoded[0] == provider))
+            # An inherited subscription binding may be a full Claude id (see
+            # _inherited_choice); an explicit choice is always an alias. Shape
+            # only: the sender's sign-in may have changed since the binding was
+            # saved, and the destination checks whether it can run it.
+            native = provider is None and isinstance(model, str) and (
+                model in model_values() or (body.get("model_inherited") is True and _full_claude_id(model)))
+            canonical = native or (decoded is not None and decoded[0] == provider)
             if (canonical and body.get("model") == model and body.get("provider_id") == provider
                     and all(key in body for key in (
                         "title", "prompt", "peer_message_content", "sender_session_id", "sender_label",
@@ -1136,6 +1170,10 @@ def accept_remote_start(body, from_device, *, readback_only=False):
     inherited = body.get("model_inherited", False)
     if inherited is not False and inherited is not True:
         raise ValueError("Invalid model_inherited")
+    if inherited and choice is None:
+        # Senders write the flag and the binding together; legacy packets
+        # without the flag keep the old path.
+        raise ValueError("An inherited model needs its model_choice binding")
 
     if database.get_profile(profile_id) is None:
         raise ValueError(f"The agent {profile_id!r} does not exist on this worker; nothing was started.")
@@ -1147,8 +1185,16 @@ def accept_remote_start(body, from_device, *, readback_only=False):
         # HERE, never quietly on something else, and the inherited settings are
         # mapped against this worker's provider rows.
         from app.core import model_override
+        if inherited and (choice.get("model") != model or choice.get("provider_id") != provider_id):
+            # The sender writes the same binding in both places (see the
+            # inherited branch of the remote-start body).
+            raise ValueError("The inherited model binding does not match the request. Nothing was started.")
+        if inherited and provider_id is not None and _full_claude_id(model):
+            # Replay's rule: a full Claude id travels only as a native binding.
+            raise ValueError("An inherited Claude model id cannot name a provider. Nothing was started.")
         try:
-            picked = model_override.resolve(choice.get("model"), runs_here=True)
+            picked = (_inherited_choice(choice.get("model"), runs_here=True) if inherited
+                      else model_override.resolve(choice.get("model"), runs_here=True))
         except ValueError as exc:
             raise ValueError(f"{exc} Nothing was started.") from None
         if picked.model != model_override.active_account_model(choice.get("model")):

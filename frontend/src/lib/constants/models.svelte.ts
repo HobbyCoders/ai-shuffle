@@ -20,7 +20,8 @@ import { api } from '$lib/api/client';
 import type { ReasoningCapabilities } from '$lib/api/model-providers';
 import { classifyRow } from '$lib/components/settings/providers/providers-model';
 
-export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable';
+/** Mythos has no alias: only the full ids a subscription's Claude Code lists. */
+export type ModelFamily = 'haiku' | 'sonnet' | 'opus' | 'fable' | 'mythos';
 
 export interface ModelOption {
 	auto_permission_supported?: boolean;
@@ -28,8 +29,8 @@ export interface ModelOption {
 	value: string;
 	/** Human-facing label for dropdowns and badges. */
 	label: string;
-	/** Badge family — maps to `.card-badge--{family}` CSS classes. */
-	family: ModelFamily;
+	/** Badge family — maps to `.card-badge--{family}` CSS classes; null shows the muted badge. */
+	family: ModelFamily | null;
 	/**
 	 * Maximum input context in tokens, as the model natively runs. The current
 	 * Claude slugs (haiku/sonnet/opus/fable) are 1M. There is no
@@ -295,13 +296,6 @@ export interface ClaudeAuthInfo {
 	cli_models?: { cli_version: string | null; captured_at: string | null } | null;
 }
 
-/** A versioned model the subscription CLI lists (Settings > Claude > Models). */
-export interface ClaudeVersionedModel extends ModelOption {
-	description: string;
-	/** The owner turned it on, so the pickers offer it. */
-	enabled: boolean;
-}
-
 // ---------------------------------------------------------------------------
 // Reactive state — hydrated from `/api/v1/models` on boot.
 // ---------------------------------------------------------------------------
@@ -313,8 +307,6 @@ interface RegistryState {
 	effortModelAliases: Record<string, string>;
 	providers: ProviderEntry[];
 	claude: ClaudeAuthInfo;
-	/** Every version the subscription CLI lists, on or off; empty otherwise. */
-	claudeVersioned: ClaudeVersionedModel[];
 	hydrated: boolean;
 	/**
 	 * Agent providers that can run now (`/auth/status` -> `agent_gate.ready_providers`):
@@ -334,7 +326,6 @@ const _registry = $state<RegistryState>({
 	effortModelAliases: { ...STATIC_EFFORT_MODEL_ALIASES },
 	providers: [],
 	claude: { auth_kind: null, plan_type: null },
-	claudeVersioned: [],
 	hydrated: false,
 	readyProviders: null
 });
@@ -342,6 +333,14 @@ const _registry = $state<RegistryState>({
 // ---------------------------------------------------------------------------
 // Public accessors — prefer these over touching `_registry` directly.
 // ---------------------------------------------------------------------------
+
+/**
+ * The four short ids with plain family labels ("Opus"), describing no
+ * particular sign-in: for a Claude credential that is not the one running.
+ */
+export function getBuiltInAliases(): readonly ModelOption[] {
+	return STATIC_MODELS;
+}
 
 /** Ordered list of selectable models. Reactive in Svelte component contexts. */
 export function getModels(): readonly ModelOption[] {
@@ -493,11 +492,6 @@ export function getClaudeAuth(): ClaudeAuthInfo {
 	return _registry.claude;
 }
 
-/** Versions this worker's subscription CLI lists (empty in other modes). */
-export function getClaudeVersionedModels(): ClaudeVersionedModel[] {
-	return _registry.claudeVersioned;
-}
-
 // ---------------------------------------------------------------------------
 // Provider display naming — the ONE place the brand/subtext rules live.
 //
@@ -643,7 +637,6 @@ export function getNativeModel(value: string | null | undefined): ModelOption | 
 	const base = normalizeModel(value);
 	const version = base.startsWith('claude-') ? base.replace(/-\d{8}$/, '') : base;
 	return _registry.models.find((m) => m.value === base)
-		?? _registry.claudeVersioned.find((m) => m.value === base)
 		?? STATIC_VERSIONED_MODELS.find((m) => m.value === version);
 }
 
@@ -761,7 +754,7 @@ function inferModelFamily(value: string | null | undefined): ModelFamily | null 
 	const registryFamily = getModelFamily(value);
 	if (registryFamily) return registryFamily;
 	const base = normalizeModel(value).toLowerCase();
-	const families: ModelFamily[] = ['haiku', 'sonnet', 'opus', 'fable'];
+	const families: ModelFamily[] = ['haiku', 'sonnet', 'opus', 'fable', 'mythos'];
 	return families.find((family) => base.includes(family)) ?? null;
 }
 
@@ -832,7 +825,7 @@ export function isReroute(
 
 /**
  * CSS badge class for a stored model value. Pairs with the
- * `card-badge--{haiku,sonnet,opus,fable,inherit,muted}` classes in
+ * `card-badge--{haiku,sonnet,opus,fable,mythos,inherit,muted}` classes in
  * `card-design-system.css`.
  */
 export function getModelBadgeClass(value: string | null | undefined): string {
@@ -849,7 +842,8 @@ interface RegistryModelPayload {
 	auto_permission_supported?: boolean;
 	value: string;
 	label: string;
-	family: ModelFamily;
+	/** Null for a model the subscription CLI lists whose family the app does not know. */
+	family: ModelFamily | null;
 	context_window?: number;
 	effort_levels?: string[] | null;
 	effort_metadata_version?: number;
@@ -889,7 +883,6 @@ interface RegistryPayload {
 	effort_model_aliases?: Record<string, string>;
 	providers?: RegistryProviderPayload[];
 	claude?: RegistryClaudePayload;
-	versioned_models?: (RegistryModelPayload & { description?: string; enabled?: boolean })[];
 }
 
 function mapPayloadModel(m: RegistryModelPayload): ModelOption {
@@ -1086,11 +1079,6 @@ async function hydrateRegistry(refreshCapabilities: boolean): Promise<boolean> {
 			? payload.providers.map(mapPayloadProvider)
 			: [];
 		_registry.claude = mapPayloadClaude(payload.claude);
-		_registry.claudeVersioned = Array.isArray(payload.versioned_models)
-			? payload.versioned_models.map((m) => ({
-				...mapPayloadModel(m), description: m.description ?? '', enabled: m.enabled === true
-			}))
-			: [];
 		_registry.hydrated = true;
 		latestCapabilityProviders = payload.providers ?? [];
 		if (refreshCapabilities) refreshStaleCapabilities(payload.providers ?? []);

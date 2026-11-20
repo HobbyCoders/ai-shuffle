@@ -3,13 +3,12 @@
 // Claude Code 2.1.325 does (scripts/devloop/fake_claude/cli.py, FAKE_CLI_MODELS).
 //
 // Cases:
-//   enable-in-settings  Settings > Providers > Claude > Models: a version is off
-//                       by default; checking it saves and the composer offers it
-//   pick-and-run        pick that version in a chat, run a turn: the fake CLI
-//                       was started with exactly that model, not the alias
-//
-// The throwaway instance's preview cookie may turn a model on or off
-// (app/api/auth.py, _preview_may_change_dev_data); a real install's may not.
+//   listed-in-settings  Settings > Providers > Claude > Models: one list of every
+//                       model Claude Code offers (aliases, versions, Mythos, and
+//                       a family the app does not know), no checkboxes, and the
+//                       pickers offer all of them
+//   pick-and-run        pick Mythos 5.1 in a chat, run a turn: the fake CLI
+//                       was started with exactly that model, not an alias
 import { readFileSync } from 'node:fs';
 import { runJourney } from './runner.mjs';
 import {
@@ -35,16 +34,14 @@ import { DEV_INSTANCE_NOISE } from './lib/noise.mjs';
 const CLAUDE_AGENT = 'Dev (Claude Code)';
 const VERSION = 'claude-opus-4-6';
 const VERSION_LABEL = 'Opus 4.6';
+const MYTHOS = 'claude-mythos-5-1';
+const MYTHOS_LABEL = 'Mythos 5.1';
+/** The fake CLI's entry from a family this release does not know. */
+const UNKNOWN = 'claude-zephyr-1';
+const UNKNOWN_LABEL = 'Zephyr 1';
 
 /** The fake CLI's log: one JSON line per event, `start` lines carry argv. */
 const cliLog = (status) => readFileSync(status.claude_cli.log, 'utf8').trim().split('\n').filter(Boolean).map(JSON.parse);
-
-const setEnabled = (page, enabled) => api(page, 'PUT', '/models/claude/enabled', { model: VERSION, enabled });
-
-async function offered(page) {
-	const registry = await api(page, 'GET', '/models');
-	return registry.models.some((m) => m.value === VERSION);
-}
 
 async function openClaudeModels(page, variant) {
 	if (isPhone(variant)) await showSidebar(page);
@@ -54,7 +51,7 @@ async function openClaudeModels(page, variant) {
 	// The subscription sign-in's own page (a saved sign-in has an id suffix).
 	await page.getByRole('button', { name: /^Open Claude .*subscription$/ }).first().click();
 	await page.getByRole('tab', { name: 'Models', exact: true }).click();
-	await page.getByTestId('claude-versioned-models').waitFor({ timeout: 30_000 });
+	await page.getByTestId('claude-cli-models').waitFor({ timeout: 30_000 });
 }
 
 /** Fresh Claude Code chat in the Dev sandbox, Bypass. */
@@ -83,81 +80,62 @@ await runJourney({
 	throttles: ['fast'],
 	cases: [
 		{
-			name: 'enable-in-settings',
+			name: 'listed-in-settings',
 			async setup({ page, status, variant }) {
 				await gotoApp(page, status);
-				await setEnabled(page, false);
 				await openClaudeModels(page, variant);
 			},
 			async act({ page, mark, log }) {
-				try {
-					const aliases = (await page.getByTestId('claude-alias-models').innerText()).replace(/\s+/g, ' ');
-					log(`aliases: ${aliases}`);
-					expect(/Opus 5\.5/.test(aliases), `the aliases are labelled as Claude Code names them: ${aliases}`);
-					const box = page.getByTestId('claude-versioned-models').getByRole('checkbox', { name: /\bOpus 4\.6\b/ });
-					expect(!(await box.isChecked()), `${VERSION_LABEL} is off by default`);
-					expect(!(await offered(page)), `${VERSION} is not in the pickers yet`);
-
-					await mark(`turn ${VERSION_LABEL} on`);
-					await box.click();
-					await page.waitForFunction(
-						async (value) => (await (await fetch('/api/v1/models', { credentials: 'include' })).json()).models.some((m) => m.value === value),
-						VERSION,
-						{ timeout: 10_000, polling: 500 }
-					);
-					expect(await box.isChecked(), `${VERSION_LABEL} reads on after saving`);
-					expect((await page.locator('.pv-msg.err[role="alert"]').count()) === 0, 'no save error');
-
-					await mark(`turn ${VERSION_LABEL} off again`);
-					await box.click();
-					await page.waitForFunction(
-						async (value) => !(await (await fetch('/api/v1/models', { credentials: 'include' })).json()).models.some((m) => m.value === value),
-						VERSION,
-						{ timeout: 10_000, polling: 500 }
-					);
-					expect(!(await box.isChecked()), `${VERSION_LABEL} reads off after saving`);
-				} finally {
-					await setEnabled(page, false).catch(() => {});
+				await mark('read the Models tab');
+				const list = page.getByTestId('claude-cli-models');
+				const text = (await list.innerText()).replace(/\s+/g, ' ');
+				log(`models: ${text}`);
+				for (const wanted of ['Opus 5.5', VERSION_LABEL, VERSION, MYTHOS_LABEL, MYTHOS, UNKNOWN_LABEL, UNKNOWN]) {
+					expect(text.includes(wanted), `the Models tab lists ${wanted}: ${text}`);
 				}
+				expect((await page.getByRole('checkbox').count()) === 0, 'no opt-in checkboxes');
+				expect((await page.getByText(/Listed by Claude Code/).count()) === 0, 'no "Listed by Claude Code" section');
+				const registry = await api(page, 'GET', '/models');
+				const values = registry.models.map((m) => m.value);
+				expect(values.includes(VERSION) && values.includes(MYTHOS), `the pickers offer every version: ${values}`);
+				expect(registry.models.find((m) => m.value === MYTHOS)?.family === 'mythos', 'Mythos is its own family');
+				// A family the app does not know yet is still offered, with no family.
+				const unknown = registry.models.find((m) => m.value === UNKNOWN);
+				expect(unknown && unknown.family === null, `an unknown family stays selectable: ${JSON.stringify(unknown)}`);
 			}
 		},
 		{
 			name: 'pick-and-run',
 			async setup({ page, status }) {
-				await gotoApp(page, status);
-				await setEnabled(page, true);
 				await openClaudeChat({ page, status });
 			},
 			async act({ page, status, mark, variant, log }) {
-				try {
-					const logged = cliLog(status).length;
-					await mark(`pick ${VERSION_LABEL}`);
-					const models = page.getByRole('dialog', { name: 'Choose model' });
-					await openPopup(page.getByRole('button', { name: /^Model:/ }).first(), models);
-					await models.getByRole('textbox', { name: 'Search models' }).fill(VERSION_LABEL);
-					await models.getByRole('option', { name: new RegExp(`^${VERSION_LABEL.replace('.', '\\.')}`) }).first().click();
-					await page.keyboard.press('Escape');
-					await models.waitFor({ state: 'hidden', timeout: 5000 });
-					await page.getByRole('button', { name: new RegExp(`^Model: .*${VERSION_LABEL.replace('.', '\\.')}`) }).first().waitFor();
+				const label = new RegExp(MYTHOS_LABEL.replace('.', '\\.'));
+				const logged = cliLog(status).length;
+				await mark(`pick ${MYTHOS_LABEL}`);
+				const models = page.getByRole('dialog', { name: 'Choose model' });
+				await openPopup(page.getByRole('button', { name: /^Model:/ }).first(), models);
+				await models.getByRole('textbox', { name: 'Search models' }).fill(MYTHOS_LABEL);
+				await models.getByRole('option', { name: new RegExp(`^${label.source}`) }).first().click();
+				await page.keyboard.press('Escape');
+				await models.waitFor({ state: 'hidden', timeout: 5000 });
+				await page.getByRole('button', { name: new RegExp(`^Model: .*${label.source}`) }).first().waitFor();
 
-					await mark('run a turn');
-					const token = `cli models ${uniq()}`;
-					await typeAndSend(page, `${token} ${scriptTag(variant, 'default')}`);
-					await waitTurnSettled(page, { messagesAtLeast: 2 });
+				await mark('run a turn');
+				const token = `cli models ${uniq()}`;
+				await typeAndSend(page, `${token} ${scriptTag(variant, 'default')}`);
+				await waitTurnSettled(page, { messagesAtLeast: 2 });
 
-					const id = await chatIdByToken(page, token);
-					const chat = await api(page, 'GET', `/sessions/${id}`);
-					log(`chat ${id} model: ${chat.model}`);
-					expect(chat.model === VERSION, `the chat saved ${VERSION}, not an alias (got ${chat.model})`);
-					// What the CLI itself was started with: `--model` of the chat's process.
-					const started = cliLog(status).slice(logged).filter((e) => e.kind === 'start' && e.argv?.includes('--model'));
-					const ran = started.map((e) => e.argv[e.argv.indexOf('--model') + 1]);
-					log(`fake CLI started with --model ${ran.join(', ')}`);
-					expect(ran.length > 0 && ran.every((value) => value === VERSION), `the CLI ran ${VERSION} (got ${ran})`);
-					await page.getByRole('button', { name: new RegExp(`^Model: .*${VERSION_LABEL.replace('.', '\\.')}`) }).first().waitFor();
-				} finally {
-					await setEnabled(page, false).catch(() => {});
-				}
+				const id = await chatIdByToken(page, token);
+				const chat = await api(page, 'GET', `/sessions/${id}`);
+				log(`chat ${id} model: ${chat.model}`);
+				expect(chat.model === MYTHOS, `the chat saved ${MYTHOS}, not an alias (got ${chat.model})`);
+				// What the CLI itself was started with: `--model` of the chat's process.
+				const started = cliLog(status).slice(logged).filter((e) => e.kind === 'start' && e.argv?.includes('--model'));
+				const ran = started.map((e) => e.argv[e.argv.indexOf('--model') + 1]);
+				log(`fake CLI started with --model ${ran.join(', ')}`);
+				expect(ran.length > 0 && ran.every((value) => value === MYTHOS), `the CLI ran ${MYTHOS} (got ${ran})`);
+				await page.getByRole('button', { name: new RegExp(`^Model: .*${label.source}`) }).first().waitFor();
 			}
 		}
 	],

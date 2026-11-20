@@ -241,8 +241,9 @@
   border: 1px solid color-mix(in oklch, var(--primary) 30%, transparent);
 }
 
-/* Fable — distinct hue to set it apart from the primary-tinted model badges */
-.card-badge--fable {
+/* Fable and Mythos — distinct hue to set them apart from the primary-tinted model badges */
+.card-badge--fable,
+.card-badge--mythos {
   background: color-mix(in oklch, var(--info) 15%, transparent);
   color: var(--info);
   border: 1px solid color-mix(in oklch, var(--info) 30%, transparent);

@@ -58,7 +58,8 @@ const MODEL_FAMILY_BLURB: Record<ModelFamily, string> = {
 	haiku: 'Fastest, lightest',
 	sonnet: 'Balanced speed and depth',
 	opus: 'Deep reasoning',
-	fable: 'Most capable'
+	fable: 'Most capable',
+	mythos: 'Frontier reasoning'
 };
 
 export interface BuildCatalogOptions {
@@ -142,7 +143,7 @@ export function buildModelPickerCatalog(opts: BuildCatalogOptions = {}): PickerC
 			options.push({
 				value: m.value,
 				label: m.label,
-				description: familyBlurbs ? (MODEL_FAMILY_BLURB[m.family] ?? m.value) : m.value,
+				description: familyBlurbs && m.family ? (MODEL_FAMILY_BLURB[m.family] ?? m.value) : m.value,
 				groupKey: NATIVE_GROUP_KEY,
 				group: claude.name,
 				groupSubtext: claude.subtext

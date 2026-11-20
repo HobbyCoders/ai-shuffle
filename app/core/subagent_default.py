@@ -69,7 +69,7 @@ def read() -> SubagentDefault:
     if not isinstance(data, dict):
         return SubagentDefault()
     version, model = data.get("version"), data.get("model")
-    from app.core.model_registry import LEGACY_MODEL_MAP, keeps_own_id
+    from app.core.model_registry import LEGACY_MODEL_MAP, keeps_own_id, native_choice
 
     if isinstance(version, str) and keeps_own_id(version.strip()):
         return SubagentDefault(model=version.strip())
@@ -77,6 +77,12 @@ def read() -> SubagentDefault:
     if model:
         # ``model`` always meant an alias: a legacy id there runs today's alias.
         model = LEGACY_MODEL_MAP.get(model, model)
+        if model.startswith("claude-") and native_choice(model) is None:
+            # A full id saved here before ``model`` held only aliases (main
+            # could store a listed dated Haiku): its family's alias, as a new
+            # save would store. A family with no alias (Mythos) runs nowhere
+            # outside a subscription: unset, so the owner is asked.
+            model = _fallback_alias(model)
     return SubagentDefault(model=model)
 
 
@@ -123,6 +129,23 @@ def normalize_model(value: Any) -> Tuple[Optional[str], Optional[str]]:
     )
 
 
+def _fallback_alias(version: str) -> Optional[str]:
+    """The short id a worker that reads only ``model`` runs for ``version``.
+
+    The legacy map first (``claude-opus-4-6`` -> ``opus``), else the family's
+    alias (a listed ``claude-haiku-4-5-20251001`` -> ``haiku``), else None: a
+    family with no alias (Mythos) has nothing to fall back to.
+    """
+    from app.core.model_registry import model_values, normalize_model
+
+    aliases = model_values()
+    alias = normalize_model(version)
+    if alias in aliases:
+        return alias
+    lowered = version.lower()
+    return next((a for a in aliases if f"claude-{a}-" in lowered), None)
+
+
 def write(model: Optional[str]) -> SubagentDefault:
     """Validate and save the setting. Raises ``ValueError`` on a bad id."""
     from app.db import database
@@ -134,12 +157,11 @@ def write(model: Optional[str]) -> SubagentDefault:
             raise ValueError(f"model: {error}")
     data: Dict[str, Any] = {"model": clean_model}
     if clean_model and clean_model.startswith("claude-"):
-        # The picked version rides in ``version``; ``model`` keeps the alias
-        # because a worker on an older release reads only ``model`` and runs
-        # the alias until it updates.
-        from app.core.model_registry import normalize_model as _alias
-
-        data = {"model": _alias(clean_model), "version": clean_model}
+        # The picked version rides in ``version``; ``model`` holds only a real
+        # alias, because API-key and cloud workers and workers on an older
+        # release read only ``model``. A version with no alias (Mythos)
+        # leaves it null there: those workers ask for a default they can run.
+        data = {"model": _fallback_alias(clean_model), "version": clean_model}
     database.set_system_setting(SETTING_KEY, json.dumps(data))
     if clean_model:
         # A later "no default" state (cleared again) may ask once more.
