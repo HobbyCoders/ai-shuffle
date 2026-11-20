@@ -65,7 +65,8 @@ export function logText(line: LogLine): string {
 	const prefix = ` - ${line.logger_name} - ${line.level} - `;
 	const at = line.message.indexOf(prefix);
 	if (at < 0 || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(,\d+)?$/.test(line.message.slice(0, at))) return line.message;
-	return line.message.slice(at + prefix.length) || line.message;
+	const text = line.message.slice(at + prefix.length);
+	return text.trim() ? text : line.message;
 }
 
 function pad(n: number, width = 2): string {

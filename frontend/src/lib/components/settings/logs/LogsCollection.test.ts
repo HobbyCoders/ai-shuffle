@@ -193,6 +193,7 @@ describe('entries', () => {
 		expect(logText({ ...line, message: 'saw "a - app.x - INFO - b" in the output' })).toBe('saw "a - app.x - INFO - b" in the output');
 		// Nothing after the prefix: keep the line rather than show an empty row.
 		expect(logText({ ...line, message: '2026-10-01 14:42:03,340 - app.x - INFO - ' })).toBe('2026-10-01 14:42:03,340 - app.x - INFO - ');
+		expect(logText({ ...line, message: '2026-10-01 14:42:03,340 - app.x - INFO -   \n' })).toBe('2026-10-01 14:42:03,340 - app.x - INFO -   \n');
 	});
 
 	it('narrows to the same logger and clears it', async () => {

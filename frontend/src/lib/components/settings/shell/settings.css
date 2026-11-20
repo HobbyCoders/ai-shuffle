@@ -330,10 +330,10 @@
    through an invisible extension. Drawn 44px, it made a label with help twice
    as tall as one without and pushed its helper text away from it. A "?"
    anywhere else stays a 44px box: its extension would cover the control next
-   to it. */
+   to it. So does one on a wide touch screen, where the label has the room. */
 .settings-shell[data-stacked] .st-rl > .st-help { position: relative; min-width: 0; min-height: 0; }
 .settings-shell[data-stacked] .st-rl > .st-help::after { content: ''; position: absolute; inset: -13px; }
-@media (max-width: 600px), (pointer: coarse) {
+@media (max-width: 600px) {
  .settings-shell .st-rl > .st-help { position: relative; min-width: 0; min-height: 0; }
  .settings-shell .st-rl > .st-help::after { content: ''; position: absolute; inset: -13px; }
 }
@@ -826,8 +826,10 @@
 .settings-shell[data-stacked] :is(.st-gt, .st-lg) { padding-inline: 0; }
 /* Phone lists read their second line instead of cutting it after a few words:
    13px and up to two lines for a row's summary and a value row's value, three
-   for a log line, which stays in its small monospace. A list drawn in a card
-   keeps the card rows' 16px inset, so its marks and times clear the border. */
+   for a log line, which stays in its small monospace. At 600px and under,
+   list rows give up their side padding (above); one drawn in a card takes the
+   card rows' 16px inset instead, so its marks and times clear the border. A
+   wider stacked screen never lost the padding. */
 .settings-shell[data-stacked] .st-it :is(.tx > .sm, .vt),
 .settings-shell[data-stacked] .st-it.log .nm {
 	display: -webkit-box;
