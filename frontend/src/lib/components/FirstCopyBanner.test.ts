@@ -80,11 +80,17 @@ it('counts transcripts after the first copy and offers the reload with them', as
 	expect(screen.getByRole('progressbar', { name: 'Copy progress' })).toBeTruthy();
 	expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
 	await fireEvent.click(screen.getByRole('button', { name: 'Minimize' }));
-	expect(screen.getByRole('button', { name: /restore details/i })).toBeTruthy();
+	const chip = screen.getByRole('button', { name: /restore details/i });
+	expect(screen.queryByRole('status')).toBeNull();
+	expect(screen.queryByRole('button', { name: 'Reload' })).toBeNull();
+	await fireEvent.click(chip);
+	expect(screen.getByRole('status').textContent).toContain('312 of 1,152 chats');
 	expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
+	await fireEvent.click(screen.getByRole('button', { name: 'Minimize' }));
 	await vi.advanceTimersByTimeAsync(10_000);
 	expect(screen.queryByRole('button', { name: /restore details/i })).toBeNull();
 	expect(screen.getByRole('status').textContent).toContain('Your data is copied');
+	expect(screen.getByRole('button', { name: 'Reload' })).toBeTruthy();
 	await vi.advanceTimersByTimeAsync(60_000);
 	expect(mocks.get).toHaveBeenCalledTimes(3);
 });
@@ -123,3 +129,46 @@ it('keeps polling while minimized, restores the latest details, and clears on co
 	await vi.advanceTimersByTimeAsync(60_000);
 	expect(mocks.get).toHaveBeenCalledTimes(3);
 });
+
+// The first-copy handoff adds Reload to the transcript details.
+it.each(['chip', 'details', 'Minimize', 'Reload', 'composer', 'modal'] as const)(
+	'handles completion while %s owns focus', async (owner) => {
+		const workspace = document.createElement('section');
+		workspace.tabIndex = -1;
+		const composer = workspace.appendChild(document.createElement('textarea'));
+		const modal = document.createElement('div');
+		modal.setAttribute('role', 'dialog');
+		modal.setAttribute('aria-modal', 'true');
+		const modalAction = modal.appendChild(document.createElement('button'));
+		document.body.append(workspace, modal);
+		try {
+			mocks.get
+				.mockResolvedValueOnce(status('syncing', downloading(60)))
+				.mockResolvedValueOnce(status('ready', null, transcripts(312)))
+				.mockResolvedValue(status('ready'));
+			render(FirstCopyBanner, { completionFocusTarget: workspace });
+			await vi.advanceTimersByTimeAsync(3000);
+			const minimize = screen.getByRole('button', { name: 'Minimize' });
+			let focused: HTMLElement;
+			if (owner === 'chip' || owner === 'details') {
+				await fireEvent.click(minimize);
+				focused = screen.getByRole('button', { name: /restore details/i });
+				if (owner === 'details') {
+					await fireEvent.click(focused);
+					focused = screen.getByText(/312 of 1,152 chats/);
+				}
+			} else {
+				focused = owner === 'composer' ? composer : owner === 'modal' ? modalAction
+					: screen.getByRole('button', { name: owner });
+				focused.focus();
+			}
+			expect(document.activeElement).toBe(focused);
+			await vi.advanceTimersByTimeAsync(10_000);
+			expect(screen.getByRole('status').textContent).toContain('Your data is copied');
+			expect(document.activeElement).toBe(owner === 'composer' || owner === 'modal' ? focused : workspace);
+		} finally {
+			workspace.remove();
+			modal.remove();
+		}
+	}
+);

@@ -23,11 +23,14 @@
 	/** Signed in or invited, waiting for another worker to admit this one. */
 	const JOIN_POLL_MS = 30_000;
 
+	let { completionFocusTarget }: { completionFocusTarget?: HTMLElement } = $props();
+
 	let status = $state<NetworkStatus | null>(null);
 	let finished = $state(false);
 	let dismissed = $state(false);
 	let minimized = $state(false);
 	let chip = $state<HTMLButtonElement>();
+	let details = $state<HTMLDivElement>();
 	let copyMessage = $state<HTMLSpanElement>();
 	const firstCopy = $derived(firstCopyNotice(status));
 	const transcripts = $derived(transcriptNotice(status));
@@ -71,10 +74,21 @@
 		try {
 			const next = await getNetworkStatus();
 			if (stopped) return;
-			const wasCopying = firstCopyNotice(status) !== null;
+			const wasCopying = firstCopy !== null;
+			const nextTranscripts = transcriptNotice(next);
+			const completing = canMinimize && !nextTranscripts && !firstCopyNotice(next);
+			const focused = completing ? document.activeElement : null;
+			const hadFocus = focused && (focused === chip || details?.contains(focused));
 			status = next;
-			if (!transcriptNotice(next)) minimized = false;
+			if (!nextTranscripts) minimized = false;
 			if (wasCopying && next.network?.bootstrap_state === 'ready') finished = true;
+			if (hadFocus) {
+				await tick();
+				// Move focus only if the notice was removed and nothing else took focus.
+				if (!stopped && !focused.isConnected && document.activeElement === document.body) {
+					completionFocusTarget?.focus({ preventScroll: true });
+				}
+			}
 		} catch {
 			// Keep the last known status; without one there is nothing to show.
 		}
@@ -92,20 +106,22 @@
 
 {#if notice && !showChip}
 	<NotificationSlot order={DOCK_ORDER.account}>
+		<!-- The dock can still read the snippet's props just before it removes the card. -->
 		<Banner
+			bind:element={details}
 			variant="page"
-			title={notice.title}
-			severity={notice.severity}
+			title={notice?.title}
+			severity={notice?.severity}
 			action={finished && !dismissed ? { label: 'Reload', onClick: () => window.location.reload() } : undefined}
 			secondaryAction={canMinimize ? { label: 'Minimize', onClick: minimize } : undefined}
 		>
-			<span class="copy-message" tabindex="-1" bind:this={copyMessage}>{notice.message}</span>
-			{#if notice.fraction !== null}
-				<progress class="copy-progress" max="1" value={notice.fraction} aria-label="Copy progress"></progress>
+			<span class="copy-message" tabindex="-1" bind:this={copyMessage}>{notice?.message}</span>
+			{#if notice?.fraction != null}
+				<progress class="copy-progress" max="1" value={notice?.fraction ?? 0} aria-label="Copy progress"></progress>
 			{/if}
 		</Banner>
 	</NotificationSlot>
-{:else if finished && !dismissed}
+{:else if !notice && finished && !dismissed}
 	<NotificationSlot order={DOCK_ORDER.account}>
 		<Banner
 			variant="page"
