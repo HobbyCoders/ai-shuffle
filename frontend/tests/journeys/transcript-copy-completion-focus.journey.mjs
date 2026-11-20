@@ -1,4 +1,4 @@
-// Named running-app check with controlled network status and a scoped history read in the combined case.
+// Named running-app check with controlled network status and scoped notification requests in the combined case.
 import assert from 'node:assert/strict';
 import { runJourney } from './runner.mjs';
 import { api, composer, openNewChat, uniq } from './lib/app.mjs';
@@ -135,8 +135,8 @@ const historyAtCompletion = {
 			id: page.__transcriptNotice, severity: 'warning', surface: 'notification',
 			category: 'journey', title: 'A notification to open during a download', message: 'Journey notice'
 		});
-		// A full phone history can cover the empty space this case must tap. Scope
-		// only this page's history GET; leave stored rows and other requests alone.
+		// A full phone history can cover the empty space this case must tap. Show
+		// only this page's fixture, without clearing or dismissing stored history.
 		await page.route((url) => url.pathname === '/api/v1/notifications', async (route) => {
 			if (route.request().method() !== 'GET') return route.fallback();
 			const response = await route.fetch();
@@ -145,6 +145,17 @@ const historyAtCompletion = {
 			const notifications = history.notifications.filter(({ id }) => id === page.__transcriptNotice);
 			log(`GET /api/v1/notifications: showing ${notifications.length} test-owned row of ${history.notifications.length}`);
 			return route.fulfill({ response, json: { ...history, notifications, unread: notifications.filter((row) => !row.read).length } });
+		});
+		// Opening the bell would mark the whole account read, not just the fixture.
+		await page.route((url) => url.pathname === '/api/v1/notifications/read-all', async (route) => {
+			if (route.request().method() !== 'POST') return route.fallback();
+			const path = `/api/v1/notifications/${encodeURIComponent(page.__transcriptNotice)}/read`;
+			const url = new URL(path, route.request().url());
+			const response = await route.fetch({ url: url.href });
+			log(`POST /api/v1/notifications/read-all scoped to POST ${path}: HTTP ${response.status()}`);
+			if (!response.ok()) return route.fulfill({ response });
+			const { ok } = await response.json();
+			return route.fulfill({ response, json: { updated: ok ? 1 : 0 } });
 		});
 		await openNewChat(ctx);
 	},
