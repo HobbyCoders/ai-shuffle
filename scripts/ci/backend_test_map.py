@@ -16,7 +16,11 @@ A changed file that is not Python selects the tests that name it and the tests
 of the code that names it in a string literal: the function holding the
 literal, the users of a module constant bound to it, or the whole file when it
 is named in code that runs at import. Docstrings, comments and messages (a
-literal with whitespace) only mention a file; they do not read it.
+literal with whitespace) only mention a file; they do not read it. Tests that
+list a folder below the top level of it count as naming it; tests that list
+the whole checkout or a top-level folder run too, but cannot narrow the
+choice. A file nothing names that way, any conftest, and any file under
+tests/ that is not Python (fixtures, data, snapshots) print ``all``.
 
     python scripts/ci/backend_test_map.py merge --hits DIR --out MAP --commit SHA
     python scripts/ci/backend_test_map.py select --map MAP --base REV [--head REV]
@@ -31,8 +35,12 @@ import ast
 from collections import defaultdict
 from fnmatch import fnmatch
 import gzip
+import hashlib
 import json
+import math
+import os
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 
@@ -57,7 +65,15 @@ FULL_SUITE_PATTERNS = (
     "requirements*.txt", "requirements*.lock", "pytest.ini", "setup.cfg", "pyproject.toml",
     "fluid/pyproject.toml", ".github/workflows/ci-backend.yml",
     "scripts/ci/backend_test_map.py", "tests/_test_map.py", "tests/__init__.py",
+    # How CI Backend splits, reruns and judges its shards.
+    "scripts/ci/backend_shard*.py", "scripts/ci/backend_gate.py", "scripts/ci/record_failures.py",
 )
+# Package manifests and lockfiles anywhere: tests read them by paths built at
+# run time (the version source reads frontend/package-lock.json), and a
+# dependency change reaches code no map follows.
+MANIFEST_NAMES = ("package.json", "package-lock.json", "npm-shrinkwrap.json", "pyproject.toml",
+                  "requirements*.txt", "requirements*.in", "requirements*.lock", "uv.lock",
+                  "poetry.lock", "Pipfile", "Pipfile.lock", "setup.py", "setup.cfg")
 SOURCE_DIRS = ("app", "fluid/fluid", "tests", "scripts", "docker")
 ROOT_SCRIPTS = ("run_local.py",)
 # At this share of the fast subset a selected run saves little; run it all.
@@ -67,6 +83,9 @@ MIN_MAPPED_TESTS = 100
 # Names too common to say which file a test means.
 GENERIC_NAMES = {"__init__.py", "README.md", "package.json", "package-lock.json", "index.ts",
                  "index.js", "main.py", "config.py", "utils.py", "base.py", "models.py"}
+# Code that lists files rather than naming them, and code that lists the whole checkout.
+WALKS = re.compile(r"\.(?:rglob|glob|iterdir|walk)\(|os\.(?:walk|listdir|scandir)\(|ls-files|ls-tree")
+REPO_LISTING = re.compile(r"ls-files|ls-tree|ROOT\.rglob\(|ROOT\.walk\(|os\.walk\(\s*ROOT\b")
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef)
 STATEMENT_LISTS = ("body", "orelse", "finalbody", "handlers", "cases")
 MAX_NAME_DEPTH = 3
@@ -92,6 +111,11 @@ def module_name(path: str) -> str | None:
     if parts and parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts) or None
+
+
+def names_folder(text: str, folders: set[str]) -> bool:
+    """Whether ``text`` names one of ``folders`` as a quoted path or the start of one."""
+    return any(f"{quote}{folder}{end}" in text for folder in folders for quote in "\"'" for end in (quote, "/"))
 
 
 def fast_subset(path: str) -> bool:
@@ -261,9 +285,20 @@ def differing(old: dict[str, str], new: dict[str, str]) -> set[str]:
 # the map
 # ---------------------------------------------------------------------------
 
-def merge(hits_dir: Path, out: Path, commit: str) -> dict:
+def file_seconds(durations_dir: Path | None) -> dict[str, float]:
+    """Seconds each test file took, summed from the shards' ``durations.json`` (node id -> seconds)."""
+    seconds: dict[str, float] = defaultdict(float)
+    for path in sorted(durations_dir.glob("**/durations.json")) if durations_dir else ():
+        for node, value in json.loads(path.read_text(encoding="utf-8")).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0:
+                seconds[node.split("::", 1)[0]] += float(value)
+    return {name: round(value, 3) for name, value in sorted(seconds.items())}
+
+
+def merge(hits_dir: Path, out: Path, commit: str, durations_dir: Path | None = None) -> dict:
     contexts: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    for path in sorted(hits_dir.glob("hits-*.json")):
+    # CI keeps each shard's records in its own directory.
+    for path in sorted(hits_dir.glob("**/hits-*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
         for context, hits in data["hits"].items():
             contexts[context].update(tuple(hit) for hit in hits)
@@ -287,6 +322,8 @@ def merge(hits_dir: Path, out: Path, commit: str) -> dict:
         "covered": {file: {q: sorted(set(ids)) for q, ids in quals.items()} for file, quals in covered.items()},
         "shared": {file: sorted(quals) for file, quals in shared.items()},
         "known": known,
+        # Only to size a pull request's shards; never to choose its tests.
+        "seconds": file_seconds(durations_dir),
     }
     out.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(out, "wt", encoding="utf-8") as handle:
@@ -516,7 +553,16 @@ class Selector:
         needles = {path} | ({p.name} if p.name not in GENERIC_NAMES and len(p.name) >= 6 else set())
         tests = {t for t in self.files if fast_subset(t) and any(n in self.files[t] for n in needles)}
         sources = {f for f in self.files if not fast_subset(f) and any(n in self.files[f] for n in needles)}
-        self.selected |= tests
+        # Tests that list a folder of it, or the whole checkout, read it
+        # unnamed. One naming a folder below the top level narrows the choice
+        # like a test naming the file; a whole-checkout lister or a top-level
+        # folder ("frontend") reads too much to say anything about this file.
+        specific = {str(parent) for parent in p.parents if len(parent.parts) >= 2}
+        top = {p.parts[0]} if len(p.parts) > 1 else set()
+        listers = {t for t in self.files if fast_subset(t) and WALKS.search(self.files[t])}
+        narrow = {t for t in listers if names_folder(self.files[t], specific)}
+        broad = {t for t in listers - narrow
+                 if REPO_LISTING.search(self.files[t]) or names_folder(self.files[t], top)}
         readers = 0
         for source in sorted(sources):
             found = mention_scopes(self.files[source], needles)
@@ -533,15 +579,13 @@ class Selector:
                 if not self._covered(source, qualname):
                     self.file_level(source, f"{qualname} reads changed {path} but the map does not know it")
             self.name_changes(source, module_name(source), names)
-        if not readers and p.parts and p.parts[0] in {"app", "fluid", "docker", "scripts"}:
-            # Nothing names it in code; code beside it may load it by folder.
-            neighbours = {f for f in self.files if f.endswith(".py") and PurePosixPath(f).parent == p.parent}
-            for source in sorted(neighbours):
-                self.file_level(source, f"sits beside changed {path}")
-            self.reasons.append(f"{path}: {len(tests)} tests name it; {len(neighbours)} sources sit beside it")
-            return
-        self.reasons.append(f"{path}: {len(tests)} tests and {len(sources)} sources name it, "
-                            f"{readers} of them in code")
+        if not tests and not narrow and not readers:
+            # Nothing names it in code: whatever reads it (code loading its
+            # folder, a path built at run time) is unknown.
+            raise FullSuite(f"{path}: no code reads it by name and no test names it or its folder")
+        self.selected |= tests | narrow | broad
+        self.reasons.append(f"{path}: {len(tests)} tests name it, {len(narrow)} list its folder, "
+                            f"{len(broad)} list everything; {readers} of {len(sources)} naming sources read it in code")
 
     def subprocess_users(self, path: str) -> None:
         module = module_name(path)
@@ -560,6 +604,17 @@ def select(changed: list[str], test_map: dict | None, files: dict[str, str], bas
         for path in changed:
             if any(fnmatch(path, pattern) for pattern in FULL_SUITE_PATTERNS):
                 raise FullSuite(f"{path} changes the test setup or dependencies")
+            if any(fnmatch(PurePosixPath(path).name, name) for name in MANIFEST_NAMES):
+                raise FullSuite(f"{path} is a package manifest or lockfile")
+            # Any conftest, the root one too: pytest loads it for every test beneath it.
+            if PurePosixPath(path).name == "conftest.py":
+                raise FullSuite(f"{path} is a conftest")
+            if "\ufffd" in path:
+                raise FullSuite(f"{path!r} is not a UTF-8 file name")
+            # Fixtures, data and snapshots under tests/ are read by paths tests
+            # build at run time; only test modules and helpers are mapped.
+            if path.startswith("tests/") and PurePosixPath(path).suffix != ".py":
+                raise FullSuite(f"{path} is test data, read by paths no map can follow")
         selector = Selector(test_map, files, base_source)
         for path in changed:
             p = PurePosixPath(path)
@@ -589,6 +644,137 @@ def git(*args: str) -> str:
     return subprocess.check_output(["git", *args], cwd=ROOT, text=True, encoding="utf-8", errors="replace")
 
 
+def changed_names(base: str, head: str) -> list[str]:
+    """The files changed from ``base`` to ``head``, read as bytes and split on NUL.
+
+    git quotes an unusual name in its plain output, which then matches no file.
+    A name that is not UTF-8 or holds a line break raises ValueError: run everything.
+    """
+    raw = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"], cwd=ROOT)
+    names = [part.decode("utf-8") for part in raw.split(b"\0") if part]
+    odd = [name for name in names if "\n" in name or "\r" in name]
+    if odd:
+        raise ValueError(f"a changed file name holds a line break: {odd[0]!r}")
+    return names
+
+
+def choose(map_path: Path, base_rev: str, head: str = "HEAD") -> tuple[str | list[str], list[str], dict | None]:
+    """``select`` for the checkout: the change from ``base_rev`` to ``head``, against the map at ``map_path``.
+
+    Returns the selection, the reasons and the map it was made from.
+    """
+    try:
+        base = git("rev-parse", base_rev).strip()
+        changed = changed_names(base, head)
+        test_map = load_map(map_path) if map_path.is_file() else None
+    except (subprocess.CalledProcessError, OSError, EOFError, ValueError, FullSuite) as error:
+        return "all", [f"Running the full suite: {error}"], None
+
+    def base_source(path: str) -> str | None:
+        # A file the change adds has no base version; git's "fatal:" line would only mislead the log.
+        shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=ROOT, capture_output=True, check=False,
+                               text=True, encoding="utf-8", errors="replace")
+        return shown.stdout if shown.returncode == 0 else None
+
+    result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
+    if test_map is not None:
+        reasons.insert(0, f"Test map from {str(test_map.get('commit', '?'))[:12]}; {len(changed)} changed files.")
+    return result, reasons, test_map
+
+
+# ---------------------------------------------------------------------------
+# CI Backend's shards (.github/workflows/ci-backend.yml)
+# ---------------------------------------------------------------------------
+
+# The shards a full run uses; scripts/ci/backend_gate.py's SHARD_COUNT.
+FULL_SHARDS = 8
+# Test files of the fast subset that CI Backend runs outside its shards (the
+# policy step of backend-security runs tests/scripts and the docs tests).
+SHARD_EXCLUDED_DIRS = ("tests/scripts/",)
+SHARD_EXCLUDED = FAST_SUBSET_EXCLUDED | {"tests/core/test_docs_content.py", "tests/test_buyer_docs.py"}
+# Measured test seconds one two-worker shard is given (about two and a half
+# minutes of wall time), and what a file the map has no time for is assumed to take.
+SHARD_SECONDS = 300.0
+UNKNOWN_FILE_SECONDS = 20.0
+
+
+def in_shards(path: str) -> bool:
+    return fast_subset(path) and path not in SHARD_EXCLUDED and not path.startswith(SHARD_EXCLUDED_DIRS)
+
+
+def shard_plan(result: str | list[str], test_map: dict | None) -> dict:
+    """What CI Backend's shards run: {selection, shards, tests}.
+
+    ``selection`` is ``all``, ``none`` or a digest of the chosen files; the
+    receipts carry it, so the gate can tell a full run from a selected one.
+    """
+    if result == "all":
+        return {"selection": "all", "shards": list(range(1, FULL_SHARDS + 1)), "tests": []}
+    tests = sorted(path for path in result if in_shards(path))
+    if not tests:
+        return {"selection": "none", "shards": [], "tests": []}
+    seconds_by_file = (test_map or {}).get("seconds") or {}
+    seconds = sum(float(seconds_by_file.get(path, UNKNOWN_FILE_SECONDS)) for path in tests)
+    count = max(1, min(FULL_SHARDS, len(tests), math.ceil(seconds / SHARD_SECONDS)))
+    digest = hashlib.sha256("\n".join(tests).encode("utf-8")).hexdigest()[:16]
+    return {"selection": f"files-{digest}", "shards": list(range(1, count + 1)), "tests": tests}
+
+
+def ci_select(map_path: Path, environ=os.environ) -> tuple[dict, list[str]]:
+    """The shard plan of this CI run. Only a pull request selects; anything else runs everything.
+
+    The change is read from the commit the map was recorded on (a full run on
+    main) to the pull request's merge into main, so the functions compared are
+    the ones the map saw run, and whatever main changed since is chosen too.
+    """
+    event = environ.get("GITHUB_EVENT_NAME", "")
+    if event != "pull_request":
+        return shard_plan("all", None), [f"A {event or 'local'} run tests everything."]
+    try:
+        parents = git("rev-list", "--parents", "-n", "1", "HEAD").split()
+        # GitHub tests a pull request on its merge into main: main is the first parent.
+        if len(parents) != 3:
+            return shard_plan("all", None), ["HEAD is not the pull request's merge commit; running everything."]
+        if not map_path.is_file():
+            return shard_plan("all", None), ["No backend test map from a full run on main; running everything."]
+        recorded = str(load_map(map_path).get("commit") or "")
+        if not recorded or subprocess.run(["git", "merge-base", "--is-ancestor", recorded, parents[1]],
+                                          cwd=ROOT, capture_output=True, check=False).returncode != 0:
+            return shard_plan("all", None), [f"The test map's commit {recorded[:12] or '?'} is not on main; running everything."]
+        result, reasons, test_map = choose(map_path, recorded, parents[0])
+        return shard_plan(result, test_map), reasons
+    except Exception as error:  # noqa: BLE001 - any doubt runs every test
+        return shard_plan("all", None), [f"Selection failed, running everything: {type(error).__name__}: {error}"]
+
+
+def write_ci_select(map_path: Path, environ=os.environ, out=sys.stdout) -> dict:
+    found, reasons = ci_select(map_path, environ)
+    print(f"selection={found['selection']}", file=out)
+    print(f"shards={json.dumps(found['shards'])}", file=out)
+    # The partition size; a rerun of only the failed shards must not change it.
+    print(f"count={len(found['shards'])}", file=out)
+    print(f"tests={json.dumps(found['tests'])}", file=out)
+    lines = ["### Backend tests this run", ""]
+    if found["selection"] == "all":
+        lines.append(f"Every test, in {len(found['shards'])} shards.")
+    elif found["selection"] == "none":
+        lines.append("No backend test in the shards can reach this change; the shards do not run.")
+    else:
+        lines.append(f"{len(found['tests'])} test files the change can reach, in {len(found['shards'])} shards. "
+                     "main runs every test after the merge.")
+    lines += ["", *[f"- {reason}" for reason in reasons[:50]]]
+    if found["tests"]:
+        lines += ["", "<details><summary>Selected test files</summary>", "",
+                  *[f"- `{path}`" for path in found["tests"]], "", "</details>"]
+    summary = environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    for reason in reasons:
+        print(f"  {reason}", file=sys.stderr)
+    return found
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Backend test map: merge records, select tests.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -596,36 +782,26 @@ def main(argv=None) -> int:
     merge_cmd.add_argument("--hits", type=Path, required=True)
     merge_cmd.add_argument("--out", type=Path, required=True)
     merge_cmd.add_argument("--commit", required=True)
+    merge_cmd.add_argument("--durations", type=Path, help="Shard results holding durations.json files")
     select_cmd = commands.add_parser("select")
     select_cmd.add_argument("--map", type=Path, required=True)
     select_cmd.add_argument("--base", required=True)
     select_cmd.add_argument("--head", default="HEAD")
+    ci_cmd = commands.add_parser("ci-select", help="CI Backend's shard plan, as $GITHUB_OUTPUT lines")
+    ci_cmd.add_argument("--map", type=Path, required=True)
     args = parser.parse_args(argv)
 
     if args.command == "merge":
-        result = merge(args.hits, args.out, args.commit)
+        result = merge(args.hits, args.out, args.commit, args.durations)
         print(f"Test map: {len(result['tests'])} test files, {len(result['covered'])} source files, "
-              f"{sum(len(q) for q in result['shared'].values())} shared functions", file=sys.stderr)
+              f"{sum(len(q) for q in result['shared'].values())} shared functions, "
+              f"{len(result['seconds'])} timed test files", file=sys.stderr)
+        return 0
+    if args.command == "ci-select":
+        write_ci_select(args.map)
         return 0
 
-    try:
-        base = git("rev-parse", args.base).strip()
-        changed = [line for line in git("diff", "--name-only", "--no-renames", f"{base}...{args.head}").splitlines() if line]
-        test_map = load_map(args.map) if args.map.is_file() else None
-    except (subprocess.CalledProcessError, OSError, ValueError, FullSuite) as error:
-        print(f"Running the full suite: {error}", file=sys.stderr)
-        print("all")
-        return 0
-
-    def base_source(path: str) -> str | None:
-        try:
-            return git("show", f"{base}:{path}")
-        except subprocess.CalledProcessError:
-            return None
-
-    result, reasons = select(changed, test_map, load_sources(ROOT), base_source)
-    if test_map is not None:
-        print(f"Test map from {test_map.get('commit', '?')[:12]}; {len(changed)} changed files.", file=sys.stderr)
+    result, reasons, _ = choose(args.map, args.base, args.head)
     for reason in reasons:
         print(f"  {reason}", file=sys.stderr)
     if result == "all":

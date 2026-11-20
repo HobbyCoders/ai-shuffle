@@ -361,10 +361,14 @@ class CostPolicyTests(unittest.TestCase):
         self.assertEqual(backend["on"]["workflow_dispatch"]["inputs"]["runner_cpus"]["default"], "2")
         self.assertEqual(javascript["on"]["workflow_dispatch"], "")
         shard = backend["jobs"]["backend-shard"]
-        self.assertEqual(shard["strategy"], {"fail-fast": "false", "matrix": {"shard": [str(i) for i in range(1, 9)]}})
+        # Eight shards on every full run; a pull request may choose fewer (scripts/ci/backend_gate.py).
+        self.assertEqual(shard["strategy"], {"fail-fast": "false",
+                                             "matrix": {"shard": "${{ fromJSON(needs.backend-select.outputs.shards) }}"}})
+        self.assertIn("FULL_SHARDS = 8\n", (ROOT / "scripts/ci/backend_test_map.py").read_text())
         self.assertEqual(backend["jobs"]["backend"]["name"], "Backend tests")
         self.assertEqual(backend["jobs"]["backend"]["if"], "always() && inputs.gated_by_caller != true")
-        for config, key, timeout in [(backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
+        for config, key, timeout in [(backend, "backend-select", "10"), (backend, "backend-map", "10"),
+                                     (backend, "backend-shard", "35"), (backend, "backend-contracts", "35"),
                                      (backend, "backend-security", "35"), (backend, "backend-postgres", "35"),
                                      (javascript, "frontend", "20")]:
             self.assertEqual(config["jobs"][key]["timeout-minutes"], timeout)

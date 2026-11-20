@@ -383,8 +383,9 @@ $env:PYTHONPATH = "fluid"; python -m pytest tests/test_auth.py -v
 #### Running the tests
 
 The full backend suite is about 21,500 tests and takes over 15 minutes. While
-working, run only the test files that cover your change; PR CI runs the full
-suites on every pull request:
+working, run only the test files that cover your change. PR CI runs the areas
+and the backend tests your change can reach, and main runs everything after the
+merge ([docs/ci/pr-checks.md](../ci/pr-checks.md)):
 
 ```bash
 PYTHONPATH=fluid pytest tests/core/test_pg_shim.py -m "not slow and not integration" -q
