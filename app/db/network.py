@@ -2184,6 +2184,8 @@ def exchange_batch(watermarks: dict, *, limit: int = 500, lane: Optional[str] = 
     with get_db() as conn:
         heads = local_watermarks(conn)
         snapshot = requires_snapshot(watermarks, exclude_origin=exclude_origin, _conn=conn, _heads=heads)
+        if snapshot:
+            return [], heads, True
         ops = ops_since(watermarks, limit=limit, lane=lane, exclude_origin=exclude_origin,
                         _conn=conn, _heads=heads)
         from app.network import nested_secret_sync
@@ -2225,6 +2227,20 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
         permission_only_projection = None
         legacy_recipient = None
         protected = ()
+        from app.network import policy
+        retired_keys = policy.RETIRED_SHARED_SETTING_KEYS
+        if retired_keys:
+            # Look up the few retired rows by (collection, record_id). Do not
+            # filter a signed stream in place: peers behind it need a snapshot.
+            placeholders = ", ".join(["%s"] * len(retired_keys))
+            cursor.execute("SELECT origin_device_id, incarnation, MAX(seq) AS seq FROM sync_ops "
+                           f"WHERE collection='system_settings' AND record_id IN ({placeholders}) "
+                           "GROUP BY origin_device_id, incarnation", retired_keys)
+            for row in cursor.fetchall():
+                origin = row["origin_device_id"]
+                if origin != exclude_origin and int(row["seq"]) > int(
+                        (watermarks.get(origin) or {}).get(str(row["incarnation"]), 0)):
+                    return True
         for origin, streams in heads.items():
             if origin == exclude_origin:
                 continue
@@ -2238,7 +2254,7 @@ def requires_snapshot(watermarks: dict, *, exclude_origin: str | None = None,
                 if int(cursor.fetchone()["n"]) != head - last:
                     return True
                 if check_tail_compatibility and legacy_recipient is None:
-                    from app.network import nested_secret_sync, policy
+                    from app.network import nested_secret_sync
                     legacy_recipient = exclude_origin is not None and not nested_secret_sync.enabled(cursor, recipient=exclude_origin)
                     if legacy_recipient:
                         protected = tuple(c.name for c in policy.COLLECTIONS.values() if c.map_secrets is not None)

@@ -3063,16 +3063,23 @@ def _snapshot_page(collection, offset, *, ctx, limit, _conn, keyset=False, after
         if retired:
             versions = []
         else:
-            if keyset:
-                if after_record_id is None:
-                    cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s",
-                                   (collection, limit + 1))
-                else:
-                    cursor.execute("SELECT * FROM sync_records WHERE collection = %s AND record_id > %s "
-                                   "ORDER BY record_id LIMIT %s", (collection, after_record_id, limit + 1))
-            else:
-                cursor.execute("SELECT * FROM sync_records WHERE collection = %s ORDER BY record_id LIMIT %s OFFSET %s",
-                               (collection, limit + 1, offset))
+            where = "collection = %s"
+            params = [collection]
+            if collection == "system_settings" and policy.RETIRED_SHARED_SETTING_KEYS:
+                # Exclude old versions (live or deleted) before paging. An
+                # offset page must neither skip the next row nor invent a delete.
+                placeholders = ", ".join(["%s"] * len(policy.RETIRED_SHARED_SETTING_KEYS))
+                where += f" AND record_id NOT IN ({placeholders})"
+                params.extend(policy.RETIRED_SHARED_SETTING_KEYS)
+            if keyset and after_record_id is not None:
+                where += " AND record_id > %s"
+                params.append(after_record_id)
+            sql = f"SELECT * FROM sync_records WHERE {where} ORDER BY record_id LIMIT %s"
+            params.append(limit + 1)
+            if not keyset:
+                sql += " OFFSET %s"
+                params.append(offset)
+            cursor.execute(sql, tuple(params))
             versions = [dict(r) for r in cursor.fetchall()]
         more = len(versions) > limit
         versions = versions[:limit]
