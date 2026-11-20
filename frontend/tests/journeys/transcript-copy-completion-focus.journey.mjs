@@ -23,7 +23,6 @@ function networkStatus(phase) {
 const button = (page, name) => page.getByRole('button', { name, exact: true });
 const chip = (page) => page.getByRole('button', { name: /Restore details/ });
 const success = (page) => page.getByText('Your data is copied', { exact: true });
-const workspace = (page) => page.locator('.app-body');
 const workspaceStart = (page) => page.getByRole('group', { name: 'Start of workspace', exact: true });
 async function focused(page, locator, description, timeout = 2000) {
 	// assert the actual active element, not a class or a document position
@@ -129,107 +128,6 @@ function makeCase(owner, viewports, throttle) {
 		}
 	};
 }
-const historyNoticeId = 'transcript-focus-journey';
-const historyAtCompletion = {
-	name: 'history-empty-tap-after-transcript-completion',
-	viewports: ['phone'],
-	throttles: ['fast'],
-	async setup(ctx) {
-		const { page, log } = ctx;
-		// This case tests focus and hit locations, not storage. Keep a single row
-		// in this page's history so unrelated notices cannot cover the tap target.
-		const notice = {
-			id: historyNoticeId, severity: 'warning', surface: 'notification', category: 'journey',
-			title: 'A notification to open during a download', message: 'Journey notice',
-			read: false, dismissed: false, created_at: Date.now()
-		};
-		await page.route((url) => /^\/api\/v1\/notifications(?:\/|$)/.test(url.pathname), async (route) => {
-			const method = route.request().method();
-			const { pathname } = new URL(route.request().url());
-			if (method === 'GET' && pathname === '/api/v1/notifications') {
-				return route.fulfill({ json: { notifications: [notice], unread: Number(!notice.read) } });
-			}
-			if (method === 'POST' && pathname === '/api/v1/notifications/read-all') {
-				const updated = Number(!notice.read);
-				notice.read = true;
-				log('POST /api/v1/notifications/read-all handled in page');
-				return route.fulfill({ json: { updated } });
-			}
-			// Never let an unhandled notification request reach the real account.
-			log(`blocked unexpected notification request: ${method} ${pathname}`);
-			return route.abort('blockedbyclient');
-		});
-		await openAtPhase(ctx, 'standalone-download');
-		await page.getByRole('button', { name: 'Notifications (1 unread)', exact: true })
-			.and(page.locator('header.topbar button.notif-btn')).waitFor();
-	},
-	async act({ page, mark, log }) {
-		const bell = page.locator('header.topbar button.notif-btn');
-		const panel = page.getByRole('dialog', { name: 'Notifications', exact: true });
-		const restore = chip(page);
-		await mark('minimize by keyboard and open notification history');
-		await button(page, 'Minimize').press('Enter');
-		await focused(page, restore, 'transcript chip');
-		await bell.tap();
-		await panel.locator(`[data-notif-id="${historyNoticeId}"]`).waitFor();
-		await mark('Tab from notification history to the transcript chip');
-		for (let i = 0; i < 40 && !(await restore.evaluate((el) => document.activeElement === el)); i++) {
-			await page.keyboard.press('Tab');
-		}
-		await focused(page, restore, 'transcript chip via Tab');
-		await mark('complete the download while history stays open');
-		phases.set(page, 'standalone-complete');
-		await restore.waitFor({ state: 'detached', timeout: 16_000 });
-		await focused(page, workspaceStart(page), 'Start of workspace');
-		assert.equal(await workspace(page).getAttribute('tabindex'), null, 'Workspace itself is not focusable');
-		assert.equal(await panel.isVisible(), true);
-
-		const spot = await workspace(page).evaluate((body) => {
-			const nonempty = '.notif-center, [data-ui-mount="ChatInput"], button, a, input, textarea, select, [contenteditable], [role="button"], [tabindex]';
-			for (let y = 8; y < innerHeight - 8; y += 16) {
-				for (let x = 12; x < innerWidth - 8; x += 24) {
-					const el = document.elementFromPoint(x, y);
-					if (!el || !body.contains(el) || !el.closest('[data-ui-state="chat"]') || el.closest(nonempty)) continue;
-					// Stay clear of nearby controls that the browser might choose for a touch.
-					const around = [-16, 0, 16];
-					if (!around.every((dx) => around.every((dy) => document.elementFromPoint(x + dx, y + dy) === el))) continue;
-					document.addEventListener('click', (event) => {
-						window.__transcriptEmptyTap = {
-							hit: event.target === el,
-							target: `${event.target.localName}.${event.target.classList[0]}`,
-							focus: document.activeElement === document.body ? 'body' : document.activeElement.getAttribute('aria-label')
-						};
-					}, { capture: true, once: true });
-					return { x, y, target: `${el.localName}.${el.classList[0]}` };
-				}
-			}
-			return null;
-		});
-		assert.ok(spot, 'hit-test must find empty chat space inside Workspace, outside history');
-		await mark(`tap empty Workspace: ${spot.target} at ${spot.x},${spot.y}`);
-		await page.touchscreen.tap(spot.x, spot.y);
-		const click = await page.evaluate(() => window.__transcriptEmptyTap);
-		log(`empty Workspace tap ${spot.target} at ${spot.x},${spot.y}; click target: ${click?.target}; active element before close: ${click?.focus}`);
-		assert.equal(click?.hit, true, 'the actual click hit the empty element, not an overlay or control');
-		await panel.waitFor({ state: 'hidden' });
-		await focused(page, bell, 'bell after an empty Workspace tap');
-		await mark('bell restored; reopen history and tap the composer');
-		await bell.tap();
-		await panel.waitFor();
-		const box = composer(page);
-		await box.evaluate((el) => el.addEventListener('click', (event) => {
-			window.__transcriptComposerTap = { target: event.target.localName, x: event.clientX, y: event.clientY };
-		}, { capture: true, once: true }));
-		await box.tap();
-		const hit = await page.evaluate(() => window.__transcriptComposerTap);
-		assert.ok(hit, 'the actual click reached the composer');
-		log(`composer tap at ${hit.x},${hit.y}; click target: ${hit.target}`);
-		await panel.waitFor({ state: 'hidden' });
-		await focused(page, box, 'composer after tapping a real control');
-		await mark('composer kept focus');
-	}
-};
-
 await runJourney({
 	name: 'transcript-copy-completion-focus',
 	allow: DEV_INSTANCE_NOISE,
@@ -239,7 +137,7 @@ await runJourney({
 		'focusChip=button[aria-label*="Restore details"]:focus', 'focusDetails=.copy-message:focus',
 		'focusAction=.banner-action:focus', 'focusWorkspaceStart=[aria-label="Start of workspace"]:focus',
 		'focusComposer=[role="textbox"][aria-label="Message"]:focus', 'focusModal=[role="dialog"] :focus',
-		'history=[role="dialog"][aria-label="Notifications"]', 'focusBell=.notif-btn:focus', 'focusChats=.tb-icon:focus'
+		'focusChats=.tb-icon:focus'
 	] },
 	// The handoff crosses all three notice states at both widths. The remaining
 	// cases cover distinct focus owners without replaying each poll at every width.
@@ -249,7 +147,6 @@ await runJourney({
 		makeCase('action', ['phone'], 'slow'),
 		makeCase('standalone-chip', ['phone'], 'fast'),
 		makeCase('composer', ['phone'], 'fast'),
-		makeCase('modal', ['desktop'], 'fast'),
-		historyAtCompletion
+		makeCase('modal', ['desktop'], 'fast')
 	]
 });

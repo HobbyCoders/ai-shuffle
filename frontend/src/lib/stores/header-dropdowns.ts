@@ -30,8 +30,6 @@ type HeaderDropdownId =
 	// The new-session row's searchable project picker (Cmd/Ctrl+P).
 	| 'new-project'
 	| 'notifications'
-	// The phone top bar's own bell, beside the drawer's mounted one.
-	| 'notifications-bar'
 	// Bound-chat session title in the header breadcrumb (rename / fork / delete).
 	| 'session-title'
 	// The chat header's one Export button.

@@ -4,9 +4,9 @@
 	 * every worker. The same control is the switch while off and the indicator
 	 * while on, so whatever shows that it is on also turns it off.
 	 *
-	 * Homes: the desktop rail's foot (`rail`, on every screen from 768px), the
-	 * phone top bars (`bar`, in the mobile shell and the responsive web bar under
-	 * 768px) and the mobile drawer's header (`drawer`, which covers the bar).
+	 * Homes: the desktop rail's foot (`rail`, on every screen from 768px and in
+	 * the opened sidebar below that) and the mobile drawer's header (`drawer`).
+	 * The phone top bars leave it out: the drawer is one tap away.
 	 *
 	 * The slot keeps its size in every state, including before the first answer
 	 * and for the whole time a tap is in flight, so nothing beside it moves. The
@@ -18,7 +18,7 @@
 	import { notify } from '$lib/stores/notifications';
 
 	interface Props {
-		variant: 'rail' | 'bar' | 'drawer';
+		variant: 'rail' | 'drawer';
 	}
 
 	let { variant }: Props = $props();
@@ -82,7 +82,6 @@
 		place-items: center;
 	}
 	.slot.rail { width: 56px; height: 44px; }
-	.slot.bar { width: 44px; height: 48px; }
 	.slot.drawer { width: 44px; height: 44px; }
 
 	.away {
